@@ -290,6 +290,7 @@ def ingest_agent_run(db: GraphDB, run: AgentRun, force: bool = False) -> dict:
             source_id=run.bead_id, source_type="bead",
             target_id=source.id, target_type="source",
             relation="implemented_by",
+            metadata=run.metadata.get("provenance", {}),
         ))
 
     db.commit()
