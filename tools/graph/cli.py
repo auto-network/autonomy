@@ -459,6 +459,43 @@ def cmd_playbooks(args):
     db.close()
 
 
+def cmd_note(args):
+    """Drop a searchable trail marker into the graph."""
+    db = GraphDB(args.db)
+    text = " ".join(args.text)
+    tags = args.tags.split(",") if args.tags else []
+
+    from .models import Source, Thought, new_id, now_iso
+    source_key = f"note:{new_id()}"
+    source = Source(
+        type="note",
+        platform="local",
+        project=args.project or _get_scope(),
+        title=text[:80],
+        file_path=source_key,
+        metadata={"tags": tags, "author": args.author or "user"},
+    )
+    db.insert_source(source)
+
+    t = Thought(
+        source_id=source.id,
+        content=text,
+        role="user",
+        turn_number=1,
+        tags=tags,
+    )
+    db.insert_thought(t)
+
+    from .ingest import extract_entities
+    for name, etype in extract_entities(text):
+        eid = db.upsert_entity(name, etype)
+        db.add_mention(eid, t.id, "thought")
+
+    db.commit()
+    print(f"  ✓ Note saved (src:{source.id[:12]})")
+    db.close()
+
+
 def cmd_agent_runs(args):
     """Discover and ingest subagent traces."""
     db = GraphDB(args.db)
@@ -683,6 +720,14 @@ def main():
     p.add_argument("--since", help="Only commits after this date (e.g. 2025-10-01)")
     p.add_argument("--force", action="store_true", help="Re-ingest from scratch")
     p.set_defaults(func=cmd_git_ingest)
+
+    # note
+    p = sub.add_parser("note", help="Drop a searchable trail marker into the graph")
+    p.add_argument("text", nargs="+", help="Note text")
+    p.add_argument("--project", "-p", help="Project to tag with")
+    p.add_argument("--tags", "-t", help="Comma-separated tags")
+    p.add_argument("--author", help="Who wrote this (default: user)")
+    p.set_defaults(func=cmd_note)
 
     # agent-runs
     p = sub.add_parser("agent-runs", help="Discover and ingest subagent traces")
