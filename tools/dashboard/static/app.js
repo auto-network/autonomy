@@ -114,7 +114,7 @@ async function renderBeadDetail(id) {
   const primer = await api(`/api/primer/${id}`);
 
   const labels = bead.labels || [];
-  const isApproved = labels.includes('approved');
+  const isApproved = labels.includes('readiness:approved');
   const isClosed = bead.status === 'closed';
   const approveBtn = (!isApproved && !isClosed)
     ? `<button onclick="approveBead('${bead.id}')" class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded">Approve for Dispatch</button>`
@@ -162,19 +162,31 @@ async function renderDispatch() {
     const containersByBead = {};
     for (const c of (status.containers || [])) {
       if (c.name.startsWith('agent-slack')) continue;
-      // Parse: agent-<bead-id>-<pid>
       const parts = c.name.replace('agent-', '').split('-');
-      parts.pop(); // remove pid
+      parts.pop();
       const beadId = parts.join('-');
       containersByBead[beadId] = c;
     }
 
-    // Active: in_progress beads (with their container if running)
-    const active = beadList.filter(b => b.status === 'in_progress');
+    // Helper: extract dispatch state from labels
+    function getDispatchState(bead) {
+      for (const l of (bead.labels || [])) {
+        if (l.startsWith('dispatch:')) return l.split(':')[1];
+      }
+      return null;
+    }
 
-    // Approved: open beads with approved label, waiting for dispatch
+    // Active: beads with active dispatch states (or in_progress for backward compat)
+    const activeDispatchStates = new Set(['queued', 'launching', 'running', 'collecting', 'merging']);
+    const active = beadList.filter(b => {
+      const ds = getDispatchState(b);
+      return (ds && activeDispatchStates.has(ds)) || b.status === 'in_progress';
+    });
+
+    // Approved: open beads with readiness:approved, waiting for dispatch
     const approvedBeads = beadList
-      .filter(b => b.status === 'open' && (b.labels || []).includes('approved'));
+      .filter(b => b.status === 'open' && (b.labels || []).includes('readiness:approved')
+              && !active.some(a => a.id === b.id));
 
     let html = '';
 
@@ -184,6 +196,12 @@ async function renderDispatch() {
     if (active.length > 0) {
       for (const b of active) {
         const container = containersByBead[b.id];
+        const ds = getDispatchState(b);
+        const stateColors = { queued: 'blue', launching: 'yellow', running: 'green', collecting: 'purple', merging: 'indigo' };
+        const stateColor = stateColors[ds] || 'gray';
+        const stateBadge = ds
+          ? `<span class="px-2 py-0.5 bg-${stateColor}-900 text-${stateColor}-300 text-xs rounded font-mono">${ds}</span>`
+          : '';
         const containerHtml = container
           ? `<div class="mt-2 ml-6 flex items-center gap-2">
                <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
@@ -191,6 +209,8 @@ async function renderDispatch() {
                <span class="text-xs text-gray-500">${container.status}</span>
                <span class="text-xs text-gray-600">${container.image}</span>
              </div>`
+          : ds === 'collecting' || ds === 'merging'
+          ? `<div class="mt-2 ml-6 text-xs text-gray-500">Agent finished — ${ds}...</div>`
           : `<div class="mt-2 ml-6 text-xs text-gray-500">Container exited — waiting for results</div>`;
         html += `
           <a href="/bead/${b.id}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500 hover:bg-gray-750">
@@ -199,6 +219,7 @@ async function renderDispatch() {
               <div class="flex gap-2 items-center flex-wrap mt-1">
                 <span class="font-mono text-xs text-gray-400">${b.id}</span>
                 ${priorityBadge(b.priority)}
+                ${stateBadge}
               </div>
             </div>
             ${containerHtml}
