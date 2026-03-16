@@ -126,10 +126,11 @@ docker run \
     --name "$CONTAINER_NAME" \
     --rm \
     -e BD_ACTOR="agent:$CONTAINER_NAME" \
+    -e BD_READONLY="${BD_READONLY:-0}" \
     -v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro" \
     -v "$GIT_DIR:$GIT_DIR" \
     -v "$REPO_ROOT/data/graph.db:/data/graph.db:ro" \
-    -v "$REPO_ROOT/.beads:/data/.beads:ro" \
+    -v "$REPO_ROOT/.beads:/data/.beads" \
     -v "$WORKTREE_DIR:/workspace/repo" \
     -v "$OUTPUT_DIR:/workspace/output" \
     -v "$SESSION_DIR:/home/agent/.claude/projects" \
