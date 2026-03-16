@@ -418,7 +418,7 @@ async def ws_terminal(websocket: WebSocket):
                 f" -v {claude_creds_file}:/home/agent/.claude/.credentials.json:ro"
                 f" -v {repo_root}/data/graph.db:/data/graph.db:ro"
                 f" -v {repo_root}/.beads:/data/.beads"
-                f" -v {repo_root}:/workspace/repo"
+                f" -v {repo_root}:/workspace/repo:ro"
                 f" -w /workspace/repo"
                 f" autonomy-agent"
                 f" --dangerously-skip-permissions"
