@@ -194,14 +194,46 @@ async function renderSearch(query, project) {
   let url = `/api/search?q=${encodeURIComponent(query)}&or=1&limit=20`;
   if (project) url += `&project=${encodeURIComponent(project)}`;
   const data = await api(url);
+
   if (data.error) {
     content.innerHTML = `<div class="text-red-400">${data.error}</div>`;
     return;
   }
-  const el = document.createElement('div');
-  el.appendChild(renderMd('```\n' + (data.results || 'No results') + '\n```'));
-  content.innerHTML = '';
-  content.appendChild(el);
+
+  const results = Array.isArray(data) ? data : [];
+  if (results.length === 0) {
+    content.innerHTML = '<div class="text-gray-400">No results found.</div>';
+    return;
+  }
+
+  let html = `<div class="text-sm text-gray-500 mb-4">${results.length} results</div><div class="space-y-3">`;
+  for (const r of results) {
+    const type = r.result_type === 'thought' ? 'T' : 'D';
+    const typeBg = r.result_type === 'thought' ? 'bg-blue-900' : 'bg-gray-700';
+    const proj = r.project ? `<span class="text-xs text-indigo-400">[${r.project}]</span>` : '';
+    const title = (r.source_title || '?').slice(0, 60);
+    const srcId = (r.source_id || '').slice(0, 12);
+    const turn = r.turn_number || '?';
+
+    // Truncate content for preview, preserve first meaningful line
+    let preview = (r.content || '').slice(0, 300);
+    if (r.content && r.content.length > 300) preview += '…';
+
+    html += `
+      <div class="p-4 bg-gray-800 rounded-lg border border-gray-700 hover:border-indigo-500 cursor-pointer transition-colors"
+           onclick="navigateTo('/source/${r.source_id}')">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="px-1.5 py-0.5 ${typeBg} rounded text-xs font-mono">${type}</span>
+          <span class="text-sm font-medium truncate">${title}</span>
+          <span class="text-xs text-gray-500">t${turn}</span>
+          ${proj}
+          <span class="text-xs text-gray-600 ml-auto font-mono">src:${srcId}</span>
+        </div>
+        <div class="text-sm text-gray-400 leading-relaxed" id="preview-${srcId}">${preview.replace(/</g, '&lt;').replace(/\n/g, '<br>')}</div>
+      </div>`;
+  }
+  html += '</div>';
+  content.innerHTML = html;
 }
 
 async function renderSource(id) {
