@@ -331,7 +331,7 @@ async def api_terminals(request):
     for k in dead:
         del _active_terminals[k]
     return JSONResponse([
-        {"id": name, "alive": True, **_active_terminals.get(name, {"cmd": "?"})}
+        {"id": name, "alive": True, **_active_terminals.get(name, {"cmd": "?", "env": "host"})}
         for name in live
     ])
 
@@ -343,6 +343,17 @@ async def api_terminal_kill(request):
         _active_terminals.pop(name, None)
         return JSONResponse({"status": "killed", "id": name})
     return JSONResponse({"status": "not_found", "id": name})
+
+
+async def api_terminal_rename(request):
+    """Rename a terminal session's display name."""
+    name = request.path_params["id"]
+    body = await request.json()
+    new_name = body.get("name", "").strip()
+    if name in _active_terminals:
+        _active_terminals[name]["name"] = new_name if new_name else None
+        return JSONResponse({"ok": True, "id": name, "name": new_name})
+    return JSONResponse({"error": "not found"}, status_code=404)
 
 
 async def api_primer(request):
@@ -451,11 +462,23 @@ async def ws_terminal(websocket: WebSocket):
         subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "off"],
                         capture_output=True)
 
-    # Track it
-    _active_terminals[tmux_name] = {
-        "cmd": params.get("cmd", attach or "bash"),
-        "started": asyncio.get_event_loop().time(),
-    }
+    # Track it — only set cmd/env on initial creation, not re-attach
+    if tmux_name not in _active_terminals:
+        if attach:
+            # Reconnecting to a session we lost track of (server restart)
+            _active_terminals[tmux_name] = {
+                "cmd": "?",
+                "env": "host",
+                "started": asyncio.get_event_loop().time(),
+            }
+        else:
+            orig_cmd = params.get("cmd", "/bin/bash")
+            is_container = "autonomy-agent" in orig_cmd
+            _active_terminals[tmux_name] = {
+                "cmd": orig_cmd,
+                "env": "container" if is_container else "host",
+                "started": asyncio.get_event_loop().time(),
+            }
 
     # Now attach to the tmux session via a PTY
     master_fd, slave_fd = pty.openpty()
@@ -611,6 +634,7 @@ routes = [
     Route("/api/active", api_active_sessions),
     Route("/api/terminals", api_terminals),
     Route("/api/terminal/{id}/kill", api_terminal_kill),
+    Route("/api/terminal/{id}/rename", api_terminal_rename, methods=["POST"]),
     Route("/api/primer/{id}", api_primer),
 
     # Static
