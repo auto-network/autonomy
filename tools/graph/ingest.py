@@ -520,6 +520,7 @@ PROJECT_NAME_MAP = {
     "-home-jeremy-workspace-enterprise-m4-arch": "enterprise-m4",
     "-home-jeremy-workspace-enterprise-ng": "enterprise-ng",
     "-mnt-c-Source-DB-v3-2-1": "db-v3",
+    "-repo": "autonomy",
 }
 
 
