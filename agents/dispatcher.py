@@ -57,6 +57,20 @@ class DispatcherConfig:
     loop: bool = False
 
 
+def run_cmd(cmd: list[str], timeout: int = 15) -> str:
+    """Run any command and return stdout."""
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=timeout,
+            cwd=str(REPO_ROOT),
+        )
+        return result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  cmd error: {e}", file=sys.stderr)
+        return ""
+
+
 def run_bd(args: list[str], timeout: int = 15) -> str:
     """Run a bd command and return stdout."""
     try:
@@ -387,12 +401,38 @@ def dispatch_cycle(config: DispatcherConfig) -> int:
     # 7. Process decision
     process_decision(result)
 
-    # 8. Ingest agent session into graph
+    # 8. Ingest agent session into graph and link to bead
     subprocess.run(
         ["graph", "sessions", "--all"],
         capture_output=True, text=True, timeout=30,
         cwd=str(REPO_ROOT),
     )
+
+    # Find the ingested session and link it to the bead
+    if result.output_dir:
+        session_dir = Path(result.output_dir) / "sessions"
+        jsonl_files = list(session_dir.glob("**/*.jsonl")) if session_dir.exists() else []
+        if jsonl_files:
+            # Search graph for the session by path fragment
+            session_name = jsonl_files[0].stem  # UUID of the session
+            search_out = run_cmd(
+                ["graph", "search", session_name, "--json", "--limit", "1"]
+            )
+            if search_out:
+                try:
+                    hits = json.loads(search_out)
+                    if isinstance(hits, list) and hits:
+                        src_id = hits[0].get("source_id", hits[0].get("id", ""))
+                        if src_id:
+                            subprocess.run(
+                                ["graph", "link", result.bead_id, src_id,
+                                 "-r", "implemented_by"],
+                                capture_output=True, text=True, timeout=15,
+                                cwd=str(REPO_ROOT),
+                            )
+                            print(f"  Linked {result.bead_id} → {src_id} (implemented_by)")
+                except json.JSONDecodeError:
+                    pass
 
     return 1
 
