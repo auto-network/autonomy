@@ -225,18 +225,35 @@ function destroyTerminal() {
   if (activeTerm) { activeTerm.dispose(); activeTerm = null; }
 }
 
-function renderTerminal(cmd, attach) {
+async function renderTerminal(cmd, attach) {
   pageTitle.textContent = attach ? `Attached: ${attach}` : 'Terminal';
   if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
   destroyTerminal();
 
+  // Fetch existing terminals
+  const terminals = await api('/api/terminals');
+  const existingList = Array.isArray(terminals) && terminals.length > 0
+    ? terminals.map(t => `
+        <button onclick="reconnectTerminal('${t.id}')"
+                class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600 flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-green-400"></span>${t.id}
+        </button>
+        <button onclick="killTerminal('${t.id}')"
+                class="px-2 py-1 bg-red-900 rounded text-xs hover:bg-red-700">✕</button>
+      `).join('')
+    : '';
+
   content.innerHTML = `
-    <div class="flex gap-2 mb-3">
+    <div class="flex gap-2 mb-3 flex-wrap">
       <button onclick="launchClaude()" class="px-3 py-1 bg-indigo-600 rounded text-sm hover:bg-indigo-500">New Claude</button>
       <button onclick="launchBash()" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">New Bash</button>
-      <span class="text-xs text-gray-500 ml-auto self-center" id="term-status">connecting...</span>
+      ${existingList ? '<span class="text-gray-600 self-center">|</span>' + existingList : ''}
+      <span class="text-xs text-gray-500 ml-auto self-center" id="term-status">ready</span>
     </div>
     <div id="terminal-container" style="height: calc(100vh - 10rem);"></div>`;
+
+  // If we have an attach target, connect immediately
+  if (!attach && !cmd) return;
 
   const termContainer = document.getElementById('terminal-container');
   const statusEl = document.getElementById('term-status');
@@ -318,6 +335,15 @@ function launchClaude() {
 
 function launchBash() {
   renderTerminal('/bin/bash');
+}
+
+function reconnectTerminal(name) {
+  renderTerminal(null, name);
+}
+
+async function killTerminal(name) {
+  await api(`/api/terminal/${name}/kill`);
+  renderTerminal(null, null);  // Refresh the terminal page
 }
 
 // ── Router ───────────────────────────────────────────────────
