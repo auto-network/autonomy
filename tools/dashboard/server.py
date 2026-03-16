@@ -266,6 +266,25 @@ async def ws_terminal(websocket: WebSocket):
             term_id = f"auto-t{_term_counter}"
         tmux_name = term_id
 
+        # Resolve special container commands
+        repo_root = str(Path(__file__).parents[2])
+        claude_creds = str(Path.home() / ".claude")
+        if cmd_str == "autonomy-agent-claude":
+            cmd_str = (
+                f"docker run -it --rm --name {tmux_name}"
+                f" -v {claude_creds}:/home/agent/.claude:ro"
+                f" -v {repo_root}/data/graph.db:/data/graph.db:ro"
+                f" -v {repo_root}:/repo:ro"
+                f" autonomy-agent"
+            )
+        elif cmd_str == "autonomy-agent-bash":
+            cmd_str = (
+                f"docker run -it --rm --name {tmux_name}"
+                f" --entrypoint /bin/bash"
+                f" -v {repo_root}:/repo:ro"
+                f" autonomy-agent"
+            )
+
         # Create detached tmux session running the command
         subprocess.run([
             "tmux", "new-session", "-d", "-s", tmux_name,

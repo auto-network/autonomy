@@ -245,8 +245,10 @@ async function renderTerminal(cmd, attach) {
 
   content.innerHTML = `
     <div class="flex gap-2 mb-3 flex-wrap">
-      <button onclick="launchClaude()" class="px-3 py-1 bg-indigo-600 rounded text-sm hover:bg-indigo-500">New Claude</button>
-      <button onclick="launchBash()" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">New Bash</button>
+      <button onclick="launchClaude()" class="px-3 py-1 bg-indigo-600 rounded text-sm hover:bg-indigo-500">Claude (host)</button>
+      <button onclick="launchClaudeContainer()" class="px-3 py-1 bg-purple-600 rounded text-sm hover:bg-purple-500">Claude (container)</button>
+      <button onclick="launchBash()" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Bash</button>
+      <button onclick="launchBashContainer()" class="px-3 py-1 bg-gray-600 rounded text-sm hover:bg-gray-500">Bash (container)</button>
       ${existingList ? '<span class="text-gray-600 self-center">|</span>' + existingList : ''}
       <span class="text-xs text-gray-500 ml-auto self-center" id="term-status">ready</span>
     </div>
@@ -318,6 +320,25 @@ async function renderTerminal(cmd, attach) {
     }
   });
 
+  // Copy: selection → clipboard
+  term.onSelectionChange(() => {
+    const sel = term.getSelection();
+    if (sel) {
+      navigator.clipboard.writeText(sel).catch(() => {});
+    }
+  });
+
+  // Paste: Ctrl+Shift+V or right-click
+  termContainer.addEventListener('contextmenu', async (e) => {
+    e.preventDefault();
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text && ws.readyState === WebSocket.OPEN) {
+        ws.send(text);
+      }
+    } catch(err) {}
+  });
+
   // Handle resize
   const resizeObserver = new ResizeObserver(() => {
     fitAddon.fit();
@@ -333,8 +354,16 @@ function launchClaude() {
   renderTerminal('claude --dangerously-skip-permissions');
 }
 
+function launchClaudeContainer() {
+  renderTerminal('autonomy-agent-claude');
+}
+
 function launchBash() {
   renderTerminal('/bin/bash');
+}
+
+function launchBashContainer() {
+  renderTerminal('autonomy-agent-bash');
 }
 
 function reconnectTerminal(name) {
