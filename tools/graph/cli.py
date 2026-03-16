@@ -459,6 +459,77 @@ def cmd_playbooks(args):
     db.close()
 
 
+def cmd_bead(args):
+    """Create a bead with provenance — links to the source conversation turns that inspired it."""
+    import subprocess
+    db = GraphDB(args.db)
+    from .models import Edge
+
+    # First, refresh the graph to capture latest turns
+    subprocess.run(["graph", "sessions", "--all"], capture_output=True, timeout=30)
+
+    # Build bd create command
+    cmd = ["bd", "create", args.title, "-p", str(args.priority)]
+    if args.desc:
+        cmd += ["-d", args.desc]
+    if args.type:
+        cmd += ["-t", args.type]
+
+    # Run bd create and capture output
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    if result.returncode != 0:
+        print(f"bd create failed: {result.stderr}")
+        db.close()
+        return
+
+    # Parse bead ID from output (format: "✓ Created issue: auto-xxx — Title")
+    import re
+    match = re.search(r"Created issue: (\S+)", result.stdout)
+    if not match:
+        print(result.stdout)
+        db.close()
+        return
+    bead_id = match.group(1)
+
+    print(result.stdout.strip())
+
+    # If source + turns provided, create the conceived_at link
+    if args.source and args.turns:
+        source = db.get_source(args.source)
+        if not source:
+            row = db.conn.execute(
+                "SELECT * FROM sources WHERE id LIKE ? LIMIT 1", (f"{args.source}%",)
+            ).fetchone()
+            if row:
+                source = dict(row)
+
+        if source:
+            turn_range = {}
+            parts = args.turns.split("-")
+            if len(parts) == 2:
+                turn_range = {"from": int(parts[0]), "to": int(parts[1])}
+            elif len(parts) == 1:
+                turn_range = {"from": int(parts[0]), "to": int(parts[0])}
+
+            metadata = {"turns": turn_range}
+            if args.note:
+                metadata["note"] = args.note
+
+            db.insert_edge(Edge(
+                source_id=bead_id,
+                source_type="bead",
+                target_id=source["id"],
+                target_type="source",
+                relation="conceived_at",
+                metadata=metadata,
+            ))
+            db.commit()
+            turns_str = f" turns {args.turns}" if args.turns else ""
+            print(f"  ✓ linked: {bead_id} —[conceived_at]→ {source['id'][:12]}{turns_str}")
+
+    db.close()
+
+
 def cmd_link(args):
     """Create a provenance edge between a bead and session turns."""
     db = GraphDB(args.db)
@@ -853,6 +924,17 @@ def main():
     p.add_argument("--since", help="Only commits after this date (e.g. 2025-10-01)")
     p.add_argument("--force", action="store_true", help="Re-ingest from scratch")
     p.set_defaults(func=cmd_git_ingest)
+
+    # bead (create with provenance)
+    p = sub.add_parser("bead", help="Create a bead with provenance link to source conversation")
+    p.add_argument("title", help="Bead title")
+    p.add_argument("-p", "--priority", type=int, default=1, help="Priority 0-3 (default: 1)")
+    p.add_argument("-d", "--desc", help="Description")
+    p.add_argument("-t", "--type", default="task", help="Type: task, epic, bug (default: task)")
+    p.add_argument("--source", help="Source ID to link as conceived_at")
+    p.add_argument("--turns", help="Turn range in source (e.g. 286 or 338-344)")
+    p.add_argument("--note", "-n", help="Context note for the provenance link")
+    p.set_defaults(func=cmd_bead)
 
     # link
     p = sub.add_parser("link", help="Create provenance edge between bead and session turns")
