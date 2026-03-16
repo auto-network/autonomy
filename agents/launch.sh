@@ -105,7 +105,9 @@ if [[ -f "$OUTPUT_DIR/decision.json" ]]; then
     echo "    Decision:"
     cat "$OUTPUT_DIR/decision.json"
 else
-    echo "    WARNING: No decision.json found"
+    echo "    WARNING: No decision.json found in $OUTPUT_DIR"
+    echo "    Files in output dir:"
+    ls -la "$OUTPUT_DIR" 2>/dev/null || echo "    (directory empty or missing)"
 fi
 
 exit $EXIT_CODE
