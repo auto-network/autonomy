@@ -432,6 +432,9 @@ async def page_index(request):
 async def page_beads(request):
     return HTMLResponse(_load_template("base.html"))
 
+async def page_dispatch(request):
+    return HTMLResponse(_load_template("base.html"))
+
 async def page_sessions(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -451,6 +454,7 @@ routes = [
     # Pages
     Route("/", page_index),
     Route("/beads", page_beads),
+    Route("/dispatch", page_dispatch),
     Route("/sessions", page_sessions),
     Route("/search", page_search),
     Route("/source/{id}", page_source),
