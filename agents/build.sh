@@ -21,6 +21,15 @@ if [[ ! -f "$BD_BIN" ]]; then
 fi
 cp "$BD_BIN" "$BUILD_DIR/bin/bd"
 
+# dolt — required by bd for database access
+DOLT_BIN="$HOME/go/bin/dolt"
+if [[ ! -f "$DOLT_BIN" ]]; then
+    echo "ERROR: dolt binary not found at $DOLT_BIN"
+    echo "Install with: go install github.com/dolthub/dolt/go/cmd/dolt@latest"
+    exit 1
+fi
+cp "$DOLT_BIN" "$BUILD_DIR/bin/dolt"
+
 # claude — ELF binary
 CLAUDE_BIN="$(readlink -f "$HOME/.local/bin/claude")"
 if [[ ! -f "$CLAUDE_BIN" ]]; then
@@ -40,6 +49,7 @@ cd "$BUILD_DIR"
 # Create build context with flat structure
 mkdir -p context/bin context/graph
 cp bin/bd context/bin/
+cp bin/dolt context/bin/
 cp bin/claude context/bin/
 cp graph/*.py context/graph/
 

@@ -24,6 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY bin/bd /usr/local/bin/bd
 RUN chmod +x /usr/local/bin/bd
 
+# ── dolt (required by bd for database access) ──
+COPY bin/dolt /usr/local/bin/dolt
+RUN chmod +x /usr/local/bin/dolt
+
 # ── Claude Code CLI ──
 COPY bin/claude /usr/local/bin/claude
 RUN chmod +x /usr/local/bin/claude
@@ -39,8 +43,12 @@ ENV PYTHONPATH=/opt/autonomy
 # ── Workspace ──
 WORKDIR /workspace
 
+# Point bd at the mounted beads directory
+ENV BEADS_DIR=/data/.beads
+
 # Verify tools are available
 RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cross-arch)" \
+    && dolt version > /dev/null 2>&1 || echo "WARN: dolt not functional" \
     && graph --help > /dev/null 2>&1 || echo "WARN: graph not functional" \
     && claude --version > /dev/null 2>&1 || echo "WARN: claude not functional"
 
