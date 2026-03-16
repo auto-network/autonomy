@@ -223,11 +223,121 @@ async function renderDispatch() {
     }
     html += `</div>`;
 
+    // Last Runs
+    const runs = await api('/api/dispatch/runs');
+    const completedRuns = Array.isArray(runs) ? runs.filter(r => r.decision) : [];
+    html += `<div class="mb-8">
+      <h2 class="text-lg font-semibold mb-3 text-gray-400">Last Runs</h2>`;
+    if (completedRuns.length > 0) {
+      for (const r of completedRuns) {
+        const status = r.decision?.status || '?';
+        const reason = r.decision?.reason || '';
+        const statusColor = status === 'DONE' ? 'green' : status === 'BLOCKED' ? 'yellow' : 'red';
+        const commitBadge = r.commit_hash
+          ? `<span class="font-mono text-xs text-gray-400">${r.commit_hash.slice(0, 10)}</span>`
+          : `<span class="text-xs text-gray-500">no commits</span>`;
+        const ts = r.timestamp.replace('-', ' ');
+        html += `
+          <a href="/dispatch/trace/${r.dir}" class="block p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-${statusColor}-500 hover:bg-gray-750">
+            <div class="flex justify-between items-center">
+              <div class="flex gap-2 items-center">
+                <span class="font-mono text-sm text-gray-400">${r.bead_id}</span>
+                <span class="badge badge-${statusColor === 'green' ? 'closed' : statusColor === 'yellow' ? 'blocked' : 'open'}">${status}</span>
+                ${commitBadge}
+              </div>
+              <span class="text-xs text-gray-500">${ts}</span>
+            </div>
+            <div class="text-sm text-gray-300 mt-1 truncate">${reason}</div>
+          </a>`;
+      }
+    } else {
+      html += `<div class="text-gray-500 text-sm">No completed runs</div>`;
+    }
+    html += `</div>`;
+
     content.innerHTML = html;
   }
 
   await refresh();
   dispatchInterval = setInterval(refresh, 5000); // auto-refresh every 5s
+}
+
+async function renderTrace(runName) {
+  pageTitle.textContent = `Trace: ${runName}`;
+  const trace = await api(`/api/dispatch/trace/${runName}`);
+  if (trace.error) {
+    content.innerHTML = `<div class="text-red-400">${trace.error}</div>`;
+    return;
+  }
+
+  const bead = Array.isArray(trace.bead) ? trace.bead[0] : trace.bead;
+  const decision = trace.decision || {};
+  const status = decision.status || '?';
+  const statusColor = status === 'DONE' ? 'green' : status === 'BLOCKED' ? 'yellow' : 'red';
+
+  let html = `
+    <div class="mb-6">
+      <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">← Back to Dispatch</a>
+      <h1 class="text-2xl font-bold mb-2">${bead?.title || trace.bead_id}</h1>
+      <div class="flex gap-2 items-center mb-4">
+        <a href="/bead/${trace.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline">${trace.bead_id}</a>
+        ${bead ? priorityBadge(bead.priority) : ''}
+        <span class="badge badge-${statusColor === 'green' ? 'closed' : 'open'}">${status}</span>
+        ${trace.commit_hash ? `<span class="font-mono text-xs text-gray-400">${trace.commit_hash.slice(0, 10)}</span>` : ''}
+      </div>
+    </div>`;
+
+  // Decision
+  html += `<div class="mb-6">
+    <h2 class="text-lg font-semibold mb-2 text-${statusColor}-400">Decision</h2>
+    <div class="bg-gray-800 rounded-lg p-4">
+      <div class="text-sm mb-2"><strong>Status:</strong> ${status}</div>
+      <div class="text-sm mb-2"><strong>Reason:</strong> ${decision.reason || 'none'}</div>
+      ${decision.notes ? `<div class="text-sm mb-2"><strong>Notes:</strong> ${decision.notes}</div>` : ''}
+      ${decision.artifacts?.length ? `<div class="text-sm"><strong>Artifacts:</strong> ${decision.artifacts.join(', ')}</div>` : ''}
+    </div>
+  </div>`;
+
+  // Discovered beads
+  if (decision.discovered_beads?.length) {
+    html += `<div class="mb-6">
+      <h2 class="text-lg font-semibold mb-2 text-blue-400">Discovered Work</h2>`;
+    for (const b of decision.discovered_beads) {
+      html += `<div class="bg-gray-800 rounded-lg p-3 mb-2">
+        <div class="font-semibold text-sm">${b.title}</div>
+        <div class="text-xs text-gray-400 mt-1">${b.description?.slice(0, 200) || ''}</div>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Git diff
+  if (trace.diff) {
+    html += `<div class="mb-6">
+      <h2 class="text-lg font-semibold mb-2 text-purple-400">Diff</h2>
+      <pre class="bg-gray-800 rounded-lg p-4 text-xs overflow-x-auto max-h-96 overflow-y-auto"><code>${escapeHtml(trace.diff)}</code></pre>
+    </div>`;
+  }
+
+  // Experience report
+  if (trace.experience_report) {
+    html += `<div class="mb-6">
+      <h2 class="text-lg font-semibold mb-2 text-yellow-400">Experience Report</h2>
+      <div id="experience-content"></div>
+    </div>`;
+  }
+
+  content.innerHTML = html;
+
+  if (trace.experience_report) {
+    document.getElementById('experience-content').appendChild(renderMd(trace.experience_report));
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 let sessionsInterval = null;
@@ -804,6 +914,8 @@ function route() {
 
   if (path === '/' || path === '/beads') {
     renderBeads();
+  } else if (path.startsWith('/dispatch/trace/')) {
+    renderTrace(path.split('/dispatch/trace/')[1]);
   } else if (path === '/dispatch') {
     renderDispatch();
   } else if (path.startsWith('/bead/')) {
