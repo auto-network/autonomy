@@ -274,17 +274,13 @@ async def ws_terminal(websocket: WebSocket):
         claude_creds = str(Path.home() / ".claude")
         claude_json = str(Path.home() / ".claude.json")
         if cmd_str == "autonomy-agent-claude":
-            host_uid = os.getuid()
-            host_gid = os.getgid()
             cmd_str = (
                 f"docker run -it --rm --name {tmux_name}"
-                f" -u {host_uid}:{host_gid}"
                 f" -v {claude_creds}:/home/agent/.claude"
                 f" -v {claude_json}:/home/agent/.claude.json:ro"
                 f" -v {repo_root}/data/graph.db:/data/graph.db:ro"
                 f" -v {repo_root}:/repo:ro"
                 f" -w /repo"
-                f" -e HOME=/home/agent"
                 f" autonomy-agent"
                 f" --dangerously-skip-permissions"
             )

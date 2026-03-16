@@ -45,7 +45,7 @@ RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cro
     && claude --version > /dev/null 2>&1 || echo "WARN: claude not functional"
 
 # Agent runs as non-root
-RUN useradd -m -s /bin/bash agent \
+RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
     && mkdir -p /home/agent/.claude \
     && echo '{"numStartups":1,"hasCompletedOnboarding":true,"hasSeenTasksHint":true,"hasSeenStashHint":true,"remoteDialogSeen":true,"installMethod":"native","autoUpdates":false}' \
        > /home/agent/.claude.json \
