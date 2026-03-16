@@ -694,6 +694,8 @@ async function renderSource(id, highlightTurn) {
 
 let activeTerm = null;
 let activeWs = null;
+let activeTerminalId = null;
+let _pillClickTimer = null;
 
 function destroyTerminal() {
   if (activeWs) { try { activeWs.close(); } catch(e) {} activeWs = null; }
@@ -709,24 +711,83 @@ async function refreshTerminalPills() {
       terminals.map(t => {
         const cmd = (t.cmd || '').toLowerCase();
         const isClaude = cmd.includes('claude') || cmd.includes('autonomy-agent-claude');
-        const isContainer = cmd.includes('docker') || cmd.includes('autonomy-agent');
+        const isContainer = t.env === 'container' || cmd.includes('docker') || cmd.includes('autonomy-agent');
         const icon = isClaude ? '🤖' : '⬛';
         const border = isContainer ? 'border border-purple-500' : 'border border-gray-600';
         const label = isClaude ? 'claude' : 'bash';
+        const active = t.id === activeTerminalId;
+        const ring = active ? 'ring-2 ring-indigo-500' : '';
+        const displayName = escapeHtml(t.name || t.id);
+        const envBadge = isContainer
+          ? '<span class="text-xs text-purple-400 font-medium">container</span>'
+          : '<span class="text-xs text-gray-500">host</span>';
         return `
-          <button onclick="reconnectTerminal('${t.id}')"
-                  class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600 flex items-center gap-2 ${border}">
-            <span class="w-2 h-2 rounded-full bg-green-400"></span>${icon} ${t.id} <span class="text-xs text-gray-500">${label}</span>
-          </button>
-          <button onclick="killTerminal('${t.id}')"
-                  class="px-2 py-1 bg-red-900 rounded text-xs hover:bg-red-700">✕</button>`;
+          <div class="flex items-center ${border} rounded overflow-hidden ${ring}">
+            <div onclick="pillSingleClick('${t.id}')"
+                 class="px-3 py-1 bg-gray-700 text-sm hover:bg-gray-600 flex items-center gap-2 cursor-pointer">
+              <span class="w-2 h-2 rounded-full bg-green-400"></span>
+              ${icon}
+              <span class="pill-name" ondblclick="startRenameTerminal(event, '${t.id}')">${displayName}</span>
+              <span class="text-xs text-gray-500">${label}</span>
+              <span class="text-xs text-gray-600">&middot;</span>
+              ${envBadge}
+            </div>
+            <button onclick="killTerminal('${t.id}')"
+                    class="px-2 py-1 bg-red-900 text-xs hover:bg-red-700 self-stretch">✕</button>
+          </div>`;
       }).join('');
   } else {
     pillBar.innerHTML = '';
   }
 }
 
+function pillSingleClick(id) {
+  clearTimeout(_pillClickTimer);
+  _pillClickTimer = setTimeout(() => {
+    _pillClickTimer = null;
+    reconnectTerminal(id);
+  }, 250);
+}
+
+function startRenameTerminal(event, id) {
+  clearTimeout(_pillClickTimer);
+  _pillClickTimer = null;
+  event.stopPropagation();
+  event.preventDefault();
+  const span = event.target.closest('.pill-name');
+  if (!span) return;
+  const currentName = span.textContent;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = currentName;
+  input.className = 'bg-gray-800 text-white text-sm px-1 w-24 rounded outline-none border border-indigo-500';
+  input.style.minWidth = '3rem';
+  input.addEventListener('click', (e) => e.stopPropagation());
+  const finish = async (save) => {
+    if (save) {
+      const newName = input.value.trim();
+      if (newName && newName !== currentName) {
+        await fetch(`/api/terminal/${id}/rename`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: newName}),
+        });
+      }
+    }
+    refreshTerminalPills();
+  };
+  input.addEventListener('blur', () => finish(true));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  span.replaceWith(input);
+  setTimeout(() => { input.focus(); input.select(); }, 0);
+}
+
 async function renderTerminal(cmd, attach) {
+  if (attach) activeTerminalId = attach;
+  else if (cmd) activeTerminalId = null;
   pageTitle.textContent = attach ? `Attached: ${attach}` : 'Terminal';
   if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
   destroyTerminal();
@@ -787,6 +848,14 @@ async function renderTerminal(cmd, attach) {
     const dims = fitAddon.proposeDimensions();
     if (dims) {
       ws.send(`\x1b[8;${dims.rows};${dims.cols}t`);
+    }
+    // For new sessions, detect the newly created terminal
+    if (!activeTerminalId) {
+      const terms = await api('/api/terminals');
+      if (Array.isArray(terms) && terms.length > 0) {
+        const newest = terms.reduce((a, b) => (b.started || 0) > (a.started || 0) ? b : a);
+        activeTerminalId = newest.id;
+      }
     }
     // Refresh pill bar now that tmux session exists
     await refreshTerminalPills();
@@ -942,12 +1011,18 @@ function launchBashContainer() {
 }
 
 function reconnectTerminal(name) {
+  // Skip if already connected to this session
+  if (name === activeTerminalId && activeWs?.readyState === WebSocket.OPEN) {
+    return;
+  }
+  activeTerminalId = name;
   renderTerminal(null, name);
 }
 
 async function killTerminal(name) {
   await api(`/api/terminal/${name}/kill`);
-  renderTerminal(null, null);  // Refresh the terminal page
+  if (activeTerminalId === name) activeTerminalId = null;
+  renderTerminal(null, null);
 }
 
 // ── Router ───────────────────────────────────────────────────
