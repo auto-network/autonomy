@@ -35,6 +35,18 @@ function statusBadge(s) {
   return `<span class="badge badge-${cls}">${s}</span>`;
 }
 
+// ── Bead Actions ────────────────────────────────────────────
+
+async function approveBead(id) {
+  const res = await fetch(`/api/bead/${id}/approve`, { method: 'POST' });
+  const data = await res.json();
+  if (data.ok) {
+    navigateTo(`/bead/${id}`);  // re-render to show approved state
+  } else {
+    alert(`Failed to approve: ${data.error}`);
+  }
+}
+
 // ── Pages ────────────────────────────────────────────────────
 
 async function renderBeads() {
@@ -97,15 +109,26 @@ async function renderBeadDetail(id) {
   // Also fetch primer
   const primer = await api(`/api/primer/${id}`);
 
+  const labels = bead.labels || [];
+  const isApproved = labels.includes('approved');
+  const isClosed = bead.status === 'closed';
+  const approveBtn = (!isApproved && !isClosed)
+    ? `<button onclick="approveBead('${bead.id}')" class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded">Approve for Dispatch</button>`
+    : isApproved
+    ? `<span class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded">Approved</span>`
+    : '';
+
   let html = `
     <div class="mb-6">
       <h1 class="text-2xl font-bold mb-2">${bead.title}</h1>
-      <div class="flex gap-2 mb-4">
+      <div class="flex gap-2 items-center mb-4">
         <span class="font-mono text-sm text-gray-500">${bead.id}</span>
         ${priorityBadge(bead.priority)}
         ${statusBadge(bead.status)}
         <span class="text-sm text-gray-400">${bead.issue_type}</span>
+        ${approveBtn}
       </div>
+      ${labels.length ? `<div class="flex gap-1 mb-2">${labels.map(l => `<span class="px-2 py-0.5 bg-gray-700 text-gray-300 text-xs rounded">${l}</span>`).join('')}</div>` : ''}
     </div>`;
 
   if (primer.content) {
