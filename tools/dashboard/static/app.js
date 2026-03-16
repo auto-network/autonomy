@@ -143,6 +143,97 @@ async function renderBeadDetail(id) {
   }
 }
 
+let dispatchInterval = null;
+
+async function renderDispatch() {
+  pageTitle.textContent = 'Dispatch';
+  if (dispatchInterval) clearInterval(dispatchInterval);
+
+  async function refresh() {
+    const status = await api('/api/dispatch/status');
+    const inProgress = await api('/api/beads/list');
+    const approved = await fetch('/api/dispatch/status').then(r => r.json());
+
+    // Get beads that are in_progress
+    const active = (Array.isArray(inProgress) ? inProgress : [])
+      .filter(b => b.status === 'in_progress');
+
+    // Get approved beads waiting for dispatch
+    let approvedBeads = [];
+    try {
+      const res = await fetch('/api/beads/list').then(r => r.json());
+      approvedBeads = (Array.isArray(res) ? res : [])
+        .filter(b => b.status === 'open' && (b.labels || []).includes('approved'));
+    } catch(e) {}
+
+    let html = '';
+
+    // Running containers
+    html += `<div class="mb-8">
+      <h2 class="text-lg font-semibold mb-3 text-green-400">Running Agents</h2>`;
+    if (status.containers && status.containers.length > 0) {
+      for (const c of status.containers) {
+        if (c.name.startsWith('agent-slack')) continue; // skip unrelated
+        html += `
+          <div class="p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500">
+            <div class="flex justify-between items-center">
+              <span class="font-mono text-sm">${c.name}</span>
+              <span class="text-xs text-gray-400">${c.status}</span>
+            </div>
+            <div class="text-xs text-gray-500 mt-1">${c.image}</div>
+          </div>`;
+      }
+    } else {
+      html += `<div class="text-gray-500 text-sm">No agents running</div>`;
+    }
+    html += `</div>`;
+
+    // In-progress beads
+    html += `<div class="mb-8">
+      <h2 class="text-lg font-semibold mb-3 text-yellow-400">In Progress</h2>`;
+    if (active.length > 0) {
+      for (const b of active) {
+        html += `
+          <a href="/bead/${b.id}" class="block p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-yellow-500 hover:bg-gray-750">
+            <div class="flex gap-2 items-center">
+              <span class="font-mono text-sm text-gray-400">${b.id}</span>
+              ${priorityBadge(b.priority)}
+              <span>${b.title}</span>
+            </div>
+          </a>`;
+      }
+    } else {
+      html += `<div class="text-gray-500 text-sm">Nothing in progress</div>`;
+    }
+    html += `</div>`;
+
+    // Approved & waiting
+    html += `<div class="mb-8">
+      <h2 class="text-lg font-semibold mb-3 text-blue-400">Approved — Waiting for Dispatch</h2>`;
+    if (approvedBeads.length > 0) {
+      for (const b of approvedBeads) {
+        html += `
+          <a href="/bead/${b.id}" class="block p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-blue-500 hover:bg-gray-750">
+            <div class="flex gap-2 items-center">
+              <span class="font-mono text-sm text-gray-400">${b.id}</span>
+              ${priorityBadge(b.priority)}
+              <span>${b.title}</span>
+            </div>
+            <div class="flex gap-1 mt-1">${(b.labels||[]).map(l => `<span class="px-2 py-0.5 bg-gray-700 text-gray-300 text-xs rounded">${l}</span>`).join('')}</div>
+          </a>`;
+      }
+    } else {
+      html += `<div class="text-gray-500 text-sm">No beads approved for dispatch</div>`;
+    }
+    html += `</div>`;
+
+    content.innerHTML = html;
+  }
+
+  await refresh();
+  dispatchInterval = setInterval(refresh, 5000); // auto-refresh every 5s
+}
+
 let sessionsInterval = null;
 
 async function renderSessions() {
@@ -708,6 +799,7 @@ function route() {
 
   // Clear any auto-refresh intervals from previous page
   if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
+  if (dispatchInterval) { clearInterval(dispatchInterval); dispatchInterval = null; }
 
   // Update active nav
   document.querySelectorAll('.nav-link').forEach(el => {
@@ -716,6 +808,8 @@ function route() {
 
   if (path === '/' || path === '/beads') {
     renderBeads();
+  } else if (path === '/dispatch') {
+    renderDispatch();
   } else if (path.startsWith('/bead/')) {
     renderBeadDetail(path.split('/bead/')[1]);
   } else if (path === '/sessions') {

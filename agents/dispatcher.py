@@ -119,6 +119,9 @@ def claim_bead(bead_id: str) -> bool:
         print(f"  Failed to claim {bead_id}: {result.stderr}", file=sys.stderr)
         return False
 
+    # Set status to in_progress so dashboard shows it
+    run_bd(["update", bead_id, "-s", "in_progress"])
+
     # Also add label for queryability
     subprocess.run(
         ["bd", "label", "add", bead_id, "work:claimed"],
