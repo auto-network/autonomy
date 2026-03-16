@@ -236,6 +236,85 @@ async function renderSearch(query, project) {
   content.innerHTML = html;
 }
 
+async function renderContext(id, turn, window = 5) {
+  // Load just the context around a specific turn — not the whole source
+  const srcData = await api(`/api/source/${id}`);
+  const src = srcData.source || {};
+  const allEntries = srcData.entries || [];
+  const edges = srcData.edges || [];
+
+  // Filter to window
+  const entries = allEntries.filter(e => {
+    const t = e.turn_number;
+    return t && Math.abs(t - turn) <= window;
+  });
+
+  const totalTurns = allEntries.length;
+  pageTitle.textContent = `${src.title?.slice(0, 40) || id.slice(0, 12)} — turn ${turn}`;
+
+  const typeBadges = {
+    note: 'bg-yellow-700', session: 'bg-green-700', conversation: 'bg-blue-700',
+    status: 'bg-purple-700', docs: 'bg-teal-700', 'agent-run': 'bg-orange-700',
+  };
+  const badgeCls = typeBadges[src.type] || 'bg-gray-700';
+  const proj = src.project ? `<span class="text-xs text-indigo-400">[${src.project}]</span>` : '';
+  const date = (src.created_at || '').slice(0, 10);
+
+  let html = `
+    <div class="mb-4">
+      <div class="flex items-center gap-3 mb-2">
+        <span class="px-2 py-0.5 ${badgeCls} rounded text-xs font-semibold">${src.type || '?'}</span>
+        ${proj}
+        <span class="text-xs text-gray-500">${date}</span>
+        <span class="text-xs text-gray-600 font-mono ml-auto">${src.id?.slice(0, 12) || ''}</span>
+      </div>
+      <h1 class="text-lg font-bold">${src.title || 'Untitled'}</h1>
+      <div class="text-xs text-gray-500 mt-1">
+        Showing turns ${turn - window}–${turn + window} of ${totalTurns}
+        <a href="/source/${id}" class="text-indigo-400 ml-2 hover:underline">View full source →</a>
+      </div>
+    </div>`;
+
+  // Render entries in chat style
+  html += `<div class="space-y-3">`;
+  for (const e of entries) {
+    const isUser = e.entry_type === 'thought';
+    const align = isUser ? 'mr-16' : 'ml-16';
+    const border = isUser ? 'border-l-4 border-blue-500' : 'border-l-4 border-gray-600';
+    const roleBadge = isUser
+      ? '<span class="text-xs text-blue-400 font-semibold">USER</span>'
+      : '<span class="text-xs text-gray-400 font-semibold">ASSISTANT</span>';
+    const t = e.turn_number || '?';
+    const highlight = (t == turn) ? 'ring-2 ring-indigo-500 bg-gray-750' : '';
+
+    html += `
+      <div class="p-3 bg-gray-800 rounded-lg ${border} ${align} ${highlight}" id="turn-${t}">
+        <div class="flex items-center gap-2 mb-1">
+          ${roleBadge}
+          <span class="text-xs text-gray-600">t${t}</span>
+        </div>
+        <div class="markdown-body entry-content text-sm" data-turn="${t}"></div>
+      </div>`;
+  }
+  html += `</div>`;
+
+  // Navigation: load more context
+  html += `
+    <div class="flex gap-4 mt-4 justify-center">
+      <button onclick="renderContext('${id}', ${turn}, ${window + 5})"
+              class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Show more context</button>
+      <a href="/source/${id}" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600 inline-block">Full source</a>
+    </div>`;
+
+  content.innerHTML = html;
+
+  // Render markdown
+  const contentEls = content.querySelectorAll('.entry-content');
+  entries.forEach((e, i) => {
+    if (contentEls[i]) contentEls[i].appendChild(renderMd(e.content));
+  });
+}
+
 async function renderSource(id, highlightTurn) {
   pageTitle.textContent = `Source: ${id.slice(0, 12)}`;
   const data = await api(`/api/source/${id}`);
@@ -614,7 +693,12 @@ function route() {
     renderSearch(params.get('q'), params.get('project'));
   } else if (path.startsWith('/source/')) {
     const params = new URLSearchParams(window.location.search);
-    renderSource(path.split('/source/')[1], params.get('turn'));
+    const turn = params.get('turn');
+    if (turn) {
+      renderContext(path.split('/source/')[1], parseInt(turn), parseInt(params.get('window') || '5'));
+    } else {
+      renderSource(path.split('/source/')[1]);
+    }
   } else if (path === '/terminal' || path.startsWith('/terminal/')) {
     const sessionId = path.startsWith('/terminal/') ? path.split('/terminal/')[1] : null;
     renderTerminal(null, sessionId);
