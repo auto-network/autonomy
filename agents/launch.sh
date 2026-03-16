@@ -19,9 +19,15 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 IMAGE="autonomy-agent"
 
 # ── Args ──────────────────────────────────────────────
-BEAD_ID="${1:?Usage: launch.sh <bead-id> [--dry-run]}"
+BEAD_ID="${1:?Usage: launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG]}"
+shift
 DRY_RUN=false
-[[ "${2:-}" == "--dry-run" ]] && DRY_RUN=true
+for arg in "$@"; do
+    case $arg in
+        --dry-run) DRY_RUN=true ;;
+        --image=*) IMAGE="${arg#*=}" ;;
+    esac
+done
 
 # ── Validate ──────────────────────────────────────────
 CLAUDE_CREDS="${CLAUDE_CREDENTIALS_DIR:-$HOME/.claude}"

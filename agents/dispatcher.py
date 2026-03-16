@@ -24,6 +24,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
 
+# Map labels to container images. Beads with these labels get dispatched
+# to specialized images with the right dependencies baked in.
+LABEL_IMAGE_MAP = {
+    "dashboard": "autonomy-agent:dashboard",
+    # Add more as project images are created:
+    # "scraper": "autonomy-agent:scraper",
+}
+DEFAULT_IMAGE = "autonomy-agent"
+
 
 @dataclass
 class DispatchResult:
@@ -137,12 +146,21 @@ def release_bead(bead_id: str, status: str, reason: str) -> None:
         run_bd(["set-state", bead_id, "work=released", "--reason", f"Unknown status: {status}"])
 
 
-def launch_agent(bead_id: str) -> DispatchResult:
+def image_for_bead(bead: dict) -> str:
+    """Select the container image based on bead labels."""
+    labels = bead.get("labels") or []
+    for label in labels:
+        if label in LABEL_IMAGE_MAP:
+            return LABEL_IMAGE_MAP[label]
+    return DEFAULT_IMAGE
+
+
+def launch_agent(bead_id: str, image: str = DEFAULT_IMAGE) -> DispatchResult:
     """Launch an agent container for a bead and collect results."""
-    print(f"  Launching agent for {bead_id}...")
+    print(f"  Launching agent for {bead_id} (image: {image})...")
 
     result = subprocess.run(
-        [str(LAUNCH_SCRIPT), bead_id],
+        [str(LAUNCH_SCRIPT), bead_id, f"--image={image}"],
         capture_output=True, text=True,
         timeout=600,  # 10 minute max per agent run
         cwd=str(REPO_ROOT),
@@ -243,7 +261,8 @@ def dispatch_cycle(config: DispatcherConfig) -> int:
     bead_id = bead["id"]
     title = bead.get("title", "?")
 
-    print(f"  Selected: {bead_id} — {title} (P{bead.get('priority', '?')})")
+    image = image_for_bead(bead)
+    print(f"  Selected: {bead_id} — {title} (P{bead.get('priority', '?')}) [{image}]")
 
     if config.dry_run:
         print("  [DRY RUN] Would dispatch this bead")
@@ -255,7 +274,7 @@ def dispatch_cycle(config: DispatcherConfig) -> int:
 
     # 5. Launch
     try:
-        result = launch_agent(bead_id)
+        result = launch_agent(bead_id, image=image)
     except subprocess.TimeoutExpired:
         print(f"  TIMEOUT: Agent exceeded 10 minute limit")
         release_bead(bead_id, "FAILED", "Agent timeout (10 min)")
