@@ -1,0 +1,31 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Databases (derived, regenerable)
+data/graph.db
+data/graph.db-wal
+data/graph.db-shm
+
+# Beads (Dolt local state — .beads/issues.jsonl IS tracked)
+.beads/beads.db
+.beads/dolt/
+.dolt/
+
+# Browser profile (contains auth tokens)
+.browser_profile/
+
+# Claude Code local settings (machine-specific)
+.claude/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
