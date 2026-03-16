@@ -225,23 +225,29 @@ function destroyTerminal() {
   if (activeTerm) { activeTerm.dispose(); activeTerm = null; }
 }
 
-async function renderTerminal(cmd, attach) {
-  pageTitle.textContent = attach ? `Attached: ${attach}` : 'Terminal';
-  if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
-  destroyTerminal();
-
-  // Fetch existing terminals
+async function refreshTerminalPills() {
+  const pillBar = document.getElementById('terminal-pills');
+  if (!pillBar) return;
   const terminals = await api('/api/terminals');
-  const existingList = Array.isArray(terminals) && terminals.length > 0
-    ? terminals.map(t => `
+  if (Array.isArray(terminals) && terminals.length > 0) {
+    pillBar.innerHTML = '<span class="text-gray-600 self-center">|</span>' +
+      terminals.map(t => `
         <button onclick="reconnectTerminal('${t.id}')"
                 class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600 flex items-center gap-2">
           <span class="w-2 h-2 rounded-full bg-green-400"></span>${t.id}
         </button>
         <button onclick="killTerminal('${t.id}')"
                 class="px-2 py-1 bg-red-900 rounded text-xs hover:bg-red-700">✕</button>
-      `).join('')
-    : '';
+      `).join('');
+  } else {
+    pillBar.innerHTML = '';
+  }
+}
+
+async function renderTerminal(cmd, attach) {
+  pageTitle.textContent = attach ? `Attached: ${attach}` : 'Terminal';
+  if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
+  destroyTerminal();
 
   content.innerHTML = `
     <div class="flex gap-2 mb-3 flex-wrap">
@@ -249,10 +255,13 @@ async function renderTerminal(cmd, attach) {
       <button onclick="launchClaudeContainer()" class="px-3 py-1 bg-purple-600 rounded text-sm hover:bg-purple-500">Claude (container)</button>
       <button onclick="launchBash()" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Bash</button>
       <button onclick="launchBashContainer()" class="px-3 py-1 bg-gray-600 rounded text-sm hover:bg-gray-500">Bash (container)</button>
-      ${existingList ? '<span class="text-gray-600 self-center">|</span>' + existingList : ''}
+      <span id="terminal-pills" class="contents"></span>
       <span class="text-xs text-gray-500 ml-auto self-center" id="term-status">ready</span>
     </div>
     <div id="terminal-container" style="height: calc(100vh - 10rem);"></div>`;
+
+  // Show existing pills
+  await refreshTerminalPills();
 
   // If we have an attach target, connect immediately
   if (!attach && !cmd) return;
@@ -289,7 +298,7 @@ async function renderTerminal(cmd, attach) {
   activeWs = ws;
   activeTerm = term;
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     statusEl.textContent = 'connected';
     statusEl.className = 'text-xs text-green-400 ml-auto self-center';
     // Send initial size
@@ -297,6 +306,8 @@ async function renderTerminal(cmd, attach) {
     if (dims) {
       ws.send(`\x1b[8;${dims.rows};${dims.cols}t`);
     }
+    // Refresh pill bar now that tmux session exists
+    await refreshTerminalPills();
   };
 
   ws.onmessage = (e) => {
