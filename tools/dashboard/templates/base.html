@@ -28,9 +28,16 @@
     .markdown-body blockquote { border-left: 3px solid #6366f1; padding-left: 1rem; margin: 0.5rem 0; color: #9ca3af; }
     .markdown-body strong { color: #e5e7eb; }
     .markdown-body a { color: #818cf8; text-decoration: underline; }
-    .nav-link { display: block; padding: 0.5rem 0.75rem; border-radius: 0.375rem; color: #9ca3af; text-decoration: none; }
+    .nav-link { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; border-radius: 0.375rem; color: #9ca3af; text-decoration: none; }
     .nav-link:hover { background: #374151; color: #e5e7eb; }
     .nav-link.active { background: #4f46e5; color: white; }
+    .nav-badge { display: inline-flex; align-items: center; justify-content: center; font-size: 0.6875rem; font-weight: 600; line-height: 1; min-width: 1.25rem; padding: 0.125rem 0.375rem; border-radius: 9999px; }
+    .nav-badge:empty { display: none; }
+    .nav-badge-indigo { background: #4f46e5; color: white; }
+    .nav-badge-green { background: #16a34a; color: white; }
+    .nav-badge-amber { background: #d97706; color: white; }
+    .nav-badge-gray { background: #4b5563; color: #d1d5db; }
+    .dispatch-badges { display: flex; gap: 0.25rem; }
     .badge { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
     .badge-p0 { background: #dc2626; color: white; }
     .badge-p1 { background: #f59e0b; color: black; }
@@ -65,11 +72,11 @@
                             transition-transform duration-200 ease-in-out">
     <h1 class="text-lg font-bold text-indigo-400 mb-4">Autonomy</h1>
     <div class="space-y-1 mb-6">
-      <a href="/beads" class="nav-link" data-page="beads" onclick="closeSidebar()">Beads</a>
-      <a href="/dispatch" class="nav-link" data-page="dispatch" onclick="closeSidebar()">Dispatch</a>
-      <a href="/sessions" class="nav-link" data-page="sessions" onclick="closeSidebar()">Sessions</a>
+      <a href="/beads" class="nav-link" data-page="beads" onclick="closeSidebar()">Beads <span id="badge-beads" class="nav-badge nav-badge-indigo"></span></a>
+      <a href="/dispatch" class="nav-link" data-page="dispatch" onclick="closeSidebar()">Dispatch <span class="dispatch-badges" id="badge-dispatch"></span></a>
+      <a href="/sessions" class="nav-link" data-page="sessions" onclick="closeSidebar()">Sessions <span id="badge-sessions" class="nav-badge nav-badge-green"></span></a>
       <a href="/search" class="nav-link" data-page="search" onclick="closeSidebar()">Search</a>
-      <a href="/terminal" class="nav-link" data-page="terminal" onclick="closeSidebar()">Terminal</a>
+      <a href="/terminal" class="nav-link" data-page="terminal" onclick="closeSidebar()">Terminal <span id="badge-terminal" class="nav-badge nav-badge-gray"></span></a>
     </div>
     <div class="mt-auto text-xs text-gray-500" id="stats-summary">loading...</div>
   </nav>
