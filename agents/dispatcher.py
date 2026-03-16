@@ -77,7 +77,8 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
     """
     if label_filter:
         # bd query supports label filtering and returns full bead data
-        out = run_bd(["query", f"status=open AND label={label_filter}", "--json"])
+        # Beads must also be labelled 'approved' — human gate before dispatch
+        out = run_bd(["query", f"status=open AND label={label_filter} AND label=approved", "--json"])
     else:
         out = run_bd(["ready", "--json"])
 
