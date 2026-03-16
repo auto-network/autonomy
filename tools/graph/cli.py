@@ -92,6 +92,16 @@ def cmd_search(args):
     db = GraphDB(args.db)
     results = db.search(args.query, limit=args.limit, project=getattr(args, 'project', None), or_mode=getattr(args, 'or_mode', False))
 
+    if args.json:
+        import json as _json
+        # Truncate content for JSON output
+        for r in results:
+            if len(r.get("content", "")) > args.width:
+                r["content"] = r["content"][:args.width] + "…"
+        print(_json.dumps(results, default=str))
+        db.close()
+        return
+
     if not results:
         print("No results found.")
         db.close()
@@ -105,7 +115,6 @@ def cmd_search(args):
         turn = r.get("turn_number", "?")
         sid = r.get("source_id", "?")[:12]
         content = r["content"]
-        # Show more content — wrap to width, indent continuation lines
         if len(content) > width:
             content = content[:width] + "…"
         lines = content.replace("\n", "\n    ").rstrip()
@@ -842,6 +851,7 @@ def main():
     p.add_argument("--limit", type=int, default=10, help="Max results")
     p.add_argument("--width", "-w", type=int, default=500, help="Max chars per result (default 500)")
     p.add_argument("--or", dest="or_mode", action="store_true", help="Join terms with OR instead of AND")
+    p.add_argument("--json", action="store_true", help="Output as JSON array")
     p.set_defaults(func=cmd_search)
 
     # read

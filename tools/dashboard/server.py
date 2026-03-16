@@ -73,16 +73,13 @@ async def api_search(request):
     q = request.query_params.get("q", "")
     if not q:
         return JSONResponse({"error": "missing q parameter"})
-    cmd = ["graph", "search", q, "--limit", request.query_params.get("limit", "20")]
+    cmd = ["graph", "search", q, "--json", "--limit", request.query_params.get("limit", "20")]
     project = request.query_params.get("project")
     if project:
         cmd += ["--project", project]
     if request.query_params.get("or"):
         cmd += ["--or"]
-    # graph search doesn't have --json yet, so we parse the text output
-    # For now return raw text; we'll add --json to graph search later
-    stdout, stderr, rc = await run_cli(cmd)
-    return JSONResponse({"results": stdout, "error": stderr if rc != 0 else None})
+    return JSONResponse(await run_cli_json(cmd))
 
 async def api_sources(request):
     cmd = ["graph", "sources"]
