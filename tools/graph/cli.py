@@ -126,50 +126,101 @@ def cmd_search(args):
     db.close()
 
 
-def cmd_read(args):
-    """Read full content of a source by ID or title search."""
-    db = GraphDB(args.db)
-
-    # Try as source ID first (or prefix)
-    source = db.get_source(args.source)
+def _resolve_source(db, source_arg, first=False):
+    """Resolve a source by ID, prefix, or title search. Returns dict or None."""
+    source = db.get_source(source_arg)
     if not source:
-        # Try prefix match
         row = db.conn.execute(
-            "SELECT * FROM sources WHERE id LIKE ? LIMIT 1", (f"{args.source}%",)
+            "SELECT * FROM sources WHERE id LIKE ? LIMIT 1", (f"{source_arg}%",)
         ).fetchone()
         if row:
             source = dict(row)
-
     if not source:
-        # Try title search
-        sources = db.find_sources(args.source, limit=5)
-        # Scope filter
+        sources = db.find_sources(source_arg, limit=5)
         scope = _get_scope()
         if scope:
             sources = [s for s in sources if s.get("project") == scope]
         if not sources:
-            print(f"No source found matching '{args.source}'")
-            db.close()
-            return
-        if len(sources) > 1 and not args.first:
-            print(f"Multiple sources match '{args.source}':")
-            for s in sources:
-                proj = f" [{s['project']}]" if s.get('project') else ""
-                print(f"  {s['id'][:12]}  {s['type']:10s}  {s.get('title', '?')[:60]}{proj}")
-            print(f"\nUse the source ID to read a specific one, or --first to read the top match.")
-            db.close()
-            return
+            return None
+        if len(sources) > 1 and not first:
+            return sources  # Return list for disambiguation
         source = sources[0]
+    return source
 
-    # Print source header
+
+def cmd_read(args):
+    """Read full content of a source by ID or title search."""
+    db = GraphDB(args.db)
+    import json as _json
+
+    result = _resolve_source(db, args.source, first=args.first)
+    if result is None:
+        print(f"No source found matching '{args.source}'")
+        db.close()
+        return
+    if isinstance(result, list):
+        print(f"Multiple sources match '{args.source}':")
+        for s in result:
+            proj = f" [{s['project']}]" if s.get('project') else ""
+            print(f"  {s['id'][:12]}  {s['type']:10s}  {s.get('title', '?')[:60]}{proj}")
+        print(f"\nUse the source ID to read a specific one, or --first to read the top match.")
+        db.close()
+        return
+    source = result
+
+    entries = db.get_source_content(source["id"])
+
+    # Get edges for this source
+    edges = db.conn.execute(
+        """SELECT * FROM edges
+           WHERE source_id = ? OR target_id = ?""",
+        (source["id"], source["id"]),
+    ).fetchall()
+
+    if args.json:
+        # Structured JSON output
+        entry_list = []
+        for e in entries:
+            entry = {
+                "id": e.get("id"),
+                "entry_type": e.get("entry_type"),
+                "role": e.get("role"),
+                "turn_number": e.get("turn_number"),
+                "content": e["content"],
+                "message_id": e.get("message_id"),
+                "metadata": e.get("metadata"),
+            }
+            if args.max_chars and len(entry["content"]) > args.max_chars:
+                entry["content"] = entry["content"][:args.max_chars] + "…"
+                entry["truncated"] = True
+            entry_list.append(entry)
+
+        edge_list = [dict(e) for e in edges]
+
+        output = {
+            "source": {
+                "id": source["id"],
+                "type": source.get("type"),
+                "title": source.get("title"),
+                "project": source.get("project"),
+                "platform": source.get("platform"),
+                "created_at": source.get("created_at"),
+                "metadata": source.get("metadata"),
+            },
+            "entries": entry_list,
+            "edges": edge_list,
+        }
+        print(_json.dumps(output, default=str))
+        db.close()
+        return
+
+    # Text output (existing behavior)
     proj = f" [{source['project']}]" if source.get('project') else ""
     print(f"Source: {source['id'][:12]}  {source['type']}{proj}")
     print(f"Title:  {source.get('title', '?')}")
     print(f"Date:   {source.get('created_at', '?')[:10]}")
     print(f"{'─' * 72}")
 
-    # Print all content
-    entries = db.get_source_content(source["id"])
     for e in entries:
         role = e.get("role", "?")
         turn = e.get("turn_number", "?")
@@ -859,6 +910,7 @@ def main():
     p.add_argument("source", help="Source ID (or prefix) or title search term")
     p.add_argument("--first", action="store_true", help="Read first match if multiple")
     p.add_argument("--max-chars", type=int, default=0, help="Max chars per turn (0=unlimited)")
+    p.add_argument("--json", action="store_true", help="Output as structured JSON (source + entries + edges)")
     p.set_defaults(func=cmd_read)
 
     # sources
