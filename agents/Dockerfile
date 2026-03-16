@@ -45,7 +45,9 @@ RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cro
     && claude --version > /dev/null 2>&1 || echo "WARN: claude not functional"
 
 # Agent runs as non-root
-RUN useradd -m -s /bin/bash agent
+RUN useradd -m -s /bin/bash agent \
+    && mkdir -p /home/agent/.claude \
+    && chown -R agent:agent /home/agent/.claude
 USER agent
 
 # Default entrypoint: claude with skip-permissions (dispatcher controls the prompt)
