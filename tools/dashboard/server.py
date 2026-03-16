@@ -396,13 +396,11 @@ async def ws_terminal(websocket: WebSocket):
 
         # Resolve special container commands
         repo_root = str(Path(__file__).parents[2])
-        claude_creds = str(Path.home() / ".claude")
-        claude_json = str(Path.home() / ".claude.json")
+        claude_creds_file = str(Path.home() / ".claude" / ".credentials.json")
         if cmd_str == "autonomy-agent-claude":
             cmd_str = (
                 f"docker run -it --rm --name {tmux_name}"
-                f" -v {claude_creds}:/home/agent/.claude"
-                f" -v {claude_json}:/home/agent/.claude.json:ro"
+                f" -v {claude_creds_file}:/home/agent/.claude/.credentials.json:ro"
                 f" -v {repo_root}/data/graph.db:/data/graph.db:ro"
                 f" -v {repo_root}:/workspace/repo"
                 f" -w /workspace/repo"
