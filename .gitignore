@@ -30,3 +30,4 @@ data/graph.db-shm
 # OS
 .DS_Store
 Thumbs.db
+.worktrees/
