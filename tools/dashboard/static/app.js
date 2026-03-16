@@ -231,28 +231,37 @@ async function renderSearch(query, project) {
 
   let html = `<div class="text-sm text-gray-500 mb-4">${results.length} results</div><div class="space-y-3">`;
   for (const r of results) {
-    const type = r.result_type === 'thought' ? 'T' : 'D';
-    const typeBg = r.result_type === 'thought' ? 'bg-blue-900' : 'bg-gray-700';
+    const isUser = r.result_type === 'thought';
+    const typeBadge = isUser
+      ? '<span class="px-1.5 py-0.5 bg-blue-900 rounded text-xs">YOU</span>'
+      : '<span class="px-1.5 py-0.5 bg-gray-700 rounded text-xs">AI</span>';
     const proj = r.project ? `<span class="text-xs text-indigo-400">[${r.project}]</span>` : '';
-    const title = (r.source_title || '?').slice(0, 60);
     const srcId = (r.source_id || '').slice(0, 12);
     const turn = r.turn_number || '?';
 
-    // Truncate content for preview, preserve first meaningful line
-    let preview = (r.content || '').slice(0, 300);
-    if (r.content && r.content.length > 300) preview += '…';
+    // First line of content as the headline
+    const lines = (r.content || '').split('\n').filter(l => l.trim());
+    const headline = (lines[0] || '').slice(0, 120);
+    // Rest as dimmer preview
+    const rest = lines.slice(1).join('\n').slice(0, 200);
+    const preview = rest ? rest.replace(/</g, '&lt;').replace(/\n/g, '<br>') + (r.content.length > 300 ? '…' : '') : '';
+
+    // Source title — shortened, as secondary context
+    const srcTitle = (r.source_title || '').slice(0, 40);
+    const srcLabel = srcTitle.startsWith('Read all the markdown') ? 'main session' : srcTitle;
 
     html += `
       <div class="p-4 bg-gray-800 rounded-lg border border-gray-700 hover:border-indigo-500 cursor-pointer transition-colors"
            onclick="navigateTo('/source/${r.source_id}?turn=${r.turn_number}')">
-        <div class="flex items-center gap-2 mb-2">
-          <span class="px-1.5 py-0.5 ${typeBg} rounded text-xs font-mono">${type}</span>
-          <span class="text-sm font-medium truncate">${title}</span>
-          <span class="text-xs text-gray-500">t${turn}</span>
+        <div class="text-sm font-medium mb-1">${headline.replace(/</g, '&lt;')}</div>
+        ${preview ? `<div class="text-xs text-gray-500 leading-relaxed mb-2">${preview}</div>` : ''}
+        <div class="flex items-center gap-2">
+          ${typeBadge}
+          <span class="text-xs text-gray-600">${srcLabel}</span>
+          <span class="text-xs text-gray-600">t${turn}</span>
           ${proj}
-          <span class="text-xs text-gray-600 ml-auto font-mono">src:${srcId}</span>
+          <span class="text-xs text-gray-700 font-mono ml-auto">src:${srcId}</span>
         </div>
-        <div class="text-sm text-gray-400 leading-relaxed" id="preview-${srcId}">${preview.replace(/</g, '&lt;').replace(/\n/g, '<br>')}</div>
       </div>`;
   }
   html += '</div>';
