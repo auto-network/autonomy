@@ -111,11 +111,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Mount .git at the same absolute path so worktree's .git file reference resolves
+GIT_DIR="$REPO_ROOT/.git"
+
 docker run \
     --name "$CONTAINER_NAME" \
     --rm \
     -e BD_ACTOR="agent:$CONTAINER_NAME" \
     -v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro" \
+    -v "$GIT_DIR:$GIT_DIR" \
     -v "$REPO_ROOT/data/graph.db:/data/graph.db:ro" \
     -v "$REPO_ROOT/.beads:/data/.beads:ro" \
     -v "$WORKTREE_DIR:/workspace/repo" \
