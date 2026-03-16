@@ -36,7 +36,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Readiness levels in lifecycle order
-READINESS_LEVELS = ("draft", "spec-complete", "ready")
+READINESS_LEVELS = ("idea", "draft", "specified", "approved")
 
 # The label dimension used with bd set-state / bd query
 READINESS_DIMENSION = "readiness"
@@ -84,7 +84,7 @@ def get_bead(bead_id: str) -> dict | None:
 def get_readiness_level(bead: dict) -> str:
     """Extract current readiness level from bead labels.
 
-    Looks for labels matching 'readiness:<level>'. Returns 'draft'
+    Looks for labels matching 'readiness:<level>'. Returns 'idea'
     if no readiness label is set (implicit default).
     """
     labels = bead.get("labels") or []
@@ -93,13 +93,13 @@ def get_readiness_level(bead: dict) -> str:
             level = label.split(":", 1)[1]
             if level in READINESS_LEVELS:
                 return level
-    return "draft"
+    return "idea"
 
 
-def check_spec_complete(bead: dict) -> ReadinessCheck:
-    """Check if a bead meets spec-complete criteria.
+def check_specified(bead: dict) -> ReadinessCheck:
+    """Check if a bead meets specified criteria.
 
-    Spec-complete means the bead is well-specified enough that an agent
+    Specified means the bead is well-specified enough that an agent
     *could* work on it. Requirements:
     - Has a non-trivial description (>50 chars)
     - Has acceptance criteria or design notes
@@ -137,39 +137,42 @@ def check_spec_complete(bead: dict) -> ReadinessCheck:
     return ReadinessCheck(
         bead_id=bead_id,
         current_level=get_readiness_level(bead),
-        target_level="spec-complete",
+        target_level="specified",
         passed=len(gaps) == 0,
         gaps=gaps,
         warnings=warnings,
     )
 
 
-def check_ready(bead: dict) -> ReadinessCheck:
-    """Check if a bead meets ready-for-dispatch criteria.
+# Keep backward-compatible alias
+check_spec_complete = check_specified
 
-    Ready means the bead is fully prepared for autonomous agent execution.
-    Builds on spec-complete and adds:
-    - Must already be spec-complete (all spec-complete checks pass)
-    - Must have the 'approved' label (human gate)
+
+def check_approved(bead: dict) -> ReadinessCheck:
+    """Check if a bead meets approved-for-dispatch criteria.
+
+    Approved means the bead is fully prepared for autonomous agent execution.
+    Builds on specified and adds:
+    - Must already be specified (all specified checks pass)
     - Must have the 'implementation' label (dispatch queue)
     - Priority must be set (not None/missing)
+
+    Note: the 'approved' label itself is not checked here — approval is the
+    human action of setting readiness=approved via set-state. This function
+    checks whether the bead *qualifies* for approval.
     """
     bead_id = bead.get("id", "?")
     gaps = []
     warnings = []
 
-    # First, must pass spec-complete
-    spec_check = check_spec_complete(bead)
+    # First, must pass specified
+    spec_check = check_specified(bead)
     if not spec_check.passed:
-        gaps.append("Does not meet spec-complete criteria:")
+        gaps.append("Does not meet specified criteria:")
         for g in spec_check.gaps:
             gaps.append(f"  - {g}")
 
     labels = bead.get("labels") or []
-
-    # Must be approved (human gate)
-    if "approved" not in labels:
-        gaps.append("Missing 'approved' label — needs human review")
 
     # Must be in implementation queue
     if "implementation" not in labels:
@@ -187,36 +190,41 @@ def check_ready(bead: dict) -> ReadinessCheck:
     return ReadinessCheck(
         bead_id=bead_id,
         current_level=get_readiness_level(bead),
-        target_level="ready",
+        target_level="approved",
         passed=len(gaps) == 0,
         gaps=gaps,
         warnings=warnings + spec_check.warnings,
     )
 
 
-def check_readiness(bead: dict, target: str = "ready") -> ReadinessCheck:
+# Keep backward-compatible alias
+check_ready = check_approved
+
+
+def check_readiness(bead: dict, target: str = "approved") -> ReadinessCheck:
     """Check if a bead meets the specified readiness level."""
-    if target == "spec-complete":
-        return check_spec_complete(bead)
-    elif target == "ready":
-        return check_ready(bead)
+    if target == "specified":
+        return check_specified(bead)
+    elif target == "approved":
+        return check_approved(bead)
     else:
         return ReadinessCheck(
             bead_id=bead.get("id", "?"),
             current_level=get_readiness_level(bead),
             target_level=target,
-            passed=target == "draft",  # draft is always met
-            gaps=[] if target == "draft" else [f"Unknown readiness level: {target}"],
+            passed=target in ("idea", "draft"),  # idea/draft are always met
+            gaps=[] if target in ("idea", "draft") else [f"Unknown readiness level: {target}"],
         )
 
 
 def is_dispatch_ready(bead: dict) -> bool:
-    """Quick check: is this bead ready for dispatch?
+    """Quick check: is this bead approved for dispatch?
 
-    Used by the dispatcher as a filter. Returns True only if
-    the bead has readiness:ready label.
+    Returns True only if the bead has readiness:approved label.
+    Note: the dispatcher no longer imports this — it queries
+    label=readiness:approved directly. Kept for CLI/programmatic use.
     """
-    return get_readiness_level(bead) == "ready"
+    return get_readiness_level(bead) == "approved"
 
 
 def set_readiness(bead_id: str, level: str, reason: str = "") -> bool:
@@ -310,7 +318,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"Bead not found: {args.bead_id}", file=sys.stderr)
         return 1
 
-    target = args.level or "ready"
+    target = args.level or "approved"
     check = check_readiness(bead, target)
     print(format_check(check))
 
