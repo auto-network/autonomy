@@ -58,9 +58,10 @@ You are an autonomous agent dispatched by the Autonomy dispatcher.
 
 - You are running with `bd --readonly`. Do not attempt to modify beads.
 - Complete the task described above.
+- Your code workspace is `/workspace/repo` — a git worktree. Edit files and commit normally.
 - Write your decision to `/workspace/output/decision.json` when done.
-- Write `experience_report.md` to `/workspace/output/` with operational feedback.
-- Write ALL output files to `/workspace/output/` — this is the only directory that persists after the container exits.
+- Write `experience_report.md` to `/workspace/output/`.
+- Code goes in the repo (commit it). Reports and decision go in `/workspace/output/`.
 - If you discover new work, include it in the decision file's `discovered_beads` array.
 - If you are blocked, write a BLOCKED decision immediately — do not spin.
 """)
