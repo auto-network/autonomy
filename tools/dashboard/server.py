@@ -189,8 +189,11 @@ async def api_active_sessions(request):
 
 async def api_terminals(request):
     """List active terminal sessions (tmux-backed)."""
-    # Refresh from tmux
     live = _list_dashboard_tmux()
+    # Clean up tracking for dead sessions
+    dead = [k for k in _active_terminals if k not in live]
+    for k in dead:
+        del _active_terminals[k]
     return JSONResponse([
         {"id": name, "alive": True, **_active_terminals.get(name, {"cmd": "?"})}
         for name in live
@@ -277,7 +280,9 @@ async def ws_terminal(websocket: WebSocket):
                 f" -v {claude_json}:/home/agent/.claude.json:ro"
                 f" -v {repo_root}/data/graph.db:/data/graph.db:ro"
                 f" -v {repo_root}:/repo:ro"
+                f" -w /repo"
                 f" autonomy-agent"
+                f" --dangerously-skip-permissions"
             )
         elif cmd_str == "autonomy-agent-bash":
             cmd_str = (

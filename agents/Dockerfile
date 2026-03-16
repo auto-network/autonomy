@@ -47,7 +47,11 @@ RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cro
 # Agent runs as non-root
 RUN useradd -m -s /bin/bash agent \
     && mkdir -p /home/agent/.claude \
-    && chown -R agent:agent /home/agent/.claude
+    && echo '{"numStartups":1,"installMethod":"native","autoUpdates":false,"hasSeenTasksHint":true}' \
+       > /home/agent/.claude.json \
+    && echo '{"skipDangerousModePermissionPrompt":true}' \
+       > /home/agent/.claude/settings.json \
+    && chown -R agent:agent /home/agent/.claude /home/agent/.claude.json
 USER agent
 
 # Default entrypoint: claude with skip-permissions (dispatcher controls the prompt)
