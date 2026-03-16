@@ -47,9 +47,9 @@ RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cro
 # Agent runs as non-root
 RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
     && mkdir -p /home/agent/.claude \
-    && echo '{"numStartups":1,"hasCompletedOnboarding":true,"hasSeenTasksHint":true,"hasSeenStashHint":true,"remoteDialogSeen":true,"installMethod":"native","autoUpdates":false}' \
+    && echo '{"numStartups":1,"hasCompletedOnboarding":true,"hasSeenTasksHint":true,"hasSeenStashHint":true,"remoteDialogSeen":true,"installMethod":"native","autoUpdates":false,"projects":{"/workspace/repo":{"hasTrustDialogAccepted":true,"effortCalloutV2Dismissed":true}}}' \
        > /home/agent/.claude.json \
-    && echo '{"skipDangerousModePermissionPrompt":true}' \
+    && echo '{"skipDangerousModePermissionPrompt":true,"effortLevel":"high"}' \
        > /home/agent/.claude/settings.json \
     && chown -R agent:agent /home/agent/.claude /home/agent/.claude.json
 USER agent
