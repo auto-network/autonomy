@@ -44,6 +44,7 @@ from .ingest import (
 from .watch import watch_sessions
 from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
+from .primer import generate_primer
 
 
 def cmd_ingest(args):
@@ -924,6 +925,20 @@ def main():
     p.add_argument("--since", help="Only commits after this date (e.g. 2025-10-01)")
     p.add_argument("--force", action="store_true", help="Re-ingest from scratch")
     p.set_defaults(func=cmd_git_ingest)
+
+    # primer
+    p = sub.add_parser("primer", help="Generate a dynamic context primer for a bead")
+    p.add_argument("bead_id", help="Bead ID to generate primer for")
+    p.add_argument("--no-provenance", action="store_true", help="Skip provenance turns")
+    p.add_argument("--no-pitfalls", action="store_true", help="Skip pitfall notes")
+    p.add_argument("--no-tools", action="store_true", help="Skip tool docs")
+    p.set_defaults(func=lambda args: print(generate_primer(
+        args.bead_id,
+        db=GraphDB(args.db),
+        include_provenance=not args.no_provenance,
+        include_pitfalls=not args.no_pitfalls,
+        include_tools=not args.no_tools,
+    )))
 
     # bead (create with provenance)
     p = sub.add_parser("bead", help="Create a bead with provenance link to source conversation")
