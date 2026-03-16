@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .readiness import is_dispatch_ready, get_readiness_level
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
 
@@ -341,9 +343,23 @@ def dispatch_cycle(config: DispatcherConfig) -> int:
         print(f"  {len(ready)} ready but all claimed")
         return 0
 
+    # 3. Readiness gate — only dispatch beads with readiness:ready
+    dispatch_ready = [b for b in available if is_dispatch_ready(b)]
+    skipped = len(available) - len(dispatch_ready)
+    if skipped:
+        for b in available:
+            if not is_dispatch_ready(b):
+                level = get_readiness_level(b)
+                print(f"  Skipping {b.get('id')}: readiness={level} (need ready)")
+    available = dispatch_ready
+
+    if not available:
+        print(f"  No beads with readiness=ready")
+        return 0
+
     print(f"  {len(available)} available beads")
 
-    # 3. Pick highest priority (lowest number)
+    # 4. Pick highest priority (lowest number)
     available.sort(key=lambda b: b.get("priority", 99))
     bead = available[0]
     bead_id = bead["id"]
@@ -356,11 +372,11 @@ def dispatch_cycle(config: DispatcherConfig) -> int:
         print("  [DRY RUN] Would dispatch this bead")
         return 0
 
-    # 4. Claim
+    # 5. Claim
     if not claim_bead(bead_id):
         return 0
 
-    # 5. Launch
+    # 6. Launch
     try:
         result = launch_agent(bead_id, image=image)
     except subprocess.TimeoutExpired:
@@ -368,10 +384,10 @@ def dispatch_cycle(config: DispatcherConfig) -> int:
         release_bead(bead_id, "FAILED", "Agent timeout (10 min)")
         return 1
 
-    # 6. Process decision
+    # 7. Process decision
     process_decision(result)
 
-    # 7. Ingest agent session into graph
+    # 8. Ingest agent session into graph
     subprocess.run(
         ["graph", "sessions", "--all"],
         capture_output=True, text=True, timeout=30,
