@@ -12,6 +12,38 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 DEFAULT_DB = Path(__file__).parents[2] / "data" / "graph.db"
 
 
+def _sanitize_fts_query(query: str, or_mode: bool = False) -> str:
+    """Sanitize a user query for safe use in FTS5 MATCH expressions.
+
+    - Preserves existing double-quoted phrases as-is.
+    - Strips FTS5 operator characters (-, :, (, ), *, ^, ~) from bare words.
+    - Wraps each bare word in double quotes to prevent operator interpretation.
+    - Joins terms with OR when or_mode=True, otherwise implicit AND (space-separated).
+
+    Examples:
+        'one-time architect'  -> '"one" "time" "architect"'
+        '"exact phrase" other' -> '"exact phrase" "other"'
+    """
+    import re
+    tokens = []
+    # Pull out already-quoted phrases first, then split remaining bare words
+    parts = re.split(r'("(?:[^"\\]|\\.)*")', query)
+    for part in parts:
+        if part.startswith('"') and part.endswith('"') and len(part) >= 2:
+            # Already a quoted phrase — keep as-is
+            tokens.append(part)
+        else:
+            # Strip FTS5 operator chars from bare text, then split into words
+            cleaned = re.sub(r'[-:()*^~]', ' ', part)
+            for word in cleaned.split():
+                if word:
+                    tokens.append(f'"{word}"')
+    if not tokens:
+        return '""'
+    joiner = " OR " if or_mode else " "
+    return joiner.join(tokens)
+
+
 class GraphDB:
     def __init__(self, db_path: Path | str = DEFAULT_DB):
         self.db_path = Path(db_path)
@@ -226,9 +258,10 @@ class GraphDB:
 
     # ── Search ───────────────────────────────────────────────
 
-    def search(self, query: str, limit: int = 20, project: str | None = None) -> list[dict]:
+    def search(self, query: str, limit: int = 20, project: str | None = None, or_mode: bool = False) -> list[dict]:
         """Full-text search across thoughts and derivations. Optionally filter by project."""
         results = []
+        fts_query = _sanitize_fts_query(query, or_mode=or_mode)
 
         if project:
             # Project-scoped search
@@ -243,7 +276,7 @@ class GraphDB:
                    WHERE thoughts_fts MATCH ? AND s.project = ?
                    ORDER BY rank
                    LIMIT ?""",
-                (query, project, limit),
+                (fts_query, project, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -258,7 +291,7 @@ class GraphDB:
                    WHERE derivations_fts MATCH ? AND s.project = ?
                    ORDER BY rank
                    LIMIT ?""",
-                (query, project, limit),
+                (fts_query, project, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
         else:
@@ -274,7 +307,7 @@ class GraphDB:
                    WHERE thoughts_fts MATCH ?
                    ORDER BY rank
                    LIMIT ?""",
-                (query, limit),
+                (fts_query, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -289,7 +322,7 @@ class GraphDB:
                    WHERE derivations_fts MATCH ?
                    ORDER BY rank
                    LIMIT ?""",
-                (query, limit),
+                (fts_query, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 

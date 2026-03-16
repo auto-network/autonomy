@@ -88,7 +88,7 @@ def cmd_ingest(args):
 def cmd_search(args):
     """Full-text search across the graph."""
     db = GraphDB(args.db)
-    results = db.search(args.query, limit=args.limit, project=getattr(args, 'project', None))
+    results = db.search(args.query, limit=args.limit, project=getattr(args, 'project', None), or_mode=getattr(args, 'or_mode', False))
 
     if not results:
         print("No results found.")
@@ -564,6 +564,7 @@ def main():
     p.add_argument("--project", "-p", help="Filter by project name")
     p.add_argument("--limit", type=int, default=10, help="Max results")
     p.add_argument("--width", "-w", type=int, default=500, help="Max chars per result (default 500)")
+    p.add_argument("--or", dest="or_mode", action="store_true", help="Join terms with OR instead of AND")
     p.set_defaults(func=cmd_search)
 
     # read
