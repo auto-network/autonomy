@@ -231,14 +231,21 @@ async function refreshTerminalPills() {
   const terminals = await api('/api/terminals');
   if (Array.isArray(terminals) && terminals.length > 0) {
     pillBar.innerHTML = '<span class="text-gray-600 self-center">|</span>' +
-      terminals.map(t => `
-        <button onclick="reconnectTerminal('${t.id}')"
-                class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600 flex items-center gap-2">
-          <span class="w-2 h-2 rounded-full bg-green-400"></span>${t.id}
-        </button>
-        <button onclick="killTerminal('${t.id}')"
-                class="px-2 py-1 bg-red-900 rounded text-xs hover:bg-red-700">✕</button>
-      `).join('');
+      terminals.map(t => {
+        const cmd = (t.cmd || '').toLowerCase();
+        const isClaude = cmd.includes('claude') || cmd.includes('autonomy-agent-claude');
+        const isContainer = cmd.includes('docker') || cmd.includes('autonomy-agent');
+        const icon = isClaude ? '🤖' : '⬛';
+        const border = isContainer ? 'border border-purple-500' : 'border border-gray-600';
+        const label = isClaude ? 'claude' : 'bash';
+        return `
+          <button onclick="reconnectTerminal('${t.id}')"
+                  class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600 flex items-center gap-2 ${border}">
+            <span class="w-2 h-2 rounded-full bg-green-400"></span>${icon} ${t.id} <span class="text-xs text-gray-500">${label}</span>
+          </button>
+          <button onclick="killTerminal('${t.id}')"
+                  class="px-2 py-1 bg-red-900 rounded text-xs hover:bg-red-700">✕</button>`;
+      }).join('');
   } else {
     pillBar.innerHTML = '';
   }
