@@ -187,6 +187,25 @@ async def api_active_sessions(request):
     return JSONResponse(sessions)
 
 
+async def api_terminals(request):
+    """List active terminal sessions (tmux-backed)."""
+    # Refresh from tmux
+    live = _list_dashboard_tmux()
+    return JSONResponse([
+        {"id": name, "alive": True, **_active_terminals.get(name, {"cmd": "?"})}
+        for name in live
+    ])
+
+async def api_terminal_kill(request):
+    """Kill a terminal session."""
+    name = request.path_params["id"]
+    if _tmux_session_exists(name):
+        subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+        _active_terminals.pop(name, None)
+        return JSONResponse({"status": "killed", "id": name})
+    return JSONResponse({"status": "not_found", "id": name})
+
+
 async def api_primer(request):
     bead_id = request.path_params["id"]
     stdout, stderr, rc = await run_cli(["graph", "primer", bead_id])
@@ -195,104 +214,155 @@ async def api_primer(request):
 
 # ── WebSocket Terminal ─────────────────────────────────────────
 
+# Track active terminal sessions
+_active_terminals: dict[str, dict] = {}
+_term_counter = 0
+
+
+def _tmux_session_exists(name: str) -> bool:
+    return subprocess.run(["tmux", "has-session", "-t", name],
+                          capture_output=True).returncode == 0
+
+
+def _list_dashboard_tmux() -> list[str]:
+    """List all tmux sessions created by the dashboard (prefixed 'auto-')."""
+    result = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    return [s for s in result.stdout.strip().split("\n") if s.startswith("auto-")]
+
+
 async def ws_terminal(websocket: WebSocket):
-    """WebSocket endpoint that bridges xterm.js to a server-side PTY.
+    """WebSocket endpoint that bridges xterm.js to a tmux session.
+
+    All terminals run inside tmux so they persist across page navigations.
+    The WebSocket just attaches/detaches — the process keeps running.
 
     Query params:
-      cmd     — command to run (default: bash)
-      attach  — tmux session name to attach to (overrides cmd)
+      cmd     — command to run in a new tmux session (default: bash)
+      attach  — existing tmux session name to attach to
+      id      — terminal session ID (auto-generated if not provided)
     """
+    global _term_counter
     await websocket.accept()
 
     params = websocket.query_params
     attach = params.get("attach")
+    term_id = params.get("id")
+
     if attach:
-        cmd = ["tmux", "attach-session", "-t", attach]
+        # Attach to existing tmux session
+        if not _tmux_session_exists(attach):
+            await websocket.send_text(f"\r\n\x1b[31mSession '{attach}' not found\x1b[0m\r\n")
+            await websocket.close()
+            return
+        tmux_name = attach
     else:
+        # Create a new tmux session
         cmd_str = params.get("cmd", "/bin/bash")
-        cmd = cmd_str.split()
+        _term_counter += 1
+        if not term_id:
+            term_id = f"auto-t{_term_counter}"
+        tmux_name = term_id
 
-    # Fork a PTY
-    child_pid, fd = pty.openpty()
-    if child_pid == 0:
-        # This is unreachable with openpty — need fork
-        pass
+        # Create detached tmux session running the command
+        subprocess.run([
+            "tmux", "new-session", "-d", "-s", tmux_name,
+            "-x", "120", "-y", "40",
+            cmd_str,
+        ], env={**os.environ, "TERM": "xterm-256color"})
 
-    pid = os.fork()
-    if pid == 0:
-        # Child process
-        os.close(fd)
-        os.setsid()
-        child_fd = os.open(os.ttyname(child_pid), os.O_RDWR)
-        os.dup2(child_fd, 0)
-        os.dup2(child_fd, 1)
-        os.dup2(child_fd, 2)
-        os.close(child_fd)
-        os.close(child_pid)
-        env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
-        env["COLUMNS"] = "120"
-        env["LINES"] = "40"
-        os.execvpe(cmd[0], cmd, env)
-    else:
-        # Parent process
-        os.close(child_pid)
+    # Track it
+    _active_terminals[tmux_name] = {
+        "cmd": params.get("cmd", attach or "bash"),
+        "started": asyncio.get_event_loop().time(),
+    }
 
-        # Make fd non-blocking
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    # Now attach to the tmux session via a PTY
+    master_fd, slave_fd = pty.openpty()
+    winsize = struct.pack("HHHH", 40, 120, 0, 0)
+    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
 
-        async def read_pty():
-            """Read from PTY and send to WebSocket."""
-            loop = asyncio.get_event_loop()
-            try:
-                while True:
-                    await asyncio.sleep(0.02)  # 50fps max
-                    try:
-                        data = os.read(fd, 65536)
-                        if data:
-                            await websocket.send_text(data.decode("utf-8", errors="replace"))
-                    except OSError:
-                        break
-            except Exception:
-                pass
+    proc = subprocess.Popen(
+        ["tmux", "attach-session", "-t", tmux_name],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        env={**os.environ, "TERM": "xterm-256color"},
+        preexec_fn=os.setsid,
+        close_fds=True,
+    )
+    os.close(slave_fd)
 
-        reader_task = asyncio.create_task(read_pty())
+    flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+    fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
+    alive = True
+
+    async def read_pty():
+        nonlocal alive
         try:
-            while True:
-                msg = await websocket.receive()
-                if msg["type"] == "websocket.disconnect":
+            while alive:
+                await asyncio.sleep(0.02)
+                try:
+                    data = os.read(master_fd, 65536)
+                    if data:
+                        await websocket.send_text(data.decode("utf-8", errors="replace"))
+                except BlockingIOError:
+                    continue
+                except OSError:
                     break
-                if "text" in msg:
-                    data = msg["text"]
-                    # Handle resize messages
-                    if data.startswith("\x1b[8;"):
-                        # Parse resize: \x1b[8;rows;colst
-                        try:
-                            parts = data[4:-1].split(";")
-                            rows, cols = int(parts[0]), int(parts[1])
-                            winsize = struct.pack("HHHH", rows, cols, 0, 0)
-                            fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
-                        except (ValueError, IndexError):
-                            pass
-                    else:
-                        os.write(fd, data.encode("utf-8"))
-                elif "bytes" in msg:
-                    os.write(fd, msg["bytes"])
+                if proc.poll() is not None:
+                    break
         except Exception:
             pass
-        finally:
-            reader_task.cancel()
-            try:
-                os.kill(pid, signal.SIGTERM)
-                os.waitpid(pid, 0)
-            except OSError:
-                pass
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        alive = False
+
+    reader_task = asyncio.create_task(read_pty())
+
+    try:
+        while alive:
+            msg = await websocket.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if "text" in msg:
+                data = msg["text"]
+                if data.startswith("\x1b[8;"):
+                    try:
+                        parts = data[4:-1].split(";")
+                        rows, cols = int(parts[0]), int(parts[1])
+                        ws_bytes = struct.pack("HHHH", rows, cols, 0, 0)
+                        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, ws_bytes)
+                        os.kill(proc.pid, signal.SIGWINCH)
+                    except (ValueError, IndexError, OSError):
+                        pass
+                else:
+                    try:
+                        os.write(master_fd, data.encode("utf-8"))
+                    except OSError:
+                        break
+            elif "bytes" in msg:
+                try:
+                    os.write(master_fd, msg["bytes"])
+                except OSError:
+                    break
+    except Exception:
+        pass
+    finally:
+        alive = False
+        reader_task.cancel()
+        # DON'T kill the tmux session — it persists for reconnection
+        # Just detach by killing the attach process
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
 
 
 async def page_terminal(request):
@@ -352,6 +422,8 @@ routes = [
     Route("/api/stats", api_stats),
     Route("/api/attention", api_attention),
     Route("/api/active", api_active_sessions),
+    Route("/api/terminals", api_terminals),
+    Route("/api/terminal/{id}/kill", api_terminal_kill),
     Route("/api/primer/{id}", api_primer),
 
     # Static
