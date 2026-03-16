@@ -67,13 +67,17 @@ async function renderBeads() {
   function renderIssueRow(issue) {
     const type = issue.issue_type === 'epic' ? '📦' : issue.issue_type === 'bug' ? '🐛' : '📋';
     return `
-      <div class="flex items-center gap-3 p-3 bg-gray-800 rounded-lg hover:bg-gray-750 cursor-pointer border border-gray-700"
+      <div class="p-4 sm:p-3 bg-gray-800 rounded-lg hover:bg-gray-750 cursor-pointer border border-gray-700"
            onclick="navigateTo('/bead/${issue.id}')">
-        <span>${type}</span>
-        <span class="font-mono text-xs text-gray-500">${issue.id}</span>
-        ${priorityBadge(issue.priority)}
-        <span class="flex-1 truncate">${issue.title}</span>
-        ${statusBadge(issue.status)}
+        <div class="flex items-center gap-2 mb-1 sm:mb-0">
+          <span>${type}</span>
+          <span class="truncate text-sm sm:text-base">${issue.title}</span>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap mt-1 sm:mt-0">
+          <span class="font-mono text-xs text-gray-500">${issue.id}</span>
+          ${priorityBadge(issue.priority)}
+          ${statusBadge(issue.status)}
+        </div>
       </div>`;
   }
 
@@ -189,11 +193,13 @@ async function renderDispatch() {
              </div>`
           : `<div class="mt-2 ml-6 text-xs text-gray-500">Container exited — waiting for results</div>`;
         html += `
-          <a href="/bead/${b.id}" class="block p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500 hover:bg-gray-750">
-            <div class="flex gap-2 items-center">
-              <span class="font-mono text-sm text-gray-400">${b.id}</span>
-              ${priorityBadge(b.priority)}
-              <span>${b.title}</span>
+          <a href="/bead/${b.id}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500 hover:bg-gray-750">
+            <div class="mb-1 sm:mb-0">
+              <div class="truncate text-sm sm:text-base">${b.title}</div>
+              <div class="flex gap-2 items-center flex-wrap mt-1">
+                <span class="font-mono text-xs text-gray-400">${b.id}</span>
+                ${priorityBadge(b.priority)}
+              </div>
             </div>
             ${containerHtml}
           </a>`;
@@ -209,11 +215,11 @@ async function renderDispatch() {
     if (approvedBeads.length > 0) {
       for (const b of approvedBeads) {
         html += `
-          <a href="/bead/${b.id}" class="block p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-blue-500 hover:bg-gray-750">
-            <div class="flex gap-2 items-center">
-              <span class="font-mono text-sm text-gray-400">${b.id}</span>
+          <a href="/bead/${b.id}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-blue-500 hover:bg-gray-750">
+            <div class="truncate text-sm sm:text-base">${b.title}</div>
+            <div class="flex gap-2 items-center flex-wrap mt-1">
+              <span class="font-mono text-xs text-gray-400">${b.id}</span>
               ${priorityBadge(b.priority)}
-              <span>${b.title}</span>
             </div>
             <div class="flex gap-1 mt-1">${(b.labels||[]).map(l => `<span class="px-2 py-0.5 bg-gray-700 text-gray-300 text-xs rounded">${l}</span>`).join('')}</div>
           </a>`;
