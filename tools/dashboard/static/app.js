@@ -302,10 +302,10 @@ async function renderContext(id, turn, window = 5) {
   html += `<div class="space-y-3">`;
   for (const e of entries) {
     const isUser = e.entry_type === 'thought';
-    const align = isUser ? 'mr-16' : 'ml-16';
-    const border = isUser ? 'border-l-4 border-blue-500' : 'border-l-4 border-gray-600';
+    const align = isUser ? 'ml-16' : 'mr-16';
+    const border = isUser ? 'border-r-4 border-blue-500' : 'border-l-4 border-gray-600';
     const roleBadge = isUser
-      ? '<span class="text-xs text-blue-400 font-semibold">USER</span>'
+      ? '<span class="text-xs text-blue-400 font-semibold">YOU</span>'
       : '<span class="text-xs text-gray-400 font-semibold">ASSISTANT</span>';
     const t = e.turn_number || '?';
     const highlight = (t == turn) ? 'ring-2 ring-indigo-500 bg-gray-750' : '';
