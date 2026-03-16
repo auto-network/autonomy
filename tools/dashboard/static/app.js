@@ -455,6 +455,9 @@ function navigateTo(path) {
 function route() {
   const path = window.location.pathname;
 
+  // Clear any auto-refresh intervals from previous page
+  if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
+
   // Update active nav
   document.querySelectorAll('.nav-link').forEach(el => {
     el.classList.toggle('active', path.startsWith('/' + el.dataset.page));
