@@ -3,8 +3,13 @@
 Owns all bead state mutations. Agents run --readonly.
 No LLM in this loop — just a state machine.
 
+Dispatches all readiness:approved beads by priority, routing each to the
+correct container image via LABEL_IMAGE_MAP. The --queue flag optionally
+narrows to a specific label.
+
 Usage:
-    python -m agents.dispatcher                  # Run one dispatch cycle
+    python -m agents.dispatcher                  # Dispatch all approved beads
+    python -m agents.dispatcher --queue dashboard  # Only dashboard-labeled beads
     python -m agents.dispatcher --loop           # Run continuously
     python -m agents.dispatcher --loop --interval 30
     python -m agents.dispatcher --dry-run        # Show what would be dispatched
@@ -49,7 +54,7 @@ class DispatchResult:
 @dataclass
 class DispatcherConfig:
     max_concurrent: int = 1  # Start simple — one at a time
-    label_filter: str = "implementation"  # Which queue to pull from
+    label_filter: str | None = None  # Optional queue label to narrow dispatch
     dry_run: bool = False
     interval: int = 60  # Seconds between dispatch cycles
     loop: bool = False
@@ -90,10 +95,10 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
     The readiness dimension (idea → draft → specified → approved) is set
     via bd set-state; the dispatcher only picks up approved beads.
     """
+    query = 'status=open AND label="readiness:approved"'
     if label_filter:
-        out = run_bd(["query", f'status=open AND label={label_filter} AND label="readiness:approved"', "--json"])
-    else:
-        out = run_bd(["ready", "--json"])
+        query += f" AND label={label_filter}"
+    out = run_bd(["query", query, "--json"])
 
     if not out:
         return []
@@ -353,12 +358,13 @@ def process_decision(dispatch_result: DispatchResult) -> None:
 def dispatch_cycle(config: DispatcherConfig) -> int:
     """Run one dispatch cycle. Returns number of beads dispatched."""
     timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"\n[{timestamp}] Dispatch cycle (queue: {config.label_filter})")
+    queue_info = f"queue: {config.label_filter}" if config.label_filter else "all approved"
+    print(f"\n[{timestamp}] Dispatch cycle ({queue_info})")
 
     # 1. Get ready beads
     ready = get_ready_beads(config.label_filter)
     if not ready:
-        print("  No ready beads in queue")
+        print("  No approved beads found")
         return 0
 
     # 2. Filter out already-claimed beads
@@ -445,7 +451,7 @@ def main():
     parser.add_argument("--loop", action="store_true", help="Run continuously")
     parser.add_argument("--interval", type=int, default=60, help="Seconds between cycles (default: 60)")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be dispatched")
-    parser.add_argument("--queue", default="implementation", help="Label queue to pull from (default: implementation)")
+    parser.add_argument("--queue", default=None, help="Optional label to narrow dispatch (default: all approved)")
     parser.add_argument("--max-concurrent", type=int, default=1, help="Max concurrent agents (default: 1)")
 
     args = parser.parse_args()
@@ -458,7 +464,7 @@ def main():
     )
 
     print(f"Autonomy Dispatcher (pid={os.getpid()})")
-    print(f"  Queue: {config.label_filter}")
+    print(f"  Queue: {config.label_filter or 'all approved'}")
     print(f"  Max concurrent: {config.max_concurrent}")
     print(f"  Loop: {config.loop} (interval: {config.interval}s)")
 
