@@ -215,6 +215,111 @@ async function renderSource(id) {
   content.appendChild(renderMd(data.content || 'No content'));
 }
 
+// ── Terminal ─────────────────────────────────────────────────
+
+let activeTerm = null;
+let activeWs = null;
+
+function destroyTerminal() {
+  if (activeWs) { try { activeWs.close(); } catch(e) {} activeWs = null; }
+  if (activeTerm) { activeTerm.dispose(); activeTerm = null; }
+}
+
+function renderTerminal(cmd, attach) {
+  pageTitle.textContent = attach ? `Attached: ${attach}` : 'Terminal';
+  if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
+  destroyTerminal();
+
+  content.innerHTML = `
+    <div class="flex gap-2 mb-3">
+      <button onclick="launchClaude()" class="px-3 py-1 bg-indigo-600 rounded text-sm hover:bg-indigo-500">New Claude</button>
+      <button onclick="launchBash()" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">New Bash</button>
+      <span class="text-xs text-gray-500 ml-auto self-center" id="term-status">connecting...</span>
+    </div>
+    <div id="terminal-container" style="height: calc(100vh - 10rem);"></div>`;
+
+  const termContainer = document.getElementById('terminal-container');
+  const statusEl = document.getElementById('term-status');
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 14,
+    fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+    theme: {
+      background: '#111827',
+      foreground: '#e5e7eb',
+      cursor: '#818cf8',
+      selectionBackground: '#4f46e580',
+    },
+  });
+
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(termContainer);
+  fitAddon.fit();
+
+  // Build WebSocket URL
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let wsUrl = `${proto}//${location.host}/ws/terminal`;
+  const params = new URLSearchParams();
+  if (attach) params.set('attach', attach);
+  else if (cmd) params.set('cmd', cmd);
+  if (params.toString()) wsUrl += '?' + params.toString();
+
+  const ws = new WebSocket(wsUrl);
+  activeWs = ws;
+  activeTerm = term;
+
+  ws.onopen = () => {
+    statusEl.textContent = 'connected';
+    statusEl.className = 'text-xs text-green-400 ml-auto self-center';
+    // Send initial size
+    const dims = fitAddon.proposeDimensions();
+    if (dims) {
+      ws.send(`\x1b[8;${dims.rows};${dims.cols}t`);
+    }
+  };
+
+  ws.onmessage = (e) => {
+    term.write(e.data);
+  };
+
+  ws.onclose = () => {
+    statusEl.textContent = 'disconnected';
+    statusEl.className = 'text-xs text-red-400 ml-auto self-center';
+    term.write('\r\n\x1b[90m--- session ended ---\x1b[0m\r\n');
+  };
+
+  ws.onerror = () => {
+    statusEl.textContent = 'error';
+    statusEl.className = 'text-xs text-red-400 ml-auto self-center';
+  };
+
+  term.onData((data) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(data);
+    }
+  });
+
+  // Handle resize
+  const resizeObserver = new ResizeObserver(() => {
+    fitAddon.fit();
+    const dims = fitAddon.proposeDimensions();
+    if (dims && ws.readyState === WebSocket.OPEN) {
+      ws.send(`\x1b[8;${dims.rows};${dims.cols}t`);
+    }
+  });
+  resizeObserver.observe(termContainer);
+}
+
+function launchClaude() {
+  renderTerminal('claude --dangerously-skip-permissions');
+}
+
+function launchBash() {
+  renderTerminal('/bin/bash');
+}
+
 // ── Router ───────────────────────────────────────────────────
 
 function navigateTo(path) {
@@ -241,6 +346,9 @@ function route() {
     renderSearch(params.get('q'), params.get('project'));
   } else if (path.startsWith('/source/')) {
     renderSource(path.split('/source/')[1]);
+  } else if (path === '/terminal' || path.startsWith('/terminal/')) {
+    const sessionId = path.startsWith('/terminal/') ? path.split('/terminal/')[1] : null;
+    renderTerminal(null, sessionId);
   } else {
     content.innerHTML = '<div class="text-gray-400">Page not found</div>';
   }

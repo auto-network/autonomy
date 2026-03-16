@@ -5,14 +5,21 @@ Every view the dashboard shows, an agent can also produce via CLI.
 """
 
 import asyncio
+import fcntl
 import json
+import os
+import pty
+import signal
+import struct
 import subprocess
+import termios
 from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
-from starlette.routing import Route, Mount
+from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
+from starlette.websockets import WebSocket
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -186,6 +193,112 @@ async def api_primer(request):
     return JSONResponse({"content": stdout, "error": stderr if rc != 0 else None})
 
 
+# ── WebSocket Terminal ─────────────────────────────────────────
+
+async def ws_terminal(websocket: WebSocket):
+    """WebSocket endpoint that bridges xterm.js to a server-side PTY.
+
+    Query params:
+      cmd     — command to run (default: bash)
+      attach  — tmux session name to attach to (overrides cmd)
+    """
+    await websocket.accept()
+
+    params = websocket.query_params
+    attach = params.get("attach")
+    if attach:
+        cmd = ["tmux", "attach-session", "-t", attach]
+    else:
+        cmd_str = params.get("cmd", "/bin/bash")
+        cmd = cmd_str.split()
+
+    # Fork a PTY
+    child_pid, fd = pty.openpty()
+    if child_pid == 0:
+        # This is unreachable with openpty — need fork
+        pass
+
+    pid = os.fork()
+    if pid == 0:
+        # Child process
+        os.close(fd)
+        os.setsid()
+        child_fd = os.open(os.ttyname(child_pid), os.O_RDWR)
+        os.dup2(child_fd, 0)
+        os.dup2(child_fd, 1)
+        os.dup2(child_fd, 2)
+        os.close(child_fd)
+        os.close(child_pid)
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        env["COLUMNS"] = "120"
+        env["LINES"] = "40"
+        os.execvpe(cmd[0], cmd, env)
+    else:
+        # Parent process
+        os.close(child_pid)
+
+        # Make fd non-blocking
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        async def read_pty():
+            """Read from PTY and send to WebSocket."""
+            loop = asyncio.get_event_loop()
+            try:
+                while True:
+                    await asyncio.sleep(0.02)  # 50fps max
+                    try:
+                        data = os.read(fd, 65536)
+                        if data:
+                            await websocket.send_text(data.decode("utf-8", errors="replace"))
+                    except OSError:
+                        break
+            except Exception:
+                pass
+
+        reader_task = asyncio.create_task(read_pty())
+
+        try:
+            while True:
+                msg = await websocket.receive()
+                if msg["type"] == "websocket.disconnect":
+                    break
+                if "text" in msg:
+                    data = msg["text"]
+                    # Handle resize messages
+                    if data.startswith("\x1b[8;"):
+                        # Parse resize: \x1b[8;rows;colst
+                        try:
+                            parts = data[4:-1].split(";")
+                            rows, cols = int(parts[0]), int(parts[1])
+                            winsize = struct.pack("HHHH", rows, cols, 0, 0)
+                            fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+                        except (ValueError, IndexError):
+                            pass
+                    else:
+                        os.write(fd, data.encode("utf-8"))
+                elif "bytes" in msg:
+                    os.write(fd, msg["bytes"])
+        except Exception:
+            pass
+        finally:
+            reader_task.cancel()
+            try:
+                os.kill(pid, signal.SIGTERM)
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+async def page_terminal(request):
+    return HTMLResponse(_load_template("base.html"))
+
+
 # ── HTML Pages ────────────────────────────────────────────────
 
 def _load_template(name: str) -> str:
@@ -220,6 +333,11 @@ routes = [
     Route("/search", page_search),
     Route("/source/{id}", page_source),
     Route("/bead/{id}", page_bead),
+    Route("/terminal", page_terminal),
+    Route("/terminal/{session_id}", page_terminal),
+
+    # WebSocket
+    WebSocketRoute("/ws/terminal", ws_terminal),
 
     # API
     Route("/api/beads/ready", api_beads_ready),
