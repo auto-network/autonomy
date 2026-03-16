@@ -43,6 +43,7 @@ from .ingest import (
 )
 from .watch import watch_sessions
 from .playbooks import get_catalog, get_playbook_status, save_playbook
+from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 
 
 def cmd_ingest(args):
@@ -458,6 +459,40 @@ def cmd_playbooks(args):
     db.close()
 
 
+def cmd_agent_runs(args):
+    """Discover and ingest subagent traces."""
+    db = GraphDB(args.db)
+
+    if args.list_only:
+        traces = discover_subagent_traces(session_id=args.session)
+        if not traces:
+            print("No subagent traces found.")
+        else:
+            for t in traces:
+                run = parse_agent_trace(t)
+                tokens = run.total_input_tokens + run.total_output_tokens
+                prompt = run.prompt[:60].replace("\n", " ") if run.prompt else "?"
+                print(f"  {run.agent_id[:16]:16s}  {run.total_tool_uses:3d} tools  {tokens:6d} tok  {prompt}")
+            print(f"\n  {len(traces)} traces found")
+        db.close()
+        return
+
+    results = ingest_all_agent_runs(db, session_id=args.session, force=args.force)
+    ingested = [r for r in results if r["status"] == "ingested"]
+    skipped = [r for r in results if r["status"] == "skipped"]
+
+    for r in ingested:
+        bead = f" bead:{r.get('bead_id', '?')}" if r.get("bead_id") else ""
+        print(f"  + {r.get('agent_id', '?')[:16]}: "
+              f"{r.get('thoughts', 0)} thoughts, {r.get('derivations', 0)} derivations, "
+              f"{r.get('tool_uses', 0)} tool uses{bead}")
+
+    if skipped:
+        print(f"  ({len(skipped)} already ingested)")
+    print(f"\nTotal: {len(ingested)} ingested, {len(skipped)} skipped")
+    db.close()
+
+
 def cmd_projects(args):
     """List projects and their source counts by type."""
     db = GraphDB(args.db)
@@ -648,6 +683,13 @@ def main():
     p.add_argument("--since", help="Only commits after this date (e.g. 2025-10-01)")
     p.add_argument("--force", action="store_true", help="Re-ingest from scratch")
     p.set_defaults(func=cmd_git_ingest)
+
+    # agent-runs
+    p = sub.add_parser("agent-runs", help="Discover and ingest subagent traces")
+    p.add_argument("--session", help="Filter to traces from a specific session ID")
+    p.add_argument("--list", dest="list_only", action="store_true", help="List traces without ingesting")
+    p.add_argument("--force", action="store_true", help="Re-ingest existing traces")
+    p.set_defaults(func=cmd_agent_runs)
 
     # projects
     p = sub.add_parser("projects", help="List projects and session counts")
