@@ -21,8 +21,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .readiness import is_dispatch_ready, get_readiness_level
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
 
@@ -86,15 +84,14 @@ def run_bd(args: list[str], timeout: int = 15) -> str:
 
 
 def get_ready_beads(label_filter: str | None = None) -> list[dict]:
-    """Get ready beads, optionally filtered by label.
+    """Get beads approved for dispatch, optionally filtered by queue label.
 
-    Uses bd query with label filter since bd ready --json doesn't include labels.
-    Only returns beads that are both unblocked (open) and match the label.
+    Queries for readiness:approved — the single human gate.
+    The readiness dimension (idea → draft → specified → approved) is set
+    via bd set-state; the dispatcher only picks up approved beads.
     """
     if label_filter:
-        # bd query supports label filtering and returns full bead data
-        # Beads must also be labelled 'approved' — human gate before dispatch
-        out = run_bd(["query", f"status=open AND label={label_filter} AND label=approved", "--json"])
+        out = run_bd(["query", f"status=open AND label={label_filter} AND label=readiness:approved", "--json"])
     else:
         out = run_bd(["ready", "--json"])
 
@@ -121,6 +118,15 @@ def get_claimed_beads() -> set[str]:
         return {b["id"] for b in beads if isinstance(b, dict)}
     except (json.JSONDecodeError, KeyError):
         return set()
+
+
+def set_dispatch_state(bead_id: str, state: str, reason: str = "") -> None:
+    """Set the dispatch dimension on a bead.
+
+    Dispatch states: queued, launching, running, collecting, merging, done, failed.
+    """
+    reason_text = reason or f"dispatch:{state}"
+    run_bd(["set-state", bead_id, f"dispatch={state}", "--reason", reason_text])
 
 
 def claim_bead(bead_id: str) -> bool:
@@ -259,6 +265,7 @@ def process_decision(dispatch_result: DispatchResult) -> None:
 
     if decision is None:
         print(f"  No decision file from {bead_id} (exit code {dispatch_result.exit_code})")
+        set_dispatch_state(bead_id, "failed", f"No decision file. Exit code: {dispatch_result.exit_code}")
         release_bead(bead_id, "FAILED", f"No decision file. Exit code: {dispatch_result.exit_code}")
         cleanup_worktree(dispatch_result.worktree_path)
         return
@@ -292,6 +299,7 @@ def process_decision(dispatch_result: DispatchResult) -> None:
 
     # Auto-merge to master on DONE if agent committed
     if status == "DONE" and dispatch_result.commit_hash and dispatch_result.branch:
+        set_dispatch_state(bead_id, "merging")
         merge_result = subprocess.run(
             ["git", "merge", dispatch_result.branch,
              "--no-edit", "-m",
@@ -322,6 +330,10 @@ def process_decision(dispatch_result: DispatchResult) -> None:
             # Override status to BLOCKED since code can't integrate
             status = "BLOCKED"
             reason = f"Merge conflict: {merge_result.stderr.strip()[:200]}"
+
+    # Set final dispatch state
+    final_dispatch = "done" if status == "DONE" else "failed"
+    set_dispatch_state(bead_id, final_dispatch, reason)
 
     # Release the bead with appropriate state
     release_bead(bead_id, status, reason)
@@ -357,20 +369,6 @@ def dispatch_cycle(config: DispatcherConfig) -> int:
         print(f"  {len(ready)} ready but all claimed")
         return 0
 
-    # 3. Readiness gate — only dispatch beads with readiness:ready
-    dispatch_ready = [b for b in available if is_dispatch_ready(b)]
-    skipped = len(available) - len(dispatch_ready)
-    if skipped:
-        for b in available:
-            if not is_dispatch_ready(b):
-                level = get_readiness_level(b)
-                print(f"  Skipping {b.get('id')}: readiness={level} (need ready)")
-    available = dispatch_ready
-
-    if not available:
-        print(f"  No beads with readiness=ready")
-        return 0
-
     print(f"  {len(available)} available beads")
 
     # 4. Pick highest priority (lowest number)
@@ -386,19 +384,24 @@ def dispatch_cycle(config: DispatcherConfig) -> int:
         print("  [DRY RUN] Would dispatch this bead")
         return 0
 
-    # 5. Claim
+    # 5. Claim + dispatch=queued
     if not claim_bead(bead_id):
         return 0
+    set_dispatch_state(bead_id, "queued")
 
-    # 6. Launch
+    # 6. Launch (dispatch=launching → running)
+    set_dispatch_state(bead_id, "launching", f"image:{image}")
     try:
+        set_dispatch_state(bead_id, "running")
         result = launch_agent(bead_id, image=image)
     except subprocess.TimeoutExpired:
         print(f"  TIMEOUT: Agent exceeded 10 minute limit")
+        set_dispatch_state(bead_id, "failed", "Agent timeout (10 min)")
         release_bead(bead_id, "FAILED", "Agent timeout (10 min)")
         return 1
 
-    # 7. Process decision
+    # 7. Collect results (dispatch=collecting)
+    set_dispatch_state(bead_id, "collecting")
     process_decision(result)
 
     # 8. Ingest agent session into graph and link to bead

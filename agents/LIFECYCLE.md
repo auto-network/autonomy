@@ -34,13 +34,21 @@ Dispatcher                          Container
 
 ## Approval Gate
 
-Beads require human approval before dispatch. In the dashboard, click "Approve for Dispatch" on a bead detail page.
+Beads require human approval before dispatch. In the dashboard, click "Approve for Dispatch" on a bead detail page. This sets `readiness=approved` via `bd set-state`, which is the single gate the dispatcher queries.
 
-**Note:** There is currently a double gate — the `approved` label AND the `readiness:ready` state are both checked. This is a known issue (`auto-uly.6`). The intent is a single approval action.
+**Three orthogonal state dimensions:**
+- **status**: open, in_progress, blocked, deferred, closed — work execution state
+- **readiness**: idea, draft, specified, approved — spec maturity, human-gated
+- **dispatch**: queued, launching, running, collecting, merging, done, failed — automation pipeline state
+
+The dispatcher queries `status=open AND label=readiness:approved` — a single condition with no duplicate checks.
 
 ## Phase 1: Pre-Launch (Dispatcher)
 
-**Claim:** `bd update <bead> -s in_progress` + `bd set-state <bead> work=claimed`
+**Claim:** `bd update <bead> -s in_progress` + `bd set-state <bead> work=claimed` + `bd set-state <bead> dispatch=queued`
+
+**Dispatch states:** The dispatcher walks the dispatch dimension through each phase:
+`queued → launching → running → collecting → merging → done` (or `failed` on error)
 
 **Branch base:** Save `git rev-parse HEAD` before agent runs — used to detect new commits after.
 
@@ -137,8 +145,8 @@ The protocol is enforced structurally, not behaviorally:
 
 The Dispatch page (`/dispatch`) shows the full lifecycle:
 
-- **Active Dispatches** — running containers linked to their beads, runtime clock
-- **Approved — Waiting** — beads approved but not yet picked up
+- **Active Dispatches** — beads with dispatch state (queued/launching/running/collecting/merging), with container info
+- **Approved — Waiting** — beads with `readiness:approved` not yet picked up
 - **Last Runs** — completed dispatches with status indicators (DONE/BLOCKED/FAILED, merged/conflict)
 - **Trace View** — click a completed run to see: decision, discovered beads, git diff, experience report
 
@@ -149,7 +157,7 @@ The Dispatch page (`/dispatch`) shows the full lifecycle:
 | `agents/dispatcher.py` | Deterministic dispatch loop |
 | `agents/launch.sh` | Worktree + container lifecycle |
 | `agents/compose.py` | Prompt generation |
-| `agents/readiness.py` | Readiness gate (draft/spec-complete/ready) |
+| `agents/readiness.py` | Readiness gate (idea/draft/specified/approved) |
 | `agents/shared/tool_guidelines.md` | Agent instructions |
 | `agents/shared/experience_report.md` | Feedback template |
 | `agents/Dockerfile` | Base container image |

@@ -70,17 +70,24 @@ async def api_bead_tree(request):
     return JSONResponse(await run_cli_json(["bd", "dep", "tree", bead_id, "--json"]))
 
 async def api_bead_approve(request):
-    """Add 'approved' label to a bead, releasing it for dispatch."""
+    """Set readiness=approved on a bead, releasing it for dispatch."""
     bead_id = request.path_params["id"]
-    stdout, stderr, rc = await run_cli(["bd", "label", "add", bead_id, "approved"])
+    stdout, stderr, rc = await run_cli(["bd", "set-state", bead_id, "readiness=approved",
+                                         "--reason", "dashboard: approved for dispatch"])
     if rc != 0:
         return JSONResponse({"error": stderr.strip(), "ok": False}, status_code=400)
     return JSONResponse({"ok": True, "bead_id": bead_id})
 
 async def api_dispatch_status(request):
-    """Show currently claimed beads and running agent containers."""
+    """Show dispatched beads with their dispatch state.
+
+    Reads the dispatch dimension (queued/launching/running/collecting/merging/done/failed)
+    instead of relying on docker ps for state.
+    """
     claimed = await run_cli_json(["bd", "query", "label=work:claimed", "--json"])
-    # Get running agent containers
+    # Also query beads with active dispatch states for richer status
+    dispatching = await run_cli_json(["bd", "query", "label=dispatch:running OR label=dispatch:launching OR label=dispatch:collecting OR label=dispatch:merging OR label=dispatch:queued", "--json"])
+    # Containers are still useful for runtime info (uptime, image)
     stdout, _, _ = await run_cli(["docker", "ps", "--filter", "name=agent-", "--format", '{"name":"{{.Names}}","status":"{{.Status}}","image":"{{.Image}}"}'])
     containers = []
     for line in stdout.strip().splitlines():
@@ -89,7 +96,11 @@ async def api_dispatch_status(request):
                 containers.append(json.loads(line))
             except json.JSONDecodeError:
                 pass
-    return JSONResponse({"claimed": claimed if isinstance(claimed, list) else [], "containers": containers})
+    return JSONResponse({
+        "claimed": claimed if isinstance(claimed, list) else [],
+        "dispatching": dispatching if isinstance(dispatching, list) else [],
+        "containers": containers,
+    })
 
 AGENT_RUNS_DIR = Path(__file__).parent.parent.parent / "data" / "agent-runs"
 
