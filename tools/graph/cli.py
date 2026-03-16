@@ -459,6 +459,54 @@ def cmd_playbooks(args):
     db.close()
 
 
+def cmd_link(args):
+    """Create a provenance edge between a bead and session turns."""
+    db = GraphDB(args.db)
+    from .models import Edge
+
+    # Parse turn range
+    turn_range = None
+    if args.turns:
+        parts = args.turns.split("-")
+        if len(parts) == 2:
+            turn_range = {"from": int(parts[0]), "to": int(parts[1])}
+        elif len(parts) == 1:
+            turn_range = {"from": int(parts[0]), "to": int(parts[0])}
+
+    # Find source by ID prefix
+    source = db.get_source(args.source)
+    if not source:
+        row = db.conn.execute(
+            "SELECT * FROM sources WHERE id LIKE ? LIMIT 1", (f"{args.source}%",)
+        ).fetchone()
+        if row:
+            source = dict(row)
+    if not source:
+        print(f"Source not found: {args.source}")
+        db.close()
+        return
+
+    metadata = {}
+    if turn_range:
+        metadata["turns"] = turn_range
+    if args.note:
+        metadata["note"] = args.note
+
+    db.insert_edge(Edge(
+        source_id=args.bead,
+        source_type="bead",
+        target_id=source["id"],
+        target_type="source",
+        relation=args.relation,
+        metadata=metadata,
+    ))
+    db.commit()
+
+    turns_str = f" turns {args.turns}" if args.turns else ""
+    print(f"  ✓ {args.bead} —[{args.relation}]→ {source['id'][:12]}{turns_str}")
+    db.close()
+
+
 def cmd_attention(args):
     """Show human input from sessions, chronologically. Fast query for sovereign content."""
     db = GraphDB(args.db)
@@ -805,6 +853,16 @@ def main():
     p.add_argument("--since", help="Only commits after this date (e.g. 2025-10-01)")
     p.add_argument("--force", action="store_true", help="Re-ingest from scratch")
     p.set_defaults(func=cmd_git_ingest)
+
+    # link
+    p = sub.add_parser("link", help="Create provenance edge between bead and session turns")
+    p.add_argument("bead", help="Bead ID (e.g. auto-ov3)")
+    p.add_argument("source", help="Source ID or prefix")
+    p.add_argument("--relation", "-r", default="informed_by",
+                   help="Relation type: informed_by, implemented_by, conceived_at, discussed_at (default: informed_by)")
+    p.add_argument("--turns", "-t", help="Turn range (e.g. 286 or 338-344)")
+    p.add_argument("--note", "-n", help="Context note for this link")
+    p.set_defaults(func=cmd_link)
 
     # attention
     p = sub.add_parser("attention", help="Show human input from sessions chronologically")
