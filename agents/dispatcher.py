@@ -270,11 +270,52 @@ def process_decision(dispatch_result: DispatchResult) -> None:
         if out:
             print(f"  Created discovered bead: {out}")
 
+    # Auto-merge to master on DONE if agent committed
+    if status == "DONE" and dispatch_result.commit_hash and dispatch_result.branch:
+        merge_result = subprocess.run(
+            ["git", "merge", dispatch_result.branch,
+             "--no-edit", "-m",
+             f"merge: {bead_id} — {reason}"],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(REPO_ROOT),
+        )
+        if merge_result.returncode == 0:
+            merge_hash = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(REPO_ROOT),
+            ).stdout.strip()
+            print(f"  Merged to master: {merge_hash[:10]}")
+            run_bd(["update", bead_id, "--append-notes",
+                    f"merged: {merge_hash}"])
+        else:
+            print(f"  Merge conflict — leaving branch for manual review")
+            print(f"    {merge_result.stderr.strip()}")
+            # Abort the failed merge
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(REPO_ROOT),
+            )
+            run_bd(["update", bead_id, "--append-notes",
+                    f"merge conflict on {dispatch_result.branch} — needs manual review"])
+            # Override status to BLOCKED since code can't integrate
+            status = "BLOCKED"
+            reason = f"Merge conflict: {merge_result.stderr.strip()[:200]}"
+
     # Release the bead with appropriate state
     release_bead(bead_id, status, reason)
 
-    # Clean up worktree (branch persists for review/merge)
+    # Clean up worktree (branch persists for review)
     cleanup_worktree(dispatch_result.worktree_path)
+
+    # Delete branch if it was merged successfully
+    if status == "DONE" and dispatch_result.branch:
+        subprocess.run(
+            ["git", "branch", "-d", dispatch_result.branch],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(REPO_ROOT),
+        )
 
 
 def dispatch_cycle(config: DispatcherConfig) -> int:
