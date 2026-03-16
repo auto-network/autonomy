@@ -67,6 +67,10 @@ mkdir -p "$(dirname "$WORKTREE_DIR")"
 git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH" 2>&1
 echo "    Worktree: $WORKTREE_DIR"
 
+# Save branch base BEFORE agent runs — used to detect new commits after
+BRANCH_BASE=$(git -C "$WORKTREE_DIR" rev-parse HEAD)
+echo "$BRANCH_BASE" > "$OUTPUT_DIR/.branch_base"
+
 # Configure git identity in worktree
 git -C "$WORKTREE_DIR" config user.name "autonomy-agent"
 git -C "$WORKTREE_DIR" config user.email "agent@autonomy.local"
@@ -139,8 +143,8 @@ echo "==> Agent exited with code: $EXIT_CODE"
 
 # Get commit hash from worktree (if agent committed)
 COMMIT_HASH=$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null || echo "")
-BRANCH_BASE=$(git -C "$REPO_ROOT" rev-parse "$BRANCH" 2>/dev/null || echo "")
-if [[ "$COMMIT_HASH" != "$BRANCH_BASE" ]] && [[ -n "$COMMIT_HASH" ]]; then
+BRANCH_BASE=$(cat "$OUTPUT_DIR/.branch_base" 2>/dev/null || echo "")
+if [[ "$COMMIT_HASH" != "$BRANCH_BASE" ]] && [[ -n "$COMMIT_HASH" ]] && [[ -n "$BRANCH_BASE" ]]; then
     echo "    Commit: $COMMIT_HASH"
     echo "    Diff:"
     git -C "$WORKTREE_DIR" log --oneline "$BRANCH_BASE..$COMMIT_HASH" 2>/dev/null || true
