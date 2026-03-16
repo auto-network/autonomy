@@ -26,6 +26,36 @@ Dispatcher                          Container
     (branch persists for review)
 ```
 
+## Readiness Gate
+
+Before a bead can be dispatched, it must pass through the readiness lifecycle:
+
+```
+draft → spec-complete → ready → (dispatch)
+```
+
+| Level | Meaning | Criteria |
+|-------|---------|----------|
+| `draft` | Created, not yet specified | Default for all new beads |
+| `spec-complete` | Well-specified | Title ≥10 chars, description ≥50 chars, acceptance criteria or design notes |
+| `ready` | Approved for dispatch | Passes spec-complete + has `approved` label + has `implementation` label + priority set |
+
+**Setting readiness:**
+```bash
+bd set-state <bead> readiness=spec-complete --reason "spec filled in"
+bd set-state <bead> readiness=ready --reason "reviewed and approved"
+```
+
+**Checking readiness:**
+```bash
+python -m agents.readiness check <bead-id>          # Check against ready
+python -m agents.readiness check <bead-id> --level spec-complete
+python -m agents.readiness gaps <bead-id>            # Show what's missing
+python -m agents.readiness promote <bead-id>         # Auto-promote if criteria met
+```
+
+The dispatcher only picks up beads with `readiness:ready` label. This is orthogonal to `bd ready` (which checks dependency blockers) and `bd lint` (which checks template sections). The readiness gate ensures a bead is well-specified enough for autonomous agent execution.
+
 ## Phase 1: Pre-Launch (Dispatcher)
 
 **Claim:** `bd set-state <bead> work=claimed --reason "dispatcher:<pid>"`
@@ -114,6 +144,7 @@ The protocol is enforced structurally, not behaviorally:
 
 | File | Role |
 |------|------|
+| `agents/readiness.py` | Readiness gate — draft/spec-complete/ready lifecycle |
 | `agents/dispatcher.py` | Deterministic dispatch loop |
 | `agents/launch.sh` | Worktree + container lifecycle |
 | `agents/compose.py` | Prompt generation |
