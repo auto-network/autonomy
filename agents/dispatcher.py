@@ -91,7 +91,7 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
     via bd set-state; the dispatcher only picks up approved beads.
     """
     if label_filter:
-        out = run_bd(["query", f"status=open AND label={label_filter} AND label=readiness:approved", "--json"])
+        out = run_bd(["query", f'status=open AND label={label_filter} AND label="readiness:approved"', "--json"])
     else:
         out = run_bd(["ready", "--json"])
 
