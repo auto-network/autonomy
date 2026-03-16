@@ -219,11 +219,15 @@ def generate_primer(
             except (json.JSONDecodeError, KeyError):
                 pass
 
-    # ── 6. Tool docs ─────────────────────────────────────────
+    # ── 6. bd prime — beads workflow context ──────────────────
     if include_tools:
-        sections.append("\n## Available Tools")
+        bd_prime = _run_bd(["prime"], timeout=10)
+        if bd_prime:
+            sections.append(f"\n{bd_prime}")
+
+        # Graph-specific tools (not covered by bd prime)
         sections.append("""
-### Knowledge Graph (`graph`)
+## Knowledge Graph (`graph`)
 - `graph search "query"` — full-text search (use `--or` for OR mode)
 - `graph read <src_id>` — read full source content
 - `graph context <src_id> <turn>` — show turns around a hit
@@ -232,14 +236,9 @@ def generate_primer(
 - `graph link <bead> <src> -r relation -t turns` — create provenance edge
 - `graph agent-runs --list` — show subagent traces
 - `graph attention --last N` — show recent human input
+- `graph primer <bead_id>` — generate this context document
 
-### Beads (`bd`)
-- `bd ready` — show unblocked work
-- `bd show <id>` — bead details
-- `bd update <id> --notes "progress"` — update progress
-- `bd close <id> --reason "done"` — close when complete
-
-### Workflow
+## Workflow
 - After completing work: write experience_report.md with tool feedback
 - Drop trail markers for pitfalls discovered: `graph note "..." --tags pitfall`
 - Link your work to the bead: `graph link <bead> <source> -r implemented_by`
