@@ -459,6 +459,91 @@ def cmd_playbooks(args):
     db.close()
 
 
+def cmd_attention(args):
+    """Show human input from sessions, chronologically. Fast query for sovereign content."""
+    db = GraphDB(args.db)
+    import json as _json
+    from pathlib import Path
+
+    session_file = args.session
+    if not session_file:
+        # Find the most recent session for the current project
+        projects_dir = Path.home() / ".claude" / "projects" / "-home-jeremy-workspace-autonomy"
+        jsonl_files = sorted(projects_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if jsonl_files:
+            session_file = str(jsonl_files[0])
+        else:
+            print("No session found.")
+            db.close()
+            return
+
+    messages = []
+    with open(session_file) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = _json.loads(line)
+            except:
+                continue
+
+            if e.get("isSidechain"):
+                continue
+
+            etype = e.get("type")
+            content = ""
+
+            if etype == "user" and not e.get("isMeta"):
+                c = e.get("message", {}).get("content", "")
+                if isinstance(c, str) and len(c) > 5:
+                    content = c
+                    msg_type = "input"
+
+            elif etype == "queue-operation":
+                c = e.get("content", e.get("message", {}).get("content", ""))
+                if isinstance(c, str) and len(c) > 5:
+                    content = c
+                    msg_type = "queued"
+
+            if not content:
+                continue
+
+            # Skip command outputs and task notifications
+            if content.startswith("<local-command") or content.startswith("<task-notification"):
+                continue
+            if content.startswith("<command-name>"):
+                continue
+
+            ts = e.get("timestamp", "")[:19]
+            uuid = e.get("uuid", "")[:12]
+
+            messages.append({
+                "ts": ts,
+                "uuid": uuid,
+                "type": msg_type,
+                "text": content,
+            })
+
+    # Apply filters
+    if args.last:
+        messages = messages[-args.last:]
+
+    if args.search:
+        query = args.search.lower()
+        messages = [m for m in messages if query in m["text"].lower()]
+
+    for m in messages:
+        tag = " [queued]" if m["type"] == "queued" else ""
+        preview = m["text"][:200].replace("\n", " ")
+        if len(m["text"]) > 200:
+            preview += "…"
+        print(f"  [{m['ts']}]{tag}  {preview}")
+
+    print(f"\n  {len(messages)} messages")
+    db.close()
+
+
 def cmd_note(args):
     """Drop a searchable trail marker into the graph."""
     db = GraphDB(args.db)
@@ -720,6 +805,13 @@ def main():
     p.add_argument("--since", help="Only commits after this date (e.g. 2025-10-01)")
     p.add_argument("--force", action="store_true", help="Re-ingest from scratch")
     p.set_defaults(func=cmd_git_ingest)
+
+    # attention
+    p = sub.add_parser("attention", help="Show human input from sessions chronologically")
+    p.add_argument("--session", help="Path to specific session JSONL (default: most recent)")
+    p.add_argument("--last", type=int, help="Show only last N messages")
+    p.add_argument("--search", "-s", help="Filter to messages containing this text")
+    p.set_defaults(func=cmd_attention)
 
     # note
     p = sub.add_parser("note", help="Drop a searchable trail marker into the graph")

@@ -414,8 +414,8 @@ def parse_claude_code_session(file_path: Path) -> tuple[dict, list[dict]]:
                     first_ts = ts
                 last_ts = ts
 
-            # Skip non-conversation entries
-            if etype not in ("user", "assistant"):
+            # Skip non-conversation entries (but keep queue-operation = human mid-work input)
+            if etype not in ("user", "assistant", "queue-operation"):
                 continue
 
             # Skip sidechain (subagent) entries
@@ -424,6 +424,25 @@ def parse_claude_code_session(file_path: Path) -> tuple[dict, list[dict]]:
 
             # Skip isMeta system entries
             if entry.get("isMeta"):
+                continue
+
+            # Queue operations are human messages sent while agent was working
+            if etype == "queue-operation":
+                qcontent = entry.get("content", entry.get("message", {}).get("content", ""))
+                if isinstance(qcontent, str) and len(qcontent) > 5:
+                    # Skip task notifications and command outputs
+                    if qcontent.startswith(("<task-notification", "<local-command", "<command-name")):
+                        continue
+                    turn_number += 1
+                    turns.append({
+                        "turn_number": turn_number,
+                        "role": "user",
+                        "content": qcontent,
+                        "message_id": entry.get("uuid"),
+                        "parent_uuid": entry.get("parentUuid"),
+                        "timestamp": ts,
+                        "queued": True,
+                    })
                 continue
 
             msg = entry.get("message", {})
