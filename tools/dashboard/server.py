@@ -397,6 +397,9 @@ async def ws_terminal(websocket: WebSocket):
             await websocket.close()
             return
         tmux_name = attach
+        # Ensure mouse mode is off for reattached sessions too
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "off"],
+                        capture_output=True)
     else:
         # Create a new tmux session
         cmd_str = params.get("cmd", "/bin/bash")
@@ -441,6 +444,11 @@ async def ws_terminal(websocket: WebSocket):
         subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"],
                         capture_output=True)
         subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"],
+                        capture_output=True)
+        # Disable tmux mouse mode so right-click/middle-click reach the browser
+        # instead of being captured by tmux (which shows its own context menu).
+        # Paste is handled at the xterm.js layer using the browser clipboard API.
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "off"],
                         capture_output=True)
 
     # Track it

@@ -860,28 +860,58 @@ async function renderTerminal(cmd, attach) {
     return origWrite(data);
   };
 
-  // Paste: right-click or Ctrl+Shift+V
-  termContainer.addEventListener('contextmenu', async (e) => {
-    e.preventDefault();
+  // ── Paste Handling ──────────────────────────────────────
+  // Multiple paths to ensure paste works regardless of tmux mouse state:
+  // 1. xterm.js onPaste (browser paste event — Ctrl+V, middle-click)
+  // 2. Right-click context menu intercept
+  // 3. Ctrl+Shift+V keyboard shortcut
+  //
+  // Uses bracket paste mode (\e[200~ ... \e[201~) to prevent shells from
+  // executing multi-line pastes immediately.
+
+  function bracketPaste(text) {
+    if (text.includes('\n') || text.includes('\r')) {
+      return `\x1b[200~${text}\x1b[201~`;
+    }
+    return text;
+  }
+
+  async function pasteFromClipboard() {
     try {
       const text = await navigator.clipboard.readText();
       if (text && ws.readyState === WebSocket.OPEN) {
-        ws.send(text);
+        ws.send(bracketPaste(text));
       }
-    } catch(err) {}
+    } catch(err) {
+      // Clipboard API may fail without HTTPS or user gesture — no fallback for read
+      console.warn('Clipboard read failed:', err.message);
+    }
+  }
+
+  // 1. xterm.js built-in paste: fires when browser delivers a paste event
+  //    to the terminal canvas (Ctrl+V, middle-click, OS paste).
+  //    We intercept here to send via WebSocket instead of xterm's default.
+  term.onPaste((text) => {
+    if (text && ws.readyState === WebSocket.OPEN) {
+      ws.send(bracketPaste(text));
+    }
   });
 
-  // Ctrl+Shift+V paste
-  termContainer.addEventListener('keydown', async (e) => {
-    if (e.ctrlKey && e.shiftKey && e.key === 'V') {
+  // 2. Right-click → paste from clipboard (suppresses browser/tmux context menu)
+  termContainer.addEventListener('contextmenu', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await pasteFromClipboard();
+  });
+
+  // 3. Ctrl+Shift+V paste shortcut
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
       e.preventDefault();
-      try {
-        const text = await navigator.clipboard.readText();
-        if (text && ws.readyState === WebSocket.OPEN) {
-          ws.send(text);
-        }
-      } catch(err) {}
+      pasteFromClipboard();
+      return false;  // prevent xterm.js from processing this key
     }
+    return true;
   });
 
   // Handle resize
