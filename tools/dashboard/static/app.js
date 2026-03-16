@@ -336,11 +336,28 @@ async function renderTerminal(cmd, attach) {
   // 1. xterm.js selection → browser clipboard (for selecting visible text)
   // 2. OSC 52 from the PTY → browser clipboard (for tmux/vim yank)
 
+  // Helper: copy text to clipboard with fallback for non-HTTPS
+  function copyToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).catch(() => {});
+    } else {
+      // Fallback: hidden textarea + execCommand
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+  }
+
   // 1. Selection → clipboard
   term.onSelectionChange(() => {
     const sel = term.getSelection();
     if (sel) {
-      navigator.clipboard.writeText(sel).catch(() => {});
+      copyToClipboard(sel);
     }
   });
 
@@ -354,7 +371,7 @@ async function renderTerminal(cmd, attach) {
       for (const m of matches) {
         try {
           const decoded = atob(m[1]);
-          navigator.clipboard.writeText(decoded).catch(() => {});
+          copyToClipboard(decoded);
         } catch(e) {}
       }
     }
