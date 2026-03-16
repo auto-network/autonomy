@@ -96,8 +96,9 @@ async def api_sources(request):
 async def api_source_read(request):
     source_id = request.path_params["id"]
     max_chars = request.query_params.get("max_chars", "50000")
-    stdout, stderr, rc = await run_cli(["graph", "read", source_id, "--max-chars", max_chars])
-    return JSONResponse({"content": stdout, "error": stderr if rc != 0 else None})
+    return JSONResponse(await run_cli_json(
+        ["graph", "read", source_id, "--json", "--max-chars", max_chars, "--first"]
+    ))
 
 async def api_context(request):
     source_id = request.path_params["id"]
