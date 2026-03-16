@@ -30,7 +30,7 @@ bd dep tree <id>                  # View dependency tree
 
 ## Decision File
 
-When you complete your work, write a decision file to `/workspace/decision.json`:
+When you complete your work, write a decision file to `/workspace/output/decision.json`:
 
 ```json
 {
