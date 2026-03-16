@@ -286,11 +286,17 @@ async def ws_terminal(websocket: WebSocket):
             )
 
         # Create detached tmux session running the command
+        # Enable set-clipboard so OSC 52 passes through to xterm.js
         subprocess.run([
             "tmux", "new-session", "-d", "-s", tmux_name,
             "-x", "120", "-y", "40",
             cmd_str,
         ], env={**os.environ, "TERM": "xterm-256color"})
+        # Enable OSC 52 clipboard passthrough in this session
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"],
+                        capture_output=True)
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"],
+                        capture_output=True)
 
     # Track it
     _active_terminals[tmux_name] = {
