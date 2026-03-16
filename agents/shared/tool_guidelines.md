@@ -2,6 +2,12 @@
 
 You have access to these CLI tools. Use them — they are your primary interface to the project's knowledge and work tracking.
 
+## Workspace
+
+Your working directory is `/workspace/repo` — a git worktree on branch `agent/<bead-id>`.
+You can read, edit, create files, and commit normally. The dispatcher will collect your
+commits after you exit.
+
 ## Knowledge Graph (`graph`)
 
 ```
@@ -51,8 +57,10 @@ When you complete your work, write a decision file to `/workspace/output/decisio
 
 ## Working Style
 
+- Work in `/workspace/repo` — edit files, commit your changes
+- Write decision and reports to `/workspace/output/` — this persists after container exit
 - Research before building — search the graph for context before writing code
 - Drop trail markers — `graph note` for pitfalls, insights, operational discoveries
-- Link your work — `graph link <bead> <source> -r implemented_by`
+- Commit your work — the dispatcher records your commit hash on the bead
 - Stay focused — complete the assigned bead, don't scope-creep
 - Report blockers — if you can't proceed, write a BLOCKED decision with details

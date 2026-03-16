@@ -41,6 +41,9 @@ class DispatchResult:
     decision: dict | None = None
     output_dir: str = ""
     error: str = ""
+    commit_hash: str = ""
+    worktree_path: str = ""
+    branch: str = ""
 
 
 @dataclass
@@ -184,13 +187,41 @@ def launch_agent(bead_id: str, image: str = DEFAULT_IMAGE) -> DispatchResult:
             except json.JSONDecodeError:
                 pass
 
+    # Read commit hash and worktree path from output dir
+    commit_hash = ""
+    worktree_path = ""
+    branch = ""
+    if output_dir:
+        commit_file = Path(output_dir) / ".commit_hash"
+        if commit_file.exists():
+            commit_hash = commit_file.read_text().strip()
+        worktree_file = Path(output_dir) / ".worktree_path"
+        if worktree_file.exists():
+            worktree_path = worktree_file.read_text().strip()
+        branch_file = Path(output_dir) / ".branch"
+        if branch_file.exists():
+            branch = branch_file.read_text().strip()
+
     return DispatchResult(
         bead_id=bead_id,
         exit_code=result.returncode,
         decision=decision,
         output_dir=output_dir,
         error=result.stderr if result.returncode != 0 else "",
+        commit_hash=commit_hash,
+        worktree_path=worktree_path,
+        branch=branch,
     )
+
+
+def cleanup_worktree(worktree_path: str) -> None:
+    """Remove a git worktree after dispatch."""
+    if worktree_path and Path(worktree_path).exists():
+        subprocess.run(
+            ["git", "worktree", "remove", worktree_path, "--force"],
+            capture_output=True, text=True, timeout=15,
+            cwd=str(REPO_ROOT),
+        )
 
 
 def process_decision(dispatch_result: DispatchResult) -> None:
@@ -198,9 +229,18 @@ def process_decision(dispatch_result: DispatchResult) -> None:
     bead_id = dispatch_result.bead_id
     decision = dispatch_result.decision
 
+    # Record commit hash on bead if agent committed
+    if dispatch_result.commit_hash:
+        commit = dispatch_result.commit_hash[:10]
+        branch = dispatch_result.branch
+        print(f"  Commit: {commit} on {branch}")
+        run_bd(["update", bead_id, "--append-notes",
+                f"commit: {dispatch_result.commit_hash} branch: {branch}"])
+
     if decision is None:
         print(f"  No decision file from {bead_id} (exit code {dispatch_result.exit_code})")
         release_bead(bead_id, "FAILED", f"No decision file. Exit code: {dispatch_result.exit_code}")
+        cleanup_worktree(dispatch_result.worktree_path)
         return
 
     status = decision.get("status", "FAILED")
@@ -232,6 +272,9 @@ def process_decision(dispatch_result: DispatchResult) -> None:
 
     # Release the bead with appropriate state
     release_bead(bead_id, status, reason)
+
+    # Clean up worktree (branch persists for review/merge)
+    cleanup_worktree(dispatch_result.worktree_path)
 
 
 def dispatch_cycle(config: DispatcherConfig) -> int:

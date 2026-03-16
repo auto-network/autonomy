@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # Launch an agent container to work on a bead.
 #
-# Usage: ./agents/launch.sh <bead-id> [--dry-run]
+# Usage: ./agents/launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG]
 #
-# What it does:
-# 1. Generates a composed prompt (primer + shared blocks + directives)
-# 2. Launches the autonomy-agent container with:
-#    - Claude credentials (~/.claude/) mounted for subscription auth
-#    - graph.db mounted read-only
-#    - .beads/ mounted read-only
-#    - Repo mounted read-only (agent writes to /workspace overlay)
-#    - Prompt piped via --print flag + stdin
-# 3. Collects decision.json and experience_report.md on exit
+# Lifecycle:
+# 1. Creates a git worktree on a bead-specific branch
+# 2. Generates a composed prompt (primer + shared blocks + directives)
+# 3. Launches container with worktree mounted read-write
+# 4. Agent edits files, commits — normal Claude Code workflow
+# 5. Collects results: decision.json, commit hash, experience report
+# 6. Cleans up worktree (keeps branch for dispatcher to validate)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -52,8 +50,26 @@ fi
 echo "    Prompt: $(echo "$PROMPT" | wc -c) bytes"
 
 # ── Prepare output directory ──────────────────────────
-OUTPUT_DIR="$REPO_ROOT/data/agent-runs/$BEAD_ID-$(date +%Y%m%d-%H%M%S)"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+OUTPUT_DIR="$REPO_ROOT/data/agent-runs/$BEAD_ID-$TIMESTAMP"
 mkdir -p "$OUTPUT_DIR"
+
+# ── Create git worktree ──────────────────────────────
+BRANCH="agent/$BEAD_ID"
+WORKTREE_DIR="$REPO_ROOT/.worktrees/$BEAD_ID-$TIMESTAMP"
+
+echo "==> Creating worktree: $BRANCH"
+# Create branch from current HEAD if it doesn't exist
+if ! git -C "$REPO_ROOT" rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
+    git -C "$REPO_ROOT" branch "$BRANCH"
+fi
+mkdir -p "$(dirname "$WORKTREE_DIR")"
+git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH" 2>&1
+echo "    Worktree: $WORKTREE_DIR"
+
+# Configure git identity in worktree
+git -C "$WORKTREE_DIR" config user.name "autonomy-agent"
+git -C "$WORKTREE_DIR" config user.email "agent@autonomy.local"
 
 # ── Container name ────────────────────────────────────
 CONTAINER_NAME="agent-${BEAD_ID}-$$"
@@ -63,15 +79,21 @@ if $DRY_RUN; then
     echo "==> DRY RUN — would launch container '$CONTAINER_NAME'"
     echo "    Image: $IMAGE"
     echo "    Bead: $BEAD_ID"
+    echo "    Branch: $BRANCH"
+    echo "    Worktree: $WORKTREE_DIR"
     echo "    Output: $OUTPUT_DIR"
     echo ""
     echo "--- PROMPT ---"
     echo "$PROMPT"
+    # Clean up worktree on dry run
+    git -C "$REPO_ROOT" worktree remove "$WORKTREE_DIR" 2>/dev/null || true
     exit 0
 fi
 
 # ── Launch ────────────────────────────────────────────
 echo "==> Launching agent container: $CONTAINER_NAME"
+echo "    Image: $IMAGE"
+echo "    Branch: $BRANCH"
 echo "    Output: $OUTPUT_DIR"
 
 # Write prompt to temp file (avoids arg length limits)
@@ -82,7 +104,12 @@ echo "$PROMPT" > "$PROMPT_FILE"
 CREDS_COPY=$(mktemp)
 cp "$CLAUDE_CREDS/.credentials.json" "$CREDS_COPY"
 chmod 644 "$CREDS_COPY"
-trap 'rm -f "$PROMPT_FILE" "$CREDS_COPY"' EXIT
+
+cleanup() {
+    rm -f "$PROMPT_FILE" "$CREDS_COPY"
+    # Don't remove worktree here — dispatcher decides after validation
+}
+trap cleanup EXIT
 
 docker run \
     --name "$CONTAINER_NAME" \
@@ -91,7 +118,7 @@ docker run \
     -v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro" \
     -v "$REPO_ROOT/data/graph.db:/data/graph.db:ro" \
     -v "$REPO_ROOT/.beads:/data/.beads:ro" \
-    -v "$REPO_ROOT:/repo:ro" \
+    -v "$WORKTREE_DIR:/workspace/repo" \
     -v "$OUTPUT_DIR:/workspace/output" \
     -v "$PROMPT_FILE:/tmp/prompt.md:ro" \
     --entrypoint claude \
@@ -105,15 +132,30 @@ EXIT_CODE=$?
 # ── Collect results ───────────────────────────────────
 echo ""
 echo "==> Agent exited with code: $EXIT_CODE"
-echo "    Output directory: $OUTPUT_DIR"
 
+# Get commit hash from worktree (if agent committed)
+COMMIT_HASH=$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null || echo "")
+BRANCH_BASE=$(git -C "$REPO_ROOT" rev-parse "$BRANCH" 2>/dev/null || echo "")
+if [[ "$COMMIT_HASH" != "$BRANCH_BASE" ]] && [[ -n "$COMMIT_HASH" ]]; then
+    echo "    Commit: $COMMIT_HASH"
+    echo "    Diff:"
+    git -C "$WORKTREE_DIR" log --oneline "$BRANCH_BASE..$COMMIT_HASH" 2>/dev/null || true
+    # Save commit hash for dispatcher
+    echo "$COMMIT_HASH" > "$OUTPUT_DIR/.commit_hash"
+else
+    echo "    No new commits on $BRANCH"
+fi
+
+echo "    Output: $OUTPUT_DIR"
 if [[ -f "$OUTPUT_DIR/decision.json" ]]; then
     echo "    Decision:"
     cat "$OUTPUT_DIR/decision.json"
 else
-    echo "    WARNING: No decision.json found in $OUTPUT_DIR"
-    echo "    Files in output dir:"
-    ls -la "$OUTPUT_DIR" 2>/dev/null || echo "    (directory empty or missing)"
+    echo "    WARNING: No decision.json found"
 fi
+
+# Save worktree path for dispatcher cleanup
+echo "$WORKTREE_DIR" > "$OUTPUT_DIR/.worktree_path"
+echo "$BRANCH" > "$OUTPUT_DIR/.branch"
 
 exit $EXIT_CODE
