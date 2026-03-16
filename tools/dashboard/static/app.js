@@ -151,59 +151,55 @@ async function renderDispatch() {
 
   async function refresh() {
     const status = await api('/api/dispatch/status');
-    const inProgress = await api('/api/beads/list');
-    const approved = await fetch('/api/dispatch/status').then(r => r.json());
+    const allBeads = await api('/api/beads/list');
+    const beadList = Array.isArray(allBeads) ? allBeads : [];
 
-    // Get beads that are in_progress
-    const active = (Array.isArray(inProgress) ? inProgress : [])
-      .filter(b => b.status === 'in_progress');
+    // Build container lookup by bead ID (extract from container name: agent-<bead-id>-<pid>)
+    const containersByBead = {};
+    for (const c of (status.containers || [])) {
+      if (c.name.startsWith('agent-slack')) continue;
+      // Parse: agent-<bead-id>-<pid>
+      const parts = c.name.replace('agent-', '').split('-');
+      parts.pop(); // remove pid
+      const beadId = parts.join('-');
+      containersByBead[beadId] = c;
+    }
 
-    // Get approved beads waiting for dispatch
-    let approvedBeads = [];
-    try {
-      const res = await fetch('/api/beads/list').then(r => r.json());
-      approvedBeads = (Array.isArray(res) ? res : [])
-        .filter(b => b.status === 'open' && (b.labels || []).includes('approved'));
-    } catch(e) {}
+    // Active: in_progress beads (with their container if running)
+    const active = beadList.filter(b => b.status === 'in_progress');
+
+    // Approved: open beads with approved label, waiting for dispatch
+    const approvedBeads = beadList
+      .filter(b => b.status === 'open' && (b.labels || []).includes('approved'));
 
     let html = '';
 
-    // Running containers
+    // Active dispatches — bead + container unified
     html += `<div class="mb-8">
-      <h2 class="text-lg font-semibold mb-3 text-green-400">Running Agents</h2>`;
-    if (status.containers && status.containers.length > 0) {
-      for (const c of status.containers) {
-        if (c.name.startsWith('agent-slack')) continue; // skip unrelated
-        html += `
-          <div class="p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500">
-            <div class="flex justify-between items-center">
-              <span class="font-mono text-sm">${c.name}</span>
-              <span class="text-xs text-gray-400">${c.status}</span>
-            </div>
-            <div class="text-xs text-gray-500 mt-1">${c.image}</div>
-          </div>`;
-      }
-    } else {
-      html += `<div class="text-gray-500 text-sm">No agents running</div>`;
-    }
-    html += `</div>`;
-
-    // In-progress beads
-    html += `<div class="mb-8">
-      <h2 class="text-lg font-semibold mb-3 text-yellow-400">In Progress</h2>`;
+      <h2 class="text-lg font-semibold mb-3 text-green-400">Active Dispatches</h2>`;
     if (active.length > 0) {
       for (const b of active) {
+        const container = containersByBead[b.id];
+        const containerHtml = container
+          ? `<div class="mt-2 ml-6 flex items-center gap-2">
+               <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+               <span class="font-mono text-xs text-gray-400">${container.name}</span>
+               <span class="text-xs text-gray-500">${container.status}</span>
+               <span class="text-xs text-gray-600">${container.image}</span>
+             </div>`
+          : `<div class="mt-2 ml-6 text-xs text-gray-500">Container exited — waiting for results</div>`;
         html += `
-          <a href="/bead/${b.id}" class="block p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-yellow-500 hover:bg-gray-750">
+          <a href="/bead/${b.id}" class="block p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500 hover:bg-gray-750">
             <div class="flex gap-2 items-center">
               <span class="font-mono text-sm text-gray-400">${b.id}</span>
               ${priorityBadge(b.priority)}
               <span>${b.title}</span>
             </div>
+            ${containerHtml}
           </a>`;
       }
     } else {
-      html += `<div class="text-gray-500 text-sm">Nothing in progress</div>`;
+      html += `<div class="text-gray-500 text-sm">No active dispatches</div>`;
     }
     html += `</div>`;
 
