@@ -276,7 +276,7 @@ async def ws_terminal(websocket: WebSocket):
         if cmd_str == "autonomy-agent-claude":
             cmd_str = (
                 f"docker run -it --rm --name {tmux_name}"
-                f" -v {claude_creds}:/home/agent/.claude:ro"
+                f" -v {claude_creds}:/home/agent/.claude"
                 f" -v {claude_json}:/home/agent/.claude.json:ro"
                 f" -v {repo_root}/data/graph.db:/data/graph.db:ro"
                 f" -v {repo_root}:/repo:ro"

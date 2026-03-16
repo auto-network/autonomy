@@ -47,7 +47,7 @@ RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cro
 # Agent runs as non-root
 RUN useradd -m -s /bin/bash agent \
     && mkdir -p /home/agent/.claude \
-    && echo '{"numStartups":1,"installMethod":"native","autoUpdates":false,"hasSeenTasksHint":true}' \
+    && echo '{"numStartups":1,"hasCompletedOnboarding":true,"hasSeenTasksHint":true,"hasSeenStashHint":true,"remoteDialogSeen":true,"installMethod":"native","autoUpdates":false}' \
        > /home/agent/.claude.json \
     && echo '{"skipDangerousModePermissionPrompt":true}' \
        > /home/agent/.claude/settings.json \
