@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Autonomy Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
+  <style>
+    .markdown-body h1 { font-size: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; }
+    .markdown-body h2 { font-size: 1.25rem; font-weight: 600; margin: 1rem 0 0.5rem; border-bottom: 1px solid #374151; padding-bottom: 0.25rem; }
+    .markdown-body h3 { font-size: 1.1rem; font-weight: 600; margin: 0.75rem 0 0.25rem; }
+    .markdown-body p { margin: 0.5rem 0; }
+    .markdown-body ul, .markdown-body ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+    .markdown-body li { margin: 0.25rem 0; }
+    .markdown-body code { background: #1f2937; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.875rem; }
+    .markdown-body pre { background: #1f2937; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin: 0.5rem 0; }
+    .markdown-body pre code { background: none; padding: 0; }
+    .markdown-body table { border-collapse: collapse; margin: 0.5rem 0; width: 100%; }
+    .markdown-body th, .markdown-body td { border: 1px solid #374151; padding: 0.375rem 0.75rem; text-align: left; }
+    .markdown-body th { background: #1f2937; font-weight: 600; }
+    .markdown-body blockquote { border-left: 3px solid #6366f1; padding-left: 1rem; margin: 0.5rem 0; color: #9ca3af; }
+    .markdown-body strong { color: #e5e7eb; }
+    .markdown-body a { color: #818cf8; text-decoration: underline; }
+    .nav-link { display: block; padding: 0.5rem 0.75rem; border-radius: 0.375rem; color: #9ca3af; text-decoration: none; }
+    .nav-link:hover { background: #374151; color: #e5e7eb; }
+    .nav-link.active { background: #4f46e5; color: white; }
+    .badge { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+    .badge-p0 { background: #dc2626; color: white; }
+    .badge-p1 { background: #f59e0b; color: black; }
+    .badge-p2 { background: #3b82f6; color: white; }
+    .badge-p3 { background: #6b7280; color: white; }
+    .badge-open { background: #22c55e; color: black; }
+    .badge-closed { background: #6b7280; color: white; }
+    .badge-blocked { background: #ef4444; color: white; }
+    .badge-in_progress { background: #a855f7; color: white; }
+  </style>
+</head>
+<body class="bg-gray-900 text-gray-100 h-screen flex">
+  <!-- Sidebar -->
+  <nav class="w-56 bg-gray-800 p-4 flex flex-col flex-shrink-0 border-r border-gray-700">
+    <h1 class="text-lg font-bold text-indigo-400 mb-4">Autonomy</h1>
+    <div class="space-y-1 mb-6">
+      <a href="/beads" class="nav-link" data-page="beads">Beads</a>
+      <a href="/sessions" class="nav-link" data-page="sessions">Sessions</a>
+      <a href="/search" class="nav-link" data-page="search">Search</a>
+    </div>
+    <div class="mt-auto text-xs text-gray-500" id="stats-summary">loading...</div>
+  </nav>
+
+  <!-- Main -->
+  <div class="flex-1 flex flex-col overflow-hidden">
+    <!-- Header -->
+    <header class="bg-gray-800 border-b border-gray-700 px-6 py-3 flex items-center gap-4">
+      <select id="scope-select" class="bg-gray-700 text-gray-100 px-3 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        <option value="">All projects</option>
+      </select>
+      <input type="text" id="global-search" placeholder="Search graph..."
+             class="bg-gray-700 text-gray-100 px-4 py-2 rounded-lg flex-1 max-w-xl
+                    focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <span class="text-sm text-gray-400" id="page-title"></span>
+    </header>
+
+    <!-- Content -->
+    <main class="flex-1 overflow-auto p-6" id="content">
+      <div class="text-gray-400">Loading...</div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
