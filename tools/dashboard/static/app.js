@@ -331,7 +331,12 @@ async function renderTerminal(cmd, attach) {
     }
   });
 
-  // Copy: selection → clipboard
+  // ── Clipboard Integration ──────────────────────────
+  // Two mechanisms:
+  // 1. xterm.js selection → browser clipboard (for selecting visible text)
+  // 2. OSC 52 from the PTY → browser clipboard (for tmux/vim yank)
+
+  // 1. Selection → clipboard
   term.onSelectionChange(() => {
     const sel = term.getSelection();
     if (sel) {
@@ -339,7 +344,24 @@ async function renderTerminal(cmd, attach) {
     }
   });
 
-  // Paste: Ctrl+Shift+V or right-click
+  // 2. OSC 52 handler: when the PTY sends \e]52;c;BASE64\a we decode and copy
+  // This lets tmux `set -g set-clipboard on` work through the browser
+  const origWrite = term.write.bind(term);
+  const osc52Regex = /\x1b\]52;[a-z]*;([A-Za-z0-9+/=]*)\x07/g;
+  term.write = function(data) {
+    if (typeof data === 'string') {
+      const matches = [...data.matchAll(osc52Regex)];
+      for (const m of matches) {
+        try {
+          const decoded = atob(m[1]);
+          navigator.clipboard.writeText(decoded).catch(() => {});
+        } catch(e) {}
+      }
+    }
+    return origWrite(data);
+  };
+
+  // Paste: right-click or Ctrl+Shift+V
   termContainer.addEventListener('contextmenu', async (e) => {
     e.preventDefault();
     try {
@@ -348,6 +370,19 @@ async function renderTerminal(cmd, attach) {
         ws.send(text);
       }
     } catch(err) {}
+  });
+
+  // Ctrl+Shift+V paste
+  termContainer.addEventListener('keydown', async (e) => {
+    if (e.ctrlKey && e.shiftKey && e.key === 'V') {
+      e.preventDefault();
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text && ws.readyState === WebSocket.OPEN) {
+          ws.send(text);
+        }
+      } catch(err) {}
+    }
   });
 
   // Handle resize
