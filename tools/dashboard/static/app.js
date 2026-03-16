@@ -221,7 +221,7 @@ async function renderSearch(query, project) {
 
     html += `
       <div class="p-4 bg-gray-800 rounded-lg border border-gray-700 hover:border-indigo-500 cursor-pointer transition-colors"
-           onclick="navigateTo('/source/${r.source_id}')">
+           onclick="navigateTo('/source/${r.source_id}?turn=${r.turn_number}')">
         <div class="flex items-center gap-2 mb-2">
           <span class="px-1.5 py-0.5 ${typeBg} rounded text-xs font-mono">${type}</span>
           <span class="text-sm font-medium truncate">${title}</span>
@@ -236,15 +236,123 @@ async function renderSearch(query, project) {
   content.innerHTML = html;
 }
 
-async function renderSource(id) {
-  pageTitle.textContent = `Source: ${id}`;
+async function renderSource(id, highlightTurn) {
+  pageTitle.textContent = `Source: ${id.slice(0, 12)}`;
   const data = await api(`/api/source/${id}`);
   if (data.error) {
     content.innerHTML = `<div class="text-red-400">${data.error}</div>`;
     return;
   }
-  content.innerHTML = '';
-  content.appendChild(renderMd(data.content || 'No content'));
+
+  const src = data.source || {};
+  const entries = data.entries || [];
+  const edges = data.edges || [];
+  const srcType = src.type || 'unknown';
+
+  // ── Header ──────────────────────────────────────
+  const typeBadges = {
+    note: 'bg-yellow-700', session: 'bg-green-700', conversation: 'bg-blue-700',
+    status: 'bg-purple-700', docs: 'bg-teal-700', 'agent-run': 'bg-orange-700',
+    musing: 'bg-pink-700', 'git-log': 'bg-gray-600', playbook: 'bg-indigo-700',
+  };
+  const badgeCls = typeBadges[srcType] || 'bg-gray-700';
+  const proj = src.project ? `<span class="text-xs text-indigo-400">[${src.project}]</span>` : '';
+  const date = (src.created_at || '').slice(0, 10);
+
+  let html = `
+    <div class="mb-6">
+      <div class="flex items-center gap-3 mb-2">
+        <span class="px-2 py-0.5 ${badgeCls} rounded text-xs font-semibold">${srcType}</span>
+        ${proj}
+        <span class="text-xs text-gray-500">${date}</span>
+        <span class="text-xs text-gray-600 font-mono ml-auto">${src.id?.slice(0, 12) || ''}</span>
+      </div>
+      <h1 class="text-xl font-bold">${src.title || 'Untitled'}</h1>
+    </div>`;
+
+  // ── Type-aware content rendering ────────────────
+  if (srcType === 'note') {
+    // Notes: single card, no turn numbers
+    const text = entries[0]?.content || '';
+    html += `<div class="p-4 bg-gray-800 rounded-lg border-l-4 border-yellow-600">`;
+    html += `<div class="markdown-body" id="note-content"></div>`;
+    html += `</div>`;
+
+  } else if (srcType === 'session' || srcType === 'conversation' || srcType === 'agent-run') {
+    // Chat-style: user left, assistant right
+    html += `<div class="space-y-4" id="chat-entries">`;
+    for (const e of entries) {
+      const isUser = e.entry_type === 'thought';
+      const align = isUser ? 'mr-16' : 'ml-16';
+      const border = isUser ? 'border-l-4 border-blue-500' : 'border-l-4 border-gray-600';
+      const roleBadge = isUser
+        ? '<span class="text-xs text-blue-400 font-semibold">USER</span>'
+        : '<span class="text-xs text-gray-400 font-semibold">ASSISTANT</span>';
+      const turnNum = e.turn_number || '?';
+      const highlight = (highlightTurn && turnNum == highlightTurn) ? 'ring-2 ring-indigo-500' : '';
+
+      html += `
+        <div class="p-4 bg-gray-800 rounded-lg ${border} ${align} ${highlight}" id="turn-${turnNum}">
+          <div class="flex items-center gap-2 mb-2">
+            ${roleBadge}
+            <span class="text-xs text-gray-600">t${turnNum}</span>
+          </div>
+          <div class="markdown-body entry-content text-sm" data-turn="${turnNum}"></div>
+        </div>`;
+    }
+    html += `</div>`;
+
+  } else {
+    // Default: simple sequential rendering for docs, status, musings, etc.
+    html += `<div class="space-y-4" id="doc-entries">`;
+    for (const e of entries) {
+      html += `<div class="markdown-body entry-content text-sm" data-turn="${e.turn_number || ''}"></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // ── Edges sidebar (if any) ──────────────────────
+  if (edges.length > 0) {
+    html += `
+      <div class="mt-8 p-4 bg-gray-800 rounded-lg border border-gray-700">
+        <h3 class="text-sm font-semibold text-gray-400 mb-3">Connections (${edges.length})</h3>
+        <div class="space-y-1">`;
+    for (const e of edges.slice(0, 20)) {
+      const rel = e.relation || '?';
+      const other = e.source_id === src.id ? e.target_id : e.source_id;
+      const otherType = e.source_id === src.id ? e.target_type : e.source_type;
+      const meta = typeof e.metadata === 'string' ? JSON.parse(e.metadata || '{}') : (e.metadata || {});
+      const turns = meta.turns ? ` t${meta.turns.from}${meta.turns.to !== meta.turns.from ? '-' + meta.turns.to : ''}` : '';
+      const note = meta.note ? ` — ${meta.note.slice(0, 50)}` : '';
+      html += `
+          <div class="text-xs text-gray-400 hover:text-gray-200 cursor-pointer"
+               onclick="navigateTo('/${otherType === 'source' ? 'source' : 'bead'}/${other}')">
+            <span class="text-indigo-400">${rel}</span> → ${other.slice(0, 12)} [${otherType}]${turns}${note}
+          </div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  content.innerHTML = html;
+
+  // ── Render markdown content ─────────────────────
+  if (srcType === 'note') {
+    const el = document.getElementById('note-content');
+    if (el && entries[0]) el.appendChild(renderMd(entries[0].content));
+  } else {
+    const contentEls = content.querySelectorAll('.entry-content');
+    entries.forEach((e, i) => {
+      if (contentEls[i]) {
+        contentEls[i].appendChild(renderMd(e.content));
+      }
+    });
+  }
+
+  // Scroll to highlighted turn
+  if (highlightTurn) {
+    const el = document.getElementById(`turn-${highlightTurn}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
 }
 
 // ── Terminal ─────────────────────────────────────────────────
@@ -505,7 +613,8 @@ function route() {
     const params = new URLSearchParams(window.location.search);
     renderSearch(params.get('q'), params.get('project'));
   } else if (path.startsWith('/source/')) {
-    renderSource(path.split('/source/')[1]);
+    const params = new URLSearchParams(window.location.search);
+    renderSource(path.split('/source/')[1], params.get('turn'));
   } else if (path === '/terminal' || path.startsWith('/terminal/')) {
     const sessionId = path.startsWith('/terminal/') ? path.split('/terminal/')[1] : null;
     renderTerminal(null, sessionId);
