@@ -37,16 +37,58 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 
 ## Key CLIs
 
+### Knowledge Graph (`graph`)
 | Command | What | Example |
 |---------|------|---------|
-| `graph search "query"` | Full-text search across knowledge graph | `graph search "CVSS fuzzing" --project enterprise-ng` |
+| `graph search "query"` | Full-text search (use `--or` for OR mode) | `graph search "CVSS fuzzing" --project enterprise-ng` |
+| `graph search "query" --or` | Match ANY term instead of all | `graph search "auth login session" --or` |
 | `graph read <src_id>` | Read full source content | `graph read dc4c73ee --max-chars 2000` |
+| `graph context <src_id> <turn>` | Show turns around a search hit | `graph context 8cdc1d85 286 --window 3` |
 | `graph sources` | List sources | `graph sources --project jira --type docs` |
 | `graph projects` | Show all projects with source counts | |
+| `graph attention` | Show human input chronologically | `graph attention --last 10` |
+| `graph note "text"` | Drop a searchable trail marker | `graph note "pitfall: X breaks Y" --tags pitfall` |
+| `graph link <bead> <src>` | Create provenance edge | `graph link auto-5kj 8cdc1d85 -r conceived_at -t 286` |
+| `graph bead "title"` | Create bead with provenance link | `graph bead "Fix X" --source 8cdc1d85 --turns 286` |
+| `graph agent-runs` | Discover and ingest subagent traces | `graph agent-runs --list` |
+| `graph sessions --all` | Ingest latest session data (107ms) | Run before searching for recent content |
+
+### Beads (`bd`)
+| Command | What | Example |
+|---------|------|---------|
 | `bd ready` | Show beads with no blockers | |
 | `bd show <id>` | Show bead details | `bd show auto-5kj` |
 | `bd create "title" -p N` | Create a bead | `bd create "Fix bug" -t task -p 1` |
 | `bd dep tree <id>` | Show dependency tree | |
+| `bd close <id> --reason "..."` | Close a completed bead | |
+
+## Workflows
+
+### When you discover something important during a conversation
+```bash
+graph sessions --all                          # refresh (107ms)
+graph search "the key phrase"                 # find the turn
+graph bead "Title" -p 1 \                     # create bead with provenance
+  --source <src_id> --turns <N>
+```
+
+### When you learn a pitfall or operational insight
+```bash
+graph note "description of the pitfall" --tags pitfall,topic --project autonomy
+```
+
+### Before creating any bead — research first
+```bash
+graph search "topic" --or --limit 10          # mine the graph for context
+graph read <src_id> --max-chars 3000          # read full sources
+# THEN create the bead with informed context
+```
+
+### Checking human attention trail
+```bash
+graph attention --last 20                     # recent human input
+graph attention --search "keyword"            # find when user discussed something
+```
 
 ## Environment
 
