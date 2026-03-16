@@ -91,6 +91,111 @@ async def api_dispatch_status(request):
                 pass
     return JSONResponse({"claimed": claimed if isinstance(claimed, list) else [], "containers": containers})
 
+AGENT_RUNS_DIR = Path(__file__).parent.parent.parent / "data" / "agent-runs"
+
+async def api_dispatch_runs(request):
+    """List completed dispatch runs with their artifacts."""
+    runs = []
+    if AGENT_RUNS_DIR.exists():
+        for run_dir in sorted(AGENT_RUNS_DIR.iterdir(), reverse=True):
+            if not run_dir.is_dir():
+                continue
+            # Parse bead ID and timestamp from dir name: <bead>-YYYYMMDD-HHMMSS
+            name = run_dir.name
+            parts = name.rsplit("-", 2)
+            if len(parts) < 3:
+                continue
+            bead_id = parts[0]
+            timestamp = f"{parts[1]}-{parts[2]}"
+
+            decision = None
+            decision_path = run_dir / "decision.json"
+            if decision_path.exists():
+                try:
+                    decision = json.loads(decision_path.read_text())
+                except json.JSONDecodeError:
+                    pass
+
+            has_experience = (run_dir / "experience_report.md").exists()
+            commit_hash = ""
+            commit_path = run_dir / ".commit_hash"
+            if commit_path.exists():
+                commit_hash = commit_path.read_text().strip()
+            branch = ""
+            branch_path = run_dir / ".branch"
+            if branch_path.exists():
+                branch = branch_path.read_text().strip()
+
+            runs.append({
+                "bead_id": bead_id,
+                "timestamp": timestamp,
+                "dir": run_dir.name,
+                "decision": decision,
+                "has_experience_report": has_experience,
+                "commit_hash": commit_hash,
+                "branch": branch,
+            })
+    return JSONResponse(runs)
+
+async def api_dispatch_trace(request):
+    """Full trace for a completed dispatch run."""
+    run_name = request.path_params["run"]
+    run_dir = AGENT_RUNS_DIR / run_name
+    if not run_dir.exists():
+        return JSONResponse({"error": "run not found"}, status_code=404)
+
+    # Decision
+    decision = None
+    decision_path = run_dir / "decision.json"
+    if decision_path.exists():
+        try:
+            decision = json.loads(decision_path.read_text())
+        except json.JSONDecodeError:
+            pass
+
+    # Experience report
+    experience = ""
+    exp_path = run_dir / "experience_report.md"
+    if exp_path.exists():
+        experience = exp_path.read_text()
+
+    # Commit info
+    commit_hash = ""
+    commit_path = run_dir / ".commit_hash"
+    if commit_path.exists():
+        commit_hash = commit_path.read_text().strip()
+    branch = ""
+    branch_path = run_dir / ".branch"
+    if branch_path.exists():
+        branch = branch_path.read_text().strip()
+
+    # Git diff (if branch still exists)
+    diff = ""
+    branch_base = ""
+    base_path = run_dir / ".branch_base"
+    if base_path.exists():
+        branch_base = base_path.read_text().strip()
+    if commit_hash and branch_base:
+        stdout, _, rc = await run_cli(["git", "diff", f"{branch_base}..{commit_hash}"], timeout=10)
+        if rc == 0:
+            diff = stdout
+
+    # Bead info
+    parts = run_dir.name.rsplit("-", 2)
+    bead_id = parts[0] if len(parts) >= 3 else run_dir.name
+    bead = await run_cli_json(["bd", "show", bead_id, "--json"])
+
+    return JSONResponse({
+        "run": run_dir.name,
+        "bead_id": bead_id,
+        "bead": bead,
+        "decision": decision,
+        "experience_report": experience,
+        "commit_hash": commit_hash,
+        "branch": branch,
+        "diff": diff,
+    })
+
 async def api_search(request):
     q = request.query_params.get("q", "")
     if not q:
@@ -472,6 +577,9 @@ routes = [
     Route("/api/bead/{id}/tree", api_bead_tree),
     Route("/api/bead/{id}/approve", api_bead_approve, methods=["POST"]),
     Route("/api/dispatch/status", api_dispatch_status),
+    Route("/api/dispatch/runs", api_dispatch_runs),
+    Route("/api/dispatch/trace/{run}", api_dispatch_trace),
+    Route("/dispatch/trace/{run}", page_dispatch),
     Route("/api/search", api_search),
     Route("/api/sources", api_sources),
     Route("/api/source/{id}", api_source_read),
