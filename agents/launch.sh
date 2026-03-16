@@ -118,6 +118,10 @@ trap cleanup EXIT
 # Mount .git at the same absolute path so worktree's .git file reference resolves
 GIT_DIR="$REPO_ROOT/.git"
 
+# Agent session logs written here — visible to host for live tailing and graph ingestion
+SESSION_DIR="$OUTPUT_DIR/sessions"
+mkdir -p "$SESSION_DIR"
+
 docker run \
     --name "$CONTAINER_NAME" \
     --rm \
@@ -128,6 +132,7 @@ docker run \
     -v "$REPO_ROOT/.beads:/data/.beads:ro" \
     -v "$WORKTREE_DIR:/workspace/repo" \
     -v "$OUTPUT_DIR:/workspace/output" \
+    -v "$SESSION_DIR:/home/agent/.claude/projects" \
     -v "$PROMPT_FILE:/tmp/prompt.md:ro" \
     --entrypoint claude \
     "$IMAGE" \
