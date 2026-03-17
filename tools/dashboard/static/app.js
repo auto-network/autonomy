@@ -212,15 +212,9 @@ function updateSelectAllCheckbox() {
 }
 
 function updateBulkActionBar() {
-  const bar = document.getElementById('bulk-action-bar');
-  if (!bar) return;
-  if (_selectedBeadIds.size > 0) {
-    bar.style.display = 'flex';
-    const countEl = document.getElementById('bulk-count');
-    if (countEl) countEl.textContent = `${_selectedBeadIds.size} selected`;
-  } else {
-    bar.style.display = 'none';
-  }
+  // Re-render filter bar container to swap between filter controls and bulk action toolbar
+  const filterContainer = document.getElementById('filter-bar-container');
+  if (filterContainer) filterContainer.innerHTML = renderFilterBar();
 }
 
 window.bulkApprove = async function() {
@@ -232,35 +226,71 @@ window.bulkApprove = async function() {
   renderBeadResults(globalSearch.value.trim());
 };
 
-window.bulkSetPriority = function(priority) {
-  // Show priority picker dropdown
+window.bulkSetPriority = function() {
   const picker = document.getElementById('bulk-priority-picker');
   if (picker) picker.classList.toggle('hidden');
+  // Close label dropdown if open
+  const labelDd = document.getElementById('bulk-label-dropdown');
+  if (labelDd) labelDd.classList.add('hidden');
 };
 
 window.bulkApplyPriority = async function(priority) {
   const ids = [..._selectedBeadIds];
-  // Priority changes require bd update which is read-only in this context
-  // Show a message indicating the action
   alert(`Set priority P${priority} for ${ids.length} beads: ${ids.join(', ')}\n(Requires bd update - not available in read-only mode)`);
   const picker = document.getElementById('bulk-priority-picker');
   if (picker) picker.classList.add('hidden');
 };
 
-window.bulkAddLabel = function() {
-  const label = prompt('Enter label to add:');
-  if (!label) return;
+window.toggleBulkLabelDropdown = function() {
+  const dd = document.getElementById('bulk-label-dropdown');
+  if (dd) dd.classList.toggle('hidden');
+  // Close priority picker if open
+  const picker = document.getElementById('bulk-priority-picker');
+  if (picker) picker.classList.add('hidden');
+};
+
+window.bulkApplyExistingLabel = function(label) {
   const ids = [..._selectedBeadIds];
   alert(`Add label "${label}" to ${ids.length} beads: ${ids.join(', ')}\n(Requires bd update - not available in read-only mode)`);
+  const dd = document.getElementById('bulk-label-dropdown');
+  if (dd) dd.classList.add('hidden');
+};
+
+window.bulkApplyNewLabel = function(label) {
+  if (!label || !label.trim()) return;
+  const ids = [..._selectedBeadIds];
+  alert(`Add label "${label.trim()}" to ${ids.length} beads: ${ids.join(', ')}\n(Requires bd update - not available in read-only mode)`);
+  const dd = document.getElementById('bulk-label-dropdown');
+  if (dd) dd.classList.add('hidden');
+};
+
+window.bulkClearSelection = function() {
+  _selectedBeadIds.clear();
+  // Update all checkboxes
+  document.querySelectorAll('.bead-table-row').forEach(row => {
+    const id = row.dataset.beadId;
+    const cb = document.getElementById(`cb-${id}`);
+    if (cb) cb.checked = false;
+  });
+  updateSelectAllCheckbox();
+  updateBulkActionBar();
 };
 
 // ── Click-outside-to-close for toolbar dropdowns ────────────
 document.addEventListener('click', function(e) {
+  // Close priority picker
   const picker = document.getElementById('bulk-priority-picker');
   if (picker && !picker.classList.contains('hidden')) {
-    // Close if click is outside the picker and its toggle button
-    if (!e.target.closest('#bulk-priority-picker') && !e.target.closest('[onclick*="bulkSetPriority"]')) {
+    if (!e.target.closest('#bulk-priority-wrap')) {
       picker.classList.add('hidden');
+    }
+  }
+  // Close bulk label dropdown
+  const labelDd = document.getElementById('bulk-label-dropdown');
+  const labelWrap = document.getElementById('bulk-label-dropdown-wrap');
+  if (labelDd && labelWrap && !labelDd.classList.contains('hidden')) {
+    if (!labelWrap.contains(e.target)) {
+      labelDd.classList.add('hidden');
     }
   }
 });
@@ -389,7 +419,71 @@ function toggleInArray(arr, val) {
   return arr;
 }
 
+function renderLabelDropdown(mode) {
+  // mode: 'filter' (in filter bar with AND/OR toggle) or 'action' (bulk add with text input)
+  const allLabels = collectAllLabels(_allBeads);
+  if (!allLabels.length && mode === 'filter') return '';
+
+  const f = _filters;
+  const isAction = mode === 'action';
+  const wrapperId = isAction ? 'bulk-label-dropdown-wrap' : 'label-dropdown-wrap';
+  const dropdownId = isAction ? 'bulk-label-dropdown' : 'label-dropdown';
+
+  // Header: AND/OR toggle for filter mode, text input for action mode
+  const headerHtml = isAction
+    ? `<div class="p-1.5 border-b border-gray-700">
+        <input type="text" id="bulk-label-input" placeholder="Type new label..."
+               class="w-full px-2 py-1 bg-gray-700 text-gray-100 text-xs rounded border border-gray-600 focus:outline-none focus:border-indigo-500"
+               onclick="event.stopPropagation()"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();bulkApplyNewLabel(this.value)}">
+      </div>`
+    : `<div class="p-1 border-b border-gray-700 flex items-center gap-1">
+        <span class="text-xs text-gray-400">Mode:</span>
+        <button class="px-1.5 py-0.5 rounded text-xs ${f.labelMode === 'or' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300'}"
+                onclick="toggleFilter('labelMode','or')">OR</button>
+        <button class="px-1.5 py-0.5 rounded text-xs ${f.labelMode === 'and' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300'}"
+                onclick="toggleFilter('labelMode','and')">AND</button>
+      </div>`;
+
+  // Label list: checkboxes for filter mode, clickable items for action mode
+  const labelsHtml = allLabels.map(l => {
+    if (isAction) {
+      return `<div class="flex items-center gap-2 px-2 py-1 hover:bg-gray-700 cursor-pointer text-xs"
+                   onclick="bulkApplyExistingLabel('${l.replace(/'/g, "\\'")}')">
+        <span class="truncate">${l}</span>
+      </div>`;
+    }
+    return `<label class="flex items-center gap-2 px-2 py-1 hover:bg-gray-700 cursor-pointer text-xs">
+      <input type="checkbox" ${f.labels.includes(l) ? 'checked' : ''}
+             onchange="toggleFilter('label','${l.replace(/'/g, "\\'")}')" class="rounded">
+      <span class="truncate">${l}</span>
+    </label>`;
+  }).join('');
+
+  const toggleFn = isAction ? `toggleBulkLabelDropdown()` : `document.getElementById('${dropdownId}').classList.toggle('hidden')`;
+  const btnLabel = isAction
+    ? 'Add Label ▾'
+    : `Labels${f.labels.length ? ` (${f.labels.length})` : ''} ▾`;
+  const btnClass = isAction
+    ? 'px-3 py-1 bg-gray-600 hover:bg-gray-500 text-white text-xs rounded font-semibold transition-colors'
+    : 'px-2 py-0.5 rounded text-xs font-medium bg-gray-700 text-gray-300 hover:bg-gray-600';
+
+  return `
+    <div class="relative inline-block" id="${wrapperId}">
+      <button class="${btnClass}" onclick="${toggleFn}">${btnLabel}</button>
+      <div id="${dropdownId}" class="hidden absolute z-20 mt-1 bg-gray-800 border border-gray-600 rounded shadow-lg max-h-48 overflow-y-auto w-48">
+        ${headerHtml}
+        ${labelsHtml}
+      </div>
+    </div>`;
+}
+
 function renderFilterBar() {
+  // When items are selected in list view, show bulk action toolbar instead
+  if (_selectedBeadIds.size > 0 && _currentView === 'list') {
+    return renderBulkActionToolbar();
+  }
+
   const allLabels = collectAllLabels(_allBeads);
   const epics = collectEpics(_allBeads);
   const f = _filters;
@@ -424,30 +518,8 @@ function renderFilterBar() {
     chip('Blocked', f.blocked === 'yes', `toggleFilter('blocked','yes')`) +
     chip('Not blocked', f.blocked === 'no', `toggleFilter('blocked','no')`);
 
-  // Labels dropdown
-  const labelDropdown = allLabels.length ? `
-    <div class="relative inline-block" id="label-dropdown-wrap">
-      <button class="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 text-gray-300 hover:bg-gray-600"
-              onclick="document.getElementById('label-dropdown').classList.toggle('hidden')">
-        Labels${f.labels.length ? ` (${f.labels.length})` : ''} ▾
-      </button>
-      <div id="label-dropdown" class="hidden absolute z-20 mt-1 bg-gray-800 border border-gray-600 rounded shadow-lg max-h-48 overflow-y-auto w-48">
-        <div class="p-1 border-b border-gray-700 flex items-center gap-1">
-          <span class="text-xs text-gray-400">Mode:</span>
-          <button class="px-1.5 py-0.5 rounded text-xs ${f.labelMode === 'or' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300'}"
-                  onclick="toggleFilter('labelMode','or')">OR</button>
-          <button class="px-1.5 py-0.5 rounded text-xs ${f.labelMode === 'and' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300'}"
-                  onclick="toggleFilter('labelMode','and')">AND</button>
-        </div>
-        ${allLabels.map(l => `
-          <label class="flex items-center gap-2 px-2 py-1 hover:bg-gray-700 cursor-pointer text-xs">
-            <input type="checkbox" ${f.labels.includes(l) ? 'checked' : ''}
-                   onchange="toggleFilter('label','${l.replace(/'/g, "\\'")}')" class="rounded">
-            <span class="truncate">${l}</span>
-          </label>
-        `).join('')}
-      </div>
-    </div>` : '';
+  // Labels dropdown (filter mode)
+  const labelDropdown = renderLabelDropdown('filter');
 
   // Epic dropdown
   const epicDropdown = epics.length ? `
@@ -496,6 +568,26 @@ function renderFilterBar() {
         ${epicDropdown}
       </div>
       ${activeChips}
+    </div>`;
+}
+
+function renderBulkActionToolbar() {
+  const labelDropdown = renderLabelDropdown('action');
+
+  return `
+    <div class="mb-4" id="filter-bar">
+      <div class="bulk-action-bar">
+        <span class="text-sm font-medium">${_selectedBeadIds.size} selected</span>
+        <button onclick="bulkApprove()" class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-xs rounded font-semibold transition-colors">Approve</button>
+        <div class="relative" id="bulk-priority-wrap">
+          <button onclick="bulkSetPriority()" class="px-3 py-1 bg-gray-600 hover:bg-gray-500 text-white text-xs rounded font-semibold transition-colors">Set Priority ▾</button>
+          <div id="bulk-priority-picker" class="hidden absolute z-20 mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg p-1 flex gap-1">
+            ${[0,1,2,3,4].map(p => `<button onclick="bulkApplyPriority(${p})" class="px-2 py-0.5 rounded text-xs font-semibold hover:bg-gray-600 transition-colors">P${p}</button>`).join('')}
+          </div>
+        </div>
+        ${labelDropdown}
+        <button onclick="bulkClearSelection()" class="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded font-semibold transition-colors ml-auto">Clear Selection</button>
+      </div>
     </div>`;
 }
 
@@ -762,22 +854,7 @@ function renderListView(filtered, terms, query) {
       </tr>`;
   }).join('');
 
-  // Bulk action bar
-  const bulkBar = `
-    <div id="bulk-action-bar" class="bulk-action-bar" style="display: ${_selectedBeadIds.size > 0 ? 'flex' : 'none'}">
-      <span id="bulk-count" class="text-sm font-medium">${_selectedBeadIds.size} selected</span>
-      <button onclick="bulkApprove()" class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-xs rounded font-semibold transition-colors">Approve</button>
-      <div class="relative">
-        <button onclick="bulkSetPriority()" class="px-3 py-1 bg-gray-600 hover:bg-gray-500 text-white text-xs rounded font-semibold transition-colors">Set Priority</button>
-        <div id="bulk-priority-picker" class="hidden absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg p-1 flex gap-1">
-          ${[0,1,2,3,4].map(p => `<button onclick="bulkApplyPriority(${p})" class="px-2 py-0.5 rounded text-xs font-semibold hover:bg-gray-600 transition-colors">P${p}</button>`).join('')}
-        </div>
-      </div>
-      <button onclick="bulkAddLabel()" class="px-3 py-1 bg-gray-600 hover:bg-gray-500 text-white text-xs rounded font-semibold transition-colors">Add Label</button>
-    </div>`;
-
   return `
-    ${bulkBar}
     <div class="overflow-x-auto">
       <table class="bead-table w-full">
         <thead><tr>${headerCells}</tr></thead>
