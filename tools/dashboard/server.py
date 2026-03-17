@@ -878,8 +878,14 @@ async def ws_terminal(websocket: WebSocket):
             await websocket.close()
             return
         tmux_name = attach
-        # Ensure mouse mode is off for reattached sessions too
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "off"],
+        # Ensure tmux mouse mode is on for reattached sessions so scroll
+        # wheel triggers tmux copy-mode (scrollback lives in tmux, not xterm.js).
+        # Users hold Shift to select text at the browser level.
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
+                        capture_output=True)
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"],
+                        capture_output=True)
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"],
                         capture_output=True)
     else:
         # Create a new tmux session
@@ -926,10 +932,11 @@ async def ws_terminal(websocket: WebSocket):
                         capture_output=True)
         subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"],
                         capture_output=True)
-        # Disable tmux mouse mode so right-click/middle-click reach the browser
-        # instead of being captured by tmux (which shows its own context menu).
+        # Enable tmux mouse mode so scroll wheel triggers tmux copy-mode
+        # (scrollback history lives in tmux, not xterm.js alternate buffer).
+        # Text selection: hold Shift to bypass tmux and select at browser level.
         # Paste is handled at the xterm.js layer using the browser clipboard API.
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "off"],
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
                         capture_output=True)
 
     # Track it — only set cmd/env on initial creation, not re-attach
