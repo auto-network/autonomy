@@ -254,6 +254,17 @@ window.bulkAddLabel = function() {
   alert(`Add label "${label}" to ${ids.length} beads: ${ids.join(', ')}\n(Requires bd update - not available in read-only mode)`);
 };
 
+// ── Click-outside-to-close for toolbar dropdowns ────────────
+document.addEventListener('click', function(e) {
+  const picker = document.getElementById('bulk-priority-picker');
+  if (picker && !picker.classList.contains('hidden')) {
+    // Close if click is outside the picker and its toggle button
+    if (!e.target.closest('#bulk-priority-picker') && !e.target.closest('[onclick*="bulkSetPriority"]')) {
+      picker.classList.add('hidden');
+    }
+  }
+});
+
 // ── Filter State & URL Persistence ─────────────────────────
 
 const _defaultFilters = {
@@ -656,7 +667,6 @@ function renderIssueRow(issue, terms, query) {
       <div class="flex items-center gap-2 flex-wrap mt-1 sm:mt-0">
         <span class="font-mono text-xs text-gray-500">${issue.id}</span>
         ${priorityBadge(issue.priority)}
-        ${statusBadge(issue.status)}
         ${approveHtml}
       </div>
     </div>`;
@@ -690,7 +700,6 @@ function renderListView(filtered, terms, query) {
     { key: 'priority',   label: 'Pri' },
     { key: 'phase',      label: 'Phase' },
     { key: 'type',       label: 'Type' },
-    { key: 'status',     label: 'Status' },
     { key: 'epic',       label: 'Epic' },
     { key: 'labels',     label: 'Labels' },
     { key: 'updated_at', label: 'Updated' },
@@ -705,7 +714,7 @@ function renderListView(filtered, terms, query) {
 
   // Header row
   const headerCells = `
-    <th class="bead-th bead-th-cb"><input type="checkbox" id="select-all-cb" onclick="toggleSelectAll(event)" class="rounded cursor-pointer"></th>
+    <th class="bead-th bead-th-cb p-0"><label class="flex items-center justify-center w-10 h-10 cursor-pointer"><input type="checkbox" id="select-all-cb" onclick="toggleSelectAll(event)" class="rounded cursor-pointer size-4"></label></th>
     ${columns.map(c => `
       <th class="bead-th bead-th-${c.key}" onclick="sortByColumn('${c.key}')" title="Sort by ${c.label}">
         ${c.label}${sortArrow(c.key)}
@@ -725,7 +734,10 @@ function renderListView(filtered, terms, query) {
       `<span class="px-1 py-0 bg-gray-700 text-gray-300 text-xs rounded whitespace-nowrap">${l}</span>`
     ).join(' ');
     const updatedRaw = issue.updated_at || issue.created_at || '';
-    const updatedDisplay = updatedRaw ? new Date(updatedRaw).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+    const updatedDate = updatedRaw ? new Date(updatedRaw) : null;
+    const updatedDisplay = updatedDate
+      ? updatedDate.getFullYear() + '-' + String(updatedDate.getMonth()+1).padStart(2,'0') + '-' + String(updatedDate.getDate()).padStart(2,'0') + ' ' + String(updatedDate.getHours()).padStart(2,'0') + ':' + String(updatedDate.getMinutes()).padStart(2,'0')
+      : '';
     const checked = _selectedBeadIds.has(issue.id) ? 'checked' : '';
     const rowBg = idx % 2 === 0 ? 'bead-tr-even' : 'bead-tr-odd';
 
@@ -733,16 +745,17 @@ function renderListView(filtered, terms, query) {
       <tr class="bead-table-row ${rowBg} hover:bg-gray-700 cursor-pointer transition-colors"
           data-bead-id="${issue.id}"
           onclick="navigateTo('/bead/${issue.id}')">
-        <td class="bead-td bead-td-cb" onclick="event.stopPropagation()">
-          <input type="checkbox" id="cb-${issue.id}" ${checked}
-                 onclick="toggleBeadSelect('${issue.id}', event)" class="rounded cursor-pointer">
+        <td class="bead-td bead-td-cb p-0" onclick="event.stopPropagation()">
+          <label class="flex items-center justify-center w-10 h-10 cursor-pointer">
+            <input type="checkbox" id="cb-${issue.id}" ${checked}
+                   onclick="toggleBeadSelect('${issue.id}', event)" class="rounded cursor-pointer size-4">
+          </label>
         </td>
         <td class="bead-td bead-td-title">${titleHtml}</td>
         <td class="bead-td bead-td-id font-mono text-xs text-gray-400">${issue.id}</td>
         <td class="bead-td bead-td-priority">${priorityBadge(issue.priority)}</td>
         <td class="bead-td bead-td-phase text-xs">${phase}</td>
         <td class="bead-td bead-td-type text-xs">${issue.issue_type || ''}</td>
-        <td class="bead-td bead-td-status">${statusBadge(issue.status)}</td>
         <td class="bead-td bead-td-epic text-xs text-gray-400 truncate max-w-[120px]" title="${epicTitle}">${epicTitle}</td>
         <td class="bead-td bead-td-labels">${labelChips}</td>
         <td class="bead-td bead-td-updated text-xs text-gray-500 whitespace-nowrap">${updatedDisplay}</td>
@@ -808,7 +821,7 @@ function renderBoardView(filtered, terms, query) {
     // Epic parent name
     const epicParentId = getEpicParent(issue);
     const epicHtml = epicParentId && epicTitleMap[epicParentId]
-      ? `<div class="text-xs text-gray-500 truncate mb-1">📦 ${epicTitleMap[epicParentId]}</div>`
+      ? `<div class="text-xs text-gray-500 truncate mb-1">${epicTitleMap[epicParentId]}</div>`
       : '';
 
     // Label chips (exclude readiness:* since column implies it)
@@ -838,7 +851,6 @@ function renderBoardView(filtered, terms, query) {
         <div class="flex items-center gap-1.5 flex-wrap">
           <span class="font-mono text-xs text-gray-500">${issue.id}</span>
           ${priorityBadge(issue.priority)}
-          ${statusBadge(issue.status)}
           ${labelChips}
         </div>
         ${approveHtml}
@@ -921,7 +933,6 @@ function renderTreeNode(issue, terms, query) {
           <span class="font-mono text-xs text-gray-600">${issue.id}</span>
           ${priorityBadge(issue.priority)}
           ${phase}
-          ${statusBadge(issue.status)}
         </div>
         ${descHtml}
       </div>
@@ -982,7 +993,7 @@ function renderTreeView(filtered, terms, query) {
     const epicTitle = epic ? highlightText(epic.title, terms) : epicId;
     const epicPhase = epic ? treePhaseBadge(epic.labels) : '';
     const epicPriority = epic ? priorityBadge(epic.priority) : '';
-    const epicStatus = epic ? statusBadge(epic.status) : '';
+    // Status removed — page is hard-filtered to open beads
     const allChildren = allChildrenByEpic.get(epicId) || group.children;
     const progressHtml = treeProgressBar(allChildren, _allBeads);
     const childCount = group.children.length;
@@ -1002,7 +1013,6 @@ function renderTreeView(filtered, terms, query) {
           <span class="font-mono text-xs text-gray-600">${epicId}</span>
           ${epicPriority}
           ${epicPhase}
-          ${epicStatus}
           <span class="text-xs text-gray-500">(${countLabel})</span>
           ${progressHtml}
         </summary>
@@ -1280,7 +1290,6 @@ function _renderDepsFlatView(filtered, terms, query, graph) {
           <span class="text-sm">${titleHtml}</span>
           <span class="font-mono text-xs text-gray-500">${issue.id}</span>
           ${priorityBadge(issue.priority)}
-          ${statusBadge(issue.status)}
         </div>
         ${depLinks ? `<div class="flex items-center gap-3 flex-wrap mb-1">${depLinks}</div>` : ''}
         ${blocks.length ? `<div class="flex items-center gap-3 flex-wrap">${blocks.join('')}</div>` : ''}
@@ -1399,7 +1408,6 @@ function _renderDepsDAGView(filtered, terms, query, graph) {
         <div class="flex items-center gap-1">
           <span class="font-mono text-[10px] text-gray-400">${id}</span>
           ${priorityBadge(bead.priority)}
-          ${statusBadge(bead.status)}
         </div>
       </div>`;
   }
