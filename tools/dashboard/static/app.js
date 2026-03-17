@@ -1358,11 +1358,12 @@ window.addEventListener('popstate', route);
 
 async function updateNavBadges() {
   try {
-    const [ready, allBeads, sessions, terminals] = await Promise.all([
+    const [ready, allBeads, sessions, terminals, dispatchStatus] = await Promise.all([
       api('/api/beads/ready'),
       api('/api/beads/list'),
       api('/api/active?threshold=600'),
       api('/api/terminals'),
+      api('/api/dispatch/status'),
     ]);
 
     // Beads: ready count
@@ -1388,6 +1389,11 @@ async function updateNavBadges() {
         runningCount++;
       }
     }
+    // Ground truth: count live agent containers (excludes persistent slack agents)
+    const agentContainers = (dispatchStatus.containers || [])
+      .filter(c => c.name.startsWith('agent-auto-'));
+    runningCount = Math.max(runningCount, agentContainers.length);
+
     const dispatchEl = document.getElementById('badge-dispatch');
     let dispatchHtml = '';
     if (runningCount) dispatchHtml += `<span class="nav-badge nav-badge-green">▶${runningCount}</span>`;
