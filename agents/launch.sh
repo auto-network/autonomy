@@ -59,10 +59,17 @@ BRANCH="agent/$BEAD_ID"
 WORKTREE_DIR="$REPO_ROOT/.worktrees/$BEAD_ID-$TIMESTAMP"
 
 echo "==> Creating worktree: $BRANCH"
-# Create branch from current HEAD if it doesn't exist
-if ! git -C "$REPO_ROOT" rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
-    git -C "$REPO_ROOT" branch "$BRANCH"
+# Prune stale worktree records (directory deleted but git reference remains)
+git -C "$REPO_ROOT" worktree prune
+# Clean up any existing worktree for this branch (stale from prior/failed runs)
+existing=$(git -C "$REPO_ROOT" worktree list --porcelain | grep -B1 "branch refs/heads/$BRANCH" | grep "^worktree " | awk '{print $2}' || true)
+if [ -n "$existing" ]; then
+    echo "    Removing stale worktree: $existing"
+    git -C "$REPO_ROOT" worktree remove "$existing" --force 2>/dev/null || true
 fi
+# Delete stale branch and recreate from current HEAD
+git -C "$REPO_ROOT" branch -D "$BRANCH" 2>/dev/null || true
+git -C "$REPO_ROOT" branch "$BRANCH"
 mkdir -p "$(dirname "$WORKTREE_DIR")"
 git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH" 2>&1
 echo "    Worktree: $WORKTREE_DIR"
