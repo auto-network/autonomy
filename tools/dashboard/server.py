@@ -196,6 +196,9 @@ async def api_dispatch_trace(request):
     bead_id = parts[0] if len(parts) >= 3 else run_dir.name
     bead = await run_cli_json(["bd", "show", bead_id, "--json"])
 
+    # Session log availability
+    has_session = bool(_find_session_files(run_dir.name))
+
     return JSONResponse({
         "run": run_dir.name,
         "bead_id": bead_id,
@@ -205,6 +208,7 @@ async def api_dispatch_trace(request):
         "commit_hash": commit_hash,
         "branch": branch,
         "diff": diff,
+        "has_session": has_session,
     })
 
 async def api_search(request):
