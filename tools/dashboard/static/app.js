@@ -1926,7 +1926,7 @@ async function renderTimeline() {
         html += '<div class="flex items-center gap-2 flex-wrap">';
         html += `<span class="text-xs text-gray-500 whitespace-nowrap">${ts}</span>`;
         html += _timelineTypeIcon(e.status);
-        html += `<a href="/bead/${e.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline" onclick="event.stopPropagation()">${e.bead_id}</a>`;
+        html += `<a href="/dispatch/trace/${e.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline" onclick="event.stopPropagation()">${e.bead_id}</a>`;
         html += _timelineOutcomeBadge(e.status);
         html += `<span class="text-xs text-gray-400">${_timelineDuration(e.duration_secs)}</span>`;
         html += commitBadge;
@@ -1967,7 +1967,8 @@ async function renderTimeline() {
         }
         // Links
         html += '<div class="flex gap-3 mt-3">';
-        html += `<a href="/bead/${e.bead_id}" class="text-xs text-indigo-400 hover:underline" onclick="event.stopPropagation()">Bead detail</a>`;
+        html += `<a href="/dispatch/trace/${e.bead_id}" class="text-xs text-indigo-400 hover:underline" onclick="event.stopPropagation()">Trace</a>`;
+        html += `<a href="/bead/${e.bead_id}" class="text-xs text-gray-400 hover:underline" onclick="event.stopPropagation()">Bead detail</a>`;
         html += '</div>';
         html += '</div>';
 
@@ -1995,6 +1996,9 @@ async function renderTrace(runName) {
     content.innerHTML = `<div class="text-red-400">${trace.error}</div>`;
     return;
   }
+
+  // Use the resolved run directory name (slug may be a bead ID)
+  const resolvedRun = trace.run || runName;
 
   const bead = Array.isArray(trace.bead) ? trace.bead[0] : trace.bead;
   const decision = trace.decision || {};
@@ -2056,7 +2060,7 @@ async function renderTrace(runName) {
   // Session log — opens in bottom-docked panel
   if (trace.has_session) {
     html += `<div class="mb-6">
-      <button onclick="showCompletedPanel('${runName}')"
+      <button onclick="showCompletedPanel('${resolvedRun}')"
               class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300">
         View Session Log
       </button>
