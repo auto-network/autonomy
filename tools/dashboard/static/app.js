@@ -98,6 +98,162 @@ const _viewTabs = ['list', 'board', 'tree', 'deps'];
 let _currentView = localStorage.getItem('beads-view') || 'board';
 if (!_viewTabs.includes(_currentView)) _currentView = 'board';
 
+// ── Table Sort & Bulk Selection State ──────────────────────
+
+let _sortColumn = 'priority';
+let _sortDirection = 'asc';
+let _selectedBeadIds = new Set();
+
+function sortBeads(beads, column, direction) {
+  const mult = direction === 'asc' ? 1 : -1;
+  return [...beads].sort((a, b) => {
+    let va, vb;
+    switch (column) {
+      case 'title':
+        va = (a.title || '').toLowerCase();
+        vb = (b.title || '').toLowerCase();
+        return mult * va.localeCompare(vb);
+      case 'id':
+        va = a.id || '';
+        vb = b.id || '';
+        return mult * va.localeCompare(vb);
+      case 'priority':
+        va = a.priority ?? 4;
+        vb = b.priority ?? 4;
+        return mult * (va - vb);
+      case 'phase':
+        const phaseOrder = { approved: 0, specified: 1, draft: 2, idea: 3 };
+        va = phaseOrder[getPhase(a.labels)] ?? 4;
+        vb = phaseOrder[getPhase(b.labels)] ?? 4;
+        return mult * (va - vb);
+      case 'type':
+        va = (a.issue_type || '').toLowerCase();
+        vb = (b.issue_type || '').toLowerCase();
+        return mult * va.localeCompare(vb);
+      case 'epic':
+        va = (getEpicParent(a) || '').toLowerCase();
+        vb = (getEpicParent(b) || '').toLowerCase();
+        return mult * va.localeCompare(vb);
+      case 'labels':
+        va = (a.labels || []).filter(l => !l.startsWith('readiness:') && !l.startsWith('dispatch:')).join(',');
+        vb = (b.labels || []).filter(l => !l.startsWith('readiness:') && !l.startsWith('dispatch:')).join(',');
+        return mult * va.localeCompare(vb);
+      case 'updated_at':
+        va = a.updated_at || a.created_at || '';
+        vb = b.updated_at || b.created_at || '';
+        return mult * va.localeCompare(vb);
+      case 'status':
+        const statusOrder = { in_progress: 0, open: 1, blocked: 2, closed: 3 };
+        va = statusOrder[a.status] ?? 4;
+        vb = statusOrder[b.status] ?? 4;
+        return mult * (va - vb);
+      default:
+        return 0;
+    }
+  });
+}
+
+window.sortByColumn = function(column) {
+  if (_sortColumn === column) {
+    _sortDirection = _sortDirection === 'asc' ? 'desc' : 'asc';
+  } else {
+    _sortColumn = column;
+    _sortDirection = 'asc';
+  }
+  renderBeadResults(globalSearch.value.trim());
+};
+
+window.toggleBeadSelect = function(id, event) {
+  if (event) event.stopPropagation();
+  if (_selectedBeadIds.has(id)) {
+    _selectedBeadIds.delete(id);
+  } else {
+    _selectedBeadIds.add(id);
+  }
+  // Update checkbox UI without full re-render
+  const cb = document.getElementById(`cb-${id}`);
+  if (cb) cb.checked = _selectedBeadIds.has(id);
+  // Update select-all checkbox
+  updateSelectAllCheckbox();
+  // Update bulk action bar visibility
+  updateBulkActionBar();
+};
+
+window.toggleSelectAll = function(event) {
+  const rows = document.querySelectorAll('.bead-table-row');
+  if (_selectedBeadIds.size > 0) {
+    // Deselect all
+    _selectedBeadIds.clear();
+  } else {
+    // Select all visible
+    rows.forEach(row => {
+      const id = row.dataset.beadId;
+      if (id) _selectedBeadIds.add(id);
+    });
+  }
+  // Update all checkboxes
+  rows.forEach(row => {
+    const id = row.dataset.beadId;
+    const cb = document.getElementById(`cb-${id}`);
+    if (cb) cb.checked = _selectedBeadIds.has(id);
+  });
+  updateSelectAllCheckbox();
+  updateBulkActionBar();
+};
+
+function updateSelectAllCheckbox() {
+  const cb = document.getElementById('select-all-cb');
+  if (!cb) return;
+  const rows = document.querySelectorAll('.bead-table-row');
+  const total = rows.length;
+  const selected = _selectedBeadIds.size;
+  cb.checked = total > 0 && selected === total;
+  cb.indeterminate = selected > 0 && selected < total;
+}
+
+function updateBulkActionBar() {
+  const bar = document.getElementById('bulk-action-bar');
+  if (!bar) return;
+  if (_selectedBeadIds.size > 0) {
+    bar.style.display = 'flex';
+    const countEl = document.getElementById('bulk-count');
+    if (countEl) countEl.textContent = `${_selectedBeadIds.size} selected`;
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+window.bulkApprove = async function() {
+  const ids = [..._selectedBeadIds];
+  for (const id of ids) {
+    await approveBead(id);
+  }
+  _selectedBeadIds.clear();
+  renderBeadResults(globalSearch.value.trim());
+};
+
+window.bulkSetPriority = function(priority) {
+  // Show priority picker dropdown
+  const picker = document.getElementById('bulk-priority-picker');
+  if (picker) picker.classList.toggle('hidden');
+};
+
+window.bulkApplyPriority = async function(priority) {
+  const ids = [..._selectedBeadIds];
+  // Priority changes require bd update which is read-only in this context
+  // Show a message indicating the action
+  alert(`Set priority P${priority} for ${ids.length} beads: ${ids.join(', ')}\n(Requires bd update - not available in read-only mode)`);
+  const picker = document.getElementById('bulk-priority-picker');
+  if (picker) picker.classList.add('hidden');
+};
+
+window.bulkAddLabel = function() {
+  const label = prompt('Enter label to add:');
+  if (!label) return;
+  const ids = [..._selectedBeadIds];
+  alert(`Add label "${label}" to ${ids.length} beads: ${ids.join(', ')}\n(Requires bd update - not available in read-only mode)`);
+};
+
 // ── Filter State & URL Persistence ─────────────────────────
 
 const _defaultFilters = {
@@ -371,7 +527,7 @@ document.addEventListener('click', (e) => {
 // ── View Switcher ──────────────────────────────────────────
 
 function renderViewSwitcher() {
-  const icons = { list: '☰', board: '▦', tree: '🌳', deps: '🔗' };
+  const icons = { list: '▤', board: '▦', tree: '🌳', deps: '🔗' };
   const labels = { list: 'List', board: 'Board', tree: 'Tree', deps: 'Deps' };
   const tabs = _viewTabs.map(v => {
     const active = v === _currentView;
@@ -387,6 +543,7 @@ function renderViewSwitcher() {
 window.switchView = function(view) {
   if (!_viewTabs.includes(view) || view === _currentView) return;
   _currentView = view;
+  _selectedBeadIds.clear();
   localStorage.setItem('beads-view', view);
   filtersToURL(_filters);
   // Re-render switcher + results without re-fetching data
@@ -514,18 +671,106 @@ function renderSection(title, items, terms, query, defaultOpen = true) {
     </details>`;
 }
 
-// ── List View (original) ───────────────────────────────────
+// ── List View (dense sortable table) ───────────────────────
 
 function renderListView(filtered, terms, query) {
-  const ready = filtered.filter(i => i.status === 'open' && !i.dependencies?.some(d => d.status !== 'closed'));
-  const inProgress = filtered.filter(i => i.status === 'in_progress');
-  const closed = filtered.filter(i => i.status === 'closed');
-  const blocked = filtered.filter(i => i.status === 'open' && i.dependencies?.some(d => d.status !== 'closed'));
+  // Build epic title lookup
+  const epicTitleMap = {};
+  for (const b of _allBeads) {
+    if (b.issue_type === 'epic') epicTitleMap[b.id] = b.title;
+  }
 
-  return renderSection('In Progress', inProgress, terms, query) +
-    renderSection('Ready', ready, terms, query) +
-    renderSection('Blocked', blocked, terms, query, false) +
-    renderSection('Closed', closed, terms, query, false);
+  // Sort
+  const sorted = sortBeads(filtered, _sortColumn, _sortDirection);
+
+  // Column definitions
+  const columns = [
+    { key: 'title',      label: 'Title' },
+    { key: 'id',         label: 'ID' },
+    { key: 'priority',   label: 'Pri' },
+    { key: 'phase',      label: 'Phase' },
+    { key: 'type',       label: 'Type' },
+    { key: 'status',     label: 'Status' },
+    { key: 'epic',       label: 'Epic' },
+    { key: 'labels',     label: 'Labels' },
+    { key: 'updated_at', label: 'Updated' },
+  ];
+
+  function sortArrow(key) {
+    if (_sortColumn !== key) return '<span class="text-gray-600 ml-0.5">&#x2195;</span>';
+    return _sortDirection === 'asc'
+      ? '<span class="text-indigo-400 ml-0.5">&#x25B2;</span>'
+      : '<span class="text-indigo-400 ml-0.5">&#x25BC;</span>';
+  }
+
+  // Header row
+  const headerCells = `
+    <th class="bead-th bead-th-cb"><input type="checkbox" id="select-all-cb" onclick="toggleSelectAll(event)" class="rounded cursor-pointer"></th>
+    ${columns.map(c => `
+      <th class="bead-th bead-th-${c.key}" onclick="sortByColumn('${c.key}')" title="Sort by ${c.label}">
+        ${c.label}${sortArrow(c.key)}
+      </th>
+    `).join('')}`;
+
+  // Body rows
+  const rows = sorted.map((issue, idx) => {
+    const titleHtml = highlightText(issue.title || '', terms);
+    const phase = getPhase(issue.labels) || '';
+    const epicId = getEpicParent(issue);
+    const epicTitle = epicId ? (epicTitleMap[epicId] || epicId) : '';
+    const visibleLabels = (issue.labels || []).filter(l =>
+      !l.startsWith('readiness:') && !l.startsWith('dispatch:')
+    );
+    const labelChips = visibleLabels.map(l =>
+      `<span class="px-1 py-0 bg-gray-700 text-gray-300 text-xs rounded whitespace-nowrap">${l}</span>`
+    ).join(' ');
+    const updatedRaw = issue.updated_at || issue.created_at || '';
+    const updatedDisplay = updatedRaw ? new Date(updatedRaw).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+    const checked = _selectedBeadIds.has(issue.id) ? 'checked' : '';
+    const rowBg = idx % 2 === 0 ? 'bead-tr-even' : 'bead-tr-odd';
+
+    return `
+      <tr class="bead-table-row ${rowBg} hover:bg-gray-700 cursor-pointer transition-colors"
+          data-bead-id="${issue.id}"
+          onclick="navigateTo('/bead/${issue.id}')">
+        <td class="bead-td bead-td-cb" onclick="event.stopPropagation()">
+          <input type="checkbox" id="cb-${issue.id}" ${checked}
+                 onclick="toggleBeadSelect('${issue.id}', event)" class="rounded cursor-pointer">
+        </td>
+        <td class="bead-td bead-td-title">${titleHtml}</td>
+        <td class="bead-td bead-td-id font-mono text-xs text-gray-400">${issue.id}</td>
+        <td class="bead-td bead-td-priority">${priorityBadge(issue.priority)}</td>
+        <td class="bead-td bead-td-phase text-xs">${phase}</td>
+        <td class="bead-td bead-td-type text-xs">${issue.issue_type || ''}</td>
+        <td class="bead-td bead-td-status">${statusBadge(issue.status)}</td>
+        <td class="bead-td bead-td-epic text-xs text-gray-400 truncate max-w-[120px]" title="${epicTitle}">${epicTitle}</td>
+        <td class="bead-td bead-td-labels">${labelChips}</td>
+        <td class="bead-td bead-td-updated text-xs text-gray-500 whitespace-nowrap">${updatedDisplay}</td>
+      </tr>`;
+  }).join('');
+
+  // Bulk action bar
+  const bulkBar = `
+    <div id="bulk-action-bar" class="bulk-action-bar" style="display: ${_selectedBeadIds.size > 0 ? 'flex' : 'none'}">
+      <span id="bulk-count" class="text-sm font-medium">${_selectedBeadIds.size} selected</span>
+      <button onclick="bulkApprove()" class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-xs rounded font-semibold transition-colors">Approve</button>
+      <div class="relative">
+        <button onclick="bulkSetPriority()" class="px-3 py-1 bg-gray-600 hover:bg-gray-500 text-white text-xs rounded font-semibold transition-colors">Set Priority</button>
+        <div id="bulk-priority-picker" class="hidden absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg p-1 flex gap-1">
+          ${[0,1,2,3,4].map(p => `<button onclick="bulkApplyPriority(${p})" class="px-2 py-0.5 rounded text-xs font-semibold hover:bg-gray-600 transition-colors">P${p}</button>`).join('')}
+        </div>
+      </div>
+      <button onclick="bulkAddLabel()" class="px-3 py-1 bg-gray-600 hover:bg-gray-500 text-white text-xs rounded font-semibold transition-colors">Add Label</button>
+    </div>`;
+
+  return `
+    ${bulkBar}
+    <div class="overflow-x-auto">
+      <table class="bead-table w-full">
+        <thead><tr>${headerCells}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
 }
 
 // ── Board View (Kanban columns by readiness phase) ─────────
