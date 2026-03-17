@@ -1236,8 +1236,9 @@ async def ws_terminal(websocket: WebSocket):
             cmd_str = (
                 f"docker run -it --rm --name {tmux_name}"
                 f" --network=host"
+                f" -e GRAPH_DB=/home/agent/graph.db"
                 f" -v {claude_creds_file}:/home/agent/.claude/.credentials.json:ro"
-                f" -v {repo_root}/data/graph.db:/data/graph.db"
+                f" -v {repo_root}/data/graph.db:/home/agent/graph.db"
                 f" -v {repo_root}/.beads:/data/.beads"
                 f" -v {repo_root}:/workspace/repo:ro"
                 f" -w /workspace/repo"
