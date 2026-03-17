@@ -861,6 +861,73 @@ function renderBoardView(filtered, terms, query) {
 
 // ── Tree View (epics with children) ────────────────────────
 
+let _treeExpanded = true; // expand-all state
+
+function treeTypeIcon(type) {
+  switch (type) {
+    case 'epic': return '📦';
+    case 'bug': return '🐛';
+    case 'feature': return '✨';
+    case 'task': return '📋';
+    default: return '📋';
+  }
+}
+
+function treePhaseBadge(labels) {
+  const phase = getPhase(labels);
+  if (!phase) return '';
+  const colors = {
+    idea: 'bg-gray-600 text-gray-200',
+    draft: 'bg-blue-900 text-blue-300',
+    specified: 'bg-indigo-900 text-indigo-300',
+    approved: 'bg-green-900 text-green-300',
+  };
+  const cls = colors[phase] || 'bg-gray-700 text-gray-300';
+  return `<span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium ${cls}">${phase}</span>`;
+}
+
+function treeProgressBar(children, allBeads) {
+  // Count closed children from full dataset (not just filtered)
+  if (!children.length) return '';
+  const total = children.length;
+  const closed = children.filter(c => c.status === 'closed').length;
+  const pct = Math.round((closed / total) * 100);
+  const barColor = pct === 100 ? 'bg-green-500' : pct > 50 ? 'bg-indigo-500' : 'bg-amber-500';
+  return `
+    <div class="inline-flex items-center gap-1.5 ml-2">
+      <div class="w-20 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+        <div class="${barColor} h-full rounded-full transition-all" style="width:${pct}%"></div>
+      </div>
+      <span class="text-xs text-gray-400">${closed}/${total}</span>
+    </div>`;
+}
+
+function renderTreeNode(issue, terms, query) {
+  const icon = treeTypeIcon(issue.issue_type);
+  const titleHtml = highlightText(issue.title || '', terms);
+  const phase = treePhaseBadge(issue.labels);
+  let descHtml = '';
+  if (query && issue.description) {
+    const desc = issue.description.length > 120 ? issue.description.slice(0, 120) + '...' : issue.description;
+    descHtml = `<div class="text-xs text-gray-500 mt-0.5 truncate">${highlightText(desc, terms)}</div>`;
+  }
+  return `
+    <div class="tree-node flex items-start gap-2 py-1.5 px-2 rounded hover:bg-gray-800 cursor-pointer group"
+         onclick="navigateTo('/bead/${issue.id}')">
+      <span class="text-sm flex-shrink-0 mt-0.5">${icon}</span>
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-1.5 flex-wrap">
+          <span class="text-sm truncate">${titleHtml}</span>
+          <span class="font-mono text-xs text-gray-600">${issue.id}</span>
+          ${priorityBadge(issue.priority)}
+          ${phase}
+          ${statusBadge(issue.status)}
+        </div>
+        ${descHtml}
+      </div>
+    </div>`;
+}
+
 function renderTreeView(filtered, terms, query) {
   // Group beads by epic parent
   const epicMap = new Map();   // epicId -> { epic, children }
@@ -881,28 +948,66 @@ function renderTreeView(filtered, terms, query) {
     }
   }
 
-  let html = '';
+  // Collapse empty branches when filtering
+  const hasFilters = !!(query || hasActiveFilters(_filters));
+  for (const [epicId, group] of epicMap) {
+    if (hasFilters && !group.children.length && (!group.epic || !filteredIds.has(epicId))) {
+      epicMap.delete(epicId);
+    }
+  }
+
+  // Also gather ALL children per epic from full dataset for progress calculation
+  const allChildrenByEpic = new Map();
+  for (const b of _allBeads) {
+    const parent = getEpicParent(b);
+    if (parent && b.issue_type !== 'epic') {
+      if (!allChildrenByEpic.has(parent)) allChildrenByEpic.set(parent, []);
+      allChildrenByEpic.get(parent).push(b);
+    }
+  }
+
+  const openAttr = _treeExpanded ? 'open' : '';
+
+  // Expand/collapse toggle
+  let html = `
+    <div class="flex items-center gap-2 mb-3">
+      <button onclick="treeToggleAll()" class="text-xs px-2 py-1 bg-gray-800 border border-gray-700 rounded hover:bg-gray-700 text-gray-300"
+              id="tree-toggle-btn">${_treeExpanded ? 'Collapse all' : 'Expand all'}</button>
+      <span class="text-xs text-gray-500">${epicMap.size} epic${epicMap.size !== 1 ? 's' : ''}${orphans.length ? `, ${orphans.length} ungrouped` : ''}</span>
+    </div>`;
 
   // Render each epic group
   for (const [epicId, group] of epicMap) {
     const epic = group.epic || _allBeads.find(b => b.id === epicId);
     const epicTitle = epic ? highlightText(epic.title, terms) : epicId;
-    const epicStatus = epic ? statusBadge(epic.status) : '';
+    const epicPhase = epic ? treePhaseBadge(epic.labels) : '';
     const epicPriority = epic ? priorityBadge(epic.priority) : '';
+    const epicStatus = epic ? statusBadge(epic.status) : '';
+    const allChildren = allChildrenByEpic.get(epicId) || group.children;
+    const progressHtml = treeProgressBar(allChildren, _allBeads);
+    const childCount = group.children.length;
+    const allCount = allChildren.length;
+    const countLabel = hasFilters && childCount !== allCount
+      ? `${childCount}/${allCount}`
+      : `${allCount}`;
 
     html += `
-      <details open class="mb-4">
-        <summary class="cursor-pointer p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-500">
-          <div class="inline-flex items-center gap-2">
-            <span>📦</span>
-            <span class="font-semibold">${epicTitle}</span>
-            <span class="font-mono text-xs text-gray-500">${epicId}</span>
-            ${epicPriority} ${epicStatus}
-            <span class="text-xs text-gray-500">(${group.children.length} children)</span>
-          </div>
+      <details ${openAttr} class="tree-group mb-2">
+        <summary class="cursor-pointer py-2 px-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-600 list-none flex items-center gap-2"
+                 onclick="event.target.closest('.tree-group') && event.target.closest('.tree-group').querySelector('.tree-epic-link')?.blur()">
+          <span class="tree-chevron text-gray-500 text-xs transition-transform flex-shrink-0">&#9654;</span>
+          <span class="flex-shrink-0">📦</span>
+          <span class="font-semibold text-sm truncate tree-epic-link cursor-pointer hover:text-indigo-400"
+                onclick="event.stopPropagation(); navigateTo('/bead/${epicId}')">${epicTitle}</span>
+          <span class="font-mono text-xs text-gray-600">${epicId}</span>
+          ${epicPriority}
+          ${epicPhase}
+          ${epicStatus}
+          <span class="text-xs text-gray-500">(${countLabel})</span>
+          ${progressHtml}
         </summary>
-        <div class="ml-6 mt-2 space-y-2 border-l-2 border-gray-700 pl-4">
-          ${group.children.length ? group.children.map(i => renderIssueRow(i, terms, query)).join('') : '<div class="text-xs text-gray-600 italic py-2">No matching children</div>'}
+        <div class="ml-4 mt-1 border-l-2 border-gray-700 pl-3">
+          ${childCount ? group.children.map(i => renderTreeNode(i, terms, query)).join('') : '<div class="text-xs text-gray-600 italic py-2 pl-2">No matching children</div>'}
         </div>
       </details>`;
   }
@@ -910,14 +1015,29 @@ function renderTreeView(filtered, terms, query) {
   // Orphans (no epic parent)
   if (orphans.length) {
     html += `
-      <details open class="mb-4">
-        <summary class="cursor-pointer text-lg font-semibold mb-3">Ungrouped <span class="text-gray-500">(${orphans.length})</span></summary>
-        <div class="space-y-2">${orphans.map(i => renderIssueRow(i, terms, query)).join('')}</div>
+      <details ${openAttr} class="tree-group mb-2 mt-4">
+        <summary class="cursor-pointer py-2 px-3 bg-gray-800/50 rounded-lg border border-dashed border-gray-700 hover:border-gray-600 list-none flex items-center gap-2">
+          <span class="tree-chevron text-gray-500 text-xs transition-transform flex-shrink-0">&#9654;</span>
+          <span class="font-semibold text-sm text-gray-400">Ungrouped</span>
+          <span class="text-xs text-gray-500">(${orphans.length})</span>
+        </summary>
+        <div class="ml-4 mt-1 border-l-2 border-gray-700/50 pl-3">
+          ${orphans.map(i => renderTreeNode(i, terms, query)).join('')}
+        </div>
       </details>`;
   }
 
   return html || '<div class="text-gray-500 text-center py-8">No beads to display in tree view</div>';
 }
+
+window.treeToggleAll = function() {
+  _treeExpanded = !_treeExpanded;
+  const btn = document.getElementById('tree-toggle-btn');
+  if (btn) btn.textContent = _treeExpanded ? 'Collapse all' : 'Expand all';
+  document.querySelectorAll('.tree-group').forEach(d => {
+    d.open = _treeExpanded;
+  });
+};
 
 // ── Deps View (dependency graph) ───────────────────────────
 

@@ -87,6 +87,11 @@
       background: #1e1b4b; border: 1px solid #4f46e5; border-radius: 0.5rem;
       margin-bottom: 0.75rem;
     }
+    /* Tree View */
+    .tree-group > summary { list-style: none; }
+    .tree-group > summary::-webkit-details-marker { display: none; }
+    .tree-group[open] > summary .tree-chevron { transform: rotate(90deg); }
+    .tree-node:hover { background: #1f2937; }
     /* Live Panel */
     #live-panel {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
