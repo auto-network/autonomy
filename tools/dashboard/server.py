@@ -474,35 +474,14 @@ def _parse_jsonl_entry(line: str) -> dict | None:
 
 def _find_session_files(run_name: str) -> list[Path]:
     """Find JSONL session files for a run, checking multiple locations."""
-    # 1. Completed run directory
+    # 1. Run directory sessions — use rglob because Claude Code writes JSONL
+    #    into a subdirectory (e.g. sessions/-workspace-repo/<hash>.jsonl)
     run_dir = AGENT_RUNS_DIR / run_name
     sessions_dir = run_dir / "sessions"
     if sessions_dir.exists():
-        files = sorted(sessions_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime)
+        files = sorted(sessions_dir.rglob("*.jsonl"), key=lambda f: f.stat().st_mtime)
         if files:
             return files
-
-    # 2. Check for active worktree session files
-    # Extract bead ID from run name (format: <bead>-YYYYMMDD-HHMMSS)
-    parts = run_name.rsplit("-", 2)
-    if len(parts) >= 3:
-        bead_id = parts[0]
-        # Look for worktree path file
-        worktree_path_file = run_dir / ".worktree_path"
-        if worktree_path_file.exists():
-            worktree = Path(worktree_path_file.read_text().strip())
-            # Claude Code sessions in worktree context
-            claude_dir = Path.home() / ".claude" / "projects"
-            if claude_dir.exists():
-                for jsonl in claude_dir.rglob("*.jsonl"):
-                    # Check if this session file is recent and related
-                    try:
-                        import time
-                        age = time.time() - jsonl.stat().st_mtime
-                        if age < 600:  # Active in last 10 minutes
-                            return [jsonl]
-                    except OSError:
-                        continue
 
     return []
 
@@ -598,11 +577,12 @@ async def _tail_from_container(run_name: str, after: int) -> tuple:
 
     session_path = stdout.strip()
 
-    # Read from offset using tail/dd
+    # Read from offset using tail -c (O(1) seek, unlike dd bs=1 which is O(N))
     if after > 0:
+        # tail -c +N starts reading at byte N (1-indexed)
         stdout, _, rc = await run_cli(
             ["docker", "exec", container_name, "sh", "-c",
-             f"dd if='{session_path}' bs=1 skip={after} 2>/dev/null"],
+             f"tail -c +{after + 1} '{session_path}'"],
             timeout=10,
         )
     else:
@@ -631,6 +611,62 @@ async def _tail_from_container(run_name: str, after: int) -> tuple:
     return entries, new_offset, True
 
 
+async def _latest_from_container(run_name: str) -> dict | None:
+    """Get latest assistant text from container using tail (not cat of entire file)."""
+    parts = run_name.rsplit("-", 2)
+    if len(parts) < 3:
+        return None
+
+    bead_id = parts[0]
+
+    stdout, _, rc = await run_cli(
+        ["docker", "ps", "--filter", f"name=agent-{bead_id}", "--format", "{{.Names}}"],
+        timeout=5,
+    )
+    if rc != 0 or not stdout.strip():
+        return None
+
+    container_name = stdout.strip().split("\n")[0]
+
+    stdout, _, rc = await run_cli(
+        ["docker", "exec", container_name, "sh", "-c",
+         "ls -t /home/agent/.claude/projects/*/*.jsonl 2>/dev/null | head -1"],
+        timeout=5,
+    )
+    if rc != 0 or not stdout.strip():
+        return None
+
+    session_path = stdout.strip()
+
+    # Only read last 4KB — enough to find the latest assistant text
+    stdout, _, rc = await run_cli(
+        ["docker", "exec", container_name, "sh", "-c",
+         f"tail -c 4096 '{session_path}'"],
+        timeout=5,
+    )
+    if rc != 0:
+        return None
+
+    for line in reversed(stdout.strip().split("\n")):
+        line = line.strip()
+        if not line:
+            continue
+        parsed = _parse_jsonl_entry(line)
+        if parsed is None:
+            continue
+        entries = parsed if isinstance(parsed, list) else [parsed]
+        for e in reversed(entries):
+            if e.get("type") == "assistant_text":
+                return {
+                    "text": e["content"][:100],
+                    "timestamp": e.get("timestamp", ""),
+                    "type": "assistant_text",
+                    "is_live": True,
+                }
+
+    return None
+
+
 async def api_dispatch_latest(request):
     """Return just the most recent entry for snippet display.
 
@@ -640,18 +676,11 @@ async def api_dispatch_latest(request):
     session_files = _find_session_files(run_name)
 
     if not session_files:
-        # Try container fallback
-        entries, _, is_live = await _tail_from_container(run_name, 0)
-        if entries:
-            # Find last assistant text
-            for e in reversed(entries):
-                if e.get("type") == "assistant_text":
-                    return JSONResponse({
-                        "text": e["content"][:100],
-                        "timestamp": e.get("timestamp", ""),
-                        "type": "assistant_text",
-                        "is_live": is_live,
-                    })
+        # Try container fallback — use _latest_from_container to avoid
+        # catting the entire session file every poll
+        result = await _latest_from_container(run_name)
+        if result:
+            return JSONResponse(result)
         return JSONResponse({"text": "", "timestamp": "", "type": "", "is_live": False})
 
     session_file = session_files[-1]
