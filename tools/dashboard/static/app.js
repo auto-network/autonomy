@@ -1099,7 +1099,63 @@ document.addEventListener('click', (e) => {
 
 window.addEventListener('popstate', route);
 
+// ── Nav Badges ───────────────────────────────────────────────
+
+async function updateNavBadges() {
+  try {
+    const [ready, allBeads, sessions, terminals] = await Promise.all([
+      api('/api/beads/ready'),
+      api('/api/beads/list'),
+      api('/api/active?threshold=600'),
+      api('/api/terminals'),
+    ]);
+
+    // Beads: ready count
+    const readyCount = Array.isArray(ready) ? ready.length : 0;
+    document.getElementById('badge-beads').textContent = readyCount || '';
+
+    // Dispatch: running + queued counts from labels
+    const beadList = Array.isArray(allBeads) ? allBeads : [];
+    const runningStates = new Set(['running', 'launching', 'collecting', 'merging']);
+    let runningCount = 0;
+    let queuedCount = 0;
+    for (const b of beadList) {
+      const labels = b.labels || [];
+      let dispatchLabel = null;
+      for (const l of labels) {
+        if (l.startsWith('dispatch:')) { dispatchLabel = l.split(':')[1]; break; }
+      }
+      if (dispatchLabel && runningStates.has(dispatchLabel)) {
+        runningCount++;
+      } else if (dispatchLabel === 'queued') {
+        queuedCount++;
+      } else if (!dispatchLabel && b.status === 'in_progress') {
+        runningCount++;
+      }
+    }
+    const dispatchEl = document.getElementById('badge-dispatch');
+    let dispatchHtml = '';
+    if (runningCount) dispatchHtml += `<span class="nav-badge nav-badge-green">▶${runningCount}</span>`;
+    if (queuedCount) dispatchHtml += `<span class="nav-badge nav-badge-amber">◦${queuedCount}</span>`;
+    dispatchEl.innerHTML = dispatchHtml;
+
+    // Sessions: active count
+    const sessionCount = Array.isArray(sessions) ? sessions.length : 0;
+    document.getElementById('badge-sessions').textContent = sessionCount || '';
+
+    // Terminal: open count
+    const termCount = Array.isArray(terminals) ? terminals.length : 0;
+    document.getElementById('badge-terminal').textContent = termCount || '';
+  } catch (e) {
+    // Silent fail — badges are non-critical
+  }
+}
+
 // ── Init ─────────────────────────────────────────────────────
+
+// Nav badges: poll every 5s
+updateNavBadges();
+setInterval(updateNavBadges, 5000);
 
 // Load stats
 api('/api/stats').then(data => {
