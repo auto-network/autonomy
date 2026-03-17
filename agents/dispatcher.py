@@ -648,6 +648,29 @@ def process_decision(dispatch_result: DispatchResult) -> None:
     if notes:
         run_bd(["update", bead_id, "--append-notes", notes])
 
+    # Record optional structured feedback fields
+    scores = decision.get("scores")
+    time_breakdown = decision.get("time_breakdown")
+    failure_category = decision.get("failure_category")
+
+    feedback_parts = []
+    if scores and isinstance(scores, dict):
+        parts = [f"{k}={v}" for k, v in scores.items()
+                 if isinstance(v, (int, float))]
+        if parts:
+            feedback_parts.append(f"scores: {', '.join(parts)}")
+    if time_breakdown and isinstance(time_breakdown, dict):
+        parts = [f"{k}={v}%" for k, v in time_breakdown.items()
+                 if isinstance(v, (int, float))]
+        if parts:
+            feedback_parts.append(f"time: {', '.join(parts)}")
+    if failure_category and status in ("BLOCKED", "FAILED"):
+        feedback_parts.append(f"failure_category: {failure_category}")
+
+    if feedback_parts:
+        run_bd(["update", bead_id, "--append-notes",
+                "agent-feedback: " + " | ".join(feedback_parts)])
+
     # Create discovered beads — always include readiness:idea as pipeline entry point
     for new_bead in decision.get("discovered_beads", []):
         title = new_bead.get("title", "Untitled")

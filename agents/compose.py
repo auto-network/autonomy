@@ -64,6 +64,7 @@ You are an autonomous agent dispatched by the Autonomy dispatcher.
 - Code goes in the repo (commit it). Reports and decision go in `/workspace/output/`.
 - If you discover new work, include it in the decision file's `discovered_beads` array.
 - If you are blocked, write a BLOCKED decision immediately — do not spin.
+- Include `scores`, `time_breakdown`, and (if BLOCKED/FAILED) `failure_category` in your decision — see tool_guidelines.md for the schema. These are optional but valuable for analytics.
 """)
 
     return "\n\n".join(sections)
