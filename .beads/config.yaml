@@ -1,1 +1,7 @@
 no-git-ops: true
+
+# Pin dolt SQL server to a fixed port so containers (--network=host) can
+# reach the host's dolt instance reliably without port-file discovery.
+# Prevents bd from auto-starting a second dolt inside agent containers,
+# which would overwrite .beads/dolt-server.port and .pid on the shared mount.
+dolt-server-port: 3306
