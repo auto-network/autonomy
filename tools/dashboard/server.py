@@ -12,14 +12,22 @@ import pty
 import signal
 import struct
 import subprocess
+import sys
 import termios
 from pathlib import Path
+
+# Allow importing from agents/ (sibling of tools/)
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
+
+from agents.dispatch_db import list_runs, get_run, get_currently_running
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -82,7 +90,7 @@ async def api_dispatch_status(request):
     """Show dispatched beads with their dispatch state.
 
     Reads the dispatch dimension (queued/launching/running/collecting/merging/done/failed)
-    instead of relying on docker ps for state.
+    from bd labels + docker ps for containers. Adds currently-running runs from SQLite.
     """
     claimed = await run_cli_json(["bd", "query", 'label="work:claimed"', "--json"])
     # Also query beads with active dispatch states for richer status
@@ -96,111 +104,172 @@ async def api_dispatch_status(request):
                 containers.append(json.loads(line))
             except json.JSONDecodeError:
                 pass
+    # Currently running runs from SQLite (started but no status yet)
+    running_runs = await asyncio.to_thread(get_currently_running)
     return JSONResponse({
         "claimed": claimed if isinstance(claimed, list) else [],
         "dispatching": dispatching if isinstance(dispatching, list) else [],
         "containers": containers,
+        "running_runs": running_runs,
     })
 
 AGENT_RUNS_DIR = Path(__file__).parent.parent.parent / "data" / "agent-runs"
 
 async def api_dispatch_runs(request):
-    """List completed dispatch runs with their artifacts."""
+    """List completed dispatch runs from SQLite."""
+    db_rows = await asyncio.to_thread(list_runs)
     runs = []
-    if AGENT_RUNS_DIR.exists():
-        for run_dir in sorted(AGENT_RUNS_DIR.iterdir(), reverse=True):
-            if not run_dir.is_dir():
-                continue
-            # Parse bead ID and timestamp from dir name: <bead>-YYYYMMDD-HHMMSS
-            name = run_dir.name
-            parts = name.rsplit("-", 2)
-            if len(parts) < 3:
-                continue
-            bead_id = parts[0]
-            timestamp = f"{parts[1]}-{parts[2]}"
+    for row in db_rows:
+        # Reconstruct decision dict from flat columns for backward compat
+        decision = None
+        if row.get("status"):
+            decision = {"status": row["status"], "reason": row.get("reason")}
+            scores = {}
+            for key in ("tooling", "clarity", "confidence"):
+                val = row.get(f"score_{key}")
+                if val is not None:
+                    scores[key] = val
+            if scores:
+                decision["scores"] = scores
+            time_breakdown = {}
+            for db_key, dec_key in [
+                ("time_research_pct", "research_pct"),
+                ("time_coding_pct", "coding_pct"),
+                ("time_debugging_pct", "debugging_pct"),
+                ("time_tooling_pct", "tooling_workaround_pct"),
+            ]:
+                val = row.get(db_key)
+                if val is not None:
+                    time_breakdown[dec_key] = val
+            if time_breakdown:
+                decision["time_breakdown"] = time_breakdown
+            if row.get("failure_category"):
+                decision["failure_category"] = row["failure_category"]
+            if row.get("discovered_beads_count"):
+                decision["discovered_beads_count"] = row["discovered_beads_count"]
 
-            decision = None
-            decision_path = run_dir / "decision.json"
-            if decision_path.exists():
-                try:
-                    decision = json.loads(decision_path.read_text())
-                except json.JSONDecodeError:
-                    pass
+        # Derive timestamp from completed_at or from the dir name
+        timestamp = ""
+        if row.get("completed_at"):
+            # completed_at is "YYYY-MM-DD HH:MM:SS" — convert to YYYYMMDD-HHMMSS
+            ts = row["completed_at"].replace("-", "").replace(":", "").replace(" ", "-")
+            timestamp = ts[:8] + "-" + ts[8:]  # YYYYMMDD-HHMMSS
+        elif row.get("id"):
+            parts = row["id"].rsplit("-", 2)
+            if len(parts) >= 3:
+                timestamp = f"{parts[1]}-{parts[2]}"
 
-            has_experience = (run_dir / "experience_report.md").exists()
-            commit_hash = ""
-            commit_path = run_dir / ".commit_hash"
-            if commit_path.exists():
-                commit_hash = commit_path.read_text().strip()
-            branch = ""
-            branch_path = run_dir / ".branch"
-            if branch_path.exists():
-                branch = branch_path.read_text().strip()
-
-            runs.append({
-                "bead_id": bead_id,
-                "timestamp": timestamp,
-                "dir": run_dir.name,
-                "decision": decision,
-                "has_experience_report": has_experience,
-                "commit_hash": commit_hash,
-                "branch": branch,
-            })
+        runs.append({
+            "bead_id": row.get("bead_id", ""),
+            "timestamp": timestamp,
+            "dir": row.get("id", ""),
+            "decision": decision,
+            "has_experience_report": bool(row.get("has_experience_report")),
+            "commit_hash": row.get("commit_hash") or "",
+            "branch": row.get("branch") or "",
+            "duration_secs": row.get("duration_secs"),
+            "lines_added": row.get("lines_added"),
+            "lines_removed": row.get("lines_removed"),
+            "files_changed": row.get("files_changed"),
+            "commit_message": row.get("commit_message") or "",
+        })
     return JSONResponse(runs)
 
 async def api_dispatch_trace(request):
-    """Full trace for a completed dispatch run."""
+    """Full trace for a completed dispatch run.
+
+    Metadata (status, reason, scores, commit info, diff stats, duration)
+    comes from SQLite. Large artifacts (experience_report.md, session JSONL,
+    git diff) are still read from disk on demand.
+    """
     run_name = request.path_params["run"]
+
+    # Get structured metadata from SQLite
+    row = await asyncio.to_thread(get_run, run_name)
+
+    # Fall back to filesystem if not in DB yet
     run_dir = AGENT_RUNS_DIR / run_name
-    if not run_dir.exists():
+    if not row and not run_dir.exists():
         return JSONResponse({"error": "run not found"}, status_code=404)
 
-    # Decision
-    decision = None
-    decision_path = run_dir / "decision.json"
-    if decision_path.exists():
-        try:
-            decision = json.loads(decision_path.read_text())
-        except json.JSONDecodeError:
-            pass
+    # Extract fields from DB row (or fall back to filesystem)
+    if row:
+        bead_id = row.get("bead_id") or ""
+        commit_hash = row.get("commit_hash") or ""
+        branch = row.get("branch") or ""
+        branch_base = row.get("branch_base") or ""
+        status = row.get("status")
+        reason = row.get("reason")
+        duration_secs = row.get("duration_secs")
+        commit_message = row.get("commit_message") or ""
+        lines_added = row.get("lines_added")
+        lines_removed = row.get("lines_removed")
+        files_changed = row.get("files_changed")
 
-    # Experience report
+        # Reconstruct decision dict from flat DB columns
+        decision = None
+        if status:
+            decision = {"status": status, "reason": reason}
+            scores = {}
+            for key in ("tooling", "clarity", "confidence"):
+                val = row.get(f"score_{key}")
+                if val is not None:
+                    scores[key] = val
+            if scores:
+                decision["scores"] = scores
+            if row.get("failure_category"):
+                decision["failure_category"] = row["failure_category"]
+    else:
+        # Filesystem fallback for runs not yet in DB
+        parts = run_name.rsplit("-", 2)
+        bead_id = parts[0] if len(parts) >= 3 else run_name
+        commit_hash = ""
+        commit_path = run_dir / ".commit_hash"
+        if commit_path.exists():
+            commit_hash = commit_path.read_text().strip()
+        branch = ""
+        branch_path = run_dir / ".branch"
+        if branch_path.exists():
+            branch = branch_path.read_text().strip()
+        branch_base = ""
+        base_path = run_dir / ".branch_base"
+        if base_path.exists():
+            branch_base = base_path.read_text().strip()
+        decision = None
+        decision_path = run_dir / "decision.json"
+        if decision_path.exists():
+            try:
+                decision = json.loads(decision_path.read_text())
+            except json.JSONDecodeError:
+                pass
+        duration_secs = None
+        commit_message = ""
+        lines_added = None
+        lines_removed = None
+        files_changed = None
+
+    # Large artifacts still from disk
     experience = ""
-    exp_path = run_dir / "experience_report.md"
-    if exp_path.exists():
-        experience = exp_path.read_text()
+    if run_dir.exists():
+        exp_path = run_dir / "experience_report.md"
+        if exp_path.exists():
+            experience = exp_path.read_text()
 
-    # Commit info
-    commit_hash = ""
-    commit_path = run_dir / ".commit_hash"
-    if commit_path.exists():
-        commit_hash = commit_path.read_text().strip()
-    branch = ""
-    branch_path = run_dir / ".branch"
-    if branch_path.exists():
-        branch = branch_path.read_text().strip()
-
-    # Git diff (if branch still exists)
+    # Git diff (computed on demand)
     diff = ""
-    branch_base = ""
-    base_path = run_dir / ".branch_base"
-    if base_path.exists():
-        branch_base = base_path.read_text().strip()
     if commit_hash and branch_base:
         stdout, _, rc = await run_cli(["git", "diff", f"{branch_base}..{commit_hash}"], timeout=10)
         if rc == 0:
             diff = stdout
 
     # Bead info
-    parts = run_dir.name.rsplit("-", 2)
-    bead_id = parts[0] if len(parts) >= 3 else run_dir.name
     bead = await run_cli_json(["bd", "show", bead_id, "--json"])
 
     # Session log availability
-    has_session = bool(_find_session_files(run_dir.name))
+    has_session = bool(_find_session_files(run_name))
 
     return JSONResponse({
-        "run": run_dir.name,
+        "run": run_name,
         "bead_id": bead_id,
         "bead": bead,
         "decision": decision,
@@ -209,6 +278,11 @@ async def api_dispatch_trace(request):
         "branch": branch,
         "diff": diff,
         "has_session": has_session,
+        "duration_secs": duration_secs,
+        "commit_message": commit_message,
+        "lines_added": lines_added,
+        "lines_removed": lines_removed,
+        "files_changed": files_changed,
     })
 
 async def api_search(request):
