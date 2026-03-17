@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from agents.dispatch_db import init_db, insert_run
+from agents.dispatch_db import init_db, insert_run, insert_launch_run
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
@@ -807,6 +807,24 @@ def _ingest_session(result: DispatchResult) -> None:
                     pass
 
 
+def _record_launch(agent: RunningAgent) -> None:
+    """Record a RUNNING row at launch time. Best-effort — never raises."""
+    try:
+        run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+        insert_launch_run(
+            run_id=run_id,
+            bead_id=agent.bead_id,
+            started_at=agent.started_at,
+            branch=agent.branch,
+            branch_base=agent.branch_base,
+            image=agent.image,
+            container_name=agent.container_name,
+            output_dir=agent.output_dir,
+        )
+    except Exception as e:
+        print(f"  WARNING: Failed to record launch to SQLite: {e}", file=sys.stderr)
+
+
 def _record_run(agent: RunningAgent, result: DispatchResult) -> None:
     """Record dispatch run metadata to SQLite. Best-effort — never raises."""
     try:
@@ -988,6 +1006,7 @@ def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int
         # Launch (non-blocking)
         agent = start_agent(bead_id, image=image)
         if agent:
+            _record_launch(agent)
             set_dispatch_state(bead_id, "running")
             running.append(agent)
             dispatched += 1
@@ -1125,6 +1144,8 @@ def main():
     running: list[RunningAgent] = recover_running_agents()
     if running:
         print(f"  Recovered {len(running)} running agent(s) from prior session")
+        for agent in running:
+            _record_launch(agent)  # Ensure RUNNING row exists in DB
 
     if config.loop:
         while True:
