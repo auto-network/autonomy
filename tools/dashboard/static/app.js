@@ -195,6 +195,7 @@ async function renderBeadDetail(id) {
 }
 
 let dispatchInterval = null;
+let timelineInterval = null;
 
 function _formatTokenCount(bytes) {
   const tokens = Math.round(bytes / 4);
@@ -388,6 +389,238 @@ async function renderDispatch() {
 
   await refresh();
   dispatchInterval = setInterval(refresh, 5000); // auto-refresh every 5s
+}
+
+// ── Timeline Page ────────────────────────────────────────────
+
+function _timelineStarRating(score, max = 5) {
+  if (score == null) return '<span class="text-xs text-gray-600">--</span>';
+  const filled = Math.round(score);
+  let html = '';
+  for (let i = 1; i <= max; i++) {
+    html += i <= filled
+      ? '<span class="text-amber-400">&#9733;</span>'
+      : '<span class="text-gray-600">&#9733;</span>';
+  }
+  return html;
+}
+
+function _timelineDuration(secs) {
+  if (secs == null) return '--';
+  if (secs < 60) return Math.round(secs) + 's';
+  if (secs < 3600) return Math.round(secs / 60) + 'm';
+  const h = Math.floor(secs / 3600);
+  const m = Math.round((secs % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+function _timelineOutcomeBadge(status) {
+  if (status === 'DONE') return '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded-full font-semibold">DONE</span>';
+  if (status === 'BLOCKED') return '<span class="px-2 py-0.5 bg-amber-900 text-amber-300 text-xs rounded-full font-semibold">BLOCKED</span>';
+  if (status === 'FAILED') return '<span class="px-2 py-0.5 bg-red-900 text-red-300 text-xs rounded-full font-semibold">FAILED</span>';
+  return '<span class="px-2 py-0.5 bg-gray-700 text-gray-400 text-xs rounded-full font-semibold">' + (status || '?') + '</span>';
+}
+
+function _timelineBreakdownBar(tb) {
+  if (!tb) return '';
+  const segments = [
+    { pct: tb.research_pct || 0, color: 'bg-indigo-500', label: 'Research' },
+    { pct: tb.coding_pct || 0, color: 'bg-green-500', label: 'Coding' },
+    { pct: tb.debugging_pct || 0, color: 'bg-amber-500', label: 'Debug' },
+    { pct: tb.tooling_workaround_pct || 0, color: 'bg-red-500', label: 'Tooling' },
+  ].filter(s => s.pct > 0);
+  if (segments.length === 0) return '';
+  let bar = '<div class="flex h-2 rounded-full overflow-hidden mt-2 mb-1" title="Time breakdown">';
+  for (const s of segments) {
+    bar += `<div class="${s.color}" style="width:${s.pct}%" title="${s.label} ${s.pct}%"></div>`;
+  }
+  bar += '</div>';
+  bar += '<div class="flex gap-3 text-xs text-gray-500">';
+  for (const s of segments) {
+    const dot = s.color.replace('bg-', 'text-');
+    bar += `<span><span class="${dot}">&#9679;</span> ${s.label} ${s.pct}%</span>`;
+  }
+  bar += '</div>';
+  return bar;
+}
+
+function _timelineTypeIcon(status) {
+  if (status === 'DONE') return '<span class="text-green-400">&#10003;</span>';
+  if (status === 'BLOCKED') return '<span class="text-amber-400">&#9888;</span>';
+  if (status === 'FAILED') return '<span class="text-red-400">&#10007;</span>';
+  return '<span class="text-gray-500">&#9679;</span>';
+}
+
+async function renderTimeline() {
+  pageTitle.textContent = 'Timeline';
+  if (timelineInterval) clearInterval(timelineInterval);
+
+  let currentRange = '1d';
+
+  function rangeToParam(r) {
+    if (r === '1D') return '1d';
+    if (r === '1W') return '7d';
+    if (r === '1M') return '30d';
+    if (r === 'All') return '';
+    return '1d';
+  }
+
+  async function refresh() {
+    const scope = document.getElementById('scope-select')?.value || '';
+    const rangeParam = rangeToParam(currentRange);
+    let statsUrl = '/api/timeline/stats';
+    let feedUrl = '/api/timeline';
+    const params = [];
+    if (rangeParam) params.push('range=' + rangeParam);
+    if (scope) params.push('project=' + encodeURIComponent(scope));
+    const qs = params.length ? '?' + params.join('&') : '';
+    statsUrl += qs;
+    feedUrl += qs;
+
+    const [stats, entries] = await Promise.all([api(statsUrl), api(feedUrl)]);
+
+    let html = '';
+
+    // Timeframe toggle
+    html += '<div class="flex items-center gap-2 mb-6">';
+    html += '<div class="inline-flex rounded-lg bg-gray-800 border border-gray-700 p-0.5">';
+    for (const r of ['1D', '1W', '1M', 'All']) {
+      const active = r === currentRange;
+      const cls = active
+        ? 'bg-indigo-600 text-white'
+        : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700';
+      html += `<button onclick="window._timelineSetRange('${r}')" class="px-3 py-1 text-sm font-medium rounded-md transition-colors ${cls}">${r}</button>`;
+    }
+    html += '</div>';
+    html += '</div>';
+
+    // Stats tiles
+    html += '<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">';
+
+    // Completed + success rate
+    const successPct = stats.success_rate != null ? (stats.success_rate * 100).toFixed(0) + '%' : '--';
+    html += `<div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div class="text-xs text-gray-500 mb-1">Completed</div>
+      <div class="text-2xl font-bold text-green-400">${stats.completed_count || 0}</div>
+      <div class="text-xs text-gray-500 mt-1">${successPct} success</div>
+    </div>`;
+
+    // Failed + Blocked
+    const failBlocked = (stats.failed_count || 0) + (stats.blocked_count || 0);
+    html += `<div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div class="text-xs text-gray-500 mb-1">Failed / Blocked</div>
+      <div class="text-2xl font-bold text-red-400">${failBlocked}</div>
+      <div class="text-xs text-gray-500 mt-1">${stats.failed_count || 0} failed, ${stats.blocked_count || 0} blocked</div>
+    </div>`;
+
+    // Avg Duration
+    html += `<div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div class="text-xs text-gray-500 mb-1">Avg Duration</div>
+      <div class="text-2xl font-bold text-indigo-400">${_timelineDuration(stats.avg_duration)}</div>
+    </div>`;
+
+    // Avg Tooling Score
+    html += `<div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div class="text-xs text-gray-500 mb-1">Avg Tooling</div>
+      <div class="text-lg mt-1">${_timelineStarRating(stats.avg_tooling_score)}</div>
+      <div class="text-xs text-gray-500 mt-1">${stats.avg_tooling_score != null ? stats.avg_tooling_score.toFixed(1) + '/5' : '--'}</div>
+    </div>`;
+
+    // Avg Confidence Score
+    html += `<div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div class="text-xs text-gray-500 mb-1">Avg Confidence</div>
+      <div class="text-lg mt-1">${_timelineStarRating(stats.avg_confidence_score)}</div>
+      <div class="text-xs text-gray-500 mt-1">${stats.avg_confidence_score != null ? stats.avg_confidence_score.toFixed(1) + '/5' : '--'}</div>
+    </div>`;
+
+    html += '</div>';
+
+    // Feed
+    html += '<div class="mb-4"><h2 class="text-lg font-semibold text-indigo-400">Feed</h2></div>';
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+      html += '<div class="text-gray-500 text-sm">No timeline entries for this period</div>';
+    } else {
+      html += '<div class="space-y-2">';
+      for (const e of entries) {
+        const ts = e.completed_at || e.started_at || '';
+        const commitBadge = e.commit_hash
+          ? `<span class="font-mono text-xs text-gray-400">${e.commit_hash.slice(0, 8)}</span>`
+          : '';
+        const discovered = e.discovered_beads_count
+          ? `<span class="text-xs text-purple-400">+${e.discovered_beads_count} discovered</span>`
+          : '';
+        const toolStars = _timelineStarRating(e.scores?.tooling);
+        const confStars = _timelineStarRating(e.scores?.confidence);
+        const statusColor = e.status === 'DONE' ? 'green' : e.status === 'BLOCKED' ? 'amber' : e.status === 'FAILED' ? 'red' : 'gray';
+        const detailId = 'tl-detail-' + (e.bead_id || '').replace(/[^a-zA-Z0-9-]/g, '');
+
+        // Collapsed card
+        html += `<div class="bg-gray-800 rounded-lg border border-gray-700 border-l-4 border-l-${statusColor}-500">`;
+        html += `<div class="p-3 cursor-pointer" onclick="document.getElementById('${detailId}').classList.toggle('hidden')">`;
+        html += '<div class="flex items-center gap-2 flex-wrap">';
+        html += `<span class="text-xs text-gray-500 whitespace-nowrap">${ts}</span>`;
+        html += _timelineTypeIcon(e.status);
+        html += `<a href="/bead/${e.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline" onclick="event.stopPropagation()">${e.bead_id}</a>`;
+        html += _timelineOutcomeBadge(e.status);
+        html += `<span class="text-xs text-gray-400">${_timelineDuration(e.duration_secs)}</span>`;
+        html += commitBadge;
+        html += `<span class="text-xs ml-auto">${toolStars}</span>`;
+        html += `<span class="text-xs">${confStars}</span>`;
+        html += discovered;
+        html += '</div>';
+        html += '</div>';
+
+        // Expanded detail (hidden by default)
+        html += `<div id="${detailId}" class="hidden border-t border-gray-700 p-3">`;
+        if (e.reason) {
+          html += `<div class="text-sm text-gray-300 mb-2"><strong class="text-gray-400">Reason:</strong> ${e.reason}</div>`;
+        }
+        if (e.commit_message) {
+          html += `<div class="text-sm text-gray-300 mb-2"><strong class="text-gray-400">Commit:</strong> ${e.commit_message}</div>`;
+        }
+        if (e.lines_added != null || e.lines_removed != null) {
+          html += `<div class="text-xs text-gray-500 mb-2">`;
+          if (e.lines_added != null) html += `<span class="text-green-400">+${e.lines_added}</span> `;
+          if (e.lines_removed != null) html += `<span class="text-red-400">-${e.lines_removed}</span> `;
+          if (e.files_changed != null) html += `<span class="text-gray-400">(${e.files_changed} files)</span>`;
+          html += '</div>';
+        }
+        html += _timelineBreakdownBar(e.time_breakdown);
+        if (e.scores) {
+          html += '<div class="flex gap-4 mt-2 text-xs">';
+          html += `<span class="text-gray-500">Tooling: ${_timelineStarRating(e.scores.tooling)}</span>`;
+          html += `<span class="text-gray-500">Clarity: ${_timelineStarRating(e.scores.clarity)}</span>`;
+          html += `<span class="text-gray-500">Confidence: ${_timelineStarRating(e.scores.confidence)}</span>`;
+          html += '</div>';
+        }
+        if (e.failure_category) {
+          html += `<div class="text-xs text-red-400 mt-2">Failure: ${e.failure_category}</div>`;
+        }
+        if (e.discovered_beads_count) {
+          html += `<div class="text-xs text-purple-400 mt-2">${e.discovered_beads_count} bead(s) discovered during execution</div>`;
+        }
+        // Links
+        html += '<div class="flex gap-3 mt-3">';
+        html += `<a href="/bead/${e.bead_id}" class="text-xs text-indigo-400 hover:underline" onclick="event.stopPropagation()">Bead detail</a>`;
+        html += '</div>';
+        html += '</div>';
+
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+
+    content.innerHTML = html;
+  }
+
+  window._timelineSetRange = function(r) {
+    currentRange = r;
+    refresh();
+  };
+
+  await refresh();
+  timelineInterval = setInterval(refresh, 15000); // slower poll — historical data
 }
 
 async function renderTrace(runName) {
@@ -1487,6 +1720,7 @@ function route() {
   // Clear any auto-refresh intervals from previous page
   if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
   if (dispatchInterval) { clearInterval(dispatchInterval); dispatchInterval = null; }
+  if (timelineInterval) { clearInterval(timelineInterval); timelineInterval = null; }
 
   // Update active nav
   document.querySelectorAll('.nav-link').forEach(el => {
@@ -1501,6 +1735,8 @@ function route() {
     renderDispatch();
   } else if (path.startsWith('/bead/')) {
     renderBeadDetail(path.split('/bead/')[1]);
+  } else if (path === '/timeline') {
+    renderTimeline();
   } else if (path === '/sessions') {
     renderSessions();
   } else if (path === '/search') {
@@ -1552,12 +1788,13 @@ window.addEventListener('popstate', route);
 
 async function updateNavBadges() {
   try {
-    const [ready, allBeads, sessions, terminals, dispatchStatus] = await Promise.all([
+    const [ready, allBeads, sessions, terminals, dispatchStatus, timelineStats] = await Promise.all([
       api('/api/beads/ready'),
       api('/api/beads/list'),
       api('/api/active?threshold=600'),
       api('/api/terminals'),
       api('/api/dispatch/status'),
+      api('/api/timeline/stats?range=1d'),
     ]);
 
     // Beads: ready count
@@ -1597,6 +1834,10 @@ async function updateNavBadges() {
     // Sessions: active count
     const sessionCount = Array.isArray(sessions) ? sessions.length : 0;
     document.getElementById('badge-sessions').textContent = sessionCount || '';
+
+    // Timeline: today's completed count
+    const todayDone = timelineStats?.completed_count || 0;
+    document.getElementById('badge-timeline').textContent = todayDone || '';
 
     // Terminal: open count
     const termCount = Array.isArray(terminals) ? terminals.length : 0;

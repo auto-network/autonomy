@@ -1337,6 +1337,9 @@ async def ws_terminal(websocket: WebSocket):
             pass
 
 
+async def page_timeline(request):
+    return HTMLResponse(_load_template("base.html"))
+
 async def page_terminal(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -1379,6 +1382,7 @@ routes = [
     Route("/search", page_search),
     Route("/source/{id}", page_source),
     Route("/bead/{id}", page_bead),
+    Route("/timeline", page_timeline),
     Route("/terminal", page_terminal),
     Route("/terminal/{session_id}", page_terminal),
 
