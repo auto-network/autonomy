@@ -149,9 +149,10 @@ if $DETACH; then
         --network=host \
         -e BD_ACTOR="agent:$CONTAINER_NAME" \
         -e BD_READONLY="${BD_READONLY:-0}" \
+        -e GRAPH_DB=/home/agent/graph.db \
         -v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro" \
         -v "$GIT_DIR:$GIT_DIR" \
-        -v "$REPO_ROOT/data/graph.db:/data/graph.db" \
+        -v "$REPO_ROOT/data/graph.db:/home/agent/graph.db" \
         -v "$REPO_ROOT/.beads:/data/.beads" \
         -v "$WORKTREE_DIR:/workspace/repo" \
         -v "$OUTPUT_DIR:/workspace/output" \
@@ -186,9 +187,10 @@ docker run \
     --network=host \
     -e BD_ACTOR="agent:$CONTAINER_NAME" \
     -e BD_READONLY="${BD_READONLY:-0}" \
+    -e GRAPH_DB=/home/agent/graph.db \
     -v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro" \
     -v "$GIT_DIR:$GIT_DIR" \
-    -v "$REPO_ROOT/data/graph.db:/data/graph.db" \
+    -v "$REPO_ROOT/data/graph.db:/home/agent/graph.db" \
     -v "$REPO_ROOT/.beads:/data/.beads" \
     -v "$WORKTREE_DIR:/workspace/repo" \
     -v "$OUTPUT_DIR:/workspace/output" \
