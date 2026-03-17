@@ -9,11 +9,14 @@ import fcntl
 import json
 import os
 import pty
+import re
 import signal
+import sqlite3
 import struct
 import subprocess
 import sys
 import termios
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Allow importing from agents/ (sibling of tools/)
@@ -27,7 +30,7 @@ from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 
-from agents.dispatch_db import list_runs, get_run, get_currently_running
+from agents.dispatch_db import list_runs, get_run, get_currently_running, DB_PATH
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -174,6 +177,225 @@ async def api_dispatch_runs(request):
             "commit_message": row.get("commit_message") or "",
         })
     return JSONResponse(runs)
+
+
+# ── Timeline API ─────────────────────────────────────────────
+
+_RANGE_MAP = {
+    "1h": timedelta(hours=1),
+    "6h": timedelta(hours=6),
+    "12h": timedelta(hours=12),
+    "1d": timedelta(days=1),
+    "3d": timedelta(days=3),
+    "7d": timedelta(days=7),
+    "14d": timedelta(days=14),
+    "30d": timedelta(days=30),
+    "90d": timedelta(days=90),
+}
+
+
+def _timeline_conn() -> sqlite3.Connection:
+    """Get a read-only connection with row_factory for timeline queries."""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _parse_range(range_str: str) -> str | None:
+    """Convert range param to a UTC datetime cutoff string, or None for 'all'."""
+    if not range_str or range_str == "all":
+        return None
+    td = _RANGE_MAP.get(range_str)
+    if td is None:
+        # Try parsing Nd or Nh patterns
+        m = re.match(r"^(\d+)([dhm])$", range_str)
+        if not m:
+            return None
+        val, unit = int(m.group(1)), m.group(2)
+        if unit == "d":
+            td = timedelta(days=val)
+        elif unit == "h":
+            td = timedelta(hours=val)
+        elif unit == "m":
+            td = timedelta(minutes=val)
+    cutoff = datetime.now(timezone.utc) - td
+    return cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _build_timeline_where(
+    range_str: str | None, project: str | None, q: str | None
+) -> tuple[str, list]:
+    """Build WHERE clause and params for timeline queries."""
+    clauses = []
+    params = []
+
+    # Time range filter
+    cutoff = _parse_range(range_str) if range_str else None
+    if cutoff:
+        clauses.append("completed_at >= ?")
+        params.append(cutoff)
+
+    # Project filter — match against bead_id prefix or image name
+    if project:
+        clauses.append("(bead_id LIKE ? OR image LIKE ?)")
+        params.append(f"{project}%")
+        params.append(f"%{project}%")
+
+    # Text search — LIKE against bead_id, reason, commit_message
+    if q:
+        terms = q.strip().split()
+        for term in terms:
+            like = f"%{term}%"
+            clauses.append(
+                "(bead_id LIKE ? OR reason LIKE ? OR commit_message LIKE ?)"
+            )
+            params.extend([like, like, like])
+
+    where = " AND ".join(clauses) if clauses else "1=1"
+    return where, params
+
+
+def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
+    """Convert a dispatch_runs row to a timeline entry dict."""
+    scores = {}
+    for key in ("tooling", "clarity", "confidence"):
+        val = row[f"score_{key}"]
+        if val is not None:
+            scores[key] = val
+
+    time_breakdown = {}
+    for db_key, out_key in [
+        ("time_research_pct", "research_pct"),
+        ("time_coding_pct", "coding_pct"),
+        ("time_debugging_pct", "debugging_pct"),
+        ("time_tooling_pct", "tooling_workaround_pct"),
+    ]:
+        val = row[db_key]
+        if val is not None:
+            time_breakdown[out_key] = val
+
+    return {
+        "bead_id": row["bead_id"] or "",
+        "title": row["bead_id"] or "",  # title derived from bead_id for now
+        "priority": None,  # not stored in dispatch_runs
+        "status": row["status"] or "",
+        "reason": row["reason"] or "",
+        "duration_secs": row["duration_secs"],
+        "commit_hash": row["commit_hash"] or "",
+        "commit_message": row["commit_message"] or "",
+        "lines_added": row["lines_added"],
+        "lines_removed": row["lines_removed"],
+        "files_changed": row["files_changed"],
+        "scores": scores or None,
+        "time_breakdown": time_breakdown or None,
+        "failure_category": row["failure_category"] or None,
+        "discovered_beads_count": row["discovered_beads_count"],
+        "started_at": row["started_at"],
+        "completed_at": row["completed_at"],
+        "has_experience_report": bool(row["has_experience_report"]),
+    }
+
+
+async def api_timeline(request):
+    """Timeline entries from dispatch_runs.
+
+    GET /api/timeline?range=1d&project=autonomy&q=search+terms
+
+    Returns reverse-chronological array of timeline entries.
+    """
+    range_str = request.query_params.get("range")
+    project = request.query_params.get("project")
+    q = request.query_params.get("q")
+    limit = min(int(request.query_params.get("limit", "200")), 1000)
+    offset = int(request.query_params.get("offset", "0"))
+
+    where, params = _build_timeline_where(range_str, project, q)
+    sql = f"""
+        SELECT * FROM dispatch_runs
+        WHERE {where}
+        ORDER BY completed_at DESC
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit, offset])
+
+    def _query():
+        conn = _timeline_conn()
+        try:
+            rows = conn.execute(sql, params).fetchall()
+            return [_row_to_timeline_entry(r) for r in rows]
+        finally:
+            conn.close()
+
+    try:
+        entries = await asyncio.to_thread(_query)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse(entries)
+
+
+async def api_timeline_stats(request):
+    """Aggregate stats from dispatch_runs.
+
+    GET /api/timeline/stats?range=1d&project=autonomy
+
+    Returns: completed_count, success_rate, failed_count, blocked_count,
+             avg_duration, avg_tooling_score, avg_confidence_score
+    """
+    range_str = request.query_params.get("range")
+    project = request.query_params.get("project")
+
+    where, params = _build_timeline_where(range_str, project, None)
+    sql = f"""
+        SELECT
+            COUNT(*) as total_count,
+            COUNT(CASE WHEN status = 'DONE' THEN 1 END) as completed_count,
+            COUNT(CASE WHEN status = 'FAILED' THEN 1 END) as failed_count,
+            COUNT(CASE WHEN status = 'BLOCKED' THEN 1 END) as blocked_count,
+            AVG(duration_secs) as avg_duration,
+            AVG(score_tooling) as avg_tooling_score,
+            AVG(score_confidence) as avg_confidence_score,
+            AVG(score_clarity) as avg_clarity_score
+        FROM dispatch_runs
+        WHERE {where}
+    """
+
+    def _query():
+        conn = _timeline_conn()
+        try:
+            row = conn.execute(sql, params).fetchone()
+            if not row or row["total_count"] == 0:
+                return {
+                    "completed_count": 0,
+                    "success_rate": 0.0,
+                    "failed_count": 0,
+                    "blocked_count": 0,
+                    "avg_duration": None,
+                    "avg_tooling_score": None,
+                    "avg_confidence_score": None,
+                    "avg_clarity_score": None,
+                }
+            total = row["total_count"]
+            completed = row["completed_count"]
+            return {
+                "completed_count": completed,
+                "success_rate": round(completed / total, 4) if total > 0 else 0.0,
+                "failed_count": row["failed_count"],
+                "blocked_count": row["blocked_count"],
+                "avg_duration": round(row["avg_duration"], 1) if row["avg_duration"] is not None else None,
+                "avg_tooling_score": round(row["avg_tooling_score"], 2) if row["avg_tooling_score"] is not None else None,
+                "avg_confidence_score": round(row["avg_confidence_score"], 2) if row["avg_confidence_score"] is not None else None,
+                "avg_clarity_score": round(row["avg_clarity_score"], 2) if row["avg_clarity_score"] is not None else None,
+            }
+        finally:
+            conn.close()
+
+    try:
+        stats = await asyncio.to_thread(_query)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse(stats)
+
 
 async def api_dispatch_trace(request):
     """Full trace for a completed dispatch run.
@@ -1187,6 +1409,8 @@ routes = [
     Route("/api/primer/{id}", api_primer),
     Route("/api/dispatch/tail/{run}", api_dispatch_tail),
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
+    Route("/api/timeline", api_timeline),
+    Route("/api/timeline/stats", api_timeline_stats),
 
     # Static
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
