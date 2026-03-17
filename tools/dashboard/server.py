@@ -707,6 +707,14 @@ async def _latest_from_container(run_name: str) -> dict | None:
 
     session_path = stdout.strip()
 
+    # Get file size for token estimation
+    size_stdout, _, size_rc = await run_cli(
+        ["docker", "exec", container_name, "sh", "-c",
+         f"stat -c %s '{session_path}' 2>/dev/null || echo 0"],
+        timeout=5,
+    )
+    file_size_bytes = int(size_stdout.strip()) if size_rc == 0 and size_stdout.strip().isdigit() else 0
+
     # Only read last 4KB — enough to find the latest assistant text
     stdout, _, rc = await run_cli(
         ["docker", "exec", container_name, "sh", "-c",
@@ -731,6 +739,7 @@ async def _latest_from_container(run_name: str) -> dict | None:
                     "timestamp": e.get("timestamp", ""),
                     "type": "assistant_text",
                     "is_live": True,
+                    "file_size_bytes": file_size_bytes,
                 }
 
     return None
@@ -740,6 +749,8 @@ async def api_dispatch_latest(request):
     """Return just the most recent entry for snippet display.
 
     GET /api/dispatch/latest/{run}
+    Returns {text, timestamp, type, is_live, file_size_bytes}.
+    file_size_bytes enables rough token estimation on the client (÷4).
     """
     run_name = request.path_params["run"]
     session_files = _find_session_files(run_name)
@@ -750,7 +761,7 @@ async def api_dispatch_latest(request):
         result = await _latest_from_container(run_name)
         if result:
             return JSONResponse(result)
-        return JSONResponse({"text": "", "timestamp": "", "type": "", "is_live": False})
+        return JSONResponse({"text": "", "timestamp": "", "type": "", "is_live": False, "file_size_bytes": 0})
 
     session_file = session_files[-1]
     is_live = (import_time() - session_file.stat().st_mtime) < 120
@@ -778,6 +789,7 @@ async def api_dispatch_latest(request):
                         "timestamp": entry.get("timestamp", ""),
                         "type": "assistant_text",
                         "is_live": is_live,
+                        "file_size_bytes": file_size,
                     })
         elif parsed.get("type") == "assistant_text":
             return JSONResponse({
@@ -785,9 +797,10 @@ async def api_dispatch_latest(request):
                 "timestamp": parsed.get("timestamp", ""),
                 "type": "assistant_text",
                 "is_live": is_live,
+                "file_size_bytes": file_size,
             })
 
-    return JSONResponse({"text": "", "timestamp": "", "type": "", "is_live": is_live})
+    return JSONResponse({"text": "", "timestamp": "", "type": "", "is_live": is_live, "file_size_bytes": file_size})
 
 
 # ── WebSocket Terminal ─────────────────────────────────────────
