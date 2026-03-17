@@ -208,6 +208,42 @@ def get_claimed_beads() -> set[str]:
         return set()
 
 
+def get_open_dependencies(bead_id: str) -> list[dict]:
+    """Check if a bead has unclosed blocking dependencies.
+
+    Returns a list of dependency dicts (with id, title, status) for any
+    'blocks'-type dependency that is NOT closed. Parent-child relationships
+    are excluded — a parent epic being open should not block its subtasks.
+
+    Returns an empty list if the bead has no blocking open dependencies
+    (i.e., it is safe to dispatch).
+    """
+    out = run_bd(["dep", "list", bead_id, "--json"])
+    if not out:
+        return []
+    try:
+        deps = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(deps, list):
+        return []
+
+    open_blockers = []
+    for dep in deps:
+        if not isinstance(dep, dict):
+            continue
+        # Only 'blocks' type dependencies gate dispatch.
+        # Parent-child deps are structural, not blocking.
+        dep_type = dep.get("dependency_type", "")
+        if dep_type == "parent-child":
+            continue
+        # Any non-closed dependency blocks dispatch
+        if dep.get("status") != "closed":
+            open_blockers.append(dep)
+
+    return open_blockers
+
+
 # ── Bead state mutations ────────────────────────────────────────
 
 
@@ -899,12 +935,31 @@ def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int
     # Filter out already-claimed and currently-running beads
     claimed = get_claimed_beads()
     running_ids = {a.bead_id for a in running}
-    available = [b for b in ready
-                 if b.get("id") not in claimed
-                 and b.get("id") not in running_ids]
+    candidates = [b for b in ready
+                  if b.get("id") not in claimed
+                  and b.get("id") not in running_ids]
+
+    if not candidates:
+        print(f"  {len(ready)} ready but all claimed or running")
+        return 0
+
+    # Filter out beads whose blocking dependencies are not yet closed
+    available = []
+    for bead in candidates:
+        bead_id = bead.get("id", "")
+        # Skip dependency check if bead has no dependencies at all
+        if bead.get("dependency_count", 0) == 0 and "dependencies" not in bead:
+            available.append(bead)
+            continue
+        open_deps = get_open_dependencies(bead_id)
+        if open_deps:
+            dep_ids = ", ".join(d.get("id", "?") for d in open_deps)
+            print(f"  Skipping {bead_id}: blocked by open dependencies [{dep_ids}]")
+        else:
+            available.append(bead)
 
     if not available:
-        print(f"  {len(ready)} ready but all claimed or running")
+        print(f"  {len(candidates)} candidate(s) but all blocked by dependencies")
         return 0
 
     print(f"  {len(available)} available beads, {slots} slot(s) open")
