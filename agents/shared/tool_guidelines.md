@@ -44,6 +44,18 @@ When you complete your work, write a decision file to `/workspace/output/decisio
   "reason": "Brief explanation",
   "artifacts": ["list", "of", "files", "produced"],
   "notes": "Anything the dispatcher should record on the bead",
+  "scores": {
+    "tooling": 3,
+    "clarity": 4,
+    "confidence": 5
+  },
+  "time_breakdown": {
+    "research_pct": 20,
+    "coding_pct": 60,
+    "debugging_pct": 15,
+    "tooling_workaround_pct": 5
+  },
+  "failure_category": "tooling|spec|timeout|code|other",
   "discovered_beads": [
     {
       "title": "New work discovered during execution",
@@ -54,6 +66,28 @@ When you complete your work, write a decision file to `/workspace/output/decisio
   ]
 }
 ```
+
+### Optional fields
+
+**All fields below are optional.** Include them when you have meaningful signal — omit when unsure.
+
+**scores** (1–5 scale, integers):
+- `tooling` — infrastructure experience (bd, graph, git, container, deps). 5 = smooth, 1 = constant fights.
+- `clarity` — was the task well-specified enough to execute? 5 = crystal clear, 1 = had to guess everything.
+- `confidence` — how solid is the delivered solution? 5 = production-ready, 1 = barely a sketch.
+
+**time_breakdown** (approximate % of time in each phase, should roughly sum to 100):
+- `research_pct` — reading docs, searching graph, understanding codebase
+- `coding_pct` — writing/editing code
+- `debugging_pct` — fixing tests, tracing bugs
+- `tooling_workaround_pct` — fighting infrastructure (bd down, git conflicts, container issues, dep problems)
+
+**failure_category** (only when status is BLOCKED or FAILED):
+- `tooling` — bd down, git conflict, container issue, dep failure
+- `spec` — task impossible or underspecified
+- `timeout` — ran out of time
+- `code` — tests fail, won't compile, logic errors
+- `other` — anything else
 
 ## Working Style
 
