@@ -95,8 +95,8 @@ let _allBeads = [];
 // ── View Switcher State ────────────────────────────────────
 
 const _viewTabs = ['list', 'board', 'tree', 'deps'];
-let _currentView = localStorage.getItem('beads-view') || 'list';
-if (!_viewTabs.includes(_currentView)) _currentView = 'list';
+let _currentView = localStorage.getItem('beads-view') || 'board';
+if (!_viewTabs.includes(_currentView)) _currentView = 'board';
 
 // ── Filter State & URL Persistence ─────────────────────────
 
@@ -133,7 +133,7 @@ function filtersFromURL() {
 
 function filtersToURL(f) {
   const p = new URLSearchParams();
-  if (_currentView !== 'list') p.set('view', _currentView);
+  if (_currentView !== 'board') p.set('view', _currentView);
   if (f.priority.length) p.set('priority', f.priority.join(','));
   if (f.phase.length) p.set('phase', f.phase.join(','));
   if (f.type.length) p.set('type', f.type.join(','));
@@ -528,50 +528,90 @@ function renderListView(filtered, terms, query) {
     renderSection('Closed', closed, terms, query, false);
 }
 
-// ── Board View (Kanban columns by status) ──────────────────
+// ── Board View (Kanban columns by readiness phase) ─────────
 
 function renderBoardView(filtered, terms, query) {
+  // Only show open/in_progress beads — closed beads don't belong on the board
+  const active = filtered.filter(i => i.status !== 'closed');
+
+  // Bucket by readiness phase
+  const buckets = { idea: [], draft: [], specified: [], approved: [] };
+  for (const issue of active) {
+    const phase = getPhase(issue.labels) || 'idea';
+    if (buckets[phase]) buckets[phase].push(issue);
+    else buckets.idea.push(issue); // unknown phase → idea
+  }
+
   const columns = [
-    { key: 'in_progress', title: 'In Progress', items: filtered.filter(i => i.status === 'in_progress') },
-    { key: 'ready', title: 'Ready', items: filtered.filter(i => i.status === 'open' && !i.dependencies?.some(d => d.status !== 'closed')) },
-    { key: 'blocked', title: 'Blocked', items: filtered.filter(i => i.status === 'open' && i.dependencies?.some(d => d.status !== 'closed')) },
-    { key: 'closed', title: 'Closed', items: filtered.filter(i => i.status === 'closed') },
+    { key: 'idea',      title: 'Ideas',     color: 'border-yellow-500', items: buckets.idea },
+    { key: 'draft',     title: 'Drafts',    color: 'border-blue-500',   items: buckets.draft },
+    { key: 'specified', title: 'Specified',  color: 'border-purple-500', items: buckets.specified },
+    { key: 'approved',  title: 'Approved',   color: 'border-green-500',  items: buckets.approved },
   ];
 
-  function renderCard(issue) {
-    const type = issue.issue_type === 'epic' ? '📦' : issue.issue_type === 'bug' ? '🐛' : '📋';
+  // Build a lookup for epic titles
+  const epicTitleMap = {};
+  for (const b of _allBeads) {
+    if (b.issue_type === 'epic') epicTitleMap[b.id] = b.title;
+  }
+
+  function renderBoardCard(issue, colKey) {
+    const typeIcon = issue.issue_type === 'epic' ? '📦'
+      : issue.issue_type === 'bug' ? '🐛' : '📋';
     const titleHtml = highlightText(issue.title || '', terms);
+
+    // Epic parent name
+    const epicParentId = getEpicParent(issue);
+    const epicHtml = epicParentId && epicTitleMap[epicParentId]
+      ? `<div class="text-xs text-gray-500 truncate mb-1">📦 ${epicTitleMap[epicParentId]}</div>`
+      : '';
+
+    // Label chips (exclude readiness:* since column implies it)
+    const visibleLabels = (issue.labels || []).filter(l =>
+      !l.startsWith('readiness:') && !l.startsWith('dispatch:')
+    );
+    const labelChips = visibleLabels.map(l =>
+      `<span class="px-1.5 py-0.5 bg-gray-700 text-gray-300 text-xs rounded">${l}</span>`
+    ).join('');
+
+    // Approve button — only on specified column cards
+    let approveHtml = '';
+    if (colKey === 'specified') {
+      approveHtml = `<button id="approve-btn-${issue.id}"
+        onclick="event.stopPropagation(); approveBead('${issue.id}', event)"
+        class="mt-2 w-full px-2 py-1 bg-green-700 hover:bg-green-600 text-white text-xs rounded font-semibold transition-colors">Approve</button>`;
+    }
+
     return `
       <div class="p-3 bg-gray-800 rounded-lg cursor-pointer border border-gray-700 hover:border-gray-500 transition-colors"
            onclick="navigateTo('/bead/${issue.id}')">
+        ${epicHtml}
         <div class="flex items-start gap-2 mb-2">
-          <span class="flex-shrink-0">${type}</span>
+          <span class="flex-shrink-0">${typeIcon}</span>
           <span class="text-sm leading-snug">${titleHtml}</span>
         </div>
         <div class="flex items-center gap-1.5 flex-wrap">
           <span class="font-mono text-xs text-gray-500">${issue.id}</span>
           ${priorityBadge(issue.priority)}
+          ${statusBadge(issue.status)}
+          ${labelChips}
         </div>
+        ${approveHtml}
       </div>`;
   }
 
-  const colColors = {
-    in_progress: 'border-blue-500',
-    ready: 'border-green-500',
-    blocked: 'border-red-500',
-    closed: 'border-gray-600',
-  };
-
   const cols = columns.map(col => `
-    <div class="flex-1 min-w-[240px]">
-      <div class="border-t-2 ${colColors[col.key]} pt-2 mb-3">
+    <div class="board-column flex-1 min-w-[260px] flex flex-col">
+      <div class="border-t-2 ${col.color} pt-2 mb-3 flex-shrink-0">
         <h3 class="text-sm font-semibold text-gray-300">${col.title} <span class="text-gray-500">(${col.items.length})</span></h3>
       </div>
-      <div class="space-y-2 ${col.key === 'closed' ? 'max-h-64 overflow-y-auto' : ''}">${col.items.map(renderCard).join('') || '<div class="text-xs text-gray-600 italic py-2">No beads</div>'}</div>
+      <div class="space-y-2 overflow-y-auto flex-1 pr-1 board-column-scroll">
+        ${col.items.map(i => renderBoardCard(i, col.key)).join('') || '<div class="text-xs text-gray-600 italic py-2">No beads</div>'}
+      </div>
     </div>
   `).join('');
 
-  return `<div class="flex gap-4 overflow-x-auto pb-4">${cols}</div>`;
+  return `<div class="board-container flex gap-4 overflow-x-auto pb-4">${cols}</div>`;
 }
 
 // ── Tree View (epics with children) ────────────────────────
