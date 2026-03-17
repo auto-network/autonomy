@@ -92,6 +92,12 @@
     .tree-group > summary::-webkit-details-marker { display: none; }
     .tree-group[open] > summary .tree-chevron { transform: rotate(90deg); }
     .tree-node:hover { background: #1f2937; }
+    /* DAG View */
+    .dag-viewport { scrollbar-width: thin; scrollbar-color: #4b5563 transparent; }
+    .dag-viewport::-webkit-scrollbar { width: 6px; height: 6px; }
+    .dag-viewport::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
+    .dag-node-critical { box-shadow: 0 0 8px rgba(239, 68, 68, 0.3); }
+    .dag-canvas { transition: transform 0.15s ease-out; }
     /* Live Panel */
     #live-panel {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;

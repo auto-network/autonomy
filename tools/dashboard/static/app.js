@@ -1039,38 +1039,241 @@ window.treeToggleAll = function() {
   });
 };
 
-// ── Deps View (dependency graph) ───────────────────────────
+// ── Deps View (DAG visualization) ──────────────────────────
+
+let _depsShowMode = 'dag'; // 'dag' or 'flat'
+let _dagZoom = 1;
+let _dagPanX = 0;
+let _dagPanY = 0;
+
+function _buildDepGraph(filtered, allBeads) {
+  // Build full graph from allBeads, then filter visible set
+  const beadMap = new Map();
+  for (const b of allBeads) beadMap.set(b.id, b);
+
+  const filteredIds = new Set(filtered.map(b => b.id));
+
+  // Collect edges: child depends_on parent (exclude parent-child/epic edges)
+  // Forward: blockerOf[id] = [ids that id blocks]
+  // Reverse: dependsOn[id] = [ids that id depends on]
+  const blockerOf = new Map();
+  const dependsOn = new Map();
+  const edgeSet = new Set(); // "from->to" dedup
+
+  for (const b of allBeads) {
+    for (const d of b.dependencies || []) {
+      if (d.type === 'parent-child') continue; // skip epic hierarchy
+      const key = `${d.depends_on_id}->${b.id}`;
+      if (edgeSet.has(key)) continue;
+      edgeSet.add(key);
+      if (!blockerOf.has(d.depends_on_id)) blockerOf.set(d.depends_on_id, []);
+      blockerOf.get(d.depends_on_id).push(b.id);
+      if (!dependsOn.has(b.id)) dependsOn.set(b.id, []);
+      dependsOn.get(b.id).push(d.depends_on_id);
+    }
+  }
+
+  // Find all nodes participating in dependency edges
+  const depNodes = new Set();
+  for (const [from, tos] of blockerOf) {
+    depNodes.add(from);
+    for (const to of tos) depNodes.add(to);
+  }
+
+  // Only include nodes in the filtered set (or their immediate deps if connected)
+  // Strategy: include any depNode that is in filtered, plus its connected neighbours
+  const visibleNodes = new Set();
+  for (const id of depNodes) {
+    if (filteredIds.has(id)) {
+      visibleNodes.add(id);
+      // Include immediate connections
+      for (const dep of (dependsOn.get(id) || [])) visibleNodes.add(dep);
+      for (const blocked of (blockerOf.get(id) || [])) visibleNodes.add(blocked);
+    }
+  }
+
+  // Assign layers via longest-path from roots (nodes with no dependencies)
+  const layers = new Map(); // id -> layer number
+  const visited = new Set();
+  function assignLayer(id, depth) {
+    if (visited.has(id) && (layers.get(id) || 0) >= depth) return;
+    visited.add(id);
+    layers.set(id, Math.max(layers.get(id) || 0, depth));
+    for (const child of (blockerOf.get(id) || [])) {
+      if (visibleNodes.has(child)) assignLayer(child, depth + 1);
+    }
+  }
+  // Roots: visible nodes with no dependencies (or deps outside visible set)
+  for (const id of visibleNodes) {
+    const deps = (dependsOn.get(id) || []).filter(d => visibleNodes.has(d));
+    if (deps.length === 0) assignLayer(id, 0);
+  }
+  // Handle cycles: assign unvisited nodes to layer 0
+  for (const id of visibleNodes) {
+    if (!visited.has(id)) layers.set(id, 0);
+  }
+
+  // Group by layer
+  const maxLayer = Math.max(0, ...layers.values());
+  const layerGroups = [];
+  for (let i = 0; i <= maxLayer; i++) layerGroups.push([]);
+  for (const id of visibleNodes) {
+    const l = layers.get(id) || 0;
+    layerGroups[l].push(id);
+  }
+
+  // Sort each layer by priority (lower = higher priority)
+  for (const group of layerGroups) {
+    group.sort((a, b) => {
+      const ba = beadMap.get(a), bb = beadMap.get(b);
+      return (ba?.priority ?? 4) - (bb?.priority ?? 4);
+    });
+  }
+
+  // Find critical path: longest chain of open blockers
+  const criticalPath = new Set();
+  function findCritical(id) {
+    const bead = beadMap.get(id);
+    if (!bead || bead.status === 'closed') return 0;
+    let maxLen = 0;
+    let maxChild = null;
+    for (const child of (blockerOf.get(id) || [])) {
+      if (!visibleNodes.has(child)) continue;
+      const childBead = beadMap.get(child);
+      if (childBead && childBead.status !== 'closed') {
+        const len = findCritical(child);
+        if (len > maxLen) { maxLen = len; maxChild = child; }
+      }
+    }
+    if (maxChild !== null) criticalPath.add(id);
+    return maxLen + 1;
+  }
+  // Start critical path from roots
+  let longestStart = null, longestLen = 0;
+  for (const group of [layerGroups[0] || []]) {
+    for (const id of group) {
+      const len = findCritical(id);
+      if (len > longestLen) { longestLen = len; longestStart = id; }
+    }
+  }
+  if (longestStart) criticalPath.add(longestStart);
+
+  // Edges for visible nodes only
+  const visibleEdges = [];
+  for (const id of visibleNodes) {
+    for (const dep of (dependsOn.get(id) || [])) {
+      if (visibleNodes.has(dep)) {
+        visibleEdges.push({ from: dep, to: id });
+      }
+    }
+  }
+
+  // Isolated filtered beads (not in any dep chain)
+  const isolated = filtered.filter(b => !depNodes.has(b.id));
+
+  return { beadMap, layerGroups, visibleNodes, visibleEdges, criticalPath, dependsOn, blockerOf, isolated };
+}
+
+function _dagNodeStatus(bead, dependsOn, beadMap) {
+  if (!bead) return 'unknown';
+  if (bead.status === 'closed') return 'closed';
+  if (bead.status === 'in_progress') return 'active';
+  // Check if blocked (has open dependencies)
+  const deps = dependsOn.get(bead.id) || [];
+  for (const depId of deps) {
+    const dep = beadMap.get(depId);
+    if (dep && dep.status !== 'closed') return 'blocked';
+  }
+  // Open with all deps closed = ready
+  if (bead.status === 'open') return 'ready';
+  return 'open';
+}
 
 function renderDepsView(filtered, terms, query) {
-  // Show beads that have dependencies, grouped by blockers
-  const withDeps = filtered.filter(i => i.dependencies?.length > 0);
-  const noDeps = filtered.filter(i => !i.dependencies?.length);
+  if (!filtered.length) {
+    return '<div class="text-gray-500 text-center py-8">No beads to display</div>';
+  }
 
-  // Build a map of id -> issue for lookups
-  const beadMap = new Map();
-  for (const b of _allBeads) beadMap.set(b.id, b);
+  const graph = _buildDepGraph(filtered, _allBeads);
+  const { beadMap, layerGroups, visibleNodes, visibleEdges, criticalPath, dependsOn, blockerOf, isolated } = graph;
+
+  // Stats
+  const blockedCount = [...visibleNodes].filter(id => _dagNodeStatus(beadMap.get(id), dependsOn, beadMap) === 'blocked').length;
+  const readyCount = [...visibleNodes].filter(id => _dagNodeStatus(beadMap.get(id), dependsOn, beadMap) === 'ready').length;
+  const activeCount = [...visibleNodes].filter(id => _dagNodeStatus(beadMap.get(id), dependsOn, beadMap) === 'active').length;
+
+  // Mode toggle + stats bar
+  let html = `
+    <div class="flex items-center gap-4 mb-4 flex-wrap">
+      <div class="flex items-center gap-2">
+        <button onclick="dagToggleMode('dag')" class="text-xs px-2 py-1 rounded ${_depsShowMode === 'dag' ? 'bg-indigo-600 text-white' : 'bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700'}">DAG</button>
+        <button onclick="dagToggleMode('flat')" class="text-xs px-2 py-1 rounded ${_depsShowMode === 'flat' ? 'bg-indigo-600 text-white' : 'bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700'}">Flat</button>
+      </div>
+      <div class="flex items-center gap-3 text-xs">
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-green-500"></span> Ready: ${readyCount}</span>
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-500"></span> Blocked: ${blockedCount}</span>
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-purple-500"></span> Active: ${activeCount}</span>
+        <span class="text-gray-500">${visibleNodes.size} in graph, ${isolated.length} independent</span>
+      </div>
+      ${_depsShowMode === 'dag' ? `
+      <div class="flex items-center gap-1 ml-auto">
+        <button onclick="dagZoom(-0.1)" class="text-xs px-2 py-1 bg-gray-800 border border-gray-700 rounded hover:bg-gray-700 text-gray-300">-</button>
+        <span class="text-xs text-gray-500 w-10 text-center">${Math.round(_dagZoom * 100)}%</span>
+        <button onclick="dagZoom(0.1)" class="text-xs px-2 py-1 bg-gray-800 border border-gray-700 rounded hover:bg-gray-700 text-gray-300">+</button>
+        <button onclick="dagResetView()" class="text-xs px-2 py-1 bg-gray-800 border border-gray-700 rounded hover:bg-gray-700 text-gray-300 ml-1">Reset</button>
+      </div>` : ''}
+    </div>`;
+
+  if (_depsShowMode === 'flat') {
+    html += _renderDepsFlatView(filtered, terms, query, graph);
+  } else {
+    html += _renderDepsDAGView(filtered, terms, query, graph);
+  }
+
+  return html;
+}
+
+function _renderDepsFlatView(filtered, terms, query, graph) {
+  const { beadMap, dependsOn, blockerOf } = graph;
+  const withDeps = filtered.filter(i => i.dependencies?.some(d => d.type !== 'parent-child'));
+  const noDeps = filtered.filter(i => !i.dependencies?.some(d => d.type !== 'parent-child'));
 
   function renderDepRow(issue) {
-    const deps = issue.dependencies || [];
-    const type = issue.issue_type === 'epic' ? '📦' : issue.issue_type === 'bug' ? '🐛' : '📋';
+    const deps = (issue.dependencies || []).filter(d => d.type !== 'parent-child');
+    const type = treeTypeIcon(issue.issue_type);
     const titleHtml = highlightText(issue.title || '', terms);
+    const nodeStatus = _dagNodeStatus(issue, dependsOn, beadMap);
+    const borderCls = nodeStatus === 'blocked' ? 'border-red-600' : nodeStatus === 'ready' ? 'border-green-600' : nodeStatus === 'active' ? 'border-purple-600' : 'border-gray-700';
 
     const depLinks = deps.map(d => {
       const depBead = beadMap.get(d.depends_on_id);
       const depTitle = depBead ? depBead.title : d.depends_on_id;
       const depStatus = depBead ? depBead.status : 'unknown';
-      const statusCls = depStatus === 'closed' ? 'text-green-400' : depStatus === 'in_progress' ? 'text-blue-400' : 'text-yellow-400';
-      const arrow = d.type === 'parent-child' ? '↑' : '←';
+      const statusCls = depStatus === 'closed' ? 'text-green-400' : depStatus === 'in_progress' ? 'text-purple-400' : 'text-yellow-400';
       return `<span class="inline-flex items-center gap-1 text-xs">
-        <span class="text-gray-500">${arrow}</span>
+        <span class="text-gray-500">depends on</span>
         <a href="/bead/${d.depends_on_id}" onclick="event.stopPropagation(); event.preventDefault(); navigateTo('/bead/${d.depends_on_id}')"
            class="${statusCls} hover:underline font-mono">${d.depends_on_id}</a>
         <span class="text-gray-500 truncate max-w-[150px]" title="${(depTitle || '').replace(/"/g, '&quot;')}">${depTitle || ''}</span>
       </span>`;
     }).join('');
 
+    // Show what this bead blocks
+    const blocks = (blockerOf.get(issue.id) || []).map(childId => {
+      const child = beadMap.get(childId);
+      const childTitle = child ? child.title : childId;
+      const childStatus = child ? child.status : 'unknown';
+      const statusCls = childStatus === 'closed' ? 'text-green-400' : childStatus === 'in_progress' ? 'text-purple-400' : 'text-yellow-400';
+      return `<span class="inline-flex items-center gap-1 text-xs">
+        <span class="text-gray-500">blocks</span>
+        <a href="/bead/${childId}" onclick="event.stopPropagation(); event.preventDefault(); navigateTo('/bead/${childId}')"
+           class="${statusCls} hover:underline font-mono">${childId}</a>
+        <span class="text-gray-500 truncate max-w-[150px]" title="${(childTitle || '').replace(/"/g, '&quot;')}">${childTitle || ''}</span>
+      </span>`;
+    });
+
     return `
-      <div class="p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-500 cursor-pointer"
+      <div class="p-3 bg-gray-800 rounded-lg border-2 ${borderCls} hover:brightness-110 cursor-pointer transition-all"
            onclick="navigateTo('/bead/${issue.id}')">
         <div class="flex items-center gap-2 mb-2">
           <span>${type}</span>
@@ -1079,7 +1282,8 @@ function renderDepsView(filtered, terms, query) {
           ${priorityBadge(issue.priority)}
           ${statusBadge(issue.status)}
         </div>
-        <div class="flex items-center gap-3 flex-wrap">${depLinks}</div>
+        ${depLinks ? `<div class="flex items-center gap-3 flex-wrap mb-1">${depLinks}</div>` : ''}
+        ${blocks.length ? `<div class="flex items-center gap-3 flex-wrap">${blocks.join('')}</div>` : ''}
       </div>`;
   }
 
@@ -1098,9 +1302,200 @@ function renderDepsView(filtered, terms, query) {
         <div class="space-y-2">${noDeps.map(i => renderIssueRow(i, terms, query)).join('')}</div>
       </details>`;
   }
-
   return html || '<div class="text-gray-500 text-center py-8">No beads to display</div>';
 }
+
+function _renderDepsDAGView(filtered, terms, query, graph) {
+  const { beadMap, layerGroups, visibleNodes, visibleEdges, criticalPath, dependsOn, blockerOf, isolated } = graph;
+
+  if (visibleNodes.size === 0 && isolated.length === 0) {
+    return '<div class="text-gray-500 text-center py-8">No dependency relationships found</div>';
+  }
+
+  // Render layered DAG
+  // Each layer is a column (left to right: blockers -> blocked)
+  // Nodes are positioned in a grid; SVG overlay draws edges
+
+  const NODE_W = 220;
+  const NODE_H = 64;
+  const LAYER_GAP = 80;
+  const NODE_GAP = 16;
+
+  // Compute positions
+  const nodePos = new Map(); // id -> { x, y, layer, idx }
+  let maxY = 0;
+
+  for (let l = 0; l < layerGroups.length; l++) {
+    const group = layerGroups[l];
+    const x = l * (NODE_W + LAYER_GAP);
+    for (let i = 0; i < group.length; i++) {
+      const y = i * (NODE_H + NODE_GAP);
+      nodePos.set(group[i], { x, y, layer: l, idx: i });
+      if (y + NODE_H > maxY) maxY = y + NODE_H;
+    }
+  }
+
+  const totalW = layerGroups.length * (NODE_W + LAYER_GAP) - LAYER_GAP;
+  const totalH = maxY;
+
+  // Build SVG edges
+  let svgEdges = '';
+  for (const edge of visibleEdges) {
+    const fromPos = nodePos.get(edge.from);
+    const toPos = nodePos.get(edge.to);
+    if (!fromPos || !toPos) continue;
+
+    const x1 = fromPos.x + NODE_W;
+    const y1 = fromPos.y + NODE_H / 2;
+    const x2 = toPos.x;
+    const y2 = toPos.y + NODE_H / 2;
+
+    const isCritical = criticalPath.has(edge.from) && criticalPath.has(edge.to);
+    const fromBead = beadMap.get(edge.from);
+    const toBead = beadMap.get(edge.to);
+    const isResolved = fromBead?.status === 'closed';
+
+    let strokeColor = '#4b5563'; // gray
+    let strokeWidth = 1.5;
+    let dashArray = '';
+    if (isCritical) { strokeColor = '#ef4444'; strokeWidth = 2.5; }
+    else if (isResolved) { strokeColor = '#22c55e'; dashArray = 'stroke-dasharray="4 3"'; }
+
+    // Bezier curve for the edge
+    const midX = (x1 + x2) / 2;
+    svgEdges += `<path d="M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}"
+      fill="none" stroke="${strokeColor}" stroke-width="${strokeWidth}" ${dashArray}
+      marker-end="url(#arrowhead${isCritical ? '-critical' : isResolved ? '-resolved' : ''})"/>`;
+  }
+
+  // Build node elements
+  let nodeHtml = '';
+  for (const [id, pos] of nodePos) {
+    const bead = beadMap.get(id);
+    if (!bead) continue;
+    const nodeStatus = _dagNodeStatus(bead, dependsOn, beadMap);
+    const title = highlightText(bead.title || '', terms);
+    const icon = treeTypeIcon(bead.issue_type);
+
+    let borderCls, bgCls;
+    switch (nodeStatus) {
+      case 'blocked': borderCls = 'border-red-500'; bgCls = 'bg-red-950'; break;
+      case 'ready': borderCls = 'border-green-500'; bgCls = 'bg-green-950'; break;
+      case 'active': borderCls = 'border-purple-500'; bgCls = 'bg-purple-950'; break;
+      case 'closed': borderCls = 'border-gray-600'; bgCls = 'bg-gray-800 opacity-60'; break;
+      default: borderCls = 'border-gray-600'; bgCls = 'bg-gray-800'; break;
+    }
+    const critCls = criticalPath.has(id) && nodeStatus !== 'closed' ? 'dag-node-critical' : '';
+
+    nodeHtml += `
+      <div class="dag-node absolute rounded-lg border-2 ${borderCls} ${bgCls} ${critCls} p-2 cursor-pointer hover:brightness-125 transition-all overflow-hidden"
+           style="left:${pos.x}px; top:${pos.y}px; width:${NODE_W}px; height:${NODE_H}px;"
+           onclick="navigateTo('/bead/${id}')"
+           title="${(bead.title || '').replace(/"/g, '&quot;')}">
+        <div class="flex items-center gap-1.5 mb-1">
+          <span class="text-xs flex-shrink-0">${icon}</span>
+          <span class="text-xs font-medium truncate flex-1">${title}</span>
+        </div>
+        <div class="flex items-center gap-1">
+          <span class="font-mono text-[10px] text-gray-400">${id}</span>
+          ${priorityBadge(bead.priority)}
+          ${statusBadge(bead.status)}
+        </div>
+      </div>`;
+  }
+
+  // Layer labels
+  let layerLabels = '';
+  for (let l = 0; l < layerGroups.length; l++) {
+    if (!layerGroups[l].length) continue;
+    const x = l * (NODE_W + LAYER_GAP);
+    const label = l === 0 ? 'Roots (no blockers)' : `Layer ${l}`;
+    layerLabels += `<div class="absolute text-[10px] text-gray-500 font-medium" style="left:${x}px; top:-20px;">${label}</div>`;
+  }
+
+  // Legend
+  const legend = `
+    <div class="flex items-center gap-4 text-[10px] text-gray-400 mt-2 flex-wrap">
+      <span class="flex items-center gap-1"><span class="w-3 h-1.5 bg-red-500 rounded-sm"></span> Critical path</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-1.5 bg-gray-500 rounded-sm"></span> Dependency</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-0.5 border-t border-dashed border-green-500" style="width:12px"></span> Resolved</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-3 border-2 border-green-500 rounded-sm"></span> Ready</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-3 border-2 border-red-500 rounded-sm"></span> Blocked</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-3 border-2 border-purple-500 rounded-sm"></span> In progress</span>
+    </div>`;
+
+  let html = `
+    <div class="dag-viewport overflow-auto border border-gray-700 rounded-lg bg-gray-900/50 relative" id="dag-viewport"
+         style="max-height: calc(100vh - 18rem);">
+      <div class="dag-canvas relative" id="dag-canvas"
+           style="transform: scale(${_dagZoom}) translate(${_dagPanX}px, ${_dagPanY}px); transform-origin: 0 0;
+                  width: ${totalW + 40}px; height: ${totalH + 40}px; padding: 30px 20px 20px 20px;">
+        ${layerLabels}
+        <svg class="absolute inset-0" style="width:${totalW + 40}px; height:${totalH + 40}px; padding: 30px 20px 20px 20px; pointer-events:none;">
+          <defs>
+            <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#4b5563"/>
+            </marker>
+            <marker id="arrowhead-critical" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#ef4444"/>
+            </marker>
+            <marker id="arrowhead-resolved" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#22c55e"/>
+            </marker>
+          </defs>
+          ${svgEdges}
+        </svg>
+        ${nodeHtml}
+      </div>
+    </div>
+    ${legend}`;
+
+  // Isolated beads section
+  if (isolated.length) {
+    html += `
+      <details class="mt-4">
+        <summary class="text-sm font-semibold mb-2 cursor-pointer text-gray-400">Independent Beads <span class="text-gray-500">(${isolated.length})</span></summary>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+          ${isolated.map(b => {
+            const icon = treeTypeIcon(b.issue_type);
+            const titleHtml = highlightText(b.title || '', terms);
+            return `<div class="p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 cursor-pointer text-xs"
+                         onclick="navigateTo('/bead/${b.id}')">
+              <div class="flex items-center gap-1.5">
+                <span>${icon}</span>
+                <span class="truncate">${titleHtml}</span>
+                <span class="font-mono text-gray-500">${b.id}</span>
+                ${priorityBadge(b.priority)}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+      </details>`;
+  }
+
+  return html;
+}
+
+window.dagToggleMode = function(mode) {
+  _depsShowMode = mode;
+  renderBeadResults(document.getElementById('global-search')?.value?.trim() || '');
+};
+
+window.dagZoom = function(delta) {
+  _dagZoom = Math.max(0.3, Math.min(2, _dagZoom + delta));
+  const canvas = document.getElementById('dag-canvas');
+  if (canvas) canvas.style.transform = `scale(${_dagZoom}) translate(${_dagPanX}px, ${_dagPanY}px)`;
+  const zoomLabel = document.querySelector('.dag-viewport ~ div .text-xs.text-gray-500.w-10, .flex .text-xs.text-gray-500.w-10');
+  // Re-render to update zoom label
+  renderBeadResults(document.getElementById('global-search')?.value?.trim() || '');
+};
+
+window.dagResetView = function() {
+  _dagZoom = 1;
+  _dagPanX = 0;
+  _dagPanY = 0;
+  renderBeadResults(document.getElementById('global-search')?.value?.trim() || '');
+};
 
 async function renderBeadDetail(id) {
   pageTitle.textContent = `Bead: ${id}`;
