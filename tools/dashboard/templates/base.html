@@ -47,8 +47,17 @@
     .badge-closed { background: #6b7280; color: white; }
     .badge-blocked { background: #ef4444; color: white; }
     .badge-in_progress { background: #a855f7; color: white; }
+    /* Board view — independent column scrolling */
+    .board-container { min-height: 0; }
+    .board-column { max-height: calc(100vh - 16rem); }
+    .board-column-scroll { scrollbar-width: thin; scrollbar-color: #4b5563 transparent; }
+    .board-column-scroll::-webkit-scrollbar { width: 4px; }
+    .board-column-scroll::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 2px; }
     @media (max-width: 639px) {
       .bead-tile { min-height: 3.5rem; }
+      .board-container { flex-direction: column !important; }
+      .board-column { min-width: 0 !important; max-height: none; }
+      .board-column-scroll { max-height: 50vh; }
     }
     /* Live Panel */
     #live-panel {
