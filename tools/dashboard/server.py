@@ -779,7 +779,14 @@ async def api_terminal_rename(request):
 async def api_primer(request):
     bead_id = request.path_params["id"]
     stdout, stderr, rc = await run_cli(["graph", "primer", bead_id, "--format", "dashboard"])
-    return JSONResponse({"content": stdout, "error": stderr if rc != 0 else None})
+    if rc != 0:
+        return JSONResponse({"error": stderr or "primer generation failed"}, status_code=500)
+    try:
+        import json as _json
+        return JSONResponse(_json.loads(stdout))
+    except (ValueError, TypeError):
+        # Fallback: return raw content if JSON parsing fails
+        return JSONResponse({"content": stdout, "error": None})
 
 
 # ── Live Session Tailing ──────────────────────────────────────
