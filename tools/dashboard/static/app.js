@@ -949,6 +949,7 @@ async function renderTerminal(cmd, attach) {
       <button onclick="launchBash()" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Bash</button>
       <button onclick="launchBashContainer()" class="px-3 py-1 bg-gray-600 rounded text-sm hover:bg-gray-500">Bash (container)</button>
       <span id="terminal-pills" class="contents"></span>
+      <span class="text-xs text-gray-600 self-center" title="Hold Shift to select text, Ctrl+Shift+V to paste">Shift+drag to select</span>
       <span class="text-xs text-gray-500 ml-auto self-center" id="term-status">ready</span>
     </div>
     <div id="terminal-container" style="height: calc(100vh - 10rem);"></div>`;
@@ -965,6 +966,7 @@ async function renderTerminal(cmd, attach) {
   const term = new Terminal({
     cursorBlink: true,
     fontSize: 14,
+    scrollback: 10000,
     fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
     theme: {
       background: '#111827',
@@ -976,6 +978,10 @@ async function renderTerminal(cmd, attach) {
 
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
+  // ClipboardAddon handles OSC 52 sequences from tmux/vim for clipboard sync
+  if (typeof ClipboardAddon !== 'undefined') {
+    term.loadAddon(new ClipboardAddon.ClipboardAddon());
+  }
   term.open(termContainer);
   fitAddon.fit();
 
@@ -1034,9 +1040,10 @@ async function renderTerminal(cmd, attach) {
   });
 
   // ── Clipboard Integration ──────────────────────────
-  // Two mechanisms:
-  // 1. xterm.js selection → browser clipboard (for selecting visible text)
-  // 2. OSC 52 from the PTY → browser clipboard (for tmux/vim yank)
+  // tmux mouse is ON so scroll wheel works (triggers tmux copy-mode).
+  // Hold Shift to select text at browser level (bypasses tmux mouse capture).
+  // ClipboardAddon handles OSC 52 from tmux/vim yank → browser clipboard.
+  // onSelectionChange copies Shift-selected text to clipboard automatically.
 
   // Helper: copy text to clipboard with fallback for non-HTTPS
   function copyToClipboard(text) {
@@ -1063,28 +1070,12 @@ async function renderTerminal(cmd, attach) {
     }
   });
 
-  // 2. OSC 52 handler: when the PTY sends \e]52;c;BASE64\a we decode and copy
-  // This lets tmux `set -g set-clipboard on` work through the browser
-  const origWrite = term.write.bind(term);
-  const osc52Regex = /\x1b\]52;[a-z]*;([A-Za-z0-9+/=]*)\x07/g;
-  term.write = function(data) {
-    if (typeof data === 'string') {
-      const matches = [...data.matchAll(osc52Regex)];
-      for (const m of matches) {
-        try {
-          const decoded = atob(m[1]);
-          copyToClipboard(decoded);
-        } catch(e) {}
-      }
-    }
-    return origWrite(data);
-  };
+  // OSC 52 clipboard sync is now handled by ClipboardAddon above.
 
   // ── Paste Handling ──────────────────────────────────────
-  // Multiple paths to ensure paste works regardless of tmux mouse state:
+  // Multiple paths to ensure paste works:
   // 1. xterm.js onPaste (browser paste event — Ctrl+V, middle-click)
-  // 2. Right-click context menu intercept
-  // 3. Ctrl+Shift+V keyboard shortcut
+  // 2. Ctrl+Shift+V keyboard shortcut
   //
   // Uses bracket paste mode (\e[200~ ... \e[201~) to prevent shells from
   // executing multi-line pastes immediately.
@@ -1117,14 +1108,7 @@ async function renderTerminal(cmd, attach) {
     }
   });
 
-  // 2. Right-click → paste from clipboard (suppresses browser/tmux context menu)
-  termContainer.addEventListener('contextmenu', async (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    await pasteFromClipboard();
-  });
-
-  // 3. Ctrl+Shift+V paste shortcut
+  // 2. Ctrl+Shift+V paste shortcut (explicit fallback)
   term.attachCustomKeyEventHandler((e) => {
     if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
       e.preventDefault();
