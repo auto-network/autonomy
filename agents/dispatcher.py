@@ -245,6 +245,104 @@ def launch_agent(bead_id: str, image: str = DEFAULT_IMAGE) -> DispatchResult:
     )
 
 
+def _recover_timeout_results(bead_id: str, exc: subprocess.TimeoutExpired) -> DispatchResult | None:
+    """Try to collect agent results after a timeout.
+
+    The agent writes decision.json and commits during the run, so results may
+    exist even when launch.sh gets killed by timeout before its post-run
+    collection phase.
+    """
+    stdout = (getattr(exc, "stdout", None) or b"")
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode(errors="replace")
+
+    # 1. Find output_dir from launch.sh stdout (printed before docker run starts)
+    output_dir = ""
+    for line in stdout.splitlines():
+        if "Output:" in line and "agent-runs" in line:
+            output_dir = line.split("Output:")[-1].strip()
+            break
+
+    # Fallback: glob for most recent output dir for this bead
+    if not output_dir:
+        runs_dir = REPO_ROOT / "data" / "agent-runs"
+        if runs_dir.exists():
+            candidates = sorted(
+                runs_dir.glob(f"{bead_id}-*"),
+                key=lambda p: p.name, reverse=True,
+            )
+            if candidates:
+                output_dir = str(candidates[0])
+
+    if not output_dir:
+        return None
+
+    # 2. Read decision.json (written by agent inside container)
+    decision = None
+    decision_path = Path(output_dir) / "decision.json"
+    if decision_path.exists():
+        try:
+            decision = json.loads(decision_path.read_text())
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Read commit hash — launch.sh writes .commit_hash after container exit,
+    #    so on timeout it usually doesn't exist. Recover from the worktree.
+    commit_hash = ""
+    worktree_path = ""
+    branch = f"agent/{bead_id}"
+
+    # Check if launch.sh managed to write these before being killed
+    commit_file = Path(output_dir) / ".commit_hash"
+    if commit_file.exists():
+        commit_hash = commit_file.read_text().strip()
+
+    wt_file = Path(output_dir) / ".worktree_path"
+    if wt_file.exists():
+        worktree_path = wt_file.read_text().strip()
+
+    # Derive worktree path from output_dir naming convention if not written:
+    # output_dir = data/agent-runs/{bead_id}-{timestamp}
+    # worktree  = .worktrees/{bead_id}-{timestamp}
+    if not worktree_path:
+        suffix = Path(output_dir).name
+        candidate = REPO_ROOT / ".worktrees" / suffix
+        if candidate.exists():
+            worktree_path = str(candidate)
+
+    # Recover commit hash from the worktree if launch.sh didn't write it
+    if not commit_hash and worktree_path and Path(worktree_path).exists():
+        base_file = Path(output_dir) / ".branch_base"
+        branch_base = ""
+        if base_file.exists():
+            branch_base = base_file.read_text().strip()
+
+        try:
+            head = subprocess.run(
+                ["git", "-C", worktree_path, "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+            if head and branch_base and head != branch_base:
+                commit_hash = head
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Only return a result if we found something useful
+    if decision is None and not commit_hash:
+        return None
+
+    return DispatchResult(
+        bead_id=bead_id,
+        exit_code=-1,
+        decision=decision,
+        output_dir=output_dir,
+        error="Agent timeout",
+        commit_hash=commit_hash,
+        worktree_path=worktree_path,
+        branch=branch,
+    )
+
+
 def check_working_tree_clean() -> tuple[bool, str]:
     """Check if the working tree is clean (no uncommitted changes).
 
@@ -488,10 +586,17 @@ def dispatch_cycle(config: DispatcherConfig) -> int:
     try:
         set_dispatch_state(bead_id, "running")
         result = launch_agent(bead_id, image=image)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         print(f"  TIMEOUT: Agent exceeded 10 minute limit")
-        set_dispatch_state(bead_id, "failed", "Agent timeout (10 min)")
-        release_bead(bead_id, "FAILED", "Agent timeout (10 min)")
+        # Agent may have completed work before timeout — check output dir
+        result = _recover_timeout_results(bead_id, e)
+        if result:
+            print(f"  Found agent results despite timeout — processing normally")
+            set_dispatch_state(bead_id, "collecting")
+            process_decision(result)
+        else:
+            set_dispatch_state(bead_id, "failed", "Agent timeout (10 min)")
+            release_bead(bead_id, "FAILED", "Agent timeout (10 min)")
         return 1
 
     # 7. Collect results (dispatch=collecting)
