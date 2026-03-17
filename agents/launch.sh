@@ -129,7 +129,7 @@ docker run \
     -e BD_READONLY="${BD_READONLY:-0}" \
     -v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro" \
     -v "$GIT_DIR:$GIT_DIR" \
-    -v "$REPO_ROOT/data/graph.db:/data/graph.db:ro" \
+    -v "$REPO_ROOT/data/graph.db:/data/graph.db" \
     -v "$REPO_ROOT/.beads:/data/.beads" \
     -v "$WORKTREE_DIR:/workspace/repo" \
     -v "$OUTPUT_DIR:/workspace/output" \
