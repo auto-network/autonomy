@@ -717,6 +717,7 @@ async function refreshTerminalPills() {
         const label = isClaude ? 'claude' : 'bash';
         const active = t.id === activeTerminalId;
         const ring = active ? 'ring-2 ring-indigo-500' : '';
+        const bgClass = active ? 'bg-indigo-900' : 'bg-gray-700';
         const displayName = escapeHtml(t.name || t.id);
         const envBadge = isContainer
           ? '<span class="text-xs text-purple-400 font-medium">container</span>'
@@ -724,7 +725,7 @@ async function refreshTerminalPills() {
         return `
           <div class="flex items-center ${border} rounded overflow-hidden ${ring}">
             <div onclick="pillSingleClick('${t.id}')"
-                 class="px-3 py-1 bg-gray-700 text-sm hover:bg-gray-600 flex items-center gap-2 cursor-pointer">
+                 class="px-3 py-1 ${bgClass} text-sm hover:bg-gray-600 flex items-center gap-2 cursor-pointer">
               <span class="w-2 h-2 rounded-full bg-green-400"></span>
               ${icon}
               <span class="pill-name" ondblclick="startRenameTerminal(event, '${t.id}')">${displayName}</span>
@@ -786,6 +787,10 @@ function startRenameTerminal(event, id) {
 }
 
 async function renderTerminal(cmd, attach) {
+  // Auto-reconnect to previously active session when navigating back
+  if (!cmd && !attach && activeTerminalId) {
+    attach = activeTerminalId;
+  }
   if (attach) activeTerminalId = attach;
   else if (cmd) activeTerminalId = null;
   pageTitle.textContent = attach ? `Attached: ${attach}` : 'Terminal';
@@ -859,6 +864,7 @@ async function renderTerminal(cmd, attach) {
     }
     // Refresh pill bar now that tmux session exists
     await refreshTerminalPills();
+    term.focus();
   };
 
   ws.onmessage = (e) => {
