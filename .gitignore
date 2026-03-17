@@ -31,3 +31,4 @@ data/graph.db-shm
 .DS_Store
 Thumbs.db
 .worktrees/
+__pycache__/
