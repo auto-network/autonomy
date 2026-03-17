@@ -92,6 +92,271 @@ function filterBeads(issues, query) {
 let _beadsSearchTimer = null;
 let _allBeads = [];
 
+// ── Filter State & URL Persistence ─────────────────────────
+
+const _defaultFilters = {
+  priority: [],    // e.g. [0, 1]
+  phase: [],       // e.g. ['idea', 'draft', 'specified', 'approved']
+  type: [],        // e.g. ['epic', 'task', 'bug', 'feature']
+  labels: [],      // arbitrary label strings
+  labelMode: 'or', // 'and' | 'or'
+  epic: '',        // parent epic id
+  blocked: '',     // 'yes' | 'no' | ''
+};
+
+let _filters = { ..._defaultFilters, priority: [], phase: [], type: [], labels: [] };
+
+function filtersFromURL() {
+  const p = new URLSearchParams(window.location.search);
+  return {
+    priority: p.get('priority') ? p.get('priority').split(',').map(Number) : [],
+    phase: p.get('phase') ? p.get('phase').split(',') : [],
+    type: p.get('type') ? p.get('type').split(',') : [],
+    labels: p.get('labels') ? p.get('labels').split(',') : [],
+    labelMode: p.get('labelMode') || 'or',
+    epic: p.get('epic') || '',
+    blocked: p.get('blocked') || '',
+  };
+}
+
+function filtersToURL(f) {
+  const p = new URLSearchParams();
+  if (f.priority.length) p.set('priority', f.priority.join(','));
+  if (f.phase.length) p.set('phase', f.phase.join(','));
+  if (f.type.length) p.set('type', f.type.join(','));
+  if (f.labels.length) p.set('labels', f.labels.join(','));
+  if (f.labelMode !== 'or') p.set('labelMode', f.labelMode);
+  if (f.epic) p.set('epic', f.epic);
+  if (f.blocked) p.set('blocked', f.blocked);
+  const qs = p.toString();
+  const newUrl = window.location.pathname + (qs ? '?' + qs : '');
+  history.replaceState({}, '', newUrl);
+}
+
+function hasActiveFilters(f) {
+  return f.priority.length || f.phase.length || f.type.length || f.labels.length || f.epic || f.blocked;
+}
+
+function getPhase(labels) {
+  for (const l of labels || []) {
+    if (l.startsWith('readiness:')) return l.split(':')[1];
+  }
+  return null;
+}
+
+function isBlocked(issue) {
+  return issue.status === 'open' && issue.dependencies?.some(d => d.status !== 'closed');
+}
+
+function getEpicParent(issue) {
+  // Check if issue has a parent-child dependency where parent is an epic
+  for (const d of issue.dependencies || []) {
+    if (d.type === 'parent-child') return d.depends_on_id;
+  }
+  return null;
+}
+
+function applyFilters(issues, filters) {
+  return issues.filter(issue => {
+    // Priority filter
+    if (filters.priority.length && !filters.priority.includes(issue.priority)) return false;
+    // Phase filter
+    if (filters.phase.length) {
+      const phase = getPhase(issue.labels);
+      if (!phase || !filters.phase.includes(phase)) return false;
+    }
+    // Type filter
+    if (filters.type.length && !filters.type.includes(issue.issue_type)) return false;
+    // Label filter
+    if (filters.labels.length) {
+      const issueLabels = issue.labels || [];
+      if (filters.labelMode === 'and') {
+        if (!filters.labels.every(l => issueLabels.includes(l))) return false;
+      } else {
+        if (!filters.labels.some(l => issueLabels.includes(l))) return false;
+      }
+    }
+    // Epic filter
+    if (filters.epic) {
+      const parent = getEpicParent(issue);
+      if (parent !== filters.epic && issue.id !== filters.epic) return false;
+    }
+    // Blocked filter
+    if (filters.blocked === 'yes' && !isBlocked(issue)) return false;
+    if (filters.blocked === 'no' && isBlocked(issue)) return false;
+    return true;
+  });
+}
+
+function collectAllLabels(issues) {
+  const set = new Set();
+  for (const i of issues) {
+    for (const l of i.labels || []) {
+      if (!l.startsWith('readiness:') && !l.startsWith('dispatch:')) set.add(l);
+    }
+  }
+  return [...set].sort();
+}
+
+function collectEpics(issues) {
+  return issues.filter(i => i.issue_type === 'epic' && i.status !== 'closed');
+}
+
+function toggleInArray(arr, val) {
+  const idx = arr.indexOf(val);
+  if (idx >= 0) arr.splice(idx, 1);
+  else arr.push(val);
+  return arr;
+}
+
+function renderFilterBar() {
+  const allLabels = collectAllLabels(_allBeads);
+  const epics = collectEpics(_allBeads);
+  const f = _filters;
+  const active = hasActiveFilters(f);
+
+  function chip(label, isActive, onclick) {
+    const cls = isActive
+      ? 'bg-indigo-600 text-white'
+      : 'bg-gray-700 text-gray-300 hover:bg-gray-600';
+    return `<button class="px-2 py-0.5 rounded-full text-xs font-medium ${cls} transition-colors" onclick="${onclick}">${label}</button>`;
+  }
+
+  // Priority chips
+  const priorityChips = [0,1,2,3,4].map(p =>
+    chip(`P${p}`, f.priority.includes(p), `toggleFilter('priority',${p})`)
+  ).join('');
+
+  // Phase chips
+  const phases = ['idea','draft','specified','approved'];
+  const phaseChips = phases.map(p =>
+    chip(p, f.phase.includes(p), `toggleFilter('phase','${p}')`)
+  ).join('');
+
+  // Type chips
+  const types = ['epic','task','bug','feature'];
+  const typeChips = types.map(t =>
+    chip(t, f.type.includes(t), `toggleFilter('type','${t}')`)
+  ).join('');
+
+  // Blocked toggle
+  const blockedChips =
+    chip('Blocked', f.blocked === 'yes', `toggleFilter('blocked','yes')`) +
+    chip('Not blocked', f.blocked === 'no', `toggleFilter('blocked','no')`);
+
+  // Labels dropdown
+  const labelDropdown = allLabels.length ? `
+    <div class="relative inline-block" id="label-dropdown-wrap">
+      <button class="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 text-gray-300 hover:bg-gray-600"
+              onclick="document.getElementById('label-dropdown').classList.toggle('hidden')">
+        Labels${f.labels.length ? ` (${f.labels.length})` : ''} ▾
+      </button>
+      <div id="label-dropdown" class="hidden absolute z-20 mt-1 bg-gray-800 border border-gray-600 rounded shadow-lg max-h-48 overflow-y-auto w-48">
+        <div class="p-1 border-b border-gray-700 flex items-center gap-1">
+          <span class="text-xs text-gray-400">Mode:</span>
+          <button class="px-1.5 py-0.5 rounded text-xs ${f.labelMode === 'or' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300'}"
+                  onclick="toggleFilter('labelMode','or')">OR</button>
+          <button class="px-1.5 py-0.5 rounded text-xs ${f.labelMode === 'and' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300'}"
+                  onclick="toggleFilter('labelMode','and')">AND</button>
+        </div>
+        ${allLabels.map(l => `
+          <label class="flex items-center gap-2 px-2 py-1 hover:bg-gray-700 cursor-pointer text-xs">
+            <input type="checkbox" ${f.labels.includes(l) ? 'checked' : ''}
+                   onchange="toggleFilter('label','${l.replace(/'/g, "\\'")}')" class="rounded">
+            <span class="truncate">${l}</span>
+          </label>
+        `).join('')}
+      </div>
+    </div>` : '';
+
+  // Epic dropdown
+  const epicDropdown = epics.length ? `
+    <select class="px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-300 border-none focus:ring-1 focus:ring-indigo-500"
+            onchange="toggleFilter('epic', this.value)">
+      <option value="">All epics</option>
+      ${epics.map(e => `<option value="${e.id}" ${f.epic === e.id ? 'selected' : ''}>${e.title}</option>`).join('')}
+    </select>` : '';
+
+  // Active filter chips (removable)
+  let activeChips = '';
+  if (active) {
+    const chips = [];
+    for (const p of f.priority) chips.push(`<span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">P${p}<button class="ml-0.5 hover:text-white" onclick="toggleFilter('priority',${p})">&times;</button></span>`);
+    for (const p of f.phase) chips.push(`<span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">${p}<button class="ml-0.5 hover:text-white" onclick="toggleFilter('phase','${p}')">&times;</button></span>`);
+    for (const t of f.type) chips.push(`<span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">${t}<button class="ml-0.5 hover:text-white" onclick="toggleFilter('type','${t}')">&times;</button></span>`);
+    for (const l of f.labels) chips.push(`<span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">${l}<button class="ml-0.5 hover:text-white" onclick="toggleFilter('label','${l.replace(/'/g, "\\'")}')">&times;</button></span>`);
+    if (f.blocked) chips.push(`<span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">${f.blocked === 'yes' ? 'Blocked' : 'Not blocked'}<button class="ml-0.5 hover:text-white" onclick="toggleFilter('blocked','')">&times;</button></span>`);
+    if (f.epic) {
+      const epicName = _allBeads.find(b => b.id === f.epic)?.title || f.epic;
+      chips.push(`<span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">Epic: ${epicName}<button class="ml-0.5 hover:text-white" onclick="toggleFilter('epic','')">&times;</button></span>`);
+    }
+    activeChips = `
+      <div class="flex items-center gap-1 flex-wrap mt-2">
+        <span class="text-xs text-gray-500">Active:</span>
+        ${chips.join('')}
+        <button class="text-xs text-gray-400 hover:text-white ml-1 underline" onclick="clearAllFilters()">Clear all</button>
+      </div>`;
+  }
+
+  return `
+    <div class="mb-4 space-y-2" id="filter-bar">
+      <div class="flex items-center gap-3 flex-wrap text-xs">
+        <span class="text-gray-500 font-medium">Priority</span>
+        <div class="flex gap-1">${priorityChips}</div>
+        <span class="text-gray-600">|</span>
+        <span class="text-gray-500 font-medium">Phase</span>
+        <div class="flex gap-1">${phaseChips}</div>
+        <span class="text-gray-600">|</span>
+        <span class="text-gray-500 font-medium">Type</span>
+        <div class="flex gap-1">${typeChips}</div>
+        <span class="text-gray-600">|</span>
+        <div class="flex gap-1">${blockedChips}</div>
+        <span class="text-gray-600">|</span>
+        ${labelDropdown}
+        ${epicDropdown}
+      </div>
+      ${activeChips}
+    </div>`;
+}
+
+// Global filter toggle handler
+window.toggleFilter = function(dimension, value) {
+  if (dimension === 'priority') {
+    toggleInArray(_filters.priority, value);
+  } else if (dimension === 'phase') {
+    toggleInArray(_filters.phase, value);
+  } else if (dimension === 'type') {
+    toggleInArray(_filters.type, value);
+  } else if (dimension === 'label') {
+    toggleInArray(_filters.labels, value);
+  } else if (dimension === 'labelMode') {
+    _filters.labelMode = value;
+  } else if (dimension === 'epic') {
+    _filters.epic = value;
+  } else if (dimension === 'blocked') {
+    _filters.blocked = _filters.blocked === value ? '' : value;
+  }
+  filtersToURL(_filters);
+  const searchInput = document.getElementById('bead-search');
+  renderBeadResults(searchInput ? searchInput.value.trim() : '');
+};
+
+window.clearAllFilters = function() {
+  _filters = { ..._defaultFilters, priority: [], phase: [], type: [], labels: [] };
+  filtersToURL(_filters);
+  const searchInput = document.getElementById('bead-search');
+  renderBeadResults(searchInput ? searchInput.value.trim() : '');
+};
+
+// Close label dropdown when clicking outside
+document.addEventListener('click', (e) => {
+  const wrap = document.getElementById('label-dropdown-wrap');
+  const dd = document.getElementById('label-dropdown');
+  if (dd && wrap && !wrap.contains(e.target)) {
+    dd.classList.add('hidden');
+  }
+});
+
 async function renderBeads() {
   pageTitle.textContent = 'Beads';
   const data = await api('/api/beads/list');
@@ -101,7 +366,10 @@ async function renderBeads() {
   }
   _allBeads = Array.isArray(data) ? data : [];
 
-  // Build search bar + results container
+  // Restore filters from URL
+  _filters = filtersFromURL();
+
+  // Build search bar + filter bar + results container
   content.innerHTML = `
     <div class="mb-4 relative">
       <input type="text" id="bead-search" placeholder="Search beads by title or description..."
@@ -111,6 +379,7 @@ async function renderBeads() {
       <button id="bead-search-clear" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400
               hover:text-gray-200 text-lg leading-none hidden max-w-xl" title="Clear search">&times;</button>
     </div>
+    <div id="filter-bar-container"></div>
     <div id="bead-results"></div>`;
 
   const searchInput = document.getElementById('bead-search');
@@ -150,7 +419,13 @@ function renderBeadResults(query) {
   const container = document.getElementById('bead-results');
   if (!container) return;
 
-  const filtered = filterBeads(_allBeads, query);
+  // Render filter bar
+  const filterContainer = document.getElementById('filter-bar-container');
+  if (filterContainer) filterContainer.innerHTML = renderFilterBar();
+
+  // Apply text search then structured filters
+  const textFiltered = filterBeads(_allBeads, query);
+  const filtered = applyFilters(textFiltered, _filters);
   const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
 
   // Group by status
@@ -204,19 +479,20 @@ function renderBeadResults(query) {
   }
 
   // Empty state
-  if (query && !filtered.length) {
+  const hasFilters = hasActiveFilters(_filters);
+  if ((query || hasFilters) && !filtered.length) {
     container.innerHTML = `
       <div class="text-center py-12 text-gray-400">
         <div class="text-4xl mb-3">🔍</div>
-        <div class="text-lg mb-1">No beads match "${query.replace(/</g, '&lt;')}"</div>
-        <div class="text-sm">Try different keywords or check spelling</div>
+        <div class="text-lg mb-1">No beads match ${query ? `"${query.replace(/</g, '&lt;')}"` : 'the active filters'}</div>
+        <div class="text-sm">${hasFilters ? 'Try removing some filters or ' : ''}Try different keywords or check spelling</div>
       </div>`;
     return;
   }
 
   // Search result count when filtering
-  const countHtml = query
-    ? `<div class="text-sm text-gray-400 mb-3">${filtered.length} bead${filtered.length !== 1 ? 's' : ''} matching "${query.replace(/</g, '&lt;')}"</div>`
+  const countHtml = (query || hasFilters)
+    ? `<div class="text-sm text-gray-400 mb-3">${filtered.length} bead${filtered.length !== 1 ? 's' : ''}${query ? ` matching "${query.replace(/</g, '&lt;')}"` : ''}${hasFilters ? ' (filtered)' : ''}</div>`
     : '';
 
   container.innerHTML = countHtml +
@@ -1893,7 +2169,7 @@ document.addEventListener('click', (e) => {
   const link = e.target.closest('a[href]');
   if (link && link.origin === window.location.origin) {
     e.preventDefault();
-    navigateTo(link.pathname);
+    navigateTo(link.pathname + link.search);
   }
 });
 
