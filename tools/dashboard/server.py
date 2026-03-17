@@ -330,8 +330,14 @@ async def api_terminals(request):
     dead = [k for k in _active_terminals if k not in live]
     for k in dead:
         del _active_terminals[k]
+    # Detect and cache type for any untracked sessions (e.g. after server restart)
+    for name in live:
+        if name not in _active_terminals:
+            info = _detect_terminal_type(name)
+            info["started"] = asyncio.get_event_loop().time()
+            _active_terminals[name] = info
     return JSONResponse([
-        {"id": name, "alive": True, **_active_terminals.get(name, {"cmd": "?", "env": "host"})}
+        {"id": name, "alive": True, **_active_terminals[name]}
         for name in live
     ])
 
@@ -381,6 +387,35 @@ def _list_dashboard_tmux() -> list[str]:
     if result.returncode != 0:
         return []
     return [s for s in result.stdout.strip().split("\n") if s.startswith("auto-")]
+
+
+def _detect_terminal_type(tmux_name: str) -> dict:
+    """Detect terminal session type for untracked sessions (e.g. after server restart)."""
+    detected_cmd = "/bin/bash"
+    detected_env = "host"
+    # Check if a docker container with this name is running -> container session
+    cr = subprocess.run(
+        ["docker", "inspect", "-f", "{{.Path}}", tmux_name],
+        capture_output=True, text=True,
+    )
+    if cr.returncode == 0:
+        detected_env = "container"
+        entrypoint = cr.stdout.strip()
+        if "bash" in entrypoint or entrypoint == "sh":
+            detected_cmd = "autonomy-agent-bash"
+        else:
+            detected_cmd = "autonomy-agent-claude"
+    else:
+        # Host session -- check tmux pane for claude
+        pr = subprocess.run(
+            ["tmux", "display-message", "-t", tmux_name, "-p",
+             "#{pane_start_command} #{pane_current_command}"],
+            capture_output=True, text=True,
+        )
+        pane_info = pr.stdout.strip().lower() if pr.returncode == 0 else ""
+        if "claude" in pane_info:
+            detected_cmd = "claude --dangerously-skip-permissions"
+    return {"cmd": detected_cmd, "env": detected_env}
 
 
 async def ws_terminal(websocket: WebSocket):
@@ -466,11 +501,9 @@ async def ws_terminal(websocket: WebSocket):
     if tmux_name not in _active_terminals:
         if attach:
             # Reconnecting to a session we lost track of (server restart)
-            _active_terminals[tmux_name] = {
-                "cmd": "?",
-                "env": "host",
-                "started": asyncio.get_event_loop().time(),
-            }
+            info = _detect_terminal_type(tmux_name)
+            info["started"] = asyncio.get_event_loop().time()
+            _active_terminals[tmux_name] = info
         else:
             orig_cmd = params.get("cmd", "/bin/bash")
             is_container = "autonomy-agent" in orig_cmd
