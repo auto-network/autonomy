@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from agents.dispatch_db import init_db, insert_run
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
 
@@ -769,6 +771,36 @@ def _ingest_session(result: DispatchResult) -> None:
                     pass
 
 
+def _record_run(agent: RunningAgent, result: DispatchResult) -> None:
+    """Record dispatch run metadata to SQLite. Best-effort — never raises."""
+    try:
+        # Derive run_id from output dir name (e.g. auto-ahd-20260316-234902)
+        run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+
+        decision = result.decision or {}
+        status = decision.get("status", "FAILED")
+        reason = decision.get("reason", "No decision file")
+
+        insert_run(
+            run_id=run_id,
+            bead_id=agent.bead_id,
+            started_at=agent.started_at,
+            completed_at=time.time(),
+            status=status,
+            reason=reason,
+            decision=result.decision,
+            commit_hash=result.commit_hash,
+            branch=result.branch or agent.branch,
+            branch_base=agent.branch_base,
+            image=agent.image,
+            container_name=agent.container_name,
+            exit_code=result.exit_code,
+            output_dir=agent.output_dir,
+        )
+    except Exception as e:
+        print(f"  WARNING: Failed to record run to SQLite: {e}", file=sys.stderr)
+
+
 # ── Poll and collect ─────────────────────────────────────────────
 
 
@@ -798,6 +830,7 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             set_dispatch_state(agent.bead_id, "collecting")
             result = collect_results(agent, exit_code)
             process_decision(result)
+            _record_run(agent, result)
             _ingest_session(result)
         except Exception as e:
             error_msg = f"Collection error: {type(e).__name__}: {e}"
@@ -817,11 +850,13 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
                 print(f"  Recovered results from timed-out {agent.bead_id}")
                 set_dispatch_state(agent.bead_id, "collecting")
                 process_decision(result)
+                _record_run(agent, result)
             else:
                 set_dispatch_state(agent.bead_id, "failed",
                                    f"Agent timeout ({MAX_AGENT_RUNTIME}s)")
                 release_bead(agent.bead_id, "FAILED",
                              f"Agent timeout ({MAX_AGENT_RUNTIME}s)")
+                _record_run(agent, result)
                 cleanup_worktree(agent.worktree_path)
         except Exception as e:
             error_msg = f"Timeout collection error: {type(e).__name__}: {e}"
@@ -1027,6 +1062,9 @@ def main():
     print(f"  Queue: {config.label_filter or 'all approved'}")
     print(f"  Max concurrent: {config.max_concurrent}")
     print(f"  Loop: {config.loop} (interval: {config.interval}s)")
+
+    # Initialize dispatch runs database
+    init_db()
 
     # Recover agents from a prior dispatcher session
     running: list[RunningAgent] = recover_running_agents()
