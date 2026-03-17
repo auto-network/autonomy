@@ -72,9 +72,27 @@ When you complete your work, write a decision file to `/workspace/output/decisio
 **All fields below are optional.** Include them when you have meaningful signal — omit when unsure.
 
 **scores** (1–5 scale, integers):
-- `tooling` — infrastructure experience (bd, graph, git, container, deps). 5 = smooth, 1 = constant fights.
-- `clarity` — was the task well-specified enough to execute? 5 = crystal clear, 1 = had to guess everything.
-- `confidence` — how solid is the delivered solution? 5 = production-ready, 1 = barely a sketch.
+
+- `tooling` — infrastructure experience (bd, graph, git, container, deps). Score reflects **outcome and friction**, not fault. It does not matter whether a problem was "pre-existing" or "not your fault" — score the experience you actually had.
+  - 5 = everything worked smoothly, no friction
+  - 4 = minor annoyances, no workarounds needed
+  - 3 = workaround needed, resolved in ≤4 turns
+  - 2 = workaround needed, took 5+ turns to resolve
+  - 1 = blocking tool failure (e.g. missing dependency, cannot run tests, broken CLI). Any tool failure that prevented you from completing a normal part of your workflow (testing, committing, searching) is a 1, period.
+
+- `clarity` — could you reconstruct the bead from the diffs alone?
+  - 5 = the diffs are a perfect expression of the spec — no new, missing, or conflicting content
+  - 4 = diffs match the spec with minor omissions or ambiguities that did not affect the outcome
+  - 3 = had to add things not in the spec, or the spec described things that did not end up being relevant
+  - 2 = significant mismatch — diffs contain substantial work not described, or spec described things that could not be implemented as written
+  - 1 = the spec and the diffs describe different tasks
+
+- `confidence` — how certain are you that this fully addresses the bead and will function exactly as desired?
+  - 5 = certain: tested, verified, covers all described behavior
+  - 4 = high: works correctly in all cases I could verify, minor uncertainty remains
+  - 3 = moderate: core functionality works, but some paths are unverified or I had to make judgment calls
+  - 2 = low: I believe the approach is right but could not fully verify (e.g. tests could not run, dependency missing, environment gap)
+  - 1 = uncertain: best effort given constraints, but substantial risk it does not work as intended
 
 **time_breakdown** (approximate % of time in each phase, should roughly sum to 100):
 - `research_pct` — reading docs, searching graph, understanding codebase
