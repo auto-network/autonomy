@@ -1244,6 +1244,9 @@ async function _livePollTail() {
  * Render parsed session entries into a container element.
  * Shared by the live panel and the trace view session log.
  */
+// Map tool_id -> {tool_name, tool_headline} for linking results to calls
+const _toolIdMap = {};
+
 function _renderSessionEntries(entries, container) {
   for (const entry of entries) {
     const el = document.createElement('div');
@@ -1276,11 +1279,21 @@ function _renderSessionEntries(entries, container) {
 
     } else if (entry.type === 'tool_use') {
       el.className += ' live-entry-tool';
+      // Track tool_id for matching results
+      if (entry.tool_id) {
+        _toolIdMap[entry.tool_id] = {
+          tool_name: entry.tool_name,
+          tool_headline: entry.tool_headline || '',
+        };
+      }
       const details = document.createElement('details');
       details.className = 'text-sm';
+      const headline = entry.tool_headline
+        ? ' ' + entry.tool_headline.replace(/`([^`]+)`/g, '<code class="text-purple-300 bg-gray-800 px-1 rounded">$1</code>')
+        : '';
       details.innerHTML = `
-        <summary class="live-tool-toggle text-purple-400 text-xs font-mono">
-          ${escapeHtml(entry.tool_name)}
+        <summary class="live-tool-toggle text-purple-400 text-xs font-mono cursor-pointer select-none">
+          <strong>${escapeHtml(entry.tool_name)}</strong>${headline}
           <span class="live-entry-time ml-2">${timeStr}</span>
         </summary>
         <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-32 overflow-y-auto bg-gray-800 rounded p-2">${escapeHtml(entry.content)}</pre>`;
@@ -1291,9 +1304,14 @@ function _renderSessionEntries(entries, container) {
       const details = document.createElement('details');
       details.className = 'text-sm';
       const preview = (entry.content || '').slice(0, 80).replace(/\n/g, ' ');
+      // Show which tool this result belongs to
+      const caller = entry.tool_id ? _toolIdMap[entry.tool_id] : null;
+      const resultLabel = caller
+        ? `<span class="text-gray-400">${escapeHtml(caller.tool_name)}</span> result`
+        : 'result';
       details.innerHTML = `
-        <summary class="live-tool-toggle text-gray-500 text-xs font-mono">
-          result <span class="text-gray-600">${escapeHtml(preview)}${entry.content.length > 80 ? '...' : ''}</span>
+        <summary class="live-tool-toggle text-gray-500 text-xs font-mono cursor-pointer select-none">
+          ${resultLabel} <span class="text-gray-600">${escapeHtml(preview)}${entry.content.length > 80 ? '...' : ''}</span>
           <span class="live-entry-time ml-2">${timeStr}</span>
         </summary>
         <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-48 overflow-y-auto bg-gray-800 rounded p-2">${escapeHtml(entry.content)}</pre>`;
