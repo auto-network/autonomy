@@ -337,15 +337,13 @@ window.toggleFilter = function(dimension, value) {
     _filters.blocked = _filters.blocked === value ? '' : value;
   }
   filtersToURL(_filters);
-  const searchInput = document.getElementById('bead-search');
-  renderBeadResults(searchInput ? searchInput.value.trim() : '');
+  renderBeadResults(globalSearch.value.trim());
 };
 
 window.clearAllFilters = function() {
   _filters = { ..._defaultFilters, priority: [], phase: [], type: [], labels: [] };
   filtersToURL(_filters);
-  const searchInput = document.getElementById('bead-search');
-  renderBeadResults(searchInput ? searchInput.value.trim() : '');
+  renderBeadResults(globalSearch.value.trim());
 };
 
 // Close label dropdown when clicking outside
@@ -369,50 +367,23 @@ async function renderBeads() {
   // Restore filters from URL
   _filters = filtersFromURL();
 
-  // Build search bar + filter bar + results container
+  // Build filter bar + results container (search uses global header input)
   content.innerHTML = `
-    <div class="mb-4 relative">
-      <input type="text" id="bead-search" placeholder="Search beads by title or description..."
-             class="bg-gray-700 text-gray-100 px-4 py-2 rounded-lg w-full max-w-xl text-sm
-                    focus:outline-none focus:ring-2 focus:ring-indigo-500 pr-8"
-             autocomplete="off">
-      <button id="bead-search-clear" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400
-              hover:text-gray-200 text-lg leading-none hidden max-w-xl" title="Clear search">&times;</button>
-    </div>
     <div id="filter-bar-container"></div>
     <div id="bead-results"></div>`;
 
-  const searchInput = document.getElementById('bead-search');
-  const clearBtn = document.getElementById('bead-search-clear');
+  // Render with current global search query
+  renderBeadResults(globalSearch.value.trim());
 
-  // Render with current (empty) query
-  renderBeadResults('');
+  // Debounced search via global input (300ms)
+  globalSearch.addEventListener('input', _beadsSearchHandler);
+}
 
-  // Debounced search (300ms)
-  searchInput.addEventListener('input', () => {
-    clearBtn.classList.toggle('hidden', !searchInput.value);
-    if (_beadsSearchTimer) clearTimeout(_beadsSearchTimer);
-    _beadsSearchTimer = setTimeout(() => {
-      renderBeadResults(searchInput.value.trim());
-    }, 300);
-  });
-
-  // Clear button
-  clearBtn.addEventListener('click', () => {
-    searchInput.value = '';
-    clearBtn.classList.add('hidden');
-    renderBeadResults('');
-    searchInput.focus();
-  });
-
-  // Escape key clears search
-  searchInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      searchInput.value = '';
-      clearBtn.classList.add('hidden');
-      renderBeadResults('');
-    }
-  });
+function _beadsSearchHandler() {
+  if (_beadsSearchTimer) clearTimeout(_beadsSearchTimer);
+  _beadsSearchTimer = setTimeout(() => {
+    renderBeadResults(globalSearch.value.trim());
+  }, 300);
 }
 
 function renderBeadResults(query) {
@@ -840,14 +811,10 @@ async function renderTimeline() {
   }
 
   async function refresh() {
-    const scope = document.getElementById('scope-select')?.value || '';
     const rangeParam = rangeToParam(currentRange);
     let statsUrl = '/api/timeline/stats';
     let feedUrl = '/api/timeline';
-    const params = [];
-    if (rangeParam) params.push('range=' + rangeParam);
-    if (scope) params.push('project=' + encodeURIComponent(scope));
-    const qs = params.length ? '?' + params.join('&') : '';
+    const qs = rangeParam ? '?range=' + rangeParam : '';
     statsUrl += qs;
     feedUrl += qs;
 
@@ -2096,6 +2063,9 @@ function route() {
   if (dispatchInterval) { clearInterval(dispatchInterval); dispatchInterval = null; }
   if (timelineInterval) { clearInterval(timelineInterval); timelineInterval = null; }
 
+  // Remove bead search listener when leaving beads page
+  globalSearch.removeEventListener('input', _beadsSearchHandler);
+
   // Update active nav
   document.querySelectorAll('.nav-link').forEach(el => {
     el.classList.toggle('active', path.startsWith('/' + el.dataset.page));
@@ -2144,21 +2114,10 @@ globalSearch.addEventListener('keydown', (e) => {
     if (q) {
       const path = window.location.pathname;
       if (path === '/' || path === '/beads') {
-        // On beads page: focus the bead search input and trigger search there
-        const beadSearch = document.getElementById('bead-search');
-        if (beadSearch) {
-          beadSearch.value = q;
-          beadSearch.dispatchEvent(new Event('input'));
-          beadSearch.focus();
-          globalSearch.value = '';
-          const clearBtn = document.getElementById('bead-search-clear');
-          if (clearBtn) clearBtn.classList.remove('hidden');
-        }
+        // On beads page: trigger bead search directly
+        renderBeadResults(q);
       } else {
-        const scope = document.getElementById('scope-select')?.value || '';
-        let url = `/search?q=${encodeURIComponent(q)}`;
-        if (scope) url += `&project=${encodeURIComponent(scope)}`;
-        navigateTo(url);
+        navigateTo(`/search?q=${encodeURIComponent(q)}`);
       }
     }
   }
@@ -2247,21 +2206,6 @@ setInterval(updateNavBadges, 5000);
 // Load stats
 api('/api/stats').then(data => {
   statsSummary.textContent = data.results || '';
-});
-
-// Load project list for scope picker
-api('/api/projects').then(data => {
-  const select = document.getElementById('scope-select');
-  const lines = (data.results || '').split('\n');
-  for (const line of lines) {
-    const match = line.trim().match(/^\s*(\S+)\s+\d+/);
-    if (match && !match[1].includes('─') && match[1] !== 'Project') {
-      const opt = document.createElement('option');
-      opt.value = match[1];
-      opt.textContent = match[1];
-      select.appendChild(opt);
-    }
-  }
 });
 
 // Initial route
