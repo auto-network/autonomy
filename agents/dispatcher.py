@@ -196,7 +196,7 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
 
 def get_claimed_beads() -> set[str]:
     """Get IDs of beads currently claimed by the dispatcher."""
-    out = run_bd(["query", "label=work:claimed", "--json"])
+    out = run_bd(["query", 'label="work:claimed"', "--json"])
     if not out:
         return set()
     try:
