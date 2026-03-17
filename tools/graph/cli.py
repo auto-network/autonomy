@@ -897,7 +897,8 @@ def _cmd_primer(args):
         include_pitfalls=not args.no_pitfalls,
     )
     if args.format == "dashboard":
-        return format_for_dashboard(data)
+        import json as _json
+        return _json.dumps(format_for_dashboard(data), indent=2)
     return format_for_agent(data)
 
 

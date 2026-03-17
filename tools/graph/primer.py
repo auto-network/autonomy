@@ -8,17 +8,17 @@ The graph is the source of truth. The primer is a disposable view.
 If the graph changes, the next primer reflects it automatically.
 
 Architecture:
-    collect_primer_data() → dict    — pure data, no formatting
-    format_for_agent(data) → str    — context markdown with follow-on commands
-    format_for_dashboard(data) → str — human-friendly markdown (no agent noise)
-    generate_primer() → str          — backward-compat wrapper (collect + agent format)
+    collect_primer_data() → dict      — pure data, no formatting
+    format_for_agent(data) → str      — context markdown with follow-on commands
+    format_for_dashboard(data) → dict — structured JSON for dashboard API
+    generate_primer() → str           — backward-compat wrapper (collect + agent format)
 """
 
 from __future__ import annotations
 import json
 import subprocess
 
-from .db import GraphDB, DEFAULT_DB
+from .db import GraphDB, DEFAULT_DB, _sanitize_fts_query
 
 
 def _run_bd(args: list[str], timeout: int = 15) -> str:
@@ -133,7 +133,6 @@ def collect_primer_data(
         title_words = [w for w in bead["title"].split() if len(w) > 3]
         if title_words:
             query_terms = " ".join(title_words[:5])
-            from .db import _sanitize_fts_query
             fts_q = _sanitize_fts_query(query_terms, or_mode=True)
             try:
                 notes = db.conn.execute(
@@ -171,50 +170,65 @@ def collect_primer_data(
                     "tags": meta.get("tags", []),
                 })
 
-    # ── 4. Pitfalls ──────────────────────────────────────────
-    if include_pitfalls:
-        try:
-            pitfalls = db.conn.execute(
-                """SELECT s.id, t.content FROM sources s
-                   JOIN thoughts t ON t.source_id = s.id
-                   WHERE s.type = 'note'
-                   AND s.metadata LIKE '%pitfall%'
-                   ORDER BY s.created_at DESC LIMIT 10""",
-            ).fetchall()
+    # ── 4. Pitfalls (scoped to bead topics) ─────────────────
+    if include_pitfalls and bead and bead.get("title"):
+        title_words = [w for w in bead["title"].split() if len(w) > 3]
+        if title_words:
+            pit_q = _sanitize_fts_query(" ".join(title_words[:5]), or_mode=True)
+            try:
+                pitfalls = db.conn.execute(
+                    """SELECT s.id, t.content, s.metadata FROM sources s
+                       JOIN thoughts t ON t.source_id = s.id
+                       JOIN thoughts_fts fts ON fts.rowid = t.rowid
+                       WHERE s.type = 'note'
+                       AND s.metadata LIKE '%pitfall%'
+                       AND thoughts_fts MATCH ?
+                       ORDER BY s.created_at DESC LIMIT 10""",
+                    (pit_q,),
+                ).fetchall()
+            except Exception:
+                pitfalls = []
 
             for p in (pitfalls or []):
+                meta = json.loads(p["metadata"]) if p["metadata"] else {}
                 result["pitfalls"].append({
                     "source_id": p["id"],
                     "content": p["content"],
+                    "tags": meta.get("tags", []),
                 })
-        except Exception:
-            pass
 
-    # ── 5. Related beads in same epic ────────────────────────
+    # ── 5. Semantically related beads (via bd find-duplicates) ──
     if include_related_beads:
-        parent_out = _run_bd(["dep", "list", bead_id, "--json"])
-        if parent_out:
+        dup_out = _run_bd(
+            ["find-duplicates", "--json", "--threshold", "0.3", "--limit", "50"],
+            timeout=30,
+        )
+        if dup_out:
             try:
-                deps = json.loads(parent_out)
-                for dep in deps:
-                    if dep.get("type") == "parent-child" and dep.get("direction") == "parent":
-                        sibling_out = _run_bd(["dep", "list", dep["target"], "--json"])
-                        if sibling_out:
-                            sibling_deps = json.loads(sibling_out)
-                            siblings = [s for s in sibling_deps
-                                        if s.get("type") == "parent-child"
-                                        and s.get("direction") == "child"
-                                        and s.get("source") != bead_id]
-                            for s in siblings[:8]:
-                                sib_bead = _get_bead(s["source"])
-                                if sib_bead:
-                                    result["related_beads"].append({
-                                        "id": s["source"],
-                                        "title": sib_bead.get("title", "?"),
-                                        "priority": sib_bead.get("priority", "?"),
-                                        "status": sib_bead.get("status", "?"),
-                                    })
-                        break
+                dup_data = json.loads(dup_out)
+                pairs = dup_data.get("pairs", [])
+                for pair in pairs:
+                    other_id = None
+                    if pair.get("issue_a_id") == bead_id:
+                        other_id = pair.get("issue_b_id")
+                        other_title = pair.get("issue_b_title", "?")
+                    elif pair.get("issue_b_id") == bead_id:
+                        other_id = pair.get("issue_a_id")
+                        other_title = pair.get("issue_a_title", "?")
+                    if other_id:
+                        other_bead = _get_bead(other_id)
+                        result["related_beads"].append({
+                            "bead_id": other_id,
+                            "title": other_title,
+                            "priority": other_bead.get("priority", "?") if other_bead else "?",
+                            "status": other_bead.get("status", "?") if other_bead else "?",
+                            "similarity": round(pair.get("similarity", 0), 3),
+                        })
+                # Sort by similarity descending, keep top 8
+                result["related_beads"].sort(
+                    key=lambda x: x.get("similarity", 0), reverse=True,
+                )
+                result["related_beads"] = result["related_beads"][:8]
             except (json.JSONDecodeError, KeyError):
                 pass
 
@@ -285,74 +299,78 @@ def format_for_agent(data: dict) -> str:
 
     # ── Related beads ────────────────────────────────────────
     if data["related_beads"]:
-        sections.append("\n## Related Beads (Same Epic)")
+        sections.append("\n## Similar Beads")
         for rb in data["related_beads"]:
             icon = "done" if rb["status"] == "closed" else "open"
-            sections.append(f"- [{icon}] {rb['id']}: {rb['title']} (P{rb['priority']})")
-        sections.append(f"\n_View details:_ `bd show <id>`")
+            sim = f" ({rb['similarity']:.0%})" if rb.get("similarity") else ""
+            bid = rb.get("bead_id", rb.get("id", "?"))
+            sections.append(f"- [{icon}] {bid}: {rb['title']} (P{rb['priority']}){sim}")
+            sections.append(f"  _Details:_ `bd show {bid}`")
 
     return "\n".join(sections)
 
 
-def format_for_dashboard(data: dict) -> str:
-    """Render primer data as human-friendly markdown for the dashboard.
+def format_for_dashboard(data: dict) -> dict:
+    """Return structured data for the dashboard /api/primer/{id} endpoint.
 
-    No agent instructions, no CLI commands. Uses readable formatting
-    that the dashboard can render as HTML.
+    Returns a dict (serialized as JSON) with each section carrying full IDs
+    so the frontend can render clickable links to /source/{src_id} and
+    /bead/{bead_id}. No agent instructions, no CLI commands.
     """
-    bead_id = data["bead_id"]
-    bead = data.get("bead")
-    sections = []
+    result = {
+        "bead_id": data["bead_id"],
+        "bead": data.get("bead"),
+        "provenance": [],
+        "related_notes": [],
+        "pitfalls": [],
+        "related_beads": [],
+    }
 
-    # ── Header ───────────────────────────────────────────────
-    if bead:
-        sections.append(f"# {bead['title']}")
-        sections.append(f"**Priority:** P{bead['priority']}  **Status:** {bead['status']}")
-        if bead["description"]:
-            sections.append(f"\n## Description\n{bead['description']}")
-        if bead["acceptance_criteria"]:
-            sections.append(f"\n## Acceptance Criteria\n{bead['acceptance_criteria']}")
-        if bead["design"]:
-            sections.append(f"\n## Design Notes\n{bead['design']}")
-    else:
-        sections.append(f"# {bead_id}")
-        sections.append("(Could not fetch bead details)")
+    # ── Provenance — with content previews ────────────────────
+    for prov in data.get("provenance", []):
+        entry = {
+            "source_id": prov["source_id"],
+            "relation": prov["relation"],
+            "note": prov.get("note", ""),
+            "turns": [],
+        }
+        for turn in prov.get("turns", []):
+            entry["turns"].append({
+                "turn_number": turn["turn_number"],
+                "role": turn["role"],
+                "content_preview": turn["content"][:500] + ("..." if len(turn["content"]) > 500 else ""),
+            })
+        result["provenance"].append(entry)
 
-    # ── Provenance ───────────────────────────────────────────
-    if data["provenance"]:
-        sections.append("\n## Background — Original Discussions")
-        for prov in data["provenance"]:
-            if prov["note"]:
-                sections.append(f"\n**{prov['relation']}:** {prov['note']}")
-            for turn in prov["turns"]:
-                sections.append(f"\n> **Turn {turn['turn_number']} — {turn['role']}:**\n> {turn['content']}")
+    # ── Related notes — with content previews ─────────────────
+    for note in data.get("related_notes", []):
+        content = note["content"]
+        result["related_notes"].append({
+            "source_id": note["source_id"],
+            "content_preview": content[:500] + ("..." if len(content) > 500 else ""),
+            "tags": note.get("tags", []),
+        })
 
-    # ── Related notes ────────────────────────────────────────
-    if data["related_notes"]:
-        sections.append("\n## Related Notes")
-        for note in data["related_notes"]:
-            content = note["content"]
-            if len(content) > 500:
-                content = content[:500] + "..."
-            sections.append(f"- {content}")
+    # ── Pitfalls — with content previews ──────────────────────
+    for p in data.get("pitfalls", []):
+        content = p["content"]
+        result["pitfalls"].append({
+            "source_id": p["source_id"],
+            "content_preview": content[:300] + ("..." if len(content) > 300 else ""),
+            "tags": p.get("tags", []),
+        })
 
-    # ── Pitfalls ─────────────────────────────────────────────
-    if data["pitfalls"]:
-        sections.append("\n## Known Pitfalls")
-        for p in data["pitfalls"]:
-            content = p["content"]
-            if len(content) > 300:
-                content = content[:300] + "..."
-            sections.append(f"- {content}")
+    # ── Related beads — with similarity scores ────────────────
+    for rb in data.get("related_beads", []):
+        result["related_beads"].append({
+            "bead_id": rb.get("bead_id", rb.get("id", "?")),
+            "title": rb.get("title", "?"),
+            "priority": rb.get("priority", "?"),
+            "status": rb.get("status", "?"),
+            "similarity": rb.get("similarity"),
+        })
 
-    # ── Related beads ────────────────────────────────────────
-    if data["related_beads"]:
-        sections.append("\n## Related Beads")
-        for rb in data["related_beads"]:
-            icon = "done" if rb["status"] == "closed" else "open"
-            sections.append(f"- [{icon}] {rb['id']}: {rb['title']} (P{rb['priority']})")
-
-    return "\n".join(sections)
+    return result
 
 
 # ── Backward-compatible wrappers ─────────────────────────────
