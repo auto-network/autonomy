@@ -30,7 +30,7 @@ from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 
-from agents.dispatch_db import list_runs, get_run, get_currently_running, DB_PATH
+from agents.dispatch_db import list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -450,7 +450,14 @@ async def api_dispatch_trace(request):
     # Fall back to filesystem if not in DB yet
     run_dir = AGENT_RUNS_DIR / run_name
     if not row and not run_dir.exists():
-        return JSONResponse({"error": "run not found"}, status_code=404)
+        # Try as bead ID — resolve to most recent run
+        runs = await asyncio.to_thread(get_runs_for_bead, run_name)
+        if runs:
+            row = runs[0]
+            run_name = row["id"]
+            run_dir = AGENT_RUNS_DIR / run_name
+        else:
+            return JSONResponse({"error": "run not found"}, status_code=404)
 
     # Extract fields from DB row (or fall back to filesystem)
     if row:
