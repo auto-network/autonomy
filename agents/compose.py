@@ -1,9 +1,9 @@
 """Agent prompt composer.
 
 Assembles the full agent prompt from:
-1. Dynamic context primer (bead-specific, generated from the graph)
-2. Shared instruction blocks (tool guidelines, experience report template)
-3. Dispatcher directives (readonly mode, output expectations)
+1. Dynamic context (bead-specific, generated from the graph) — pure context, no instructions
+2. Shared instruction blocks (tool guidelines = single source of truth, experience report template)
+3. Dispatcher directives (runtime-specific only: output paths, worktree info)
 
 Usage:
     python -m agents.compose <bead-id> [--output FILE]
@@ -31,40 +31,48 @@ def compose_prompt(bead_id: str) -> str:
     """Compose the full agent prompt for a bead.
 
     Returns a markdown string ready to be passed as the agent's prompt.
+
+    Assembly order:
+    1. format_for_agent(primer_data) — pure context with follow-on commands
+    2. agents/shared/*.md — tool_guidelines.md (single source of truth for
+       all tool instructions) + experience_report.md (template)
+    3. Dispatcher directives — ONLY runtime-specific bits not already in
+       tool_guidelines.md (readonly mode, output paths, etc.)
     """
     # Import here to avoid circular deps when running outside the repo
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from tools.graph.primer import generate_primer
+    from tools.graph.primer import collect_primer_data, format_for_agent
 
     sections = []
 
-    # 1. Dynamic primer — bead-specific context from the graph
-    primer = generate_primer(bead_id)
-    sections.append(primer)
+    # 1. Dynamic context — bead-specific data from the graph
+    #    Pure context: task description, provenance, notes, pitfalls, siblings.
+    #    No instructions, no CLI docs, no workflow guidance.
+    primer_data = collect_primer_data(bead_id)
+    sections.append(format_for_agent(primer_data))
 
-    # 2. Shared instruction blocks
+    # 2. Shared instruction blocks (tool_guidelines.md + experience_report.md)
+    #    tool_guidelines.md is THE single source of truth for:
+    #    - Workspace location, graph CLI, bd readonly commands
+    #    - Decision file schema (status, scores, time_breakdown, etc.)
+    #    - Working style guidance
     shared = load_shared_blocks()
     if shared:
         sections.append("\n---\n")
         sections.extend(shared)
 
-    # 3. Dispatcher directives
+    # 3. Dispatcher directives — runtime-specific only
+    #    Everything else (tool docs, decision schema, working style) is
+    #    already covered by tool_guidelines.md. This section contains ONLY
+    #    what's unique to this dispatch invocation.
     sections.append("""
 ---
 
 # Dispatcher Directives
 
 You are an autonomous agent dispatched by the Autonomy dispatcher.
-
-- You are running with `bd --readonly`. Do not attempt to modify beads.
-- Complete the task described above.
-- Your code workspace is `/workspace/repo` — a git worktree. Edit files and commit normally.
-- Write your decision to `/workspace/output/decision.json` when done.
-- Write `experience_report.md` to `/workspace/output/`.
-- Code goes in the repo (commit it). Reports and decision go in `/workspace/output/`.
-- If you discover new work, include it in the decision file's `discovered_beads` array.
-- If you are blocked, write a BLOCKED decision immediately — do not spin.
-- Include `scores`, `time_breakdown`, and (if BLOCKED/FAILED) `failure_category` in your decision — see tool_guidelines.md for the schema. These are optional but valuable for analytics.
+Complete the task described above. See tool_guidelines.md sections above
+for workspace layout, tool usage, decision file schema, and working style.
 """)
 
     return "\n\n".join(sections)

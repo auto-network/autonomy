@@ -52,7 +52,7 @@ from .ingest import (
 from .watch import watch_sessions
 from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
-from .primer import generate_primer
+from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 
 
 def cmd_ingest(args):
@@ -888,6 +888,19 @@ def cmd_related(args):
     db.close()
 
 
+def _cmd_primer(args):
+    """Generate primer with the requested format."""
+    data = collect_primer_data(
+        args.bead_id,
+        db=GraphDB(args.db),
+        include_provenance=not args.no_provenance,
+        include_pitfalls=not args.no_pitfalls,
+    )
+    if args.format == "dashboard":
+        return format_for_dashboard(data)
+    return format_for_agent(data)
+
+
 def cmd_wait(args):
     """Block until a dispatched bead completes, then print a compact report."""
     bead_id = args.bead_id
@@ -1160,14 +1173,10 @@ def main():
     p.add_argument("bead_id", help="Bead ID to generate primer for")
     p.add_argument("--no-provenance", action="store_true", help="Skip provenance turns")
     p.add_argument("--no-pitfalls", action="store_true", help="Skip pitfall notes")
-    p.add_argument("--no-tools", action="store_true", help="Skip tool docs")
-    p.set_defaults(func=lambda args: print(generate_primer(
-        args.bead_id,
-        db=GraphDB(args.db),
-        include_provenance=not args.no_provenance,
-        include_pitfalls=not args.no_pitfalls,
-        include_tools=not args.no_tools,
-    )))
+    p.add_argument("--no-tools", action="store_true", help="Skip tool docs (ignored, kept for compat)")
+    p.add_argument("--format", choices=["agent", "dashboard"], default="agent",
+                   help="Output format: agent (with follow-on commands) or dashboard (human-friendly)")
+    p.set_defaults(func=lambda args: print(_cmd_primer(args)))
 
     # bead (create with provenance)
     p = sub.add_parser("bead", help="Create a bead with provenance link to source conversation")

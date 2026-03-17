@@ -778,7 +778,7 @@ async def api_terminal_rename(request):
 
 async def api_primer(request):
     bead_id = request.path_params["id"]
-    stdout, stderr, rc = await run_cli(["graph", "primer", bead_id])
+    stdout, stderr, rc = await run_cli(["graph", "primer", bead_id, "--format", "dashboard"])
     return JSONResponse({"content": stdout, "error": stderr if rc != 0 else None})
 
 
