@@ -159,7 +159,11 @@ def claim_bead(bead_id: str) -> bool:
 
 
 def release_bead(bead_id: str, status: str, reason: str) -> None:
-    """Release a bead after agent completion."""
+    """Release a bead after agent completion.
+
+    For non-DONE outcomes, resets status to open so the bead can be
+    re-queued. Every release removes the work:claimed label.
+    """
     # Remove claim label
     subprocess.run(
         ["bd", "label", "remove", bead_id, "work:claimed"],
@@ -170,13 +174,16 @@ def release_bead(bead_id: str, status: str, reason: str) -> None:
     if status == "DONE":
         run_bd(["close", bead_id, "--reason", reason])
     elif status == "BLOCKED":
+        run_bd(["update", bead_id, "-s", "open"])
         run_bd(["set-state", bead_id, "work=blocked", "--reason", reason])
         run_bd(["update", bead_id, "--append-notes", f"Blocked: {reason}"])
     elif status == "FAILED":
+        run_bd(["update", bead_id, "-s", "open"])
         run_bd(["set-state", bead_id, "work=failed", "--reason", reason])
         run_bd(["update", bead_id, "--append-notes", f"Failed: {reason}"])
     else:
         # Unknown status — log and release
+        run_bd(["update", bead_id, "-s", "open"])
         run_bd(["set-state", bead_id, "work=released", "--reason", f"Unknown status: {status}"])
 
 
@@ -453,6 +460,18 @@ def cleanup_worktree(worktree_path: str) -> None:
         )
 
 
+def find_worktree_for_bead(bead_id: str) -> str:
+    """Find the most recent worktree path for a bead, if one exists."""
+    worktrees_dir = REPO_ROOT / ".worktrees"
+    if not worktrees_dir.exists():
+        return ""
+    candidates = sorted(
+        worktrees_dir.glob(f"{bead_id}-*"),
+        key=lambda p: p.name, reverse=True,
+    )
+    return str(candidates[0]) if candidates else ""
+
+
 def process_decision(dispatch_result: DispatchResult) -> None:
     """Process agent decision and update bead state."""
     bead_id = dispatch_result.bead_id
@@ -584,57 +603,72 @@ def dispatch_cycle(config: DispatcherConfig) -> int:
     # 6. Launch (dispatch=launching → running)
     set_dispatch_state(bead_id, "launching", f"image:{image}")
     try:
-        set_dispatch_state(bead_id, "running")
-        result = launch_agent(bead_id, image=image)
-    except subprocess.TimeoutExpired as e:
-        print(f"  TIMEOUT: Agent exceeded 10 minute limit")
-        # Agent may have completed work before timeout — check output dir
-        result = _recover_timeout_results(bead_id, e)
-        if result:
-            print(f"  Found agent results despite timeout — processing normally")
-            set_dispatch_state(bead_id, "collecting")
-            process_decision(result)
-        else:
-            set_dispatch_state(bead_id, "failed", "Agent timeout (10 min)")
-            release_bead(bead_id, "FAILED", "Agent timeout (10 min)")
-        return 1
+        try:
+            set_dispatch_state(bead_id, "running")
+            result = launch_agent(bead_id, image=image)
+        except subprocess.TimeoutExpired as e:
+            print(f"  TIMEOUT: Agent exceeded 10 minute limit")
+            # Agent may have completed work before timeout — check output dir
+            result = _recover_timeout_results(bead_id, e)
+            if result:
+                print(f"  Found agent results despite timeout — processing normally")
+                set_dispatch_state(bead_id, "collecting")
+                process_decision(result)
+            else:
+                set_dispatch_state(bead_id, "failed", "Agent timeout (10 min)")
+                release_bead(bead_id, "FAILED", "Agent timeout (10 min)")
+                # Clean up worktree that _recover_timeout_results couldn't find results in
+                wt = find_worktree_for_bead(bead_id)
+                if wt:
+                    cleanup_worktree(wt)
+            return 1
 
-    # 7. Collect results (dispatch=collecting)
-    set_dispatch_state(bead_id, "collecting")
-    process_decision(result)
+        # 7. Collect results (dispatch=collecting)
+        set_dispatch_state(bead_id, "collecting")
+        process_decision(result)
 
-    # 8. Ingest agent session into graph and link to bead
-    subprocess.run(
-        ["graph", "sessions", "--all"],
-        capture_output=True, text=True, timeout=30,
-        cwd=str(REPO_ROOT),
-    )
+        # 8. Ingest agent session into graph and link to bead
+        subprocess.run(
+            ["graph", "sessions", "--all"],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(REPO_ROOT),
+        )
 
-    # Find the ingested session and link it to the bead
-    if result.output_dir:
-        session_dir = Path(result.output_dir) / "sessions"
-        jsonl_files = list(session_dir.glob("**/*.jsonl")) if session_dir.exists() else []
-        if jsonl_files:
-            # Search graph for the session by path fragment
-            session_name = jsonl_files[0].stem  # UUID of the session
-            search_out = run_cmd(
-                ["graph", "search", session_name, "--json", "--limit", "1"]
-            )
-            if search_out:
-                try:
-                    hits = json.loads(search_out)
-                    if isinstance(hits, list) and hits:
-                        src_id = hits[0].get("source_id", hits[0].get("id", ""))
-                        if src_id:
-                            subprocess.run(
-                                ["graph", "link", result.bead_id, src_id,
-                                 "-r", "implemented_by"],
-                                capture_output=True, text=True, timeout=15,
-                                cwd=str(REPO_ROOT),
-                            )
-                            print(f"  Linked {result.bead_id} → {src_id} (implemented_by)")
-                except json.JSONDecodeError:
-                    pass
+        # Find the ingested session and link it to the bead
+        if result.output_dir:
+            session_dir = Path(result.output_dir) / "sessions"
+            jsonl_files = list(session_dir.glob("**/*.jsonl")) if session_dir.exists() else []
+            if jsonl_files:
+                # Search graph for the session by path fragment
+                session_name = jsonl_files[0].stem  # UUID of the session
+                search_out = run_cmd(
+                    ["graph", "search", session_name, "--json", "--limit", "1"]
+                )
+                if search_out:
+                    try:
+                        hits = json.loads(search_out)
+                        if isinstance(hits, list) and hits:
+                            src_id = hits[0].get("source_id", hits[0].get("id", ""))
+                            if src_id:
+                                subprocess.run(
+                                    ["graph", "link", result.bead_id, src_id,
+                                     "-r", "implemented_by"],
+                                    capture_output=True, text=True, timeout=15,
+                                    cwd=str(REPO_ROOT),
+                                )
+                                print(f"  Linked {result.bead_id} → {src_id} (implemented_by)")
+                    except json.JSONDecodeError:
+                        pass
+
+    except Exception as e:
+        # Catch-all: any unexpected failure must not leave bead in limbo
+        error_msg = f"Unexpected dispatch error: {type(e).__name__}: {e}"
+        print(f"  ERROR: {error_msg}", file=sys.stderr)
+        set_dispatch_state(bead_id, "failed", error_msg[:200])
+        release_bead(bead_id, "FAILED", error_msg[:200])
+        wt = find_worktree_for_bead(bead_id)
+        if wt:
+            cleanup_worktree(wt)
 
     return 1
 
