@@ -157,13 +157,13 @@ async def api_dispatch_status(request):
 AGENT_RUNS_DIR = Path(__file__).parent.parent.parent / "data" / "agent-runs"
 
 async def api_dispatch_runs(request):
-    """List completed dispatch runs from SQLite."""
+    """List dispatch runs from SQLite (includes RUNNING rows)."""
     db_rows = await asyncio.to_thread(list_runs)
     runs = []
     for row in db_rows:
         # Reconstruct decision dict from flat columns for backward compat
         decision = None
-        if row.get("status"):
+        if row.get("status") and row["status"] != "RUNNING":
             decision = {"status": row["status"], "reason": row.get("reason")}
             scores = {}
             for key in ("tooling", "clarity", "confidence"):
@@ -189,12 +189,15 @@ async def api_dispatch_runs(request):
             if row.get("discovered_beads_count"):
                 decision["discovered_beads_count"] = row["discovered_beads_count"]
 
-        # Derive timestamp from completed_at or from the dir name
+        # Derive timestamp from completed_at, started_at, or dir name
         timestamp = ""
         if row.get("completed_at"):
             # completed_at is "YYYY-MM-DD HH:MM:SS" — convert to YYYYMMDD-HHMMSS
             ts = row["completed_at"].replace("-", "").replace(":", "").replace(" ", "-")
             timestamp = ts[:8] + "-" + ts[8:]  # YYYYMMDD-HHMMSS
+        elif row.get("started_at"):
+            ts = row["started_at"].replace("-", "").replace(":", "").replace(" ", "-")
+            timestamp = ts[:8] + "-" + ts[8:]
         elif row.get("id"):
             parts = row["id"].rsplit("-", 2)
             if len(parts) >= 3:
@@ -205,6 +208,7 @@ async def api_dispatch_runs(request):
             "timestamp": timestamp,
             "dir": row.get("id", ""),
             "decision": decision,
+            "status": row.get("status") or "",
             "has_experience_report": bool(row.get("has_experience_report")),
             "commit_hash": row.get("commit_hash") or "",
             "branch": row.get("branch") or "",
@@ -264,8 +268,11 @@ def _parse_range(range_str: str) -> str | None:
 def _build_timeline_where(
     range_str: str | None, project: str | None, q: str | None
 ) -> tuple[str, list]:
-    """Build WHERE clause and params for timeline queries."""
-    clauses = []
+    """Build WHERE clause and params for timeline queries.
+
+    Always excludes RUNNING rows — timeline shows completed work only.
+    """
+    clauses = ["status != 'RUNNING'"]
     params = []
 
     # Time range filter
@@ -535,6 +542,8 @@ async def api_dispatch_trace(request):
     # Session log availability
     has_session = bool(_find_session_files(run_name))
 
+    is_live = row.get("status") == "RUNNING" if row else False
+
     return JSONResponse({
         "run": run_name,
         "bead_id": bead_id,
@@ -545,6 +554,7 @@ async def api_dispatch_trace(request):
         "branch": branch,
         "diff": diff,
         "has_session": has_session,
+        "is_live": is_live,
         "duration_secs": duration_secs,
         "commit_message": commit_message,
         "lines_added": lines_added,
