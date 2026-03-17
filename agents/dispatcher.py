@@ -1,7 +1,11 @@
-"""Autonomy Dispatcher — deterministic claim/release/close loop.
+"""Autonomy Dispatcher — non-blocking claim/poll/collect loop.
 
 Owns all bead state mutations. Agents run --readonly.
 No LLM in this loop — just a state machine.
+
+Launches agent containers in detached mode (docker run -d) and polls for
+completion each cycle. This enables: concurrent dispatch, resilience to
+dispatcher restarts, and responsive polling between agent runs.
 
 Dispatches all readiness:approved beads by priority, routing each to the
 correct container image via LABEL_IMAGE_MAP. The --queue flag optionally
@@ -13,6 +17,7 @@ Usage:
     python -m agents.dispatcher --loop           # Run continuously
     python -m agents.dispatcher --loop --interval 30
     python -m agents.dispatcher --dry-run        # Show what would be dispatched
+    python -m agents.dispatcher --max-concurrent 3  # Run up to 3 agents at once
 """
 
 from __future__ import annotations
@@ -38,6 +43,9 @@ LABEL_IMAGE_MAP = {
 }
 DEFAULT_IMAGE = "autonomy-agent"
 
+# Kill containers exceeding this runtime (seconds)
+MAX_AGENT_RUNTIME = 600
+
 
 @dataclass
 class DispatchResult:
@@ -52,12 +60,29 @@ class DispatchResult:
 
 
 @dataclass
+class RunningAgent:
+    """Tracks a launched agent container that hasn't been collected yet."""
+    bead_id: str
+    container_name: str
+    container_id: str
+    output_dir: str
+    worktree_path: str
+    branch: str
+    branch_base: str
+    image: str
+    started_at: float
+
+
+@dataclass
 class DispatcherConfig:
-    max_concurrent: int = 1  # Start simple — one at a time
+    max_concurrent: int = 1
     label_filter: str | None = None  # Optional queue label to narrow dispatch
     dry_run: bool = False
     interval: int = 60  # Seconds between dispatch cycles
     loop: bool = False
+
+
+# ── Helpers ──────────────────────────────────────────────────────
 
 
 def run_cmd(cmd: list[str], timeout: int = 15) -> str:
@@ -88,11 +113,14 @@ def run_bd(args: list[str], timeout: int = 15) -> str:
         return ""
 
 
+# ── Bead queries ─────────────────────────────────────────────────
+
+
 def get_ready_beads(label_filter: str | None = None) -> list[dict]:
     """Get beads approved for dispatch, optionally filtered by queue label.
 
     Queries for readiness:approved — the single human gate.
-    The readiness dimension (idea → draft → specified → approved) is set
+    The readiness dimension (idea -> draft -> specified -> approved) is set
     via bd set-state; the dispatcher only picks up approved beads.
     """
     query = 'status=open AND label="readiness:approved"'
@@ -123,6 +151,9 @@ def get_claimed_beads() -> set[str]:
         return {b["id"] for b in beads if isinstance(b, dict)}
     except (json.JSONDecodeError, KeyError):
         return set()
+
+
+# ── Bead state mutations ────────────────────────────────────────
 
 
 def set_dispatch_state(bead_id: str, state: str, reason: str = "") -> None:
@@ -187,6 +218,9 @@ def release_bead(bead_id: str, status: str, reason: str) -> None:
         run_bd(["set-state", bead_id, "work=released", "--reason", f"Unknown status: {status}"])
 
 
+# ── Image routing ────────────────────────────────────────────────
+
+
 def image_for_bead(bead: dict) -> str:
     """Select the container image based on bead labels."""
     labels = bead.get("labels") or []
@@ -196,95 +230,112 @@ def image_for_bead(bead: dict) -> str:
     return DEFAULT_IMAGE
 
 
-def launch_agent(bead_id: str, image: str = DEFAULT_IMAGE) -> DispatchResult:
-    """Launch an agent container for a bead and collect results."""
-    print(f"  Launching agent for {bead_id} (image: {image})...")
-
-    result = subprocess.run(
-        [str(LAUNCH_SCRIPT), bead_id, f"--image={image}"],
-        capture_output=True, text=True,
-        timeout=600,  # 10 minute max per agent run
-        cwd=str(REPO_ROOT),
-        env={**os.environ, "BD_READONLY": "1"},
-    )
-
-    # Find output directory from stdout
-    output_dir = ""
-    for line in result.stdout.splitlines():
-        if "Output:" in line and "agent-runs" in line:
-            output_dir = line.split("Output:")[-1].strip()
-            break
-
-    # Try to read decision file
-    decision = None
-    if output_dir:
-        decision_path = Path(output_dir) / "decision.json"
-        if decision_path.exists():
-            try:
-                decision = json.loads(decision_path.read_text())
-            except json.JSONDecodeError:
-                pass
-
-    # Read commit hash and worktree path from output dir
-    commit_hash = ""
-    worktree_path = ""
-    branch = ""
-    if output_dir:
-        commit_file = Path(output_dir) / ".commit_hash"
-        if commit_file.exists():
-            commit_hash = commit_file.read_text().strip()
-        worktree_file = Path(output_dir) / ".worktree_path"
-        if worktree_file.exists():
-            worktree_path = worktree_file.read_text().strip()
-        branch_file = Path(output_dir) / ".branch"
-        if branch_file.exists():
-            branch = branch_file.read_text().strip()
-
-    return DispatchResult(
-        bead_id=bead_id,
-        exit_code=result.returncode,
-        decision=decision,
-        output_dir=output_dir,
-        error=result.stderr if result.returncode != 0 else "",
-        commit_hash=commit_hash,
-        worktree_path=worktree_path,
-        branch=branch,
-    )
+# ── Non-blocking agent lifecycle ─────────────────────────────────
 
 
-def _recover_timeout_results(bead_id: str, exc: subprocess.TimeoutExpired) -> DispatchResult | None:
-    """Try to collect agent results after a timeout.
+def start_agent(bead_id: str, image: str = DEFAULT_IMAGE) -> RunningAgent | None:
+    """Launch an agent container in detached mode. Returns immediately.
 
-    The agent writes decision.json and commits during the run, so results may
-    exist even when launch.sh gets killed by timeout before its post-run
-    collection phase.
+    Calls launch.sh --detach which:
+    1. Creates worktree and generates prompt
+    2. Starts container with docker run -d
+    3. Returns container metadata as key=value pairs
+
+    Returns RunningAgent on success, None on failure.
     """
-    stdout = (getattr(exc, "stdout", None) or b"")
-    if isinstance(stdout, bytes):
-        stdout = stdout.decode(errors="replace")
+    print(f"  Starting agent for {bead_id} (image: {image})...")
 
-    # 1. Find output_dir from launch.sh stdout (printed before docker run starts)
-    output_dir = ""
-    for line in stdout.splitlines():
-        if "Output:" in line and "agent-runs" in line:
-            output_dir = line.split("Output:")[-1].strip()
-            break
-
-    # Fallback: glob for most recent output dir for this bead
-    if not output_dir:
-        runs_dir = REPO_ROOT / "data" / "agent-runs"
-        if runs_dir.exists():
-            candidates = sorted(
-                runs_dir.glob(f"{bead_id}-*"),
-                key=lambda p: p.name, reverse=True,
-            )
-            if candidates:
-                output_dir = str(candidates[0])
-
-    if not output_dir:
+    try:
+        result = subprocess.run(
+            [str(LAUNCH_SCRIPT), bead_id, f"--image={image}", "--detach"],
+            capture_output=True, text=True,
+            timeout=120,  # Prep phase only — worktree + prompt gen
+            cwd=str(REPO_ROOT),
+            env={**os.environ, "BD_READONLY": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  ERROR: launch.sh --detach timed out for {bead_id}", file=sys.stderr)
         return None
 
-    # 2. Read decision.json (written by agent inside container)
+    if result.returncode != 0:
+        print(f"  ERROR: launch.sh --detach failed for {bead_id}: {result.stderr}",
+              file=sys.stderr)
+        return None
+
+    # Parse key=value output from launch.sh --detach
+    metadata = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            metadata[key.strip()] = value.strip()
+
+    container_id = metadata.get("CONTAINER_ID", "")
+    container_name = metadata.get("CONTAINER_NAME", "")
+    output_dir = metadata.get("OUTPUT_DIR", "")
+    worktree_path = metadata.get("WORKTREE_DIR", "")
+    branch = metadata.get("BRANCH", "")
+    branch_base = metadata.get("BRANCH_BASE", "")
+
+    if not container_id or not output_dir:
+        print(f"  ERROR: Missing container metadata from launch.sh for {bead_id}",
+              file=sys.stderr)
+        return None
+
+    print(f"  Container started: {container_name} ({container_id[:12]})")
+
+    return RunningAgent(
+        bead_id=bead_id,
+        container_name=container_name,
+        container_id=container_id,
+        output_dir=output_dir,
+        worktree_path=worktree_path,
+        branch=branch,
+        branch_base=branch_base,
+        image=image,
+        started_at=time.time(),
+    )
+
+
+def poll_container(container_id: str) -> tuple[bool, int]:
+    """Check if a docker container has exited.
+
+    Returns (finished, exit_code). If still running, returns (False, -1).
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format",
+             "{{.State.Status}} {{.State.ExitCode}}", container_id],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            # Container doesn't exist — treat as finished with error
+            return True, -1
+
+        parts = result.stdout.strip().split()
+        status = parts[0] if parts else "unknown"
+        exit_code = int(parts[1]) if len(parts) > 1 else -1
+
+        if status == "exited":
+            return True, exit_code
+        elif status == "running":
+            return False, -1
+        else:
+            # created, paused, restarting, removing, dead
+            return status in ("dead", "removing"), exit_code
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        return False, -1
+
+
+def collect_results(agent: RunningAgent, exit_code: int) -> DispatchResult:
+    """Collect results from a completed agent container.
+
+    Reads decision.json and commit hash from the output directory,
+    then removes the docker container and cleans up temp files.
+    """
+    output_dir = agent.output_dir
+
+    # Read decision file (written by agent inside container)
     decision = None
     decision_path = Path(output_dir) / "decision.json"
     if decision_path.exists():
@@ -293,61 +344,63 @@ def _recover_timeout_results(bead_id: str, exc: subprocess.TimeoutExpired) -> Di
         except json.JSONDecodeError:
             pass
 
-    # 3. Read commit hash — launch.sh writes .commit_hash after container exit,
-    #    so on timeout it usually doesn't exist. Recover from the worktree.
+    # Check for new commits in the worktree
     commit_hash = ""
-    worktree_path = ""
-    branch = f"agent/{bead_id}"
-
-    # Check if launch.sh managed to write these before being killed
-    commit_file = Path(output_dir) / ".commit_hash"
-    if commit_file.exists():
-        commit_hash = commit_file.read_text().strip()
-
-    wt_file = Path(output_dir) / ".worktree_path"
-    if wt_file.exists():
-        worktree_path = wt_file.read_text().strip()
-
-    # Derive worktree path from output_dir naming convention if not written:
-    # output_dir = data/agent-runs/{bead_id}-{timestamp}
-    # worktree  = .worktrees/{bead_id}-{timestamp}
-    if not worktree_path:
-        suffix = Path(output_dir).name
-        candidate = REPO_ROOT / ".worktrees" / suffix
-        if candidate.exists():
-            worktree_path = str(candidate)
-
-    # Recover commit hash from the worktree if launch.sh didn't write it
-    if not commit_hash and worktree_path and Path(worktree_path).exists():
-        base_file = Path(output_dir) / ".branch_base"
-        branch_base = ""
-        if base_file.exists():
-            branch_base = base_file.read_text().strip()
-
+    if agent.worktree_path and Path(agent.worktree_path).exists():
         try:
             head = subprocess.run(
-                ["git", "-C", worktree_path, "rev-parse", "HEAD"],
+                ["git", "-C", agent.worktree_path, "rev-parse", "HEAD"],
                 capture_output=True, text=True, timeout=5,
             ).stdout.strip()
-            if head and branch_base and head != branch_base:
+            if head and agent.branch_base and head != agent.branch_base:
                 commit_hash = head
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
-    # Only return a result if we found something useful
-    if decision is None and not commit_hash:
-        return None
+    # Write collection artifacts for consistency with foreground mode
+    if commit_hash:
+        (Path(output_dir) / ".commit_hash").write_text(commit_hash)
+    (Path(output_dir) / ".worktree_path").write_text(agent.worktree_path)
+    (Path(output_dir) / ".branch").write_text(agent.branch)
+
+    # Remove the stopped container (no --rm in detach mode)
+    remove_container(agent.container_name)
+
+    # Clean up detach-mode temp files stored in output dir
+    for tmpfile in (".credentials.json", ".prompt.md"):
+        p = Path(output_dir) / tmpfile
+        if p.exists():
+            p.unlink()
 
     return DispatchResult(
-        bead_id=bead_id,
-        exit_code=-1,
+        bead_id=agent.bead_id,
+        exit_code=exit_code,
         decision=decision,
         output_dir=output_dir,
-        error="Agent timeout",
+        error="" if exit_code == 0 else f"Agent exited with code {exit_code}",
         commit_hash=commit_hash,
-        worktree_path=worktree_path,
-        branch=branch,
+        worktree_path=agent.worktree_path,
+        branch=agent.branch,
     )
+
+
+def kill_container(container_name: str) -> None:
+    """Kill a running docker container."""
+    subprocess.run(
+        ["docker", "kill", container_name],
+        capture_output=True, text=True, timeout=10,
+    )
+
+
+def remove_container(container_name: str) -> None:
+    """Remove a docker container (force, ignores errors if already gone)."""
+    subprocess.run(
+        ["docker", "rm", "-f", container_name],
+        capture_output=True, text=True, timeout=10,
+    )
+
+
+# ── Working tree / merge / cleanup ──────────────────────────────
 
 
 def check_working_tree_clean() -> tuple[bool, str]:
@@ -472,6 +525,9 @@ def find_worktree_for_bead(bead_id: str) -> str:
     return str(candidates[0]) if candidates else ""
 
 
+# ── Decision processing ─────────────────────────────────────────
+
+
 def process_decision(dispatch_result: DispatchResult) -> None:
     """Process agent decision and update bead state."""
     bead_id = dispatch_result.bead_id
@@ -560,117 +616,277 @@ def process_decision(dispatch_result: DispatchResult) -> None:
         )
 
 
-def dispatch_cycle(config: DispatcherConfig) -> int:
-    """Run one dispatch cycle. Returns number of beads dispatched."""
+# ── Session ingestion ───────────────────────────────────────────
+
+
+def _ingest_session(result: DispatchResult) -> None:
+    """Ingest agent session into the knowledge graph and link to bead."""
+    subprocess.run(
+        ["graph", "sessions", "--all"],
+        capture_output=True, text=True, timeout=30,
+        cwd=str(REPO_ROOT),
+    )
+
+    if result.output_dir:
+        session_dir = Path(result.output_dir) / "sessions"
+        jsonl_files = list(session_dir.glob("**/*.jsonl")) if session_dir.exists() else []
+        if jsonl_files:
+            session_name = jsonl_files[0].stem
+            search_out = run_cmd(
+                ["graph", "search", session_name, "--json", "--limit", "1"]
+            )
+            if search_out:
+                try:
+                    hits = json.loads(search_out)
+                    if isinstance(hits, list) and hits:
+                        src_id = hits[0].get("source_id", hits[0].get("id", ""))
+                        if src_id:
+                            subprocess.run(
+                                ["graph", "link", result.bead_id, src_id,
+                                 "-r", "implemented_by"],
+                                capture_output=True, text=True, timeout=15,
+                                cwd=str(REPO_ROOT),
+                            )
+                            print(f"  Linked {result.bead_id} -> {src_id} (implemented_by)")
+                except json.JSONDecodeError:
+                    pass
+
+
+# ── Poll and collect ─────────────────────────────────────────────
+
+
+def poll_and_collect(running: list[RunningAgent]) -> None:
+    """Poll running agents and collect results for any that completed or timed out.
+
+    Modifies the running list in place — removes completed/timed-out agents.
+    """
+    completed: list[tuple[RunningAgent, int]] = []
+    timed_out: list[RunningAgent] = []
+
+    for agent in running:
+        elapsed = time.time() - agent.started_at
+        finished, exit_code = poll_container(agent.container_id)
+
+        if finished:
+            print(f"  Completed: {agent.bead_id} (exit={exit_code}, {elapsed:.0f}s)")
+            completed.append((agent, exit_code))
+        elif elapsed > MAX_AGENT_RUNTIME:
+            print(f"  Timeout: {agent.bead_id} ({elapsed:.0f}s > {MAX_AGENT_RUNTIME}s)")
+            timed_out.append(agent)
+
+    # Process normally-completed agents
+    for agent, exit_code in completed:
+        running.remove(agent)
+        try:
+            set_dispatch_state(agent.bead_id, "collecting")
+            result = collect_results(agent, exit_code)
+            process_decision(result)
+            _ingest_session(result)
+        except Exception as e:
+            error_msg = f"Collection error: {type(e).__name__}: {e}"
+            print(f"  ERROR: {error_msg}", file=sys.stderr)
+            set_dispatch_state(agent.bead_id, "failed", error_msg[:200])
+            release_bead(agent.bead_id, "FAILED", error_msg[:200])
+            cleanup_worktree(agent.worktree_path)
+
+    # Handle timed-out agents — kill, then try to recover results
+    for agent in timed_out:
+        running.remove(agent)
+        kill_container(agent.container_name)
+
+        try:
+            result = collect_results(agent, -1)
+            if result.decision or result.commit_hash:
+                print(f"  Recovered results from timed-out {agent.bead_id}")
+                set_dispatch_state(agent.bead_id, "collecting")
+                process_decision(result)
+            else:
+                set_dispatch_state(agent.bead_id, "failed",
+                                   f"Agent timeout ({MAX_AGENT_RUNTIME}s)")
+                release_bead(agent.bead_id, "FAILED",
+                             f"Agent timeout ({MAX_AGENT_RUNTIME}s)")
+                cleanup_worktree(agent.worktree_path)
+        except Exception as e:
+            error_msg = f"Timeout collection error: {type(e).__name__}: {e}"
+            print(f"  ERROR: {error_msg}", file=sys.stderr)
+            set_dispatch_state(agent.bead_id, "failed", error_msg[:200])
+            release_bead(agent.bead_id, "FAILED", error_msg[:200])
+            cleanup_worktree(agent.worktree_path)
+
+
+# ── Dispatch cycle ──────────────────────────────────────────────
+
+
+def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int:
+    """Run one dispatch cycle. Non-blocking.
+
+    Phase 1: Poll running agents for completion, collect results.
+    Phase 2: Launch new agents if under max_concurrent.
+
+    Returns number of beads newly dispatched this cycle.
+    """
     timestamp = datetime.now().strftime("%H:%M:%S")
     queue_info = f"queue: {config.label_filter}" if config.label_filter else "all approved"
-    print(f"\n[{timestamp}] Dispatch cycle ({queue_info})")
+    print(f"\n[{timestamp}] Dispatch cycle ({queue_info}, {len(running)} running)")
 
-    # 1. Get ready beads
+    # ── Phase 1: Poll running agents ──────────────────────────
+    poll_and_collect(running)
+
+    # ── Phase 2: Launch new agents ────────────────────────────
+    slots = config.max_concurrent - len(running)
+    if slots <= 0:
+        print(f"  At capacity ({len(running)}/{config.max_concurrent})")
+        return 0
+
+    # Get ready beads
     ready = get_ready_beads(config.label_filter)
     if not ready:
         print("  No approved beads found")
         return 0
 
-    # 2. Filter out already-claimed beads
+    # Filter out already-claimed and currently-running beads
     claimed = get_claimed_beads()
-    available = [b for b in ready if b.get("id") not in claimed]
+    running_ids = {a.bead_id for a in running}
+    available = [b for b in ready
+                 if b.get("id") not in claimed
+                 and b.get("id") not in running_ids]
 
     if not available:
-        print(f"  {len(ready)} ready but all claimed")
+        print(f"  {len(ready)} ready but all claimed or running")
         return 0
 
-    print(f"  {len(available)} available beads")
+    print(f"  {len(available)} available beads, {slots} slot(s) open")
 
-    # 4. Pick highest priority (lowest number)
+    # Sort by priority and dispatch up to available slots
     available.sort(key=lambda b: b.get("priority", 99))
-    bead = available[0]
-    bead_id = bead["id"]
-    title = bead.get("title", "?")
+    dispatched = 0
 
-    image = image_for_bead(bead)
-    print(f"  Selected: {bead_id} — {title} (P{bead.get('priority', '?')}) [{image}]")
+    for bead in available[:slots]:
+        bead_id = bead["id"]
+        title = bead.get("title", "?")
+        image = image_for_bead(bead)
+        print(f"  Selected: {bead_id} — {title} (P{bead.get('priority', '?')}) [{image}]")
 
-    if config.dry_run:
-        print("  [DRY RUN] Would dispatch this bead")
-        return 0
+        if config.dry_run:
+            print("  [DRY RUN] Would dispatch this bead")
+            continue
 
-    # 5. Claim + dispatch=queued
-    if not claim_bead(bead_id):
-        return 0
-    set_dispatch_state(bead_id, "queued")
+        # Claim
+        if not claim_bead(bead_id):
+            continue
 
-    # 6. Launch (dispatch=launching → running)
-    set_dispatch_state(bead_id, "launching", f"image:{image}")
-    try:
-        try:
+        set_dispatch_state(bead_id, "queued")
+        set_dispatch_state(bead_id, "launching", f"image:{image}")
+
+        # Launch (non-blocking)
+        agent = start_agent(bead_id, image=image)
+        if agent:
             set_dispatch_state(bead_id, "running")
-            result = launch_agent(bead_id, image=image)
-        except subprocess.TimeoutExpired as e:
-            print(f"  TIMEOUT: Agent exceeded 10 minute limit")
-            # Agent may have completed work before timeout — check output dir
-            result = _recover_timeout_results(bead_id, e)
-            if result:
-                print(f"  Found agent results despite timeout — processing normally")
-                set_dispatch_state(bead_id, "collecting")
-                process_decision(result)
-            else:
-                set_dispatch_state(bead_id, "failed", "Agent timeout (10 min)")
-                release_bead(bead_id, "FAILED", "Agent timeout (10 min)")
-                # Clean up worktree that _recover_timeout_results couldn't find results in
-                wt = find_worktree_for_bead(bead_id)
-                if wt:
-                    cleanup_worktree(wt)
-            return 1
+            running.append(agent)
+            dispatched += 1
+        else:
+            set_dispatch_state(bead_id, "failed", "launch.sh --detach failed")
+            release_bead(bead_id, "FAILED", "Container launch failed")
+            wt = find_worktree_for_bead(bead_id)
+            if wt:
+                cleanup_worktree(wt)
 
-        # 7. Collect results (dispatch=collecting)
-        set_dispatch_state(bead_id, "collecting")
-        process_decision(result)
+    return dispatched
 
-        # 8. Ingest agent session into graph and link to bead
-        subprocess.run(
-            ["graph", "sessions", "--all"],
-            capture_output=True, text=True, timeout=30,
-            cwd=str(REPO_ROOT),
+
+# ── Recovery ────────────────────────────────────────────────────
+
+
+def recover_running_agents() -> list[RunningAgent]:
+    """Scan for running agent containers from a prior dispatcher session.
+
+    Looks for docker containers matching the agent-* naming convention
+    and reconstructs RunningAgent objects from their output dirs.
+    Enables dispatcher restart without losing track of running agents.
+    """
+    recovered = []
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--filter", "name=agent-",
+             "--format", "{{.ID}} {{.Names}} {{.Status}}"],
+            capture_output=True, text=True, timeout=10,
         )
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
 
-        # Find the ingested session and link it to the bead
-        if result.output_dir:
-            session_dir = Path(result.output_dir) / "sessions"
-            jsonl_files = list(session_dir.glob("**/*.jsonl")) if session_dir.exists() else []
-            if jsonl_files:
-                # Search graph for the session by path fragment
-                session_name = jsonl_files[0].stem  # UUID of the session
-                search_out = run_cmd(
-                    ["graph", "search", session_name, "--json", "--limit", "1"]
-                )
-                if search_out:
-                    try:
-                        hits = json.loads(search_out)
-                        if isinstance(hits, list) and hits:
-                            src_id = hits[0].get("source_id", hits[0].get("id", ""))
-                            if src_id:
-                                subprocess.run(
-                                    ["graph", "link", result.bead_id, src_id,
-                                     "-r", "implemented_by"],
-                                    capture_output=True, text=True, timeout=15,
-                                    cwd=str(REPO_ROOT),
-                                )
-                                print(f"  Linked {result.bead_id} → {src_id} (implemented_by)")
-                    except json.JSONDecodeError:
-                        pass
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(None, 2)
+            if len(parts) < 2:
+                continue
+            container_id, container_name = parts[0], parts[1]
 
-    except Exception as e:
-        # Catch-all: any unexpected failure must not leave bead in limbo
-        error_msg = f"Unexpected dispatch error: {type(e).__name__}: {e}"
-        print(f"  ERROR: {error_msg}", file=sys.stderr)
-        set_dispatch_state(bead_id, "failed", error_msg[:200])
-        release_bead(bead_id, "FAILED", error_msg[:200])
-        wt = find_worktree_for_bead(bead_id)
-        if wt:
-            cleanup_worktree(wt)
+            # Extract bead_id from container name: agent-{bead_id}-{pid}
+            name_parts = container_name.split("-", 2)
+            if len(name_parts) < 3 or name_parts[0] != "agent":
+                continue
+            # bead_id may contain hyphens, pid is the last segment
+            bead_id_and_pid = container_name[len("agent-"):]
+            bead_id = bead_id_and_pid.rsplit("-", 1)[0]
 
-    return 1
+            # Find output dir
+            runs_dir = REPO_ROOT / "data" / "agent-runs"
+            if not runs_dir.exists():
+                continue
+            candidates = sorted(
+                runs_dir.glob(f"{bead_id}-*"),
+                key=lambda p: p.name, reverse=True,
+            )
+            if not candidates:
+                continue
+            output_dir = str(candidates[0])
+
+            # Read metadata from output dir
+            branch_base = ""
+            base_file = Path(output_dir) / ".branch_base"
+            if base_file.exists():
+                branch_base = base_file.read_text().strip()
+
+            worktree_path = ""
+            wt_file = Path(output_dir) / ".worktree_path"
+            if wt_file.exists():
+                worktree_path = wt_file.read_text().strip()
+
+            branch = ""
+            branch_file = Path(output_dir) / ".branch"
+            if branch_file.exists():
+                branch = branch_file.read_text().strip()
+            else:
+                branch = f"agent/{bead_id}"
+
+            # Estimate started_at from output dir timestamp (YYYYMMDD-HHMMSS)
+            dir_name = Path(output_dir).name
+            ts_part = dir_name.replace(f"{bead_id}-", "", 1)
+            try:
+                started_at = datetime.strptime(ts_part, "%Y%m%d-%H%M%S").timestamp()
+            except ValueError:
+                started_at = time.time()
+
+            agent = RunningAgent(
+                bead_id=bead_id,
+                container_name=container_name,
+                container_id=container_id,
+                output_dir=output_dir,
+                worktree_path=worktree_path,
+                branch=branch,
+                branch_base=branch_base,
+                image="",  # Unknown — doesn't matter for poll/collect
+                started_at=started_at,
+            )
+            recovered.append(agent)
+            print(f"  Recovered running agent: {bead_id} (container: {container_name})")
+
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return recovered
+
+
+# ── Main ────────────────────────────────────────────────────────
 
 
 def main():
@@ -695,16 +911,31 @@ def main():
     print(f"  Max concurrent: {config.max_concurrent}")
     print(f"  Loop: {config.loop} (interval: {config.interval}s)")
 
+    # Recover agents from a prior dispatcher session
+    running: list[RunningAgent] = recover_running_agents()
+    if running:
+        print(f"  Recovered {len(running)} running agent(s) from prior session")
+
     if config.loop:
         while True:
             try:
-                dispatch_cycle(config)
+                dispatch_cycle(config, running)
                 time.sleep(config.interval)
             except KeyboardInterrupt:
-                print("\nDispatcher stopped.")
+                print(f"\nDispatcher stopped. {len(running)} agent(s) still running.")
+                if running:
+                    print("Running containers (will continue in background):")
+                    for a in running:
+                        print(f"  {a.bead_id}: {a.container_name}")
                 break
     else:
-        dispatch_cycle(config)
+        # Single-shot: launch, then poll until all agents complete
+        dispatch_cycle(config, running)
+        if running:
+            print(f"\nWaiting for {len(running)} agent(s) to complete...")
+            while running:
+                time.sleep(5)
+                poll_and_collect(running)
 
 
 if __name__ == "__main__":
