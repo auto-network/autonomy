@@ -352,7 +352,7 @@ async function renderDispatch() {
                 <span class="font-mono text-sm text-gray-400">${r.bead_id}</span>
                 <span class="badge badge-${statusColor === 'green' ? 'closed' : statusColor === 'yellow' ? 'blocked' : 'open'}">${status}</span>
                 ${commitBadge}
-                <button onclick="event.preventDefault(); event.stopPropagation(); showLivePanel('${r.dir}')"
+                <button onclick="event.preventDefault(); event.stopPropagation(); showCompletedPanel('${r.dir}')"
                         class="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded">Session</button>
               </div>
               <span class="text-xs text-gray-500">${ts}</span>
@@ -437,16 +437,13 @@ async function renderTrace(runName) {
     </div>`;
   }
 
-  // Session log (lazy-loaded)
+  // Session log — opens in bottom-docked panel
   if (trace.has_session) {
     html += `<div class="mb-6">
-      <h2 class="text-lg font-semibold mb-2 text-cyan-400">Session Log</h2>
-      <div id="session-log-container">
-        <button id="session-log-load"
-                class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300">
-          Load full session log
-        </button>
-      </div>
+      <button onclick="showCompletedPanel('${runName}')"
+              class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300">
+        View Session Log
+      </button>
     </div>`;
   }
 
@@ -456,11 +453,7 @@ async function renderTrace(runName) {
     document.getElementById('experience-content').appendChild(renderMd(trace.experience_report));
   }
 
-  // Attach session log loader after DOM is ready
-  const sessionLoadBtn = document.getElementById('session-log-load');
-  if (sessionLoadBtn) {
-    sessionLoadBtn.addEventListener('click', () => loadSessionLog(runName));
-  }
+  // Session log now opens in the bottom-docked panel via showCompletedPanel()
 }
 
 async function loadSessionLog(runName) {
@@ -1177,6 +1170,8 @@ function showLivePanel(runDir) {
   const entries = document.getElementById('live-panel-entries');
   const beadLabel = document.getElementById('live-panel-bead');
   const statusEl = document.getElementById('live-panel-status');
+  const pulseEl = document.getElementById('live-pulse');
+  const badgeEl = document.getElementById('live-panel-badge');
 
   // Reset state
   _livePanelRunDir = runDir;
@@ -1190,6 +1185,12 @@ function showLivePanel(runDir) {
   const beadId = parts.length >= 3 ? parts.slice(0, -2).join('-') : runDir;
   beadLabel.textContent = beadId;
   statusEl.textContent = 'connecting...';
+
+  // Live appearance
+  badgeEl.textContent = 'Live';
+  badgeEl.className = 'badge badge-open';
+  pulseEl.style.animation = '';
+  pulseEl.style.background = '#22c55e';
 
   // Show panel and add padding to main content
   panel.style.display = 'flex';
@@ -1208,6 +1209,77 @@ function showLivePanel(runDir) {
   if (_livePanelInterval) clearInterval(_livePanelInterval);
   _livePollTail(); // immediate first poll
   _livePanelInterval = setInterval(_livePollTail, 1500);
+}
+
+/**
+ * Open the bottom-docked session panel for a completed dispatch.
+ * Same panel as showLivePanel but loads all entries at once (no polling)
+ * and shows a gray "Complete" badge instead of green "Live".
+ */
+async function showCompletedPanel(runDir) {
+  const panel = document.getElementById('live-panel');
+  const entries = document.getElementById('live-panel-entries');
+  const beadLabel = document.getElementById('live-panel-bead');
+  const statusEl = document.getElementById('live-panel-status');
+  const pulseEl = document.getElementById('live-pulse');
+  const badgeEl = document.getElementById('live-panel-badge');
+
+  // Stop any existing polling
+  if (_livePanelInterval) {
+    clearInterval(_livePanelInterval);
+    _livePanelInterval = null;
+  }
+
+  // Reset state
+  _livePanelRunDir = runDir;
+  _livePanelOffset = 0;
+  _livePanelAutoScroll = true;
+  entries.innerHTML = '';
+  document.getElementById('live-resume-btn').style.display = 'none';
+
+  // Extract bead ID
+  const parts = runDir.split('-');
+  const beadId = parts.length >= 3 ? parts.slice(0, -2).join('-') : runDir;
+  beadLabel.textContent = beadId;
+
+  // Completed appearance — gray badge, no pulse animation
+  badgeEl.textContent = 'Complete';
+  badgeEl.className = 'badge badge-closed';
+  pulseEl.style.background = '#6b7280';
+  pulseEl.style.animation = 'none';
+  statusEl.textContent = 'loading...';
+  statusEl.className = 'text-xs text-gray-500 ml-auto';
+
+  // Show panel
+  panel.style.display = 'flex';
+  panel.classList.remove('collapsed');
+  document.getElementById('content').style.paddingBottom = '20rem';
+
+  // Scroll detection
+  const body = document.getElementById('live-panel-body');
+  body.onscroll = () => {
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 50;
+    _livePanelAutoScroll = atBottom;
+    document.getElementById('live-resume-btn').style.display = atBottom ? 'none' : 'block';
+  };
+
+  // Load all entries at once — no polling
+  try {
+    const data = await api(`/api/dispatch/tail/${runDir}?after=0`);
+    if (data.entries && data.entries.length > 0) {
+      _liveAppendEntries(data.entries);
+      statusEl.textContent = `${data.entries.length} entries`;
+    } else {
+      entries.innerHTML = '<div class="text-sm text-gray-500 p-2">No session entries found.</div>';
+      statusEl.textContent = 'empty';
+    }
+    if (data.offset !== undefined) {
+      _livePanelOffset = data.offset;
+    }
+  } catch (err) {
+    statusEl.textContent = 'error';
+    statusEl.className = 'text-xs text-red-400 ml-auto';
+  }
 }
 
 function hideLivePanel() {
@@ -1242,14 +1314,20 @@ async function _livePollTail() {
     const statusEl = document.getElementById('live-panel-status');
     const pulseEl = document.getElementById('live-pulse');
 
+    const badgeEl = document.getElementById('live-panel-badge');
     if (data.is_live) {
       statusEl.textContent = 'streaming';
       statusEl.className = 'text-xs text-green-400 ml-auto';
       pulseEl.style.background = '#22c55e';
+      badgeEl.textContent = 'Live';
+      badgeEl.className = 'badge badge-open';
     } else {
       statusEl.textContent = 'completed';
       statusEl.className = 'text-xs text-gray-500 ml-auto';
       pulseEl.style.background = '#6b7280';
+      pulseEl.style.animation = 'none';
+      badgeEl.textContent = 'Complete';
+      badgeEl.className = 'badge badge-closed';
       // Stop polling if not live and we've already loaded data
       if (_livePanelOffset > 0 && !data.entries.length) {
         clearInterval(_livePanelInterval);
