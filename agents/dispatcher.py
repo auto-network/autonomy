@@ -85,32 +85,85 @@ class DispatcherConfig:
 # ── Helpers ──────────────────────────────────────────────────────
 
 
+class BdCommandError(Exception):
+    """Raised when a bd command fails and check=True."""
+
+    def __init__(self, args: list[str], returncode: int, stderr: str):
+        self.args_list = args
+        self.returncode = returncode
+        self.stderr = stderr
+        cmd_str = " ".join(["bd"] + args)
+        super().__init__(f"{cmd_str} failed (exit {returncode}): {stderr}")
+
+
 def run_cmd(cmd: list[str], timeout: int = 15) -> str:
-    """Run any command and return stdout."""
+    """Run any command and return stdout. Logs stderr on failure."""
     try:
         result = subprocess.run(
             cmd,
             capture_output=True, text=True, timeout=timeout,
             cwd=str(REPO_ROOT),
         )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            print(f"  cmd {cmd[0]} failed (exit {result.returncode}): {stderr}",
+                  file=sys.stderr)
+            return ""
         return result.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"  cmd error: {e}", file=sys.stderr)
         return ""
 
 
-def run_bd(args: list[str], timeout: int = 15) -> str:
-    """Run a bd command and return stdout."""
+def run_bd(args: list[str], timeout: int = 15, check: bool = False) -> str:
+    """Run a bd command and return stdout.
+
+    Logs stderr on non-zero exit code. If check=True, raises
+    BdCommandError on failure instead of returning empty string.
+    """
     try:
         result = subprocess.run(
             ["bd"] + args,
             capture_output=True, text=True, timeout=timeout,
             cwd=str(REPO_ROOT),
         )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            print(f"  bd {args[0]} failed (exit {result.returncode}): {stderr}",
+                  file=sys.stderr)
+            if check:
+                raise BdCommandError(args, result.returncode, stderr)
+            return ""
         return result.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"  bd error: {e}", file=sys.stderr)
+        if check:
+            raise BdCommandError(args, -1, str(e)) from e
         return ""
+
+
+def _retry_bd(args: list[str], max_retries: int = 2, timeout: int = 15) -> str:
+    """Run a bd command with retries for critical state mutations.
+
+    Retries with exponential backoff (1s, 2s). Raises BdCommandError
+    if all attempts fail.
+    """
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            return run_bd(args, timeout=timeout, check=True)
+        except BdCommandError as e:
+            last_err = e
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                print(f"  Retrying bd {args[0]} in {wait}s "
+                      f"(attempt {attempt + 2}/{max_retries + 1})...",
+                      file=sys.stderr)
+                time.sleep(wait)
+    print(f"  CRITICAL: bd {' '.join(args)} failed after "
+          f"{max_retries + 1} attempts: {last_err}",
+          file=sys.stderr)
+    raise last_err
 
 
 # ── Bead queries ─────────────────────────────────────────────────
@@ -156,13 +209,20 @@ def get_claimed_beads() -> set[str]:
 # ── Bead state mutations ────────────────────────────────────────
 
 
-def set_dispatch_state(bead_id: str, state: str, reason: str = "") -> None:
-    """Set the dispatch dimension on a bead.
+def set_dispatch_state(bead_id: str, state: str, reason: str = "") -> bool:
+    """Set the dispatch dimension on a bead. Returns True on success.
 
     Dispatch states: queued, launching, running, collecting, merging, done, failed.
+    Retries on failure. Logs a manual-cleanup warning if all retries fail.
     """
     reason_text = reason or f"dispatch:{state}"
-    run_bd(["set-state", bead_id, f"dispatch={state}", "--reason", reason_text])
+    try:
+        _retry_bd(["set-state", bead_id, f"dispatch={state}", "--reason", reason_text])
+        return True
+    except BdCommandError:
+        print(f"  MANUAL CLEANUP NEEDED: {bead_id} dispatch state not set to {state}",
+              file=sys.stderr)
+        return False
 
 
 def claim_bead(bead_id: str) -> bool:
@@ -178,44 +238,74 @@ def claim_bead(bead_id: str) -> bool:
         return False
 
     # Set status to in_progress so dashboard shows it
-    run_bd(["update", bead_id, "-s", "in_progress"])
+    if not run_bd(["update", bead_id, "-s", "in_progress"]):
+        print(f"  WARNING: Claimed {bead_id} but failed to set in_progress",
+              file=sys.stderr)
 
     # Also add label for queryability
-    subprocess.run(
+    label_result = subprocess.run(
         ["bd", "label", "add", bead_id, "work:claimed"],
         capture_output=True, text=True, timeout=15,
         cwd=str(REPO_ROOT),
     )
+    if label_result.returncode != 0:
+        print(f"  WARNING: Failed to add work:claimed label to {bead_id}: "
+              f"{label_result.stderr.strip()}", file=sys.stderr)
     return True
 
 
-def release_bead(bead_id: str, status: str, reason: str) -> None:
-    """Release a bead after agent completion.
+def release_bead(bead_id: str, status: str, reason: str) -> bool:
+    """Release a bead after agent completion. Returns True if all ops succeed.
 
     For non-DONE outcomes, resets status to open so the bead can be
     re-queued. Every release removes the work:claimed label.
+    Uses retry for critical state mutations. Logs manual-cleanup
+    warnings on persistent failure so stale beads are visible.
     """
-    # Remove claim label
-    subprocess.run(
-        ["bd", "label", "remove", bead_id, "work:claimed"],
-        capture_output=True, text=True, timeout=15,
-        cwd=str(REPO_ROOT),
-    )
+    success = True
 
-    if status == "DONE":
-        run_bd(["close", bead_id, "--reason", reason])
-    elif status == "BLOCKED":
-        run_bd(["update", bead_id, "-s", "open"])
-        run_bd(["set-state", bead_id, "work=blocked", "--reason", reason])
-        run_bd(["update", bead_id, "--append-notes", f"Blocked: {reason}"])
-    elif status == "FAILED":
-        run_bd(["update", bead_id, "-s", "open"])
-        run_bd(["set-state", bead_id, "work=failed", "--reason", reason])
-        run_bd(["update", bead_id, "--append-notes", f"Failed: {reason}"])
-    else:
-        # Unknown status — log and release
-        run_bd(["update", bead_id, "-s", "open"])
-        run_bd(["set-state", bead_id, "work=released", "--reason", f"Unknown status: {status}"])
+    # Remove claim label
+    try:
+        label_result = subprocess.run(
+            ["bd", "label", "remove", bead_id, "work:claimed"],
+            capture_output=True, text=True, timeout=15,
+            cwd=str(REPO_ROOT),
+        )
+        if label_result.returncode != 0:
+            print(f"  Failed to remove work:claimed from {bead_id}: "
+                  f"{label_result.stderr.strip()}", file=sys.stderr)
+            success = False
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  Failed to remove work:claimed from {bead_id}: {e}",
+              file=sys.stderr)
+        success = False
+
+    try:
+        if status == "DONE":
+            _retry_bd(["close", bead_id, "--reason", reason])
+        elif status == "BLOCKED":
+            _retry_bd(["update", bead_id, "-s", "open"])
+            _retry_bd(["set-state", bead_id, "work=blocked", "--reason", reason])
+            run_bd(["update", bead_id, "--append-notes", f"Blocked: {reason}"])
+        elif status == "FAILED":
+            _retry_bd(["update", bead_id, "-s", "open"])
+            _retry_bd(["set-state", bead_id, "work=failed", "--reason", reason])
+            run_bd(["update", bead_id, "--append-notes", f"Failed: {reason}"])
+        else:
+            # Unknown status — log and release
+            _retry_bd(["update", bead_id, "-s", "open"])
+            _retry_bd(["set-state", bead_id, "work=released",
+                       "--reason", f"Unknown status: {status}"])
+    except BdCommandError as e:
+        print(f"  MANUAL CLEANUP NEEDED: {bead_id} release failed "
+              f"(status={status}): {e}", file=sys.stderr)
+        success = False
+
+    if not success:
+        print(f"  STALE BEAD WARNING: {bead_id} may need manual cleanup "
+              f"(intended status: {status})", file=sys.stderr)
+
+    return success
 
 
 # ── Image routing ────────────────────────────────────────────────
