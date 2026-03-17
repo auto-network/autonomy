@@ -59,6 +59,34 @@
       .board-column { min-width: 0 !important; max-height: none; }
       .board-column-scroll { max-height: 50vh; }
     }
+    /* Dense Table View */
+    .bead-table { border-collapse: collapse; font-size: 0.8125rem; }
+    .bead-th {
+      text-align: left; padding: 0.375rem 0.5rem; font-weight: 600; font-size: 0.75rem;
+      color: #9ca3af; border-bottom: 2px solid #374151; cursor: pointer; user-select: none;
+      white-space: nowrap; position: sticky; top: 0; background: #111827; z-index: 1;
+    }
+    .bead-th:hover { color: #e5e7eb; }
+    .bead-th-cb { width: 2rem; cursor: default; }
+    .bead-th-title { min-width: 200px; }
+    .bead-th-id { width: 80px; }
+    .bead-th-priority { width: 48px; }
+    .bead-th-phase { width: 80px; }
+    .bead-th-type { width: 64px; }
+    .bead-th-status { width: 80px; }
+    .bead-th-epic { width: 120px; }
+    .bead-th-labels { min-width: 100px; }
+    .bead-th-updated_at { width: 72px; }
+    .bead-td { padding: 0.25rem 0.5rem; border-bottom: 1px solid #1f2937; vertical-align: middle; }
+    .bead-td-cb { width: 2rem; }
+    .bead-td-title { font-size: 0.8125rem; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bead-tr-even { background: #111827; }
+    .bead-tr-odd { background: #0d1117; }
+    .bulk-action-bar {
+      display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.75rem;
+      background: #1e1b4b; border: 1px solid #4f46e5; border-radius: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
     /* Live Panel */
     #live-panel {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
