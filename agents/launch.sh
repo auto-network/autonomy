@@ -146,6 +146,7 @@ if $DETACH; then
     # No --rm: dispatcher removes container after collecting results.
     CONTAINER_ID=$(docker run -d \
         --name "$CONTAINER_NAME" \
+        --network=host \
         -e BD_ACTOR="agent:$CONTAINER_NAME" \
         -e BD_READONLY="${BD_READONLY:-0}" \
         -v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro" \
@@ -182,6 +183,7 @@ fi
 docker run \
     --name "$CONTAINER_NAME" \
     --rm \
+    --network=host \
     -e BD_ACTOR="agent:$CONTAINER_NAME" \
     -e BD_READONLY="${BD_READONLY:-0}" \
     -v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro" \
