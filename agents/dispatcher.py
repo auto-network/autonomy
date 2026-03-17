@@ -648,12 +648,16 @@ def process_decision(dispatch_result: DispatchResult) -> None:
     if notes:
         run_bd(["update", bead_id, "--append-notes", notes])
 
-    # Create discovered beads
+    # Create discovered beads — always include readiness:idea as pipeline entry point
     for new_bead in decision.get("discovered_beads", []):
         title = new_bead.get("title", "Untitled")
         desc = new_bead.get("description", "")
         labels = new_bead.get("labels", ["refinement"])
         priority = new_bead.get("priority", 2)
+
+        # Ensure readiness:idea is present for the readiness pipeline
+        if not any(l.startswith("readiness:") for l in labels):
+            labels = labels + ["readiness:idea"]
 
         label_args = ["-l", ",".join(labels)] if labels else []
         out = run_bd([

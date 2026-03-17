@@ -58,7 +58,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 |---------|------|---------|
 | `bd ready` | Show beads with no blockers | |
 | `bd show <id>` | Show bead details | `bd show auto-5kj` |
-| `bd create "title" -p N` | Create a bead | `bd create "Fix bug" -t task -p 1` |
+| `bd create "title" -p N -l readiness:idea` | Create a bead (always include readiness label) | `bd create "Fix bug" -t task -p 1 -l readiness:idea` |
 | `bd dep tree <id>` | Show dependency tree | |
 | `bd close <id> --reason "..."` | Close a completed bead | |
 
