@@ -154,6 +154,65 @@ async def api_dispatch_status(request):
         "running_runs": running_runs,
     })
 
+
+async def api_dispatch_approved(request):
+    """Return approved beads split into waiting (unblocked) vs blocked.
+
+    For each approved bead, checks dependencies via `bd dep list`.
+    Blocked beads include their open blockers so the frontend can link to them.
+    """
+    all_beads = await run_cli_json(["bd", "list", "--json", "-n", "100"])
+    bead_list = all_beads if isinstance(all_beads, list) else []
+
+    # Filter to open, approved beads not currently being dispatched
+    dispatch_labels = {
+        "dispatch:queued", "dispatch:launching", "dispatch:running",
+        "dispatch:collecting", "dispatch:merging",
+    }
+    approved = []
+    for b in bead_list:
+        if b.get("status") != "open":
+            continue
+        labels = set(b.get("labels") or [])
+        if "readiness:approved" not in labels:
+            continue
+        if labels & dispatch_labels:
+            continue
+        approved.append(b)
+
+    # Check dependencies for each approved bead in parallel
+    async def check_deps(bead):
+        dep_data = await run_cli_json(["bd", "dep", "list", bead["id"], "--json"])
+        if not isinstance(dep_data, list):
+            return bead, []
+        open_blockers = []
+        for dep in dep_data:
+            if not isinstance(dep, dict):
+                continue
+            if dep.get("dependency_type") == "parent-child":
+                continue
+            if dep.get("status") != "closed":
+                open_blockers.append({
+                    "id": dep.get("id", ""),
+                    "title": dep.get("title", ""),
+                    "status": dep.get("status", ""),
+                    "priority": dep.get("priority"),
+                })
+        return bead, open_blockers
+
+    results = await asyncio.gather(*(check_deps(b) for b in approved))
+
+    waiting = []
+    blocked = []
+    for bead, blockers in results:
+        if blockers:
+            blocked.append({**bead, "blockers": blockers})
+        else:
+            waiting.append(bead)
+
+    return JSONResponse({"waiting": waiting, "blocked": blocked})
+
+
 AGENT_RUNS_DIR = Path(__file__).parent.parent.parent / "data" / "agent-runs"
 
 async def api_dispatch_runs(request):
@@ -1453,6 +1512,7 @@ routes = [
     Route("/api/bead/{id}/tree", api_bead_tree),
     Route("/api/bead/{id}/approve", api_bead_approve, methods=["POST"]),
     Route("/api/dispatch/status", api_dispatch_status),
+    Route("/api/dispatch/approved", api_dispatch_approved),
     Route("/api/dispatch/runs", api_dispatch_runs),
     Route("/api/dispatch/trace/{run}", api_dispatch_trace),
     Route("/dispatch/trace/{run}", page_dispatch),
