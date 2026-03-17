@@ -37,12 +37,33 @@ function statusBadge(s) {
 
 // ── Bead Actions ────────────────────────────────────────────
 
-async function approveBead(id) {
+async function approveBead(id, event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const btn = document.getElementById(`approve-btn-${id}`);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '...';
+  }
   const res = await fetch(`/api/bead/${id}/approve`, { method: 'POST' });
   const data = await res.json();
   if (data.ok) {
-    navigateTo(`/bead/${id}`);  // re-render to show approved state
+    if (btn) {
+      // Replace button with "Approved" badge inline
+      const badge = document.createElement('span');
+      badge.className = 'px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded font-semibold';
+      badge.textContent = 'Approved';
+      btn.replaceWith(badge);
+    } else {
+      navigateTo(`/bead/${id}`);
+    }
   } else {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Approve';
+    }
     alert(`Failed to approve: ${data.error}`);
   }
 }
@@ -66,6 +87,15 @@ async function renderBeads() {
 
   function renderIssueRow(issue) {
     const type = issue.issue_type === 'epic' ? '📦' : issue.issue_type === 'bug' ? '🐛' : '📋';
+    const labels = issue.labels || [];
+    const isApproved = labels.includes('readiness:approved');
+    const canApprove = issue.status !== 'closed' && !isApproved;
+    const approveHtml = isApproved
+      ? `<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded font-semibold">Approved</span>`
+      : canApprove
+      ? `<button id="approve-btn-${issue.id}" onclick="event.stopPropagation(); approveBead('${issue.id}', event)"
+                 class="px-2 py-0.5 bg-green-700 hover:bg-green-600 text-white text-xs rounded">Approve</button>`
+      : '';
     return `
       <div class="p-4 sm:p-3 bg-gray-800 rounded-lg hover:bg-gray-750 cursor-pointer border border-gray-700"
            onclick="navigateTo('/bead/${issue.id}')">
@@ -77,6 +107,7 @@ async function renderBeads() {
           <span class="font-mono text-xs text-gray-500">${issue.id}</span>
           ${priorityBadge(issue.priority)}
           ${statusBadge(issue.status)}
+          ${approveHtml}
         </div>
       </div>`;
   }
@@ -117,7 +148,7 @@ async function renderBeadDetail(id) {
   const isApproved = labels.includes('readiness:approved');
   const isClosed = bead.status === 'closed';
   const approveBtn = (!isApproved && !isClosed)
-    ? `<button onclick="approveBead('${bead.id}')" class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded">Approve for Dispatch</button>`
+    ? `<button id="approve-btn-${bead.id}" onclick="approveBead('${bead.id}', event)" class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded">Approve for Dispatch</button>`
     : isApproved
     ? `<span class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded">Approved</span>`
     : '';
