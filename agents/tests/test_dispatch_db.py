@@ -137,3 +137,36 @@ def test_insert_or_replace():
     assert len(rows) == 1
     assert rows[0]["status"] == "DONE"
     assert rows[0]["reason"] == "second"
+
+
+def test_get_runs_for_bead():
+    """Lookup by bead_id returns runs ordered most recent first."""
+    _use_temp_db()
+    base = dict(
+        bead_id="auto-multi",
+        started_at=1710000000.0,
+        status="DONE",
+        reason="ok",
+        decision=None,
+        commit_hash="",
+        branch="",
+        branch_base="",
+        image="",
+        container_name="",
+        exit_code=0,
+        output_dir="",
+    )
+    db.insert_run(run_id="auto-multi-20260316-120000", completed_at=1710000300.0, **base)
+    db.insert_run(run_id="auto-multi-20260317-120000", completed_at=1710086700.0, **base)
+
+    runs = db.get_runs_for_bead("auto-multi")
+    assert len(runs) == 2
+    # Most recent first
+    assert runs[0]["id"] == "auto-multi-20260317-120000"
+    assert runs[1]["id"] == "auto-multi-20260316-120000"
+
+
+def test_get_runs_for_bead_empty():
+    """Lookup by nonexistent bead_id returns empty list."""
+    _use_temp_db()
+    assert db.get_runs_for_bead("nonexistent") == []

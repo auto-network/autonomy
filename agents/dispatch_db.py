@@ -229,6 +229,20 @@ def get_run(run_id: str) -> dict | None:
         conn.close()
 
 
+def get_runs_for_bead(bead_id: str) -> list[dict]:
+    """Get dispatch runs for a bead, most recent first."""
+    conn = _get_conn()
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT * FROM dispatch_runs WHERE bead_id = ? ORDER BY completed_at DESC",
+            (bead_id,),
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def get_currently_running() -> list[dict]:
     """Get runs that are currently in progress (started but not completed)."""
     conn = _get_conn()
