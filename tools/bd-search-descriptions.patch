@@ -1,0 +1,86 @@
+diff --git a/cmd/bd/search.go b/cmd/bd/search.go
+index 477976b..c7da1f2 100644
+--- a/cmd/bd/search.go
++++ b/cmd/bd/search.go
+@@ -16,10 +16,11 @@ var searchCmd = &cobra.Command{
+ 	Use:     "search [query]",
+ 	GroupID: "issues",
+ 	Short:   "Search issues by text query",
+-	Long: `Search issues across title and ID (excludes closed issues by default).
++	Long: `Search issues across title, description, and ID (excludes closed issues by default).
+ 
+ ID-like queries (e.g., "bd-123", "hq-319") use fast exact/prefix matching.
+-Text queries search titles. Use --desc-contains for description search.
++Text queries search titles and descriptions. Use --desc-contains to filter
++by description only without a title match.
+ Use --status all to include closed issues.
+ 
+ Examples:
+diff --git a/internal/storage/dolt/filters.go b/internal/storage/dolt/filters.go
+index 448d0b4..339a734 100644
+--- a/internal/storage/dolt/filters.go
++++ b/internal/storage/dolt/filters.go
+@@ -30,15 +30,10 @@ func buildIssueFilterClauses(query string, filter types.IssueFilter, tables filt
+ 	var whereClauses []string
+ 	var args []interface{}
+ 
+-	// Free-text search — optimized to avoid full-table scans (hq-319).
++	// Free-text search across title, description, and id.
+ 	//
+-	// The old approach used (title LIKE %q% OR description LIKE %q% OR id LIKE %q%)
+-	// which forces Dolt to scan every row in the prolly tree for all three columns.
+-	// With 12K+ issues and concurrent agents, this caused CPU spikes of 200-400%.
+-	//
+-	// Optimization: detect ID-like queries and use exact/prefix match on the indexed
+-	// id column. For text queries, search title and id only (description is large and
+-	// rarely matches short queries — use --desc-contains for explicit description search).
++	// ID-like queries use exact/prefix match on the indexed id column for speed.
++	// Text queries search title, description, and id (case-insensitive).
+ 	if query != "" {
+ 		lowerQuery := strings.ToLower(query)
+ 		if looksLikeIssueID(query) {
+@@ -49,13 +44,11 @@ func buildIssueFilterClauses(query string, filter types.IssueFilter, tables filt
+ 			whereClauses = append(whereClauses, "(id = ? OR id LIKE ? OR LOWER(title) LIKE ? OR LOWER(external_ref) LIKE ?)")
+ 			args = append(args, lowerQuery, lowerQuery+"%", "%"+lowerQuery+"%", "%"+lowerQuery+"%")
+ 		} else {
+-			// Text query: search title and id (skip description — it's large and
+-			// LIKE %% on TEXT columns causes the worst prolly-tree scan behavior).
+-			// Users can use --desc-contains for explicit description search.
++			// Text query: search title, description, and id (case-insensitive).
+ 			// LOWER() ensures case-insensitive matching (Dolt uses binary collation by default).
+-			whereClauses = append(whereClauses, "(LOWER(title) LIKE ? OR id LIKE ?)")
++			whereClauses = append(whereClauses, "(LOWER(title) LIKE ? OR LOWER(description) LIKE ? OR id LIKE ?)")
+ 			pattern := "%" + lowerQuery + "%"
+-			args = append(args, pattern, pattern)
++			args = append(args, pattern, pattern, pattern)
+ 		}
+ 	}
+ 
+diff --git a/internal/storage/dolt/queries_test.go b/internal/storage/dolt/queries_test.go
+index 35e0ea8..83482cf 100644
+--- a/internal/storage/dolt/queries_test.go
++++ b/internal/storage/dolt/queries_test.go
+@@ -768,16 +768,19 @@ func TestSearchIssues_ByDescription(t *testing.T) {
+ 		t.Fatalf("failed to create issue: %v", err)
+ 	}
+ 
+-	// Free-text query should NOT match description-only content (hq-319).
++	// Free-text query should match description content.
+ 	results, err := store.SearchIssues(ctx, "Special unique description", types.IssueFilter{})
+ 	if err != nil {
+ 		t.Fatalf("unexpected error: %v", err)
+ 	}
+-	if len(results) != 0 {
+-		t.Fatalf("free-text search should not scan descriptions (hq-319), got %d results", len(results))
++	if len(results) != 1 {
++		t.Fatalf("free-text search should match descriptions, expected 1 result, got %d", len(results))
++	}
++	if results[0].ID != issue.ID {
++		t.Errorf("expected issue %s, got %s", issue.ID, results[0].ID)
+ 	}
+ 
+-	// DescriptionContains filter should still find it.
++	// DescriptionContains filter should also find it.
+ 	results, err = store.SearchIssues(ctx, "", types.IssueFilter{DescriptionContains: "Special unique description"})
+ 	if err != nil {
+ 		t.Fatalf("unexpected error: %v", err)
