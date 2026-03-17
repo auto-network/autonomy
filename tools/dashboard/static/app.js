@@ -1605,9 +1605,14 @@ async function renderDispatch() {
   if (dispatchInterval) clearInterval(dispatchInterval);
 
   async function refresh() {
-    const status = await api('/api/dispatch/status');
-    const allBeads = await api('/api/beads/list');
+    const [status, allBeads, approvedData] = await Promise.all([
+      api('/api/dispatch/status'),
+      api('/api/beads/list'),
+      api('/api/dispatch/approved'),
+    ]);
     const beadList = Array.isArray(allBeads) ? allBeads : [];
+    const waitingBeads = Array.isArray(approvedData?.waiting) ? approvedData.waiting : [];
+    const blockedBeads = Array.isArray(approvedData?.blocked) ? approvedData.blocked : [];
 
     // Build container lookup by bead ID (extract from container name: agent-<bead-id>-<pid>)
     const containersByBead = {};
@@ -1633,11 +1638,6 @@ async function renderDispatch() {
       const ds = getDispatchState(b);
       return (ds && activeDispatchStates.has(ds)) || b.status === 'in_progress';
     });
-
-    // Approved: open beads with readiness:approved, waiting for dispatch
-    const approvedBeads = beadList
-      .filter(b => b.status === 'open' && (b.labels || []).includes('readiness:approved')
-              && !active.some(a => a.id === b.id));
 
     let html = '';
     let runsByBead = {};
@@ -1704,11 +1704,11 @@ async function renderDispatch() {
     }
     html += `</div>`;
 
-    // Approved & waiting
+    // Approved — Waiting for Dispatch (unblocked)
     html += `<div class="mb-8">
       <h2 class="text-lg font-semibold mb-3 text-blue-400">Approved — Waiting for Dispatch</h2>`;
-    if (approvedBeads.length > 0) {
-      for (const b of approvedBeads) {
+    if (waitingBeads.length > 0) {
+      for (const b of waitingBeads) {
         html += `
           <a href="/bead/${b.id}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-blue-500 hover:bg-gray-750">
             <div class="truncate text-sm sm:text-base">${b.title}</div>
@@ -1716,45 +1716,39 @@ async function renderDispatch() {
               <span class="font-mono text-xs text-gray-400">${b.id}</span>
               ${priorityBadge(b.priority)}
             </div>
-            <div class="flex gap-1 mt-1">${(b.labels||[]).map(l => `<span class="px-2 py-0.5 bg-gray-700 text-gray-300 text-xs rounded">${l}</span>`).join('')}</div>
           </a>`;
       }
     } else {
-      html += `<div class="text-gray-500 text-sm">No beads approved for dispatch</div>`;
+      html += `<div class="text-gray-500 text-sm">No unblocked beads waiting</div>`;
     }
     html += `</div>`;
 
-    // Last Runs
-    const runs = await api('/api/dispatch/runs');
-    const completedRuns = Array.isArray(runs) ? runs.filter(r => r.decision) : [];
+    // Approved — Blocked (has open dependencies)
     html += `<div class="mb-8">
-      <h2 class="text-lg font-semibold mb-3 text-gray-400">Last Runs</h2>`;
-    if (completedRuns.length > 0) {
-      for (const r of completedRuns) {
-        const status = r.decision?.status || '?';
-        const reason = r.decision?.reason || '';
-        const statusColor = status === 'DONE' ? 'green' : status === 'BLOCKED' ? 'yellow' : 'red';
-        const commitBadge = r.commit_hash
-          ? `<span class="font-mono text-xs text-gray-400">${r.commit_hash.slice(0, 10)}</span>`
-          : `<span class="text-xs text-gray-500">no commits</span>`;
-        const ts = r.timestamp.replace('-', ' ');
+      <h2 class="text-lg font-semibold mb-3 text-yellow-400">Approved — Blocked</h2>`;
+    if (blockedBeads.length > 0) {
+      for (const b of blockedBeads) {
+        const blockerLinks = (b.blockers || []).map(bl =>
+          `<a href="/bead/${bl.id}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 px-2 py-0.5 bg-yellow-900/50 text-yellow-300 text-xs rounded hover:bg-yellow-800/60">
+            <span class="font-mono">${bl.id}</span>
+            <span class="text-yellow-400/70">${bl.title}</span>
+          </a>`
+        ).join('');
         html += `
-          <a href="/dispatch/trace/${r.dir}" class="block p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-${statusColor}-500 hover:bg-gray-750">
-            <div class="flex justify-between items-center">
-              <div class="flex gap-2 items-center">
-                <span class="font-mono text-sm text-gray-400">${r.bead_id}</span>
-                <span class="badge badge-${statusColor === 'green' ? 'closed' : statusColor === 'yellow' ? 'blocked' : 'open'}">${status}</span>
-                ${commitBadge}
-                <button onclick="event.preventDefault(); event.stopPropagation(); showCompletedPanel('${r.dir}')"
-                        class="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded">Session</button>
-              </div>
-              <span class="text-xs text-gray-500">${ts}</span>
+          <a href="/bead/${b.id}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-yellow-500 hover:bg-gray-750">
+            <div class="truncate text-sm sm:text-base">${b.title}</div>
+            <div class="flex gap-2 items-center flex-wrap mt-1">
+              <span class="font-mono text-xs text-gray-400">${b.id}</span>
+              ${priorityBadge(b.priority)}
             </div>
-            <div class="text-sm text-gray-300 mt-1 truncate">${reason}</div>
+            <div class="mt-2 flex items-center gap-1 flex-wrap">
+              <span class="text-xs text-yellow-500">Blocked by:</span>
+              ${blockerLinks}
+            </div>
           </a>`;
       }
     } else {
-      html += `<div class="text-gray-500 text-sm">No completed runs</div>`;
+      html += `<div class="text-gray-500 text-sm">No blocked beads</div>`;
     }
     html += `</div>`;
 
