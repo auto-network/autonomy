@@ -192,3 +192,51 @@ def insert_run(
         conn.commit()
     finally:
         conn.close()
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict:
+    """Convert a sqlite3.Row to a plain dict."""
+    return {k: row[k] for k in row.keys()}
+
+
+def list_runs(limit: int = 200, offset: int = 0) -> list[dict]:
+    """List dispatch runs ordered by completed_at DESC.
+
+    Returns dicts with all columns from dispatch_runs.
+    """
+    conn = _get_conn()
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT * FROM dispatch_runs ORDER BY completed_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_run(run_id: str) -> dict | None:
+    """Get a single dispatch run by its id (directory name)."""
+    conn = _get_conn()
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM dispatch_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_currently_running() -> list[dict]:
+    """Get runs that are currently in progress (started but not completed)."""
+    conn = _get_conn()
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT * FROM dispatch_runs WHERE status IS NULL AND started_at IS NOT NULL"
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+    finally:
+        conn.close()
