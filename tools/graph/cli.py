@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
+import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 from .db import GraphDB, DEFAULT_DB
@@ -880,6 +883,165 @@ def cmd_related(args):
     db.close()
 
 
+def cmd_wait(args):
+    """Block until a dispatched bead completes, then print a compact report."""
+    bead_id = args.bead_id
+    timeout = args.timeout
+    poll_interval = 2.0
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    dispatch_db = repo_root / "data" / "dispatch.db"
+
+    # ── Step 1: Check bead exists and is approved ──
+    try:
+        result = subprocess.run(
+            ["bd", "show", bead_id, "--json"],
+            capture_output=True, text=True, timeout=15,
+            cwd=str(repo_root),
+        )
+        bd_out = result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"Error: could not run bd: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not bd_out or result.returncode != 0:
+        print(f"Error: Bead '{bead_id}' not found. Check the ID and try again.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        bead_data = json.loads(bd_out)
+        if isinstance(bead_data, list) and bead_data:
+            bead_data = bead_data[0]
+    except json.JSONDecodeError:
+        print(f"Error: Bead '{bead_id}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    # Check readiness
+    labels = bead_data.get("labels") or []
+    readiness = "idea"
+    for label in labels:
+        if label.startswith("readiness:"):
+            readiness = label.split(":", 1)[1]
+            break
+
+    if readiness != "approved":
+        print(f"Error: Bead {bead_id} is not approved for dispatch (current: readiness:{readiness})",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # ── Step 2: Ensure dispatch.db exists ──
+    if not dispatch_db.exists():
+        print(f"Error: dispatch database not found at {dispatch_db}", file=sys.stderr)
+        sys.exit(1)
+
+    # ── Step 3: Poll for completion ──
+    last_status = None
+    start_time = time.monotonic()
+
+    while True:
+        elapsed = time.monotonic() - start_time
+        if elapsed > timeout:
+            # Timeout — report last known state
+            print(f"\nError: Timeout after {timeout}s waiting for {bead_id}", file=sys.stderr)
+            if last_status:
+                print(f"  Last known state: {last_status}", file=sys.stderr)
+            sys.exit(1)
+
+        # Query dispatch_runs for a completed row
+        try:
+            conn = sqlite3.connect(str(dispatch_db))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """SELECT * FROM dispatch_runs
+                   WHERE bead_id = ? AND completed_at IS NOT NULL
+                   ORDER BY completed_at DESC LIMIT 1""",
+                (bead_id,),
+            ).fetchone()
+            conn.close()
+        except sqlite3.Error:
+            row = None
+
+        if row:
+            # ── Step 5: Print report ──
+            run = dict(row)
+            status = run.get("status", "UNKNOWN")
+            duration = run.get("duration_secs")
+            duration_str = f"{duration}s" if duration is not None else "?"
+
+            if status == "DONE":
+                # Success report
+                commit = run.get("commit_hash", "")[:7] or "none"
+                added = run.get("lines_added") or 0
+                removed = run.get("lines_removed") or 0
+                files = run.get("files_changed") or 0
+                message = run.get("commit_message") or ""
+                reason = run.get("reason") or ""
+                discovered = run.get("discovered_beads_count") or 0
+
+                score_t = run.get("score_tooling")
+                score_cl = run.get("score_clarity")
+                score_co = run.get("score_confidence")
+
+                print(f"\u2713 {bead_id} DONE ({duration_str})")
+                if commit != "none":
+                    print(f"  Commit: {commit} (+{added} -{removed}, {files} files)")
+                if message:
+                    print(f"  Message: {message}")
+                if score_t is not None or score_cl is not None or score_co is not None:
+                    parts = []
+                    if score_t is not None:
+                        parts.append(f"tooling={score_t}")
+                    if score_cl is not None:
+                        parts.append(f"clarity={score_cl}")
+                    if score_co is not None:
+                        parts.append(f"confidence={score_co}")
+                    print(f"  Scores: {' '.join(parts)}")
+                if discovered:
+                    print(f"  Discovered: {discovered} beads")
+                if reason:
+                    print(f"  Decision: {reason}")
+            else:
+                # Failure report (FAILED, BLOCKED, UNKNOWN)
+                exit_code = run.get("exit_code")
+                failure_cat = run.get("failure_category") or ""
+                reason = run.get("reason") or ""
+
+                print(f"\u2717 {bead_id} {status} ({duration_str})")
+                if exit_code is not None:
+                    print(f"  Exit: {exit_code}")
+                if failure_cat:
+                    print(f"  Category: {failure_cat}")
+                if reason:
+                    print(f"  Decision: {reason}")
+
+            sys.exit(0 if status == "DONE" else 1)
+
+        # Not completed yet — check current state for status messages
+        try:
+            conn = sqlite3.connect(str(dispatch_db))
+            conn.row_factory = sqlite3.Row
+            running_row = conn.execute(
+                """SELECT * FROM dispatch_runs
+                   WHERE bead_id = ? AND completed_at IS NULL
+                   ORDER BY started_at DESC LIMIT 1""",
+                (bead_id,),
+            ).fetchone()
+            conn.close()
+        except sqlite3.Error:
+            running_row = None
+
+        if running_row and running_row["started_at"]:
+            current_status = "Running..."
+        else:
+            current_status = "Waiting for dispatch..."
+
+        if current_status != last_status:
+            print(current_status, file=sys.stderr)
+            last_status = current_status
+
+        time.sleep(poll_interval)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="autonomy-graph",
@@ -1062,6 +1224,12 @@ def main():
     p.add_argument("--project", "-p", help="Filter to projects matching this substring")
     p.add_argument("--verbose", "-v", action="store_true", help="Show skip events too")
     p.set_defaults(func=cmd_watch)
+
+    # wait
+    p = sub.add_parser("wait", help="Block until a dispatched bead completes")
+    p.add_argument("bead_id", help="Bead ID (e.g. auto-mys.2.1)")
+    p.add_argument("--timeout", type=int, default=600, help="Max wait seconds (default: 600)")
+    p.set_defaults(func=cmd_wait)
 
     args = parser.parse_args()
 
