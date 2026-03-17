@@ -84,9 +84,9 @@ async def api_dispatch_status(request):
     Reads the dispatch dimension (queued/launching/running/collecting/merging/done/failed)
     instead of relying on docker ps for state.
     """
-    claimed = await run_cli_json(["bd", "query", "label=work:claimed", "--json"])
+    claimed = await run_cli_json(["bd", "query", 'label="work:claimed"', "--json"])
     # Also query beads with active dispatch states for richer status
-    dispatching = await run_cli_json(["bd", "query", "label=dispatch:running OR label=dispatch:launching OR label=dispatch:collecting OR label=dispatch:merging OR label=dispatch:queued", "--json"])
+    dispatching = await run_cli_json(["bd", "query", 'label="dispatch:running" OR label="dispatch:launching" OR label="dispatch:collecting" OR label="dispatch:merging" OR label="dispatch:queued"', "--json"])
     # Containers are still useful for runtime info (uptime, image)
     stdout, _, _ = await run_cli(["docker", "ps", "--filter", "name=agent-", "--format", '{"name":"{{.Names}}","status":"{{.Status}}","image":"{{.Image}}"}'])
     containers = []
