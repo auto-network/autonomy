@@ -139,11 +139,27 @@ async function renderBeadDetail(id) {
     html += '<div class="mt-6" id="primer-content"></div>';
   }
 
+  // Add padding at bottom if live panel might open
+  const isRunning = labels.some(l => l.startsWith('dispatch:running') || l.startsWith('dispatch:launching') || l.startsWith('dispatch:collecting'));
+  if (isRunning) {
+    html += '<div style="height: 20rem;"></div>';  // spacer for live panel
+  }
+
   content.innerHTML = html;
 
   // Render primer as markdown
   if (primer.content) {
     document.getElementById('primer-content').appendChild(renderMd(primer.content));
+  }
+
+  // Auto-open live panel if dispatch is running
+  if (isRunning) {
+    const runs = await api('/api/dispatch/runs');
+    const runsList = Array.isArray(runs) ? runs : [];
+    const beadRun = runsList.find(r => r.bead_id === id);
+    if (beadRun) {
+      showLivePanel(beadRun.dir);
+    }
   }
 }
 
@@ -194,6 +210,14 @@ async function renderDispatch() {
     html += `<div class="mb-8">
       <h2 class="text-lg font-semibold mb-3 text-green-400">Active Dispatches</h2>`;
     if (active.length > 0) {
+      // Fetch latest runs to match active beads to run dirs
+      const runsData = await api('/api/dispatch/runs');
+      const runsList = Array.isArray(runsData) ? runsData : [];
+      const runsByBead = {};
+      for (const r of runsList) {
+        if (!runsByBead[r.bead_id]) runsByBead[r.bead_id] = r;
+      }
+
       for (const b of active) {
         const container = containersByBead[b.id];
         const ds = getDispatchState(b);
@@ -212,6 +236,16 @@ async function renderDispatch() {
           : ds === 'collecting' || ds === 'merging'
           ? `<div class="mt-2 ml-6 text-xs text-gray-500">Agent finished — ${ds}...</div>`
           : `<div class="mt-2 ml-6 text-xs text-gray-500">Container exited — waiting for results</div>`;
+
+        // Live view button + snippet area
+        const run = runsByBead[b.id];
+        const runDir = run ? run.dir : '';
+        const liveBtn = runDir
+          ? `<button onclick="event.preventDefault(); event.stopPropagation(); showLivePanel('${runDir}')"
+                    class="px-2 py-0.5 bg-indigo-700 hover:bg-indigo-600 text-white text-xs rounded ml-2">View Live</button>`
+          : '';
+        const snippetId = `snippet-${b.id}`;
+
         html += `
           <a href="/bead/${b.id}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500 hover:bg-gray-750">
             <div class="mb-1 sm:mb-0">
@@ -220,11 +254,27 @@ async function renderDispatch() {
                 <span class="font-mono text-xs text-gray-400">${b.id}</span>
                 ${priorityBadge(b.priority)}
                 ${stateBadge}
+                ${liveBtn}
               </div>
             </div>
             ${containerHtml}
+            <div id="${snippetId}" class="mt-2 ml-6 text-xs text-gray-500 italic truncate" data-run="${runDir}"></div>
           </a>`;
       }
+
+      // Load snippets for active dispatches (non-blocking)
+      setTimeout(async () => {
+        for (const b of active) {
+          const run = runsByBead[b.id];
+          if (!run) continue;
+          const snippetEl = document.getElementById(`snippet-${b.id}`);
+          if (!snippetEl) continue;
+          const snippet = await getLiveSnippet(run.dir);
+          if (snippet && snippet.text) {
+            snippetEl.textContent = snippet.text;
+          }
+        }
+      }, 0);
     } else {
       html += `<div class="text-gray-500 text-sm">No active dispatches</div>`;
     }
@@ -271,6 +321,8 @@ async function renderDispatch() {
                 <span class="font-mono text-sm text-gray-400">${r.bead_id}</span>
                 <span class="badge badge-${statusColor === 'green' ? 'closed' : statusColor === 'yellow' ? 'blocked' : 'open'}">${status}</span>
                 ${commitBadge}
+                <button onclick="event.preventDefault(); event.stopPropagation(); showLivePanel('${r.dir}')"
+                        class="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded">Session</button>
               </div>
               <span class="text-xs text-gray-500">${ts}</span>
             </div>
@@ -1023,6 +1075,209 @@ async function killTerminal(name) {
   await api(`/api/terminal/${name}/kill`);
   if (activeTerminalId === name) activeTerminalId = null;
   renderTerminal(null, null);
+}
+
+// ── Live Session Panel ───────────────────────────────────────
+
+let _livePanelInterval = null;
+let _livePanelRunDir = null;
+let _livePanelOffset = 0;
+let _livePanelAutoScroll = true;
+
+function showLivePanel(runDir) {
+  const panel = document.getElementById('live-panel');
+  const entries = document.getElementById('live-panel-entries');
+  const beadLabel = document.getElementById('live-panel-bead');
+  const statusEl = document.getElementById('live-panel-status');
+
+  // Reset state
+  _livePanelRunDir = runDir;
+  _livePanelOffset = 0;
+  _livePanelAutoScroll = true;
+  entries.innerHTML = '';
+  document.getElementById('live-resume-btn').style.display = 'none';
+
+  // Extract bead ID from run dir name (format: <bead>-YYYYMMDD-HHMMSS)
+  const parts = runDir.split('-');
+  const beadId = parts.length >= 3 ? parts.slice(0, -2).join('-') : runDir;
+  beadLabel.textContent = beadId;
+  statusEl.textContent = 'connecting...';
+
+  // Show panel and add padding to main content
+  panel.style.display = 'flex';
+  panel.classList.remove('collapsed');
+  document.getElementById('content').style.paddingBottom = '20rem';
+
+  // Set up scroll detection
+  const body = document.getElementById('live-panel-body');
+  body.onscroll = () => {
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 50;
+    _livePanelAutoScroll = atBottom;
+    document.getElementById('live-resume-btn').style.display = atBottom ? 'none' : 'block';
+  };
+
+  // Start polling
+  if (_livePanelInterval) clearInterval(_livePanelInterval);
+  _livePollTail(); // immediate first poll
+  _livePanelInterval = setInterval(_livePollTail, 1500);
+}
+
+function hideLivePanel() {
+  const panel = document.getElementById('live-panel');
+  panel.style.display = 'none';
+  panel.classList.add('collapsed');
+  document.getElementById('content').style.paddingBottom = '';
+  if (_livePanelInterval) {
+    clearInterval(_livePanelInterval);
+    _livePanelInterval = null;
+  }
+  _livePanelRunDir = null;
+}
+
+function toggleLivePanel() {
+  const panel = document.getElementById('live-panel');
+  panel.classList.toggle('collapsed');
+}
+
+function liveResumeScroll() {
+  _livePanelAutoScroll = true;
+  document.getElementById('live-resume-btn').style.display = 'none';
+  const body = document.getElementById('live-panel-body');
+  body.scrollTop = body.scrollHeight;
+}
+
+async function _livePollTail() {
+  if (!_livePanelRunDir) return;
+
+  try {
+    const data = await api(`/api/dispatch/tail/${_livePanelRunDir}?after=${_livePanelOffset}`);
+    const statusEl = document.getElementById('live-panel-status');
+    const pulseEl = document.getElementById('live-pulse');
+
+    if (data.is_live) {
+      statusEl.textContent = 'streaming';
+      statusEl.className = 'text-xs text-green-400 ml-auto';
+      pulseEl.style.background = '#22c55e';
+    } else {
+      statusEl.textContent = 'completed';
+      statusEl.className = 'text-xs text-gray-500 ml-auto';
+      pulseEl.style.background = '#6b7280';
+      // Stop polling if not live and we've already loaded data
+      if (_livePanelOffset > 0 && !data.entries.length) {
+        clearInterval(_livePanelInterval);
+        _livePanelInterval = null;
+      }
+    }
+
+    if (data.offset !== undefined) {
+      _livePanelOffset = data.offset;
+    }
+
+    if (data.entries && data.entries.length > 0) {
+      _liveAppendEntries(data.entries);
+    }
+  } catch (err) {
+    const statusEl = document.getElementById('live-panel-status');
+    statusEl.textContent = 'error';
+    statusEl.className = 'text-xs text-red-400 ml-auto';
+  }
+}
+
+function _liveAppendEntries(entries) {
+  const container = document.getElementById('live-panel-entries');
+  const body = document.getElementById('live-panel-body');
+
+  for (const entry of entries) {
+    const el = document.createElement('div');
+    el.className = 'live-entry';
+
+    const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '';
+
+    if (entry.type === 'user') {
+      el.className += ' live-entry-user';
+      el.innerHTML = `
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-xs text-blue-400 font-semibold">USER</span>
+          <span class="live-entry-time">${timeStr}</span>
+        </div>`;
+      const textEl = document.createElement('div');
+      textEl.className = 'text-sm text-gray-300';
+      textEl.textContent = entry.content;
+      el.appendChild(textEl);
+
+    } else if (entry.type === 'assistant_text') {
+      el.className += ' live-entry-assistant';
+      el.innerHTML = `
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-xs text-indigo-400 font-semibold">ASSISTANT</span>
+          <span class="live-entry-time">${timeStr}</span>
+        </div>`;
+      const mdEl = renderMd(entry.content);
+      mdEl.className += ' text-sm';
+      el.appendChild(mdEl);
+
+    } else if (entry.type === 'tool_use') {
+      el.className += ' live-entry-tool';
+      const details = document.createElement('details');
+      details.className = 'text-sm';
+      details.innerHTML = `
+        <summary class="live-tool-toggle text-purple-400 text-xs font-mono">
+          ${escapeHtml(entry.tool_name)}
+          <span class="live-entry-time ml-2">${timeStr}</span>
+        </summary>
+        <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-32 overflow-y-auto bg-gray-800 rounded p-2">${escapeHtml(entry.content)}</pre>`;
+      el.appendChild(details);
+
+    } else if (entry.type === 'tool_result') {
+      el.className += ' live-entry-tool';
+      const details = document.createElement('details');
+      details.className = 'text-sm';
+      const preview = (entry.content || '').slice(0, 80).replace(/\n/g, ' ');
+      details.innerHTML = `
+        <summary class="live-tool-toggle text-gray-500 text-xs font-mono">
+          result <span class="text-gray-600">${escapeHtml(preview)}${entry.content.length > 80 ? '...' : ''}</span>
+          <span class="live-entry-time ml-2">${timeStr}</span>
+        </summary>
+        <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-48 overflow-y-auto bg-gray-800 rounded p-2">${escapeHtml(entry.content)}</pre>`;
+      el.appendChild(details);
+
+    } else if (entry.type === 'thinking') {
+      el.className += ' live-entry-thinking';
+      const details = document.createElement('details');
+      details.className = 'text-sm';
+      details.innerHTML = `
+        <summary class="live-tool-toggle text-gray-600 text-xs">
+          thinking...
+          <span class="live-entry-time ml-2">${timeStr}</span>
+        </summary>
+        <div class="text-xs text-gray-500 mt-1 italic">${escapeHtml(entry.content)}</div>`;
+      el.appendChild(details);
+
+    } else {
+      continue;
+    }
+
+    container.appendChild(el);
+  }
+
+  // Auto-scroll
+  if (_livePanelAutoScroll) {
+    body.scrollTop = body.scrollHeight;
+  }
+}
+
+/**
+ * Get a snippet (last assistant text, ~100 chars) for inline display.
+ * Returns {text, timestamp, is_live} or null.
+ */
+async function getLiveSnippet(runDir) {
+  try {
+    const data = await api(`/api/dispatch/latest/${runDir}`);
+    if (data.text) return data;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ── Router ───────────────────────────────────────────────────

@@ -362,6 +362,330 @@ async def api_primer(request):
     return JSONResponse({"content": stdout, "error": stderr if rc != 0 else None})
 
 
+# ── Live Session Tailing ──────────────────────────────────────
+
+def _parse_jsonl_entry(line: str) -> dict | None:
+    """Parse a single JSONL line into a display entry."""
+    try:
+        raw = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+    entry_type = raw.get("type")
+    timestamp = raw.get("timestamp", "")
+    is_sidechain = raw.get("isSidechain", False)
+
+    # Skip non-content entries
+    if entry_type in ("queue-operation", "progress", "system"):
+        return None
+    if is_sidechain:
+        return None
+
+    message = raw.get("message", {})
+    role = message.get("role", entry_type)
+    content_raw = message.get("content", "")
+
+    if entry_type == "user":
+        text = ""
+        if isinstance(content_raw, str):
+            text = content_raw
+        elif isinstance(content_raw, list):
+            for block in content_raw:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text += block.get("text", "")
+        if not text:
+            return None
+        return {
+            "type": "user",
+            "role": "user",
+            "content": text[:2000],
+            "timestamp": timestamp,
+        }
+
+    if entry_type == "assistant" and isinstance(content_raw, list):
+        # Expand assistant content blocks into sub-entries
+        blocks = []
+        for block in content_raw:
+            btype = block.get("type", "")
+            if btype == "text":
+                text = block.get("text", "").strip()
+                if text:
+                    blocks.append({
+                        "type": "assistant_text",
+                        "role": "assistant",
+                        "content": text,
+                        "timestamp": timestamp,
+                    })
+            elif btype == "tool_use":
+                tool_input = block.get("input", {})
+                # Truncate large inputs for display
+                input_str = json.dumps(tool_input, indent=2)
+                if len(input_str) > 3000:
+                    input_str = input_str[:3000] + "\n... (truncated)"
+                blocks.append({
+                    "type": "tool_use",
+                    "role": "assistant",
+                    "tool_name": block.get("name", "?"),
+                    "tool_id": block.get("id", ""),
+                    "content": input_str,
+                    "timestamp": timestamp,
+                })
+            elif btype == "thinking":
+                thinking = block.get("thinking", "").strip()
+                if thinking:
+                    blocks.append({
+                        "type": "thinking",
+                        "role": "assistant",
+                        "content": thinking[:1000],
+                        "timestamp": timestamp,
+                    })
+        return blocks if blocks else None
+
+    if entry_type == "tool_result":
+        # Tool results can be large; extract just the summary
+        tool_id = raw.get("toolUseId", "")
+        result_content = ""
+        if isinstance(content_raw, str):
+            result_content = content_raw
+        elif isinstance(content_raw, list):
+            for block in content_raw:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    result_content += block.get("text", "")
+        if len(result_content) > 2000:
+            result_content = result_content[:2000] + "\n... (truncated)"
+        if not result_content:
+            return None
+        return {
+            "type": "tool_result",
+            "role": "tool",
+            "tool_id": tool_id,
+            "content": result_content,
+            "timestamp": timestamp,
+        }
+
+    return None
+
+
+def _find_session_files(run_name: str) -> list[Path]:
+    """Find JSONL session files for a run, checking multiple locations."""
+    # 1. Completed run directory
+    run_dir = AGENT_RUNS_DIR / run_name
+    sessions_dir = run_dir / "sessions"
+    if sessions_dir.exists():
+        files = sorted(sessions_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime)
+        if files:
+            return files
+
+    # 2. Check for active worktree session files
+    # Extract bead ID from run name (format: <bead>-YYYYMMDD-HHMMSS)
+    parts = run_name.rsplit("-", 2)
+    if len(parts) >= 3:
+        bead_id = parts[0]
+        # Look for worktree path file
+        worktree_path_file = run_dir / ".worktree_path"
+        if worktree_path_file.exists():
+            worktree = Path(worktree_path_file.read_text().strip())
+            # Claude Code sessions in worktree context
+            claude_dir = Path.home() / ".claude" / "projects"
+            if claude_dir.exists():
+                for jsonl in claude_dir.rglob("*.jsonl"):
+                    # Check if this session file is recent and related
+                    try:
+                        import time
+                        age = time.time() - jsonl.stat().st_mtime
+                        if age < 600:  # Active in last 10 minutes
+                            return [jsonl]
+                    except OSError:
+                        continue
+
+    return []
+
+
+async def api_dispatch_tail(request):
+    """Tail JSONL session data for a dispatch run.
+
+    Returns parsed entries after a byte offset for incremental polling.
+    GET /api/dispatch/tail/{run}?after=N
+    """
+    run_name = request.path_params["run"]
+    after = int(request.query_params.get("after", "0"))
+
+    session_files = _find_session_files(run_name)
+    if not session_files:
+        # Try docker exec fallback for running containers
+        entries, new_offset, is_live = await _tail_from_container(run_name, after)
+        if entries is not None:
+            return JSONResponse({
+                "entries": entries,
+                "offset": new_offset,
+                "is_live": is_live,
+            })
+        return JSONResponse({"entries": [], "offset": 0, "is_live": False})
+
+    # Read from the largest/most recent session file
+    session_file = session_files[-1]
+    file_size = session_file.stat().st_size
+    is_live = (import_time() - session_file.stat().st_mtime) < 120
+
+    if after >= file_size:
+        return JSONResponse({"entries": [], "offset": file_size, "is_live": is_live})
+
+    entries = []
+    with open(session_file, "rb") as f:
+        f.seek(after)
+        data = f.read()
+        new_offset = after + len(data)
+
+        text = data.decode("utf-8", errors="replace")
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            parsed = _parse_jsonl_entry(line)
+            if parsed is None:
+                continue
+            if isinstance(parsed, list):
+                entries.extend(parsed)
+            else:
+                entries.append(parsed)
+
+    return JSONResponse({
+        "entries": entries,
+        "offset": new_offset,
+        "is_live": is_live,
+    })
+
+
+def import_time():
+    """Lazy import of time.time()."""
+    import time
+    return time.time()
+
+
+async def _tail_from_container(run_name: str, after: int) -> tuple:
+    """Try to tail session data from a running container via docker exec."""
+    # Extract bead ID from run name
+    parts = run_name.rsplit("-", 2)
+    if len(parts) < 3:
+        return None, 0, False
+
+    bead_id = parts[0]
+
+    # Find running container for this bead
+    stdout, _, rc = await run_cli(
+        ["docker", "ps", "--filter", f"name=agent-{bead_id}", "--format", "{{.Names}}"],
+        timeout=5,
+    )
+    if rc != 0 or not stdout.strip():
+        return None, 0, False
+
+    container_name = stdout.strip().split("\n")[0]
+
+    # Find session files inside container
+    stdout, _, rc = await run_cli(
+        ["docker", "exec", container_name, "sh", "-c",
+         "ls -t /home/agent/.claude/projects/*/*.jsonl 2>/dev/null | head -1"],
+        timeout=5,
+    )
+    if rc != 0 or not stdout.strip():
+        return None, 0, False
+
+    session_path = stdout.strip()
+
+    # Read from offset using tail/dd
+    if after > 0:
+        stdout, _, rc = await run_cli(
+            ["docker", "exec", container_name, "sh", "-c",
+             f"dd if='{session_path}' bs=1 skip={after} 2>/dev/null"],
+            timeout=10,
+        )
+    else:
+        stdout, _, rc = await run_cli(
+            ["docker", "exec", container_name, "cat", session_path],
+            timeout=10,
+        )
+
+    if rc != 0:
+        return None, 0, False
+
+    entries = []
+    new_offset = after + len(stdout.encode("utf-8"))
+    for line in stdout.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parsed = _parse_jsonl_entry(line)
+        if parsed is None:
+            continue
+        if isinstance(parsed, list):
+            entries.extend(parsed)
+        else:
+            entries.append(parsed)
+
+    return entries, new_offset, True
+
+
+async def api_dispatch_latest(request):
+    """Return just the most recent entry for snippet display.
+
+    GET /api/dispatch/latest/{run}
+    """
+    run_name = request.path_params["run"]
+    session_files = _find_session_files(run_name)
+
+    if not session_files:
+        # Try container fallback
+        entries, _, is_live = await _tail_from_container(run_name, 0)
+        if entries:
+            # Find last assistant text
+            for e in reversed(entries):
+                if e.get("type") == "assistant_text":
+                    return JSONResponse({
+                        "text": e["content"][:100],
+                        "timestamp": e.get("timestamp", ""),
+                        "type": "assistant_text",
+                        "is_live": is_live,
+                    })
+        return JSONResponse({"text": "", "timestamp": "", "type": "", "is_live": False})
+
+    session_file = session_files[-1]
+    is_live = (import_time() - session_file.stat().st_mtime) < 120
+
+    # Read last ~4KB to find latest assistant text
+    file_size = session_file.stat().st_size
+    read_from = max(0, file_size - 4096)
+    with open(session_file, "rb") as f:
+        f.seek(read_from)
+        data = f.read().decode("utf-8", errors="replace")
+
+    # Parse lines in reverse to find latest assistant text
+    for line in reversed(data.strip().split("\n")):
+        line = line.strip()
+        if not line:
+            continue
+        parsed = _parse_jsonl_entry(line)
+        if parsed is None:
+            continue
+        if isinstance(parsed, list):
+            for entry in reversed(parsed):
+                if entry.get("type") == "assistant_text":
+                    return JSONResponse({
+                        "text": entry["content"][:100],
+                        "timestamp": entry.get("timestamp", ""),
+                        "type": "assistant_text",
+                        "is_live": is_live,
+                    })
+        elif parsed.get("type") == "assistant_text":
+            return JSONResponse({
+                "text": parsed["content"][:100],
+                "timestamp": parsed.get("timestamp", ""),
+                "type": "assistant_text",
+                "is_live": is_live,
+            })
+
+    return JSONResponse({"text": "", "timestamp": "", "type": "", "is_live": is_live})
+
+
 # ── WebSocket Terminal ─────────────────────────────────────────
 
 # Track active terminal sessions
@@ -636,6 +960,8 @@ routes = [
     Route("/api/terminal/{id}/kill", api_terminal_kill),
     Route("/api/terminal/{id}/rename", api_terminal_rename, methods=["POST"]),
     Route("/api/primer/{id}", api_primer),
+    Route("/api/dispatch/tail/{run}", api_dispatch_tail),
+    Route("/api/dispatch/latest/{run}", api_dispatch_latest),
 
     # Static
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
