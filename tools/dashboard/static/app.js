@@ -196,6 +196,32 @@ async function renderBeadDetail(id) {
 
 let dispatchInterval = null;
 
+function _formatTokenCount(bytes) {
+  const tokens = Math.round(bytes / 4);
+  if (tokens >= 1000000) return (tokens / 1000000).toFixed(1) + 'M tok';
+  if (tokens >= 1000) return (tokens / 1000).toFixed(0) + 'k tok';
+  return tokens + ' tok';
+}
+
+async function _loadDispatchSnippets(activeBeads, runsByBead) {
+  const fetches = activeBeads.map(async (b) => {
+    const run = runsByBead[b.id];
+    if (!run) return;
+    const el = document.getElementById(`snippet-${b.id}`);
+    if (!el) return;
+    const snippet = await getLiveSnippet(run.dir);
+    const textEl = el.querySelector('.snippet-text');
+    const tokensEl = el.querySelector('.snippet-tokens');
+    if (snippet) {
+      if (textEl && snippet.text) textEl.textContent = snippet.text;
+      if (tokensEl && snippet.file_size_bytes > 0) {
+        tokensEl.textContent = '~' + _formatTokenCount(snippet.file_size_bytes);
+      }
+    }
+  });
+  await Promise.all(fetches);
+}
+
 async function renderDispatch() {
   pageTitle.textContent = 'Dispatch';
   if (dispatchInterval) clearInterval(dispatchInterval);
@@ -236,6 +262,7 @@ async function renderDispatch() {
               && !active.some(a => a.id === b.id));
 
     let html = '';
+    let runsByBead = {};
 
     // Active dispatches — bead + container unified
     html += `<div class="mb-8">
@@ -244,7 +271,6 @@ async function renderDispatch() {
       // Fetch latest runs to match active beads to run dirs
       const runsData = await api('/api/dispatch/runs');
       const runsList = Array.isArray(runsData) ? runsData : [];
-      const runsByBead = {};
       for (const r of runsList) {
         if (!runsByBead[r.bead_id]) runsByBead[r.bead_id] = r;
       }
@@ -289,23 +315,12 @@ async function renderDispatch() {
               </div>
             </div>
             ${containerHtml}
-            <div id="${snippetId}" class="mt-2 ml-6 text-xs text-gray-500 italic truncate" data-run="${runDir}"></div>
+            <div id="${snippetId}" class="mt-2 ml-6 flex items-center gap-2" data-run="${runDir}">
+              <span class="snippet-text text-xs text-gray-500 italic truncate flex-1"></span>
+              <span class="snippet-tokens text-xs text-gray-600 font-mono whitespace-nowrap"></span>
+            </div>
           </a>`;
       }
-
-      // Load snippets for active dispatches (non-blocking)
-      setTimeout(async () => {
-        for (const b of active) {
-          const run = runsByBead[b.id];
-          if (!run) continue;
-          const snippetEl = document.getElementById(`snippet-${b.id}`);
-          if (!snippetEl) continue;
-          const snippet = await getLiveSnippet(run.dir);
-          if (snippet && snippet.text) {
-            snippetEl.textContent = snippet.text;
-          }
-        }
-      }, 0);
     } else {
       html += `<div class="text-gray-500 text-sm">No active dispatches</div>`;
     }
@@ -366,6 +381,9 @@ async function renderDispatch() {
     html += `</div>`;
 
     content.innerHTML = html;
+
+    // Load snippets + token counts for active dispatches (after DOM is ready)
+    _loadDispatchSnippets(active, runsByBead);
   }
 
   await refresh();
@@ -1465,7 +1483,7 @@ function _liveAppendEntries(entries) {
 async function getLiveSnippet(runDir) {
   try {
     const data = await api(`/api/dispatch/latest/${runDir}`);
-    if (data.text) return data;
+    if (data.text || data.file_size_bytes) return data;
     return null;
   } catch {
     return null;
