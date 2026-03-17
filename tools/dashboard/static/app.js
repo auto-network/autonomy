@@ -406,10 +406,61 @@ async function renderTrace(runName) {
     </div>`;
   }
 
+  // Session log (lazy-loaded)
+  if (trace.has_session) {
+    html += `<div class="mb-6">
+      <h2 class="text-lg font-semibold mb-2 text-cyan-400">Session Log</h2>
+      <div id="session-log-container">
+        <button id="session-log-load"
+                class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300">
+          Load full session log
+        </button>
+      </div>
+    </div>`;
+  }
+
   content.innerHTML = html;
 
   if (trace.experience_report) {
     document.getElementById('experience-content').appendChild(renderMd(trace.experience_report));
+  }
+
+  // Attach session log loader after DOM is ready
+  const sessionLoadBtn = document.getElementById('session-log-load');
+  if (sessionLoadBtn) {
+    sessionLoadBtn.addEventListener('click', () => loadSessionLog(runName));
+  }
+}
+
+async function loadSessionLog(runName) {
+  const container = document.getElementById('session-log-container');
+  const loadBtn = document.getElementById('session-log-load');
+  loadBtn.textContent = 'Loading...';
+  loadBtn.disabled = true;
+
+  try {
+    const data = await api(`/api/dispatch/tail/${runName}?after=0`);
+    container.innerHTML = '';
+
+    if (!data.entries || data.entries.length === 0) {
+      container.innerHTML = '<div class="text-sm text-gray-500">No session entries found.</div>';
+      return;
+    }
+
+    // Entry count summary
+    const summary = document.createElement('div');
+    summary.className = 'text-xs text-gray-500 mb-3';
+    summary.textContent = `${data.entries.length} entries`;
+    container.appendChild(summary);
+
+    // Scrollable entries container
+    const entriesEl = document.createElement('div');
+    entriesEl.className = 'bg-gray-800 rounded-lg p-4 max-h-[80vh] overflow-y-auto';
+    container.appendChild(entriesEl);
+
+    _renderSessionEntries(data.entries, entriesEl);
+  } catch (err) {
+    container.innerHTML = `<div class="text-sm text-red-400">Failed to load session log: ${escapeHtml(err.message)}</div>`;
   }
 }
 
@@ -1189,10 +1240,11 @@ async function _livePollTail() {
   }
 }
 
-function _liveAppendEntries(entries) {
-  const container = document.getElementById('live-panel-entries');
-  const body = document.getElementById('live-panel-body');
-
+/**
+ * Render parsed session entries into a container element.
+ * Shared by the live panel and the trace view session log.
+ */
+function _renderSessionEntries(entries, container) {
   for (const entry of entries) {
     const el = document.createElement('div');
     el.className = 'live-entry';
@@ -1265,6 +1317,13 @@ function _liveAppendEntries(entries) {
 
     container.appendChild(el);
   }
+}
+
+function _liveAppendEntries(entries) {
+  const container = document.getElementById('live-panel-entries');
+  const body = document.getElementById('live-panel-body');
+
+  _renderSessionEntries(entries, container);
 
   // Auto-scroll
   if (_livePanelAutoScroll) {
