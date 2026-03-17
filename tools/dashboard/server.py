@@ -374,6 +374,68 @@ async def api_primer(request):
 
 # ── Live Session Tailing ──────────────────────────────────────
 
+
+def _tool_headline(name: str, inp: dict) -> str:
+    """Extract a human-readable headline from a tool_use input dict.
+
+    Returns a short string like ``Read path/to/file.py`` suitable for display
+    in the collapsed summary of a tool call.
+    """
+    n = (name or "").lower()
+
+    if n == "read":
+        fp = inp.get("file_path", "")
+        return f"`{fp}`" if fp else ""
+
+    if n == "bash":
+        cmd = inp.get("command", "")
+        if len(cmd) > 60:
+            cmd = cmd[:57] + "..."
+        return f"`{cmd}`" if cmd else ""
+
+    if n == "write":
+        fp = inp.get("file_path", "")
+        content = inp.get("content", "")
+        n_lines = content.count("\n") + 1 if content else 0
+        return f"`{fp}` ({n_lines} lines)" if fp else ""
+
+    if n == "edit":
+        fp = inp.get("file_path", "")
+        old = inp.get("old_string", "")
+        preview = old.replace("\n", " ").strip()
+        if len(preview) > 40:
+            preview = preview[:37] + "..."
+        extra = f' "{preview}"' if preview else ""
+        return f"`{fp}`{extra}" if fp else ""
+
+    if n == "grep":
+        pat = inp.get("pattern", "")
+        path = inp.get("path", "")
+        suffix = f" in `{path}`" if path else ""
+        return f"`{pat}`{suffix}" if pat else ""
+
+    if n == "glob":
+        pat = inp.get("pattern", "")
+        return f"`{pat}`" if pat else ""
+
+    if n == "agent":
+        desc = inp.get("description", "")
+        return desc if desc else ""
+
+    if n == "todowrite":
+        todos = inp.get("todos", [])
+        return f"{len(todos)} items" if todos else ""
+
+    # Fallback: show first string-valued param, truncated
+    for v in inp.values():
+        if isinstance(v, str) and v:
+            preview = v.replace("\n", " ").strip()
+            if len(preview) > 50:
+                preview = preview[:47] + "..."
+            return preview
+    return ""
+
+
 def _parse_jsonl_entry(line: str) -> dict | None:
     """Parse a single JSONL line into a display entry."""
     try:
@@ -428,6 +490,8 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                     })
             elif btype == "tool_use":
                 tool_input = block.get("input", {})
+                tool_name = block.get("name", "?")
+                headline = _tool_headline(tool_name, tool_input)
                 # Truncate large inputs for display
                 input_str = json.dumps(tool_input, indent=2)
                 if len(input_str) > 3000:
@@ -435,7 +499,8 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                 blocks.append({
                     "type": "tool_use",
                     "role": "assistant",
-                    "tool_name": block.get("name", "?"),
+                    "tool_name": tool_name,
+                    "tool_headline": headline,
                     "tool_id": block.get("id", ""),
                     "content": input_str,
                     "timestamp": timestamp,
