@@ -92,6 +92,12 @@ function filterBeads(issues, query) {
 let _beadsSearchTimer = null;
 let _allBeads = [];
 
+// ── View Switcher State ────────────────────────────────────
+
+const _viewTabs = ['list', 'board', 'tree', 'deps'];
+let _currentView = localStorage.getItem('beads-view') || 'list';
+if (!_viewTabs.includes(_currentView)) _currentView = 'list';
+
 // ── Filter State & URL Persistence ─────────────────────────
 
 const _defaultFilters = {
@@ -108,6 +114,12 @@ let _filters = { ..._defaultFilters, priority: [], phase: [], type: [], labels: 
 
 function filtersFromURL() {
   const p = new URLSearchParams(window.location.search);
+  // Restore view from URL param, fallback to localStorage, then 'list'
+  const urlView = p.get('view');
+  if (urlView && _viewTabs.includes(urlView)) {
+    _currentView = urlView;
+    localStorage.setItem('beads-view', _currentView);
+  }
   return {
     priority: p.get('priority') ? p.get('priority').split(',').map(Number) : [],
     phase: p.get('phase') ? p.get('phase').split(',') : [],
@@ -121,6 +133,7 @@ function filtersFromURL() {
 
 function filtersToURL(f) {
   const p = new URLSearchParams();
+  if (_currentView !== 'list') p.set('view', _currentView);
   if (f.priority.length) p.set('priority', f.priority.join(','));
   if (f.phase.length) p.set('phase', f.phase.join(','));
   if (f.type.length) p.set('type', f.type.join(','));
@@ -355,6 +368,33 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// ── View Switcher ──────────────────────────────────────────
+
+function renderViewSwitcher() {
+  const icons = { list: '☰', board: '▦', tree: '🌳', deps: '🔗' };
+  const labels = { list: 'List', board: 'Board', tree: 'Tree', deps: 'Deps' };
+  const tabs = _viewTabs.map(v => {
+    const active = v === _currentView;
+    const cls = active
+      ? 'border-indigo-500 text-indigo-400'
+      : 'border-transparent text-gray-400 hover:text-gray-200 hover:border-gray-500';
+    return `<button class="px-3 py-2 text-sm font-medium border-b-2 ${cls} transition-colors"
+                    onclick="switchView('${v}')">${icons[v]} ${labels[v]}</button>`;
+  }).join('');
+  return `<div class="flex gap-1 border-b border-gray-700 mb-4" id="view-switcher">${tabs}</div>`;
+}
+
+window.switchView = function(view) {
+  if (!_viewTabs.includes(view) || view === _currentView) return;
+  _currentView = view;
+  localStorage.setItem('beads-view', view);
+  filtersToURL(_filters);
+  // Re-render switcher + results without re-fetching data
+  const switcherContainer = document.getElementById('view-switcher-container');
+  if (switcherContainer) switcherContainer.innerHTML = renderViewSwitcher();
+  renderBeadResults(globalSearch.value.trim());
+};
+
 async function renderBeads() {
   pageTitle.textContent = 'Beads';
   const data = await api('/api/beads/list');
@@ -367,8 +407,9 @@ async function renderBeads() {
   // Restore filters from URL
   _filters = filtersFromURL();
 
-  // Build filter bar + results container (search uses global header input)
+  // Build view switcher + filter bar + results container
   content.innerHTML = `
+    <div id="view-switcher-container">${renderViewSwitcher()}</div>
     <div id="filter-bar-container"></div>
     <div id="bead-results"></div>`;
 
@@ -399,57 +440,7 @@ function renderBeadResults(query) {
   const filtered = applyFilters(textFiltered, _filters);
   const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
 
-  // Group by status
-  const ready = filtered.filter(i => i.status === 'open' && !i.dependencies?.some(d => d.status !== 'closed'));
-  const inProgress = filtered.filter(i => i.status === 'in_progress');
-  const closed = filtered.filter(i => i.status === 'closed');
-  const blocked = filtered.filter(i => i.status === 'open' && i.dependencies?.some(d => d.status !== 'closed'));
-
-  function renderIssueRow(issue) {
-    const type = issue.issue_type === 'epic' ? '📦' : issue.issue_type === 'bug' ? '🐛' : '📋';
-    const labels = issue.labels || [];
-    const isApproved = labels.includes('readiness:approved');
-    const canApprove = issue.status !== 'closed' && !isApproved;
-    const approveHtml = isApproved
-      ? `<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded font-semibold">Approved</span>`
-      : canApprove
-      ? `<button id="approve-btn-${issue.id}" onclick="event.stopPropagation(); approveBead('${issue.id}', event)"
-                 class="px-2 py-0.5 bg-green-700 hover:bg-green-600 text-white text-xs rounded">Approve</button>`
-      : '';
-    const titleHtml = highlightText(issue.title || '', terms);
-    // Show description snippet when searching
-    let descHtml = '';
-    if (query && issue.description) {
-      const desc = issue.description.length > 120 ? issue.description.slice(0, 120) + '...' : issue.description;
-      descHtml = `<div class="text-xs text-gray-400 mt-1 truncate">${highlightText(desc, terms)}</div>`;
-    }
-    return `
-      <div class="p-4 sm:p-3 bg-gray-800 rounded-lg hover:bg-gray-750 cursor-pointer border border-gray-700"
-           onclick="navigateTo('/bead/${issue.id}')">
-        <div class="flex items-center gap-2 mb-1 sm:mb-0">
-          <span>${type}</span>
-          <span class="truncate text-sm sm:text-base">${titleHtml}</span>
-        </div>
-        ${descHtml}
-        <div class="flex items-center gap-2 flex-wrap mt-1 sm:mt-0">
-          <span class="font-mono text-xs text-gray-500">${issue.id}</span>
-          ${priorityBadge(issue.priority)}
-          ${statusBadge(issue.status)}
-          ${approveHtml}
-        </div>
-      </div>`;
-  }
-
-  function renderSection(title, items, defaultOpen = true) {
-    if (!items.length) return '';
-    return `
-      <details ${defaultOpen ? 'open' : ''} class="mb-6">
-        <summary class="text-lg font-semibold mb-3 cursor-pointer">${title} <span class="text-gray-500">(${items.length})</span></summary>
-        <div class="space-y-2">${items.map(renderIssueRow).join('')}</div>
-      </details>`;
-  }
-
-  // Empty state
+  // Empty state (shared across all views)
   const hasFilters = hasActiveFilters(_filters);
   if ((query || hasFilters) && !filtered.length) {
     container.innerHTML = `
@@ -461,16 +452,249 @@ function renderBeadResults(query) {
     return;
   }
 
-  // Search result count when filtering
+  // Search result count when filtering (shared across all views)
   const countHtml = (query || hasFilters)
     ? `<div class="text-sm text-gray-400 mb-3">${filtered.length} bead${filtered.length !== 1 ? 's' : ''}${query ? ` matching "${query.replace(/</g, '&lt;')}"` : ''}${hasFilters ? ' (filtered)' : ''}</div>`
     : '';
 
-  container.innerHTML = countHtml +
-    renderSection('In Progress', inProgress) +
-    renderSection('Ready', ready) +
-    renderSection('Blocked', blocked, false) +
-    renderSection('Closed', closed, false);
+  // Dispatch to view-specific renderer
+  if (_currentView === 'board') {
+    container.innerHTML = countHtml + renderBoardView(filtered, terms, query);
+  } else if (_currentView === 'tree') {
+    container.innerHTML = countHtml + renderTreeView(filtered, terms, query);
+  } else if (_currentView === 'deps') {
+    container.innerHTML = countHtml + renderDepsView(filtered, terms, query);
+  } else {
+    container.innerHTML = countHtml + renderListView(filtered, terms, query);
+  }
+}
+
+// ── Shared Bead Rendering Helpers ──────────────────────────
+
+function renderIssueRow(issue, terms, query) {
+  const type = issue.issue_type === 'epic' ? '📦' : issue.issue_type === 'bug' ? '🐛' : '📋';
+  const labels = issue.labels || [];
+  const isApproved = labels.includes('readiness:approved');
+  const canApprove = issue.status !== 'closed' && !isApproved;
+  const approveHtml = isApproved
+    ? `<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded font-semibold">Approved</span>`
+    : canApprove
+    ? `<button id="approve-btn-${issue.id}" onclick="event.stopPropagation(); approveBead('${issue.id}', event)"
+               class="px-2 py-0.5 bg-green-700 hover:bg-green-600 text-white text-xs rounded">Approve</button>`
+    : '';
+  const titleHtml = highlightText(issue.title || '', terms);
+  let descHtml = '';
+  if (query && issue.description) {
+    const desc = issue.description.length > 120 ? issue.description.slice(0, 120) + '...' : issue.description;
+    descHtml = `<div class="text-xs text-gray-400 mt-1 truncate">${highlightText(desc, terms)}</div>`;
+  }
+  return `
+    <div class="p-4 sm:p-3 bg-gray-800 rounded-lg hover:bg-gray-750 cursor-pointer border border-gray-700"
+         onclick="navigateTo('/bead/${issue.id}')">
+      <div class="flex items-center gap-2 mb-1 sm:mb-0">
+        <span>${type}</span>
+        <span class="truncate text-sm sm:text-base">${titleHtml}</span>
+      </div>
+      ${descHtml}
+      <div class="flex items-center gap-2 flex-wrap mt-1 sm:mt-0">
+        <span class="font-mono text-xs text-gray-500">${issue.id}</span>
+        ${priorityBadge(issue.priority)}
+        ${statusBadge(issue.status)}
+        ${approveHtml}
+      </div>
+    </div>`;
+}
+
+function renderSection(title, items, terms, query, defaultOpen = true) {
+  if (!items.length) return '';
+  return `
+    <details ${defaultOpen ? 'open' : ''} class="mb-6">
+      <summary class="text-lg font-semibold mb-3 cursor-pointer">${title} <span class="text-gray-500">(${items.length})</span></summary>
+      <div class="space-y-2">${items.map(i => renderIssueRow(i, terms, query)).join('')}</div>
+    </details>`;
+}
+
+// ── List View (original) ───────────────────────────────────
+
+function renderListView(filtered, terms, query) {
+  const ready = filtered.filter(i => i.status === 'open' && !i.dependencies?.some(d => d.status !== 'closed'));
+  const inProgress = filtered.filter(i => i.status === 'in_progress');
+  const closed = filtered.filter(i => i.status === 'closed');
+  const blocked = filtered.filter(i => i.status === 'open' && i.dependencies?.some(d => d.status !== 'closed'));
+
+  return renderSection('In Progress', inProgress, terms, query) +
+    renderSection('Ready', ready, terms, query) +
+    renderSection('Blocked', blocked, terms, query, false) +
+    renderSection('Closed', closed, terms, query, false);
+}
+
+// ── Board View (Kanban columns by status) ──────────────────
+
+function renderBoardView(filtered, terms, query) {
+  const columns = [
+    { key: 'in_progress', title: 'In Progress', items: filtered.filter(i => i.status === 'in_progress') },
+    { key: 'ready', title: 'Ready', items: filtered.filter(i => i.status === 'open' && !i.dependencies?.some(d => d.status !== 'closed')) },
+    { key: 'blocked', title: 'Blocked', items: filtered.filter(i => i.status === 'open' && i.dependencies?.some(d => d.status !== 'closed')) },
+    { key: 'closed', title: 'Closed', items: filtered.filter(i => i.status === 'closed') },
+  ];
+
+  function renderCard(issue) {
+    const type = issue.issue_type === 'epic' ? '📦' : issue.issue_type === 'bug' ? '🐛' : '📋';
+    const titleHtml = highlightText(issue.title || '', terms);
+    return `
+      <div class="p-3 bg-gray-800 rounded-lg cursor-pointer border border-gray-700 hover:border-gray-500 transition-colors"
+           onclick="navigateTo('/bead/${issue.id}')">
+        <div class="flex items-start gap-2 mb-2">
+          <span class="flex-shrink-0">${type}</span>
+          <span class="text-sm leading-snug">${titleHtml}</span>
+        </div>
+        <div class="flex items-center gap-1.5 flex-wrap">
+          <span class="font-mono text-xs text-gray-500">${issue.id}</span>
+          ${priorityBadge(issue.priority)}
+        </div>
+      </div>`;
+  }
+
+  const colColors = {
+    in_progress: 'border-blue-500',
+    ready: 'border-green-500',
+    blocked: 'border-red-500',
+    closed: 'border-gray-600',
+  };
+
+  const cols = columns.map(col => `
+    <div class="flex-1 min-w-[240px]">
+      <div class="border-t-2 ${colColors[col.key]} pt-2 mb-3">
+        <h3 class="text-sm font-semibold text-gray-300">${col.title} <span class="text-gray-500">(${col.items.length})</span></h3>
+      </div>
+      <div class="space-y-2 ${col.key === 'closed' ? 'max-h-64 overflow-y-auto' : ''}">${col.items.map(renderCard).join('') || '<div class="text-xs text-gray-600 italic py-2">No beads</div>'}</div>
+    </div>
+  `).join('');
+
+  return `<div class="flex gap-4 overflow-x-auto pb-4">${cols}</div>`;
+}
+
+// ── Tree View (epics with children) ────────────────────────
+
+function renderTreeView(filtered, terms, query) {
+  // Group beads by epic parent
+  const epicMap = new Map();   // epicId -> { epic, children }
+  const orphans = [];          // beads with no epic parent
+
+  const filteredIds = new Set(filtered.map(i => i.id));
+
+  for (const issue of filtered) {
+    const parent = getEpicParent(issue);
+    if (parent && issue.issue_type !== 'epic') {
+      if (!epicMap.has(parent)) epicMap.set(parent, { epic: null, children: [] });
+      epicMap.get(parent).children.push(issue);
+    } else if (issue.issue_type === 'epic') {
+      if (!epicMap.has(issue.id)) epicMap.set(issue.id, { epic: issue, children: [] });
+      else epicMap.get(issue.id).epic = issue;
+    } else {
+      orphans.push(issue);
+    }
+  }
+
+  let html = '';
+
+  // Render each epic group
+  for (const [epicId, group] of epicMap) {
+    const epic = group.epic || _allBeads.find(b => b.id === epicId);
+    const epicTitle = epic ? highlightText(epic.title, terms) : epicId;
+    const epicStatus = epic ? statusBadge(epic.status) : '';
+    const epicPriority = epic ? priorityBadge(epic.priority) : '';
+
+    html += `
+      <details open class="mb-4">
+        <summary class="cursor-pointer p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-500">
+          <div class="inline-flex items-center gap-2">
+            <span>📦</span>
+            <span class="font-semibold">${epicTitle}</span>
+            <span class="font-mono text-xs text-gray-500">${epicId}</span>
+            ${epicPriority} ${epicStatus}
+            <span class="text-xs text-gray-500">(${group.children.length} children)</span>
+          </div>
+        </summary>
+        <div class="ml-6 mt-2 space-y-2 border-l-2 border-gray-700 pl-4">
+          ${group.children.length ? group.children.map(i => renderIssueRow(i, terms, query)).join('') : '<div class="text-xs text-gray-600 italic py-2">No matching children</div>'}
+        </div>
+      </details>`;
+  }
+
+  // Orphans (no epic parent)
+  if (orphans.length) {
+    html += `
+      <details open class="mb-4">
+        <summary class="cursor-pointer text-lg font-semibold mb-3">Ungrouped <span class="text-gray-500">(${orphans.length})</span></summary>
+        <div class="space-y-2">${orphans.map(i => renderIssueRow(i, terms, query)).join('')}</div>
+      </details>`;
+  }
+
+  return html || '<div class="text-gray-500 text-center py-8">No beads to display in tree view</div>';
+}
+
+// ── Deps View (dependency graph) ───────────────────────────
+
+function renderDepsView(filtered, terms, query) {
+  // Show beads that have dependencies, grouped by blockers
+  const withDeps = filtered.filter(i => i.dependencies?.length > 0);
+  const noDeps = filtered.filter(i => !i.dependencies?.length);
+
+  // Build a map of id -> issue for lookups
+  const beadMap = new Map();
+  for (const b of _allBeads) beadMap.set(b.id, b);
+
+  function renderDepRow(issue) {
+    const deps = issue.dependencies || [];
+    const type = issue.issue_type === 'epic' ? '📦' : issue.issue_type === 'bug' ? '🐛' : '📋';
+    const titleHtml = highlightText(issue.title || '', terms);
+
+    const depLinks = deps.map(d => {
+      const depBead = beadMap.get(d.depends_on_id);
+      const depTitle = depBead ? depBead.title : d.depends_on_id;
+      const depStatus = depBead ? depBead.status : 'unknown';
+      const statusCls = depStatus === 'closed' ? 'text-green-400' : depStatus === 'in_progress' ? 'text-blue-400' : 'text-yellow-400';
+      const arrow = d.type === 'parent-child' ? '↑' : '←';
+      return `<span class="inline-flex items-center gap-1 text-xs">
+        <span class="text-gray-500">${arrow}</span>
+        <a href="/bead/${d.depends_on_id}" onclick="event.stopPropagation(); event.preventDefault(); navigateTo('/bead/${d.depends_on_id}')"
+           class="${statusCls} hover:underline font-mono">${d.depends_on_id}</a>
+        <span class="text-gray-500 truncate max-w-[150px]" title="${(depTitle || '').replace(/"/g, '&quot;')}">${depTitle || ''}</span>
+      </span>`;
+    }).join('');
+
+    return `
+      <div class="p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-500 cursor-pointer"
+           onclick="navigateTo('/bead/${issue.id}')">
+        <div class="flex items-center gap-2 mb-2">
+          <span>${type}</span>
+          <span class="text-sm">${titleHtml}</span>
+          <span class="font-mono text-xs text-gray-500">${issue.id}</span>
+          ${priorityBadge(issue.priority)}
+          ${statusBadge(issue.status)}
+        </div>
+        <div class="flex items-center gap-3 flex-wrap">${depLinks}</div>
+      </div>`;
+  }
+
+  let html = '';
+  if (withDeps.length) {
+    html += `
+      <details open class="mb-6">
+        <summary class="text-lg font-semibold mb-3 cursor-pointer">With Dependencies <span class="text-gray-500">(${withDeps.length})</span></summary>
+        <div class="space-y-2">${withDeps.map(renderDepRow).join('')}</div>
+      </details>`;
+  }
+  if (noDeps.length) {
+    html += `
+      <details class="mb-6">
+        <summary class="text-lg font-semibold mb-3 cursor-pointer">No Dependencies <span class="text-gray-500">(${noDeps.length})</span></summary>
+        <div class="space-y-2">${noDeps.map(i => renderIssueRow(i, terms, query)).join('')}</div>
+      </details>`;
+  }
+
+  return html || '<div class="text-gray-500 text-center py-8">No beads to display</div>';
 }
 
 async function renderBeadDetail(id) {
