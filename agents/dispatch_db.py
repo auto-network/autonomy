@@ -1,7 +1,8 @@
 """SQLite storage for dispatch run metadata.
 
 Stores structured metadata for every agent dispatch in data/dispatch.db.
-The dispatcher writes a row on completion via insert_run().
+The dispatcher writes a RUNNING row at launch via insert_launch_run(),
+then updates it on completion via insert_run() (upsert).
 """
 
 from __future__ import annotations
@@ -115,6 +116,45 @@ def _git_commit_message(commit_hash: str) -> str | None:
     return None
 
 
+def insert_launch_run(
+    *,
+    run_id: str,
+    bead_id: str,
+    started_at: float,
+    branch: str,
+    branch_base: str,
+    image: str,
+    container_name: str,
+    output_dir: str,
+) -> None:
+    """Insert a RUNNING row at agent launch time.
+
+    Only the fields known at launch are populated. Completion fields
+    (decision, commit_hash, exit_code, completed_at, etc.) are left NULL
+    and filled in by insert_run() when the agent finishes.
+    """
+    started_dt = datetime.fromtimestamp(started_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if started_at else None
+
+    conn = _get_conn()
+    try:
+        conn.execute(
+            """\
+            INSERT OR IGNORE INTO dispatch_runs (
+                id, bead_id, started_at, status,
+                branch, branch_base, image, container_name, output_dir
+            ) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id, bead_id, started_dt,
+                branch or None, branch_base or None,
+                image or None, container_name or None, output_dir or None,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def insert_run(
     *,
     run_id: str,
@@ -132,7 +172,12 @@ def insert_run(
     exit_code: int,
     output_dir: str,
 ) -> None:
-    """Insert a dispatch run row. All LLM-produced fields extracted from decision."""
+    """Upsert a dispatch run row on completion.
+
+    If a RUNNING row was inserted at launch, this updates it with completion
+    data. If no prior row exists (e.g. backfill), it inserts a new one.
+    All LLM-produced fields extracted from decision.
+    """
     duration_secs = int(completed_at - started_at) if started_at and completed_at else None
 
     # Derive git stats
@@ -199,18 +244,28 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return {k: row[k] for k in row.keys()}
 
 
-def list_runs(limit: int = 200, offset: int = 0) -> list[dict]:
-    """List dispatch runs ordered by completed_at DESC.
+def list_runs(limit: int = 200, offset: int = 0, *, completed_only: bool = False) -> list[dict]:
+    """List dispatch runs ordered by most recent first.
 
-    Returns dicts with all columns from dispatch_runs.
+    When completed_only=True, excludes RUNNING rows (for timeline/stats).
+    When completed_only=False (default), returns all rows including RUNNING.
+    Orders by started_at DESC so RUNNING rows (NULL completed_at) sort first.
     """
     conn = _get_conn()
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
-            "SELECT * FROM dispatch_runs ORDER BY completed_at DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        ).fetchall()
+        if completed_only:
+            rows = conn.execute(
+                "SELECT * FROM dispatch_runs WHERE status != 'RUNNING' "
+                "ORDER BY completed_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM dispatch_runs "
+                "ORDER BY COALESCE(completed_at, started_at) DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
         return [_row_to_dict(r) for r in rows]
     finally:
         conn.close()
@@ -230,12 +285,17 @@ def get_run(run_id: str) -> dict | None:
 
 
 def get_runs_for_bead(bead_id: str) -> list[dict]:
-    """Get dispatch runs for a bead, most recent first."""
+    """Get dispatch runs for a bead, most recent first.
+
+    RUNNING rows (NULL completed_at) sort before completed rows so the
+    active run appears first.
+    """
     conn = _get_conn()
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT * FROM dispatch_runs WHERE bead_id = ? ORDER BY completed_at DESC",
+            "SELECT * FROM dispatch_runs WHERE bead_id = ? "
+            "ORDER BY COALESCE(completed_at, started_at) DESC",
             (bead_id,),
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
@@ -244,12 +304,12 @@ def get_runs_for_bead(bead_id: str) -> list[dict]:
 
 
 def get_currently_running() -> list[dict]:
-    """Get runs that are currently in progress (started but not completed)."""
+    """Get runs that are currently in progress (status=RUNNING)."""
     conn = _get_conn()
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT * FROM dispatch_runs WHERE status IS NULL AND started_at IS NOT NULL"
+            "SELECT * FROM dispatch_runs WHERE status = 'RUNNING'"
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
     finally:

@@ -170,3 +170,189 @@ def test_get_runs_for_bead_empty():
     """Lookup by nonexistent bead_id returns empty list."""
     _use_temp_db()
     assert db.get_runs_for_bead("nonexistent") == []
+
+
+def test_insert_launch_run():
+    """insert_launch_run creates a RUNNING row with launch-time fields."""
+    tmp = _use_temp_db()
+    db.insert_launch_run(
+        run_id="auto-live-20260317-100000",
+        bead_id="auto-live",
+        started_at=1710000000.0,
+        branch="agent/auto-live",
+        branch_base="abc123",
+        image="autonomy-agent",
+        container_name="agent-auto-live-1234",
+        output_dir="/tmp/test-live",
+    )
+
+    conn = sqlite3.connect(tmp)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM dispatch_runs WHERE id = ?",
+                       ("auto-live-20260317-100000",)).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["bead_id"] == "auto-live"
+    assert row["status"] == "RUNNING"
+    assert row["completed_at"] is None
+    assert row["exit_code"] is None
+    assert row["branch"] == "agent/auto-live"
+    assert row["image"] == "autonomy-agent"
+    assert row["output_dir"] == "/tmp/test-live"
+
+
+def test_launch_then_complete():
+    """insert_launch_run followed by insert_run updates the row."""
+    _use_temp_db()
+    run_id = "auto-lc-20260317-110000"
+
+    # Launch
+    db.insert_launch_run(
+        run_id=run_id,
+        bead_id="auto-lc",
+        started_at=1710000000.0,
+        branch="agent/auto-lc",
+        branch_base="",
+        image="autonomy-agent",
+        container_name="agent-auto-lc-5678",
+        output_dir="",
+    )
+
+    # Verify RUNNING
+    row = db.get_run(run_id)
+    assert row["status"] == "RUNNING"
+    assert row["completed_at"] is None
+
+    # Complete (upsert replaces the RUNNING row)
+    db.insert_run(
+        run_id=run_id,
+        bead_id="auto-lc",
+        started_at=1710000000.0,
+        completed_at=1710000300.0,
+        status="DONE",
+        reason="All good",
+        decision={"status": "DONE", "reason": "All good"},
+        commit_hash="",
+        branch="agent/auto-lc",
+        branch_base="",
+        image="autonomy-agent",
+        container_name="agent-auto-lc-5678",
+        exit_code=0,
+        output_dir="",
+    )
+
+    # Verify updated
+    row = db.get_run(run_id)
+    assert row["status"] == "DONE"
+    assert row["completed_at"] is not None
+    assert row["reason"] == "All good"
+
+
+def test_get_currently_running():
+    """get_currently_running returns only RUNNING rows."""
+    _use_temp_db()
+
+    # Insert a RUNNING row
+    db.insert_launch_run(
+        run_id="auto-run-20260317-120000",
+        bead_id="auto-run",
+        started_at=1710000000.0,
+        branch="agent/auto-run",
+        branch_base="",
+        image="autonomy-agent",
+        container_name="agent-auto-run-1111",
+        output_dir="",
+    )
+    # Insert a completed row
+    db.insert_run(
+        run_id="auto-done-20260317-120000",
+        bead_id="auto-done",
+        started_at=1710000000.0,
+        completed_at=1710000300.0,
+        status="DONE",
+        reason="ok",
+        decision=None,
+        commit_hash="",
+        branch="",
+        branch_base="",
+        image="",
+        container_name="",
+        exit_code=0,
+        output_dir="",
+    )
+
+    running = db.get_currently_running()
+    assert len(running) == 1
+    assert running[0]["bead_id"] == "auto-run"
+    assert running[0]["status"] == "RUNNING"
+
+
+def test_list_runs_completed_only():
+    """list_runs(completed_only=True) excludes RUNNING rows."""
+    _use_temp_db()
+
+    # Insert a RUNNING row
+    db.insert_launch_run(
+        run_id="auto-r1-20260317-130000",
+        bead_id="auto-r1",
+        started_at=1710000000.0,
+        branch="",
+        branch_base="",
+        image="",
+        container_name="",
+        output_dir="",
+    )
+    # Insert a completed row
+    db.insert_run(
+        run_id="auto-c1-20260317-130000",
+        bead_id="auto-c1",
+        started_at=1710000000.0,
+        completed_at=1710000300.0,
+        status="DONE",
+        reason="ok",
+        decision=None,
+        commit_hash="",
+        branch="",
+        branch_base="",
+        image="",
+        container_name="",
+        exit_code=0,
+        output_dir="",
+    )
+
+    # Default: returns all (including RUNNING)
+    all_runs = db.list_runs()
+    assert len(all_runs) == 2
+
+    # completed_only=True: excludes RUNNING
+    completed = db.list_runs(completed_only=True)
+    assert len(completed) == 1
+    assert completed[0]["bead_id"] == "auto-c1"
+
+
+def test_insert_launch_run_ignore_duplicate():
+    """insert_launch_run uses INSERT OR IGNORE — doesn't overwrite existing rows."""
+    _use_temp_db()
+    run_id = "auto-ign-20260317-140000"
+
+    # Insert and complete
+    db.insert_launch_run(
+        run_id=run_id, bead_id="auto-ign", started_at=1710000000.0,
+        branch="", branch_base="", image="", container_name="", output_dir="",
+    )
+    db.insert_run(
+        run_id=run_id, bead_id="auto-ign", started_at=1710000000.0,
+        completed_at=1710000300.0, status="DONE", reason="done",
+        decision=None, commit_hash="", branch="", branch_base="",
+        image="", container_name="", exit_code=0, output_dir="",
+    )
+
+    # Try to re-insert launch — should be ignored (row already exists with DONE)
+    db.insert_launch_run(
+        run_id=run_id, bead_id="auto-ign", started_at=1710000000.0,
+        branch="", branch_base="", image="", container_name="", output_dir="",
+    )
+
+    row = db.get_run(run_id)
+    assert row["status"] == "DONE"  # Not overwritten to RUNNING

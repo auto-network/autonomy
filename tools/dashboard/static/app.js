@@ -2008,6 +2008,24 @@ async function renderTrace(runName) {
   // Use the resolved run directory name (slug may be a bead ID)
   const resolvedRun = trace.run || runName;
 
+  // If this is a live/running dispatch, show live view instead of trace
+  if (trace.is_live) {
+    const bead = Array.isArray(trace.bead) ? trace.bead[0] : trace.bead;
+    content.innerHTML = `
+      <div class="mb-6">
+        <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">← Back to Dispatch</a>
+        <h1 class="text-2xl font-bold mb-2">${bead?.title || trace.bead_id}</h1>
+        <div class="flex gap-2 items-center mb-4">
+          <a href="/bead/${trace.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline">${trace.bead_id}</a>
+          ${bead ? priorityBadge(bead.priority) : ''}
+          <span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded font-mono animate-pulse">RUNNING</span>
+        </div>
+      </div>
+      <div style="height: 20rem;"></div>`;
+    showLivePanel(resolvedRun);
+    return;
+  }
+
   const bead = Array.isArray(trace.bead) ? trace.bead[0] : trace.bead;
   const decision = trace.decision || {};
   const status = decision.status || '?';
