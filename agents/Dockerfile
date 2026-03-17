@@ -10,7 +10,7 @@ FROM ubuntu:24.04
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System packages: Python 3.12 (ships with 24.04), git, sqlite3
+# System packages: Python 3.12 (ships with 24.04), git, sqlite3, node
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-venv \
@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         sqlite3 \
         ca-certificates \
         curl \
+        nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --break-system-packages --no-cache-dir pytest
 
@@ -52,7 +53,8 @@ ENV BEADS_DIR=/data/.beads
 RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cross-arch)" \
     && dolt version > /dev/null 2>&1 || echo "WARN: dolt not functional" \
     && graph --help > /dev/null 2>&1 || echo "WARN: graph not functional" \
-    && claude --version > /dev/null 2>&1 || echo "WARN: claude not functional"
+    && claude --version > /dev/null 2>&1 || echo "WARN: claude not functional" \
+    && node --version > /dev/null 2>&1 || echo "WARN: node not functional"
 
 # Agent runs as non-root
 RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
