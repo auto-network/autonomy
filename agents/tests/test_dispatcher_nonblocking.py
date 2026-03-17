@@ -18,6 +18,7 @@ from agents.dispatcher import (
     poll_and_collect,
     dispatch_cycle,
     recover_running_agents,
+    get_open_dependencies,
     REPO_ROOT,
 )
 
@@ -514,3 +515,214 @@ class TestRecoverRunningAgents:
         assert agents[0].bead_id == "auto-xyz"
         assert agents[0].container_name == "agent-auto-xyz-5555"
         assert agents[0].branch == "agent/auto-xyz"
+
+
+# ── get_open_dependencies ──────────────────────────────────────
+
+
+class TestGetOpenDependencies:
+    @patch("agents.dispatcher.run_bd")
+    def test_no_dependencies(self, mock_bd):
+        """Bead with no deps returns empty list."""
+        mock_bd.return_value = "[]"
+        result = get_open_dependencies("auto-abc")
+        assert result == []
+
+    @patch("agents.dispatcher.run_bd")
+    def test_all_deps_closed(self, mock_bd):
+        """All blocking deps closed — returns empty list."""
+        mock_bd.return_value = json.dumps([
+            {"id": "auto-dep1", "status": "closed", "dependency_type": "blocks"},
+            {"id": "auto-dep2", "status": "closed", "dependency_type": "blocks"},
+        ])
+        result = get_open_dependencies("auto-abc")
+        assert result == []
+
+    @patch("agents.dispatcher.run_bd")
+    def test_open_blocking_dep(self, mock_bd):
+        """Open blocking dep is returned."""
+        mock_bd.return_value = json.dumps([
+            {"id": "auto-dep1", "status": "open", "dependency_type": "blocks"},
+        ])
+        result = get_open_dependencies("auto-abc")
+        assert len(result) == 1
+        assert result[0]["id"] == "auto-dep1"
+
+    @patch("agents.dispatcher.run_bd")
+    def test_in_progress_blocking_dep(self, mock_bd):
+        """In-progress blocking dep is returned (not closed yet)."""
+        mock_bd.return_value = json.dumps([
+            {"id": "auto-dep1", "status": "in_progress", "dependency_type": "blocks"},
+        ])
+        result = get_open_dependencies("auto-abc")
+        assert len(result) == 1
+
+    @patch("agents.dispatcher.run_bd")
+    def test_parent_child_dep_ignored(self, mock_bd):
+        """Parent-child deps never block dispatch."""
+        mock_bd.return_value = json.dumps([
+            {"id": "auto-epic", "status": "open", "dependency_type": "parent-child"},
+        ])
+        result = get_open_dependencies("auto-abc")
+        assert result == []
+
+    @patch("agents.dispatcher.run_bd")
+    def test_mixed_deps(self, mock_bd):
+        """Only open blocking deps are returned; closed and parent-child are excluded."""
+        mock_bd.return_value = json.dumps([
+            {"id": "auto-dep1", "status": "closed", "dependency_type": "blocks"},
+            {"id": "auto-dep2", "status": "open", "dependency_type": "blocks"},
+            {"id": "auto-epic", "status": "open", "dependency_type": "parent-child"},
+        ])
+        result = get_open_dependencies("auto-abc")
+        assert len(result) == 1
+        assert result[0]["id"] == "auto-dep2"
+
+    @patch("agents.dispatcher.run_bd")
+    def test_bd_returns_empty(self, mock_bd):
+        """bd dep list returns empty string (command failure)."""
+        mock_bd.return_value = ""
+        result = get_open_dependencies("auto-abc")
+        assert result == []
+
+    @patch("agents.dispatcher.run_bd")
+    def test_bd_returns_invalid_json(self, mock_bd):
+        """bd dep list returns malformed output."""
+        mock_bd.return_value = "not json"
+        result = get_open_dependencies("auto-abc")
+        assert result == []
+
+
+# ── dispatch_cycle dependency filtering ─────────────────────────
+
+
+class TestDispatchCycleDependencyFiltering:
+    @patch("agents.dispatcher.get_open_dependencies")
+    @patch("agents.dispatcher.start_agent")
+    @patch("agents.dispatcher.set_dispatch_state")
+    @patch("agents.dispatcher.claim_bead")
+    @patch("agents.dispatcher.get_claimed_beads")
+    @patch("agents.dispatcher.get_ready_beads")
+    @patch("agents.dispatcher.poll_and_collect")
+    def test_skips_bead_with_open_deps(
+        self, mock_poll, mock_ready, mock_claimed, mock_claim,
+        mock_set_state, mock_start, mock_open_deps
+    ):
+        """Bead with open blocking dependency is NOT dispatched."""
+        running = []
+        config = DispatcherConfig(max_concurrent=2)
+
+        mock_ready.return_value = [
+            {"id": "auto-blocked", "title": "Blocked", "priority": 1,
+             "dependency_count": 1},
+            {"id": "auto-free", "title": "Free", "priority": 2,
+             "dependency_count": 0},
+        ]
+        mock_claimed.return_value = set()
+        mock_claim.return_value = True
+        mock_start.return_value = _make_running_agent(bead_id="auto-free")
+
+        # auto-blocked has an open dep, auto-free has none (skipped due to dep_count=0)
+        mock_open_deps.return_value = [
+            {"id": "auto-prereq", "status": "open", "dependency_type": "blocks"}
+        ]
+
+        dispatched = dispatch_cycle(config, running)
+
+        # Only auto-free should be dispatched
+        assert dispatched == 1
+        assert len(running) == 1
+        assert running[0].bead_id == "auto-free"
+
+        # get_open_dependencies should only be called for the bead with deps
+        mock_open_deps.assert_called_once_with("auto-blocked")
+
+    @patch("agents.dispatcher.get_open_dependencies")
+    @patch("agents.dispatcher.start_agent")
+    @patch("agents.dispatcher.set_dispatch_state")
+    @patch("agents.dispatcher.claim_bead")
+    @patch("agents.dispatcher.get_claimed_beads")
+    @patch("agents.dispatcher.get_ready_beads")
+    @patch("agents.dispatcher.poll_and_collect")
+    def test_all_beads_blocked_by_deps(
+        self, mock_poll, mock_ready, mock_claimed, mock_claim,
+        mock_set_state, mock_start, mock_open_deps
+    ):
+        """When all beads have open deps, nothing is dispatched."""
+        running = []
+        config = DispatcherConfig()
+
+        mock_ready.return_value = [
+            {"id": "auto-a", "title": "A", "priority": 1, "dependency_count": 1},
+        ]
+        mock_claimed.return_value = set()
+        mock_open_deps.return_value = [
+            {"id": "auto-prereq", "status": "open", "dependency_type": "blocks"}
+        ]
+
+        dispatched = dispatch_cycle(config, running)
+
+        assert dispatched == 0
+        assert len(running) == 0
+        mock_claim.assert_not_called()
+        mock_start.assert_not_called()
+
+    @patch("agents.dispatcher.get_open_dependencies")
+    @patch("agents.dispatcher.start_agent")
+    @patch("agents.dispatcher.set_dispatch_state")
+    @patch("agents.dispatcher.claim_bead")
+    @patch("agents.dispatcher.get_claimed_beads")
+    @patch("agents.dispatcher.get_ready_beads")
+    @patch("agents.dispatcher.poll_and_collect")
+    def test_bead_with_closed_deps_dispatched(
+        self, mock_poll, mock_ready, mock_claimed, mock_claim,
+        mock_set_state, mock_start, mock_open_deps
+    ):
+        """Bead whose deps are all closed gets dispatched normally."""
+        running = []
+        config = DispatcherConfig()
+
+        mock_ready.return_value = [
+            {"id": "auto-ok", "title": "Ready", "priority": 1,
+             "dependency_count": 2},
+        ]
+        mock_claimed.return_value = set()
+        mock_claim.return_value = True
+        mock_open_deps.return_value = []  # All deps closed
+        mock_start.return_value = _make_running_agent(bead_id="auto-ok")
+
+        dispatched = dispatch_cycle(config, running)
+
+        assert dispatched == 1
+        assert len(running) == 1
+        mock_open_deps.assert_called_once_with("auto-ok")
+
+    @patch("agents.dispatcher.get_open_dependencies")
+    @patch("agents.dispatcher.start_agent")
+    @patch("agents.dispatcher.set_dispatch_state")
+    @patch("agents.dispatcher.claim_bead")
+    @patch("agents.dispatcher.get_claimed_beads")
+    @patch("agents.dispatcher.get_ready_beads")
+    @patch("agents.dispatcher.poll_and_collect")
+    def test_bead_with_no_dep_count_but_inline_deps(
+        self, mock_poll, mock_ready, mock_claimed, mock_claim,
+        mock_set_state, mock_start, mock_open_deps
+    ):
+        """Bead with dependencies inline in JSON is checked even without dependency_count."""
+        running = []
+        config = DispatcherConfig()
+
+        mock_ready.return_value = [
+            {"id": "auto-inline", "title": "Inline deps", "priority": 1,
+             "dependency_count": 0,
+             "dependencies": [{"id": "auto-dep", "dependency_type": "blocks"}]},
+        ]
+        mock_claimed.return_value = set()
+        mock_open_deps.return_value = [
+            {"id": "auto-dep", "status": "open", "dependency_type": "blocks"}
+        ]
+
+        dispatched = dispatch_cycle(config, running)
+
+        assert dispatched == 0
+        mock_open_deps.assert_called_once_with("auto-inline")
