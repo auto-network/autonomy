@@ -12,7 +12,7 @@ Usage:
 from __future__ import annotations
 
 import json
-import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,34 +52,47 @@ def _parse_dir_name(name: str) -> tuple[str, str]:
 
 
 def _timestamp_to_epoch(ts: str) -> float | None:
-    """Convert YYYYMMDD-HHMMSS to epoch seconds, or None."""
+    """Convert YYYYMMDD-HHMMSS to epoch seconds, or None.
+
+    Dir names use local time (launch.sh calls date +%Y%m%d-%H%M%S without TZ).
+    """
     if not ts:
         return None
     try:
         dt = datetime.strptime(ts, "%Y%m%d-%H%M%S")
-        # Assume local time since launch.sh uses date without TZ
-        return dt.replace(tzinfo=timezone.utc).timestamp()
+        # Local time — no tzinfo, .timestamp() uses local timezone
+        return dt.timestamp()
     except ValueError:
         return None
 
 
-def _dir_mtime_epoch(run_dir: Path) -> float | None:
-    """Get directory modification time as epoch seconds."""
+def _git_commit_epoch(commit_hash: str) -> float | None:
+    """Get commit timestamp as epoch seconds via git log."""
+    if not commit_hash:
+        return None
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "log", "--format=%ct", "-1", commit_hash],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(REPO_ROOT),
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        pass
+    return None
+
+
+def _estimate_completed_at(run_dir: Path, commit_hash: str) -> float | None:
+    """Best estimate of completion time: git commit timestamp, else dir mtime."""
+    epoch = _git_commit_epoch(commit_hash)
+    if epoch:
+        return epoch
     try:
         return run_dir.stat().st_mtime
     except OSError:
         return None
-
-
-def _estimate_duration(run_dir: Path, started_at: float | None) -> int | None:
-    """Estimate run duration from directory mtime minus started_at."""
-    if started_at is None:
-        return None
-    mtime = _dir_mtime_epoch(run_dir)
-    if mtime is None:
-        return None
-    duration = int(mtime - started_at)
-    return duration if duration >= 0 else None
 
 
 def backfill_one(run_dir: Path, *, dry_run: bool = False) -> dict:
@@ -117,8 +130,8 @@ def backfill_one(run_dir: Path, *, dry_run: bool = False) -> dict:
 
     # Timestamps
     started_at = _timestamp_to_epoch(timestamp)
-    completed_at = _dir_mtime_epoch(run_dir)
-    duration_secs = _estimate_duration(run_dir, started_at)
+    completed_at = _estimate_completed_at(run_dir, commit_hash)
+    duration_secs = int(completed_at - started_at) if started_at and completed_at and completed_at >= started_at else None
 
     # Git stats
     lines_added, lines_removed, files_changed = _git_diff_stats(branch_base, commit_hash)
