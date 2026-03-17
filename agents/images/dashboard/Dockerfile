@@ -8,10 +8,8 @@ FROM autonomy-agent
 
 USER root
 
-# Dashboard dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends python3-pip \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --break-system-packages --no-cache-dir \
+# Dashboard dependencies (python3-pip already in base image)
+RUN pip install --break-system-packages --no-cache-dir \
        starlette uvicorn websockets httptools
 
 # Copy dashboard source into image

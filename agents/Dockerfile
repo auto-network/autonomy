@@ -14,11 +14,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-venv \
+        python3-pip \
         git \
         sqlite3 \
         ca-certificates \
         curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --break-system-packages --no-cache-dir pytest
 
 # ── bd CLI (Go binary, statically-ish linked — just needs libc) ──
 COPY bin/bd /usr/local/bin/bd
