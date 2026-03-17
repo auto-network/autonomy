@@ -80,6 +80,44 @@ async def api_bead_tree(request):
     bead_id = request.path_params["id"]
     return JSONResponse(await run_cli_json(["bd", "dep", "tree", bead_id, "--json"]))
 
+async def api_beads_search(request):
+    """Search beads by title and description. Falls back to issues.jsonl if bd unavailable."""
+    q = request.query_params.get("q", "").strip().lower()
+    if not q:
+        return JSONResponse({"error": "missing q parameter"})
+
+    # Try bd search first
+    stdout, stderr, rc = await run_cli(["bd", "search", q, "--json"], timeout=10)
+    if rc == 0 and stdout.strip():
+        try:
+            results = json.loads(stdout)
+            if isinstance(results, list):
+                return JSONResponse(results)
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback: read issues.jsonl directly and filter
+    issues_path = _REPO_ROOT / ".beads" / "issues.jsonl"
+    if not issues_path.exists():
+        return JSONResponse({"error": "no beads data found"})
+
+    terms = q.split()
+    results = []
+    with open(issues_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                issue = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            searchable = f"{issue.get('title', '')} {issue.get('description', '')}".lower()
+            if all(term in searchable for term in terms):
+                results.append(issue)
+    return JSONResponse(results)
+
+
 async def api_bead_approve(request):
     """Set readiness=approved on a bead, releasing it for dispatch."""
     bead_id = request.path_params["id"]
@@ -1392,6 +1430,7 @@ routes = [
     # API
     Route("/api/beads/ready", api_beads_ready),
     Route("/api/beads/list", api_beads_list),
+    Route("/api/beads/search", api_beads_search),
     Route("/api/bead/{id}", api_bead_show),
     Route("/api/bead/{id}/tree", api_bead_tree),
     Route("/api/bead/{id}/approve", api_bead_approve, methods=["POST"]),
