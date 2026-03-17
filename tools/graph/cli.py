@@ -26,9 +26,14 @@ def _get_scope() -> str | None:
 
 
 def _get_db_path() -> Path:
-    """Get DB path from env or default."""
+    """Get DB path with resolution order: (a) GRAPH_DB env, (b) ./data/graph.db, (c) legacy parents[2] fallback."""
     env_db = os.environ.get("GRAPH_DB")
-    return Path(env_db) if env_db else DEFAULT_DB
+    if env_db:
+        return Path(env_db)
+    cwd_db = Path.cwd() / "data" / "graph.db"
+    if cwd_db.exists():
+        return cwd_db
+    return DEFAULT_DB
 
 
 def _apply_scope(args) -> None:
@@ -1047,7 +1052,7 @@ def main():
         prog="autonomy-graph",
         description="Autonomy Knowledge Graph CLI",
     )
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Database path")
+    parser.add_argument("--db", type=Path, default=_get_db_path(), help="Database path")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
