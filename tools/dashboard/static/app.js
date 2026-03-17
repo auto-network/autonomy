@@ -70,6 +70,28 @@ async function approveBead(id, event) {
 
 // ── Pages ────────────────────────────────────────────────────
 
+// ── Bead Search Helpers ──────────────────────────────────────
+
+function highlightText(text, terms) {
+  if (!terms.length) return text;
+  // Escape regex special chars in search terms
+  const escaped = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const re = new RegExp(`(${escaped.join('|')})`, 'gi');
+  return text.replace(re, '<mark class="bg-yellow-600 text-white rounded px-0.5">$1</mark>');
+}
+
+function filterBeads(issues, query) {
+  if (!query) return issues;
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return issues.filter(issue => {
+    const haystack = `${issue.title || ''} ${issue.description || ''} ${issue.id || ''}`.toLowerCase();
+    return terms.every(term => haystack.includes(term));
+  });
+}
+
+let _beadsSearchTimer = null;
+let _allBeads = [];
+
 async function renderBeads() {
   pageTitle.textContent = 'Beads';
   const data = await api('/api/beads/list');
@@ -77,13 +99,65 @@ async function renderBeads() {
     content.innerHTML = `<div class="text-red-400">${data.error}</div>`;
     return;
   }
-  const issues = Array.isArray(data) ? data : [];
+  _allBeads = Array.isArray(data) ? data : [];
+
+  // Build search bar + results container
+  content.innerHTML = `
+    <div class="mb-4 relative">
+      <input type="text" id="bead-search" placeholder="Search beads by title or description..."
+             class="bg-gray-700 text-gray-100 px-4 py-2 rounded-lg w-full max-w-xl text-sm
+                    focus:outline-none focus:ring-2 focus:ring-indigo-500 pr-8"
+             autocomplete="off">
+      <button id="bead-search-clear" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400
+              hover:text-gray-200 text-lg leading-none hidden max-w-xl" title="Clear search">&times;</button>
+    </div>
+    <div id="bead-results"></div>`;
+
+  const searchInput = document.getElementById('bead-search');
+  const clearBtn = document.getElementById('bead-search-clear');
+
+  // Render with current (empty) query
+  renderBeadResults('');
+
+  // Debounced search (300ms)
+  searchInput.addEventListener('input', () => {
+    clearBtn.classList.toggle('hidden', !searchInput.value);
+    if (_beadsSearchTimer) clearTimeout(_beadsSearchTimer);
+    _beadsSearchTimer = setTimeout(() => {
+      renderBeadResults(searchInput.value.trim());
+    }, 300);
+  });
+
+  // Clear button
+  clearBtn.addEventListener('click', () => {
+    searchInput.value = '';
+    clearBtn.classList.add('hidden');
+    renderBeadResults('');
+    searchInput.focus();
+  });
+
+  // Escape key clears search
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      searchInput.value = '';
+      clearBtn.classList.add('hidden');
+      renderBeadResults('');
+    }
+  });
+}
+
+function renderBeadResults(query) {
+  const container = document.getElementById('bead-results');
+  if (!container) return;
+
+  const filtered = filterBeads(_allBeads, query);
+  const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
 
   // Group by status
-  const ready = issues.filter(i => i.status === 'open' && !i.dependencies?.some(d => d.status !== 'closed'));
-  const inProgress = issues.filter(i => i.status === 'in_progress');
-  const closed = issues.filter(i => i.status === 'closed');
-  const blocked = issues.filter(i => i.status === 'open' && i.dependencies?.some(d => d.status !== 'closed'));
+  const ready = filtered.filter(i => i.status === 'open' && !i.dependencies?.some(d => d.status !== 'closed'));
+  const inProgress = filtered.filter(i => i.status === 'in_progress');
+  const closed = filtered.filter(i => i.status === 'closed');
+  const blocked = filtered.filter(i => i.status === 'open' && i.dependencies?.some(d => d.status !== 'closed'));
 
   function renderIssueRow(issue) {
     const type = issue.issue_type === 'epic' ? '📦' : issue.issue_type === 'bug' ? '🐛' : '📋';
@@ -96,13 +170,21 @@ async function renderBeads() {
       ? `<button id="approve-btn-${issue.id}" onclick="event.stopPropagation(); approveBead('${issue.id}', event)"
                  class="px-2 py-0.5 bg-green-700 hover:bg-green-600 text-white text-xs rounded">Approve</button>`
       : '';
+    const titleHtml = highlightText(issue.title || '', terms);
+    // Show description snippet when searching
+    let descHtml = '';
+    if (query && issue.description) {
+      const desc = issue.description.length > 120 ? issue.description.slice(0, 120) + '...' : issue.description;
+      descHtml = `<div class="text-xs text-gray-400 mt-1 truncate">${highlightText(desc, terms)}</div>`;
+    }
     return `
       <div class="p-4 sm:p-3 bg-gray-800 rounded-lg hover:bg-gray-750 cursor-pointer border border-gray-700"
            onclick="navigateTo('/bead/${issue.id}')">
         <div class="flex items-center gap-2 mb-1 sm:mb-0">
           <span>${type}</span>
-          <span class="truncate text-sm sm:text-base">${issue.title}</span>
+          <span class="truncate text-sm sm:text-base">${titleHtml}</span>
         </div>
+        ${descHtml}
         <div class="flex items-center gap-2 flex-wrap mt-1 sm:mt-0">
           <span class="font-mono text-xs text-gray-500">${issue.id}</span>
           ${priorityBadge(issue.priority)}
@@ -121,7 +203,23 @@ async function renderBeads() {
       </details>`;
   }
 
-  content.innerHTML =
+  // Empty state
+  if (query && !filtered.length) {
+    container.innerHTML = `
+      <div class="text-center py-12 text-gray-400">
+        <div class="text-4xl mb-3">🔍</div>
+        <div class="text-lg mb-1">No beads match "${query.replace(/</g, '&lt;')}"</div>
+        <div class="text-sm">Try different keywords or check spelling</div>
+      </div>`;
+    return;
+  }
+
+  // Search result count when filtering
+  const countHtml = query
+    ? `<div class="text-sm text-gray-400 mb-3">${filtered.length} bead${filtered.length !== 1 ? 's' : ''} matching "${query.replace(/</g, '&lt;')}"</div>`
+    : '';
+
+  container.innerHTML = countHtml +
     renderSection('In Progress', inProgress) +
     renderSection('Ready', ready) +
     renderSection('Blocked', blocked, false) +
@@ -1727,6 +1825,9 @@ function route() {
     el.classList.toggle('active', path.startsWith('/' + el.dataset.page));
   });
 
+  // Update global search placeholder based on page
+  globalSearch.placeholder = (path === '/' || path === '/beads') ? 'Search beads...' : 'Search graph...';
+
   if (path === '/' || path === '/beads') {
     renderBeads();
   } else if (path.startsWith('/dispatch/trace/')) {
@@ -1760,15 +1861,29 @@ function route() {
 
 // ── Event Handlers ───────────────────────────────────────────
 
-// Global search — scope-aware
+// Global search — context-sensitive (beads page searches beads, others search graph)
 globalSearch.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     const q = globalSearch.value.trim();
     if (q) {
-      const scope = document.getElementById('scope-select')?.value || '';
-      let url = `/search?q=${encodeURIComponent(q)}`;
-      if (scope) url += `&project=${encodeURIComponent(scope)}`;
-      navigateTo(url);
+      const path = window.location.pathname;
+      if (path === '/' || path === '/beads') {
+        // On beads page: focus the bead search input and trigger search there
+        const beadSearch = document.getElementById('bead-search');
+        if (beadSearch) {
+          beadSearch.value = q;
+          beadSearch.dispatchEvent(new Event('input'));
+          beadSearch.focus();
+          globalSearch.value = '';
+          const clearBtn = document.getElementById('bead-search-clear');
+          if (clearBtn) clearBtn.classList.remove('hidden');
+        }
+      } else {
+        const scope = document.getElementById('scope-select')?.value || '';
+        let url = `/search?q=${encodeURIComponent(q)}`;
+        if (scope) url += `&project=${encodeURIComponent(scope)}`;
+        navigateTo(url);
+      }
     }
   }
 });
