@@ -245,6 +245,106 @@ def launch_agent(bead_id: str, image: str = DEFAULT_IMAGE) -> DispatchResult:
     )
 
 
+def check_working_tree_clean() -> tuple[bool, str]:
+    """Check if the working tree is clean (no uncommitted changes).
+
+    Returns (is_clean, dirty_files_summary). If dirty, the summary lists
+    modified/untracked files so the error message is actionable.
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True, text=True, timeout=10,
+        cwd=str(REPO_ROOT),
+    )
+    output = result.stdout.strip()
+    if not output:
+        return True, ""
+
+    lines = output.splitlines()
+    summary = "; ".join(lines[:10])
+    if len(lines) > 10:
+        summary += f" ... and {len(lines) - 10} more"
+    return False, summary
+
+
+def merge_branch(branch: str, bead_id: str, reason: str) -> tuple[bool, str]:
+    """Merge a branch into the current HEAD, handling dirty working trees.
+
+    If the working tree is dirty, attempts git stash before merging and
+    restores afterward. Returns (success, error_message).
+    """
+    is_clean, dirty_files = check_working_tree_clean()
+    stashed = False
+
+    if not is_clean:
+        print(f"  Working tree is dirty: {dirty_files}")
+        print(f"  Attempting git stash before merge...")
+        stash_result = subprocess.run(
+            ["git", "stash", "push", "-m", f"dispatcher-auto-stash-{bead_id}"],
+            capture_output=True, text=True, timeout=15,
+            cwd=str(REPO_ROOT),
+        )
+        if stash_result.returncode != 0:
+            msg = (
+                f"Dirty working tree blocks merge and stash failed. "
+                f"Dirty files: {dirty_files}. "
+                f"Stash error: {stash_result.stderr.strip()}"
+            )
+            return False, msg
+
+        # Verify stash actually saved something (git stash returns 0 even with nothing to stash)
+        if "No local changes to save" in stash_result.stdout:
+            # Shouldn't happen since we checked porcelain, but be safe
+            pass
+        else:
+            stashed = True
+            print(f"  Stashed local changes successfully")
+
+    # Attempt the merge
+    merge_result = subprocess.run(
+        ["git", "merge", branch,
+         "--no-edit", "-m",
+         f"merge: {bead_id} — {reason}"],
+        capture_output=True, text=True, timeout=30,
+        cwd=str(REPO_ROOT),
+    )
+
+    merge_ok = merge_result.returncode == 0
+    merge_err = merge_result.stderr.strip()
+
+    if not merge_ok:
+        # Abort the failed merge attempt
+        subprocess.run(
+            ["git", "merge", "--abort"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(REPO_ROOT),
+        )
+
+    # Restore stashed changes regardless of merge outcome
+    if stashed:
+        print(f"  Restoring stashed changes...")
+        pop_result = subprocess.run(
+            ["git", "stash", "pop"],
+            capture_output=True, text=True, timeout=15,
+            cwd=str(REPO_ROOT),
+        )
+        if pop_result.returncode != 0:
+            print(f"  WARNING: stash pop failed: {pop_result.stderr.strip()}")
+            print(f"  Stashed changes preserved in git stash list")
+
+    if merge_ok:
+        return True, ""
+    else:
+        if "overwritten by merge" in merge_err or "local changes" in merge_err.lower():
+            msg = (
+                f"Dirty working tree blocked merge even after stash attempt. "
+                f"Error: {merge_err[:200]}"
+            )
+        else:
+            msg = f"Merge conflict: {merge_err[:200]}"
+        return False, msg
+
+
 def cleanup_worktree(worktree_path: str) -> None:
     """Remove a git worktree after dispatch."""
     if worktree_path and Path(worktree_path).exists():
@@ -305,14 +405,10 @@ def process_decision(dispatch_result: DispatchResult) -> None:
     # Auto-merge to master on DONE if agent committed
     if status == "DONE" and dispatch_result.commit_hash and dispatch_result.branch:
         set_dispatch_state(bead_id, "merging")
-        merge_result = subprocess.run(
-            ["git", "merge", dispatch_result.branch,
-             "--no-edit", "-m",
-             f"merge: {bead_id} — {reason}"],
-            capture_output=True, text=True, timeout=30,
-            cwd=str(REPO_ROOT),
+        merge_ok, merge_err = merge_branch(
+            dispatch_result.branch, bead_id, reason
         )
-        if merge_result.returncode == 0:
+        if merge_ok:
             merge_hash = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 capture_output=True, text=True, timeout=5,
@@ -322,19 +418,11 @@ def process_decision(dispatch_result: DispatchResult) -> None:
             run_bd(["update", bead_id, "--append-notes",
                     f"merged: {merge_hash}"])
         else:
-            print(f"  Merge conflict — leaving branch for manual review")
-            print(f"    {merge_result.stderr.strip()}")
-            # Abort the failed merge
-            subprocess.run(
-                ["git", "merge", "--abort"],
-                capture_output=True, text=True, timeout=5,
-                cwd=str(REPO_ROOT),
-            )
+            print(f"  Merge failed: {merge_err}")
             run_bd(["update", bead_id, "--append-notes",
-                    f"merge conflict on {dispatch_result.branch} — needs manual review"])
-            # Override status to BLOCKED since code can't integrate
+                    f"merge failed on {dispatch_result.branch}: {merge_err}"])
             status = "BLOCKED"
-            reason = f"Merge conflict: {merge_result.stderr.strip()[:200]}"
+            reason = merge_err
 
     # Set final dispatch state
     final_dispatch = "done" if status == "DONE" else "failed"
