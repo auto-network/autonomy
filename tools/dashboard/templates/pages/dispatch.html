@@ -1,0 +1,36 @@
+<div x-data="dispatchPage()" x-init="startRefresh()">
+
+  <!-- Active Dispatches -->
+  <div class="mb-8">
+    <h2 class="text-lg font-semibold mb-3 text-green-400">Active Dispatches</h2>
+    <template x-if="active.length === 0">
+      <div class="text-gray-500 text-sm">No active dispatches</div>
+    </template>
+    <template x-for="b in active" :key="b.id">
+      {% include 'partials/bead-card.html' %}
+    </template>
+  </div>
+
+  <!-- Approved — Waiting for Dispatch -->
+  <div class="mb-8">
+    <h2 class="text-lg font-semibold mb-3 text-blue-400">Approved — Waiting for Dispatch</h2>
+    <template x-if="waiting.length === 0">
+      <div class="text-gray-500 text-sm">No unblocked beads waiting</div>
+    </template>
+    <template x-for="b in waiting" :key="b.id">
+      {% include 'partials/bead-card.html' %}
+    </template>
+  </div>
+
+  <!-- Approved — Blocked -->
+  <div class="mb-8">
+    <h2 class="text-lg font-semibold mb-3 text-yellow-400">Approved — Blocked</h2>
+    <template x-if="blocked.length === 0">
+      <div class="text-gray-500 text-sm">No blocked beads</div>
+    </template>
+    <template x-for="b in blocked" :key="b.id">
+      {% include 'partials/bead-card.html' %}
+    </template>
+  </div>
+
+</div>
