@@ -35,14 +35,25 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
+_TS_FIELDS = {"started_at", "completed_at", "last_activity"}
+
+
+def _coerce_ts(row: dict) -> dict:
+    """Append Z to bare UTC timestamp strings returned from SQLite."""
+    return {
+        k: (v + "Z") if (k in _TS_FIELDS and isinstance(v, str)) else v
+        for k, v in row.items()
+    }
+
+
 def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
     rows = conn.execute(sql, params).fetchall()
-    return [{k: row[k] for k in row.keys()} for row in rows]
+    return [_coerce_ts({k: row[k] for k in row.keys()}) for row in rows]
 
 
 def _one(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> dict | None:
     row = conn.execute(sql, params).fetchone()
-    return {k: row[k] for k in row.keys()} if row else None
+    return _coerce_ts({k: row[k] for k in row.keys()}) if row else None
 
 
 def get_running_with_stats() -> list[dict]:
