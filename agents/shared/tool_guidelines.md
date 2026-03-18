@@ -107,6 +107,15 @@ When you complete your work, write a decision file to `/workspace/output/decisio
 - `code` — tests fail, won't compile, logic errors
 - `other` — anything else
 
+## Provenance as Primary Source
+
+The **Background — Original Discussions** section in your task prompt contains the conversation
+where this task was conceived. These turns are your primary source material, not background color.
+User messages especially may contain implementation specifics, constraints, and design decisions
+that are not fully captured in the bead description. Read them carefully for any details that
+would aid implementation. When the description and a user message conflict, the user message
+is authoritative.
+
 ## Working Style
 
 - Work in `/workspace/repo` — edit files, commit your changes
