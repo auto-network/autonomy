@@ -3585,6 +3585,7 @@ window.addEventListener('popstate', route);
 // Live dispatch badge via SSE nav topic
 connectEvents(['nav'], {
   nav: (data) => {
+    console.log('[Nav] handler called with', data);
     const running = data.running_agents || 0;
     const waiting = data.approved_waiting || 0;
     const blocked = data.approved_blocked || 0;
