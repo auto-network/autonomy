@@ -24,10 +24,12 @@
       es.addEventListener(topic, (e) => {
         try {
           const data = JSON.parse(e.data);
+          console.log('[EventBus] received', topic, data);
           // Update global cache so pages can read on mount.
           window._sseCache[topic] = data;
           // Dispatch to all registered handlers.
           const set = _handlers[topic];
+          console.log('[EventBus] handlers for', topic, set ? set.size : 0);
           if (set) {
             set.forEach(fn => {
               try { fn(data); } catch (err) {
@@ -50,6 +52,12 @@
   function registerHandler(topic, fn) {
     if (!_handlers[topic]) _handlers[topic] = new Set();
     _handlers[topic].add(fn);
+    // Replay cached data so late-registered handlers get the initial state
+    if (window._sseCache[topic]) {
+      try { fn(window._sseCache[topic]); } catch (err) {
+        console.warn('[EventBus] handler replay error for topic', topic, err);
+      }
+    }
   }
 
   function unregisterHandler(topic, fn) {
@@ -83,10 +91,13 @@
     };
   }
 
-  // Start the one persistent connection at module load time.
-  _connect();
-
+  // Expose API first, connect after — so app.js can register handlers
+  // before the initial SSE event arrives.
   window.connectEvents = connectEvents;
   window.registerHandler = registerHandler;
   window.unregisterHandler = unregisterHandler;
+
+  // Defer connection to next microtask so synchronous handler registrations
+  // in app.js (loaded immediately after this script) are in place.
+  setTimeout(_connect, 0);
 })();
