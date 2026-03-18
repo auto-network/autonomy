@@ -1,46 +1,31 @@
 <a :href="'/bead/' + encodeURIComponent(b.id)"
-   class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 hover:bg-gray-750"
-   :class="'border-' + b._borderColor + '-500'">
-  <div class="mb-1 sm:mb-0">
-    <div class="truncate text-sm sm:text-base" x-text="b.title"></div>
-    <div class="flex gap-2 items-center flex-wrap mt-1">
-      <span class="font-mono text-xs text-gray-400" x-text="b.id"></span>
-      {% include 'partials/priority-badge.html' %}
-      {% include 'partials/state-badge.html' %}
-      <template x-if="b._runDir">
-        <button @click.prevent.stop="showLivePanel(b._runDir)"
-                class="px-2 py-0.5 bg-indigo-700 hover:bg-indigo-600 text-white text-xs rounded ml-2">View Live</button>
-      </template>
-    </div>
+   class="block px-4 py-3 bg-gray-800 rounded-lg mb-2 hover:bg-gray-700">
+
+  <!-- Line 1: dot · title (bead-id) · [View Live] -->
+  <div class="flex items-center gap-2 min-w-0">
+    <span class="flex-shrink-0 w-2 h-2 rounded-full"
+          :class="{
+            'bg-green-400 animate-pulse': b._dotPulse,
+            'bg-yellow-400': !b._dotPulse && b._dotColor === 'yellow',
+            'bg-gray-500': b._dotColor === 'gray'
+          }"></span>
+    <span class="text-sm font-medium truncate flex-1" x-text="b.title"></span>
+    <span class="flex-shrink-0 font-mono text-xs" style="color:#4b5563" x-text="'(' + b.id + ')'"></span>
+    <template x-if="b._runDir">
+      <button @click.prevent.stop="showLivePanel(b._runDir)"
+              class="flex-shrink-0 inline-flex items-center px-2 rounded text-xs"
+              style="height:18px; background:#312e81; color:#a5b4fc; white-space:nowrap;">View Live</button>
+    </template>
   </div>
 
-  <!-- Active-only: container info -->
-  <template x-if="b._section === 'active' && b._container">
-    <div class="mt-2 ml-6 flex items-center gap-2">
-      <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
-      <span class="font-mono text-xs text-gray-400" x-text="b._container.name"></span>
-      <span class="text-xs text-gray-500" x-text="b._container.status"></span>
-      <span class="text-xs text-gray-600" x-text="b._container.image"></span>
-    </div>
-  </template>
-  <template x-if="b._section === 'active' && !b._container && (b._ds === 'collecting' || b._ds === 'merging')">
-    <div class="mt-2 ml-6 text-xs text-gray-500">Agent finished — <span x-text="b._ds"></span>...</div>
-  </template>
-  <template x-if="b._section === 'active' && !b._container && b._ds !== 'collecting' && b._ds !== 'merging'">
-    <div class="mt-2 ml-6 text-xs text-gray-500">Container exited — waiting for results</div>
-  </template>
-
-  <!-- Active-only: snippet area (reactive via x-text — no imperative DOM writes) -->
+  <!-- Line 2: snippet (active only) -->
   <template x-if="b._section === 'active'">
-    <div class="mt-2 ml-6 flex items-center gap-2">
-      <span class="text-xs text-gray-500 italic truncate flex-1" x-text="b._snippet"></span>
-      <span class="text-xs text-gray-600 font-mono whitespace-nowrap" x-text="b._tokens"></span>
-    </div>
+    <div class="mt-1.5 text-xs italic truncate" style="color:#6b7280" x-text="b._snippet || '\u00a0'"></div>
   </template>
 
-  <!-- Blocked-only: blockers list -->
+  <!-- Blocked: blockers list -->
   <template x-if="b._section === 'blocked'">
-    <div class="mt-2 flex items-center gap-1 flex-wrap">
+    <div class="mt-1.5 flex items-center gap-1 flex-wrap">
       <span class="text-xs text-yellow-500">Blocked by:</span>
       <template x-for="bl in (b.blockers || [])" :key="bl.id">
         <a :href="'/bead/' + encodeURIComponent(bl.id)" @click.stop
@@ -51,4 +36,39 @@
       </template>
     </div>
   </template>
+
+  <!-- Active footer: thin divider + badges left + stats right -->
+  <template x-if="b._section === 'active'">
+    <div>
+      <div class="my-2 h-px bg-gray-700"></div>
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-1.5">
+          {% include 'partials/priority-badge.html' %}
+          {% include 'partials/state-badge.html' %}
+        </div>
+        <div class="flex items-center gap-3 text-xs font-mono" style="color:#6b7280">
+          <template x-if="b._duration">
+            <span x-text="'\u23f1 ' + b._duration"></span>
+          </template>
+          <template x-if="b._cpu_pct">
+            <span x-text="'cpu ' + b._cpu_pct + ' / ' + b._cpu_secs"></span>
+          </template>
+          <template x-if="b._mem_mb">
+            <span x-text="'mem ' + b._mem_mb"></span>
+          </template>
+          <template x-if="b._tok">
+            <span x-text="'tok ' + b._tok"></span>
+          </template>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Non-active footer: just priority badge -->
+  <template x-if="b._section !== 'active'">
+    <div class="mt-2 flex items-center gap-1.5">
+      {% include 'partials/priority-badge.html' %}
+    </div>
+  </template>
+
 </a>

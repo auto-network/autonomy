@@ -3,14 +3,21 @@
 // Alpine.initTree() is called by the SPA router.
 //
 // Data shape for each bead:
-//   _section: 'active' | 'waiting' | 'blocked'  — drives conditional rendering in bead-card.html
-//   _borderColor: 'green' | 'blue' | 'yellow'   — left border colour
-//   _ds: string | null                            — dispatch: label value
-//   _stateColor: string                           — Tailwind colour name for _ds badge
-//   _container: object | null                     — matching Docker container (active only)
-//   _runDir: string                               — run dir name for live panel (active only)
-//   _snippet: string                              — latest snippet text pushed by server
-//   _tokens: string                               — formatted token estimate pushed by server
+//   _section:    'active' | 'waiting' | 'blocked'  — drives conditional rendering in bead-card.html
+//   _ds:         string | null                       — dispatch: label value
+//   _stateColor: string                              — Tailwind colour name for _ds badge
+//   _runDir:     string                              — run dir name for live panel (active only)
+//   _snippet:    string                              — latest snippet text pushed by server
+//   _dotColor:   'green' | 'yellow' | 'gray'        — status dot colour
+//   _dotPulse:   boolean                             — whether dot should animate
+//   _duration:   string                              — formatted elapsed time, e.g. "4m00s"
+//   _cpu_pct:    string                              — formatted CPU %, e.g. "12.4%"
+//   _cpu_secs:   string                              — formatted CPU time, e.g. "45.2s"
+//   _mem_mb:     string                              — formatted memory, e.g. "487MB"
+//   _tok:        string                              — formatted token count, e.g. "18.2K"
+//
+// Server fields consumed (active beads):
+//   cpu_pct, cpu_usec, mem_mb, token_count, duration_secs, last_activity, container, run_dir
 //
 // Data is pushed via SSE (connectEvents) rather than polled.
 // The 'dispatch' topic delivers {active, waiting, blocked} from the server.
@@ -32,34 +39,94 @@
     return null;
   }
 
-  function _formatTokenCount(bytes) {
-    const tokens = Math.round(bytes / 4);
-    if (tokens >= 1000000) return (tokens / 1000000).toFixed(1) + 'M tok';
-    if (tokens >= 1000) return (tokens / 1000).toFixed(0) + 'k tok';
-    return tokens + ' tok';
+  function _formatDuration(secs) {
+    if (!secs && secs !== 0) return '';
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return m + 'm' + String(s).padStart(2, '0') + 's';
+  }
+
+  function _formatCpuTime(usec) {
+    if (!usec) return '';
+    const secs = usec / 1e6;
+    if (secs >= 60) {
+      const m = Math.floor(secs / 60);
+      const s = Math.floor(secs % 60);
+      return m + 'm' + String(s).padStart(2, '0') + 's';
+    }
+    return secs.toFixed(1) + 's';
+  }
+
+  function _formatTokens(count) {
+    if (!count) return '';
+    if (count >= 1e6) return (count / 1e6).toFixed(1) + 'M';
+    if (count >= 1000) return (count / 1000).toFixed(1) + 'K';
+    return String(count);
+  }
+
+  function _computeDot(b) {
+    if (b.container) return { color: 'green', pulse: true };
+    const now = Date.now() / 1000;
+    if (b.last_activity && (now - b.last_activity) < 30) return { color: 'green', pulse: true };
+    if (b.last_activity) return { color: 'yellow', pulse: false };
+    return { color: 'gray', pulse: false };
   }
 
   function _mapActive(b) {
     const ds = _getDispatchState(b);
+    const dot = _computeDot(b);
+    const cpuPct = b.cpu_pct != null ? b.cpu_pct.toFixed(1) + '%' : '';
     return {
       ...b,
       _section: 'active',
-      _borderColor: 'green',
       _ds: ds,
       _stateColor: _STATE_COLORS[ds] || 'gray',
-      _container: b.container || null,
       _runDir: b.run_dir || '',
       _snippet: b.last_snippet || '',
-      _tokens: b.token_count ? '~' + _formatTokenCount(b.token_count) : '',
+      _dotColor: dot.color,
+      _dotPulse: dot.pulse,
+      _duration: _formatDuration(b.duration_secs),
+      _cpu_pct: cpuPct,
+      _cpu_secs: _formatCpuTime(b.cpu_usec),
+      _mem_mb: b.mem_mb != null ? Math.round(b.mem_mb) + 'MB' : '',
+      _tok: _formatTokens(b.token_count),
     };
   }
 
   function _mapWaiting(b) {
-    return { ...b, _section: 'waiting', _borderColor: 'blue', _ds: null, _stateColor: 'gray', _container: null, _runDir: '', _snippet: '', _tokens: '' };
+    return {
+      ...b,
+      _section: 'waiting',
+      _ds: null,
+      _stateColor: 'gray',
+      _runDir: '',
+      _snippet: '',
+      _dotColor: 'gray',
+      _dotPulse: false,
+      _duration: '',
+      _cpu_pct: '',
+      _cpu_secs: '',
+      _mem_mb: '',
+      _tok: '',
+    };
   }
 
   function _mapBlocked(b) {
-    return { ...b, _section: 'blocked', _borderColor: 'yellow', _ds: null, _stateColor: 'gray', _container: null, _runDir: '', _snippet: '', _tokens: '' };
+    return {
+      ...b,
+      _section: 'blocked',
+      _ds: null,
+      _stateColor: 'gray',
+      _runDir: '',
+      _snippet: '',
+      _dotColor: 'gray',
+      _dotPulse: false,
+      _duration: '',
+      _cpu_pct: '',
+      _cpu_secs: '',
+      _mem_mb: '',
+      _tok: '',
+    };
   }
 
   document.addEventListener('alpine:init', () => {
