@@ -52,13 +52,14 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph bead "title"` | Create bead with provenance link | `graph bead "Fix X" --source 8cdc1d85 --turns 286` |
 | `graph agent-runs` | Discover and ingest subagent traces | `graph agent-runs --list` |
 | `graph sessions --all` | Ingest latest session data (107ms) | Run before searching for recent content |
+| `graph wait <bead-id>` | Block until a dispatched bead completes | `graph wait auto-x7wr --timeout 900` |
 
 ### Beads (`bd`)
 | Command | What | Example |
 |---------|------|---------|
 | `bd ready` | Show beads with no blockers | |
 | `bd show <id>` | Show bead details | `bd show auto-5kj` |
-| `bd create "title" -p N -l readiness:idea` | Create a bead (always include readiness label) | `bd create "Fix bug" -t task -p 1 -l readiness:idea` |
+| `graph bead "title"` | Create bead with provenance link (preferred over `bd create`) | `graph bead "Fix X" -p 1 --source 8cdc1d85 --turns 286` |
 | `bd dep tree <id>` | Show dependency tree | |
 | `bd close <id> --reason "..."` | Close a completed bead | |
 
