@@ -3580,73 +3580,7 @@ document.addEventListener('click', (e) => {
 
 window.addEventListener('popstate', route);
 
-// ── Nav Badges ───────────────────────────────────────────────
-
-async function updateNavBadges() {
-  try {
-    const [ready, allBeads, sessions, terminals, dispatchStatus, timelineStats] = await Promise.all([
-      api('/api/beads/ready'),
-      api('/api/beads/list'),
-      api('/api/active?threshold=600'),
-      api('/api/terminals'),
-      api('/api/dispatch/status'),
-      api('/api/timeline/stats?range=1d'),
-    ]);
-
-    // Beads: ready count
-    const readyCount = Array.isArray(ready) ? ready.length : 0;
-    document.getElementById('badge-beads').textContent = readyCount || '';
-
-    // Dispatch: running + queued counts from labels
-    const beadList = Array.isArray(allBeads) ? allBeads : [];
-    const runningStates = new Set(['running', 'launching', 'collecting', 'merging']);
-    let runningCount = 0;
-    let queuedCount = 0;
-    for (const b of beadList) {
-      const labels = b.labels || [];
-      let dispatchLabel = null;
-      for (const l of labels) {
-        if (l.startsWith('dispatch:')) { dispatchLabel = l.split(':')[1]; break; }
-      }
-      if (dispatchLabel && runningStates.has(dispatchLabel)) {
-        runningCount++;
-      } else if (dispatchLabel === 'queued') {
-        queuedCount++;
-      } else if (!dispatchLabel && b.status === 'in_progress') {
-        runningCount++;
-      }
-    }
-    // Ground truth: count live agent containers (excludes persistent slack agents)
-    const agentContainers = (dispatchStatus.containers || [])
-      .filter(c => c.name.startsWith('agent-auto-'));
-    runningCount = Math.max(runningCount, agentContainers.length);
-
-    const dispatchEl = document.getElementById('badge-dispatch');
-    let dispatchHtml = '';
-    if (runningCount) dispatchHtml += `<span class="nav-badge nav-badge-green">▶${runningCount}</span>`;
-    if (queuedCount) dispatchHtml += `<span class="nav-badge nav-badge-amber">◦${queuedCount}</span>`;
-    dispatchEl.innerHTML = dispatchHtml;
-
-    // Sessions: active count
-    const sessionCount = Array.isArray(sessions) ? sessions.length : 0;
-    document.getElementById('badge-sessions').textContent = sessionCount || '';
-
-    // Timeline: today's completed count
-    const todayDone = timelineStats?.completed_count || 0;
-    document.getElementById('badge-timeline').textContent = todayDone || '';
-
-    // Terminal: open count
-    const termCount = Array.isArray(terminals) ? terminals.length : 0;
-    document.getElementById('badge-terminal').textContent = termCount || '';
-  } catch (e) {
-    // Silent fail — badges are non-critical
-  }
-}
-
 // ── Init ─────────────────────────────────────────────────────
-
-// Nav badges: initial poll — SSE nav topic keeps badges live after that
-updateNavBadges();
 
 // Live dispatch badge via SSE nav topic
 connectEvents(['nav'], {

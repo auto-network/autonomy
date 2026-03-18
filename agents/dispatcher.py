@@ -1219,6 +1219,131 @@ def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int
 # ── Recovery ────────────────────────────────────────────────────
 
 
+def reconcile_state(running: list[RunningAgent]) -> None:
+    """Reconcile all state locations at startup after recover_running_agents().
+
+    Compares the in-memory running list (agents with live containers) against:
+    1. SQLite dispatch_runs RUNNING rows — mark orphaned ones FAILED
+    2. Dolt in_progress beads — reset orphaned ones to open
+    3. Worktrees — delete orphaned ones with no new commits
+
+    "Orphaned" means the bead has no live container in the running list.
+    If commit state cannot be determined (broken worktree), logs a warning
+    and leaves the worktree in place.
+    """
+    active_bead_ids = {a.bead_id for a in running}
+    print(f"  reconcile_state: {len(active_bead_ids)} live containers")
+
+    # 1. Mark orphaned RUNNING rows in SQLite as FAILED
+    try:
+        running_rows = get_currently_running()
+        orphaned_rows = [r for r in running_rows if r.get("bead_id") not in active_bead_ids]
+        if orphaned_rows:
+            from agents.dispatch_db import _get_conn
+            conn = _get_conn()
+            try:
+                for row in orphaned_rows:
+                    print(f"  reconcile: marking SQLite row {row['id']} FAILED "
+                          f"(bead {row.get('bead_id')} has no container)")
+                    conn.execute(
+                        "UPDATE dispatch_runs SET status='FAILED', "
+                        "reason='orphaned: no container at startup' "
+                        "WHERE id=? AND status='RUNNING'",
+                        (row["id"],),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        else:
+            print("  reconcile: no orphaned SQLite RUNNING rows")
+    except Exception as e:
+        print(f"  WARNING: reconcile SQLite failed: {e}", file=sys.stderr)
+
+    # 2. Reset orphaned Dolt in_progress beads to open
+    try:
+        out = run_bd(["query", "status=in_progress", "--json"])
+        if out:
+            try:
+                in_progress_beads = json.loads(out)
+            except json.JSONDecodeError:
+                in_progress_beads = []
+            if isinstance(in_progress_beads, list):
+                for bead in in_progress_beads:
+                    bead_id = bead.get("id", "")
+                    if bead_id and bead_id not in active_bead_ids:
+                        print(f"  reconcile: resetting {bead_id} to open (no container)")
+                        run_bd(["update", bead_id, "-s", "open"])
+    except Exception as e:
+        print(f"  WARNING: reconcile Dolt in_progress failed: {e}", file=sys.stderr)
+
+    # 3. Clean orphaned worktrees with no new commits
+    worktrees_dir = REPO_ROOT / ".worktrees"
+    if not worktrees_dir.exists():
+        return
+    try:
+        for worktree in sorted(worktrees_dir.iterdir()):
+            if not worktree.is_dir():
+                continue
+
+            # Extract bead_id: worktrees are named {bead_id}-{YYYYMMDD}-{HHMMSS}
+            name = worktree.name
+            parts = name.rsplit("-", 2)
+            if len(parts) < 3:
+                continue
+            bead_id = "-".join(parts[:-2])
+
+            if bead_id in active_bead_ids:
+                continue  # Belongs to a live agent — leave it
+
+            # Determine if the worktree has new commits
+            try:
+                head_result = subprocess.run(
+                    ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if head_result.returncode != 0 or not head_result.stdout.strip():
+                    print(f"  WARNING: reconcile: cannot determine commit state "
+                          f"for worktree {name}, leaving it")
+                    continue
+                head = head_result.stdout.strip()
+            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                print(f"  WARNING: reconcile: error checking worktree {name}: {e}, "
+                      f"leaving it")
+                continue
+
+            # Get branch_base from the most recent output dir for this bead
+            branch_base = ""
+            runs_dir = REPO_ROOT / "data" / "agent-runs"
+            if runs_dir.exists():
+                run_candidates = sorted(
+                    runs_dir.glob(f"{bead_id}-*"),
+                    key=lambda p: p.name, reverse=True,
+                )
+                if run_candidates:
+                    base_file = run_candidates[0] / ".branch_base"
+                    if base_file.exists():
+                        branch_base = base_file.read_text().strip()
+
+            if not branch_base:
+                print(f"  WARNING: reconcile: no branch_base for worktree {name}, "
+                      f"leaving it")
+                continue
+
+            if head != branch_base:
+                print(f"  reconcile: leaving worktree {name} (has commits)")
+                continue
+
+            # No new commits — safe to remove
+            print(f"  reconcile: removing orphaned worktree {name} (no commits)")
+            subprocess.run(
+                ["git", "worktree", "remove", str(worktree), "--force"],
+                capture_output=True, text=True, timeout=15,
+                cwd=str(REPO_ROOT),
+            )
+    except Exception as e:
+        print(f"  WARNING: reconcile worktrees failed: {e}", file=sys.stderr)
+
+
 def recover_running_agents() -> list[RunningAgent]:
     """Scan for running agent containers from a prior dispatcher session.
 
@@ -1342,6 +1467,9 @@ def main():
         print(f"  Recovered {len(running)} running agent(s) from prior session")
         for agent in running:
             _record_launch(agent)  # Ensure RUNNING row exists in DB
+
+    # Reconcile all state locations — clean up orphaned rows, beads, and worktrees
+    reconcile_state(running)
 
     if config.loop:
         while True:
