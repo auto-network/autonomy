@@ -404,8 +404,8 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         "time_breakdown": time_breakdown or None,
         "failure_category": row["failure_category"] or None,
         "discovered_beads_count": row["discovered_beads_count"],
-        "started_at": row["started_at"],
-        "completed_at": row["completed_at"],
+        "started_at": (row["started_at"] + "Z") if row["started_at"] else None,
+        "completed_at": (row["completed_at"] + "Z") if row["completed_at"] else None,
         "has_experience_report": bool(row["has_experience_report"]),
     }
 
