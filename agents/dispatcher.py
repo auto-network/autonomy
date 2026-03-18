@@ -1100,7 +1100,8 @@ def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int
     """
     timestamp = datetime.now().strftime("%H:%M:%S")
     queue_info = f"queue: {config.label_filter}" if config.label_filter else "all approved"
-    print(f"\n[{timestamp}] Dispatch cycle ({queue_info}, {len(running)} running)")
+    running_ids = ", ".join(a.bead_id for a in running) if running else "none"
+    print(f"\n[{timestamp}] pid={os.getpid()} cycle ({queue_info}, {len(running)} running: [{running_ids}])")
 
     # ── Phase 1: Poll running agents ──────────────────────────
     poll_and_collect(running)
@@ -1417,10 +1418,26 @@ def main():
         loop=args.loop,
     )
 
-    print(f"Autonomy Dispatcher (pid={os.getpid()})")
+    pid = os.getpid()
+    print(f"Autonomy Dispatcher (pid={pid})")
     print(f"  Queue: {config.label_filter or 'all approved'}")
     print(f"  Max concurrent: {config.max_concurrent}")
     print(f"  Loop: {config.loop} (interval: {config.interval}s)")
+
+    # Ensure only one dispatcher runs at a time
+    pid_file = REPO_ROOT / "data" / "dispatcher.pid"
+    if pid_file.exists():
+        old_pid = pid_file.read_text().strip()
+        try:
+            old_pid_int = int(old_pid)
+            if old_pid_int != pid:
+                os.kill(old_pid_int, 0)  # Check if alive
+                print(f"  ERROR: Another dispatcher is running (pid={old_pid}). Exiting.",
+                      file=sys.stderr)
+                sys.exit(1)
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass  # Stale PID file or dead process — safe to proceed
+    pid_file.write_text(str(pid))
 
     # Initialize dispatch runs database
     init_db()
