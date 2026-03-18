@@ -3585,20 +3585,30 @@ window.addEventListener('popstate', route);
 // Live dispatch badge via SSE nav topic
 connectEvents(['nav'], {
   nav: (data) => {
-    console.log('[Nav] handler called with', data);
     const running = data.running_agents || 0;
     const waiting = data.approved_waiting || 0;
     const blocked = data.approved_blocked || 0;
+
     const dispatchEl = document.getElementById('badge-dispatch');
-    if (!dispatchEl) return;
-    let html = '';
-    if (running) html += `<span class="nav-badge nav-badge-green">▶${running}</span>`;
-    if (waiting) html += `<span class="nav-badge nav-badge-blue">◦${waiting}</span>`;
-    if (blocked) html += `<span class="nav-badge nav-badge-amber">⊘${blocked}</span>`;
-    dispatchEl.innerHTML = html;
+    if (dispatchEl) {
+      let html = '';
+      if (running) html += `<span class="nav-badge nav-badge-green">▶${running}</span>`;
+      if (waiting) html += `<span class="nav-badge nav-badge-blue">◦${waiting}</span>`;
+      if (blocked) html += `<span class="nav-badge nav-badge-amber">⊘${blocked}</span>`;
+      dispatchEl.innerHTML = html;
+    }
 
     const beadsEl = document.getElementById('badge-beads');
     if (beadsEl && data.open_beads != null) beadsEl.textContent = data.open_beads || '';
+
+    const sessionsEl = document.getElementById('badge-sessions');
+    if (sessionsEl) sessionsEl.textContent = data.active_sessions || '';
+
+    const timelineEl = document.getElementById('badge-timeline');
+    if (timelineEl) timelineEl.textContent = data.today_done || '';
+
+    const terminalEl = document.getElementById('badge-terminal');
+    if (terminalEl) terminalEl.textContent = data.terminal_count || '';
   },
 });
 
