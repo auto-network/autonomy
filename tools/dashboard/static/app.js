@@ -100,8 +100,8 @@ if (!_viewTabs.includes(_currentView)) _currentView = 'board';
 
 // ── Table Sort & Bulk Selection State ──────────────────────
 
-let _sortColumn = 'priority';
-let _sortDirection = 'asc';
+let _sortColumn = 'updated_at';
+let _sortDirection = 'desc';
 let _selectedBeadIds = new Set();
 
 function sortBeads(beads, column, direction) {
