@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running, is_bead_claimed
+from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
@@ -258,19 +258,6 @@ def get_open_dependencies(bead_id: str) -> list[dict]:
 # ── Bead state mutations ────────────────────────────────────────
 
 
-
-def is_container_running_for_bead(bead_id: str) -> bool:
-    """Check if a docker container is already running for this bead."""
-    try:
-        result = subprocess.run(
-            ["docker", "ps", "--filter", f"name=agent-{bead_id}-",
-             "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(REPO_ROOT),
-        )
-        return bool(result.stdout.strip())
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False  # can't check, assume safe
 
 
 def release_bead(bead_id: str, status: str, reason: str) -> bool:
@@ -1059,6 +1046,7 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
     # Process normally-completed agents
     for agent, exit_code in completed:
         running.remove(agent)
+        print(f"  Collecting: {agent.bead_id} (container: {agent.container_name})")
         try:
             result = collect_results(agent, exit_code)
             process_decision(result)
@@ -1066,13 +1054,16 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             _ingest_session(result)
         except Exception as e:
             error_msg = f"Collection error: {type(e).__name__}: {e}"
-            print(f"  ERROR: {error_msg}", file=sys.stderr)
+            print(f"  ERROR collecting {agent.bead_id}: {error_msg}")
             release_bead(agent.bead_id, "FAILED", error_msg[:200])
+            _record_run(agent, DispatchResult(
+                bead_id=agent.bead_id, exit_code=exit_code, error=error_msg))
             cleanup_worktree(agent.worktree_path)
 
     # Handle timed-out agents — kill, then try to recover results
     for agent in timed_out:
         running.remove(agent)
+        print(f"  Killing timed-out: {agent.bead_id} (container: {agent.container_name})")
         kill_container(agent.container_name)
 
         try:
@@ -1082,14 +1073,17 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
                 process_decision(result)
                 _record_run(agent, result)
             else:
+                print(f"  No results from timed-out {agent.bead_id}, marking FAILED")
                 release_bead(agent.bead_id, "FAILED",
                              f"Agent timeout ({MAX_AGENT_RUNTIME}s)")
                 _record_run(agent, result)
                 cleanup_worktree(agent.worktree_path)
         except Exception as e:
             error_msg = f"Timeout collection error: {type(e).__name__}: {e}"
-            print(f"  ERROR: {error_msg}", file=sys.stderr)
+            print(f"  ERROR collecting timed-out {agent.bead_id}: {error_msg}")
             release_bead(agent.bead_id, "FAILED", error_msg[:200])
+            _record_run(agent, DispatchResult(
+                bead_id=agent.bead_id, exit_code=-1, error=error_msg))
             cleanup_worktree(agent.worktree_path)
 
 
@@ -1169,45 +1163,15 @@ def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int
             print("  [DRY RUN] Would dispatch this bead")
             continue
 
-        # Pre-launch guards: check SQLite and Docker before launching
-        if is_bead_claimed(bead_id):
-            print(f"  Skipping {bead_id}: already has RUNNING row in dispatch_runs")
-            continue
-        if is_container_running_for_bead(bead_id):
-            print(f"  Skipping {bead_id}: container already running")
-            continue
-
-        # Write RUNNING row BEFORE launching — this is the claim lock.
-        # If start_agent fails, we clean it up. But while start_agent runs
-        # (5-30 seconds), the next cycle will see the RUNNING row and skip.
-        timestamp = time.time()
-        run_id = f"{bead_id}-{datetime.fromtimestamp(timestamp).strftime('%Y%m%d-%H%M%S')}"
-        insert_launch_run(
-            run_id=run_id, bead_id=bead_id, started_at=timestamp,
-            branch=f"agent/{bead_id}", branch_base="", image=image,
-            container_name="", output_dir="",
-        )
-
-        # Launch (non-blocking)
+        # Launch agent container (blocks until container starts)
         agent = start_agent(bead_id, image=image)
         if agent:
-            # Update the pre-launch row with actual container details
             _record_launch(agent)
             running.append(agent)
             dispatched += 1
+            print(f"  Dispatched: {bead_id} → {agent.container_name}")
         else:
-            # Launch failed — clean up the pre-launch RUNNING row
-            from agents.dispatch_db import _get_conn
-            try:
-                conn = _get_conn()
-                conn.execute(
-                    "UPDATE dispatch_runs SET status='FAILED', reason='launch failed' WHERE id=?",
-                    (run_id,),
-                )
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
+            print(f"  Launch failed: {bead_id}")
             release_bead(bead_id, "FAILED", "Container launch failed")
             wt = find_worktree_for_bead(bead_id)
             if wt:
