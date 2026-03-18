@@ -8,13 +8,13 @@
 //   _ds: string | null                            — dispatch: label value
 //   _stateColor: string                           — Tailwind colour name for _ds badge
 //   _container: object | null                     — matching Docker container (active only)
-//   _runDir: string                               — run dir name for snippet/live panel (active only)
-//   _snippet: string                              — latest snippet text (reactive, x-text safe)
-//   _tokens: string                               — formatted token estimate (reactive, x-text safe)
+//   _runDir: string                               — run dir name for live panel (active only)
+//   _snippet: string                              — latest snippet text pushed by server
+//   _tokens: string                               — formatted token estimate pushed by server
 //
 // Data is pushed via SSE (connectEvents) rather than polled.
 // The 'dispatch' topic delivers {active, waiting, blocked} from the server.
-// Snippet text is still fetched reactively via getLiveSnippet() from app.js.
+// The 'nav' topic delivers badge counts (open_beads, running_agents, approved_waiting).
 
 (function () {
   const _STATE_COLORS = {
@@ -32,6 +32,13 @@
     return null;
   }
 
+  function _formatTokenCount(bytes) {
+    const tokens = Math.round(bytes / 4);
+    if (tokens >= 1000000) return (tokens / 1000000).toFixed(1) + 'M tok';
+    if (tokens >= 1000) return (tokens / 1000).toFixed(0) + 'k tok';
+    return tokens + ' tok';
+  }
+
   function _mapActive(b) {
     const ds = _getDispatchState(b);
     return {
@@ -42,7 +49,6 @@
       _stateColor: _STATE_COLORS[ds] || 'gray',
       _container: b.container || null,
       _runDir: b.run_dir || '',
-      // Prefer server-pushed snippet; getLiveSnippet() refreshes it below.
       _snippet: b.last_snippet || '',
       _tokens: b.token_count ? '~' + _formatTokenCount(b.token_count) : '',
     };
@@ -67,26 +73,14 @@
         this.waiting = (data.waiting || []).map(_mapWaiting);
         this.blocked = (data.blocked || []).map(_mapBlocked);
         this.active  = (data.active  || []).map(_mapActive);
-
-        // Fetch fresh snippet text reactively for active beads.
-        for (let i = 0; i < this.active.length; i++) {
-          const b = this.active[i];
-          if (!b._runDir) continue;
-          getLiveSnippet(b._runDir).then(snippet => {
-            if (!snippet) return;
-            if (snippet.text) this.active[i]._snippet = snippet.text;
-            if (snippet.file_size_bytes > 0) {
-              this.active[i]._tokens = '~' + _formatTokenCount(snippet.file_size_bytes);
-            }
-          });
-        }
       },
 
-      // Called from x-init in the fragment.
-      // Connects to SSE and stores handle for cleanup in destroy().
-      startRefresh() {
-        this._eventsHandle = connectEvents(['dispatch'], {
+      // Alpine lifecycle — called automatically when the component initialises.
+      // Connects to SSE for dispatch data and nav badge updates.
+      init() {
+        this._eventsHandle = connectEvents(['dispatch', 'nav'], {
           dispatch: data => this.applyDispatch(data),
+          nav: () => {}, // nav events handled globally in app.js
         });
       },
 
@@ -94,11 +88,6 @@
         if (this._eventsHandle) {
           this._eventsHandle.close();
           this._eventsHandle = null;
-        }
-        // Clear any legacy polling interval left by older code.
-        if (window.dispatchInterval) {
-          clearInterval(window.dispatchInterval);
-          window.dispatchInterval = null;
         }
       },
     }));
