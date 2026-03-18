@@ -1,0 +1,54 @@
+<a :href="'/bead/' + encodeURIComponent(b.id)"
+   class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 hover:bg-gray-750"
+   :class="'border-' + b._borderColor + '-500'">
+  <div class="mb-1 sm:mb-0">
+    <div class="truncate text-sm sm:text-base" x-text="b.title"></div>
+    <div class="flex gap-2 items-center flex-wrap mt-1">
+      <span class="font-mono text-xs text-gray-400" x-text="b.id"></span>
+      {% include 'partials/priority-badge.html' %}
+      {% include 'partials/state-badge.html' %}
+      <template x-if="b._runDir">
+        <button @click.prevent.stop="showLivePanel(b._runDir)"
+                class="px-2 py-0.5 bg-indigo-700 hover:bg-indigo-600 text-white text-xs rounded ml-2">View Live</button>
+      </template>
+    </div>
+  </div>
+
+  <!-- Active-only: container info -->
+  <template x-if="b._section === 'active' && b._container">
+    <div class="mt-2 ml-6 flex items-center gap-2">
+      <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+      <span class="font-mono text-xs text-gray-400" x-text="b._container.name"></span>
+      <span class="text-xs text-gray-500" x-text="b._container.status"></span>
+      <span class="text-xs text-gray-600" x-text="b._container.image"></span>
+    </div>
+  </template>
+  <template x-if="b._section === 'active' && !b._container && (b._ds === 'collecting' || b._ds === 'merging')">
+    <div class="mt-2 ml-6 text-xs text-gray-500">Agent finished — <span x-text="b._ds"></span>...</div>
+  </template>
+  <template x-if="b._section === 'active' && !b._container && b._ds !== 'collecting' && b._ds !== 'merging'">
+    <div class="mt-2 ml-6 text-xs text-gray-500">Container exited — waiting for results</div>
+  </template>
+
+  <!-- Active-only: snippet area (reactive via x-text — no imperative DOM writes) -->
+  <template x-if="b._section === 'active'">
+    <div class="mt-2 ml-6 flex items-center gap-2">
+      <span class="text-xs text-gray-500 italic truncate flex-1" x-text="b._snippet"></span>
+      <span class="text-xs text-gray-600 font-mono whitespace-nowrap" x-text="b._tokens"></span>
+    </div>
+  </template>
+
+  <!-- Blocked-only: blockers list -->
+  <template x-if="b._section === 'blocked'">
+    <div class="mt-2 flex items-center gap-1 flex-wrap">
+      <span class="text-xs text-yellow-500">Blocked by:</span>
+      <template x-for="bl in (b.blockers || [])" :key="bl.id">
+        <a :href="'/bead/' + encodeURIComponent(bl.id)" @click.stop
+           class="inline-flex items-center gap-1 px-2 py-0.5 bg-yellow-900/50 text-yellow-300 text-xs rounded hover:bg-yellow-800/60">
+          <span class="font-mono" x-text="bl.id"></span>
+          <span class="text-yellow-400/70" x-text="bl.title"></span>
+        </a>
+      </template>
+    </div>
+  </template>
+</a>

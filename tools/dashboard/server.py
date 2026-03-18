@@ -28,6 +28,7 @@ from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
+from starlette.templating import Jinja2Templates
 from starlette.websockets import WebSocket
 
 from agents.dispatch_db import list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH
@@ -37,6 +38,7 @@ from agents.experiments_db import (
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
+templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
 
 # ── CLI Subprocess Helper ─────────────────────────────────────
@@ -1572,6 +1574,15 @@ async def page_beads(request):
 async def page_dispatch(request):
     return HTMLResponse(_load_template("base.html"))
 
+async def page_dispatch_fragment(request):
+    """Return the Dispatch page as an HTML fragment for SPA injection.
+
+    Rendered via Jinja2 so {% include %} partials work.
+    The fragment is injected into #content by the client router, then
+    Alpine.initTree() initialises the x-data="dispatchPage()" component.
+    """
+    return templates.TemplateResponse(request, "pages/dispatch.html")
+
 async def page_sessions(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -1594,6 +1605,7 @@ routes = [
     Route("/dispatch", page_dispatch),
     Route("/dispatch/alpine", page_dispatch),
     Route("/dispatch/lit", page_dispatch),
+    Route("/pages/dispatch", page_dispatch_fragment),
     Route("/sessions", page_sessions),
     Route("/search", page_search),
     Route("/source/{id}", page_source),
