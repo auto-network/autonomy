@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats
+from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
@@ -201,14 +201,15 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
 
 
 def get_claimed_beads() -> set[str]:
-    """Get IDs of beads currently claimed by the dispatcher."""
-    out = run_bd(["query", 'label="work:claimed"', "--json"])
-    if not out:
-        return set()
+    """Get IDs of beads currently claimed by the dispatcher.
+
+    Queries dispatch_runs WHERE status=RUNNING in SQLite rather than
+    the Dolt work:claimed label (which was redundant).
+    """
     try:
-        beads = json.loads(out)
-        return {b["id"] for b in beads if isinstance(b, dict)}
-    except (json.JSONDecodeError, KeyError):
+        runs = get_currently_running()
+        return {r["bead_id"] for r in runs if r.get("bead_id")}
+    except Exception:
         return set()
 
 
@@ -253,21 +254,11 @@ def get_open_dependencies(bead_id: str) -> list[dict]:
 
 
 def claim_bead(bead_id: str) -> bool:
-    """Claim a bead for dispatch. Returns True if successful."""
-    # Set status to in_progress so dashboard shows it
-    if not run_bd(["update", bead_id, "-s", "in_progress"]):
-        print(f"  WARNING: Failed to set {bead_id} in_progress",
-              file=sys.stderr)
+    """Claim a bead for dispatch. Returns True if successful.
 
-    # Add label for queryability (used by get_claimed_beads)
-    label_result = subprocess.run(
-        ["bd", "label", "add", bead_id, "work:claimed"],
-        capture_output=True, text=True, timeout=15,
-        cwd=str(REPO_ROOT),
-    )
-    if label_result.returncode != 0:
-        print(f"  WARNING: Failed to add work:claimed label to {bead_id}: "
-              f"{label_result.stderr.strip()}", file=sys.stderr)
+    The RUNNING row in dispatch_runs is the authoritative claim record,
+    written by _record_launch() after container start. No Dolt writes here.
+    """
     return True
 
 
@@ -275,28 +266,10 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
     """Release a bead after agent completion. Returns True if all ops succeed.
 
     For non-DONE outcomes, resets status to open so the bead can be
-    re-queued. Every release removes the work:claimed label.
+    re-queued. The dispatch_runs status is updated separately by _record_run().
     Uses retry for critical state mutations. Logs manual-cleanup
     warnings on persistent failure so stale beads are visible.
     """
-    success = True
-
-    # Remove claim label
-    try:
-        label_result = subprocess.run(
-            ["bd", "label", "remove", bead_id, "work:claimed"],
-            capture_output=True, text=True, timeout=15,
-            cwd=str(REPO_ROOT),
-        )
-        if label_result.returncode != 0:
-            print(f"  Failed to remove work:claimed from {bead_id}: "
-                  f"{label_result.stderr.strip()}", file=sys.stderr)
-            success = False
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"  Failed to remove work:claimed from {bead_id}: {e}",
-              file=sys.stderr)
-        success = False
-
     try:
         if status == "DONE":
             _retry_bd(["close", bead_id, "--reason", reason])
@@ -313,13 +286,11 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
     except BdCommandError as e:
         print(f"  MANUAL CLEANUP NEEDED: {bead_id} release failed "
               f"(status={status}): {e}", file=sys.stderr)
-        success = False
-
-    if not success:
         print(f"  STALE BEAD WARNING: {bead_id} may need manual cleanup "
               f"(intended status: {status})", file=sys.stderr)
+        return False
 
-    return success
+    return True
 
 
 # ── Image routing ────────────────────────────────────────────────

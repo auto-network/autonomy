@@ -165,10 +165,8 @@ class TestRetryBd:
 
 class TestReleaseBead:
     @patch("agents.dispatcher._retry_bd")
-    @patch("agents.dispatcher.subprocess.run")
-    def test_done_closes_bead(self, mock_run, mock_retry):
+    def test_done_closes_bead(self, mock_retry):
         """DONE status calls bd close with retry."""
-        mock_run.return_value = _completed_process()  # label remove
         mock_retry.return_value = "ok"
 
         result = release_bead("auto-1", "DONE", "completed task")
@@ -180,10 +178,8 @@ class TestReleaseBead:
 
     @patch("agents.dispatcher.run_bd")
     @patch("agents.dispatcher._retry_bd")
-    @patch("agents.dispatcher.subprocess.run")
-    def test_failed_resets_and_flags(self, mock_run, mock_retry, mock_run_bd):
+    def test_failed_resets_and_flags(self, mock_retry, mock_run_bd):
         """FAILED status resets to open and appends notes."""
-        mock_run.return_value = _completed_process()
         mock_retry.return_value = "ok"
         mock_run_bd.return_value = ""
 
@@ -197,23 +193,8 @@ class TestReleaseBead:
         )
 
     @patch("agents.dispatcher._retry_bd")
-    @patch("agents.dispatcher.subprocess.run")
-    def test_label_remove_failure_returns_false(self, mock_run, mock_retry):
-        """If label removal fails, returns False with stale bead warning."""
-        mock_run.return_value = _completed_process(
-            returncode=1, stderr="dolt down"
-        )
-        mock_retry.return_value = "ok"
-
-        result = release_bead("auto-1", "DONE", "done")
-
-        assert result is False
-
-    @patch("agents.dispatcher._retry_bd")
-    @patch("agents.dispatcher.subprocess.run")
-    def test_retry_failure_returns_false(self, mock_run, mock_retry):
+    def test_retry_failure_returns_false(self, mock_retry):
         """If critical mutations fail after retries, returns False."""
-        mock_run.return_value = _completed_process()  # label remove ok
         mock_retry.side_effect = BdCommandError(["close"], 1, "down")
 
         result = release_bead("auto-1", "DONE", "done")
@@ -221,12 +202,8 @@ class TestReleaseBead:
         assert result is False
 
     @patch("agents.dispatcher._retry_bd")
-    @patch("agents.dispatcher.subprocess.run")
-    def test_stale_bead_warning_logged(self, mock_run, mock_retry, capsys):
+    def test_stale_bead_warning_logged(self, mock_retry, capsys):
         """On failure, logs STALE BEAD WARNING with bead ID."""
-        mock_run.return_value = _completed_process(
-            returncode=1, stderr="timeout"
-        )
         mock_retry.side_effect = BdCommandError(["close"], 1, "down")
 
         release_bead("auto-1", "DONE", "done")
@@ -237,10 +214,8 @@ class TestReleaseBead:
 
     @patch("agents.dispatcher.run_bd")
     @patch("agents.dispatcher._retry_bd")
-    @patch("agents.dispatcher.subprocess.run")
-    def test_blocked_status_handling(self, mock_run, mock_retry, mock_run_bd):
+    def test_blocked_status_handling(self, mock_retry, mock_run_bd):
         """BLOCKED status resets to open and appends notes."""
-        mock_run.return_value = _completed_process()
         mock_retry.return_value = "ok"
         mock_run_bd.return_value = ""
 
@@ -257,36 +232,7 @@ class TestReleaseBead:
 
 
 class TestClaimBead:
-    @patch("agents.dispatcher.run_bd")
-    @patch("agents.dispatcher.subprocess.run")
-    def test_update_failure_logs_warning(self, mock_run, mock_run_bd, capsys):
-        """If update to in_progress fails, logs warning but still returns True."""
-        mock_run.side_effect = [
-            # label add (success)
-            _completed_process(),
-        ]
-        mock_run_bd.return_value = ""  # update fails (returns empty)
-
+    def test_returns_true(self):
+        """claim_bead always returns True; RUNNING row is written by _record_launch."""
         result = claim_bead("auto-1")
-
         assert result is True
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.err
-        assert "in_progress" in captured.err
-
-    @patch("agents.dispatcher.run_bd")
-    @patch("agents.dispatcher.subprocess.run")
-    def test_label_add_failure_logs_warning(self, mock_run, mock_run_bd, capsys):
-        """If label add fails, logs warning but still returns True."""
-        mock_run.side_effect = [
-            # label add (fails)
-            _completed_process(returncode=1, stderr="label error"),
-        ]
-        mock_run_bd.return_value = "ok"  # update succeeds
-
-        result = claim_bead("auto-1")
-
-        assert result is True
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.err
-        assert "work:claimed label" in captured.err
