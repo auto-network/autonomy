@@ -15,9 +15,11 @@
 //   _cpu_secs:   string                              — formatted CPU time, e.g. "45.2s"
 //   _mem_mb:     string                              — formatted memory, e.g. "487MB"
 //   _tok:        string                              — formatted token count, e.g. "18.2K"
+//   _tools:      string                              — formatted tool call count, e.g. "14"
+//   _turns:      string                              — formatted turn count, e.g. "8"
 //
 // Server fields consumed (active beads):
-//   cpu_pct, cpu_usec, mem_mb, token_count, duration_secs, last_activity, container, run_dir
+//   cpu_pct, cpu_usec, mem_mb, token_count, tool_count, turn_count, duration_secs, last_activity, container, run_dir
 //
 // Data is pushed via SSE (connectEvents) rather than polled.
 // The 'dispatch' topic delivers {active, waiting, blocked} from the server.
@@ -90,6 +92,8 @@
       _cpu_secs: _formatCpuTime(b.cpu_usec),
       _mem_mb: b.mem_mb != null ? Math.round(b.mem_mb) + 'MB' : '',
       _tok: _formatTokens(b.token_count),
+      _tools: b.tool_count != null ? String(b.tool_count) : '',
+      _turns: b.turn_count != null ? String(b.turn_count) : '',
     };
   }
 
@@ -108,6 +112,8 @@
       _cpu_secs: '',
       _mem_mb: '',
       _tok: '',
+      _tools: '',
+      _turns: '',
     };
   }
 
@@ -126,6 +132,8 @@
       _cpu_secs: '',
       _mem_mb: '',
       _tok: '',
+      _tools: '',
+      _turns: '',
     };
   }
 
