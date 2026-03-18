@@ -1817,8 +1817,8 @@ function _timelineStarRating(score, max = 5) {
   let html = '';
   for (let i = 1; i <= max; i++) {
     html += i <= filled
-      ? '<span class="text-amber-400">&#9733;</span>'
-      : '<span class="text-gray-600">&#9733;</span>';
+      ? '<span class="tl-star-on">&#9733;</span>'
+      : '<span class="tl-star-off">&#9733;</span>';
   }
   return html;
 }
@@ -1841,25 +1841,24 @@ function _timelineOutcomeBadge(status) {
 
 function _timelineBreakdownBar(tb) {
   if (!tb) return '';
-  const segments = [
-    { pct: tb.research_pct || 0, color: 'bg-indigo-500', label: 'Research' },
-    { pct: tb.coding_pct || 0, color: 'bg-green-500', label: 'Coding' },
-    { pct: tb.debugging_pct || 0, color: 'bg-amber-500', label: 'Debug' },
-    { pct: tb.tooling_workaround_pct || 0, color: 'bg-red-500', label: 'Tooling' },
-  ].filter(s => s.pct > 0);
-  if (segments.length === 0) return '';
-  let bar = '<div class="flex h-2 rounded-full overflow-hidden mt-2 mb-1" title="Time breakdown">';
-  for (const s of segments) {
-    bar += `<div class="${s.color}" style="width:${s.pct}%" title="${s.label} ${s.pct}%"></div>`;
-  }
+  const r = tb.research_pct || 0;
+  const c = tb.coding_pct || 0;
+  const d = tb.debugging_pct || 0;
+  const t = tb.tooling_workaround_pct || 0;
+  if (r + c + d + t === 0) return '';
+  let legend = '<div class="tl-legend">';
+  if (r) legend += `<span class="tl-lr">research ${r}%</span>`;
+  if (c) legend += `<span class="tl-lc">coding ${c}%</span>`;
+  if (d) legend += `<span class="tl-ld">debug ${d}%</span>`;
+  if (t) legend += `<span class="tl-lt">tooling ${t}%</span>`;
+  legend += '</div>';
+  let bar = '<div class="tl-stacked-bar">';
+  if (r) bar += `<div class="tl-bar-r" style="width:${r}%"></div>`;
+  if (c) bar += `<div class="tl-bar-c" style="width:${c}%"></div>`;
+  if (d) bar += `<div class="tl-bar-d" style="width:${d}%"></div>`;
+  if (t) bar += `<div class="tl-bar-t" style="width:${t}%"></div>`;
   bar += '</div>';
-  bar += '<div class="flex gap-3 text-xs text-gray-500">';
-  for (const s of segments) {
-    const dot = s.color.replace('bg-', 'text-');
-    bar += `<span><span class="${dot}">&#9679;</span> ${s.label} ${s.pct}%</span>`;
-  }
-  bar += '</div>';
-  return bar;
+  return { legend, bar };
 }
 
 function _timelineTypeIcon(status) {
@@ -1955,73 +1954,108 @@ async function renderTimeline() {
     if (!Array.isArray(entries) || entries.length === 0) {
       html += '<div class="text-gray-500 text-sm">No timeline entries for this period</div>';
     } else {
-      html += '<div class="space-y-2">';
+      html += '<div>';
       for (const e of entries) {
-        const ts = e.completed_at || e.started_at || '';
-        const commitBadge = e.commit_hash
-          ? `<span class="font-mono text-xs text-gray-400">${e.commit_hash.slice(0, 8)}</span>`
-          : '';
-        const discovered = e.discovered_beads_count
-          ? `<span class="text-xs text-purple-400">+${e.discovered_beads_count} discovered</span>`
-          : '';
-        const toolStars = _timelineStarRating(e.scores?.tooling);
-        const confStars = _timelineStarRating(e.scores?.confidence);
-        const statusColor = e.status === 'DONE' ? 'green' : e.status === 'BLOCKED' ? 'amber' : e.status === 'FAILED' ? 'red' : 'gray';
-        const detailId = 'tl-detail-' + (e.bead_id || '').replace(/[^a-zA-Z0-9-]/g, '');
+        const rawTs = e.completed_at || e.started_at || '';
+        const ts = rawTs ? new Date(rawTs).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '';
+        const cardId = 'tl-card-' + (e.bead_id || '').replace(/[^a-zA-Z0-9-]/g, '');
 
-        // Collapsed card
-        html += `<div class="bg-gray-800 rounded-lg border border-gray-700 border-l-4 border-l-${statusColor}-500">`;
-        html += `<div class="p-3 cursor-pointer" onclick="document.getElementById('${detailId}').classList.toggle('hidden')">`;
-        html += '<div class="flex items-center gap-2 flex-wrap">';
-        html += `<span class="text-xs text-gray-500 whitespace-nowrap">${ts}</span>`;
-        html += _timelineTypeIcon(e.status);
-        html += `<a href="/dispatch/trace/${e.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline" onclick="event.stopPropagation()">${e.bead_id}</a>`;
-        html += _timelineOutcomeBadge(e.status);
-        html += `<span class="text-xs text-gray-400">${_timelineDuration(e.duration_secs)}</span>`;
-        html += commitBadge;
-        html += `<span class="text-xs ml-auto">${toolStars}</span>`;
-        html += `<span class="text-xs">${confStars}</span>`;
-        html += discovered;
-        html += '</div>';
-        html += '</div>';
+        // Dot color by status
+        const dotCls = e.status === 'DONE' ? 'tl-dot-done'
+          : e.status === 'FAILED' ? 'tl-dot-failed'
+          : e.status === 'BLOCKED' ? 'tl-dot-blocked'
+          : 'tl-dot-default';
 
-        // Expanded detail (hidden by default)
-        html += `<div id="${detailId}" class="hidden border-t border-gray-700 p-3">`;
-        if (e.reason) {
-          html += `<div class="text-sm text-gray-300 mb-2"><strong class="text-gray-400">Reason:</strong> ${_esc(e.reason)}</div>`;
-        }
-        if (e.commit_message) {
-          html += `<div class="text-sm text-gray-300 mb-2"><strong class="text-gray-400">Commit:</strong> ${_esc(e.commit_message)}</div>`;
-        }
-        if (e.lines_added != null || e.lines_removed != null) {
-          html += `<div class="text-xs text-gray-500 mb-2">`;
-          if (e.lines_added != null) html += `<span class="text-green-400">+${e.lines_added}</span> `;
-          if (e.lines_removed != null) html += `<span class="text-red-400">-${e.lines_removed}</span> `;
-          if (e.files_changed != null) html += `<span class="text-gray-400">(${e.files_changed} files)</span>`;
-          html += '</div>';
-        }
-        html += _timelineBreakdownBar(e.time_breakdown);
+        // Priority badge
+        const prio = e.priority != null ? e.priority : '';
+        const prioCls = prio === 0 ? 'tl-ft-p0' : prio === 1 ? 'tl-ft-p1' : prio === 2 ? 'tl-ft-p2' : 'tl-ft-p3';
+        const prioBadge = prio !== '' ? `<span class="tl-ft ${prioCls}">P${prio}</span>` : '';
+
+        // Status badge
+        const stCls = e.status === 'DONE' ? 'tl-ft-done'
+          : e.status === 'FAILED' ? 'tl-ft-failed'
+          : e.status === 'BLOCKED' ? 'tl-ft-blocked'
+          : 'tl-ft-p3';
+        const stBadge = `<span class="tl-ft ${stCls}">${_esc(e.status || '?')}</span>`;
+
+        // Blended star rating (collapsed)
+        let avgHtml = '';
+        let expScores = '';
         if (e.scores) {
-          html += '<div class="flex gap-4 mt-2 text-xs">';
-          html += `<span class="text-gray-500">Tooling: ${_timelineStarRating(e.scores.tooling)}</span>`;
-          html += `<span class="text-gray-500">Clarity: ${_timelineStarRating(e.scores.clarity)}</span>`;
-          html += `<span class="text-gray-500">Confidence: ${_timelineStarRating(e.scores.confidence)}</span>`;
-          html += '</div>';
+          const avg = (e.scores.tooling + e.scores.clarity + e.scores.confidence) / 3;
+          avgHtml = `<span class="tl-avg-wrap">${_timelineStarRating(Math.round(avg))} <span class="tl-avg-num">(${avg.toFixed(1)})</span></span>`;
+          expScores =
+            `<span><span class="tl-exp-label">Tooling</span>${_timelineStarRating(e.scores.tooling)}</span>` +
+            `<span><span class="tl-exp-label">Clarity</span>${_timelineStarRating(e.scores.clarity)}</span>` +
+            `<span><span class="tl-exp-label">Confidence</span>${_timelineStarRating(e.scores.confidence)}</span>`;
         }
+
+        // Diff stats
+        let diffHtml = '';
+        if (e.lines_added != null || e.lines_removed != null) {
+          if (e.lines_added != null) diffHtml += `<span class="tl-diff-add">+${e.lines_added}</span>`;
+          if (e.lines_removed != null) diffHtml += ` <span class="tl-diff-del">-${e.lines_removed}</span>`;
+        }
+
+        // Breakdown bar + legend
+        const breakdown = _timelineBreakdownBar(e.time_breakdown);
+        const legendHtml = breakdown ? breakdown.legend : '';
+        const barHtml = breakdown ? breakdown.bar : '';
+
+        // Bottom section (legend + stats row + bar)
+        let bottomHtml = '';
+        if (breakdown || avgHtml || diffHtml || e.duration_secs != null) {
+          bottomHtml = '<div class="tl-bottom"><div class="tl-bottom-row">' + legendHtml +
+            '<div class="tl-stats-right">' +
+            (e.duration_secs != null ? `<span>&#9201; ${_timelineDuration(e.duration_secs)}</span>` : '') +
+            (diffHtml ? diffHtml : '') +
+            avgHtml +
+            '</div></div>' + barHtml + '</div>';
+        }
+
+        // Expanded detail: links left, scores right
+        let expDetail = '<div class="tl-exp-detail"><div class="tl-exp-row">' +
+          '<div class="tl-exp-links">' +
+          `<a class="tl-exp-link" href="/dispatch/trace/${_esc(e.bead_id)}" onclick="event.stopPropagation()">Trace &#8594;</a>` +
+          `<a class="tl-exp-link" href="/bead/${_esc(e.bead_id)}" onclick="event.stopPropagation()">Bead &#8594;</a>` +
+          '</div>';
+        if (expScores) {
+          expDetail += `<div class="tl-exp-scores" style="margin-left:auto">${expScores}</div>`;
+        }
+        expDetail += '</div>';
         if (e.failure_category) {
-          html += `<div class="text-xs text-red-400 mt-2">Failure: ${_esc(e.failure_category)}</div>`;
+          expDetail += `<div class="text-xs text-red-400 mt-1">Failure: ${_esc(e.failure_category)}</div>`;
         }
         if (e.discovered_beads_count) {
-          html += `<div class="text-xs text-purple-400 mt-2">${e.discovered_beads_count} bead(s) discovered during execution</div>`;
+          expDetail += `<div class="text-xs text-purple-400 mt-1">${e.discovered_beads_count} bead(s) discovered</div>`;
         }
-        // Links
-        html += '<div class="flex gap-3 mt-3">';
-        html += `<a href="/dispatch/trace/${e.bead_id}" class="text-xs text-indigo-400 hover:underline" onclick="event.stopPropagation()">Trace</a>`;
-        html += `<a href="/bead/${e.bead_id}" class="text-xs text-gray-400 hover:underline" onclick="event.stopPropagation()">Bead detail</a>`;
-        html += '</div>';
-        html += '</div>';
+        expDetail += '</div>';
 
-        html += '</div>';
+        html += `<div class="tl-card" id="${cardId}" onclick="this.classList.toggle('open')">` +
+
+          // Row 1: dot · title · (bead-id) time
+          '<div class="tl-row1">' +
+          `<span class="tl-dot ${dotCls}"></span>` +
+          `<span class="tl-title">${_esc(e.title || e.bead_id)}</span>` +
+          '<div class="tl-top-right">' +
+          `<span class="tl-bead-id">(${_esc(e.bead_id)})</span>` +
+          `<span class="tl-ts">${_esc(ts)}</span>` +
+          '</div>' +
+          '</div>' +
+
+          // Row 2: reason (truncated) · priority + status badges
+          '<div class="tl-row2">' +
+          `<div class="tl-reason">${_esc(e.reason || '')}</div>` +
+          '<div class="tl-row2-badges">' + prioBadge + stBadge + '</div>' +
+          '</div>' +
+
+          // Expanded detail (CSS-driven via .tl-card.open)
+          expDetail +
+
+          // Bottom: legend + stats row + stacked bar
+          bottomHtml +
+
+          '</div>';
       }
       html += '</div>';
     }
