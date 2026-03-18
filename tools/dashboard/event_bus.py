@@ -31,9 +31,15 @@ class EventBus:
         self._last: dict[str, str] = {}
 
     def subscribe(self, topic: str) -> asyncio.Queue:
-        """Subscribe to a topic. Returns a Queue that will receive broadcast data."""
+        """Subscribe to a topic. Returns a Queue that will receive broadcast data.
+
+        If there is a cached state for the topic, it is immediately enqueued so
+        the first SSE client message arrives without waiting for the next broadcast.
+        """
         q: asyncio.Queue = asyncio.Queue()
         self._subscribers[topic].append(q)
+        if topic in self._last:
+            q.put_nowait(json.loads(self._last[topic]))
         return q
 
     def unsubscribe(self, queue: asyncio.Queue) -> None:
