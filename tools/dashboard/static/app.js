@@ -3405,13 +3405,19 @@ async function renderExperiment(expId) {
   html += `</div>`;
   content.innerHTML = html;
 
-  // Inject fixture + HTML into iframes
+  // Inject fixture + HTML into iframes (with Tailwind + dashboard CSS so variants
+  // use identical markup to the main app — winning variant drops in with zero rework)
+  const _parentCSS = document.querySelector('style')?.textContent || '';
   variants.forEach(v => {
     const iframe = content.querySelector(`iframe[data-variant="${v.id}"]`);
     if (!iframe) return;
     const doc = iframe.contentDocument || iframe.contentWindow.document;
     doc.open();
-    doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}</style></head><body>
+    doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+<script src="https://cdn.tailwindcss.com"><\/script>
+<style>${_parentCSS}</style>
+<style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;}</style>
+</head><body>
 <script>window.FIXTURE = ${exp.fixture || '{}'};<\/script>
 ${v.html}
 </body></html>`);
