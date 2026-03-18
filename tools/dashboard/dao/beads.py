@@ -71,7 +71,7 @@ def _coerce(row: dict) -> dict:
     out = {}
     for k, v in row.items():
         if isinstance(v, datetime):
-            out[k] = v.isoformat()
+            out[k] = v.isoformat() + "Z"
         elif k == "labels" and isinstance(v, str):
             out[k] = _parse_labels(v)
         else:
