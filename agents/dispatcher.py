@@ -251,40 +251,15 @@ def get_open_dependencies(bead_id: str) -> list[dict]:
 # ── Bead state mutations ────────────────────────────────────────
 
 
-def set_dispatch_state(bead_id: str, state: str, reason: str = "") -> bool:
-    """Set the dispatch dimension on a bead. Returns True on success.
-
-    Dispatch states: queued, launching, running, collecting, merging, done, failed.
-    Retries on failure. Logs a manual-cleanup warning if all retries fail.
-    """
-    reason_text = reason or f"dispatch:{state}"
-    try:
-        _retry_bd(["set-state", bead_id, f"dispatch={state}", "--reason", reason_text])
-        return True
-    except BdCommandError:
-        print(f"  MANUAL CLEANUP NEEDED: {bead_id} dispatch state not set to {state}",
-              file=sys.stderr)
-        return False
-
 
 def claim_bead(bead_id: str) -> bool:
     """Claim a bead for dispatch. Returns True if successful."""
-    result = subprocess.run(
-        ["bd", "set-state", bead_id, "work=claimed",
-         "--reason", f"dispatcher:{os.getpid()}"],
-        capture_output=True, text=True, timeout=15,
-        cwd=str(REPO_ROOT),
-    )
-    if result.returncode != 0:
-        print(f"  Failed to claim {bead_id}: {result.stderr}", file=sys.stderr)
-        return False
-
     # Set status to in_progress so dashboard shows it
     if not run_bd(["update", bead_id, "-s", "in_progress"]):
-        print(f"  WARNING: Claimed {bead_id} but failed to set in_progress",
+        print(f"  WARNING: Failed to set {bead_id} in_progress",
               file=sys.stderr)
 
-    # Also add label for queryability
+    # Add label for queryability (used by get_claimed_beads)
     label_result = subprocess.run(
         ["bd", "label", "add", bead_id, "work:claimed"],
         capture_output=True, text=True, timeout=15,
@@ -327,17 +302,14 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
             _retry_bd(["close", bead_id, "--reason", reason])
         elif status == "BLOCKED":
             _retry_bd(["update", bead_id, "-s", "open"])
-            _retry_bd(["set-state", bead_id, "work=blocked", "--reason", reason])
             run_bd(["update", bead_id, "--append-notes", f"Blocked: {reason}"])
         elif status == "FAILED":
             _retry_bd(["update", bead_id, "-s", "open"])
-            _retry_bd(["set-state", bead_id, "work=failed", "--reason", reason])
             run_bd(["update", bead_id, "--append-notes", f"Failed: {reason}"])
         else:
             # Unknown status — log and release
             _retry_bd(["update", bead_id, "-s", "open"])
-            _retry_bd(["set-state", bead_id, "work=released",
-                       "--reason", f"Unknown status: {status}"])
+            run_bd(["update", bead_id, "--append-notes", f"Released (unknown status {status}): {reason}"])
     except BdCommandError as e:
         print(f"  MANUAL CLEANUP NEEDED: {bead_id} release failed "
               f"(status={status}): {e}", file=sys.stderr)
@@ -675,7 +647,6 @@ def process_decision(dispatch_result: DispatchResult) -> None:
 
     if decision is None:
         print(f"  No decision file from {bead_id} (exit code {dispatch_result.exit_code})")
-        set_dispatch_state(bead_id, "failed", f"No decision file. Exit code: {dispatch_result.exit_code}")
         release_bead(bead_id, "FAILED", f"No decision file. Exit code: {dispatch_result.exit_code}")
         cleanup_worktree(dispatch_result.worktree_path)
         return
@@ -736,7 +707,6 @@ def process_decision(dispatch_result: DispatchResult) -> None:
 
     # Auto-merge to master on DONE if agent committed
     if status == "DONE" and dispatch_result.commit_hash and dispatch_result.branch:
-        set_dispatch_state(bead_id, "merging")
         merge_ok, merge_err = merge_branch(
             dispatch_result.branch, bead_id, reason
         )
@@ -755,10 +725,6 @@ def process_decision(dispatch_result: DispatchResult) -> None:
                     f"merge failed on {dispatch_result.branch}: {merge_err}"])
             status = "BLOCKED"
             reason = merge_err
-
-    # Set final dispatch state
-    final_dispatch = "done" if status == "DONE" else "failed"
-    set_dispatch_state(bead_id, final_dispatch, reason)
 
     # Release the bead with appropriate state
     release_bead(bead_id, status, reason)
@@ -1074,7 +1040,6 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
     for agent, exit_code in completed:
         running.remove(agent)
         try:
-            set_dispatch_state(agent.bead_id, "collecting")
             result = collect_results(agent, exit_code)
             process_decision(result)
             _record_run(agent, result)
@@ -1082,7 +1047,6 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
         except Exception as e:
             error_msg = f"Collection error: {type(e).__name__}: {e}"
             print(f"  ERROR: {error_msg}", file=sys.stderr)
-            set_dispatch_state(agent.bead_id, "failed", error_msg[:200])
             release_bead(agent.bead_id, "FAILED", error_msg[:200])
             cleanup_worktree(agent.worktree_path)
 
@@ -1095,12 +1059,9 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             result = collect_results(agent, -1)
             if result.decision or result.commit_hash:
                 print(f"  Recovered results from timed-out {agent.bead_id}")
-                set_dispatch_state(agent.bead_id, "collecting")
                 process_decision(result)
                 _record_run(agent, result)
             else:
-                set_dispatch_state(agent.bead_id, "failed",
-                                   f"Agent timeout ({MAX_AGENT_RUNTIME}s)")
                 release_bead(agent.bead_id, "FAILED",
                              f"Agent timeout ({MAX_AGENT_RUNTIME}s)")
                 _record_run(agent, result)
@@ -1108,7 +1069,6 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
         except Exception as e:
             error_msg = f"Timeout collection error: {type(e).__name__}: {e}"
             print(f"  ERROR: {error_msg}", file=sys.stderr)
-            set_dispatch_state(agent.bead_id, "failed", error_msg[:200])
             release_bead(agent.bead_id, "FAILED", error_msg[:200])
             cleanup_worktree(agent.worktree_path)
 
@@ -1193,18 +1153,13 @@ def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int
         if not claim_bead(bead_id):
             continue
 
-        set_dispatch_state(bead_id, "queued")
-        set_dispatch_state(bead_id, "launching", f"image:{image}")
-
         # Launch (non-blocking)
         agent = start_agent(bead_id, image=image)
         if agent:
             _record_launch(agent)
-            set_dispatch_state(bead_id, "running")
             running.append(agent)
             dispatched += 1
         else:
-            set_dispatch_state(bead_id, "failed", "launch.sh --detach failed")
             release_bead(bead_id, "FAILED", "Container launch failed")
             wt = find_worktree_for_bead(bead_id)
             if wt:
