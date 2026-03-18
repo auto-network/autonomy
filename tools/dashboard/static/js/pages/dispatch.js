@@ -11,6 +11,10 @@
 //   _runDir: string                               — run dir name for snippet/live panel (active only)
 //   _snippet: string                              — latest snippet text (reactive, x-text safe)
 //   _tokens: string                               — formatted token estimate (reactive, x-text safe)
+//
+// Data is pushed via SSE (connectEvents) rather than polled.
+// The 'dispatch' topic delivers {active, waiting, blocked} from the server.
+// Snippet text is still fetched reactively via getLiveSnippet() from app.js.
 
 (function () {
   const _STATE_COLORS = {
@@ -20,7 +24,6 @@
     collecting: 'purple',
     merging: 'indigo',
   };
-  const _ACTIVE_DISPATCH_STATES = new Set(['queued', 'launching', 'running', 'collecting', 'merging']);
 
   function _getDispatchState(bead) {
     for (const l of (bead.labels || [])) {
@@ -29,70 +32,43 @@
     return null;
   }
 
+  function _mapActive(b) {
+    const ds = _getDispatchState(b);
+    return {
+      ...b,
+      _section: 'active',
+      _borderColor: 'green',
+      _ds: ds,
+      _stateColor: _STATE_COLORS[ds] || 'gray',
+      _container: b.container || null,
+      _runDir: b.run_dir || '',
+      // Prefer server-pushed snippet; getLiveSnippet() refreshes it below.
+      _snippet: b.last_snippet || '',
+      _tokens: b.token_count ? '~' + _formatTokenCount(b.token_count) : '',
+    };
+  }
+
+  function _mapWaiting(b) {
+    return { ...b, _section: 'waiting', _borderColor: 'blue', _ds: null, _stateColor: 'gray', _container: null, _runDir: '', _snippet: '', _tokens: '' };
+  }
+
+  function _mapBlocked(b) {
+    return { ...b, _section: 'blocked', _borderColor: 'yellow', _ds: null, _stateColor: 'gray', _container: null, _runDir: '', _snippet: '', _tokens: '' };
+  }
+
   document.addEventListener('alpine:init', () => {
     Alpine.data('dispatchPage', () => ({
       active: [],
       waiting: [],
       blocked: [],
+      _eventsHandle: null,
 
-      async refresh() {
-        const [status, allBeads, approvedData] = await Promise.all([
-          api('/api/dispatch/status'),
-          api('/api/beads/list'),
-          api('/api/dispatch/approved'),
-        ]);
+      applyDispatch(data) {
+        this.waiting = (data.waiting || []).map(_mapWaiting);
+        this.blocked = (data.blocked || []).map(_mapBlocked);
+        this.active  = (data.active  || []).map(_mapActive);
 
-        const beadList = Array.isArray(allBeads) ? allBeads : [];
-
-        this.waiting = (Array.isArray(approvedData?.waiting) ? approvedData.waiting : [])
-          .map(b => ({ ...b, _section: 'waiting', _borderColor: 'blue', _ds: null, _stateColor: 'gray', _container: null, _runDir: '', _snippet: '', _tokens: '' }));
-
-        this.blocked = (Array.isArray(approvedData?.blocked) ? approvedData.blocked : [])
-          .map(b => ({ ...b, _section: 'blocked', _borderColor: 'yellow', _ds: null, _stateColor: 'gray', _container: null, _runDir: '', _snippet: '', _tokens: '' }));
-
-        // Build container lookup (skip slack agent containers)
-        const containersByBead = {};
-        for (const c of (status.containers || [])) {
-          if (c.name.startsWith('agent-slack')) continue;
-          const parts = c.name.replace('agent-', '').split('-');
-          parts.pop();
-          containersByBead[parts.join('-')] = c;
-        }
-
-        // Filter beads that are actively dispatched or in_progress
-        const filteredActive = beadList.filter(b => {
-          const ds = _getDispatchState(b);
-          return (ds && _ACTIVE_DISPATCH_STATES.has(ds)) || b.status === 'in_progress';
-        });
-
-        // Build runs lookup (only when there are active beads — avoids extra round-trip)
-        const runsByBead = {};
-        if (filteredActive.length > 0) {
-          const runsData = await api('/api/dispatch/runs');
-          const runsList = Array.isArray(runsData) ? runsData : [];
-          for (const r of runsList) {
-            if (!runsByBead[r.bead_id]) runsByBead[r.bead_id] = r;
-          }
-        }
-
-        this.active = filteredActive.map(b => {
-          const ds = _getDispatchState(b);
-          const run = runsByBead[b.id];
-          return {
-            ...b,
-            _section: 'active',
-            _borderColor: 'green',
-            _ds: ds,
-            _stateColor: _STATE_COLORS[ds] || 'gray',
-            _container: containersByBead[b.id] || null,
-            _runDir: run ? run.dir : '',
-            _snippet: '',
-            _tokens: '',
-          };
-        });
-
-        // Fetch snippet data reactively — store on bead objects so x-text renders them.
-        // Uses getLiveSnippet() and _formatTokenCount() from app.js (shared utilities).
+        // Fetch fresh snippet text reactively for active beads.
         for (let i = 0; i < this.active.length; i++) {
           const b = this.active[i];
           if (!b._runDir) continue;
@@ -106,11 +82,24 @@
         }
       },
 
-      // Called from x-init in the fragment. Registers the interval on window.dispatchInterval
-      // so the SPA router can clear it when navigating away.
+      // Called from x-init in the fragment.
+      // Connects to SSE and stores handle for cleanup in destroy().
       startRefresh() {
-        this.refresh();
-        window.dispatchInterval = setInterval(() => this.refresh(), 5000);
+        this._eventsHandle = connectEvents(['dispatch'], {
+          dispatch: data => this.applyDispatch(data),
+        });
+      },
+
+      destroy() {
+        if (this._eventsHandle) {
+          this._eventsHandle.close();
+          this._eventsHandle = null;
+        }
+        // Clear any legacy polling interval left by older code.
+        if (window.dispatchInterval) {
+          clearInterval(window.dispatchInterval);
+          window.dispatchInterval = null;
+        }
       },
     }));
   });
