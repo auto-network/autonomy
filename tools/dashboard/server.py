@@ -73,7 +73,7 @@ async def api_beads_ready(request):
     return JSONResponse(await run_cli_json(["bd", "ready", "--json"]))
 
 async def api_beads_list(request):
-    return JSONResponse(await run_cli_json(["bd", "list", "--json", "-n", "100"]))
+    return JSONResponse(await run_cli_json(["bd", "list", "--json", "-n", "100", "--sort", "updated"]))
 
 async def api_bead_show(request):
     bead_id = request.path_params["id"]
