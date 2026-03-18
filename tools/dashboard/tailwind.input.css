@@ -1,0 +1,10 @@
+/* Tailwind CSS v4 input file — pre-built to static/tailwind.css by start-dashboard.sh.
+ * Replaces the CDN script tag that ran a MutationObserver causing scroll lag.
+ *
+ * @source directives tell tailwindcss which files to scan for class names.
+ * Equivalent to the `content` array in tailwind.config.js (v3).
+ */
+@import "tailwindcss";
+
+@source "./templates/**/*.html";
+@source "./static/**/*.js";
