@@ -3539,14 +3539,32 @@ function _esc(s) {
 
 // ── Sidebar Experiment Indicator ─────────────────────────────
 
+function getDismissedExperiments() {
+  try {
+    return JSON.parse(localStorage.getItem('dismissed-experiments') || '[]');
+  } catch { return []; }
+}
+
+function dismissExperiment(expId) {
+  const dismissed = getDismissedExperiments();
+  if (!dismissed.includes(expId)) {
+    dismissed.push(expId);
+    localStorage.setItem('dismissed-experiments', JSON.stringify(dismissed));
+  }
+  const el = document.querySelector(`[data-exp-id="${expId}"]`);
+  if (el) el.remove();
+}
+
 async function checkPendingExperiments() {
   const container = document.getElementById('sidebar-experiments');
   if (!container) return;
   try {
     const pending = await api('/api/experiments/pending');
+    const dismissed = getDismissedExperiments();
     const ids = new Set();
     if (Array.isArray(pending)) {
       pending.forEach(exp => {
+        if (dismissed.includes(exp.id)) return;
         ids.add(exp.id);
         if (container.querySelector(`[data-exp-id="${exp.id}"]`)) return;
         const link = document.createElement('a');
@@ -3555,10 +3573,16 @@ async function checkPendingExperiments() {
         link.href = `/experiments/${exp.id}`;
         link.onclick = (e) => { e.preventDefault(); navigateTo(`/experiments/${exp.id}`); };
         link.innerHTML = `<span class="sidebar-exp-icon">\uD83E\uDDEA</span><span class="sidebar-exp-text">${_esc(exp.title)}</span>`;
+        const btn = document.createElement('button');
+        btn.className = 'sidebar-exp-dismiss';
+        btn.title = 'Dismiss';
+        btn.textContent = '\u00d7';
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); dismissExperiment(exp.id); };
+        link.appendChild(btn);
         container.appendChild(link);
       });
     }
-    // Remove indicators for experiments that are no longer pending
+    // Remove indicators for experiments that are no longer pending (or dismissed)
     container.querySelectorAll('[data-exp-id]').forEach(el => {
       if (!ids.has(el.dataset.expId)) el.remove();
     });
