@@ -3412,6 +3412,14 @@ async function renderExperiment(expId) {
     const iframe = content.querySelector(`iframe[data-variant="${v.id}"]`);
     if (!iframe) return;
     const doc = iframe.contentDocument || iframe.contentWindow.document;
+    // Wrap inline <script> bodies in a load listener so they execute
+    // after Tailwind CDN has loaded and set up its MutationObserver.
+    // Without this, variant JS that writes innerHTML with utility classes
+    // runs before Tailwind sees the DOM, and classes are never processed.
+    const _safeHtml = v.html.replace(
+      /<script(?![^>]*\bsrc\b)([^>]*)>([\s\S]*?)<\/script>/gi,
+      (_, attrs, body) => `<script${attrs}>window.addEventListener("load",function(){${body}});<\/script>`
+    );
     doc.open();
     doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
 <script src="https://cdn.tailwindcss.com"><\/script>
@@ -3419,7 +3427,7 @@ async function renderExperiment(expId) {
 <style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;}</style>
 </head><body>
 <script>window.FIXTURE = ${exp.fixture || '{}'};<\/script>
-${v.html}
+${_safeHtml}
 </body></html>`);
     doc.close();
 
