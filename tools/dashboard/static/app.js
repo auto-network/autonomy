@@ -3468,9 +3468,9 @@ async function submitExperiment(expId) {
 
   if (data.ok) {
     btn.textContent = 'Submitted';
-    // Dismiss any toast for this experiment
-    const toast = document.querySelector(`[data-experiment-id="${expId}"]`);
-    if (toast) toast.remove();
+    // Dismiss sidebar indicator for this experiment
+    const indicator = document.querySelector(`[data-exp-id="${expId}"]`);
+    if (indicator) indicator.remove();
     // Refresh page to show completed state
     setTimeout(() => renderExperiment(expId), 500);
   } else {
@@ -3485,46 +3485,31 @@ function _esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── Toast Notifications ──────────────────────────────────────
-
-function showToast(id, message, linkUrl, icon) {
-  const container = document.getElementById('toast-container');
-  if (!container) return;
-  // Don't show duplicate
-  if (container.querySelector(`[data-toast-id="${id}"]`)) return;
-
-  const toast = document.createElement('div');
-  toast.className = 'toast';
-  toast.dataset.toastId = id;
-  if (linkUrl) toast.dataset.experimentId = id;
-  toast.innerHTML = `
-    <span class="toast-icon">${icon || '\u2728'}</span>
-    <span class="flex-1">${message}</span>
-    <span class="toast-dismiss" onclick="event.stopPropagation(); this.parentElement.remove();">\u2715</span>
-  `;
-  if (linkUrl) {
-    toast.onclick = (e) => {
-      if (e.target.closest('.toast-dismiss')) return;
-      navigateTo(linkUrl);
-      toast.remove();
-    };
-  }
-  container.appendChild(toast);
-}
+// ── Sidebar Experiment Indicator ─────────────────────────────
 
 async function checkPendingExperiments() {
+  const container = document.getElementById('sidebar-experiments');
+  if (!container) return;
   try {
     const pending = await api('/api/experiments/pending');
+    const ids = new Set();
     if (Array.isArray(pending)) {
       pending.forEach(exp => {
-        showToast(
-          exp.id,
-          `Experiment: ${exp.title}`,
-          `/experiments/${exp.id}`,
-          '\uD83E\uDDEA'
-        );
+        ids.add(exp.id);
+        if (container.querySelector(`[data-exp-id="${exp.id}"]`)) return;
+        const link = document.createElement('a');
+        link.className = 'sidebar-exp';
+        link.dataset.expId = exp.id;
+        link.href = `/experiments/${exp.id}`;
+        link.onclick = (e) => { e.preventDefault(); navigateTo(`/experiments/${exp.id}`); };
+        link.innerHTML = `<span class="sidebar-exp-icon">\uD83E\uDDEA</span><span class="sidebar-exp-text">${_esc(exp.title)}</span>`;
+        container.appendChild(link);
       });
     }
+    // Remove indicators for experiments that are no longer pending
+    container.querySelectorAll('[data-exp-id]').forEach(el => {
+      if (!ids.has(el.dataset.expId)) el.remove();
+    });
   } catch(e) {}
 }
 

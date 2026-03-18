@@ -131,30 +131,21 @@
     }
     .live-pulse { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: #22c55e; animation: pulse 2s infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-    /* Toast notifications */
-    #toast-container {
-      position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 60;
-      display: flex; flex-direction: column; gap: 0.5rem; pointer-events: none;
+    /* Sidebar experiment indicator */
+    #sidebar-experiments:empty { display: none; }
+    .sidebar-exp {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.375rem 0.5rem; border-radius: 0.375rem;
+      background: #1e1b4b; border: 1px solid #4f46e5;
+      color: #e5e7eb; font-size: 0.75rem; cursor: pointer;
+      text-decoration: none; animation: sidebar-exp-in 0.3s ease-out;
     }
-    .toast {
-      pointer-events: auto;
-      background: #1e1b4b; border: 1px solid #4f46e5; border-radius: 0.5rem;
-      padding: 0.75rem 1rem; color: #e5e7eb; font-size: 0.875rem;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-      display: flex; align-items: center; gap: 0.75rem;
-      animation: toast-in 0.3s ease-out;
-      max-width: 24rem; cursor: pointer;
-    }
-    .toast:hover { border-color: #818cf8; }
-    .toast-icon { font-size: 1.25rem; flex-shrink: 0; }
-    .toast-dismiss {
-      margin-left: auto; color: #6b7280; cursor: pointer;
-      font-size: 0.75rem; padding: 0.25rem; flex-shrink: 0;
-    }
-    .toast-dismiss:hover { color: #e5e7eb; }
-    @keyframes toast-in {
-      from { transform: translateY(1rem); opacity: 0; }
-      to { transform: translateY(0); opacity: 1; }
+    .sidebar-exp:hover { border-color: #818cf8; background: #2e1065; }
+    .sidebar-exp-icon { font-size: 0.875rem; flex-shrink: 0; }
+    .sidebar-exp-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    @keyframes sidebar-exp-in {
+      from { opacity: 0; transform: translateY(-0.25rem); }
+      to { opacity: 1; transform: translateY(0); }
     }
     /* Experiment gallery */
     .exp-variant {
@@ -224,7 +215,10 @@
       <a href="/search" class="nav-link" data-page="search" onclick="closeSidebar()">Search</a>
       <a href="/terminal" class="nav-link" data-page="terminal" onclick="closeSidebar()">Terminal <span id="badge-terminal" class="nav-badge nav-badge-gray"></span></a>
     </div>
-    <div class="mt-auto text-xs text-gray-500" id="stats-summary">loading...</div>
+    <div class="mt-auto">
+      <div id="sidebar-experiments" class="mb-2 space-y-1"></div>
+      <div class="text-xs text-gray-500" id="stats-summary">loading...</div>
+    </div>
   </nav>
 
   <script>
@@ -279,9 +273,6 @@
       <button id="live-resume-btn" class="live-resume-btn" onclick="liveResumeScroll()">↓ Resume auto-scroll</button>
     </div>
   </div>
-
-  <!-- Toast notifications -->
-  <div id="toast-container"></div>
 
   <script src="/static/app.js"></script>
 </body>
