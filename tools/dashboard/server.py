@@ -1318,12 +1318,21 @@ async def ws_terminal(websocket: WebSocket):
         # Resolve special container commands
         repo_root = str(Path(__file__).parents[2])
         claude_creds_file = str(Path.home() / ".claude" / ".credentials.json")
+        setup_token_file = Path.home() / ".claude" / ".setup-token"
+        # Prefer long-lived setup token over OAuth credentials file
+        setup_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+        if not setup_token and setup_token_file.exists():
+            setup_token = setup_token_file.read_text().strip()
+        if setup_token:
+            claude_auth_arg = f" -e CLAUDE_CODE_OAUTH_TOKEN={setup_token}"
+        else:
+            claude_auth_arg = f" -v {claude_creds_file}:/home/agent/.claude/.credentials.json:ro"
         if cmd_str == "autonomy-agent-claude":
             cmd_str = (
                 f"docker run -it --rm --name {tmux_name}"
                 f" --network=host"
                 f" -e GRAPH_DB=/home/agent/graph.db"
-                f" -v {claude_creds_file}:/home/agent/.claude/.credentials.json:ro"
+                f"{claude_auth_arg}"
                 f" -v {repo_root}/data/graph.db:/home/agent/graph.db"
                 f" -v {repo_root}/.beads:/data/.beads"
                 f" -v {repo_root}:/workspace/repo:ro"
