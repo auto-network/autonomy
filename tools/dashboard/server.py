@@ -30,11 +30,13 @@ from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
 from starlette.websockets import WebSocket
+from sse_starlette.sse import EventSourceResponse
 
 from agents.dispatch_db import list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH
 from agents.experiments_db import (
     create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
 )
+from tools.dashboard.event_bus import event_bus
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -1596,6 +1598,210 @@ async def page_bead(request):
     return HTMLResponse(_load_template("base.html"))
 
 
+# ── SSE EventBus endpoint ─────────────────────────────────────
+
+async def api_events(request):
+    """Server-Sent Events endpoint — topic-based pub/sub.
+
+    GET /api/events?topics=dispatch,nav
+
+    Each event is sent as:
+        event: {topic}
+        data: {json}
+
+    The browser EventSource API handles reconnection automatically.
+    """
+    topics_param = request.query_params.get("topics", "")
+    topics = [t.strip() for t in topics_param.split(",") if t.strip()]
+    if not topics:
+        return JSONResponse({"error": "topics parameter required"}, status_code=400)
+
+    queues = {topic: event_bus.subscribe(topic) for topic in topics}
+
+    async def event_generator():
+        try:
+            while True:
+                # Wait for the next event on any subscribed topic
+                pending = {
+                    asyncio.ensure_future(q.get()): topic
+                    for topic, q in queues.items()
+                }
+                done, _ = await asyncio.wait(
+                    pending.keys(), return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    topic = pending[task]
+                    data = task.result()
+                    # Cancel remaining futures to avoid leaks
+                    for t in pending:
+                        if t not in done:
+                            t.cancel()
+                    yield {"event": topic, "data": json.dumps(data)}
+                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            for q in queues.values():
+                event_bus.unsubscribe(q)
+
+    return EventSourceResponse(event_generator())
+
+
+# ── Background watchers ───────────────────────────────────────
+
+_DISPATCH_STATES = {"queued", "launching", "running", "collecting", "merging"}
+_DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
+_NAV_WATCHER_INTERVAL = 10       # seconds between nav polls
+
+
+async def _collect_dispatch_data() -> dict:
+    """Collect data for the 'dispatch' topic: active, waiting, blocked."""
+    # Active beads (have a dispatch:* label that isn't done/failed)
+    dispatching = await run_cli_json([
+        "bd", "query",
+        'label="dispatch:running" OR label="dispatch:launching" OR '
+        'label="dispatch:collecting" OR label="dispatch:merging" OR label="dispatch:queued"',
+        "--json"
+    ])
+    active_beads = dispatching if isinstance(dispatching, list) else []
+
+    # Currently running runs from SQLite
+    running_runs = await asyncio.to_thread(get_currently_running)
+    run_by_bead = {r["bead_id"]: r for r in running_runs if r.get("bead_id")}
+
+    # Container lookup
+    stdout, _, _ = await run_cli([
+        "docker", "ps", "--filter", "name=agent-",
+        "--format", '{"name":"{{.Names}}","status":"{{.Status}}"}'
+    ])
+    containers = []
+    for line in stdout.strip().splitlines():
+        if line:
+            try:
+                containers.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    container_by_bead = {}
+    for c in containers:
+        if c["name"].startswith("agent-slack"):
+            continue
+        parts = c["name"].replace("agent-", "").split("-")
+        parts.pop()
+        container_by_bead["-".join(parts)] = c
+
+    active = []
+    for b in active_beads:
+        run = run_by_bead.get(b.get("id", ""))
+        active.append({
+            "id": b.get("id"),
+            "title": b.get("title"),
+            "priority": b.get("priority"),
+            "labels": b.get("labels", []),
+            "container": container_by_bead.get(b.get("id", "")),
+            "run_dir": run["id"] if run else None,
+            "last_snippet": run.get("last_snippet") if run else None,
+            "token_count": run.get("token_count") if run else None,
+        })
+
+    # Approved waiting / blocked
+    approved_data = await _collect_approved_data()
+
+    return {
+        "active": active,
+        "waiting": approved_data["waiting"],
+        "blocked": approved_data["blocked"],
+    }
+
+
+async def _collect_approved_data() -> dict:
+    """Collect approved beads, split into waiting vs blocked."""
+    all_beads = await run_cli_json(["bd", "list", "--json", "-n", "100"])
+    bead_list = all_beads if isinstance(all_beads, list) else []
+
+    dispatch_labels = {
+        "dispatch:queued", "dispatch:launching", "dispatch:running",
+        "dispatch:collecting", "dispatch:merging",
+    }
+    approved = [
+        b for b in bead_list
+        if b.get("status") == "open"
+        and "readiness:approved" in set(b.get("labels") or [])
+        and not (set(b.get("labels") or []) & dispatch_labels)
+    ]
+
+    async def check_deps(bead):
+        dep_data = await run_cli_json(["bd", "dep", "list", bead["id"], "--json"])
+        if not isinstance(dep_data, list):
+            return bead, []
+        open_blockers = [
+            {"id": d.get("id"), "title": d.get("title"), "status": d.get("status")}
+            for d in dep_data
+            if isinstance(d, dict)
+            and d.get("dependency_type") != "parent-child"
+            and d.get("status") != "closed"
+        ]
+        return bead, open_blockers
+
+    results = await asyncio.gather(*(check_deps(b) for b in approved))
+    waiting, blocked = [], []
+    for bead, blockers in results:
+        stripped = {k: bead[k] for k in ("id", "title", "priority", "labels", "status") if k in bead}
+        if blockers:
+            blocked.append({**stripped, "blockers": blockers})
+        else:
+            waiting.append(stripped)
+    return {"waiting": waiting, "blocked": blocked}
+
+
+async def _collect_nav_data() -> dict:
+    """Collect badge counts for the 'nav' topic."""
+    all_beads = await run_cli_json(["bd", "list", "--json", "-n", "100"])
+    bead_list = all_beads if isinstance(all_beads, list) else []
+
+    open_count = sum(1 for b in bead_list if b.get("status") == "open")
+    approved_waiting = sum(
+        1 for b in bead_list
+        if b.get("status") == "open"
+        and "readiness:approved" in set(b.get("labels") or [])
+        and not any(
+            l in set(b.get("labels") or [])
+            for l in ("dispatch:queued", "dispatch:launching", "dispatch:running",
+                      "dispatch:collecting", "dispatch:merging")
+        )
+    )
+    running_runs = await asyncio.to_thread(get_currently_running)
+
+    return {
+        "open_beads": open_count,
+        "running_agents": len(running_runs),
+        "approved_waiting": approved_waiting,
+    }
+
+
+async def _dispatch_watcher():
+    """Background task: poll dispatch state and broadcast to 'dispatch' topic."""
+    while True:
+        try:
+            if event_bus.subscriber_count("dispatch") > 0:
+                data = await _collect_dispatch_data()
+                await event_bus.broadcast("dispatch", data)
+        except Exception:
+            pass
+        await asyncio.sleep(_DISPATCH_WATCHER_INTERVAL)
+
+
+async def _nav_watcher():
+    """Background task: poll bead counts and broadcast to 'nav' topic."""
+    while True:
+        try:
+            if event_bus.subscriber_count("nav") > 0:
+                data = await _collect_nav_data()
+                await event_bus.broadcast("nav", data)
+        except Exception:
+            pass
+        await asyncio.sleep(_NAV_WATCHER_INTERVAL)
+
+
 # ── App ───────────────────────────────────────────────────────
 
 routes = [
@@ -1616,6 +1822,9 @@ routes = [
 
     # WebSocket
     WebSocketRoute("/ws/terminal", ws_terminal),
+
+    # Events (SSE)
+    Route("/api/events", api_events),
 
     # API
     Route("/api/beads/ready", api_beads_ready),
@@ -1658,7 +1867,11 @@ routes = [
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
 ]
 
-app = Starlette(routes=routes)
+async def _on_startup():
+    asyncio.create_task(_dispatch_watcher())
+    asyncio.create_task(_nav_watcher())
+
+app = Starlette(routes=routes, on_startup=[_on_startup])
 
 
 def main():

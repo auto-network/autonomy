@@ -4162,9 +4162,26 @@ async function updateNavBadges() {
 
 // ── Init ─────────────────────────────────────────────────────
 
-// Nav badges: poll every 5s
+// Nav badges: initial poll + 30s fallback (SSE keeps dispatch badge live)
 updateNavBadges();
-setInterval(updateNavBadges, 5000);
+setInterval(updateNavBadges, 30000);
+
+// Live dispatch badge via SSE nav topic
+connectEvents(['nav'], {
+  nav: (data) => {
+    const running = data.running_agents || 0;
+    const waiting = data.approved_waiting || 0;
+    const dispatchEl = document.getElementById('badge-dispatch');
+    if (!dispatchEl) return;
+    let html = '';
+    if (running) html += `<span class="nav-badge nav-badge-green">▶${running}</span>`;
+    if (waiting) html += `<span class="nav-badge nav-badge-amber">◦${waiting}</span>`;
+    dispatchEl.innerHTML = html;
+
+    const beadsEl = document.getElementById('badge-beads');
+    if (beadsEl && data.open_beads != null) beadsEl.textContent = data.open_beads || '';
+  },
+});
 
 // Load stats — compact 2x2 grid
 api('/api/stats').then(data => {
@@ -4191,6 +4208,51 @@ api('/api/stats').then(data => {
     statsSummary.textContent = raw.trim() ? raw.trim().split('\n').slice(0, 2).join(', ') : '';
   }
 });
+
+// ── SSE EventBus client utility ──────────────────────────────
+
+/**
+ * Connect to the server's EventBus over SSE.
+ *
+ * @param {string[]} topics  - Array of topic names to subscribe to
+ * @param {Object}   handlers - Map of topic -> handler function(data)
+ * @returns {{ close: () => void }} - Handle; call .close() to disconnect
+ *
+ * Usage in Alpine init()/destroy():
+ *   init() { this._events = connectEvents(['dispatch','nav'], {
+ *     dispatch: data => { this.active = data.active; ... },
+ *     nav: data => { this.openBeads = data.open_beads; },
+ *   }); }
+ *   destroy() { this._events?.close(); }
+ */
+function connectEvents(topics, handlers) {
+  if (!topics.length) return { close: () => {} };
+  const url = '/api/events?topics=' + topics.join(',');
+  const es = new EventSource(url);
+
+  for (const topic of topics) {
+    const handler = handlers[topic];
+    if (!handler) continue;
+    es.addEventListener(topic, (e) => {
+      try {
+        handler(JSON.parse(e.data));
+      } catch (err) {
+        console.warn('[EventBus] parse error for topic', topic, err);
+      }
+    });
+  }
+
+  es.onerror = (e) => {
+    // Browser EventSource will auto-reconnect; just log.
+    console.warn('[EventBus] SSE error, will reconnect', e);
+  };
+
+  return {
+    close() { es.close(); },
+  };
+}
+
+window.connectEvents = connectEvents;
 
 // Check for pending experiments
 checkPendingExperiments();
