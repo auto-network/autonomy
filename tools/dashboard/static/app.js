@@ -2659,10 +2659,32 @@ let activeTerm = null;
 let activeWs = null;
 let activeTerminalId = null;
 let _pillClickTimer = null;
+let _terminalFitAddon = null;
+let _terminalResizeObserver = null;
+let _terminalPageRendered = false;
 
 function destroyTerminal() {
+  if (_terminalResizeObserver) { _terminalResizeObserver.disconnect(); _terminalResizeObserver = null; }
   if (activeWs) { try { activeWs.close(); } catch(e) {} activeWs = null; }
   if (activeTerm) { activeTerm.dispose(); activeTerm = null; }
+  _terminalFitAddon = null;
+}
+
+function _ensureTerminalPageLayout() {
+  if (_terminalPageRendered) return;
+  const termPage = document.getElementById('terminal-page');
+  termPage.innerHTML = `
+    <div class="flex gap-2 mb-3 flex-wrap">
+      <button onclick="launchClaude()" class="px-3 py-1 bg-indigo-600 rounded text-sm hover:bg-indigo-500">Claude (host)</button>
+      <button onclick="launchClaudeContainer()" class="px-3 py-1 bg-purple-600 rounded text-sm hover:bg-purple-500">Claude (container)</button>
+      <button onclick="launchBash()" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Bash</button>
+      <button onclick="launchBashContainer()" class="px-3 py-1 bg-gray-600 rounded text-sm hover:bg-gray-500">Bash (container)</button>
+      <span id="terminal-pills" class="contents"></span>
+      <span class="text-xs text-gray-600 self-center" title="Hold Shift to select text, Ctrl+Shift+V to paste">Shift+drag to select</span>
+      <span class="text-xs text-gray-500 ml-auto self-center" id="term-status">ready</span>
+    </div>
+    <div id="terminal-container" style="height: calc(100vh - 10rem);"></div>`;
+  _terminalPageRendered = true;
 }
 
 async function refreshTerminalPills() {
@@ -2754,23 +2776,24 @@ async function renderTerminal(cmd, attach) {
   if (!cmd && !attach && activeTerminalId) {
     attach = activeTerminalId;
   }
-  if (attach) activeTerminalId = attach;
-  else if (cmd) activeTerminalId = null;
   pageTitle.textContent = attach ? `Attached: ${attach}` : 'Terminal';
   if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
-  destroyTerminal();
 
-  content.innerHTML = `
-    <div class="flex gap-2 mb-3 flex-wrap">
-      <button onclick="launchClaude()" class="px-3 py-1 bg-indigo-600 rounded text-sm hover:bg-indigo-500">Claude (host)</button>
-      <button onclick="launchClaudeContainer()" class="px-3 py-1 bg-purple-600 rounded text-sm hover:bg-purple-500">Claude (container)</button>
-      <button onclick="launchBash()" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Bash</button>
-      <button onclick="launchBashContainer()" class="px-3 py-1 bg-gray-600 rounded text-sm hover:bg-gray-500">Bash (container)</button>
-      <span id="terminal-pills" class="contents"></span>
-      <span class="text-xs text-gray-600 self-center" title="Hold Shift to select text, Ctrl+Shift+V to paste">Shift+drag to select</span>
-      <span class="text-xs text-gray-500 ml-auto self-center" id="term-status">ready</span>
-    </div>
-    <div id="terminal-container" style="height: calc(100vh - 10rem);"></div>`;
+  // Ensure the persistent terminal page layout exists
+  _ensureTerminalPageLayout();
+
+  // If we already have an active connection to the requested session, just re-fit
+  if (!cmd && attach && activeTerm && activeWs && activeWs.readyState === WebSocket.OPEN
+      && activeTerminalId === attach) {
+    await refreshTerminalPills();
+    if (_terminalFitAddon) _terminalFitAddon.fit();
+    activeTerm.focus();
+    return;
+  }
+
+  // Update active terminal ID
+  if (attach) activeTerminalId = attach;
+  else if (cmd) activeTerminalId = null;
 
   // Show existing pills
   await refreshTerminalPills();
@@ -2778,8 +2801,14 @@ async function renderTerminal(cmd, attach) {
   // If we have an attach target, connect immediately
   if (!attach && !cmd) return;
 
+  // Need to create or switch session — destroy previous
+  destroyTerminal();
+
   const termContainer = document.getElementById('terminal-container');
+  termContainer.innerHTML = '';
   const statusEl = document.getElementById('term-status');
+  statusEl.textContent = 'connecting...';
+  statusEl.className = 'text-xs text-yellow-400 ml-auto self-center';
 
   const term = new Terminal({
     cursorBlink: true,
@@ -2795,6 +2824,7 @@ async function renderTerminal(cmd, attach) {
   });
 
   const fitAddon = new FitAddon.FitAddon();
+  _terminalFitAddon = fitAddon;
   term.loadAddon(fitAddon);
   // ClipboardAddon handles OSC 52 sequences from tmux/vim for clipboard sync
   if (typeof ClipboardAddon !== 'undefined') {
@@ -2816,8 +2846,11 @@ async function renderTerminal(cmd, attach) {
   activeTerm = term;
 
   ws.onopen = async () => {
-    statusEl.textContent = 'connected';
-    statusEl.className = 'text-xs text-green-400 ml-auto self-center';
+    const s = document.getElementById('term-status');
+    if (s) {
+      s.textContent = 'connected';
+      s.className = 'text-xs text-green-400 ml-auto self-center';
+    }
     // Send initial size
     const dims = fitAddon.proposeDimensions();
     if (dims) {
@@ -2841,14 +2874,20 @@ async function renderTerminal(cmd, attach) {
   };
 
   ws.onclose = () => {
-    statusEl.textContent = 'disconnected';
-    statusEl.className = 'text-xs text-red-400 ml-auto self-center';
+    const s = document.getElementById('term-status');
+    if (s) {
+      s.textContent = 'disconnected';
+      s.className = 'text-xs text-red-400 ml-auto self-center';
+    }
     term.write('\r\n\x1b[90m--- session ended ---\x1b[0m\r\n');
   };
 
   ws.onerror = () => {
-    statusEl.textContent = 'error';
-    statusEl.className = 'text-xs text-red-400 ml-auto self-center';
+    const s = document.getElementById('term-status');
+    if (s) {
+      s.textContent = 'error';
+      s.className = 'text-xs text-red-400 ml-auto self-center';
+    }
   };
 
   term.onData((data) => {
@@ -2936,15 +2975,18 @@ async function renderTerminal(cmd, attach) {
     return true;
   });
 
-  // Handle resize
-  const resizeObserver = new ResizeObserver(() => {
-    fitAddon.fit();
-    const dims = fitAddon.proposeDimensions();
-    if (dims && ws.readyState === WebSocket.OPEN) {
-      ws.send(`\x1b[8;${dims.rows};${dims.cols}t`);
+  // Handle resize (guard against 0x0 when terminal page is hidden)
+  if (_terminalResizeObserver) _terminalResizeObserver.disconnect();
+  _terminalResizeObserver = new ResizeObserver((entries) => {
+    const entry = entries[0];
+    if (!entry || entry.contentRect.width === 0 || entry.contentRect.height === 0) return;
+    if (_terminalFitAddon) _terminalFitAddon.fit();
+    const dims = _terminalFitAddon ? _terminalFitAddon.proposeDimensions() : null;
+    if (dims && activeWs && activeWs.readyState === WebSocket.OPEN) {
+      activeWs.send(`\x1b[8;${dims.rows};${dims.cols}t`);
     }
   });
-  resizeObserver.observe(termContainer);
+  _terminalResizeObserver.observe(termContainer);
 }
 
 function launchClaude() {
@@ -2968,13 +3010,18 @@ function reconnectTerminal(name) {
   if (name === activeTerminalId && activeWs?.readyState === WebSocket.OPEN) {
     return;
   }
-  activeTerminalId = name;
   renderTerminal(null, name);
 }
 
 async function killTerminal(name) {
   await api(`/api/terminal/${name}/kill`);
-  if (activeTerminalId === name) activeTerminalId = null;
+  if (activeTerminalId === name) {
+    activeTerminalId = null;
+    destroyTerminal();
+    // Clear the terminal container since the session was killed
+    const tc = document.getElementById('terminal-container');
+    if (tc) tc.innerHTML = '';
+  }
   renderTerminal(null, null);
 }
 
@@ -3522,6 +3569,17 @@ function navigateTo(path) {
 
 function route() {
   const path = window.location.pathname;
+  const isTerminalPage = path === '/terminal' || path.startsWith('/terminal/');
+
+  // Toggle between #content and persistent #terminal-page
+  const termPage = document.getElementById('terminal-page');
+  if (isTerminalPage) {
+    content.style.display = 'none';
+    termPage.style.display = '';
+  } else {
+    termPage.style.display = 'none';
+    content.style.display = '';
+  }
 
   // Clear any auto-refresh intervals from previous page
   if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
@@ -3562,7 +3620,7 @@ function route() {
     } else {
       renderSource(path.split('/source/')[1]);
     }
-  } else if (path === '/terminal' || path.startsWith('/terminal/')) {
+  } else if (isTerminalPage) {
     const sessionId = path.startsWith('/terminal/') ? path.split('/terminal/')[1] : null;
     renderTerminal(null, sessionId);
   } else if (path.startsWith('/experiments/')) {
