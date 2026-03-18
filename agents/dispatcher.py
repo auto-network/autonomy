@@ -1229,7 +1229,7 @@ def recover_running_agents() -> list[RunningAgent]:
     recovered = []
     try:
         result = subprocess.run(
-            ["docker", "ps", "--filter", "name=agent-",
+            ["docker", "ps", "--filter", "name=agent-", "--no-trunc",
              "--format", "{{.ID}} {{.Names}} {{.Status}}"],
             capture_output=True, text=True, timeout=10,
         )
