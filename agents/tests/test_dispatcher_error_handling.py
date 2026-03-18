@@ -11,7 +11,6 @@ from agents.dispatcher import (
     run_bd,
     run_cmd,
     _retry_bd,
-    set_dispatch_state,
     release_bead,
     claim_bead,
     REPO_ROOT,
@@ -161,33 +160,6 @@ class TestRetryBd:
         assert "CRITICAL" in captured.err
 
 
-# ── set_dispatch_state ──────────────────────────────────────────
-
-
-class TestSetDispatchState:
-    @patch("agents.dispatcher._retry_bd")
-    def test_success_returns_true(self, mock_retry):
-        mock_retry.return_value = "ok"
-        assert set_dispatch_state("auto-1", "running") is True
-
-    @patch("agents.dispatcher._retry_bd")
-    def test_failure_returns_false(self, mock_retry):
-        mock_retry.side_effect = BdCommandError(
-            ["set-state", "auto-1"], 1, "err"
-        )
-        assert set_dispatch_state("auto-1", "running") is False
-
-    @patch("agents.dispatcher._retry_bd")
-    def test_failure_logs_manual_cleanup(self, mock_retry, capsys):
-        mock_retry.side_effect = BdCommandError(
-            ["set-state", "auto-1"], 1, "err"
-        )
-        set_dispatch_state("auto-1", "done")
-        captured = capsys.readouterr()
-        assert "MANUAL CLEANUP NEEDED" in captured.err
-        assert "auto-1" in captured.err
-
-
 # ── release_bead ────────────────────────────────────────────────
 
 
@@ -210,7 +182,7 @@ class TestReleaseBead:
     @patch("agents.dispatcher._retry_bd")
     @patch("agents.dispatcher.subprocess.run")
     def test_failed_resets_and_flags(self, mock_run, mock_retry, mock_run_bd):
-        """FAILED status resets to open and sets work=failed with retry."""
+        """FAILED status resets to open and appends notes."""
         mock_run.return_value = _completed_process()
         mock_retry.return_value = "ok"
         mock_run_bd.return_value = ""
@@ -218,10 +190,10 @@ class TestReleaseBead:
         result = release_bead("auto-1", "FAILED", "agent crashed")
 
         assert result is True
-        assert mock_retry.call_count == 2  # update + set-state
-        mock_retry.assert_any_call(["update", "auto-1", "-s", "open"])
-        mock_retry.assert_any_call(
-            ["set-state", "auto-1", "work=failed", "--reason", "agent crashed"]
+        assert mock_retry.call_count == 1  # update only (no set-state)
+        mock_retry.assert_called_once_with(["update", "auto-1", "-s", "open"])
+        mock_run_bd.assert_called_once_with(
+            ["update", "auto-1", "--append-notes", "Failed: agent crashed"]
         )
 
     @patch("agents.dispatcher._retry_bd")
@@ -267,7 +239,7 @@ class TestReleaseBead:
     @patch("agents.dispatcher._retry_bd")
     @patch("agents.dispatcher.subprocess.run")
     def test_blocked_status_handling(self, mock_run, mock_retry, mock_run_bd):
-        """BLOCKED status resets to open and sets work=blocked."""
+        """BLOCKED status resets to open and appends notes."""
         mock_run.return_value = _completed_process()
         mock_retry.return_value = "ok"
         mock_run_bd.return_value = ""
@@ -275,10 +247,9 @@ class TestReleaseBead:
         result = release_bead("auto-1", "BLOCKED", "merge conflict")
 
         assert result is True
-        mock_retry.assert_any_call(["update", "auto-1", "-s", "open"])
-        mock_retry.assert_any_call(
-            ["set-state", "auto-1", "work=blocked",
-             "--reason", "merge conflict"]
+        mock_retry.assert_called_once_with(["update", "auto-1", "-s", "open"])
+        mock_run_bd.assert_called_once_with(
+            ["update", "auto-1", "--append-notes", "Blocked: merge conflict"]
         )
 
 
@@ -291,8 +262,6 @@ class TestClaimBead:
     def test_update_failure_logs_warning(self, mock_run, mock_run_bd, capsys):
         """If update to in_progress fails, logs warning but still returns True."""
         mock_run.side_effect = [
-            # set-state work=claimed (success)
-            _completed_process(),
             # label add (success)
             _completed_process(),
         ]
@@ -303,15 +272,13 @@ class TestClaimBead:
         assert result is True
         captured = capsys.readouterr()
         assert "WARNING" in captured.err
-        assert "failed to set in_progress" in captured.err
+        assert "in_progress" in captured.err
 
     @patch("agents.dispatcher.run_bd")
     @patch("agents.dispatcher.subprocess.run")
     def test_label_add_failure_logs_warning(self, mock_run, mock_run_bd, capsys):
         """If label add fails, logs warning but still returns True."""
         mock_run.side_effect = [
-            # set-state work=claimed (success)
-            _completed_process(),
             # label add (fails)
             _completed_process(returncode=1, stderr="label error"),
         ]
