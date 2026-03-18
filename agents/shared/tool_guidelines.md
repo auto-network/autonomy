@@ -118,8 +118,11 @@ is authoritative.
 
 ## Dashboard & Experiments
 
-The dashboard runs on the host at `http://localhost:8080`. From inside the container
-(`--network=host`), you can query its APIs directly:
+The **live** dashboard runs on the host at `http://localhost:8080`. From inside the container
+(`--network=host`), you can query its APIs to read data. Note: this is the production
+dashboard — it does NOT reflect code changes you make in your worktree. Your edits
+to server.py, app.js, or templates won't be visible here until after your branch is
+merged and the dashboard restarts.
 
 ```
 # Fetch experiment variant HTML (for implementing a UI design)
