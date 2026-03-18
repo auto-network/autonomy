@@ -3292,6 +3292,242 @@ async function getLiveSnippet(runDir) {
   }
 }
 
+// ── Experiment Gallery ────────────────────────────────────────
+
+async function renderExperiment(expId) {
+  pageTitle.textContent = 'Experiment';
+  content.innerHTML = '<div class="text-gray-400">Loading experiment...</div>';
+
+  const exp = await api(`/api/experiments/${expId}/full`);
+  if (exp.error) {
+    content.innerHTML = `<div class="text-red-400">Experiment not found</div>`;
+    return;
+  }
+
+  const variants = exp.variants || [];
+  const isCompleted = exp.status === 'completed';
+
+  // Track selection state
+  const selected = new Map();
+  if (isCompleted) {
+    variants.forEach(v => { if (v.selected) selected.set(v.id, v.rank); });
+  }
+
+  let html = `
+    <div class="max-w-6xl mx-auto">
+      <h2 class="text-xl font-bold text-indigo-400 mb-1">${_esc(exp.title)}</h2>
+      ${exp.description ? `<p class="text-gray-400 text-sm mb-4">${_esc(exp.description)}</p>` : ''}
+      ${isCompleted ? '<p class="text-green-400 text-sm mb-4 font-semibold">Results submitted</p>' : ''}
+      <div id="exp-variants">`;
+
+  variants.forEach(v => {
+    const isSelected = isCompleted && v.selected;
+    html += `
+        <div class="exp-variant" data-variant-id="${_esc(v.id)}">
+          <div class="exp-variant-header">
+            <span class="exp-variant-label">${_esc(v.id)}</span>
+            <div class="flex items-center gap-2">
+              <span class="exp-rank-wrap" style="display:none;">
+                <label class="text-xs text-gray-400 mr-1">Rank</label>
+                <select class="exp-rank-select" data-variant="${_esc(v.id)}" ${isCompleted ? 'disabled' : ''}>
+                  ${variants.map((_, i) => `<option value="${i+1}">${i+1}</option>`).join('')}
+                </select>
+              </span>
+              <button class="exp-select-btn ${isSelected ? 'selected' : ''}"
+                      data-variant="${_esc(v.id)}" title="Select this variant"
+                      ${isCompleted ? 'disabled' : ''}>
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="3,8 7,12 13,4"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <iframe class="exp-variant-iframe" data-variant="${_esc(v.id)}" style="min-height:300px;"></iframe>
+        </div>`;
+  });
+
+  html += `</div>`;
+
+  if (!isCompleted) {
+    html += `
+      <div class="exp-submit-bar" id="exp-submit-bar">
+        <span class="text-sm text-gray-400" id="exp-selection-hint">Select variants to rank them</span>
+        <button class="exp-submit-btn" id="exp-submit-btn" disabled onclick="submitExperiment('${expId}')">Submit Rankings</button>
+      </div>`;
+  }
+
+  html += `</div>`;
+  content.innerHTML = html;
+
+  // Inject fixture + HTML into iframes
+  variants.forEach(v => {
+    const iframe = content.querySelector(`iframe[data-variant="${v.id}"]`);
+    if (!iframe) return;
+    const doc = iframe.contentDocument || iframe.contentWindow.document;
+    doc.open();
+    doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}</style></head><body>
+<script>window.FIXTURE = ${exp.fixture || '{}'};<\/script>
+${v.html}
+</body></html>`);
+    doc.close();
+
+    // Auto-resize iframe to content height
+    const resizeIframe = () => {
+      try {
+        const h = iframe.contentDocument.documentElement.scrollHeight;
+        iframe.style.height = Math.max(200, Math.min(h, 800)) + 'px';
+      } catch(e) {}
+    };
+    iframe.addEventListener('load', resizeIframe);
+    setTimeout(resizeIframe, 200);
+    setTimeout(resizeIframe, 600);
+  });
+
+  if (isCompleted) {
+    // Show rank badges on completed variants
+    variants.forEach(v => {
+      if (v.selected && v.rank != null) {
+        const rankWrap = content.querySelector(`[data-variant="${v.id}"]`)?.closest('.exp-variant')?.querySelector('.exp-rank-wrap');
+        if (rankWrap) {
+          rankWrap.style.display = '';
+          rankWrap.querySelector('.exp-rank-select').value = v.rank;
+        }
+      }
+    });
+    return;
+  }
+
+  // Selection toggle logic
+  function updateSelectionUI() {
+    const count = selected.size;
+    const showRanks = count >= 2;
+    content.querySelectorAll('.exp-rank-wrap').forEach(el => {
+      const vid = el.querySelector('.exp-rank-select').dataset.variant;
+      el.style.display = (showRanks && selected.has(vid)) ? '' : 'none';
+    });
+    const hint = document.getElementById('exp-selection-hint');
+    const btn = document.getElementById('exp-submit-btn');
+    if (count === 0) {
+      hint.textContent = 'Select variants to rank them';
+      btn.disabled = true;
+    } else if (count === 1) {
+      hint.textContent = '1 selected \u2014 select more to rank, or submit as winner';
+      btn.disabled = false;
+    } else {
+      hint.textContent = `${count} selected \u2014 set ranks and submit`;
+      btn.disabled = false;
+    }
+  }
+
+  content.querySelectorAll('.exp-select-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const vid = btn.dataset.variant;
+      if (selected.has(vid)) {
+        selected.delete(vid);
+        btn.classList.remove('selected');
+      } else {
+        selected.set(vid, selected.size + 1);
+        btn.classList.add('selected');
+        // Set default rank
+        const rankSel = content.querySelector(`.exp-rank-select[data-variant="${vid}"]`);
+        if (rankSel) rankSel.value = selected.size;
+      }
+      updateSelectionUI();
+    });
+  });
+
+  // Store selection map globally for submit
+  window._expSelected = selected;
+}
+
+async function submitExperiment(expId) {
+  const selected = window._expSelected;
+  if (!selected || selected.size === 0) return;
+
+  const btn = document.getElementById('exp-submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Submitting...';
+
+  // Gather selections with ranks from the UI
+  const selections = [];
+  selected.forEach((_, vid) => {
+    const rankSel = document.querySelector(`.exp-rank-select[data-variant="${vid}"]`);
+    const rank = rankSel ? parseInt(rankSel.value) : 1;
+    selections.push({ id: vid, rank });
+  });
+
+  // If only 1 selected, rank is 1
+  if (selections.length === 1) selections[0].rank = 1;
+
+  const res = await fetch(`/api/experiments/${expId}/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ selections }),
+  });
+  const data = await res.json();
+
+  if (data.ok) {
+    btn.textContent = 'Submitted';
+    // Dismiss any toast for this experiment
+    const toast = document.querySelector(`[data-experiment-id="${expId}"]`);
+    if (toast) toast.remove();
+    // Refresh page to show completed state
+    setTimeout(() => renderExperiment(expId), 500);
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Submit Rankings';
+    alert('Failed to submit: ' + (data.error || 'unknown error'));
+  }
+}
+
+function _esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Toast Notifications ──────────────────────────────────────
+
+function showToast(id, message, linkUrl, icon) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  // Don't show duplicate
+  if (container.querySelector(`[data-toast-id="${id}"]`)) return;
+
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.dataset.toastId = id;
+  if (linkUrl) toast.dataset.experimentId = id;
+  toast.innerHTML = `
+    <span class="toast-icon">${icon || '\u2728'}</span>
+    <span class="flex-1">${message}</span>
+    <span class="toast-dismiss" onclick="event.stopPropagation(); this.parentElement.remove();">\u2715</span>
+  `;
+  if (linkUrl) {
+    toast.onclick = (e) => {
+      if (e.target.closest('.toast-dismiss')) return;
+      navigateTo(linkUrl);
+      toast.remove();
+    };
+  }
+  container.appendChild(toast);
+}
+
+async function checkPendingExperiments() {
+  try {
+    const pending = await api('/api/experiments/pending');
+    if (Array.isArray(pending)) {
+      pending.forEach(exp => {
+        showToast(
+          exp.id,
+          `Experiment: ${exp.title}`,
+          `/experiments/${exp.id}`,
+          '\uD83E\uDDEA'
+        );
+      });
+    }
+  } catch(e) {}
+}
+
 // ── Router ───────────────────────────────────────────────────
 
 function navigateTo(path) {
@@ -3344,6 +3580,8 @@ function route() {
   } else if (path === '/terminal' || path.startsWith('/terminal/')) {
     const sessionId = path.startsWith('/terminal/') ? path.split('/terminal/')[1] : null;
     renderTerminal(null, sessionId);
+  } else if (path.startsWith('/experiments/')) {
+    renderExperiment(path.split('/experiments/')[1]);
   } else {
     content.innerHTML = '<div class="text-gray-400">Page not found</div>';
   }
@@ -3447,10 +3685,35 @@ async function updateNavBadges() {
 updateNavBadges();
 setInterval(updateNavBadges, 5000);
 
-// Load stats
+// Load stats — compact 2x2 grid
 api('/api/stats').then(data => {
-  statsSummary.textContent = data.results || '';
+  const raw = data.results || '';
+  // Parse "table  count" lines into key/value pairs
+  const entries = [];
+  raw.split('\n').forEach(line => {
+    const m = line.match(/^\s*(\w+)\s+(\d+)/);
+    if (m) entries.push([m[1], parseInt(m[2])]);
+  });
+  // Show the 4 most important: sources, thoughts, entities, edges
+  const keys = ['sources', 'thoughts', 'entities', 'edges'];
+  const show = keys.map(k => {
+    const e = entries.find(([name]) => name === k);
+    return e ? e : [k, 0];
+  });
+  if (show.length) {
+    const fmt = n => n >= 1000 ? (n/1000).toFixed(1) + 'k' : String(n);
+    statsSummary.innerHTML = '<div class="kb-stats">' +
+      show.map(([k,v]) =>
+        `<div class="kb-stat"><span class="kb-stat-label">${k}</span><span class="kb-stat-value">${fmt(v)}</span></div>`
+      ).join('') + '</div>';
+  } else {
+    statsSummary.textContent = raw.trim() ? raw.trim().split('\n').slice(0, 2).join(', ') : '';
+  }
 });
+
+// Check for pending experiments
+checkPendingExperiments();
+setInterval(checkPendingExperiments, 10000);
 
 // Initial route
 route();
