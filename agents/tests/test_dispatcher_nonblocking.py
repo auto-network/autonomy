@@ -247,9 +247,8 @@ class TestPollAndCollect:
     @patch("agents.dispatcher._ingest_session")
     @patch("agents.dispatcher.process_decision")
     @patch("agents.dispatcher.collect_results")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.poll_container")
-    def test_completed_agent_collected(self, mock_poll, mock_set_state,
+    def test_completed_agent_collected(self, mock_poll,
                                         mock_collect, mock_process, mock_ingest):
         """Completed agent is removed from running and processed."""
         agent = _make_running_agent()
@@ -263,7 +262,6 @@ class TestPollAndCollect:
         poll_and_collect(running)
 
         assert len(running) == 0
-        mock_set_state.assert_called_with(agent.bead_id, "collecting")
         mock_collect.assert_called_once_with(agent, 0)
         mock_process.assert_called_once()
         mock_ingest.assert_called_once()
@@ -283,12 +281,11 @@ class TestPollAndCollect:
 
     @patch("agents.dispatcher.cleanup_worktree")
     @patch("agents.dispatcher.release_bead")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.collect_results")
     @patch("agents.dispatcher.kill_container")
     @patch("agents.dispatcher.poll_container")
     def test_timed_out_agent_killed(self, mock_poll, mock_kill,
-                                     mock_collect, mock_set_state,
+                                     mock_collect,
                                      mock_release, mock_cleanup):
         """Agent exceeding MAX_AGENT_RUNTIME is killed and released."""
         agent = _make_running_agent(
@@ -311,11 +308,10 @@ class TestPollAndCollect:
     @patch("agents.dispatcher._ingest_session")
     @patch("agents.dispatcher.process_decision")
     @patch("agents.dispatcher.collect_results")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.kill_container")
     @patch("agents.dispatcher.poll_container")
     def test_timed_out_agent_with_results_processed(self, mock_poll, mock_kill,
-                                                     mock_set_state, mock_collect,
+                                                     mock_collect,
                                                      mock_process, mock_ingest):
         """Timed out agent with partial results gets processed normally."""
         agent = _make_running_agent(
@@ -342,14 +338,12 @@ class TestPollAndCollect:
 
 class TestDispatchCycle:
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_launches_agent_when_slots_available(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim,
-        mock_set_state, mock_start
+        self, mock_poll, mock_ready, mock_claimed, mock_claim, mock_start
     ):
         """With empty running list and ready beads, launches an agent."""
         running = []
@@ -381,14 +375,12 @@ class TestDispatchCycle:
         mock_ready.assert_not_called()  # Shouldn't even query beads
 
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_multiple_slots_dispatches_multiple(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim,
-        mock_set_state, mock_start
+        self, mock_poll, mock_ready, mock_claimed, mock_claim, mock_start
     ):
         """With max_concurrent=3 and 2 available beads, launches 2."""
         running = []
@@ -423,14 +415,12 @@ class TestDispatchCycle:
         assert dispatched == 0
 
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_dry_run_no_launch(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim,
-        mock_set_state, mock_start
+        self, mock_poll, mock_ready, mock_claimed, mock_claim, mock_start
     ):
         """Dry run shows bead but doesn't launch."""
         running = []
@@ -450,7 +440,6 @@ class TestDispatchCycle:
     @patch("agents.dispatcher.cleanup_worktree")
     @patch("agents.dispatcher.find_worktree_for_bead")
     @patch("agents.dispatcher.release_bead")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.start_agent")
     @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
@@ -458,7 +447,7 @@ class TestDispatchCycle:
     @patch("agents.dispatcher.poll_and_collect")
     def test_launch_failure_releases_bead(
         self, mock_poll, mock_ready, mock_claimed, mock_claim,
-        mock_start, mock_set_state, mock_release, mock_find_wt, mock_cleanup
+        mock_start, mock_release, mock_find_wt, mock_cleanup
     ):
         """If start_agent fails, bead is released as FAILED."""
         running = []
@@ -598,14 +587,13 @@ class TestGetOpenDependencies:
 class TestDispatchCycleDependencyFiltering:
     @patch("agents.dispatcher.get_open_dependencies")
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_skips_bead_with_open_deps(
         self, mock_poll, mock_ready, mock_claimed, mock_claim,
-        mock_set_state, mock_start, mock_open_deps
+        mock_start, mock_open_deps
     ):
         """Bead with open blocking dependency is NOT dispatched."""
         running = []
@@ -638,14 +626,13 @@ class TestDispatchCycleDependencyFiltering:
 
     @patch("agents.dispatcher.get_open_dependencies")
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_all_beads_blocked_by_deps(
         self, mock_poll, mock_ready, mock_claimed, mock_claim,
-        mock_set_state, mock_start, mock_open_deps
+        mock_start, mock_open_deps
     ):
         """When all beads have open deps, nothing is dispatched."""
         running = []
@@ -668,14 +655,13 @@ class TestDispatchCycleDependencyFiltering:
 
     @patch("agents.dispatcher.get_open_dependencies")
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_bead_with_closed_deps_dispatched(
         self, mock_poll, mock_ready, mock_claimed, mock_claim,
-        mock_set_state, mock_start, mock_open_deps
+        mock_start, mock_open_deps
     ):
         """Bead whose deps are all closed gets dispatched normally."""
         running = []
@@ -698,14 +684,13 @@ class TestDispatchCycleDependencyFiltering:
 
     @patch("agents.dispatcher.get_open_dependencies")
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.set_dispatch_state")
     @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_bead_with_no_dep_count_but_inline_deps(
         self, mock_poll, mock_ready, mock_claimed, mock_claim,
-        mock_set_state, mock_start, mock_open_deps
+        mock_start, mock_open_deps
     ):
         """Bead with dependencies inline in JSON is checked even without dependency_count."""
         running = []
