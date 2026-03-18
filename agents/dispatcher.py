@@ -394,14 +394,16 @@ def poll_container(container_id: str) -> tuple[bool, int]:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
-            # Docker inspect failed — could be transient. Don't assume finished.
-            print(f"  WARNING: docker inspect failed (rc={result.returncode}), "
-                  f"treating as still running", file=sys.stderr)
+            print(f"  poll_container({container_id[:12]}): docker inspect failed "
+                  f"rc={result.returncode} stderr={result.stderr.strip()!r}",
+                  file=sys.stderr)
             return False, -1
 
         parts = result.stdout.strip().split()
         status = parts[0] if parts else "unknown"
         exit_code = int(parts[1]) if len(parts) > 1 else -1
+
+        print(f"  poll_container({container_id[:12]}): status={status} exit_code={exit_code}")
 
         if status == "exited":
             return True, exit_code
@@ -409,9 +411,13 @@ def poll_container(container_id: str) -> tuple[bool, int]:
             return False, -1
         else:
             # created, paused, restarting, removing, dead
-            return status in ("dead", "removing"), exit_code
+            finished = status in ("dead", "removing")
+            print(f"  poll_container({container_id[:12]}): unusual status={status}, "
+                  f"finished={finished}")
+            return finished, exit_code
 
-    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError) as e:
+        print(f"  poll_container({container_id[:12]}): exception {e}", file=sys.stderr)
         return False, -1
 
 
@@ -1171,13 +1177,37 @@ def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int
             print(f"  Skipping {bead_id}: container already running")
             continue
 
+        # Write RUNNING row BEFORE launching — this is the claim lock.
+        # If start_agent fails, we clean it up. But while start_agent runs
+        # (5-30 seconds), the next cycle will see the RUNNING row and skip.
+        timestamp = time.time()
+        run_id = f"{bead_id}-{datetime.fromtimestamp(timestamp).strftime('%Y%m%d-%H%M%S')}"
+        insert_launch_run(
+            run_id=run_id, bead_id=bead_id, started_at=timestamp,
+            branch=f"agent/{bead_id}", branch_base="", image=image,
+            container_name="", output_dir="",
+        )
+
         # Launch (non-blocking)
         agent = start_agent(bead_id, image=image)
         if agent:
+            # Update the pre-launch row with actual container details
             _record_launch(agent)
             running.append(agent)
             dispatched += 1
         else:
+            # Launch failed — clean up the pre-launch RUNNING row
+            from agents.dispatch_db import _get_conn
+            try:
+                conn = _get_conn()
+                conn.execute(
+                    "UPDATE dispatch_runs SET status='FAILED', reason='launch failed' WHERE id=?",
+                    (run_id,),
+                )
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
             release_bead(bead_id, "FAILED", "Container launch failed")
             wt = find_worktree_for_bead(bead_id)
             if wt:
