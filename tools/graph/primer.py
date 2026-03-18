@@ -81,6 +81,7 @@ def collect_primer_data(
             "description": bead.get("description", ""),
             "acceptance_criteria": bead.get("acceptance_criteria", ""),
             "design": bead.get("design", ""),
+            "comments": bead.get("comments", []),
         }
 
     # ── 2. Provenance — original conversation turns ──────────
@@ -265,6 +266,14 @@ def format_for_agent(data: dict) -> str:
             sections.append(f"\n## Acceptance Criteria\n{bead['acceptance_criteria']}")
         if bead["design"]:
             sections.append(f"\n## Design Notes\n{bead['design']}")
+        comments = bead.get("comments", [])
+        if comments:
+            sections.append("\n## Comments")
+            for c in comments:
+                author = c.get("author", "?") if isinstance(c, dict) else "?"
+                ts = c.get("created_at", "") if isinstance(c, dict) else ""
+                text = c.get("text", "") if isinstance(c, dict) else str(c)
+                sections.append(f"\n**{author}** ({ts}):\n{text}")
     else:
         sections.append(f"# Task: {bead_id}")
         sections.append("(Could not fetch bead details from bd)")
