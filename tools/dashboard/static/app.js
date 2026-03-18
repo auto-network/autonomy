@@ -2137,10 +2137,10 @@ async function renderTimeline() {
         // Expanded detail (hidden by default)
         html += `<div id="${detailId}" class="hidden border-t border-gray-700 p-3">`;
         if (e.reason) {
-          html += `<div class="text-sm text-gray-300 mb-2"><strong class="text-gray-400">Reason:</strong> ${e.reason}</div>`;
+          html += `<div class="text-sm text-gray-300 mb-2"><strong class="text-gray-400">Reason:</strong> ${_esc(e.reason)}</div>`;
         }
         if (e.commit_message) {
-          html += `<div class="text-sm text-gray-300 mb-2"><strong class="text-gray-400">Commit:</strong> ${e.commit_message}</div>`;
+          html += `<div class="text-sm text-gray-300 mb-2"><strong class="text-gray-400">Commit:</strong> ${_esc(e.commit_message)}</div>`;
         }
         if (e.lines_added != null || e.lines_removed != null) {
           html += `<div class="text-xs text-gray-500 mb-2">`;
@@ -2158,7 +2158,7 @@ async function renderTimeline() {
           html += '</div>';
         }
         if (e.failure_category) {
-          html += `<div class="text-xs text-red-400 mt-2">Failure: ${e.failure_category}</div>`;
+          html += `<div class="text-xs text-red-400 mt-2">Failure: ${_esc(e.failure_category)}</div>`;
         }
         if (e.discovered_beads_count) {
           html += `<div class="text-xs text-purple-400 mt-2">${e.discovered_beads_count} bead(s) discovered during execution</div>`;
@@ -2191,7 +2191,7 @@ async function renderTrace(runName) {
   pageTitle.textContent = `Trace: ${runName}`;
   const trace = await api(`/api/dispatch/trace/${runName}`);
   if (trace.error) {
-    content.innerHTML = `<div class="text-red-400">${trace.error}</div>`;
+    content.innerHTML = `<div class="text-red-400">${_esc(trace.error)}</div>`;
     return;
   }
 
@@ -2204,9 +2204,9 @@ async function renderTrace(runName) {
     content.innerHTML = `
       <div class="mb-6">
         <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">← Back to Dispatch</a>
-        <h1 class="text-2xl font-bold mb-2">${bead?.title || trace.bead_id}</h1>
+        <h1 class="text-2xl font-bold mb-2">${_esc(bead?.title || trace.bead_id)}</h1>
         <div class="flex gap-2 items-center mb-4">
-          <a href="/bead/${trace.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline">${trace.bead_id}</a>
+          <a href="/bead/${trace.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline">${_esc(trace.bead_id)}</a>
           ${bead ? priorityBadge(bead.priority) : ''}
           <span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded font-mono animate-pulse">RUNNING</span>
         </div>
@@ -2224,11 +2224,11 @@ async function renderTrace(runName) {
   let html = `
     <div class="mb-6">
       <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">← Back to Dispatch</a>
-      <h1 class="text-2xl font-bold mb-2">${bead?.title || trace.bead_id}</h1>
+      <h1 class="text-2xl font-bold mb-2">${_esc(bead?.title || trace.bead_id)}</h1>
       <div class="flex gap-2 items-center mb-4">
-        <a href="/bead/${trace.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline">${trace.bead_id}</a>
+        <a href="/bead/${trace.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline">${_esc(trace.bead_id)}</a>
         ${bead ? priorityBadge(bead.priority) : ''}
-        <span class="badge badge-${statusColor === 'green' ? 'closed' : 'open'}">${status}</span>
+        <span class="badge badge-${statusColor === 'green' ? 'closed' : 'open'}">${_esc(status)}</span>
         ${trace.commit_hash ? `<span class="font-mono text-xs text-gray-400">${trace.commit_hash.slice(0, 10)}</span>` : ''}
       </div>
     </div>`;
@@ -2237,10 +2237,10 @@ async function renderTrace(runName) {
   html += `<div class="mb-6">
     <h2 class="text-lg font-semibold mb-2 text-${statusColor}-400">Decision</h2>
     <div class="bg-gray-800 rounded-lg p-4">
-      <div class="text-sm mb-2"><strong>Status:</strong> ${status}</div>
-      <div class="text-sm mb-2"><strong>Reason:</strong> ${decision.reason || 'none'}</div>
-      ${decision.notes ? `<div class="text-sm mb-2"><strong>Notes:</strong> ${decision.notes}</div>` : ''}
-      ${decision.artifacts?.length ? `<div class="text-sm"><strong>Artifacts:</strong> ${decision.artifacts.join(', ')}</div>` : ''}
+      <div class="text-sm mb-2"><strong>Status:</strong> ${_esc(status)}</div>
+      <div class="text-sm mb-2"><strong>Reason:</strong> ${_esc(decision.reason || 'none')}</div>
+      ${decision.notes ? `<div class="text-sm mb-2"><strong>Notes:</strong> ${_esc(decision.notes)}</div>` : ''}
+      ${decision.artifacts?.length ? `<div class="text-sm"><strong>Artifacts:</strong> ${_esc(decision.artifacts.join(', '))}</div>` : ''}
     </div>
   </div>`;
 
@@ -2250,8 +2250,8 @@ async function renderTrace(runName) {
       <h2 class="text-lg font-semibold mb-2 text-blue-400">Discovered Work</h2>`;
     for (const b of decision.discovered_beads) {
       html += `<div class="bg-gray-800 rounded-lg p-3 mb-2">
-        <div class="font-semibold text-sm">${b.title}</div>
-        <div class="text-xs text-gray-400 mt-1">${b.description?.slice(0, 200) || ''}</div>
+        <div class="font-semibold text-sm">${_esc(b.title)}</div>
+        <div class="text-xs text-gray-400 mt-1">${_esc(b.description?.slice(0, 200) || '')}</div>
       </div>`;
     }
     html += `</div>`;
