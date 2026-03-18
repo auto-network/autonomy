@@ -464,7 +464,7 @@ def test_read_jsonl_incremental(tmp_path):
     ]
     jsonl.write_text("\n".join(json.dumps(l) for l in lines) + "\n")
 
-    snippet, token_delta, new_offset, last_activity = _read_jsonl_incremental(jsonl, 0)
+    snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(jsonl, 0)
 
     assert snippet == "Hi there, I will help."
     assert token_delta == 30
@@ -489,7 +489,7 @@ def test_read_jsonl_incremental_offset(tmp_path):
     jsonl.write_text(first_line + second_line)
     offset = len(first_line.encode())
 
-    snippet, token_delta, new_offset, last_activity = _read_jsonl_incremental(
+    snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
         jsonl, offset
     )
 
@@ -507,7 +507,7 @@ def test_read_jsonl_incremental_no_new_data(tmp_path):
     jsonl.write_text(json.dumps({"type": "assistant", "message": {}}) + "\n")
     file_size = jsonl.stat().st_size
 
-    snippet, token_delta, new_offset, last_activity = _read_jsonl_incremental(
+    snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
         jsonl, file_size
     )
 

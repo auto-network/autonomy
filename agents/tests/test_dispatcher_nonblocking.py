@@ -74,10 +74,10 @@ class TestPollContainer:
 
     @patch("agents.dispatcher.subprocess.run")
     def test_container_not_found(self, mock_run):
-        """Container doesn't exist (already removed)."""
+        """docker inspect failure (e.g. container removed) → unknown, retry next cycle."""
         mock_run.return_value = _completed_process(returncode=1, stderr="No such object")
         finished, exit_code = poll_container("abc123")
-        assert finished is True
+        assert finished is False
         assert exit_code == -1
 
     @patch("agents.dispatcher.subprocess.run")
@@ -338,12 +338,11 @@ class TestPollAndCollect:
 
 class TestDispatchCycle:
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_launches_agent_when_slots_available(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim, mock_start
+        self, mock_poll, mock_ready, mock_claimed, mock_start
     ):
         """With empty running list and ready beads, launches an agent."""
         running = []
@@ -353,7 +352,6 @@ class TestDispatchCycle:
             {"id": "auto-abc", "title": "Test", "priority": 1}
         ]
         mock_claimed.return_value = set()
-        mock_claim.return_value = True
         mock_start.return_value = _make_running_agent(bead_id="auto-abc")
 
         dispatched = dispatch_cycle(config, running)
@@ -375,12 +373,11 @@ class TestDispatchCycle:
         mock_ready.assert_not_called()  # Shouldn't even query beads
 
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_multiple_slots_dispatches_multiple(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim, mock_start
+        self, mock_poll, mock_ready, mock_claimed, mock_start
     ):
         """With max_concurrent=3 and 2 available beads, launches 2."""
         running = []
@@ -391,7 +388,6 @@ class TestDispatchCycle:
             {"id": "auto-b", "title": "B", "priority": 2},
         ]
         mock_claimed.return_value = set()
-        mock_claim.return_value = True
         mock_start.side_effect = [
             _make_running_agent(bead_id="auto-a"),
             _make_running_agent(bead_id="auto-b"),
@@ -415,12 +411,11 @@ class TestDispatchCycle:
         assert dispatched == 0
 
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_dry_run_no_launch(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim, mock_start
+        self, mock_poll, mock_ready, mock_claimed, mock_start
     ):
         """Dry run shows bead but doesn't launch."""
         running = []
@@ -434,19 +429,17 @@ class TestDispatchCycle:
         dispatched = dispatch_cycle(config, running)
 
         assert dispatched == 0
-        mock_claim.assert_not_called()
         mock_start.assert_not_called()
 
     @patch("agents.dispatcher.cleanup_worktree")
     @patch("agents.dispatcher.find_worktree_for_bead")
     @patch("agents.dispatcher.release_bead")
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_launch_failure_releases_bead(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim,
+        self, mock_poll, mock_ready, mock_claimed,
         mock_start, mock_release, mock_find_wt, mock_cleanup
     ):
         """If start_agent fails, bead is released as FAILED."""
@@ -457,7 +450,6 @@ class TestDispatchCycle:
             {"id": "auto-fail", "title": "Fail", "priority": 1}
         ]
         mock_claimed.return_value = set()
-        mock_claim.return_value = True
         mock_start.return_value = None
         mock_find_wt.return_value = ""
 
@@ -587,12 +579,11 @@ class TestGetOpenDependencies:
 class TestDispatchCycleDependencyFiltering:
     @patch("agents.dispatcher.get_open_dependencies")
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_skips_bead_with_open_deps(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim,
+        self, mock_poll, mock_ready, mock_claimed,
         mock_start, mock_open_deps
     ):
         """Bead with open blocking dependency is NOT dispatched."""
@@ -606,7 +597,6 @@ class TestDispatchCycleDependencyFiltering:
              "dependency_count": 0},
         ]
         mock_claimed.return_value = set()
-        mock_claim.return_value = True
         mock_start.return_value = _make_running_agent(bead_id="auto-free")
 
         # auto-blocked has an open dep, auto-free has none (skipped due to dep_count=0)
@@ -626,12 +616,11 @@ class TestDispatchCycleDependencyFiltering:
 
     @patch("agents.dispatcher.get_open_dependencies")
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_all_beads_blocked_by_deps(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim,
+        self, mock_poll, mock_ready, mock_claimed,
         mock_start, mock_open_deps
     ):
         """When all beads have open deps, nothing is dispatched."""
@@ -650,17 +639,15 @@ class TestDispatchCycleDependencyFiltering:
 
         assert dispatched == 0
         assert len(running) == 0
-        mock_claim.assert_not_called()
         mock_start.assert_not_called()
 
     @patch("agents.dispatcher.get_open_dependencies")
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_bead_with_closed_deps_dispatched(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim,
+        self, mock_poll, mock_ready, mock_claimed,
         mock_start, mock_open_deps
     ):
         """Bead whose deps are all closed gets dispatched normally."""
@@ -672,7 +659,6 @@ class TestDispatchCycleDependencyFiltering:
              "dependency_count": 2},
         ]
         mock_claimed.return_value = set()
-        mock_claim.return_value = True
         mock_open_deps.return_value = []  # All deps closed
         mock_start.return_value = _make_running_agent(bead_id="auto-ok")
 
@@ -684,12 +670,11 @@ class TestDispatchCycleDependencyFiltering:
 
     @patch("agents.dispatcher.get_open_dependencies")
     @patch("agents.dispatcher.start_agent")
-    @patch("agents.dispatcher.claim_bead")
     @patch("agents.dispatcher.get_claimed_beads")
     @patch("agents.dispatcher.get_ready_beads")
     @patch("agents.dispatcher.poll_and_collect")
     def test_bead_with_no_dep_count_but_inline_deps(
-        self, mock_poll, mock_ready, mock_claimed, mock_claim,
+        self, mock_poll, mock_ready, mock_claimed,
         mock_start, mock_open_deps
     ):
         """Bead with dependencies inline in JSON is checked even without dependency_count."""
