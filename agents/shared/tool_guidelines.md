@@ -116,6 +116,30 @@ that are not fully captured in the bead description. Read them carefully for any
 would aid implementation. When the description and a user message conflict, the user message
 is authoritative.
 
+## Dashboard & Experiments
+
+The dashboard runs on the host at `http://localhost:8080`. From inside the container
+(`--network=host`), you can query its APIs directly:
+
+```
+# Fetch experiment variant HTML (for implementing a UI design)
+curl -s http://localhost:8080/api/experiments/{uuid}/full | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+for v in d['variants']:
+    print('Variant:', v['id'])
+    print(v['html'])
+"
+
+# List pending experiments
+curl -s http://localhost:8080/api/experiments/pending
+
+# Fetch any dashboard API
+curl -s http://localhost:8080/api/beads/list
+curl -s http://localhost:8080/api/dispatch/runs
+```
+
+Use `localhost:8080`, not the Tailnet IP.
+
 ## Working Style
 
 - Work in `/workspace/repo` — edit files, commit your changes
