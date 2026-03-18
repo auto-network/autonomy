@@ -1,33 +1,40 @@
 // EventBus SSE client utility.
-// Provides connectEvents(topics, handlers) for subscribing to server-sent events.
-// Loaded before app.js so all pages can call connectEvents() as a global.
+// Maintains ONE persistent EventSource for the app lifetime — never torn down.
+// Pages register handlers for topics; the connection is shared across all pages.
+//
+// Globals exposed:
+//   window._sseCache         — last data received per topic, keyed by topic name
+//   window.connectEvents     — legacy compat: (topics, handlers) -> { close() }
+//   window.registerHandler   — (topic, fn) — add a per-topic handler
+//   window.unregisterHandler — (topic, fn) — remove a per-topic handler
 
 (function () {
-  /**
-   * Connect to the server's EventBus over SSE.
-   *
-   * @param {string[]} topics   - Array of topic names to subscribe to
-   * @param {Object}   handlers - Map of topic -> handler function(data)
-   * @returns {{ close: () => void }} - Handle; call .close() to disconnect
-   *
-   * Usage in Alpine init()/destroy():
-   *   init()    { this._events = connectEvents(['dispatch', 'nav'], {
-   *     dispatch: data => { this.active = data.active; ... },
-   *     nav:      data => { this.openBeads = data.open_beads; },
-   *   }); }
-   *   destroy() { this._events?.close(); }
-   */
-  function connectEvents(topics, handlers) {
-    if (!topics.length) return { close: () => {} };
-    const url = '/api/events?topics=' + topics.join(',');
+  window._sseCache = {};
+  const _handlers = {};  // topic -> Set<fn>
+
+  // All topics the persistent connection subscribes to.
+  // Add new topics here as pages are added.
+  const _TOPICS = ['dispatch', 'nav'];
+
+  function _connect() {
+    const url = '/api/events?topics=' + _TOPICS.join(',');
     const es = new EventSource(url);
 
-    for (const topic of topics) {
-      const handler = handlers[topic];
-      if (!handler) continue;
+    for (const topic of _TOPICS) {
       es.addEventListener(topic, (e) => {
         try {
-          handler(JSON.parse(e.data));
+          const data = JSON.parse(e.data);
+          // Update global cache so pages can read on mount.
+          window._sseCache[topic] = data;
+          // Dispatch to all registered handlers.
+          const set = _handlers[topic];
+          if (set) {
+            set.forEach(fn => {
+              try { fn(data); } catch (err) {
+                console.warn('[EventBus] handler error for topic', topic, err);
+              }
+            });
+          }
         } catch (err) {
           console.warn('[EventBus] parse error for topic', topic, err);
         }
@@ -38,11 +45,48 @@
       // Browser EventSource auto-reconnects; just log.
       console.warn('[EventBus] SSE error, will reconnect', e);
     };
+  }
 
+  function registerHandler(topic, fn) {
+    if (!_handlers[topic]) _handlers[topic] = new Set();
+    _handlers[topic].add(fn);
+  }
+
+  function unregisterHandler(topic, fn) {
+    if (_handlers[topic]) _handlers[topic].delete(fn);
+  }
+
+  /**
+   * Connect to the server's EventBus over SSE.
+   * Now a thin wrapper over registerHandler/unregisterHandler.
+   * The underlying connection is persistent and shared.
+   *
+   * @param {string[]} topics   - Topics to subscribe to
+   * @param {Object}   handlers - Map of topic -> handler function(data)
+   * @returns {{ close: () => void }} - Call .close() to unregister handlers
+   */
+  function connectEvents(topics, handlers) {
+    if (!topics.length) return { close: () => {} };
+    const registered = [];
+    for (const topic of topics) {
+      const handler = handlers[topic];
+      if (!handler) continue;
+      registerHandler(topic, handler);
+      registered.push([topic, handler]);
+    }
     return {
-      close() { es.close(); },
+      close() {
+        for (const [topic, handler] of registered) {
+          unregisterHandler(topic, handler);
+        }
+      },
     };
   }
 
+  // Start the one persistent connection at module load time.
+  _connect();
+
   window.connectEvents = connectEvents;
+  window.registerHandler = registerHandler;
+  window.unregisterHandler = unregisterHandler;
 })();

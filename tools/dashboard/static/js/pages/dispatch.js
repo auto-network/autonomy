@@ -142,7 +142,7 @@
       active: [],
       waiting: [],
       blocked: [],
-      _eventsHandle: null,
+      _dispatchHandler: null,
 
       applyDispatch(data) {
         this.waiting = (data.waiting || []).map(_mapWaiting);
@@ -151,18 +151,23 @@
       },
 
       // Alpine lifecycle — called automatically when the component initialises.
-      // Connects to SSE for dispatch data and nav badge updates.
+      // Reads from the global SSE cache for an instant render, then registers
+      // for live updates. Does NOT open a new SSE connection.
       init() {
-        this._eventsHandle = connectEvents(['dispatch', 'nav'], {
-          dispatch: data => this.applyDispatch(data),
-          nav: () => {}, // nav events handled globally in app.js
-        });
+        // Instant render: if SSE has already delivered dispatch data, use it.
+        if (window._sseCache && window._sseCache.dispatch) {
+          this.applyDispatch(window._sseCache.dispatch);
+        }
+        // Register for live updates via the shared persistent connection.
+        this._dispatchHandler = data => this.applyDispatch(data);
+        registerHandler('dispatch', this._dispatchHandler);
       },
 
       destroy() {
-        if (this._eventsHandle) {
-          this._eventsHandle.close();
-          this._eventsHandle = null;
+        // Unregister only — do NOT close the shared SSE connection.
+        if (this._dispatchHandler) {
+          unregisterHandler('dispatch', this._dispatchHandler);
+          this._dispatchHandler = null;
         }
       },
     }));
