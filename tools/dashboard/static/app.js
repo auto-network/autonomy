@@ -1742,6 +1742,24 @@ async function renderBeadDetail(id) {
     html += '<div class="mt-6" id="primer-content"></div>';
   }
 
+  // Render comments from bead data (below description/primer sections)
+  const comments = bead.comments || [];
+  if (comments.length) {
+    let commentsHtml = '<div class="space-y-3">';
+    for (const c of comments) {
+      const ts = c.created_at ? new Date(c.created_at).toLocaleString() : '';
+      const mdEl = document.createElement('div');
+      mdEl.innerHTML = marked.parse(c.text || '');
+      commentsHtml += `
+        <div class="pl-4 border-l-2 border-indigo-700/50">
+          <div class="text-xs text-gray-500 mb-1">${_escHtml(c.author || '?')} · ${_escHtml(ts)}</div>
+          <div class="text-sm text-gray-300 prose prose-invert prose-sm max-w-none">${mdEl.innerHTML}</div>
+        </div>`;
+    }
+    commentsHtml += '</div>';
+    html += _renderPrimerSection('Comments', commentsHtml);
+  }
+
   // Add padding at bottom if live panel might open
   const isRunning = labels.some(l => l.startsWith('dispatch:running') || l.startsWith('dispatch:launching') || l.startsWith('dispatch:collecting'));
   if (isRunning) {
