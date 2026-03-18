@@ -2027,26 +2027,23 @@ async function renderDispatchAlpine() {
             _stateColor: stateColorMap[ds] || 'gray',
             _container: containersByBead[b.id] || null,
             _runDir: run ? run.dir : '',
+            _snippet: '',
+            _tokens: '',
           };
         });
 
-        // Store for snippet loading
-        this._runsByBead = runsByBead;
-      },
-      async loadSnippets() {
-        for (const b of this.active) {
+        // Fetch snippet data reactively — store on bead objects so x-text renders them
+        for (let i = 0; i < this.active.length; i++) {
+          const b = this.active[i];
           if (!b._runDir) continue;
-          const el = document.getElementById(`alpine-snippet-${b.id}`);
-          if (!el) continue;
-          const snippet = await getLiveSnippet(b._runDir);
-          const textEl = el.querySelector('.snippet-text');
-          const tokensEl = el.querySelector('.snippet-tokens');
-          if (snippet) {
-            if (textEl && snippet.text) textEl.textContent = snippet.text;
-            if (tokensEl && snippet.file_size_bytes > 0) {
-              tokensEl.textContent = '~' + _formatTokenCount(snippet.file_size_bytes);
+          getLiveSnippet(b._runDir).then(snippet => {
+            if (snippet) {
+              if (snippet.text) this.active[i]._snippet = snippet.text;
+              if (snippet.file_size_bytes > 0) {
+                this.active[i]._tokens = '~' + _formatTokenCount(snippet.file_size_bytes);
+              }
             }
-          }
+          });
         }
       },
     };
@@ -2054,8 +2051,7 @@ async function renderDispatchAlpine() {
 
   // Set up Alpine template (x-text is safe by default — no XSS)
   content.innerHTML = `
-    <div x-data="dispatchData()" x-init="refresh(); dispatchInterval = setInterval(() => refresh(), 5000)"
-         x-effect="$nextTick(() => loadSnippets())">
+    <div x-data="dispatchData()" x-init="refresh(); dispatchInterval = setInterval(() => refresh(), 5000)">
       <!-- Active Dispatches -->
       <div class="mb-8">
         <h2 class="text-lg font-semibold mb-3 text-green-400">Active Dispatches</h2>
@@ -2095,10 +2091,10 @@ async function renderDispatchAlpine() {
             <template x-if="!b._container && b._ds !== 'collecting' && b._ds !== 'merging'">
               <div class="mt-2 ml-6 text-xs text-gray-500">Container exited — waiting for results</div>
             </template>
-            <!-- Snippet area -->
-            <div class="mt-2 ml-6 flex items-center gap-2" :id="'alpine-snippet-' + b.id" :data-run="b._runDir || ''">
-              <span class="snippet-text text-xs text-gray-500 italic truncate flex-1"></span>
-              <span class="snippet-tokens text-xs text-gray-600 font-mono whitespace-nowrap"></span>
+            <!-- Snippet area (reactive via x-text — no imperative DOM writes) -->
+            <div class="mt-2 ml-6 flex items-center gap-2">
+              <span class="text-xs text-gray-500 italic truncate flex-1" x-text="b._snippet"></span>
+              <span class="text-xs text-gray-600 font-mono whitespace-nowrap" x-text="b._tokens"></span>
             </div>
           </a>
         </template>
