@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS dispatch_runs (
 )
 """
 
+CREATE_INDEX = """\
+CREATE INDEX IF NOT EXISTS idx_dispatch_runs_completed ON dispatch_runs(completed_at DESC)
+"""
+
 
 def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -57,10 +61,11 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create the dispatch_runs table if it doesn't exist."""
+    """Create the dispatch_runs table and indexes if they don't exist."""
     conn = _get_conn()
     try:
         conn.execute(CREATE_TABLE)
+        conn.execute(CREATE_INDEX)
         conn.commit()
     finally:
         conn.close()
