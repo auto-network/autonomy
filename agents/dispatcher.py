@@ -760,24 +760,28 @@ def _find_jsonl_file(output_dir: str) -> Path | None:
 def _read_jsonl_incremental(
     jsonl_path: Path,
     offset: int,
-) -> tuple[str | None, int, int, str | None]:
+) -> tuple[str | None, int, int, int, int, str | None]:
     """Read new JSONL lines starting at byte offset.
 
-    Returns (snippet, token_delta, new_offset, last_activity_iso).
+    Returns (snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity_iso).
 
     snippet      — last assistant/user text seen (first 300 chars), or None
     token_delta  — sum of input+output tokens in new lines
     new_offset   — byte offset after last complete line consumed
+    tool_delta   — count of tool_use entries in new lines
+    turn_delta   — count of assistant + thinking entries in new lines
     last_activity_iso — ISO timestamp of last entry seen, or None
     """
     snippet: str | None = None
     token_delta = 0
+    tool_delta = 0
+    turn_delta = 0
     last_activity: str | None = None
 
     try:
         file_size = jsonl_path.stat().st_size
         if file_size <= offset:
-            return snippet, token_delta, offset, last_activity
+            return snippet, token_delta, offset, tool_delta, turn_delta, last_activity
 
         with open(jsonl_path, "rb") as fh:
             fh.seek(offset)
@@ -786,7 +790,7 @@ def _read_jsonl_incremental(
         # Only process up to the last complete line (ends with \n)
         last_nl = data.rfind(b"\n")
         if last_nl == -1:
-            return snippet, token_delta, offset, last_activity
+            return snippet, token_delta, offset, tool_delta, turn_delta, last_activity
 
         complete = data[: last_nl + 1]
         new_offset = offset + last_nl + 1
@@ -804,6 +808,15 @@ def _read_jsonl_incremental(
             ts = entry.get("timestamp", "")
             if ts:
                 last_activity = ts
+
+            # Count tool_use entries
+            if etype == "tool_use":
+                tool_delta += 1
+                continue
+
+            # Count assistant + thinking entries as turns
+            if etype in ("assistant", "thinking"):
+                turn_delta += 1
 
             if etype not in ("user", "assistant"):
                 continue
@@ -830,10 +843,10 @@ def _read_jsonl_incremental(
             if text:
                 snippet = text[:300]
 
-        return snippet, token_delta, new_offset, last_activity
+        return snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity
 
     except OSError:
-        return snippet, token_delta, offset, last_activity
+        return snippet, token_delta, offset, tool_delta, turn_delta, last_activity
 
 
 def _read_cgroup_mem_mb(container_id: str) -> int | None:
@@ -883,11 +896,13 @@ def _collect_live_stats(agent: RunningAgent) -> None:
         # --- JSONL: incremental read ---
         snippet: str | None = None
         token_delta = 0
+        tool_delta = 0
+        turn_delta = 0
         last_activity: str | None = None
 
         jsonl_file = _find_jsonl_file(agent.output_dir)
         if jsonl_file:
-            snippet, token_delta, new_offset, last_activity = _read_jsonl_incremental(
+            snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
                 jsonl_file, agent.jsonl_offset
             )
             agent.jsonl_offset = new_offset
@@ -915,6 +930,8 @@ def _collect_live_stats(agent: RunningAgent) -> None:
             run_id=run_id,
             last_snippet=snippet,
             token_delta=token_delta,
+            tool_delta=tool_delta,
+            turn_delta=turn_delta,
             cpu_pct=cpu_pct,
             cpu_usec=cpu_usec,
             mem_mb=mem_mb,
