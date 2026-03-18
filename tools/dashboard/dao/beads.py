@@ -24,15 +24,6 @@ _DOLT_USER = "root"
 _DOLT_PASSWORD = ""
 _DOLT_DB = "auto"
 
-# Labels that indicate a bead is being actively dispatched (not done/failed)
-_ACTIVE_DISPATCH_LABELS = (
-    "dispatch:queued",
-    "dispatch:launching",
-    "dispatch:running",
-    "dispatch:collecting",
-    "dispatch:merging",
-)
-
 _local = threading.local()
 
 
@@ -97,55 +88,32 @@ _BEAD_COLS = """
     GROUP_CONCAT(l.label ORDER BY l.label SEPARATOR ',') AS labels
 """
 
-_ACTIVE_PLACEHOLDERS = ", ".join(["%s"] * len(_ACTIVE_DISPATCH_LABELS))
-
 
 # ── Public API ─────────────────────────────────────────────────────────
 
 def get_dispatch_beads() -> dict[str, list[dict]]:
     """Return beads grouped by dispatch role for the Dispatch page.
 
-    Returns a dict with three keys:
-    - "active": beads with an active dispatch label (queued/launching/
-      running/collecting/merging), regardless of readiness
-    - "approved_waiting": readiness:approved, open, no active dispatch,
-      all blocking deps satisfied (closed)
-    - "approved_blocked": readiness:approved, open, no active dispatch,
-      at least one open non-parent-child dependency
+    Returns a dict with two keys:
+    - "approved_waiting": readiness:approved, open, all blocking deps
+      satisfied (closed).  Active dispatches are driven by SQLite
+      dispatch_runs (status=RUNNING), not Dolt labels.
+    - "approved_blocked": readiness:approved, open, at least one open
+      non-parent-child dependency.
 
     Deps are resolved server-side via SQL — no N+1 bd subprocess calls.
     """
     conn = _get_conn()
     with conn.cursor() as cur:
 
-        # Active dispatches (any active dispatch label, not closed)
-        cur.execute(
-            f"""
-            SELECT {_BEAD_COLS}
-            FROM issues i
-            JOIN labels ld ON ld.issue_id = i.id
-                AND ld.label IN ({_ACTIVE_PLACEHOLDERS})
-            LEFT JOIN labels l ON l.issue_id = i.id
-            WHERE i.status != %s
-            GROUP BY i.id
-            ORDER BY i.priority ASC, i.updated_at DESC
-            """,
-            (*_ACTIVE_DISPATCH_LABELS, "closed"),
-        )
-        active = [_coerce(r) for r in _rows(cur)]
-
-        # Approved waiting: open, readiness:approved, no active dispatch,
-        # no open blocking deps
+        # Approved waiting: open, readiness:approved, no open blocking deps
         cur.execute(
             f"""
             SELECT {_BEAD_COLS}
             FROM issues i
             JOIN labels la ON la.issue_id = i.id AND la.label = %s
-            LEFT JOIN labels ld ON ld.issue_id = i.id
-                AND ld.label IN ({_ACTIVE_PLACEHOLDERS})
             LEFT JOIN labels l ON l.issue_id = i.id
             WHERE i.status = %s
-              AND ld.label IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM dependencies d
                   JOIN issues di ON di.id = d.depends_on_id
@@ -156,15 +124,14 @@ def get_dispatch_beads() -> dict[str, list[dict]]:
             GROUP BY i.id
             ORDER BY i.priority ASC, i.updated_at DESC
             """,
-            ("readiness:approved", *_ACTIVE_DISPATCH_LABELS,
-             "open", "parent-child", "closed"),
+            ("readiness:approved", "open", "parent-child", "closed"),
         )
         approved_waiting = [_coerce(r) for r in _rows(cur)]
 
-        # Approved blocked: same as waiting but has at least one open dep
+        # Approved blocked: same as waiting but has at least one open dep.
         # Include the IDs of open blockers for the frontend to link to.
         cur.execute(
-            f"""
+            """
             SELECT
                 i.id, i.title, i.status, i.priority, i.issue_type,
                 i.description, i.created_at, i.updated_at,
@@ -174,18 +141,14 @@ def get_dispatch_beads() -> dict[str, list[dict]]:
                 GROUP_CONCAT(DISTINCT di.title ORDER BY di.id SEPARATOR '\x1f') AS open_blocker_titles
             FROM issues i
             JOIN labels la ON la.issue_id = i.id AND la.label = %s
-            LEFT JOIN labels ld ON ld.issue_id = i.id
-                AND ld.label IN ({_ACTIVE_PLACEHOLDERS})
             JOIN dependencies d ON d.issue_id = i.id AND d.type != %s
             JOIN issues di ON di.id = d.depends_on_id AND di.status != %s
             LEFT JOIN labels l ON l.issue_id = i.id
             WHERE i.status = %s
-              AND ld.label IS NULL
             GROUP BY i.id
             ORDER BY i.priority ASC, i.updated_at DESC
             """,
-            ("readiness:approved", *_ACTIVE_DISPATCH_LABELS,
-             "parent-child", "closed", "open"),
+            ("readiness:approved", "parent-child", "closed", "open"),
         )
         approved_blocked_raw = _rows(cur)
 
@@ -204,10 +167,35 @@ def get_dispatch_beads() -> dict[str, list[dict]]:
         approved_blocked.append(row)
 
     return {
-        "active": active,
         "approved_waiting": approved_waiting,
         "approved_blocked": approved_blocked,
     }
+
+
+def get_bead_title_priority(bead_ids: list[str]) -> dict[str, dict]:
+    """Return a mapping of bead_id → {id, title, priority, labels} for the given IDs.
+
+    Used to enrich SQLite dispatch_runs rows with Dolt bead metadata.
+    Missing bead IDs are silently omitted from the result.
+    """
+    if not bead_ids:
+        return {}
+    conn = _get_conn()
+    placeholders = ", ".join(["%s"] * len(bead_ids))
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT i.id, i.title, i.priority,
+                   GROUP_CONCAT(l.label ORDER BY l.label SEPARATOR ',') AS labels
+            FROM issues i
+            LEFT JOIN labels l ON l.issue_id = i.id
+            WHERE i.id IN ({placeholders})
+            GROUP BY i.id
+            """,
+            tuple(bead_ids),
+        )
+        rows = _rows(cur)
+    return {r["id"]: _coerce(r) for r in rows}
 
 
 def get_bead(bead_id: str) -> dict | None:
@@ -296,16 +284,16 @@ def get_bead_counts() -> dict[str, int]:
     """Return lightweight counts for nav badges and dashboard header.
 
     Returns:
-        open_count       — beads with status='open'
-        in_progress_count — beads with status='in_progress'
-        approved_count   — open beads with readiness:approved label
-        dispatching_count — beads with any active dispatch label
-        total_open_count  — all non-closed beads
+        open_count            — beads with status='open'
+        in_progress_count     — beads with status='in_progress'
+        approved_count        — open beads with readiness:approved label
+        approved_blocked_count — approved open beads with at least one open blocker
+        total_open_count      — all non-closed beads
     """
     conn = _get_conn()
     with conn.cursor() as cur:
         cur.execute(
-            f"""
+            """
             SELECT
                 SUM(CASE WHEN i.status = %s THEN 1 ELSE 0 END)
                     AS open_count,
@@ -316,19 +304,28 @@ def get_bead_counts() -> dict[str, int]:
                     WHERE l.issue_id = i.id AND l.label = %s
                 ) THEN 1 ELSE 0 END)
                     AS approved_count,
-                SUM(CASE WHEN EXISTS (
-                    SELECT 1 FROM labels l
-                    WHERE l.issue_id = i.id
-                      AND l.label IN ({_ACTIVE_PLACEHOLDERS})
-                ) THEN 1 ELSE 0 END)
-                    AS dispatching_count,
+                SUM(CASE WHEN i.status = %s
+                    AND EXISTS (
+                        SELECT 1 FROM labels la
+                        WHERE la.issue_id = i.id AND la.label = %s
+                    )
+                    AND EXISTS (
+                        SELECT 1 FROM dependencies d
+                        JOIN issues di ON di.id = d.depends_on_id
+                        WHERE d.issue_id = i.id
+                          AND d.type != %s
+                          AND di.status != %s
+                    )
+                    THEN 1 ELSE 0 END)
+                    AS approved_blocked_count,
                 COUNT(*)
                     AS total_open_count
             FROM issues i
             WHERE i.status != %s
             """,
             ("open", "in_progress", "readiness:approved",
-             *_ACTIVE_DISPATCH_LABELS, "closed"),
+             "open", "readiness:approved", "parent-child", "closed",
+             "closed"),
         )
         row = cur.fetchone()
 
@@ -337,7 +334,7 @@ def get_bead_counts() -> dict[str, int]:
             "open_count": 0,
             "in_progress_count": 0,
             "approved_count": 0,
-            "dispatching_count": 0,
+            "approved_blocked_count": 0,
             "total_open_count": 0,
         }
     return {k: int(v or 0) for k, v in row.items()}
