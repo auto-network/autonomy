@@ -117,12 +117,16 @@ def collect_primer_data(
                 for entry in relevant:
                     role = "USER" if entry.get("entry_type") == "thought" else "ASSISTANT"
                     content = entry["content"]
-                    if chars_used + len(content) > max_context_chars // 3:
-                        content = content[:500] + "\n... [truncated]"
+                    # Never truncate USER messages — they are the primary spec.
+                    # Only apply budget and character limits to ASSISTANT turns.
+                    if role != "USER":
+                        if chars_used + len(content) > max_context_chars // 3:
+                            content = content[:500] + "\n... [truncated]"
+                        content = content[:1000]
                     prov_entry["turns"].append({
                         "turn_number": entry["turn_number"],
                         "role": role,
-                        "content": content[:1000],
+                        "content": content,
                     })
                     chars_used += len(content)
 
