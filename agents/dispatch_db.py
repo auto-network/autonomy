@@ -154,6 +154,22 @@ def _git_commit_message(commit_hash: str) -> str | None:
     return None
 
 
+def is_bead_claimed(bead_id: str) -> bool:
+    """Check if a bead already has a RUNNING row in dispatch_runs.
+
+    Used as a pre-launch guard to prevent double-dispatch.
+    """
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM dispatch_runs WHERE bead_id = ? AND status = 'RUNNING' LIMIT 1",
+            (bead_id,),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
 def insert_launch_run(
     *,
     run_id: str,

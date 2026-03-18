@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running
+from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running, is_bead_claimed
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
@@ -200,17 +200,23 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
     return beads
 
 
+_claimed_cache: set[str] = set()
+
+
 def get_claimed_beads() -> set[str]:
     """Get IDs of beads currently claimed by the dispatcher.
 
-    Queries dispatch_runs WHERE status=RUNNING in SQLite rather than
-    the Dolt work:claimed label (which was redundant).
+    Queries dispatch_runs WHERE status=RUNNING in SQLite.
+    On error, logs and returns the previous known set (never empty on error).
     """
+    global _claimed_cache
     try:
         runs = get_currently_running()
-        return {r["bead_id"] for r in runs if r.get("bead_id")}
-    except Exception:
-        return set()
+        _claimed_cache = {r["bead_id"] for r in runs if r.get("bead_id")}
+        return _claimed_cache
+    except Exception as e:
+        print(f"  WARNING: get_claimed_beads failed: {e}", file=sys.stderr)
+        return _claimed_cache
 
 
 def get_open_dependencies(bead_id: str) -> list[dict]:
@@ -253,13 +259,18 @@ def get_open_dependencies(bead_id: str) -> list[dict]:
 
 
 
-def claim_bead(bead_id: str) -> bool:
-    """Claim a bead for dispatch. Returns True if successful.
-
-    The RUNNING row in dispatch_runs is the authoritative claim record,
-    written by _record_launch() after container start. No Dolt writes here.
-    """
-    return True
+def is_container_running_for_bead(bead_id: str) -> bool:
+    """Check if a docker container is already running for this bead."""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--filter", f"name=agent-{bead_id}-",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(REPO_ROOT),
+        )
+        return bool(result.stdout.strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False  # can't check, assume safe
 
 
 def release_bead(bead_id: str, status: str, reason: str) -> bool:
@@ -383,8 +394,10 @@ def poll_container(container_id: str) -> tuple[bool, int]:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
-            # Container doesn't exist — treat as finished with error
-            return True, -1
+            # Docker inspect failed — could be transient. Don't assume finished.
+            print(f"  WARNING: docker inspect failed (rc={result.returncode}), "
+                  f"treating as still running", file=sys.stderr)
+            return False, -1
 
         parts = result.stdout.strip().split()
         status = parts[0] if parts else "unknown"
@@ -1018,8 +1031,21 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             print(f"  Completed: {agent.bead_id} (exit={exit_code}, {elapsed:.0f}s)")
             completed.append((agent, exit_code))
         elif elapsed > MAX_AGENT_RUNTIME:
-            print(f"  Timeout: {agent.bead_id} ({elapsed:.0f}s > {MAX_AGENT_RUNTIME}s)")
-            timed_out.append(agent)
+            # Check JSONL staleness — only timeout if agent hasn't written recently
+            jsonl_file = _find_jsonl_file(agent.output_dir)
+            stale = True
+            if jsonl_file:
+                try:
+                    mtime = jsonl_file.stat().st_mtime
+                    stale_secs = time.time() - mtime
+                    stale = stale_secs > 300  # 5 minutes without JSONL writes
+                except OSError:
+                    pass
+            if stale:
+                print(f"  Timeout: {agent.bead_id} ({elapsed:.0f}s, JSONL stale)")
+                timed_out.append(agent)
+            else:
+                print(f"  {agent.bead_id}: {elapsed:.0f}s elapsed but JSONL active, continuing")
         else:
             # Still running — collect live stats (JSONL tail + cgroup reads)
             _collect_live_stats(agent)
@@ -1137,8 +1163,12 @@ def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int
             print("  [DRY RUN] Would dispatch this bead")
             continue
 
-        # Claim
-        if not claim_bead(bead_id):
+        # Pre-launch guards: check SQLite and Docker before launching
+        if is_bead_claimed(bead_id):
+            print(f"  Skipping {bead_id}: already has RUNNING row in dispatch_runs")
+            continue
+        if is_container_running_for_bead(bead_id):
+            print(f"  Skipping {bead_id}: container already running")
             continue
 
         # Launch (non-blocking)
