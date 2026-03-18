@@ -37,6 +37,8 @@ from agents.experiments_db import (
     create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
 )
 from tools.dashboard.event_bus import event_bus
+from tools.dashboard.dao import beads as dao_beads
+from tools.dashboard.dao import dispatch as dao_dispatch
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -1649,132 +1651,88 @@ async def api_events(request):
 
 # ── Background watchers ───────────────────────────────────────
 
-_DISPATCH_STATES = {"queued", "launching", "running", "collecting", "merging"}
 _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
 _NAV_WATCHER_INTERVAL = 10       # seconds between nav polls
 
 
 async def _collect_dispatch_data() -> dict:
-    """Collect data for the 'dispatch' topic: active, waiting, blocked."""
-    # Active beads (have a dispatch:* label that isn't done/failed)
-    dispatching = await run_cli_json([
-        "bd", "query",
-        'label="dispatch:running" OR label="dispatch:launching" OR '
-        'label="dispatch:collecting" OR label="dispatch:merging" OR label="dispatch:queued"',
-        "--json"
-    ])
-    active_beads = dispatching if isinstance(dispatching, list) else []
+    """Collect data for the 'dispatch' topic: active, waiting, blocked.
 
-    # Currently running runs from SQLite
-    running_runs = await asyncio.to_thread(get_currently_running)
+    Reads Dolt via dao_beads (no bd subprocess) and dispatch.db via
+    dao_dispatch (no docker ps).  Live stats (snippet, tokens, cpu, mem)
+    come from dispatch_runs rows written by the dispatcher's poll cycle.
+    """
+    # Get bead data and running runs concurrently
+    bead_data, running_runs = await asyncio.gather(
+        asyncio.to_thread(dao_beads.get_dispatch_beads),
+        asyncio.to_thread(dao_dispatch.get_running_with_stats),
+    )
+
     run_by_bead = {r["bead_id"]: r for r in running_runs if r.get("bead_id")}
 
-    # Container lookup
-    stdout, _, _ = await run_cli([
-        "docker", "ps", "--filter", "name=agent-",
-        "--format", '{"name":"{{.Names}}","status":"{{.Status}}"}'
-    ])
-    containers = []
-    for line in stdout.strip().splitlines():
-        if line:
-            try:
-                containers.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    container_by_bead = {}
-    for c in containers:
-        if c["name"].startswith("agent-slack"):
-            continue
-        parts = c["name"].replace("agent-", "").split("-")
-        parts.pop()
-        container_by_bead["-".join(parts)] = c
-
+    # Enrich active beads with live stats from dispatch_runs
     active = []
-    for b in active_beads:
+    for b in bead_data["active"]:
         run = run_by_bead.get(b.get("id", ""))
+        container = None
+        if run and run.get("container_name"):
+            container = {
+                "name": run["container_name"],
+                "image": run.get("image"),
+                "status": None,
+            }
         active.append({
             "id": b.get("id"),
             "title": b.get("title"),
             "priority": b.get("priority"),
             "labels": b.get("labels", []),
-            "container": container_by_bead.get(b.get("id", "")),
+            "container": container,
             "run_dir": run["id"] if run else None,
             "last_snippet": run.get("last_snippet") if run else None,
             "token_count": run.get("token_count") if run else None,
+            "cpu_pct": run.get("cpu_pct") if run else None,
+            "mem_mb": run.get("mem_mb") if run else None,
         })
 
-    # Approved waiting / blocked
-    approved_data = await _collect_approved_data()
-
-    return {
-        "active": active,
-        "waiting": approved_data["waiting"],
-        "blocked": approved_data["blocked"],
-    }
-
-
-async def _collect_approved_data() -> dict:
-    """Collect approved beads, split into waiting vs blocked."""
-    all_beads = await run_cli_json(["bd", "list", "--json", "-n", "100"])
-    bead_list = all_beads if isinstance(all_beads, list) else []
-
-    dispatch_labels = {
-        "dispatch:queued", "dispatch:launching", "dispatch:running",
-        "dispatch:collecting", "dispatch:merging",
-    }
-    approved = [
-        b for b in bead_list
-        if b.get("status") == "open"
-        and "readiness:approved" in set(b.get("labels") or [])
-        and not (set(b.get("labels") or []) & dispatch_labels)
+    # Waiting: strip to minimal fields
+    waiting = [
+        {
+            "id": b["id"], "title": b["title"],
+            "priority": b["priority"], "labels": b.get("labels", []),
+            "status": b.get("status"),
+        }
+        for b in bead_data["approved_waiting"]
     ]
 
-    async def check_deps(bead):
-        dep_data = await run_cli_json(["bd", "dep", "list", bead["id"], "--json"])
-        if not isinstance(dep_data, list):
-            return bead, []
-        open_blockers = [
-            {"id": d.get("id"), "title": d.get("title"), "status": d.get("status")}
-            for d in dep_data
-            if isinstance(d, dict)
-            and d.get("dependency_type") != "parent-child"
-            and d.get("status") != "closed"
-        ]
-        return bead, open_blockers
+    # Blocked: rename open_blockers → blockers for client compatibility
+    blocked = [
+        {
+            "id": b["id"], "title": b["title"],
+            "priority": b["priority"], "labels": b.get("labels", []),
+            "status": b.get("status"),
+            "blockers": b.get("open_blockers", []),
+        }
+        for b in bead_data["approved_blocked"]
+    ]
 
-    results = await asyncio.gather(*(check_deps(b) for b in approved))
-    waiting, blocked = [], []
-    for bead, blockers in results:
-        stripped = {k: bead[k] for k in ("id", "title", "priority", "labels", "status") if k in bead}
-        if blockers:
-            blocked.append({**stripped, "blockers": blockers})
-        else:
-            waiting.append(stripped)
-    return {"waiting": waiting, "blocked": blocked}
+    return {"active": active, "waiting": waiting, "blocked": blocked}
 
 
 async def _collect_nav_data() -> dict:
-    """Collect badge counts for the 'nav' topic."""
-    all_beads = await run_cli_json(["bd", "list", "--json", "-n", "100"])
-    bead_list = all_beads if isinstance(all_beads, list) else []
+    """Collect badge counts for the 'nav' topic.
 
-    open_count = sum(1 for b in bead_list if b.get("status") == "open")
-    approved_waiting = sum(
-        1 for b in bead_list
-        if b.get("status") == "open"
-        and "readiness:approved" in set(b.get("labels") or [])
-        and not any(
-            l in set(b.get("labels") or [])
-            for l in ("dispatch:queued", "dispatch:launching", "dispatch:running",
-                      "dispatch:collecting", "dispatch:merging")
-        )
+    Reads Dolt via dao_beads.get_bead_counts() (no bd subprocess) and
+    dispatch.db via dao_dispatch.get_running_with_stats() (no docker ps).
+    """
+    counts, running_runs = await asyncio.gather(
+        asyncio.to_thread(dao_beads.get_bead_counts),
+        asyncio.to_thread(dao_dispatch.get_running_with_stats),
     )
-    running_runs = await asyncio.to_thread(get_currently_running)
 
     return {
-        "open_beads": open_count,
+        "open_beads": counts["open_count"],
         "running_agents": len(running_runs),
-        "approved_waiting": approved_waiting,
+        "approved_waiting": counts["approved_count"],
     }
 
 
