@@ -1658,9 +1658,10 @@ _NAV_WATCHER_INTERVAL = 10       # seconds between nav polls
 async def _collect_dispatch_data() -> dict:
     """Collect data for the 'dispatch' topic: active, waiting, blocked.
 
-    Reads Dolt via dao_beads (no bd subprocess) and dispatch.db via
-    dao_dispatch (no docker ps).  Live stats (snippet, tokens, cpu, mem)
-    come from dispatch_runs rows written by the dispatcher's poll cycle.
+    Active dispatches come from SQLite dispatch_runs WHERE status=RUNNING,
+    enriched with Dolt bead metadata (title, priority, labels).
+    Waiting/blocked come from Dolt (readiness:approved beads), with
+    currently-running beads excluded to avoid double-counting.
     """
     # Get bead data and running runs concurrently
     bead_data, running_runs = await asyncio.gather(
@@ -1668,33 +1669,44 @@ async def _collect_dispatch_data() -> dict:
         asyncio.to_thread(dao_dispatch.get_running_with_stats),
     )
 
-    run_by_bead = {r["bead_id"]: r for r in running_runs if r.get("bead_id")}
+    # Look up Dolt metadata for all running beads in a single query
+    running_bead_ids = [r["bead_id"] for r in running_runs if r.get("bead_id")]
+    bead_meta = await asyncio.to_thread(
+        dao_beads.get_bead_title_priority, running_bead_ids
+    )
 
-    # Enrich active beads with live stats from dispatch_runs
+    # Build active list from SQLite RUNNING runs + Dolt metadata
     active = []
-    for b in bead_data["active"]:
-        run = run_by_bead.get(b.get("id", ""))
+    for run in running_runs:
+        bead_id = run.get("bead_id", "")
+        meta = bead_meta.get(bead_id, {})
         container = None
-        if run and run.get("container_name"):
+        if run.get("container_name"):
             container = {
                 "name": run["container_name"],
                 "image": run.get("image"),
                 "status": None,
             }
         active.append({
-            "id": b.get("id"),
-            "title": b.get("title"),
-            "priority": b.get("priority"),
-            "labels": b.get("labels", []),
+            "id": bead_id,
+            "title": meta.get("title") or bead_id,
+            "priority": meta.get("priority"),
+            "labels": meta.get("labels", []),
             "container": container,
-            "run_dir": run["id"] if run else None,
-            "last_snippet": run.get("last_snippet") if run else None,
-            "token_count": run.get("token_count") if run else None,
-            "cpu_pct": run.get("cpu_pct") if run else None,
-            "mem_mb": run.get("mem_mb") if run else None,
+            "run_dir": run.get("id"),
+            "last_snippet": run.get("last_snippet"),
+            "token_count": run.get("token_count"),
+            "cpu_pct": run.get("cpu_pct"),
+            "cpu_usec": run.get("cpu_usec"),
+            "mem_mb": run.get("mem_mb"),
+            "duration_secs": run.get("duration_secs"),
+            "last_activity": run.get("last_activity"),
         })
 
-    # Waiting: strip to minimal fields
+    # Exclude running beads from waiting/blocked to avoid double-counting
+    running_ids = set(running_bead_ids)
+
+    # Waiting: strip to minimal fields, exclude currently-running beads
     waiting = [
         {
             "id": b["id"], "title": b["title"],
@@ -1702,9 +1714,10 @@ async def _collect_dispatch_data() -> dict:
             "status": b.get("status"),
         }
         for b in bead_data["approved_waiting"]
+        if b["id"] not in running_ids
     ]
 
-    # Blocked: rename open_blockers → blockers for client compatibility
+    # Blocked: rename open_blockers → blockers, exclude currently-running beads
     blocked = [
         {
             "id": b["id"], "title": b["title"],
@@ -1713,6 +1726,7 @@ async def _collect_dispatch_data() -> dict:
             "blockers": b.get("open_blockers", []),
         }
         for b in bead_data["approved_blocked"]
+        if b["id"] not in running_ids
     ]
 
     return {"active": active, "waiting": waiting, "blocked": blocked}
@@ -1723,16 +1737,24 @@ async def _collect_nav_data() -> dict:
 
     Reads Dolt via dao_beads.get_bead_counts() (no bd subprocess) and
     dispatch.db via dao_dispatch.get_running_with_stats() (no docker ps).
+
+    approved_waiting excludes beads currently being dispatched (RUNNING
+    in SQLite) to avoid double-counting them in both the running badge
+    and the waiting badge.
     """
     counts, running_runs = await asyncio.gather(
         asyncio.to_thread(dao_beads.get_bead_counts),
         asyncio.to_thread(dao_dispatch.get_running_with_stats),
     )
 
+    running_count = len(running_runs)
+    approved_waiting = max(0, counts["approved_count"] - running_count)
+
     return {
         "open_beads": counts["open_count"],
-        "running_agents": len(running_runs),
-        "approved_waiting": counts["approved_count"],
+        "running_agents": running_count,
+        "approved_waiting": approved_waiting,
+        "approved_blocked": counts["approved_blocked_count"],
     }
 
 

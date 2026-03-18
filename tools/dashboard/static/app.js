@@ -3593,11 +3593,13 @@ connectEvents(['nav'], {
   nav: (data) => {
     const running = data.running_agents || 0;
     const waiting = data.approved_waiting || 0;
+    const blocked = data.approved_blocked || 0;
     const dispatchEl = document.getElementById('badge-dispatch');
     if (!dispatchEl) return;
     let html = '';
     if (running) html += `<span class="nav-badge nav-badge-green">▶${running}</span>`;
-    if (waiting) html += `<span class="nav-badge nav-badge-amber">◦${waiting}</span>`;
+    if (waiting) html += `<span class="nav-badge nav-badge-blue">◦${waiting}</span>`;
+    if (blocked) html += `<span class="nav-badge nav-badge-amber">⊘${blocked}</span>`;
     dispatchEl.innerHTML = html;
 
     const beadsEl = document.getElementById('badge-beads');
