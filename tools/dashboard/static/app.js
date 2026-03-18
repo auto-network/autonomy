@@ -1770,6 +1770,21 @@ async function renderBeadDetail(id) {
 let dispatchInterval = null;
 let timelineInterval = null;
 
+// ── Dispatch Page (Jinja2 fragment + Alpine) ──────────────────
+
+async function renderDispatchFragment() {
+  pageTitle.textContent = 'Dispatch';
+  if (dispatchInterval) clearInterval(dispatchInterval);
+
+  const res = await fetch('/pages/dispatch');
+  const html = await res.text();
+  content.innerHTML = html;
+
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
+}
+
 function _formatTokenCount(bytes) {
   const tokens = Math.round(bytes / 4);
   if (tokens >= 1000000) return (tokens / 1000000).toFixed(1) + 'M tok';
@@ -4025,7 +4040,7 @@ function route() {
   } else if (path === '/dispatch/lit') {
     renderDispatchLit();
   } else if (path === '/dispatch') {
-    renderDispatch();
+    renderDispatchFragment();
   } else if (path.startsWith('/bead/')) {
     renderBeadDetail(path.split('/bead/')[1]);
   } else if (path === '/timeline') {
