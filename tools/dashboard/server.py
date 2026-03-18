@@ -1696,6 +1696,8 @@ async def _collect_dispatch_data() -> dict:
             "run_dir": run.get("id"),
             "last_snippet": run.get("last_snippet"),
             "token_count": run.get("token_count"),
+            "tool_count": run.get("tool_count"),
+            "turn_count": run.get("turn_count"),
             "cpu_pct": run.get("cpu_pct"),
             "cpu_usec": run.get("cpu_usec"),
             "mem_mb": run.get("mem_mb"),

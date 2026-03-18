@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS dispatch_runs (
   output_dir TEXT,
   last_snippet TEXT,
   token_count INTEGER,
+  tool_count INTEGER,
+  turn_count INTEGER,
   cpu_pct REAL,
   cpu_usec INTEGER,
   mem_mb INTEGER,
@@ -66,6 +68,8 @@ _MIGRATIONS = [
     "ALTER TABLE dispatch_runs ADD COLUMN mem_mb INTEGER",
     "ALTER TABLE dispatch_runs ADD COLUMN last_activity DATETIME",
     "ALTER TABLE dispatch_runs ADD COLUMN jsonl_offset INTEGER DEFAULT 0",
+    "ALTER TABLE dispatch_runs ADD COLUMN tool_count INTEGER",
+    "ALTER TABLE dispatch_runs ADD COLUMN turn_count INTEGER",
 ]
 
 CREATE_INDEX = """\
@@ -355,6 +359,8 @@ def update_live_stats(
     run_id: str,
     last_snippet: str | None = None,
     token_delta: int = 0,
+    tool_delta: int = 0,
+    turn_delta: int = 0,
     cpu_pct: float | None = None,
     cpu_usec: int | None = None,
     mem_mb: int | None = None,
@@ -367,9 +373,9 @@ def update_live_stats(
     Best-effort — silently ignores all errors so a stats failure never
     disrupts the dispatch loop.
 
-    token_delta is added to the cumulative token_count (not replaced).
-    All other fields replace the previous value when provided.
-    Fields left at their default (None / 0) are not touched.
+    token_delta, tool_delta, and turn_delta are added to the cumulative
+    counts (not replaced). All other fields replace the previous value
+    when provided. Fields left at their default (None / 0) are not touched.
     """
     updates: list[str] = []
     params: list = []
@@ -381,6 +387,14 @@ def update_live_stats(
     if token_delta > 0:
         updates.append("token_count = COALESCE(token_count, 0) + ?")
         params.append(token_delta)
+
+    if tool_delta > 0:
+        updates.append("tool_count = COALESCE(tool_count, 0) + ?")
+        params.append(tool_delta)
+
+    if turn_delta > 0:
+        updates.append("turn_count = COALESCE(turn_count, 0) + ?")
+        params.append(turn_delta)
 
     if cpu_pct is not None:
         updates.append("cpu_pct = ?")
