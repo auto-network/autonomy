@@ -1583,6 +1583,8 @@ routes = [
     Route("/", page_index),
     Route("/beads", page_beads),
     Route("/dispatch", page_dispatch),
+    Route("/dispatch/alpine", page_dispatch),
+    Route("/dispatch/lit", page_dispatch),
     Route("/sessions", page_sessions),
     Route("/search", page_search),
     Route("/source/{id}", page_source),
