@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from agents.dispatch_db import init_db, insert_run, insert_launch_run
+from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
@@ -73,6 +73,10 @@ class RunningAgent:
     branch_base: str
     image: str
     started_at: float
+    # Live stats tracking — accumulated each poll cycle, persisted to dispatch_runs
+    jsonl_offset: int = 0          # byte offset into the session JSONL file
+    prev_cpu_usec: int = 0         # previous cpu.stat usage_usec reading
+    prev_cpu_poll_time: float = 0.0  # wall time of previous CPU reading
 
 
 @dataclass
@@ -771,6 +775,192 @@ def process_decision(dispatch_result: DispatchResult) -> None:
         )
 
 
+# ── Live stats collection ────────────────────────────────────────
+
+
+def _find_jsonl_file(output_dir: str) -> Path | None:
+    """Find the session JSONL file for a running agent.
+
+    The file is at {output_dir}/sessions/**/*.jsonl — typically one per agent.
+    Returns the first match, or None if not found yet.
+    """
+    session_dir = Path(output_dir) / "sessions"
+    if not session_dir.exists():
+        return None
+    files = list(session_dir.glob("**/*.jsonl"))
+    return files[0] if files else None
+
+
+def _read_jsonl_incremental(
+    jsonl_path: Path,
+    offset: int,
+) -> tuple[str | None, int, int, str | None]:
+    """Read new JSONL lines starting at byte offset.
+
+    Returns (snippet, token_delta, new_offset, last_activity_iso).
+
+    snippet      — last assistant/user text seen (first 300 chars), or None
+    token_delta  — sum of input+output tokens in new lines
+    new_offset   — byte offset after last complete line consumed
+    last_activity_iso — ISO timestamp of last entry seen, or None
+    """
+    snippet: str | None = None
+    token_delta = 0
+    last_activity: str | None = None
+
+    try:
+        file_size = jsonl_path.stat().st_size
+        if file_size <= offset:
+            return snippet, token_delta, offset, last_activity
+
+        with open(jsonl_path, "rb") as fh:
+            fh.seek(offset)
+            data = fh.read()
+
+        # Only process up to the last complete line (ends with \n)
+        last_nl = data.rfind(b"\n")
+        if last_nl == -1:
+            return snippet, token_delta, offset, last_activity
+
+        complete = data[: last_nl + 1]
+        new_offset = offset + last_nl + 1
+
+        for raw_line in complete.splitlines():
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            etype = entry.get("type")
+            ts = entry.get("timestamp", "")
+            if ts:
+                last_activity = ts
+
+            if etype not in ("user", "assistant"):
+                continue
+
+            msg = entry.get("message", {})
+
+            # Accumulate tokens
+            usage = msg.get("usage", {})
+            token_delta += usage.get("input_tokens", 0)
+            token_delta += usage.get("output_tokens", 0)
+
+            # Extract text for snippet
+            content = msg.get("content", "")
+            text = ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        break
+
+            text = text.strip()
+            if text:
+                snippet = text[:300]
+
+        return snippet, token_delta, new_offset, last_activity
+
+    except OSError:
+        return snippet, token_delta, offset, last_activity
+
+
+def _read_cgroup_mem_mb(container_id: str) -> int | None:
+    """Read current memory usage in MB from cgroup memory.current.
+
+    Returns integer MB, or None if the cgroup file is not accessible.
+    This is essentially free — a single file read taking ~1ms.
+    """
+    cgroup_path = Path(
+        f"/sys/fs/cgroup/system.slice/docker-{container_id}.scope/memory.current"
+    )
+    try:
+        mem_bytes = int(cgroup_path.read_text().strip())
+        return mem_bytes // (1024 * 1024)
+    except (OSError, ValueError):
+        return None
+
+
+def _read_cgroup_cpu_usec(container_id: str) -> int | None:
+    """Read cumulative CPU usage in microseconds from cgroup cpu.stat.
+
+    Parses the usage_usec line from cpu.stat. Returns None if not accessible.
+    This is essentially free — a single file read taking ~1ms.
+    """
+    cgroup_path = Path(
+        f"/sys/fs/cgroup/system.slice/docker-{container_id}.scope/cpu.stat"
+    )
+    try:
+        for line in cgroup_path.read_text().splitlines():
+            if line.startswith("usage_usec"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _collect_live_stats(agent: RunningAgent) -> None:
+    """Collect live stats for a running agent and persist to dispatch_runs.
+
+    Called each poll cycle. Reads new JSONL lines incrementally (seeking
+    to jsonl_offset), reads cgroup memory and CPU, then calls update_live_stats().
+    All errors are swallowed — stats are best-effort and must not disrupt dispatch.
+    """
+    try:
+        run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+
+        # --- JSONL: incremental read ---
+        snippet: str | None = None
+        token_delta = 0
+        last_activity: str | None = None
+
+        jsonl_file = _find_jsonl_file(agent.output_dir)
+        if jsonl_file:
+            snippet, token_delta, new_offset, last_activity = _read_jsonl_incremental(
+                jsonl_file, agent.jsonl_offset
+            )
+            agent.jsonl_offset = new_offset
+
+        # --- Cgroup: memory ---
+        mem_mb = _read_cgroup_mem_mb(agent.container_id)
+
+        # --- Cgroup: CPU (diff from previous reading) ---
+        cpu_usec = _read_cgroup_cpu_usec(agent.container_id)
+        cpu_pct: float | None = None
+        now = time.time()
+
+        if cpu_usec is not None and agent.prev_cpu_usec > 0:
+            elapsed_usec = (now - agent.prev_cpu_poll_time) * 1_000_000
+            if elapsed_usec > 0:
+                cpu_pct = (cpu_usec - agent.prev_cpu_usec) / elapsed_usec * 100.0
+                cpu_pct = max(0.0, cpu_pct)
+
+        if cpu_usec is not None:
+            agent.prev_cpu_usec = cpu_usec
+            agent.prev_cpu_poll_time = now
+
+        # --- Persist to DB ---
+        update_live_stats(
+            run_id=run_id,
+            last_snippet=snippet,
+            token_delta=token_delta,
+            cpu_pct=cpu_pct,
+            cpu_usec=cpu_usec,
+            mem_mb=mem_mb,
+            last_activity=last_activity,
+            jsonl_offset=agent.jsonl_offset,
+        )
+
+    except Exception as e:
+        print(f"  WARNING: live stats collection failed for {agent.bead_id}: {e}",
+              file=sys.stderr)
+
+
 # ── Session ingestion ───────────────────────────────────────────
 
 
@@ -876,6 +1066,9 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
         elif elapsed > MAX_AGENT_RUNTIME:
             print(f"  Timeout: {agent.bead_id} ({elapsed:.0f}s > {MAX_AGENT_RUNTIME}s)")
             timed_out.append(agent)
+        else:
+            # Still running — collect live stats (JSONL tail + cgroup reads)
+            _collect_live_stats(agent)
 
     # Process normally-completed agents
     for agent, exit_code in completed:

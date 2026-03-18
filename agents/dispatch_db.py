@@ -44,9 +44,29 @@ CREATE TABLE IF NOT EXISTS dispatch_runs (
   time_tooling_pct INTEGER,
   discovered_beads_count INTEGER,
   has_experience_report BOOLEAN,
-  output_dir TEXT
+  output_dir TEXT,
+  last_snippet TEXT,
+  token_count INTEGER,
+  cpu_pct REAL,
+  cpu_usec INTEGER,
+  mem_mb INTEGER,
+  last_activity DATETIME,
+  jsonl_offset INTEGER DEFAULT 0
 )
 """
+
+# Migrations for columns added after initial schema deployment.
+# Each entry is (column_name, ALTER TABLE statement).
+# init_db() runs these and ignores "duplicate column name" errors.
+_MIGRATIONS = [
+    "ALTER TABLE dispatch_runs ADD COLUMN last_snippet TEXT",
+    "ALTER TABLE dispatch_runs ADD COLUMN token_count INTEGER",
+    "ALTER TABLE dispatch_runs ADD COLUMN cpu_pct REAL",
+    "ALTER TABLE dispatch_runs ADD COLUMN cpu_usec INTEGER",
+    "ALTER TABLE dispatch_runs ADD COLUMN mem_mb INTEGER",
+    "ALTER TABLE dispatch_runs ADD COLUMN last_activity DATETIME",
+    "ALTER TABLE dispatch_runs ADD COLUMN jsonl_offset INTEGER DEFAULT 0",
+]
 
 CREATE_INDEX = """\
 CREATE INDEX IF NOT EXISTS idx_dispatch_runs_completed ON dispatch_runs(completed_at DESC)
@@ -61,11 +81,20 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create the dispatch_runs table and indexes if they don't exist."""
+    """Create the dispatch_runs table and indexes if they don't exist.
+
+    Also runs column migrations for databases created before new columns
+    were added. ALTER TABLE errors from duplicate columns are silently ignored.
+    """
     conn = _get_conn()
     try:
         conn.execute(CREATE_TABLE)
         conn.execute(CREATE_INDEX)
+        for stmt in _MIGRATIONS:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         conn.commit()
     finally:
         conn.close()
@@ -319,3 +348,73 @@ def get_currently_running() -> list[dict]:
         return [_row_to_dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def update_live_stats(
+    *,
+    run_id: str,
+    last_snippet: str | None = None,
+    token_delta: int = 0,
+    cpu_pct: float | None = None,
+    cpu_usec: int | None = None,
+    mem_mb: int | None = None,
+    last_activity: str | None = None,
+    jsonl_offset: int = 0,
+) -> None:
+    """Update live monitoring stats on a RUNNING dispatch_runs row.
+
+    Called by the dispatcher's poll cycle for each running agent.
+    Best-effort — silently ignores all errors so a stats failure never
+    disrupts the dispatch loop.
+
+    token_delta is added to the cumulative token_count (not replaced).
+    All other fields replace the previous value when provided.
+    Fields left at their default (None / 0) are not touched.
+    """
+    updates: list[str] = []
+    params: list = []
+
+    if last_snippet is not None:
+        updates.append("last_snippet = ?")
+        params.append(last_snippet)
+
+    if token_delta > 0:
+        updates.append("token_count = COALESCE(token_count, 0) + ?")
+        params.append(token_delta)
+
+    if cpu_pct is not None:
+        updates.append("cpu_pct = ?")
+        params.append(cpu_pct)
+
+    if cpu_usec is not None:
+        updates.append("cpu_usec = ?")
+        params.append(cpu_usec)
+
+    if mem_mb is not None:
+        updates.append("mem_mb = ?")
+        params.append(mem_mb)
+
+    if last_activity is not None:
+        updates.append("last_activity = ?")
+        params.append(last_activity)
+
+    if jsonl_offset > 0:
+        updates.append("jsonl_offset = ?")
+        params.append(jsonl_offset)
+
+    if not updates:
+        return
+
+    params.append(run_id)
+    try:
+        conn = _get_conn()
+        try:
+            conn.execute(
+                f"UPDATE dispatch_runs SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
