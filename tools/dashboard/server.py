@@ -31,6 +31,9 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 
 from agents.dispatch_db import list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH
+from agents.experiments_db import (
+    create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -1466,6 +1469,86 @@ async def page_terminal(request):
     return HTMLResponse(_load_template("base.html"))
 
 
+# ── Experiments API ────────────────────────────────────────────
+
+async def api_experiments_create(request):
+    """Create a new experiment. Returns {id: uuid}."""
+    body = await request.json()
+    title = body.get("title", "Untitled Experiment")
+    description = body.get("description")
+    fixture = body.get("fixture")  # JSON string or dict
+    variants = body.get("variants", [])
+
+    if not variants:
+        return JSONResponse({"error": "At least one variant required"}, status_code=400)
+
+    # Ensure fixture is stored as JSON string
+    if fixture and not isinstance(fixture, str):
+        fixture = json.dumps(fixture)
+
+    exp_id = await asyncio.to_thread(
+        create_experiment,
+        title=title,
+        description=description,
+        fixture=fixture,
+        variants=variants,
+    )
+    return JSONResponse({"id": exp_id}, status_code=201)
+
+
+async def api_experiments_poll(request):
+    """Poll experiment status. 202 while pending, 200 with results when completed."""
+    exp_id = request.path_params["id"]
+    exp = await asyncio.to_thread(get_experiment, exp_id)
+    if not exp:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    if exp["status"] == "pending":
+        return JSONResponse({"status": "pending", "id": exp_id}, status_code=202)
+
+    # Completed — return results
+    results = []
+    for v in exp["variants"]:
+        if v["selected"]:
+            results.append({"id": v["id"], "rank": v["rank"]})
+    results.sort(key=lambda x: x["rank"] or 999)
+    return JSONResponse({
+        "status": "completed",
+        "id": exp_id,
+        "results": results,
+    })
+
+
+async def api_experiments_get(request):
+    """Get full experiment data for gallery rendering."""
+    exp_id = request.path_params["id"]
+    exp = await asyncio.to_thread(get_experiment, exp_id)
+    if not exp:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(exp)
+
+
+async def api_experiments_submit(request):
+    """Submit ranking results."""
+    exp_id = request.path_params["id"]
+    body = await request.json()
+    selections = body.get("selections", [])
+    ok = await asyncio.to_thread(submit_results, exp_id, selections)
+    if not ok:
+        return JSONResponse({"error": "experiment not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+async def api_experiments_pending(request):
+    """List pending experiments (for toast notifications)."""
+    pending = await asyncio.to_thread(list_pending_experiments)
+    return JSONResponse(pending)
+
+
+async def page_experiment(request):
+    return HTMLResponse(_load_template("base.html"))
+
+
 # ── HTML Pages ────────────────────────────────────────────────
 
 def _load_template(name: str) -> str:
@@ -1539,6 +1622,14 @@ routes = [
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
     Route("/api/timeline", api_timeline),
     Route("/api/timeline/stats", api_timeline_stats),
+
+    # Experiments
+    Route("/api/experiments", api_experiments_create, methods=["POST"]),
+    Route("/api/experiments/pending", api_experiments_pending),
+    Route("/api/experiments/{id}", api_experiments_poll),
+    Route("/api/experiments/{id}/full", api_experiments_get),
+    Route("/api/experiments/{id}/submit", api_experiments_submit, methods=["POST"]),
+    Route("/experiments/{id}", page_experiment),
 
     # Static
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
