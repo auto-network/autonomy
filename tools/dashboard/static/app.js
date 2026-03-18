@@ -1789,10 +1789,18 @@ let timelineInterval = null;
 
 // ── Dispatch Page (Jinja2 fragment + Alpine) ──────────────────
 
+const _fragmentCache = new Map();
+
 async function renderDispatchFragment() {
   pageTitle.textContent = 'Dispatch';
-  const res = await fetch('/pages/dispatch');
-  const html = await res.text();
+  let html;
+  if (_fragmentCache.has('/pages/dispatch')) {
+    html = _fragmentCache.get('/pages/dispatch');
+  } else {
+    const res = await fetch('/pages/dispatch');
+    html = await res.text();
+    _fragmentCache.set('/pages/dispatch', html);
+  }
   content.innerHTML = html;
 
   if (window.Alpine) {
