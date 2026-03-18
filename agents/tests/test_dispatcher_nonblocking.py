@@ -490,7 +490,6 @@ class TestRecoverRunningAgents:
         agents = recover_running_agents()
         assert agents == []
 
-    @patch("agents.dispatcher.REPO_ROOT", new_callable=lambda: property(lambda self: Path("/tmp")))
     @patch("agents.dispatcher.subprocess.run")
     def test_recovers_running_container(self, mock_run, tmp_path):
         """Recovers agent metadata from docker ps + output dir."""
