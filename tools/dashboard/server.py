@@ -1666,7 +1666,6 @@ async def api_events(request):
 # ── Background watchers ───────────────────────────────────────
 
 _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
-_NAV_WATCHER_INTERVAL = 10       # seconds between nav polls
 
 
 async def _collect_dispatch_data() -> dict:
@@ -1748,54 +1747,36 @@ async def _collect_dispatch_data() -> dict:
     return {"active": active, "waiting": waiting, "blocked": blocked}
 
 
-async def _collect_nav_data() -> dict:
-    """Collect badge counts for the 'nav' topic.
-
-    Reads Dolt via dao_beads.get_bead_counts() (no bd subprocess) and
-    dispatch.db via dao_dispatch.get_running_with_stats() (no docker ps).
-
-    approved_waiting excludes beads currently being dispatched (RUNNING
-    in SQLite) to avoid double-counting them in both the running badge
-    and the waiting badge.
-    """
-    counts, running_runs = await asyncio.gather(
-        asyncio.to_thread(dao_beads.get_bead_counts),
-        asyncio.to_thread(dao_dispatch.get_running_with_stats),
-    )
-
-    running_count = len(running_runs)
-    approved_waiting = max(0, counts["approved_count"] - running_count)
-
-    return {
-        "open_beads": counts["open_count"],
-        "running_agents": running_count,
-        "approved_waiting": approved_waiting,
-        "approved_blocked": counts["approved_blocked_count"],
-    }
-
-
 async def _dispatch_watcher():
-    """Background task: poll dispatch state and broadcast to 'dispatch' topic."""
+    """Background task: poll dispatch state and broadcast to 'dispatch' and 'nav' topics.
+
+    Both topics are derived from the same data collection pass so they always
+    see a consistent snapshot. Nav counts are derived directly from the dispatch
+    lists (running_agents=len(active), approved_waiting=len(waiting),
+    approved_blocked=len(blocked)) plus open_count from get_bead_counts().
+    """
     while True:
         try:
-            if event_bus.subscriber_count("dispatch") > 0:
-                data = await _collect_dispatch_data()
-                await event_bus.broadcast("dispatch", data)
+            has_dispatch = event_bus.subscriber_count("dispatch") > 0
+            has_nav = event_bus.subscriber_count("nav") > 0
+            if has_dispatch or has_nav:
+                dispatch_data, counts = await asyncio.gather(
+                    _collect_dispatch_data(),
+                    asyncio.to_thread(dao_beads.get_bead_counts),
+                )
+                nav_data = {
+                    "open_beads": counts.get("open_count", 0),
+                    "running_agents": len(dispatch_data["active"]),
+                    "approved_waiting": len(dispatch_data["waiting"]),
+                    "approved_blocked": len(dispatch_data["blocked"]),
+                }
+                if has_dispatch:
+                    await event_bus.broadcast("dispatch", dispatch_data)
+                if has_nav:
+                    await event_bus.broadcast("nav", nav_data)
         except Exception:
             pass
         await asyncio.sleep(_DISPATCH_WATCHER_INTERVAL)
-
-
-async def _nav_watcher():
-    """Background task: poll bead counts and broadcast to 'nav' topic."""
-    while True:
-        try:
-            if event_bus.subscriber_count("nav") > 0:
-                data = await _collect_nav_data()
-                await event_bus.broadcast("nav", data)
-        except Exception:
-            pass
-        await asyncio.sleep(_NAV_WATCHER_INTERVAL)
 
 
 # ── App ───────────────────────────────────────────────────────
@@ -1865,7 +1846,6 @@ routes = [
 
 async def _on_startup():
     asyncio.create_task(_dispatch_watcher())
-    asyncio.create_task(_nav_watcher())
 
 app = Starlette(routes=routes, on_startup=[_on_startup])
 
