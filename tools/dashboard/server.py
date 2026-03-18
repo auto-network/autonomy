@@ -444,6 +444,20 @@ async def api_timeline(request):
         entries = await asyncio.to_thread(_query)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+    # Enrich with bead title and priority from Dolt
+    bead_ids = [e["bead_id"] for e in entries if e.get("bead_id")]
+    if bead_ids:
+        try:
+            meta = await asyncio.to_thread(dao_beads.get_bead_title_priority, bead_ids)
+            for entry in entries:
+                bid = entry.get("bead_id")
+                if bid and bid in meta:
+                    entry["title"] = meta[bid].get("title") or entry["bead_id"]
+                    entry["priority"] = meta[bid].get("priority")
+        except Exception:
+            pass  # fall back to bead_id as title
+
     return JSONResponse(entries)
 
 
