@@ -1747,6 +1747,31 @@ async def _collect_dispatch_data() -> dict:
     return {"active": active, "waiting": waiting, "blocked": blocked}
 
 
+def _count_active_sessions(threshold: int = 600) -> int:
+    """Count active Claude Code sessions (JSONL files modified within threshold seconds)."""
+    import time as _time
+    now = _time.time()
+    return sum(1 for f in (Path.home() / ".claude" / "projects").rglob("*.jsonl")
+               if now - f.stat().st_mtime < threshold)
+
+
+def _count_terminals() -> int:
+    """Count active dashboard tmux sessions."""
+    return len(_list_dashboard_tmux())
+
+
+def _count_today_done() -> int:
+    """Count dispatch runs completed successfully today."""
+    conn = _timeline_conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM dispatch_runs WHERE status='DONE' AND completed_at >= date('now')"
+        ).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+
 async def _dispatch_watcher():
     """Background task: poll dispatch state and broadcast to 'dispatch' and 'nav' topics.
 
@@ -1760,15 +1785,23 @@ async def _dispatch_watcher():
             has_dispatch = event_bus.subscriber_count("dispatch") > 0
             has_nav = event_bus.subscriber_count("nav") > 0
             if has_dispatch or has_nav:
-                dispatch_data, counts = await asyncio.gather(
-                    _collect_dispatch_data(),
-                    asyncio.to_thread(dao_beads.get_bead_counts),
+                dispatch_data, counts, active_sessions, terminal_count, today_done = (
+                    await asyncio.gather(
+                        _collect_dispatch_data(),
+                        asyncio.to_thread(dao_beads.get_bead_counts),
+                        asyncio.to_thread(_count_active_sessions),
+                        asyncio.to_thread(_count_terminals),
+                        asyncio.to_thread(_count_today_done),
+                    )
                 )
                 nav_data = {
                     "open_beads": counts.get("open_count", 0),
                     "running_agents": len(dispatch_data["active"]),
                     "approved_waiting": len(dispatch_data["waiting"]),
                     "approved_blocked": len(dispatch_data["blocked"]),
+                    "active_sessions": active_sessions,
+                    "terminal_count": terminal_count,
+                    "today_done": today_done,
                 }
                 if has_dispatch:
                     await event_bus.broadcast("dispatch", dispatch_data)
