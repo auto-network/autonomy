@@ -118,7 +118,7 @@ def cmd_search(args):
     width = args.width
     for r in results:
         rtype = r["result_type"][0].upper()  # T or D
-        source = r.get("source_title", "?")
+        source = r.get("source_title") or "?"
         project = r.get("project", "")
         turn = r.get("turn_number", "?")
         sid = r.get("source_id", "?")[:12]

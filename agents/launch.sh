@@ -34,13 +34,24 @@ for arg in "$@"; do
     esac
 done
 
-# ── Validate ──────────────────────────────────────────
+# ── Validate credentials ─────────────────────────────
+# Prefer long-lived setup token (env var) over OAuth credentials file.
 CLAUDE_CREDS="${CLAUDE_CREDENTIALS_DIR:-$HOME/.claude}"
-if [[ ! -f "$CLAUDE_CREDS/.credentials.json" ]]; then
-    echo "ERROR: Claude credentials not found at $CLAUDE_CREDS/.credentials.json" >&2
-    echo "Run 'claude setup-token' to generate a long-lived token." >&2
+SETUP_TOKEN_FILE="$CLAUDE_CREDS/.setup-token"
+if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+    AUTH_MODE="token"
+elif [[ -f "$SETUP_TOKEN_FILE" ]]; then
+    CLAUDE_CODE_OAUTH_TOKEN="$(cat "$SETUP_TOKEN_FILE")"
+    AUTH_MODE="token"
+elif [[ -f "$CLAUDE_CREDS/.credentials.json" ]]; then
+    AUTH_MODE="creds_file"
+else
+    echo "ERROR: No Claude credentials found." >&2
+    echo "Either: set CLAUDE_CODE_OAUTH_TOKEN, save token to $SETUP_TOKEN_FILE," >&2
+    echo "        or run 'claude login' to create $CLAUDE_CREDS/.credentials.json" >&2
     exit 1
 fi
+echo "    Auth: $AUTH_MODE"
 
 if ! docker image inspect "$IMAGE" > /dev/null 2>&1; then
     echo "ERROR: Docker image '$IMAGE' not found. Run agents/build.sh first." >&2
@@ -113,20 +124,31 @@ fi
 # In foreground mode, use temp files with cleanup trap.
 if $DETACH; then
     PROMPT_FILE="$OUTPUT_DIR/.prompt.md"
-    CREDS_COPY="$OUTPUT_DIR/.credentials.json"
 else
     PROMPT_FILE=$(mktemp)
-    CREDS_COPY=$(mktemp)
     cleanup() {
-        rm -f "$PROMPT_FILE" "$CREDS_COPY"
+        rm -f "$PROMPT_FILE"
+        [[ "${AUTH_MODE}" == "creds_file" ]] && rm -f "$CREDS_COPY"
         # Don't remove worktree here — dispatcher decides after validation
     }
     trap cleanup EXIT
 fi
 
 echo "$PROMPT" > "$PROMPT_FILE"
-cp "$CLAUDE_CREDS/.credentials.json" "$CREDS_COPY"
-chmod 644 "$CREDS_COPY"
+
+# Prepare credential mount/env for docker — only copy file if using creds_file mode
+if [[ "$AUTH_MODE" == "creds_file" ]]; then
+    if $DETACH; then
+        CREDS_COPY="$OUTPUT_DIR/.credentials.json"
+    else
+        CREDS_COPY=$(mktemp)
+    fi
+    cp "$CLAUDE_CREDS/.credentials.json" "$CREDS_COPY"
+    chmod 644 "$CREDS_COPY"
+    AUTH_DOCKER_ARGS=(-v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro")
+else
+    AUTH_DOCKER_ARGS=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
+fi
 
 # ── Launch ────────────────────────────────────────────
 echo "==> Launching agent container: $CONTAINER_NAME"
@@ -150,7 +172,7 @@ if $DETACH; then
         -e BD_ACTOR="agent:$CONTAINER_NAME" \
         -e BD_READONLY="${BD_READONLY:-0}" \
         -e GRAPH_DB=/home/agent/graph.db \
-        -v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro" \
+        "${AUTH_DOCKER_ARGS[@]}" \
         -v "$GIT_DIR:$GIT_DIR" \
         -v "$REPO_ROOT/data/graph.db:/home/agent/graph.db" \
         -v "$REPO_ROOT/.beads:/data/.beads" \
@@ -188,7 +210,7 @@ docker run \
     -e BD_ACTOR="agent:$CONTAINER_NAME" \
     -e BD_READONLY="${BD_READONLY:-0}" \
     -e GRAPH_DB=/home/agent/graph.db \
-    -v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro" \
+    "${AUTH_DOCKER_ARGS[@]}" \
     -v "$GIT_DIR:$GIT_DIR" \
     -v "$REPO_ROOT/data/graph.db:/home/agent/graph.db" \
     -v "$REPO_ROOT/.beads:/data/.beads" \
