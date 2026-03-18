@@ -2698,17 +2698,16 @@ async function refreshTerminalPills() {
         const isClaude = cmd.includes('claude') || cmd.includes('autonomy-agent-claude');
         const isContainer = t.env === 'container' || cmd.includes('docker') || cmd.includes('autonomy-agent');
         const icon = isClaude ? '🤖' : '⬛';
-        const border = isContainer ? 'border border-purple-500' : 'border border-gray-600';
         const label = isClaude ? 'claude' : 'bash';
         const active = t.id === activeTerminalId;
-        const ring = active ? 'ring-2 ring-indigo-500' : '';
+        const border = active ? 'border-2 border-indigo-500' : 'border-2 border-gray-700';
         const bgClass = active ? 'bg-indigo-900' : 'bg-gray-700';
         const displayName = escapeHtml(t.name || t.id);
         const envBadge = isContainer
           ? '<span class="text-xs text-purple-400 font-medium">container</span>'
           : '<span class="text-xs text-gray-500">host</span>';
         return `
-          <div class="flex items-center ${border} rounded overflow-hidden ${ring}">
+          <div class="flex items-center ${border} rounded overflow-hidden">
             <div onclick="pillSingleClick('${t.id}')"
                  class="px-3 py-1 ${bgClass} text-sm hover:bg-gray-600 flex items-center gap-2 cursor-pointer">
               <span class="w-2 h-2 rounded-full bg-green-400"></span>
