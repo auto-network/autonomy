@@ -1645,15 +1645,15 @@ async def api_events(request):
                 done, _ = await asyncio.wait(
                     pending.keys(), return_when=asyncio.FIRST_COMPLETED
                 )
+                # Cancel incomplete futures to avoid leaks
+                for t in pending:
+                    if t not in done:
+                        t.cancel()
+                # Yield ALL completed events (not just the first)
                 for task in done:
                     topic = pending[task]
                     data = task.result()
-                    # Cancel remaining futures to avoid leaks
-                    for t in pending:
-                        if t not in done:
-                            t.cancel()
                     yield {"event": topic, "data": json.dumps(data)}
-                    break
         except asyncio.CancelledError:
             pass
         finally:
