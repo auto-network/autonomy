@@ -1855,41 +1855,42 @@ async function renderDispatch() {
         const stateColors = { queued: 'blue', launching: 'yellow', running: 'green', collecting: 'purple', merging: 'indigo' };
         const stateColor = stateColors[ds] || 'gray';
         const stateBadge = ds
-          ? `<span class="px-2 py-0.5 bg-${stateColor}-900 text-${stateColor}-300 text-xs rounded font-mono">${ds}</span>`
+          ? `<span class="px-2 py-0.5 bg-${stateColor}-900 text-${stateColor}-300 text-xs rounded font-mono">${escapeHtml(ds)}</span>`
           : '';
         const containerHtml = container
           ? `<div class="mt-2 ml-6 flex items-center gap-2">
                <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
-               <span class="font-mono text-xs text-gray-400">${container.name}</span>
-               <span class="text-xs text-gray-500">${container.status}</span>
-               <span class="text-xs text-gray-600">${container.image}</span>
+               <span class="font-mono text-xs text-gray-400">${escapeHtml(container.name)}</span>
+               <span class="text-xs text-gray-500">${escapeHtml(container.status)}</span>
+               <span class="text-xs text-gray-600">${escapeHtml(container.image)}</span>
              </div>`
           : ds === 'collecting' || ds === 'merging'
-          ? `<div class="mt-2 ml-6 text-xs text-gray-500">Agent finished — ${ds}...</div>`
+          ? `<div class="mt-2 ml-6 text-xs text-gray-500">Agent finished — ${escapeHtml(ds)}...</div>`
           : `<div class="mt-2 ml-6 text-xs text-gray-500">Container exited — waiting for results</div>`;
 
         // Live view button + snippet area
         const run = runsByBead[b.id];
         const runDir = run ? run.dir : '';
+        const safeRunDir = escapeHtml(runDir);
         const liveBtn = runDir
-          ? `<button onclick="event.preventDefault(); event.stopPropagation(); showLivePanel('${runDir}')"
+          ? `<button onclick="event.preventDefault(); event.stopPropagation(); showLivePanel('${safeRunDir}')"
                     class="px-2 py-0.5 bg-indigo-700 hover:bg-indigo-600 text-white text-xs rounded ml-2">View Live</button>`
           : '';
-        const snippetId = `snippet-${b.id}`;
+        const snippetId = `snippet-${escapeHtml(b.id)}`;
 
         html += `
-          <a href="/bead/${b.id}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500 hover:bg-gray-750">
+          <a href="/bead/${encodeURIComponent(b.id)}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500 hover:bg-gray-750">
             <div class="mb-1 sm:mb-0">
-              <div class="truncate text-sm sm:text-base">${b.title}</div>
+              <div class="truncate text-sm sm:text-base">${escapeHtml(b.title)}</div>
               <div class="flex gap-2 items-center flex-wrap mt-1">
-                <span class="font-mono text-xs text-gray-400">${b.id}</span>
+                <span class="font-mono text-xs text-gray-400">${escapeHtml(b.id)}</span>
                 ${priorityBadge(b.priority)}
                 ${stateBadge}
                 ${liveBtn}
               </div>
             </div>
             ${containerHtml}
-            <div id="${snippetId}" class="mt-2 ml-6 flex items-center gap-2" data-run="${runDir}">
+            <div id="${snippetId}" class="mt-2 ml-6 flex items-center gap-2" data-run="${safeRunDir}">
               <span class="snippet-text text-xs text-gray-500 italic truncate flex-1"></span>
               <span class="snippet-tokens text-xs text-gray-600 font-mono whitespace-nowrap"></span>
             </div>
@@ -1906,10 +1907,10 @@ async function renderDispatch() {
     if (waitingBeads.length > 0) {
       for (const b of waitingBeads) {
         html += `
-          <a href="/bead/${b.id}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-blue-500 hover:bg-gray-750">
-            <div class="truncate text-sm sm:text-base">${b.title}</div>
+          <a href="/bead/${encodeURIComponent(b.id)}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-blue-500 hover:bg-gray-750">
+            <div class="truncate text-sm sm:text-base">${escapeHtml(b.title)}</div>
             <div class="flex gap-2 items-center flex-wrap mt-1">
-              <span class="font-mono text-xs text-gray-400">${b.id}</span>
+              <span class="font-mono text-xs text-gray-400">${escapeHtml(b.id)}</span>
               ${priorityBadge(b.priority)}
             </div>
           </a>`;
@@ -1925,16 +1926,16 @@ async function renderDispatch() {
     if (blockedBeads.length > 0) {
       for (const b of blockedBeads) {
         const blockerLinks = (b.blockers || []).map(bl =>
-          `<a href="/bead/${bl.id}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 px-2 py-0.5 bg-yellow-900/50 text-yellow-300 text-xs rounded hover:bg-yellow-800/60">
-            <span class="font-mono">${bl.id}</span>
-            <span class="text-yellow-400/70">${bl.title}</span>
+          `<a href="/bead/${encodeURIComponent(bl.id)}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 px-2 py-0.5 bg-yellow-900/50 text-yellow-300 text-xs rounded hover:bg-yellow-800/60">
+            <span class="font-mono">${escapeHtml(bl.id)}</span>
+            <span class="text-yellow-400/70">${escapeHtml(bl.title)}</span>
           </a>`
         ).join('');
         html += `
-          <a href="/bead/${b.id}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-yellow-500 hover:bg-gray-750">
-            <div class="truncate text-sm sm:text-base">${b.title}</div>
+          <a href="/bead/${encodeURIComponent(b.id)}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-yellow-500 hover:bg-gray-750">
+            <div class="truncate text-sm sm:text-base">${escapeHtml(b.title)}</div>
             <div class="flex gap-2 items-center flex-wrap mt-1">
-              <span class="font-mono text-xs text-gray-400">${b.id}</span>
+              <span class="font-mono text-xs text-gray-400">${escapeHtml(b.id)}</span>
               ${priorityBadge(b.priority)}
             </div>
             <div class="mt-2 flex items-center gap-1 flex-wrap">
@@ -1956,6 +1957,391 @@ async function renderDispatch() {
 
   await refresh();
   dispatchInterval = setInterval(refresh, 5000); // auto-refresh every 5s
+}
+
+// ── Dispatch Page (Alpine.js) ────────────────────────────────
+
+async function renderDispatchAlpine() {
+  pageTitle.textContent = 'Dispatch (Alpine)';
+  if (dispatchInterval) clearInterval(dispatchInterval);
+
+  // Helper: extract dispatch state from bead labels
+  function _alpineGetDispatchState(bead) {
+    for (const l of (bead.labels || [])) {
+      if (l.startsWith('dispatch:')) return l.split(':')[1];
+    }
+    return null;
+  }
+
+  const stateColorMap = { queued: 'blue', launching: 'yellow', running: 'green', collecting: 'purple', merging: 'indigo' };
+  const activeDispatchStates = new Set(['queued', 'launching', 'running', 'collecting', 'merging']);
+
+  // Register Alpine data function BEFORE setting innerHTML so Alpine can find it
+  window.dispatchData = function() {
+    return {
+      active: [],
+      waiting: [],
+      blocked: [],
+      async refresh() {
+        const [status, allBeads, approvedData] = await Promise.all([
+          api('/api/dispatch/status'),
+          api('/api/beads/list'),
+          api('/api/dispatch/approved'),
+        ]);
+        const beadList = Array.isArray(allBeads) ? allBeads : [];
+        this.waiting = Array.isArray(approvedData?.waiting) ? approvedData.waiting : [];
+        this.blocked = Array.isArray(approvedData?.blocked) ? approvedData.blocked : [];
+
+        // Build container lookup
+        const containersByBead = {};
+        for (const c of (status.containers || [])) {
+          if (c.name.startsWith('agent-slack')) continue;
+          const parts = c.name.replace('agent-', '').split('-');
+          parts.pop();
+          containersByBead[parts.join('-')] = c;
+        }
+
+        // Build runs lookup
+        const runsByBead = {};
+        const activeStates = activeDispatchStates;
+        const filteredActive = beadList.filter(b => {
+          const ds = _alpineGetDispatchState(b);
+          return (ds && activeStates.has(ds)) || b.status === 'in_progress';
+        });
+
+        if (filteredActive.length > 0) {
+          const runsData = await api('/api/dispatch/runs');
+          const runsList = Array.isArray(runsData) ? runsData : [];
+          for (const r of runsList) {
+            if (!runsByBead[r.bead_id]) runsByBead[r.bead_id] = r;
+          }
+        }
+
+        // Annotate active beads with computed state
+        this.active = filteredActive.map(b => {
+          const ds = _alpineGetDispatchState(b);
+          const run = runsByBead[b.id];
+          return {
+            ...b,
+            _ds: ds,
+            _stateColor: stateColorMap[ds] || 'gray',
+            _container: containersByBead[b.id] || null,
+            _runDir: run ? run.dir : '',
+          };
+        });
+
+        // Store for snippet loading
+        this._runsByBead = runsByBead;
+      },
+      async loadSnippets() {
+        for (const b of this.active) {
+          if (!b._runDir) continue;
+          const el = document.getElementById(`alpine-snippet-${b.id}`);
+          if (!el) continue;
+          const snippet = await getLiveSnippet(b._runDir);
+          const textEl = el.querySelector('.snippet-text');
+          const tokensEl = el.querySelector('.snippet-tokens');
+          if (snippet) {
+            if (textEl && snippet.text) textEl.textContent = snippet.text;
+            if (tokensEl && snippet.file_size_bytes > 0) {
+              tokensEl.textContent = '~' + _formatTokenCount(snippet.file_size_bytes);
+            }
+          }
+        }
+      },
+    };
+  };
+
+  // Set up Alpine template (x-text is safe by default — no XSS)
+  content.innerHTML = `
+    <div x-data="dispatchData()" x-init="refresh(); dispatchInterval = setInterval(() => refresh(), 5000)"
+         x-effect="$nextTick(() => loadSnippets())">
+      <!-- Active Dispatches -->
+      <div class="mb-8">
+        <h2 class="text-lg font-semibold mb-3 text-green-400">Active Dispatches</h2>
+        <template x-if="active.length === 0">
+          <div class="text-gray-500 text-sm">No active dispatches</div>
+        </template>
+        <template x-for="b in active" :key="b.id">
+          <a :href="'/bead/' + encodeURIComponent(b.id)" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500 hover:bg-gray-750">
+            <div class="mb-1 sm:mb-0">
+              <div class="truncate text-sm sm:text-base" x-text="b.title"></div>
+              <div class="flex gap-2 items-center flex-wrap mt-1">
+                <span class="font-mono text-xs text-gray-400" x-text="b.id"></span>
+                <span class="badge" :class="'badge-p' + b.priority" x-text="'P' + b.priority"></span>
+                <template x-if="b._ds">
+                  <span class="px-2 py-0.5 text-xs rounded font-mono"
+                        :class="'bg-' + (b._stateColor) + '-900 text-' + (b._stateColor) + '-300'"
+                        x-text="b._ds"></span>
+                </template>
+                <template x-if="b._runDir">
+                  <button @click.prevent.stop="showLivePanel(b._runDir)"
+                          class="px-2 py-0.5 bg-indigo-700 hover:bg-indigo-600 text-white text-xs rounded ml-2">View Live</button>
+                </template>
+              </div>
+            </div>
+            <!-- Container info -->
+            <template x-if="b._container">
+              <div class="mt-2 ml-6 flex items-center gap-2">
+                <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+                <span class="font-mono text-xs text-gray-400" x-text="b._container.name"></span>
+                <span class="text-xs text-gray-500" x-text="b._container.status"></span>
+                <span class="text-xs text-gray-600" x-text="b._container.image"></span>
+              </div>
+            </template>
+            <template x-if="!b._container && (b._ds === 'collecting' || b._ds === 'merging')">
+              <div class="mt-2 ml-6 text-xs text-gray-500">Agent finished — <span x-text="b._ds"></span>...</div>
+            </template>
+            <template x-if="!b._container && b._ds !== 'collecting' && b._ds !== 'merging'">
+              <div class="mt-2 ml-6 text-xs text-gray-500">Container exited — waiting for results</div>
+            </template>
+            <!-- Snippet area -->
+            <div class="mt-2 ml-6 flex items-center gap-2" :id="'alpine-snippet-' + b.id" :data-run="b._runDir || ''">
+              <span class="snippet-text text-xs text-gray-500 italic truncate flex-1"></span>
+              <span class="snippet-tokens text-xs text-gray-600 font-mono whitespace-nowrap"></span>
+            </div>
+          </a>
+        </template>
+      </div>
+
+      <!-- Approved — Waiting for Dispatch -->
+      <div class="mb-8">
+        <h2 class="text-lg font-semibold mb-3 text-blue-400">Approved — Waiting for Dispatch</h2>
+        <template x-if="waiting.length === 0">
+          <div class="text-gray-500 text-sm">No unblocked beads waiting</div>
+        </template>
+        <template x-for="b in waiting" :key="b.id">
+          <a :href="'/bead/' + encodeURIComponent(b.id)" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-blue-500 hover:bg-gray-750">
+            <div class="truncate text-sm sm:text-base" x-text="b.title"></div>
+            <div class="flex gap-2 items-center flex-wrap mt-1">
+              <span class="font-mono text-xs text-gray-400" x-text="b.id"></span>
+              <span class="badge" :class="'badge-p' + b.priority" x-text="'P' + b.priority"></span>
+            </div>
+          </a>
+        </template>
+      </div>
+
+      <!-- Approved — Blocked -->
+      <div class="mb-8">
+        <h2 class="text-lg font-semibold mb-3 text-yellow-400">Approved — Blocked</h2>
+        <template x-if="blocked.length === 0">
+          <div class="text-gray-500 text-sm">No blocked beads</div>
+        </template>
+        <template x-for="b in blocked" :key="b.id">
+          <a :href="'/bead/' + encodeURIComponent(b.id)" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-yellow-500 hover:bg-gray-750">
+            <div class="truncate text-sm sm:text-base" x-text="b.title"></div>
+            <div class="flex gap-2 items-center flex-wrap mt-1">
+              <span class="font-mono text-xs text-gray-400" x-text="b.id"></span>
+              <span class="badge" :class="'badge-p' + b.priority" x-text="'P' + b.priority"></span>
+            </div>
+            <div class="mt-2 flex items-center gap-1 flex-wrap">
+              <span class="text-xs text-yellow-500">Blocked by:</span>
+              <template x-for="bl in (b.blockers || [])" :key="bl.id">
+                <a :href="'/bead/' + encodeURIComponent(bl.id)" @click.stop
+                   class="inline-flex items-center gap-1 px-2 py-0.5 bg-yellow-900/50 text-yellow-300 text-xs rounded hover:bg-yellow-800/60">
+                  <span class="font-mono" x-text="bl.id"></span>
+                  <span class="text-yellow-400/70" x-text="bl.title"></span>
+                </a>
+              </template>
+            </div>
+          </a>
+        </template>
+      </div>
+    </div>`;
+
+  // Explicitly initialize Alpine on the new DOM content
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
+}
+
+// ── Dispatch Page (lit-html) ─────────────────────────────────
+
+// lit-html loaded as ES module from CDN
+let _litHtml = null;
+let _litRender = null;
+
+async function _ensureLitHtml() {
+  if (_litHtml && _litRender) return;
+  const mod = await import('https://cdn.jsdelivr.net/npm/lit-html@3/+esm');
+  _litHtml = mod.html;
+  _litRender = mod.render;
+}
+
+async function renderDispatchLit() {
+  pageTitle.textContent = 'Dispatch (lit-html)';
+  if (dispatchInterval) clearInterval(dispatchInterval);
+
+  await _ensureLitHtml();
+  const html = _litHtml;
+  const render = _litRender;
+
+  const stateColorMap = { queued: 'blue', launching: 'yellow', running: 'green', collecting: 'purple', merging: 'indigo' };
+  const activeDispatchStates = new Set(['queued', 'launching', 'running', 'collecting', 'merging']);
+
+  function getDispatchState(bead) {
+    for (const l of (bead.labels || [])) {
+      if (l.startsWith('dispatch:')) return l.split(':')[1];
+    }
+    return null;
+  }
+
+  function renderPriorityBadge(p) {
+    return html`<span class="badge badge-p${p}">P${p}</span>`;
+  }
+
+  function renderActiveCard(b, container, ds, runDir) {
+    const stateColor = stateColorMap[ds] || 'gray';
+    return html`
+      <a href="/bead/${encodeURIComponent(b.id)}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-green-500 hover:bg-gray-750">
+        <div class="mb-1 sm:mb-0">
+          <div class="truncate text-sm sm:text-base">${b.title}</div>
+          <div class="flex gap-2 items-center flex-wrap mt-1">
+            <span class="font-mono text-xs text-gray-400">${b.id}</span>
+            ${renderPriorityBadge(b.priority)}
+            ${ds ? html`<span class=${'px-2 py-0.5 bg-' + stateColor + '-900 text-' + stateColor + '-300 text-xs rounded font-mono'}>${ds}</span>` : ''}
+            ${runDir ? html`<button @click=${(e) => { e.preventDefault(); e.stopPropagation(); showLivePanel(runDir); }}
+                      class="px-2 py-0.5 bg-indigo-700 hover:bg-indigo-600 text-white text-xs rounded ml-2">View Live</button>` : ''}
+          </div>
+        </div>
+        ${container
+          ? html`<div class="mt-2 ml-6 flex items-center gap-2">
+                   <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+                   <span class="font-mono text-xs text-gray-400">${container.name}</span>
+                   <span class="text-xs text-gray-500">${container.status}</span>
+                   <span class="text-xs text-gray-600">${container.image}</span>
+                 </div>`
+          : (ds === 'collecting' || ds === 'merging')
+            ? html`<div class="mt-2 ml-6 text-xs text-gray-500">Agent finished — ${ds}...</div>`
+            : html`<div class="mt-2 ml-6 text-xs text-gray-500">Container exited — waiting for results</div>`}
+        <div id=${'lit-snippet-' + b.id} class="mt-2 ml-6 flex items-center gap-2" data-run=${runDir || ''}>
+          <span class="snippet-text text-xs text-gray-500 italic truncate flex-1"></span>
+          <span class="snippet-tokens text-xs text-gray-600 font-mono whitespace-nowrap"></span>
+        </div>
+      </a>`;
+  }
+
+  function renderWaitingCard(b) {
+    return html`
+      <a href="/bead/${encodeURIComponent(b.id)}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-blue-500 hover:bg-gray-750">
+        <div class="truncate text-sm sm:text-base">${b.title}</div>
+        <div class="flex gap-2 items-center flex-wrap mt-1">
+          <span class="font-mono text-xs text-gray-400">${b.id}</span>
+          ${renderPriorityBadge(b.priority)}
+        </div>
+      </a>`;
+  }
+
+  function renderBlockedCard(b) {
+    return html`
+      <a href="/bead/${encodeURIComponent(b.id)}" class="block p-4 sm:p-3 bg-gray-800 rounded-lg mb-2 border-l-4 border-yellow-500 hover:bg-gray-750">
+        <div class="truncate text-sm sm:text-base">${b.title}</div>
+        <div class="flex gap-2 items-center flex-wrap mt-1">
+          <span class="font-mono text-xs text-gray-400">${b.id}</span>
+          ${renderPriorityBadge(b.priority)}
+        </div>
+        <div class="mt-2 flex items-center gap-1 flex-wrap">
+          <span class="text-xs text-yellow-500">Blocked by:</span>
+          ${(b.blockers || []).map(bl => html`
+            <a href="/bead/${encodeURIComponent(bl.id)}" @click=${(e) => e.stopPropagation()}
+               class="inline-flex items-center gap-1 px-2 py-0.5 bg-yellow-900/50 text-yellow-300 text-xs rounded hover:bg-yellow-800/60">
+              <span class="font-mono">${bl.id}</span>
+              <span class="text-yellow-400/70">${bl.title}</span>
+            </a>`)}
+        </div>
+      </a>`;
+  }
+
+  function renderPage(active, waiting, blocked, containersByBead, runsByBead) {
+    return html`
+      <!-- Active Dispatches -->
+      <div class="mb-8">
+        <h2 class="text-lg font-semibold mb-3 text-green-400">Active Dispatches</h2>
+        ${active.length > 0
+          ? active.map(b => {
+              const ds = getDispatchState(b);
+              const container = containersByBead[b.id];
+              const run = runsByBead[b.id];
+              return renderActiveCard(b, container, ds, run ? run.dir : '');
+            })
+          : html`<div class="text-gray-500 text-sm">No active dispatches</div>`}
+      </div>
+
+      <!-- Approved — Waiting for Dispatch -->
+      <div class="mb-8">
+        <h2 class="text-lg font-semibold mb-3 text-blue-400">Approved — Waiting for Dispatch</h2>
+        ${waiting.length > 0
+          ? waiting.map(b => renderWaitingCard(b))
+          : html`<div class="text-gray-500 text-sm">No unblocked beads waiting</div>`}
+      </div>
+
+      <!-- Approved — Blocked -->
+      <div class="mb-8">
+        <h2 class="text-lg font-semibold mb-3 text-yellow-400">Approved — Blocked</h2>
+        ${blocked.length > 0
+          ? blocked.map(b => renderBlockedCard(b))
+          : html`<div class="text-gray-500 text-sm">No blocked beads</div>`}
+      </div>`;
+  }
+
+  async function refresh() {
+    const [status, allBeads, approvedData] = await Promise.all([
+      api('/api/dispatch/status'),
+      api('/api/beads/list'),
+      api('/api/dispatch/approved'),
+    ]);
+    const beadList = Array.isArray(allBeads) ? allBeads : [];
+    const waitingBeads = Array.isArray(approvedData?.waiting) ? approvedData.waiting : [];
+    const blockedBeads = Array.isArray(approvedData?.blocked) ? approvedData.blocked : [];
+
+    // Build container lookup
+    const containersByBead = {};
+    for (const c of (status.containers || [])) {
+      if (c.name.startsWith('agent-slack')) continue;
+      const parts = c.name.replace('agent-', '').split('-');
+      parts.pop();
+      containersByBead[parts.join('-')] = c;
+    }
+
+    // Active beads
+    const active = beadList.filter(b => {
+      const ds = getDispatchState(b);
+      return (ds && activeDispatchStates.has(ds)) || b.status === 'in_progress';
+    });
+
+    // Runs lookup
+    const runsByBead = {};
+    if (active.length > 0) {
+      const runsData = await api('/api/dispatch/runs');
+      const runsList = Array.isArray(runsData) ? runsData : [];
+      for (const r of runsList) {
+        if (!runsByBead[r.bead_id]) runsByBead[r.bead_id] = r;
+      }
+    }
+
+    // Render with lit-html (all interpolations auto-escaped)
+    render(renderPage(active, waitingBeads, blockedBeads, containersByBead, runsByBead), content);
+
+    // Load snippets after DOM render
+    for (const b of active) {
+      const run = runsByBead[b.id];
+      if (!run) continue;
+      const el = document.getElementById(`lit-snippet-${b.id}`);
+      if (!el) continue;
+      const snippet = await getLiveSnippet(run.dir);
+      const textEl = el.querySelector('.snippet-text');
+      const tokensEl = el.querySelector('.snippet-tokens');
+      if (snippet) {
+        if (textEl && snippet.text) textEl.textContent = snippet.text;
+        if (tokensEl && snippet.file_size_bytes > 0) {
+          tokensEl.textContent = '~' + _formatTokenCount(snippet.file_size_bytes);
+        }
+      }
+    }
+  }
+
+  await refresh();
+  dispatchInterval = setInterval(refresh, 5000);
 }
 
 // ── Timeline Page ────────────────────────────────────────────
@@ -3638,6 +4024,10 @@ function route() {
     renderBeads();
   } else if (path.startsWith('/dispatch/trace/')) {
     renderTrace(path.split('/dispatch/trace/')[1]);
+  } else if (path === '/dispatch/alpine') {
+    renderDispatchAlpine();
+  } else if (path === '/dispatch/lit') {
+    renderDispatchLit();
   } else if (path === '/dispatch') {
     renderDispatch();
   } else if (path.startsWith('/bead/')) {
