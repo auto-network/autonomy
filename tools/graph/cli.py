@@ -914,7 +914,19 @@ def cmd_ui_exp(args):
     print(f"  Series: {series_id}")
     print(f"  Variants: {', '.join(variants.keys())}")
     print(f"  URL: {api_base}/experiments/{exp_id}")
+    print(f"  Screenshot: {dir_path}/screenshot.png (auto-updated from browser)")
     print(f"\n  Watching {dir_path}/ for changes... (Ctrl+C to stop)\n")
+
+    # Wait for initial screenshot from browser
+    screenshot_src = Path(f"data/experiments/{exp_id}/screenshot.png")
+    for _ in range(10):
+        import time as _time_init
+        _time_init.sleep(0.5)
+        if screenshot_src.exists():
+            import shutil
+            shutil.copy2(str(screenshot_src), str(dir_path / "screenshot.png"))
+            print(f"  📸 initial screenshot.png captured")
+            break
 
     prev_states = _file_states()
 
@@ -963,6 +975,16 @@ def cmd_ui_exp(args):
                 result = _post("/api/experiments", exp_data)
                 new_id = result["id"]
                 print(f"  → {new_id} ({len(variants)} variants)")
+                # Wait for browser to auto-capture screenshot, then copy it into the watched dir
+                screenshot_src = Path(f"data/experiments/{new_id}/screenshot.png")
+                for _ in range(10):
+                    _time.sleep(0.5)
+                    if screenshot_src.exists():
+                        import shutil
+                        dest = dir_path / "screenshot.png"
+                        shutil.copy2(str(screenshot_src), str(dest))
+                        print(f"  📸 screenshot.png updated")
+                        break
             except Exception as e:
                 print(f"  ERROR: {e}", file=sys.stderr)
 
