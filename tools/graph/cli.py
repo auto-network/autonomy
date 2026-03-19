@@ -841,6 +841,137 @@ def cmd_watch(args):
     )
 
 
+def cmd_ui_exp(args):
+    """Create a UI experiment from HTML files and watch for changes."""
+    import time as _time
+    import urllib.request
+    import ssl
+
+    sys.stdout.reconfigure(line_buffering=True)
+
+    dir_path = Path(args.dir)
+    if not dir_path.is_dir():
+        print(f"Error: {dir_path} is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    api_base = args.api.rstrip("/")
+    # Skip TLS verification for self-signed certs
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    def _post(endpoint, data):
+        body = json.dumps(data).encode()
+        req = urllib.request.Request(
+            f"{api_base}{endpoint}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, context=ctx)
+        return json.loads(resp.read())
+
+    def _scan_variants():
+        variants = {}
+        for f in sorted(dir_path.glob("*.html")):
+            variants[f.stem] = f.read_text()
+        return variants
+
+    def _file_states():
+        states = {}
+        for f in sorted(dir_path.glob("*.html")):
+            states[f.stem] = f.stat().st_mtime
+        return states
+
+    # Load optional fixture
+    fixture = None
+    if args.fixture:
+        fixture = Path(args.fixture).read_text()
+
+    # Initial scan
+    variants = _scan_variants()
+    if not variants:
+        print(f"No .html files found in {dir_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Create experiment
+    exp_data = {
+        "title": args.title,
+        "variants": [{"id": vid, "html": html} for vid, html in variants.items()],
+    }
+    if args.series:
+        exp_data["series_id"] = args.series
+    if fixture:
+        exp_data["fixture"] = fixture
+
+    result = _post("/api/experiments", exp_data)
+    exp_id = result["id"]
+
+    # If no series was specified, use this experiment's ID as the series
+    series_id = args.series or exp_id
+
+    print(f"  Created experiment: {exp_id}")
+    print(f"  Series: {series_id}")
+    print(f"  Variants: {', '.join(variants.keys())}")
+    print(f"  URL: {api_base}/experiments/{exp_id}")
+    print(f"\n  Watching {dir_path}/ for changes... (Ctrl+C to stop)\n")
+
+    prev_states = _file_states()
+
+    try:
+        while True:
+            _time.sleep(1)
+            curr_states = _file_states()
+
+            if curr_states == prev_states:
+                continue
+
+            # Detect changes
+            added = set(curr_states) - set(prev_states)
+            removed = set(prev_states) - set(curr_states)
+            changed = {k for k in set(curr_states) & set(prev_states)
+                       if curr_states[k] != prev_states[k]}
+
+            if not added and not removed and not changed:
+                continue
+
+            changes = []
+            if added:
+                changes.append(f"+{', '.join(added)}")
+            if removed:
+                changes.append(f"-{', '.join(removed)}")
+            if changed:
+                changes.append(f"~{', '.join(changed)}")
+            print(f"  [{_time.strftime('%H:%M:%S')}] {' '.join(changes)}")
+
+            # Post new experiment in the series with current file state
+            variants = _scan_variants()
+            if not variants:
+                print("  WARNING: no variants left, skipping")
+                prev_states = curr_states
+                continue
+
+            exp_data = {
+                "title": args.title,
+                "series_id": series_id,
+                "variants": [{"id": vid, "html": html} for vid, html in variants.items()],
+            }
+            if fixture:
+                exp_data["fixture"] = fixture
+
+            try:
+                result = _post("/api/experiments", exp_data)
+                new_id = result["id"]
+                print(f"  → {new_id} ({len(variants)} variants)")
+            except Exception as e:
+                print(f"  ERROR: {e}", file=sys.stderr)
+
+            prev_states = curr_states
+
+    except KeyboardInterrupt:
+        print(f"\n  Stopped watching. Series: {series_id}")
+
+
 def cmd_related(args):
     """Find content related to a search term."""
     db = GraphDB(args.db)
@@ -1225,6 +1356,14 @@ def main():
     p.add_argument("bead_id", help="Bead ID (e.g. auto-mys.2.1)")
     p.add_argument("--timeout", type=int, default=600, help="Max wait seconds (default: 600)")
     p.set_defaults(func=cmd_wait)
+
+    p = sub.add_parser("ui-exp", help="Create and live-watch a UI experiment from HTML files")
+    p.add_argument("title", help="Experiment title")
+    p.add_argument("dir", help="Directory of .html variant files")
+    p.add_argument("--series", help="Existing series ID to append to")
+    p.add_argument("--fixture", help="Path to fixture JSON file")
+    p.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
+    p.set_defaults(func=cmd_ui_exp)
 
     args = parser.parse_args()
 
