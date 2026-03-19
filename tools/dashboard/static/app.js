@@ -1733,261 +1733,39 @@ async function renderSessionsFragment() {
   }
 }
 
-async function renderSearch(query, project) {
-  pageTitle.textContent = query ? `Search: ${query}${project ? ' [' + project + ']' : ''}` : 'Search';
-  if (!query) {
-    content.innerHTML = '<div class="text-gray-400">Enter a search query above</div>';
-    return;
+async function renderSearchFragment() {
+  const params = new URLSearchParams(window.location.search);
+  const q = params.get('q');
+  pageTitle.textContent = q ? `Search: ${q}${params.get('project') ? ' [' + params.get('project') + ']' : ''}` : 'Search';
+  let html;
+  if (_fragmentCache.has('/pages/search')) {
+    html = _fragmentCache.get('/pages/search');
+  } else {
+    const res = await fetch('/pages/search');
+    html = await res.text();
+    _fragmentCache.set('/pages/search', html);
   }
-  let url = `/api/search?q=${encodeURIComponent(query)}&or=1&limit=20`;
-  if (project) url += `&project=${encodeURIComponent(project)}`;
-  const data = await api(url);
-
-  if (data.error) {
-    content.innerHTML = `<div class="text-red-400">${data.error}</div>`;
-    return;
-  }
-
-  const results = Array.isArray(data) ? data : [];
-  if (results.length === 0) {
-    content.innerHTML = '<div class="text-gray-400">No results found.</div>';
-    return;
-  }
-
-  let html = `<div class="text-sm text-gray-500 mb-4">${results.length} results</div><div class="space-y-3">`;
-  for (const r of results) {
-    const isUser = r.result_type === 'thought';
-    const typeBadge = isUser
-      ? '<span class="px-1.5 py-0.5 bg-blue-900 rounded text-xs">YOU</span>'
-      : '<span class="px-1.5 py-0.5 bg-gray-700 rounded text-xs">AI</span>';
-    const proj = r.project ? `<span class="text-xs text-indigo-400">[${r.project}]</span>` : '';
-    const srcId = (r.source_id || '').slice(0, 12);
-    const turn = r.turn_number || '?';
-
-    // First line of content as the headline
-    const lines = (r.content || '').split('\n').filter(l => l.trim());
-    const headline = (lines[0] || '').slice(0, 120);
-    // Rest as dimmer preview
-    const rest = lines.slice(1).join('\n').slice(0, 200);
-    const preview = rest ? rest.replace(/</g, '&lt;').replace(/\n/g, '<br>') + (r.content.length > 300 ? '…' : '') : '';
-
-    // Source title — shortened, as secondary context
-    const srcTitle = (r.source_title || '').slice(0, 40);
-    const srcLabel = srcTitle.startsWith('Read all the markdown') ? 'main session' : srcTitle;
-
-    html += `
-      <div class="p-4 bg-gray-800 rounded-lg border border-gray-700 hover:border-indigo-500 cursor-pointer transition-colors"
-           onclick="navigateTo('/source/${r.source_id}?turn=${r.turn_number}')">
-        <div class="text-sm font-medium mb-1">${headline.replace(/</g, '&lt;')}</div>
-        ${preview ? `<div class="text-xs text-gray-500 leading-relaxed mb-2">${preview}</div>` : ''}
-        <div class="flex items-center gap-2">
-          ${typeBadge}
-          <span class="text-xs text-gray-600">${srcLabel}</span>
-          <span class="text-xs text-gray-600">t${turn}</span>
-          ${proj}
-          <span class="text-xs text-gray-700 font-mono ml-auto">src:${srcId}</span>
-        </div>
-      </div>`;
-  }
-  html += '</div>';
   content.innerHTML = html;
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
 }
 
-async function renderContext(id, turn, window = 5) {
-  // Load just the context around a specific turn — not the whole source
-  const srcData = await api(`/api/source/${id}`);
-  const src = srcData.source || {};
-  const allEntries = srcData.entries || [];
-  const edges = srcData.edges || [];
-
-  // Filter to window
-  const entries = allEntries.filter(e => {
-    const t = e.turn_number;
-    return t && Math.abs(t - turn) <= window;
-  });
-
-  const totalTurns = allEntries.length;
-  pageTitle.textContent = `${src.title?.slice(0, 40) || id.slice(0, 12)} — turn ${turn}`;
-
-  const typeBadges = {
-    note: 'bg-yellow-700', session: 'bg-green-700', conversation: 'bg-blue-700',
-    status: 'bg-purple-700', docs: 'bg-teal-700', 'agent-run': 'bg-orange-700',
-  };
-  const badgeCls = typeBadges[src.type] || 'bg-gray-700';
-  const proj = src.project ? `<span class="text-xs text-indigo-400">[${src.project}]</span>` : '';
-  const date = (src.created_at || '').slice(0, 10);
-
-  let html = `
-    <div class="mb-4">
-      <div class="flex items-center gap-3 mb-2">
-        <span class="px-2 py-0.5 ${badgeCls} rounded text-xs font-semibold">${src.type || '?'}</span>
-        ${proj}
-        <span class="text-xs text-gray-500">${date}</span>
-        <span class="text-xs text-gray-600 font-mono ml-auto">${src.id?.slice(0, 12) || ''}</span>
-      </div>
-      <h1 class="text-lg font-bold">${src.title || 'Untitled'}</h1>
-      <div class="text-xs text-gray-500 mt-1">
-        Showing turns ${turn - window}–${turn + window} of ${totalTurns}
-        <a href="/source/${id}" class="text-indigo-400 ml-2 hover:underline">View full source →</a>
-      </div>
-    </div>`;
-
-  // Render entries in chat style
-  html += `<div class="space-y-3">`;
-  for (const e of entries) {
-    const isUser = e.entry_type === 'thought';
-    const align = isUser ? 'ml-16' : 'mr-16';
-    const border = isUser ? 'border-r-4 border-blue-500' : 'border-l-4 border-gray-600';
-    const roleBadge = isUser
-      ? '<span class="text-xs text-blue-400 font-semibold">YOU</span>'
-      : '<span class="text-xs text-gray-400 font-semibold">ASSISTANT</span>';
-    const t = e.turn_number || '?';
-    const highlight = (t == turn) ? 'ring-2 ring-indigo-500 bg-gray-750' : '';
-
-    html += `
-      <div class="p-3 bg-gray-800 rounded-lg ${border} ${align} ${highlight}" id="turn-${t}">
-        <div class="flex items-center gap-2 mb-1">
-          ${roleBadge}
-          <span class="text-xs text-gray-600">t${t}</span>
-        </div>
-        <div class="markdown-body entry-content text-sm" data-turn="${t}"></div>
-      </div>`;
-  }
-  html += `</div>`;
-
-  // Navigation: load more context
-  html += `
-    <div class="flex gap-4 mt-4 justify-center">
-      <button onclick="renderContext('${id}', ${turn}, ${window + 5})"
-              class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Show more context</button>
-      <a href="/source/${id}" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600 inline-block">Full source</a>
-    </div>`;
-
-  content.innerHTML = html;
-
-  // Render markdown
-  const contentEls = content.querySelectorAll('.entry-content');
-  entries.forEach((e, i) => {
-    if (contentEls[i]) contentEls[i].appendChild(renderMd(e.content));
-  });
-}
-
-async function renderSource(id, highlightTurn) {
+async function renderSourceFragment() {
+  const path = window.location.pathname;
+  const id = path.split('/source/')[1] || '';
   pageTitle.textContent = `Source: ${id.slice(0, 12)}`;
-  const data = await api(`/api/source/${id}`);
-  if (data.error) {
-    content.innerHTML = `<div class="text-red-400">${data.error}</div>`;
-    return;
-  }
-
-  const src = data.source || {};
-  const entries = data.entries || [];
-  const edges = data.edges || [];
-  const srcType = src.type || 'unknown';
-
-  // ── Header ──────────────────────────────────────
-  const typeBadges = {
-    note: 'bg-yellow-700', session: 'bg-green-700', conversation: 'bg-blue-700',
-    status: 'bg-purple-700', docs: 'bg-teal-700', 'agent-run': 'bg-orange-700',
-    musing: 'bg-pink-700', 'git-log': 'bg-gray-600', playbook: 'bg-indigo-700',
-  };
-  const badgeCls = typeBadges[srcType] || 'bg-gray-700';
-  const proj = src.project ? `<span class="text-xs text-indigo-400">[${src.project}]</span>` : '';
-  const date = (src.created_at || '').slice(0, 10);
-
-  let html = `
-    <div class="mb-6">
-      <div class="flex items-center gap-3 mb-2">
-        <span class="px-2 py-0.5 ${badgeCls} rounded text-xs font-semibold">${srcType}</span>
-        ${proj}
-        <span class="text-xs text-gray-500">${date}</span>
-        <span class="text-xs text-gray-600 font-mono ml-auto">${src.id?.slice(0, 12) || ''}</span>
-      </div>
-      <h1 class="text-xl font-bold">${src.title || 'Untitled'}</h1>
-    </div>`;
-
-  // ── Type-aware content rendering ────────────────
-  if (srcType === 'note') {
-    // Notes: single card, no turn numbers
-    const text = entries[0]?.content || '';
-    html += `<div class="p-4 bg-gray-800 rounded-lg border-l-4 border-yellow-600">`;
-    html += `<div class="markdown-body" id="note-content"></div>`;
-    html += `</div>`;
-
-  } else if (srcType === 'session' || srcType === 'conversation' || srcType === 'agent-run') {
-    // Chat-style: user left, assistant right
-    html += `<div class="space-y-4" id="chat-entries">`;
-    for (const e of entries) {
-      const isUser = e.entry_type === 'thought';
-      const align = isUser ? 'mr-16' : 'ml-16';
-      const border = isUser ? 'border-l-4 border-blue-500' : 'border-l-4 border-gray-600';
-      const roleBadge = isUser
-        ? '<span class="text-xs text-blue-400 font-semibold">USER</span>'
-        : '<span class="text-xs text-gray-400 font-semibold">ASSISTANT</span>';
-      const turnNum = e.turn_number || '?';
-      const highlight = (highlightTurn && turnNum == highlightTurn) ? 'ring-2 ring-indigo-500' : '';
-
-      html += `
-        <div class="p-4 bg-gray-800 rounded-lg ${border} ${align} ${highlight}" id="turn-${turnNum}">
-          <div class="flex items-center gap-2 mb-2">
-            ${roleBadge}
-            <span class="text-xs text-gray-600">t${turnNum}</span>
-          </div>
-          <div class="markdown-body entry-content text-sm" data-turn="${turnNum}"></div>
-        </div>`;
-    }
-    html += `</div>`;
-
+  let html;
+  if (_fragmentCache.has('/pages/source')) {
+    html = _fragmentCache.get('/pages/source');
   } else {
-    // Default: simple sequential rendering for docs, status, musings, etc.
-    html += `<div class="space-y-4" id="doc-entries">`;
-    for (const e of entries) {
-      html += `<div class="markdown-body entry-content text-sm" data-turn="${e.turn_number || ''}"></div>`;
-    }
-    html += `</div>`;
+    const res = await fetch('/pages/source');
+    html = await res.text();
+    _fragmentCache.set('/pages/source', html);
   }
-
-  // ── Edges sidebar (if any) ──────────────────────
-  if (edges.length > 0) {
-    html += `
-      <div class="mt-8 p-4 bg-gray-800 rounded-lg border border-gray-700">
-        <h3 class="text-sm font-semibold text-gray-400 mb-3">Connections (${edges.length})</h3>
-        <div class="space-y-1">`;
-    for (const e of edges.slice(0, 20)) {
-      const rel = e.relation || '?';
-      const other = e.source_id === src.id ? e.target_id : e.source_id;
-      const otherType = e.source_id === src.id ? e.target_type : e.source_type;
-      const meta = typeof e.metadata === 'string' ? JSON.parse(e.metadata || '{}') : (e.metadata || {});
-      const turns = meta.turns ? ` t${meta.turns.from}${meta.turns.to !== meta.turns.from ? '-' + meta.turns.to : ''}` : '';
-      const note = meta.note ? ` — ${meta.note.slice(0, 50)}` : '';
-      html += `
-          <div class="text-xs text-gray-400 hover:text-gray-200 cursor-pointer"
-               onclick="navigateTo('/${otherType === 'source' ? 'source' : 'bead'}/${other}')">
-            <span class="text-indigo-400">${rel}</span> → ${other.slice(0, 12)} [${otherType}]${turns}${note}
-          </div>`;
-    }
-    html += `</div></div>`;
-  }
-
   content.innerHTML = html;
-
-  // ── Render markdown content ─────────────────────
-  if (srcType === 'note') {
-    const el = document.getElementById('note-content');
-    if (el && entries[0]) el.appendChild(renderMd(entries[0].content));
-  } else {
-    const contentEls = content.querySelectorAll('.entry-content');
-    entries.forEach((e, i) => {
-      if (contentEls[i]) {
-        contentEls[i].appendChild(renderMd(e.content));
-      }
-    });
-  }
-
-  // Scroll to highlighted turn
-  if (highlightTurn) {
-    const el = document.getElementById(`turn-${highlightTurn}`);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
   }
 }
 
@@ -3459,16 +3237,9 @@ function route() {
   } else if (path === '/sessions') {
     renderSessionsFragment();
   } else if (path === '/search') {
-    const params = new URLSearchParams(window.location.search);
-    renderSearch(params.get('q'), params.get('project'));
+    renderSearchFragment();
   } else if (path.startsWith('/source/')) {
-    const params = new URLSearchParams(window.location.search);
-    const turn = params.get('turn');
-    if (turn) {
-      renderContext(path.split('/source/')[1], parseInt(turn), parseInt(params.get('window') || '5'));
-    } else {
-      renderSource(path.split('/source/')[1]);
-    }
+    renderSourceFragment();
   } else if (isTerminalPage) {
     const sessionId = path.startsWith('/terminal/') ? path.split('/terminal/')[1] : null;
     renderTerminal(null, sessionId);
