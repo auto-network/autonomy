@@ -521,7 +521,27 @@ PROJECT_NAME_MAP = {
     "-home-jeremy-workspace-enterprise-ng": "enterprise-ng",
     "-mnt-c-Source-DB-v3-2-1": "db-v3",
     "-repo": "autonomy",
+    "-workspace-repo": "autonomy",
 }
+
+# Repo root for scanning agent-run session directories
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _load_session_meta(file_path: Path) -> dict:
+    """Look for .session_meta.json in the same directory or parent directory.
+
+    Returns the parsed dict if found, otherwise an empty dict.
+    Used to enrich session source metadata with session type, bead_id, etc.
+    """
+    for search_dir in (file_path.parent, file_path.parent.parent):
+        meta_file = search_dir / ".session_meta.json"
+        if meta_file.exists():
+            try:
+                return json.loads(meta_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+    return {}
 
 
 def _extract_project_name(file_path: Path) -> str | None:
@@ -674,21 +694,31 @@ def ingest_claude_code_session(
         if len(first_user["content"]) > 80:
             title += "…"
 
+    # Merge .session_meta.json fields if present alongside this JSONL
+    session_meta = _load_session_meta(file_path)
+
+    source_meta = {
+        "session_id": meta["session_id"],
+        "model": meta.get("model"),
+        "total_input_tokens": meta.get("total_input_tokens", 0),
+        "total_output_tokens": meta.get("total_output_tokens", 0),
+        "started_at": meta.get("started_at"),
+        "ended_at": meta.get("ended_at"),
+        "file_size": current_size,
+    }
+    # Overlay session_meta fields (session_type, bead_id, job_id, etc.)
+    for key in ("type", "bead_id", "job_id", "job_type", "context_id",
+                "container_name", "launched_at"):
+        if key in session_meta:
+            source_meta[f"session_{key}" if key == "type" else key] = session_meta[key]
+
     source = Source(
         type="session",
         platform="claude-code",
         project=project,
         title=title,
         file_path=abs_path,
-        metadata={
-            "session_id": meta["session_id"],
-            "model": meta.get("model"),
-            "total_input_tokens": meta.get("total_input_tokens", 0),
-            "total_output_tokens": meta.get("total_output_tokens", 0),
-            "started_at": meta.get("started_at"),
-            "ended_at": meta.get("ended_at"),
-            "file_size": current_size,
-        },
+        metadata=source_meta,
         created_at=meta.get("started_at", now_iso()),
     )
     db.insert_source(source)
@@ -776,21 +806,46 @@ def ingest_claude_code_project(db: GraphDB, project_path: str | Path = None, for
 
 
 def ingest_all_claude_code(db: GraphDB, force: bool = False) -> list[dict]:
-    """Ingest all Claude Code sessions across all projects."""
-    projects_dir = Path.home() / ".claude" / "projects"
-    if not projects_dir.exists():
-        return []
+    """Ingest all Claude Code sessions across all projects.
 
+    Scans two locations:
+    1. ~/.claude/projects/ — user sessions, chatwith, terminal containers
+    2. data/agent-runs/*/sessions/ — dispatch and librarian agent sessions
+    """
     results = []
-    for project_dir in sorted(projects_dir.iterdir()):
-        if not project_dir.is_dir():
-            continue
-        project_name = project_dir.name
-        for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-            result = ingest_claude_code_session(db, jsonl_file, force, project=project_name)
-            result["file"] = str(jsonl_file)
-            result["project"] = project_name
-            results.append(result)
+
+    # ── Location 1: host ~/.claude/projects ───────────────────
+    projects_dir = Path.home() / ".claude" / "projects"
+    if projects_dir.exists():
+        for project_dir in sorted(projects_dir.iterdir()):
+            if not project_dir.is_dir():
+                continue
+            project_name = project_dir.name
+            for jsonl_file in sorted(project_dir.glob("*.jsonl")):
+                result = ingest_claude_code_session(db, jsonl_file, force, project=project_name)
+                result["file"] = str(jsonl_file)
+                result["project"] = project_name
+                results.append(result)
+
+    # ── Location 2: data/agent-runs/*/sessions/ ───────────────
+    agent_runs_dir = _REPO_ROOT / "data" / "agent-runs"
+    if agent_runs_dir.exists():
+        for run_dir in sorted(agent_runs_dir.iterdir()):
+            if not run_dir.is_dir():
+                continue
+            sessions_dir = run_dir / "sessions"
+            if not sessions_dir.is_dir():
+                continue
+            for project_dir in sorted(sessions_dir.iterdir()):
+                if not project_dir.is_dir():
+                    continue
+                project_name = PROJECT_NAME_MAP.get(project_dir.name, project_dir.name)
+                for jsonl_file in sorted(project_dir.glob("*.jsonl")):
+                    result = ingest_claude_code_session(db, jsonl_file, force,
+                                                        project=project_name)
+                    result["file"] = str(jsonl_file)
+                    result["project"] = project_name
+                    results.append(result)
 
     return results
 

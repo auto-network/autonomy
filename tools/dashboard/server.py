@@ -34,6 +34,7 @@ from starlette.websockets import WebSocket
 from sse_starlette.sse import EventSourceResponse
 
 from agents.dispatch_db import list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH
+from agents.session_launcher import launch_session
 from agents.experiments_db import (
     create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
     dismiss_experiment,
@@ -893,32 +894,16 @@ async def api_chatwith_spawn(request):
     already_exists = _tmux_session_exists(session_name)
     if not already_exists:
         # Launch Claude in a container (read-only repo, isolated from host)
-        # Build the same docker run command that ws_terminal uses for
-        # "autonomy-agent-claude" — can't pass that magic string to tmux directly.
-        repo_root = str(Path(__file__).parents[2])
-        setup_token_file = Path.home() / ".claude" / ".setup-token"
-        setup_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-        if not setup_token and setup_token_file.exists():
-            setup_token = setup_token_file.read_text().strip()
-        if setup_token:
-            auth_arg = f" -e CLAUDE_CODE_OAUTH_TOKEN={setup_token}"
-        else:
-            creds = str(Path.home() / ".claude" / ".credentials.json")
-            auth_arg = f" -v {creds}:/home/agent/.claude/.credentials.json:ro"
-        claude_projects = str(Path.home() / ".claude" / "projects")
-        docker_cmd = (
-            f"docker run -it --rm --name {session_name}"
-            f" --network=host"
-            f" -e GRAPH_DB=/home/agent/graph.db"
-            f"{auth_arg}"
-            f" -v {repo_root}/data/graph.db:/home/agent/graph.db"
-            f" -v {repo_root}/.beads:/data/.beads"
-            f" -v {repo_root}:/workspace/repo:ro"
-            f" -v {claude_projects}:/home/agent/.claude/projects"
-            f" -w /workspace/repo"
-            f" autonomy-agent"
-            f" --dangerously-skip-permissions"
+        # launch_session returns a shell-safe docker run -it --rm command string.
+        docker_cmd = launch_session(
+            session_type="chatwith",
+            name=session_name,
+            prompt=None,
+            metadata={"context_id": context_id, "page_type": page_type},
+            detach=False,
         )
+        if not docker_cmd:
+            return JSONResponse({"error": "Failed to resolve credentials for container"}, status_code=500)
         subprocess.run(
             ["tmux", "new-session", "-d", "-s", session_name,
              "-x", "220", "-y", "50", docker_cmd],
@@ -1510,33 +1495,18 @@ async def ws_terminal(websocket: WebSocket):
         tmux_name = term_id
 
         # Resolve special container commands
-        repo_root = str(Path(__file__).parents[2])
-        claude_creds_file = str(Path.home() / ".claude" / ".credentials.json")
-        setup_token_file = Path.home() / ".claude" / ".setup-token"
-        # Prefer long-lived setup token over OAuth credentials file
-        setup_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-        if not setup_token and setup_token_file.exists():
-            setup_token = setup_token_file.read_text().strip()
-        if setup_token:
-            claude_auth_arg = f" -e CLAUDE_CODE_OAUTH_TOKEN={setup_token}"
-        else:
-            claude_auth_arg = f" -v {claude_creds_file}:/home/agent/.claude/.credentials.json:ro"
-        claude_projects = str(Path.home() / ".claude" / "projects")
         if cmd_str == "autonomy-agent-claude":
-            cmd_str = (
-                f"docker run -it --rm --name {tmux_name}"
-                f" --network=host"
-                f" -e GRAPH_DB=/home/agent/graph.db"
-                f"{claude_auth_arg}"
-                f" -v {repo_root}/data/graph.db:/home/agent/graph.db"
-                f" -v {repo_root}/.beads:/data/.beads"
-                f" -v {repo_root}:/workspace/repo:ro"
-                f" -v {claude_projects}:/home/agent/.claude/projects"
-                f" -w /workspace/repo"
-                f" autonomy-agent"
-                f" --dangerously-skip-permissions"
+            # launch_session returns a shell-safe docker run -it --rm command string
+            launched = launch_session(
+                session_type="terminal",
+                name=tmux_name,
+                prompt=None,
+                detach=False,
             )
+            if launched:
+                cmd_str = launched
         elif cmd_str == "autonomy-agent-bash":
+            repo_root = str(Path(__file__).parents[2])
             cmd_str = (
                 f"docker run -it --rm --name {tmux_name}"
                 f" --network=host"

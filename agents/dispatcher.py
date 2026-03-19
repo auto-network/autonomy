@@ -33,10 +33,10 @@ from datetime import datetime
 from pathlib import Path
 
 import importlib
-import shutil
 
 from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running
 from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
+from agents.session_launcher import launch_session
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
@@ -1051,43 +1051,12 @@ def _build_librarian_prompt(job_type: str, payload: dict) -> str:
     return primer + "\n\n---\n\n" + static
 
 
-def _get_auth_docker_args(output_dir: str) -> list[str] | None:
-    """Resolve Claude credentials and return docker auth args.
-
-    Returns a list of docker args, or None if no credentials found.
-    May copy credentials file into output_dir for the container lifetime.
-    """
-    claude_creds = Path(os.environ.get("CLAUDE_CREDENTIALS_DIR",
-                                       str(Path.home() / ".claude")))
-    setup_token_file = claude_creds / ".setup-token"
-    creds_file = claude_creds / ".credentials.json"
-
-    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-    if not oauth_token and setup_token_file.exists():
-        try:
-            oauth_token = setup_token_file.read_text().strip()
-        except OSError:
-            pass
-
-    if oauth_token:
-        return ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={oauth_token}"]
-
-    if creds_file.exists():
-        creds_copy = str(Path(output_dir) / ".credentials.json")
-        shutil.copy2(str(creds_file), creds_copy)
-        return ["-v", f"{creds_copy}:/home/agent/.claude/.credentials.json:ro"]
-
-    return None
-
-
 def start_librarian(job: dict) -> RunningLibrarian | None:
     """Launch a librarian container in detached mode. Returns immediately.
 
     Launches directly via docker run -d (no worktree, no git branch).
-    Container mounts:
-    - Repo: read-only
-    - Graph DB: read-write
-    - Beads: read-write (Dolt on host network)
+    Delegates to launch_session() which handles credential resolution,
+    per-run session directory creation, and .session_meta.json writing.
 
     Returns RunningLibrarian on success, None on failure.
     """
@@ -1110,68 +1079,22 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
               file=sys.stderr)
         return None
 
-    # Prepare output dir
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_id = f"librarian-{job_type}-{job_id[:8]}-{ts}"
     output_dir = str(REPO_ROOT / "data" / "agent-runs" / run_id)
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    session_dir = Path(output_dir) / "sessions"
-    session_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write prompt to persistent file (needed for container lifetime)
-    prompt_file = Path(output_dir) / ".prompt.md"
-    prompt_file.write_text(prompt)
-
-    # Resolve auth
-    auth_args = _get_auth_docker_args(output_dir)
-    if auth_args is None:
-        print("  ERROR: No Claude credentials found for librarian", file=sys.stderr)
-        return None
 
     container_name = f"librarian-{job_type}-{os.getpid()}-{job_id[:8]}"
 
-    cmd = [
-        "docker", "run", "-d",
-        "--name", container_name,
-        "--network=host",
-        "-e", f"BD_ACTOR=librarian:{container_name}",
-        "-e", "BD_READONLY=0",
-        "-e", f"GRAPH_DB=/home/agent/graph.db",
-        *auth_args,
-        # Repo: read-only (no code changes)
-        "-v", f"{REPO_ROOT}:/workspace/repo:ro",
-        # Graph DB: read-write (librarians write notes/beads)
-        "-v", f"{REPO_ROOT}/data/graph.db:/home/agent/graph.db",
-        # Beads: read-write
-        "-v", f"{REPO_ROOT}/.beads:/data/.beads",
-        # Output and session dirs
-        "-v", f"{output_dir}:/workspace/output",
-        "-v", f"{str(Path.home() / '.claude' / 'projects')}:/home/agent/.claude/projects",
-        # Prompt file (read-only reference)
-        "-v", f"{str(prompt_file)}:/tmp/prompt.md:ro",
-        "--entrypoint", "claude",
-        DEFAULT_IMAGE,
-        "--dangerously-skip-permissions",
-        "--print",
-        prompt,
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        print(f"  ERROR: docker run -d timed out for librarian {job_id[:8]}",
-              file=sys.stderr)
-        return None
-
-    if result.returncode != 0:
-        print(f"  ERROR: docker run -d failed for librarian {job_id[:8]}: {result.stderr}",
-              file=sys.stderr)
-        return None
-
-    container_id = result.stdout.strip()
+    container_id = launch_session(
+        session_type="librarian",
+        name=container_name,
+        prompt=prompt,
+        metadata={"job_id": job_id, "job_type": job_type},
+        detach=True,
+        image=DEFAULT_IMAGE,
+        output_dir=output_dir,
+    )
     if not container_id:
-        print(f"  ERROR: docker run returned empty container ID for librarian {job_id[:8]}",
-              file=sys.stderr)
         return None
 
     print(f"  Librarian container started: {container_name} ({container_id[:12]})")
