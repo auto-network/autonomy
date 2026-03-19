@@ -1611,6 +1611,57 @@ async def api_experiments_pending(request):
     return JSONResponse(pending)
 
 
+async def api_experiments_screenshot(request):
+    """Save a screenshot blob for an experiment.
+
+    POST /api/experiments/{id}/screenshot
+    Body: raw image bytes (Content-Type: image/png or image/*)
+    Returns: {path: "/absolute/path/to/screenshot.png"}
+    """
+    exp_id = request.path_params["id"]
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith("image/"):
+        return JSONResponse({"error": "content-type must be image/*"}, status_code=400)
+
+    exp = await asyncio.to_thread(get_experiment, exp_id)
+    if not exp:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    screenshot_dir = _REPO_ROOT / "data" / "experiments" / exp_id
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_path = screenshot_dir / "screenshot.png"
+
+    body = await request.body()
+    await asyncio.to_thread(screenshot_path.write_bytes, body)
+
+    abs_path = str(screenshot_path.resolve())
+
+    # Fire-and-forget tmux notification — don't block the response
+    series_id = exp.get("series_id") or exp_id
+    asyncio.create_task(_notify_screenshot_tmux(series_id, exp_id, abs_path))
+
+    return JSONResponse({"path": abs_path})
+
+
+async def _notify_screenshot_tmux(series_id: str, exp_id: str, screenshot_path: str) -> None:
+    """Inject a screenshot notification into a Chat With tmux session if one exists.
+
+    Checks chatwith-{series_id} first (covers the whole design series),
+    then chatwith-{exp_id} as fallback (single-experiment sessions).
+    """
+    for session_id in [series_id, exp_id]:
+        session_name = f"chatwith-{session_id}"
+        exists = await asyncio.to_thread(_tmux_session_exists, session_name)
+        if exists:
+            msg = f"Screenshot saved: {screenshot_path}"
+            await asyncio.to_thread(
+                subprocess.run,
+                ["tmux", "send-keys", "-t", session_name, msg, "Enter"],
+                capture_output=True,
+            )
+            return  # notify only the first matching session
+
+
 async def page_experiment(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -1912,6 +1963,7 @@ routes = [
     Route("/api/experiments/{id}", api_experiments_poll),
     Route("/api/experiments/{id}/full", api_experiments_get),
     Route("/api/experiments/{id}/submit", api_experiments_submit, methods=["POST"]),
+    Route("/api/experiments/{id}/screenshot", api_experiments_screenshot, methods=["POST"]),
     Route("/experiments/{id}", page_experiment),
 
     # Static
