@@ -1,0 +1,121 @@
+<div x-data="sourcePage()">
+
+  <!-- Loading -->
+  <template x-if="state === 'loading'">
+    <div class="text-gray-500 text-sm">Loading source...</div>
+  </template>
+
+  <!-- Error -->
+  <template x-if="state === 'error'">
+    <div class="text-red-400" x-text="errorMsg"></div>
+  </template>
+
+  <!-- Content -->
+  <template x-if="state === 'ready'">
+    <div>
+
+      <!-- Header -->
+      <section aria-label="Source Header" class="mb-6">
+        <div class="flex items-center gap-3 mb-2">
+          <span class="px-2 py-0.5 rounded text-xs font-semibold"
+                :class="badgeCls"
+                x-text="srcType"></span>
+          <template x-if="src.project">
+            <span class="text-xs text-indigo-400" x-text="'[' + src.project + ']'"></span>
+          </template>
+          <span class="text-xs text-gray-500" x-text="date"></span>
+          <span class="text-xs text-gray-600 font-mono ml-auto"
+                x-text="(src.id || '').slice(0, 12)"></span>
+        </div>
+        <h1 class="font-bold"
+            :class="isContext ? 'text-lg' : 'text-xl'"
+            x-text="src.title || 'Untitled'"></h1>
+
+        <!-- Context mode sub-header -->
+        <template x-if="isContext">
+          <div class="text-xs text-gray-500 mt-1">
+            Showing turns
+            <span x-text="(targetTurn - contextWindow) + '–' + (targetTurn + contextWindow)"></span>
+            of
+            <span x-text="allEntries.length"></span>
+            <a :href="'/source/' + id"
+               class="text-indigo-400 ml-2 hover:underline">View full source →</a>
+          </div>
+        </template>
+      </section>
+
+      <!-- Note layout -->
+      <template x-if="isNote">
+        <div class="p-4 bg-gray-800 rounded-lg border-l-4 border-yellow-600"
+             :data-source-id="src.id">
+          <div x-markdown="noteContent"></div>
+        </div>
+      </template>
+
+      <!-- Chat layout (session / conversation / agent-run) -->
+      <template x-if="isChat">
+        <div class="space-y-4">
+          <template x-for="e in visibleEntries" :key="e._key">
+            <div class="p-4 bg-gray-800 rounded-lg border-l-4"
+                 :class="{
+                   'border-blue-500 mr-16': e.entry_type === 'thought',
+                   'border-gray-600 ml-16': e.entry_type !== 'thought',
+                   'ring-2 ring-indigo-500': isHighlighted(e.turn_number)
+                 }"
+                 :id="'turn-' + e.turn_number"
+                 :data-source-id="src.id">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="text-xs font-semibold"
+                      :class="e.entry_type === 'thought' ? 'text-blue-400' : 'text-gray-400'"
+                      x-text="e.entry_type === 'thought' ? 'USER' : 'ASSISTANT'"></span>
+                <span class="text-xs text-gray-600" x-text="'t' + e.turn_number"></span>
+              </div>
+              <div class="text-sm" x-markdown="e.content || ''"></div>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Doc layout (docs / status / musings / etc.) -->
+      <template x-if="isDoc">
+        <div class="space-y-4">
+          <template x-for="e in visibleEntries" :key="e._key">
+            <div class="text-sm" x-markdown="e.content || ''"></div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Context expand buttons -->
+      <template x-if="isContext">
+        <div class="flex gap-4 mt-4 justify-center">
+          <button @click="showMoreContext()"
+                  class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Show more context</button>
+          <a :href="'/source/' + id"
+             class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600 inline-block">Full source</a>
+        </div>
+      </template>
+
+      <!-- Edges sidebar -->
+      <template x-if="edges.length > 0">
+        <section aria-label="Connections" class="mt-8 p-4 bg-gray-800 rounded-lg border border-gray-700">
+          <h3 class="text-sm font-semibold text-gray-400 mb-3"
+              x-text="'Connections (' + edges.length + ')'"></h3>
+          <div class="space-y-1">
+            <template x-for="e in edges" :key="e._key">
+              <a :href="edgeHref(e)"
+                 :data-source-id="edgeTarget(e)"
+                 class="block text-xs text-gray-400 hover:text-gray-200 no-underline">
+                <span class="text-indigo-400" x-text="e.relation || '?'"></span>
+                →
+                <span x-text="edgeTarget(e).slice(0, 12)"></span>
+                [<span x-text="edgeTargetType(e)"></span>]<span x-text="edgeMeta(e)"></span>
+              </a>
+            </template>
+          </div>
+        </section>
+      </template>
+
+    </div>
+  </template>
+
+</div>
