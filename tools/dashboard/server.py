@@ -1856,29 +1856,30 @@ async def api_events(request):
 
     queues = {topic: event_bus.subscribe(topic) for topic in topics}
 
+    # Merge all topic queues into one tagged queue to avoid
+    # creating/cancelling futures every iteration (which leaks tasks).
+    merged: asyncio.Queue = asyncio.Queue()
+
+    async def _relay(topic: str, src: asyncio.Queue):
+        try:
+            while True:
+                data = await src.get()
+                await merged.put((topic, data))
+        except asyncio.CancelledError:
+            pass
+
+    relay_tasks = [asyncio.create_task(_relay(t, q)) for t, q in queues.items()]
+
     async def event_generator():
         try:
             while True:
-                # Wait for the next event on any subscribed topic
-                pending = {
-                    asyncio.ensure_future(q.get()): topic
-                    for topic, q in queues.items()
-                }
-                done, _ = await asyncio.wait(
-                    pending.keys(), return_when=asyncio.FIRST_COMPLETED
-                )
-                # Cancel incomplete futures to avoid leaks
-                for t in pending:
-                    if t not in done:
-                        t.cancel()
-                # Yield ALL completed events (not just the first)
-                for task in done:
-                    topic = pending[task]
-                    data = task.result()
-                    yield {"event": topic, "data": json.dumps(data)}
+                topic, data = await merged.get()
+                yield {"event": topic, "data": json.dumps(data)}
         except asyncio.CancelledError:
             pass
         finally:
+            for t in relay_tasks:
+                t.cancel()
             for q in queues.values():
                 event_bus.unsubscribe(q)
 
