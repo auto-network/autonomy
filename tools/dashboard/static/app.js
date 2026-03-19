@@ -3238,15 +3238,35 @@ async function renderExperiment(expId) {
   const variants = exp.variants || [];
   const isCompleted = exp.status === 'completed';
 
+  // Series navigation
+  const siblingIds = exp.sibling_ids || [expId];
+  const seriesIdx = siblingIds.indexOf(expId);
+  const seriesTotal = siblingIds.length;
+  const isInSeries = seriesTotal > 1;
+  const prevId = isInSeries && seriesIdx > 0 ? siblingIds[seriesIdx - 1] : null;
+  const nextId = isInSeries && seriesIdx < seriesTotal - 1 ? siblingIds[seriesIdx + 1] : null;
+
   // Track selection state
   const selected = new Map();
   if (isCompleted) {
     variants.forEach(v => { if (v.selected) selected.set(v.id, v.rank); });
   }
 
+  const seriesNav = isInSeries ? `
+    <div class="flex items-center gap-3 mb-3 text-sm">
+      ${prevId
+        ? `<button class="text-indigo-400 hover:text-indigo-300" onclick="navigateTo('/experiments/${_esc(prevId)}')">\u2190 Prev</button>`
+        : `<span class="text-gray-600">\u2190 Prev</span>`}
+      <span class="text-gray-400">Iteration ${seriesIdx + 1} of ${seriesTotal}</span>
+      ${nextId
+        ? `<button class="text-indigo-400 hover:text-indigo-300" onclick="navigateTo('/experiments/${_esc(nextId)}')">Next \u2192</button>`
+        : `<span class="text-gray-600">Next \u2192</span>`}
+    </div>` : '';
+
   let html = `
     <div class="max-w-6xl mx-auto">
       <h2 class="text-xl font-bold text-indigo-400 mb-1">${_esc(exp.title)}</h2>
+      ${seriesNav}
       ${exp.description ? `<p class="text-gray-400 text-sm mb-4">${_esc(exp.description)}</p>` : ''}
       ${isCompleted ? '<p class="text-green-400 text-sm mb-4 font-semibold">Results submitted</p>' : ''}
       <div id="exp-variants">`;
@@ -3454,30 +3474,44 @@ async function checkPendingExperiments() {
   try {
     const pending = await api('/api/experiments/pending');
     const dismissed = getDismissedExperiments();
-    const ids = new Set();
+    const keys = new Set();
     if (Array.isArray(pending)) {
       pending.forEach(exp => {
-        if (dismissed.includes(exp.id)) return;
-        ids.add(exp.id);
-        if (container.querySelector(`[data-exp-id="${exp.id}"]`)) return;
+        // Use series_id as the stable key so the toast represents the whole series
+        const seriesKey = exp.series_id || exp.id;
+        if (dismissed.includes(seriesKey)) return;
+        keys.add(seriesKey);
+        const iterLabel = exp.iteration_count > 1
+          ? `${_esc(exp.title)} <span class="text-gray-500 text-xs">(${exp.iteration_count} iterations)</span>`
+          : _esc(exp.title);
+        const existing = container.querySelector(`[data-exp-id="${seriesKey}"]`);
+        if (existing) {
+          // Update link target and label in case a new iteration was added
+          existing.href = `/experiments/${exp.id}`;
+          existing.onclick = (e) => { e.preventDefault(); navigateTo(`/experiments/${exp.id}`); };
+          const textEl = existing.querySelector('.sidebar-exp-text');
+          if (textEl) textEl.innerHTML = iterLabel;
+          return;
+        }
         const link = document.createElement('a');
         link.className = 'sidebar-exp';
-        link.dataset.expId = exp.id;
+        link.dataset.expId = seriesKey;
+        // Navigate to latest iteration (exp.id is already the latest from the API)
         link.href = `/experiments/${exp.id}`;
         link.onclick = (e) => { e.preventDefault(); navigateTo(`/experiments/${exp.id}`); };
-        link.innerHTML = `<span class="sidebar-exp-icon">\uD83E\uDDEA</span><span class="sidebar-exp-text">${_esc(exp.title)}</span>`;
+        link.innerHTML = `<span class="sidebar-exp-icon">\uD83E\uDDEA</span><span class="sidebar-exp-text">${iterLabel}</span>`;
         const btn = document.createElement('button');
         btn.className = 'sidebar-exp-dismiss';
         btn.title = 'Dismiss';
         btn.textContent = '\u00d7';
-        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); dismissExperiment(exp.id); };
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); dismissExperiment(seriesKey); };
         link.appendChild(btn);
         container.appendChild(link);
       });
     }
-    // Remove indicators for experiments that are no longer pending (or dismissed)
+    // Remove indicators for series that are no longer pending (or dismissed)
     container.querySelectorAll('[data-exp-id]').forEach(el => {
-      if (!ids.has(el.dataset.expId)) el.remove();
+      if (!keys.has(el.dataset.expId)) el.remove();
     });
   } catch(e) {}
 }
