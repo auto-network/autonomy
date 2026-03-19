@@ -812,6 +812,40 @@ async def api_primer(request):
         return JSONResponse({"content": stdout, "error": None})
 
 
+async def api_chatwith_primer(request):
+    """Return a Chat With primer for a specific page type and context ID.
+
+    GET /api/chatwith/primer/{page_type}?context={id}
+
+    Returns {primer_text: str, session_name: str}.
+    Returns 400 for unknown page_type or missing context param.
+    Returns 404 if the context resource is not found.
+    """
+    from tools.dashboard.chatwith_primers import get_primer, VALID_PAGE_TYPES
+
+    page_type = request.path_params["page_type"]
+    context_id = request.query_params.get("context", "").strip()
+
+    if not context_id:
+        return JSONResponse(
+            {"error": "Missing required query parameter: context"},
+            status_code=400,
+        )
+
+    try:
+        result = await asyncio.to_thread(get_primer, page_type, context_id)
+        return JSONResponse(result)
+    except ValueError as exc:
+        msg = str(exc)
+        if "Unknown page type" in msg:
+            return JSONResponse(
+                {"error": msg, "valid_types": VALID_PAGE_TYPES},
+                status_code=400,
+            )
+        # Resource not found (experiment missing, etc.)
+        return JSONResponse({"error": msg}, status_code=404)
+
+
 # ── Live Session Tailing ──────────────────────────────────────
 
 
@@ -1862,6 +1896,7 @@ routes = [
     Route("/api/terminal/{id}/kill", api_terminal_kill),
     Route("/api/terminal/{id}/rename", api_terminal_rename, methods=["POST"]),
     Route("/api/primer/{id}", api_primer),
+    Route("/api/chatwith/primer/{page_type}", api_chatwith_primer),
     Route("/api/dispatch/tail/{run}", api_dispatch_tail),
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
     Route("/api/timeline", api_timeline),
