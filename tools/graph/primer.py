@@ -145,6 +145,7 @@ def collect_primer_data(
                        JOIN thoughts t ON t.source_id = s.id
                        JOIN thoughts_fts fts ON fts.rowid = t.rowid
                        WHERE s.type = 'note'
+                       AND s.metadata NOT LIKE '%pitfall%'
                        AND thoughts_fts MATCH ?
                        ORDER BY s.created_at DESC LIMIT 5""",
                     (fts_q,),
@@ -160,6 +161,7 @@ def collect_primer_data(
                            JOIN thoughts t ON t.source_id = s.id
                            JOIN thoughts_fts fts ON fts.rowid = t.rowid
                            WHERE s.type = 'note'
+                           AND s.metadata NOT LIKE '%pitfall%'
                            AND thoughts_fts MATCH ?
                            ORDER BY s.created_at DESC LIMIT 5""",
                         (fts_q,),
