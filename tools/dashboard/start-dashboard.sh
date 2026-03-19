@@ -132,11 +132,16 @@ setsid bash -c "
     -o static/tailwind.css \
     --watch=always \
     >> \"$LOG_FILE\" 2>&1 &
+  SSL_ARGS=\"\"
+  if [[ -f \"$REPO_ROOT/data/tls.crt\" && -f \"$REPO_ROOT/data/tls.key\" ]]; then
+    SSL_ARGS=\"--ssl-certfile $REPO_ROOT/data/tls.crt --ssl-keyfile $REPO_ROOT/data/tls.key\"
+  fi
   \"$VENV\" -m uvicorn tools.dashboard.server:app \
     --host \"$HOST\" \
     --port \"$PORT\" \
     --reload \
     --reload-dir tools/dashboard \
+    \$SSL_ARGS \
     >> \"$LOG_FILE\" 2>&1 &
   wait
 " &
@@ -147,7 +152,11 @@ echo "$PGID" > "$PID_FILE"
 sleep 2
 if kill -0 "-$PGID" 2>/dev/null || kill -0 "$PGID" 2>/dev/null; then
     echo "dashboard started: PGID $PGID"
-    echo "  URL: http://$HOST:$PORT"
+    if [[ -f "$REPO_ROOT/data/tls.crt" ]]; then
+        echo "  URL: https://$HOST:$PORT (TLS enabled)"
+    else
+        echo "  URL: http://$HOST:$PORT"
+    fi
     echo "  Log: $LOG_FILE"
     echo "  PID file: $PID_FILE (stores PGID)"
     echo "  Hot-reload: tools/dashboard/"
