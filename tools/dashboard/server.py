@@ -1559,6 +1559,17 @@ async def api_experiments_create(request):
         variants=variants,
         series_id=series_id,
     )
+
+    # Broadcast to SSE so gallery pages auto-update without refresh
+    exp_data = await asyncio.to_thread(get_experiment, exp_id)
+    if exp_data:
+        topic = f"experiments:{exp_data['series_id']}"
+        await event_bus.broadcast(topic, {
+            "experiment_id": exp_id,
+            "series_id": exp_data["series_id"],
+            "series_seq": exp_data["series_seq"],
+        })
+
     return JSONResponse({"id": exp_id}, status_code=201)
 
 
