@@ -847,6 +847,93 @@ async def api_chatwith_primer(request):
         return JSONResponse({"error": msg}, status_code=404)
 
 
+async def api_chatwith_spawn(request):
+    """Spawn a Chat With Claude session for a given page context.
+
+    POST /api/chatwith/spawn
+    Body: {page_type: str, context_id: str}
+
+    Creates a tmux session named "chatwith-{context_id}" running Claude,
+    injects the primer, and returns {session_name, ws_url, new}.
+    If the session already exists, returns it without re-creating.
+    """
+    from tools.dashboard.chatwith_primers import get_primer, VALID_PAGE_TYPES
+
+    body = await request.json()
+    page_type = (body.get("page_type") or "").strip()
+    context_id = (body.get("context_id") or "").strip()
+
+    if not page_type or not context_id:
+        return JSONResponse({"error": "Missing page_type or context_id"}, status_code=400)
+
+    try:
+        primer_result = await asyncio.to_thread(get_primer, page_type, context_id)
+    except ValueError as exc:
+        msg = str(exc)
+        if "Unknown page type" in msg:
+            return JSONResponse({"error": msg, "valid_types": VALID_PAGE_TYPES}, status_code=400)
+        return JSONResponse({"error": msg}, status_code=404)
+
+    session_name = primer_result["session_name"]
+    primer_text = primer_result["primer_text"]
+
+    already_exists = _tmux_session_exists(session_name)
+    if not already_exists:
+        # Launch Claude in a detached tmux session
+        subprocess.run(
+            [
+                "tmux", "new-session", "-d", "-s", session_name,
+                "-x", "220", "-y", "50",
+                "claude --dangerously-skip-permissions",
+            ],
+            env={**os.environ, "TERM": "xterm-256color"},
+        )
+        subprocess.run(
+            ["tmux", "set-option", "-t", session_name, "mouse", "on"],
+            capture_output=True,
+        )
+
+        # Wait for Claude to initialize and display its prompt
+        await asyncio.sleep(4)
+
+        # Write primer to a temp file and inject via tmux paste-buffer
+        primer_path = f"/tmp/chatwith_primer_{context_id}.txt"
+        Path(primer_path).write_text(primer_text, encoding="utf-8")
+        subprocess.run(
+            ["tmux", "load-buffer", "-b", "cw_primer", primer_path],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["tmux", "paste-buffer", "-b", "cw_primer", "-t", session_name],
+            capture_output=True,
+        )
+        await asyncio.sleep(0.3)
+        subprocess.run(
+            ["tmux", "send-keys", "-t", session_name, "", "Enter"],
+            capture_output=True,
+        )
+
+    ws_url = f"/ws/terminal?attach={session_name}"
+    return JSONResponse({
+        "session_name": session_name,
+        "ws_url": ws_url,
+        "new": not already_exists,
+    })
+
+
+async def api_chatwith_check(request):
+    """Check if a Chat With tmux session exists.
+
+    GET /api/chatwith/check?session={session_name}
+    Returns {exists: bool, session_name: str}.
+    """
+    session_name = request.query_params.get("session", "").strip()
+    if not session_name:
+        return JSONResponse({"error": "Missing session parameter"}, status_code=400)
+    exists = _tmux_session_exists(session_name)
+    return JSONResponse({"exists": exists, "session_name": session_name})
+
+
 # ── Live Session Tailing ──────────────────────────────────────
 
 
@@ -1901,6 +1988,8 @@ routes = [
     Route("/api/terminal/{id}/rename", api_terminal_rename, methods=["POST"]),
     Route("/api/primer/{id}", api_primer),
     Route("/api/chatwith/primer/{page_type}", api_chatwith_primer),
+    Route("/api/chatwith/spawn", api_chatwith_spawn, methods=["POST"]),
+    Route("/api/chatwith/check", api_chatwith_check),
     Route("/api/dispatch/tail/{run}", api_dispatch_tail),
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
     Route("/api/timeline", api_timeline),

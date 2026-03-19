@@ -2538,6 +2538,128 @@ async function renderSource(id, highlightTurn) {
   }
 }
 
+// ── Chat With Panel ─────────────────────────────────────────
+
+let _chatWithTerm = null;
+let _chatWithWs = null;
+let _chatWithFitAddon = null;
+let _chatWithResizeObs = null;
+let _chatWithCollapsed = false;
+
+function destroyChatWith() {
+  if (_chatWithResizeObs) { _chatWithResizeObs.disconnect(); _chatWithResizeObs = null; }
+  if (_chatWithWs) { try { _chatWithWs.close(); } catch(e) {} _chatWithWs = null; }
+  if (_chatWithTerm) { _chatWithTerm.dispose(); _chatWithTerm = null; }
+  _chatWithFitAddon = null;
+}
+
+function connectChatWithTerminal(sessionName) {
+  destroyChatWith();
+
+  const panel = document.getElementById('chatwith-panel');
+  const body = document.getElementById('chatwith-body');
+  const container = document.getElementById('chatwith-container');
+  const statusEl = document.getElementById('chatwith-status');
+  if (!panel || !container) return;
+
+  panel.style.display = '';
+  if (!_chatWithCollapsed) body.style.display = '';
+
+  const killBtn = document.getElementById('chatwith-kill-btn');
+  if (killBtn) killBtn.style.display = '';
+
+  if (statusEl) { statusEl.textContent = 'connecting...'; statusEl.className = 'text-xs text-yellow-400 ml-2'; }
+
+  const term = new Terminal({
+    theme: {background:'#111827',foreground:'#e5e7eb',cursor:'#6366f1',selectionBackground:'rgba(99,102,241,0.3)'},
+    fontSize: 13,
+    fontFamily: '"JetBrains Mono",ui-monospace,monospace',
+    cursorBlink: true,
+    scrollback: 5000,
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  _chatWithFitAddon = fitAddon;
+  term.loadAddon(fitAddon);
+  term.open(container);
+  fitAddon.fit();
+  _chatWithTerm = term;
+
+  _chatWithResizeObs = new ResizeObserver(() => { if (_chatWithFitAddon) _chatWithFitAddon.fit(); });
+  _chatWithResizeObs.observe(container);
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${proto}//${location.host}/ws/terminal?attach=${encodeURIComponent(sessionName)}`;
+  const ws = new WebSocket(wsUrl);
+  _chatWithWs = ws;
+
+  ws.onopen = () => {
+    if (statusEl) { statusEl.textContent = 'connected'; statusEl.className = 'text-xs text-green-400 ml-2'; }
+    const dims = fitAddon.proposeDimensions();
+    if (dims) ws.send(`\x1b[8;${dims.rows};${dims.cols}t`);
+    term.focus();
+  };
+  ws.onmessage = (e) => term.write(e.data);
+  ws.onclose = () => {
+    if (statusEl) { statusEl.textContent = 'disconnected'; statusEl.className = 'text-xs text-red-400 ml-2'; }
+    term.write('\r\n\x1b[90m--- disconnected ---\x1b[0m\r\n');
+  };
+  ws.onerror = () => {
+    if (statusEl) { statusEl.textContent = 'error'; statusEl.className = 'text-xs text-red-400 ml-2'; }
+  };
+  term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+}
+
+async function spawnChatWith(expId) {
+  const btn = document.getElementById('chatwith-btn');
+  const statusEl = document.getElementById('chatwith-status');
+  if (btn) { btn.disabled = true; btn.textContent = 'Spawning...'; }
+  if (statusEl) { statusEl.textContent = 'spawning...'; statusEl.className = 'text-xs text-yellow-400 ml-2'; }
+
+  const panel = document.getElementById('chatwith-panel');
+  if (panel) panel.style.display = '';
+
+  try {
+    const res = await fetch('/api/chatwith/spawn', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({page_type: 'experiment', context_id: expId}),
+    });
+    const result = await res.json();
+    if (result.error) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Chat With'; }
+      if (statusEl) { statusEl.textContent = `Error: ${result.error}`; statusEl.className = 'text-xs text-red-400 ml-2'; }
+      return;
+    }
+    if (btn) { btn.disabled = false; btn.textContent = 'Reconnect'; }
+    connectChatWithTerminal(result.session_name);
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Chat With'; }
+    if (statusEl) { statusEl.textContent = 'spawn failed'; statusEl.className = 'text-xs text-red-400 ml-2'; }
+    console.error('spawnChatWith error:', e);
+  }
+}
+
+function toggleChatWithPanel() {
+  const body = document.getElementById('chatwith-body');
+  const toggleBtn = document.getElementById('chatwith-toggle-btn');
+  if (!body) return;
+  _chatWithCollapsed = !_chatWithCollapsed;
+  body.style.display = _chatWithCollapsed ? 'none' : '';
+  if (toggleBtn) toggleBtn.textContent = _chatWithCollapsed ? '▸' : '▾';
+  if (!_chatWithCollapsed && _chatWithFitAddon) setTimeout(() => _chatWithFitAddon.fit(), 50);
+}
+
+async function killChatWithSession(expId) {
+  const sessionName = `chatwith-${expId}`;
+  destroyChatWith();
+  const panel = document.getElementById('chatwith-panel');
+  if (panel) panel.style.display = 'none';
+  const btn = document.getElementById('chatwith-btn');
+  if (btn) { btn.textContent = 'Chat With'; btn.disabled = false; }
+  await fetch(`/api/terminal/${sessionName}/kill`);
+}
+
+
 // ── Terminal ─────────────────────────────────────────────────
 
 let activeTerm = null;
@@ -3228,6 +3350,8 @@ async function getLiveSnippet(runDir) {
 async function renderExperiment(expId) {
   pageTitle.textContent = 'Experiment';
   content.innerHTML = '<div class="text-gray-400">Loading experiment...</div>';
+  destroyChatWith();
+  _chatWithCollapsed = false;
 
   const exp = await api(`/api/experiments/${expId}/full`);
   if (exp.error) {
@@ -3265,7 +3389,13 @@ async function renderExperiment(expId) {
 
   let html = `
     <div class="max-w-6xl mx-auto">
-      <h2 class="text-xl font-bold text-indigo-400 mb-1">${_esc(exp.title)}</h2>
+      <div class="flex items-center gap-3 mb-1">
+        <h2 class="text-xl font-bold text-indigo-400">${_esc(exp.title)}</h2>
+        <button id="chatwith-btn" onclick="spawnChatWith('${_esc(expId)}')"
+                class="ml-auto px-3 py-1 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white">
+          Chat With
+        </button>
+      </div>
       ${seriesNav}
       ${exp.description ? `<p class="text-gray-400 text-sm mb-4">${_esc(exp.description)}</p>` : ''}
       ${isCompleted ? '<p class="text-green-400 text-sm mb-4 font-semibold">Results submitted</p>' : ''}
@@ -3307,8 +3437,43 @@ async function renderExperiment(expId) {
       </div>`;
   }
 
+  // Chat With terminal panel (hidden until spawned or reconnected)
+  html += `
+    <div id="chatwith-panel" class="mt-6 border border-gray-700 rounded overflow-hidden" style="display:none;">
+      <div class="flex items-center px-3 py-2 bg-gray-800 border-b border-gray-700 cursor-pointer"
+           onclick="toggleChatWithPanel()">
+        <span class="text-sm font-semibold text-indigo-400">Chat With Claude</span>
+        <span id="chatwith-status" class="text-xs text-gray-500 ml-2"></span>
+        <div class="ml-auto flex items-center gap-2" onclick="event.stopPropagation()">
+          <button id="chatwith-kill-btn"
+                  onclick="killChatWithSession('${_esc(expId)}')"
+                  class="text-xs text-red-400 hover:text-red-300 px-2 py-0.5 rounded border border-red-800 hover:border-red-600"
+                  style="display:none;">Kill</button>
+          <button id="chatwith-toggle-btn"
+                  onclick="toggleChatWithPanel()"
+                  class="text-xs text-gray-400 hover:text-white px-2">&#9662;</button>
+        </div>
+      </div>
+      <div id="chatwith-body" style="height:300px;display:none;">
+        <div id="chatwith-container" style="height:300px;"></div>
+      </div>
+    </div>`;
+
   html += `</div>`;
   content.innerHTML = html;
+
+  // Auto-reconnect Chat With panel if session already exists (fire-and-forget)
+  (async () => {
+    const sessionName = `chatwith-${expId}`;
+    try {
+      const check = await api(`/api/chatwith/check?session=${encodeURIComponent(sessionName)}`);
+      if (check && check.exists) {
+        const btn = document.getElementById('chatwith-btn');
+        if (btn) btn.textContent = 'Reconnect';
+        connectChatWithTerminal(sessionName);
+      }
+    } catch(e) { /* ignore — check is best-effort */ }
+  })();
 
   // Inject fixture + HTML into iframes (with Tailwind + dashboard CSS so variants
   // use identical markup to the main app — winning variant drops in with zero rework)
