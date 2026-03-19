@@ -8,9 +8,6 @@
 //
 // state machine: 'loading' → 'ready' | 'error' | 'notFound'
 //
-// Markdown sections (description, acceptance_criteria, design, comment bodies)
-// are rendered via marked.parse() using x-html. These fields are trusted
-// server content from the knowledge graph — not user input.
 
 (function () {
   function _formatTs(ts) {
@@ -42,11 +39,6 @@
       isApproved: false,
       isRunning: false,
       approving: false,
-
-      mdHtml(text) {
-        if (!text) return '';
-        return marked.parse(text);
-      },
 
       formatTs(ts) {
         return _formatTs(ts);
@@ -121,11 +113,6 @@
           }
 
           this.state = 'ready';
-
-          // Highlight code blocks after Alpine renders the markdown
-          if (window.hljs) {
-            this.$nextTick(() => hljs.highlightAll());
-          }
 
           // Auto-open live panel if dispatch is running
           if (this.isRunning && window.showLivePanel) {
