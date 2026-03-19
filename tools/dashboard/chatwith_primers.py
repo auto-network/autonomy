@@ -237,11 +237,11 @@ def _format_experiment_primer(data: dict) -> str:
     lines.append("### Screenshots\n")
     lines.append(
         "The user's browser auto-captures a screenshot of the experiment page after each "
-        "variant loads. Screenshots are saved to:\n\n"
-        "  `data/experiments/{experiment_id}/screenshot.png`\n\n"
-        "When a new screenshot is captured, you will see a notification in this session: "
-        "`Screenshot saved: /path/to/screenshot.png`\n\n"
-        "You can read any screenshot with the Read tool to see exactly what the user sees.\n"
+        "variant loads. When using `graph ui-exp`, the screenshot is automatically copied "
+        "into your working directory as `screenshot.png`. Read it any time to see exactly "
+        "what the user sees:\n\n"
+        "  `<your-variants-dir>/screenshot.png`\n\n"
+        "The screenshot updates automatically after each iteration.\n"
     )
     # Check if a screenshot already exists for the current experiment
     screenshot_path = Path(f"data/experiments/{exp_id}/screenshot.png")
