@@ -39,8 +39,12 @@ from agents.experiments_db import (
     dismiss_experiment,
 )
 from tools.dashboard.event_bus import event_bus
-from tools.dashboard.dao import beads as dao_beads
-from tools.dashboard.dao import dispatch as dao_dispatch
+if os.environ.get("DASHBOARD_MOCK"):
+    from tools.dashboard.dao import mock as dao_beads
+    from tools.dashboard.dao import mock as dao_dispatch
+else:
+    from tools.dashboard.dao import beads as dao_beads
+    from tools.dashboard.dao import dispatch as dao_dispatch
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
