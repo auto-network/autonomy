@@ -2597,8 +2597,10 @@ function connectChatWithTerminal(sessionName) {
   const ws = new WebSocket(wsUrl);
   _chatWithWs = ws;
 
+  const reconnectBtn = document.getElementById('chatwith-reconnect-btn');
   ws.onopen = () => {
     if (statusEl) { statusEl.textContent = 'connected'; statusEl.className = 'text-xs text-green-400 ml-2'; }
+    if (reconnectBtn) reconnectBtn.style.display = 'none';
     const dims = fitAddon.proposeDimensions();
     if (dims) ws.send(`\x1b[8;${dims.rows};${dims.cols}t`);
     term.focus();
@@ -2606,10 +2608,12 @@ function connectChatWithTerminal(sessionName) {
   ws.onmessage = (e) => term.write(e.data);
   ws.onclose = () => {
     if (statusEl) { statusEl.textContent = 'disconnected'; statusEl.className = 'text-xs text-red-400 ml-2'; }
+    if (reconnectBtn) reconnectBtn.style.display = '';
     term.write('\r\n\x1b[90m--- disconnected ---\x1b[0m\r\n');
   };
   ws.onerror = () => {
     if (statusEl) { statusEl.textContent = 'error'; statusEl.className = 'text-xs text-red-400 ml-2'; }
+    if (reconnectBtn) reconnectBtn.style.display = '';
   };
   term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
 }
@@ -3596,6 +3600,10 @@ async function renderExperiment(expId) {
         <span class="text-sm font-semibold text-indigo-400">Chat With Claude</span>
         <span id="chatwith-status" class="text-xs text-gray-500 ml-2"></span>
         <div class="ml-auto flex items-center gap-2" onclick="event.stopPropagation()">
+          <button id="chatwith-reconnect-btn"
+                  onclick="connectChatWithTerminal('chatwith-${_esc(sessionCtx)}')"
+                  class="text-xs text-indigo-400 hover:text-indigo-300 px-2 py-0.5 rounded border border-indigo-800 hover:border-indigo-600"
+                  style="display:none;">Reconnect</button>
           <button id="chatwith-kill-btn"
                   onclick="killChatWithSession('${_esc(sessionCtx)}')"
                   class="text-xs text-red-400 hover:text-red-300 px-2 py-0.5 rounded border border-red-800 hover:border-red-600"
