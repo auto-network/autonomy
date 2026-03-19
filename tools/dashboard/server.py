@@ -879,12 +879,12 @@ async def api_chatwith_spawn(request):
 
     already_exists = _tmux_session_exists(session_name)
     if not already_exists:
-        # Launch Claude in a detached tmux session
+        # Launch Claude in a container (read-only repo, isolated from host)
         subprocess.run(
             [
                 "tmux", "new-session", "-d", "-s", session_name,
                 "-x", "220", "-y", "50",
-                "claude --dangerously-skip-permissions",
+                "autonomy-agent-claude",
             ],
             env={**os.environ, "TERM": "xterm-256color"},
         )
