@@ -1825,6 +1825,31 @@ async def page_source(request):
 async def page_bead(request):
     return HTMLResponse(_load_template("base.html"))
 
+async def page_bead_fragment(request):
+    """Return the Bead detail page as an HTML fragment for SPA injection.
+
+    Rendered via Jinja2 so {% include %} partials work.
+    The fragment is injected into #content by the client router, then
+    Alpine.initTree() initialises the x-data="beadDetailPage()" component.
+    The component reads the bead ID from window.location.pathname on init.
+    """
+    return templates.TemplateResponse(request, "pages/bead-detail.html")
+
+async def api_dao_bead(request):
+    """Return a single bead with labels, deps, and comments via DAO (not bd CLI).
+
+    GET /api/dao/bead/{id}
+
+    Uses dao_beads.get_bead() which connects directly to Dolt/MySQL.
+    Returns 404 JSON if the bead does not exist.
+    In mock mode, reads from the fixture file.
+    """
+    bead_id = request.path_params["id"]
+    bead = await asyncio.to_thread(dao_beads.get_bead, bead_id)
+    if bead is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(bead)
+
 
 # ── SSE EventBus endpoint ─────────────────────────────────────
 
@@ -2017,6 +2042,7 @@ routes = [
     Route("/pages/dispatch", page_dispatch_fragment),
     Route("/sessions", page_sessions),
     Route("/pages/sessions", page_sessions_fragment),
+    Route("/pages/bead", page_bead_fragment),
     Route("/search", page_search),
     Route("/source/{id}", page_source),
     Route("/bead/{id}", page_bead),
@@ -2052,6 +2078,7 @@ routes = [
     Route("/api/active", api_active_sessions),
     Route("/api/dao/active_sessions", api_dao_active_sessions),
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
+    Route("/api/dao/bead/{id}", api_dao_bead),
     Route("/api/terminals", api_terminals),
     Route("/api/terminal/{id}/kill", api_terminal_kill),
     Route("/api/terminal/{id}/rename", api_terminal_rename, methods=["POST"]),
