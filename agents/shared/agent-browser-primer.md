@@ -62,6 +62,43 @@ agent-browser click [3]                # interact with element ref [3]
 agent-browser diff snapshot            # shows what changed in DOM
 ```
 
+## Mock DAO — Testing with Controlled Data
+
+The dashboard has a mock DAO layer that reads fixture data from a JSON file instead of hitting Dolt/SQLite. This lets you test with controlled data — XSS payloads, empty states, edge cases — without touching production databases.
+
+**Start a mock dashboard:**
+```bash
+# Write fixture data
+cat > /tmp/fixtures.json << 'EOF'
+{
+  "beads": [
+    {"id": "auto-test1", "title": "Normal bead", "priority": 0, "status": "open", "issue_type": "task", "labels": []},
+    {"id": "auto-xss", "title": "<script>alert(1)</script>", "priority": 1, "status": "open", "issue_type": "bug", "labels": ["dashboard"]},
+    {"id": "auto-empty", "title": "", "priority": 4, "status": "open", "issue_type": "task", "labels": []}
+  ],
+  "runs": [
+    {"id": "run-001", "bead_id": "auto-test1", "status": "COMPLETED", "started_at": "2026-01-01T00:00:00Z", "completed_at": "2026-01-01T00:05:00Z"}
+  ]
+}
+EOF
+
+# Boot on a different port — no Dolt or SQLite needed
+DASHBOARD_MOCK=/tmp/fixtures.json PYTHONPATH=/workspace/repo \
+  uvicorn tools.dashboard.server:app --host 0.0.0.0 --port 8081 &
+```
+
+**Mock is HTTP (no TLS), so no `--ignore-https-errors` needed:**
+```bash
+agent-browser open http://localhost:8081/beads
+```
+
+**Live editing — change fixtures without restarting:**
+The mock reads the JSON file fresh on every request. Edit the file, refresh the page, see new data immediately.
+
+**Fixture format:** Bead dicts need at minimum `id`, `title`, `status`, `priority`. Missing fields are auto-filled with sensible defaults. See `tools/dashboard/dao/mock.py` for the full defaults and supported keys.
+
+**Coverage note:** The mock covers DAO-backed endpoints (`dao_beads.*`, `dao_dispatch.*`). Pages still using `bd` CLI subprocess calls (e.g. `api_beads_list`, `api_bead_show`) won't use mock data until they are migrated to the DAO layer — which is part of the Alpine migration work.
+
 ## Dashboard-Specific Gotchas
 
 - **SPA navigation:** Some views still use `onclick="navigateTo()"` on `<div>`/`<tr>` instead of `<a>` tags. These won't appear in `snapshot -i`. Use `eval "navigateTo('/bead/auto-xxxx')"` or click via `[data-bead-id]` selector where available.
