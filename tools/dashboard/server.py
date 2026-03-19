@@ -2224,7 +2224,7 @@ class _CSPMiddleware(BaseHTTPMiddleware):
 
     _CSP = (
         "default-src 'self'; "
-        "script-src 'self' cdn.jsdelivr.net 'unsafe-inline'; "
+        "script-src 'self' cdn.jsdelivr.net 'unsafe-inline' 'unsafe-eval'; "
         "style-src 'self' cdn.jsdelivr.net 'unsafe-inline'; "
         "img-src 'self' data:; "
         "connect-src 'self' ws: wss:; "
