@@ -1,0 +1,193 @@
+<div x-data="beadDetailPage()">
+
+  <!-- Loading state -->
+  <template x-if="state === 'loading'">
+    <div class="text-gray-500 text-sm">Loading bead...</div>
+  </template>
+
+  <!-- Error state -->
+  <template x-if="state === 'error'">
+    <div class="text-red-400" x-text="errorMsg"></div>
+  </template>
+
+  <!-- Not found state -->
+  <template x-if="state === 'notFound'">
+    <div class="text-gray-400">Bead not found</div>
+  </template>
+
+  <!-- Main content -->
+  <template x-if="state === 'ready'">
+    <div>
+
+      <!-- Header -->
+      <section aria-label="Bead Header" class="mb-6">
+        <h1 class="text-2xl font-bold mb-2" x-text="bead.title"></h1>
+        <div class="flex gap-2 items-center mb-4 flex-wrap">
+          <span class="font-mono text-sm text-gray-500" x-text="bead.id"></span>
+          <span class="ft-badge" :class="'badge-p' + bead.priority" x-text="'P' + bead.priority"></span>
+          <span class="badge" :class="'badge-' + bead.status" x-text="bead.status"></span>
+          <span class="text-sm text-gray-400" x-text="bead.issue_type || ''"></span>
+          <template x-if="!isApproved && bead.status !== 'closed'">
+            <button @click="approve()"
+                    :disabled="approving"
+                    class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50"
+                    x-text="approving ? '...' : 'Approve for Dispatch'"></button>
+          </template>
+          <template x-if="isApproved">
+            <span class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded">Approved</span>
+          </template>
+        </div>
+        <!-- Labels -->
+        <template x-if="bead.labels && bead.labels.length > 0">
+          <div class="flex gap-1 mb-2 flex-wrap">
+            <template x-for="label in bead.labels" :key="label">
+              <span class="px-2 py-0.5 bg-gray-700 text-gray-300 text-xs rounded" x-text="label"></span>
+            </template>
+          </div>
+        </template>
+      </section>
+
+      <!-- Description -->
+      <template x-if="bead.description">
+        <section aria-label="Description" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Description</h2>
+          <div class="prose prose-invert prose-sm max-w-none" x-html="mdHtml(bead.description)"></div>
+        </section>
+      </template>
+
+      <!-- Acceptance Criteria -->
+      <template x-if="bead.acceptance_criteria">
+        <section aria-label="Acceptance Criteria" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Acceptance Criteria</h2>
+          <div class="prose prose-invert prose-sm max-w-none" x-html="mdHtml(bead.acceptance_criteria)"></div>
+        </section>
+      </template>
+
+      <!-- Design Notes -->
+      <template x-if="bead.design">
+        <section aria-label="Design Notes" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Design Notes</h2>
+          <div class="prose prose-invert prose-sm max-w-none" x-html="mdHtml(bead.design)"></div>
+        </section>
+      </template>
+
+      <!-- Background — Original Discussions (provenance) -->
+      <template x-if="primer && primer.provenance && primer.provenance.length > 0">
+        <section aria-label="Background — Original Discussions" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Background — Original Discussions</h2>
+          <template x-for="prov in primer.provenance" :key="prov.source_id">
+            <div class="mb-3">
+              <template x-if="prov.note">
+                <div class="mb-2 text-sm text-gray-300">
+                  <span class="text-gray-500" x-text="prov.relation + ':'"></span>
+                  <span x-text="' ' + prov.note"></span>
+                </div>
+              </template>
+              <template x-for="turn in (prov.turns || [])" :key="turn.turn_number">
+                <div class="ml-3 mb-2 pl-3 border-l-2 border-gray-700">
+                  <div class="text-xs mb-1"
+                       :class="turn.role === 'USER' ? 'text-blue-400' : 'text-green-400'"
+                       x-text="'Turn ' + turn.turn_number + ' — ' + turn.role"></div>
+                  <div class="text-sm text-gray-300" x-text="turn.content_preview || turn.content || ''"></div>
+                </div>
+              </template>
+              <div class="text-xs text-gray-500">
+                Source: <a :href="'/source/' + prov.source_id"
+                           class="text-indigo-400 hover:underline font-mono text-xs"
+                           x-text="prov.source_id.slice(0, 12)"></a>
+              </div>
+            </div>
+          </template>
+        </section>
+      </template>
+
+      <!-- Related Notes -->
+      <template x-if="primer && primer.related_notes && primer.related_notes.length > 0">
+        <section aria-label="Related Notes" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Related Notes</h2>
+          <div class="space-y-2">
+            <template x-for="note in primer.related_notes" :key="note.source_id">
+              <div class="p-2 bg-gray-800 rounded border border-gray-700">
+                <div class="text-sm text-gray-300 mb-1" x-text="note.content_preview || ''"></div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <a :href="'/source/' + note.source_id"
+                     class="text-indigo-400 hover:underline font-mono text-xs"
+                     x-text="note.source_id.slice(0, 12)"></a>
+                  <template x-for="tag in (note.tags || [])" :key="tag">
+                    <span class="px-1.5 py-0.5 bg-gray-700 text-gray-400 text-xs rounded" x-text="tag"></span>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <!-- Known Pitfalls -->
+      <template x-if="primer && primer.pitfalls && primer.pitfalls.length > 0">
+        <section aria-label="Known Pitfalls" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Known Pitfalls</h2>
+          <div class="space-y-2">
+            <template x-for="pit in primer.pitfalls" :key="pit.source_id">
+              <div class="p-2 bg-yellow-900/20 rounded border border-yellow-800/30">
+                <div class="text-sm text-gray-300 mb-1" x-text="pit.content_preview || ''"></div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <a :href="'/source/' + pit.source_id"
+                     class="text-indigo-400 hover:underline font-mono text-xs"
+                     x-text="pit.source_id.slice(0, 12)"></a>
+                  <template x-for="tag in (pit.tags || [])" :key="tag">
+                    <span class="px-1.5 py-0.5 bg-gray-700 text-gray-400 text-xs rounded" x-text="tag"></span>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <!-- Similar Beads -->
+      <template x-if="primer && primer.related_beads && primer.related_beads.length > 0">
+        <section aria-label="Similar Beads" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Similar Beads</h2>
+          <div class="space-y-1">
+            <template x-for="rb in primer.related_beads" :key="rb.bead_id || rb.id">
+              <a :href="'/bead/' + (rb.bead_id || rb.id)"
+                 :data-bead-id="rb.bead_id || rb.id"
+                 class="flex items-center gap-2 p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline">
+                <span class="badge" :class="'badge-' + (rb.status || 'open')" x-text="rb.status || 'open'"></span>
+                <span class="ft-badge" :class="'badge-p' + rb.priority" x-text="'P' + rb.priority"></span>
+                <span class="font-mono text-xs text-gray-500" x-text="rb.bead_id || rb.id"></span>
+                <span class="text-sm text-gray-200 flex-1" x-text="rb.title"></span>
+                <template x-if="rb.similarity != null">
+                  <span class="text-xs text-gray-500" x-text="Math.round(rb.similarity * 100) + '% similar'"></span>
+                </template>
+              </a>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <!-- Comments -->
+      <template x-if="bead.comments && bead.comments.length > 0">
+        <section aria-label="Comments" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Comments</h2>
+          <div class="space-y-3">
+            <template x-for="c in bead.comments" :key="c.id || c.created_at">
+              <div class="pl-4 border-l-2 border-indigo-700/50">
+                <div class="text-xs text-gray-500 mb-1" x-text="(c.author || '?') + ' · ' + formatTs(c.created_at)"></div>
+                <div class="text-sm text-gray-300 prose prose-invert prose-sm max-w-none" x-html="mdHtml(c.text || '')"></div>
+              </div>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <!-- Live panel spacer (shown when dispatch is running) -->
+      <template x-if="isRunning">
+        <div style="height: 20rem;"></div>
+      </template>
+
+    </div>
+  </template>
+
+</div>
