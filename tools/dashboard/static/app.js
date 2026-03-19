@@ -1769,6 +1769,30 @@ async function renderSourceFragment() {
   }
 }
 
+// ── Experiment Page (Jinja2 fragment + Alpine) ───────────────
+
+async function renderExperimentFragment() {
+  pageTitle.textContent = 'Experiment';
+  // Belt-and-suspenders: clean up any SSE subscription before replacing DOM
+  // (Alpine destroy() will also fire, but ordering is not guaranteed).
+  if (window._expSeriesCleanup) {
+    window._expSeriesCleanup();
+    window._expSeriesCleanup = null;
+  }
+  let html;
+  if (_fragmentCache.has('/pages/experiment')) {
+    html = _fragmentCache.get('/pages/experiment');
+  } else {
+    const res = await fetch('/pages/experiment');
+    html = await res.text();
+    _fragmentCache.set('/pages/experiment', html);
+  }
+  content.innerHTML = html;
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
+}
+
 // ── Chat With Panel ─────────────────────────────────────────
 
 let _chatWithTerm = null;
@@ -1784,22 +1808,34 @@ function destroyChatWith() {
   _chatWithFitAddon = null;
 }
 
+// Called by the experiment Alpine component when expanding the Chat With panel.
+function _fitChatWithAddon() {
+  if (_chatWithFitAddon) _chatWithFitAddon.fit();
+}
+
 function connectChatWithTerminal(sessionName) {
   destroyChatWith();
 
-  const panel = document.getElementById('chatwith-panel');
-  const body = document.getElementById('chatwith-body');
   const container = document.getElementById('chatwith-container');
-  const statusEl = document.getElementById('chatwith-status');
-  if (!panel || !container) return;
+  if (!container) return;
 
-  panel.style.display = '';
-  if (!_chatWithCollapsed) body.style.display = '';
-
-  const killBtn = document.getElementById('chatwith-kill-btn');
-  if (killBtn) killBtn.style.display = '';
-
-  if (statusEl) { statusEl.textContent = 'connecting...'; statusEl.className = 'text-xs text-yellow-400 ml-2'; }
+  // Use Alpine bridge if the experiment Alpine component is active; otherwise
+  // fall back to direct DOM manipulation for the legacy (non-Alpine) path.
+  const page = window._experimentPage;
+  if (page) {
+    page.showChatWithPanel();
+    page.setKillVisible(true);
+    page.setChatWithStatus('connecting...', 'text-xs text-yellow-400 ml-2');
+  } else {
+    const panel = document.getElementById('chatwith-panel');
+    const body = document.getElementById('chatwith-body');
+    const killBtn = document.getElementById('chatwith-kill-btn');
+    const statusEl = document.getElementById('chatwith-status');
+    if (panel) panel.style.display = '';
+    if (body && !_chatWithCollapsed) body.style.display = '';
+    if (killBtn) killBtn.style.display = '';
+    if (statusEl) { statusEl.textContent = 'connecting...'; statusEl.className = 'text-xs text-yellow-400 ml-2'; }
+  }
 
   const term = new Terminal({
     theme: {background:'#111827',foreground:'#e5e7eb',cursor:'#6366f1',selectionBackground:'rgba(99,102,241,0.3)'},
@@ -1823,23 +1859,43 @@ function connectChatWithTerminal(sessionName) {
   const ws = new WebSocket(wsUrl);
   _chatWithWs = ws;
 
-  const reconnectBtn = document.getElementById('chatwith-reconnect-btn');
   ws.onopen = () => {
-    if (statusEl) { statusEl.textContent = 'connected'; statusEl.className = 'text-xs text-green-400 ml-2'; }
-    if (reconnectBtn) reconnectBtn.style.display = 'none';
+    if (page) {
+      page.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
+      page.setReconnectVisible(false);
+    } else {
+      const statusEl = document.getElementById('chatwith-status');
+      const reconnectBtn = document.getElementById('chatwith-reconnect-btn');
+      if (statusEl) { statusEl.textContent = 'connected'; statusEl.className = 'text-xs text-green-400 ml-2'; }
+      if (reconnectBtn) reconnectBtn.style.display = 'none';
+    }
     const dims = fitAddon.proposeDimensions();
     if (dims) ws.send(`\x1b[8;${dims.rows};${dims.cols}t`);
     term.focus();
   };
   ws.onmessage = (e) => term.write(e.data);
   ws.onclose = () => {
-    if (statusEl) { statusEl.textContent = 'disconnected'; statusEl.className = 'text-xs text-red-400 ml-2'; }
-    if (reconnectBtn) reconnectBtn.style.display = '';
+    if (page) {
+      page.setChatWithStatus('disconnected', 'text-xs text-red-400 ml-2');
+      page.setReconnectVisible(true);
+    } else {
+      const statusEl = document.getElementById('chatwith-status');
+      const reconnectBtn = document.getElementById('chatwith-reconnect-btn');
+      if (statusEl) { statusEl.textContent = 'disconnected'; statusEl.className = 'text-xs text-red-400 ml-2'; }
+      if (reconnectBtn) reconnectBtn.style.display = '';
+    }
     term.write('\r\n\x1b[90m--- disconnected ---\x1b[0m\r\n');
   };
   ws.onerror = () => {
-    if (statusEl) { statusEl.textContent = 'error'; statusEl.className = 'text-xs text-red-400 ml-2'; }
-    if (reconnectBtn) reconnectBtn.style.display = '';
+    if (page) {
+      page.setChatWithStatus('error', 'text-xs text-red-400 ml-2');
+      page.setReconnectVisible(true);
+    } else {
+      const statusEl = document.getElementById('chatwith-status');
+      const reconnectBtn = document.getElementById('chatwith-reconnect-btn');
+      if (statusEl) { statusEl.textContent = 'error'; statusEl.className = 'text-xs text-red-400 ml-2'; }
+      if (reconnectBtn) reconnectBtn.style.display = '';
+    }
   };
   term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
 }
@@ -2504,8 +2560,12 @@ async function initDisplayCapture(expId) {
 }
 
 function _updateScreenshotStatus(expId, msg) {
-  const el = document.getElementById('exp-screenshot-status');
-  if (el) el.textContent = msg;
+  if (window._experimentPage) {
+    window._experimentPage.setScreenshotStatus(msg);
+  } else {
+    const el = document.getElementById('exp-screenshot-status');
+    if (el) el.textContent = msg;
+  }
 }
 
 /** Grab a frame from the active display stream and POST to server. */
@@ -3127,7 +3187,7 @@ function route() {
     const sessionId = path.startsWith('/terminal/') ? path.split('/terminal/')[1] : null;
     renderTerminal(null, sessionId);
   } else if (path.startsWith('/experiments/')) {
-    renderExperiment(path.split('/experiments/')[1]);
+    renderExperimentFragment();
   } else {
     content.innerHTML = '<div class="text-gray-400">Page not found</div>';
   }
