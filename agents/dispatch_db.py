@@ -76,6 +76,27 @@ CREATE_INDEX = """\
 CREATE INDEX IF NOT EXISTS idx_dispatch_runs_completed ON dispatch_runs(completed_at DESC)
 """
 
+CREATE_LIBRARIAN_JOBS = """\
+CREATE TABLE IF NOT EXISTS librarian_jobs (
+    id TEXT PRIMARY KEY,
+    job_type TEXT NOT NULL,
+    payload TEXT,
+    status TEXT DEFAULT 'pending',
+    priority INTEGER DEFAULT 1,
+    created_at DATETIME DEFAULT (datetime('now')),
+    started_at DATETIME,
+    completed_at DATETIME,
+    librarian_type TEXT,
+    session_id TEXT,
+    attempts INTEGER DEFAULT 0,
+    max_attempts INTEGER DEFAULT 3
+)
+"""
+
+CREATE_LIBRARIAN_JOBS_INDEX = """\
+CREATE INDEX IF NOT EXISTS idx_librarian_jobs_status ON librarian_jobs(status, priority DESC, created_at ASC)
+"""
+
 
 def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +115,8 @@ def init_db() -> None:
     try:
         conn.execute(CREATE_TABLE)
         conn.execute(CREATE_INDEX)
+        conn.execute(CREATE_LIBRARIAN_JOBS)
+        conn.execute(CREATE_LIBRARIAN_JOBS_INDEX)
         for stmt in _MIGRATIONS:
             try:
                 conn.execute(stmt)
