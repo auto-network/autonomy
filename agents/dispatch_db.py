@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS dispatch_runs (
   cpu_usec INTEGER,
   mem_mb INTEGER,
   last_activity DATETIME,
-  jsonl_offset INTEGER DEFAULT 0
+  jsonl_offset INTEGER DEFAULT 0,
+  librarian_type TEXT
 )
 """
 
@@ -70,6 +71,7 @@ _MIGRATIONS = [
     "ALTER TABLE dispatch_runs ADD COLUMN jsonl_offset INTEGER DEFAULT 0",
     "ALTER TABLE dispatch_runs ADD COLUMN tool_count INTEGER",
     "ALTER TABLE dispatch_runs ADD COLUMN turn_count INTEGER",
+    "ALTER TABLE dispatch_runs ADD COLUMN librarian_type TEXT",
 ]
 
 CREATE_INDEX = """\
@@ -203,6 +205,7 @@ def insert_launch_run(
     image: str,
     container_name: str,
     output_dir: str,
+    librarian_type: str | None = None,
 ) -> None:
     """Insert a RUNNING row at agent launch time.
 
@@ -218,13 +221,14 @@ def insert_launch_run(
             """\
             INSERT OR IGNORE INTO dispatch_runs (
                 id, bead_id, started_at, status,
-                branch, branch_base, image, container_name, output_dir
-            ) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?)
+                branch, branch_base, image, container_name, output_dir, librarian_type
+            ) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id, bead_id, started_dt,
                 branch or None, branch_base or None,
                 image or None, container_name or None, output_dir or None,
+                librarian_type,
             ),
         )
         conn.commit()
@@ -248,6 +252,7 @@ def insert_run(
     container_name: str,
     exit_code: int,
     output_dir: str,
+    librarian_type: str | None = None,
 ) -> None:
     """Upsert a dispatch run row on completion.
 
@@ -287,7 +292,7 @@ def insert_run(
                 lines_added, lines_removed, files_changed,
                 score_tooling, score_clarity, score_confidence,
                 time_research_pct, time_coding_pct, time_debugging_pct, time_tooling_pct,
-                discovered_beads_count, has_experience_report, output_dir
+                discovered_beads_count, has_experience_report, output_dir, librarian_type
             ) VALUES (
                 ?, ?, ?, ?, ?,
                 ?, ?, ?,
@@ -296,7 +301,7 @@ def insert_run(
                 ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, ?, ?
+                ?, ?, ?, ?
             )
             """,
             (
@@ -308,7 +313,7 @@ def insert_run(
                 scores.get("tooling"), scores.get("clarity"), scores.get("confidence"),
                 time_breakdown.get("research_pct"), time_breakdown.get("coding_pct"),
                 time_breakdown.get("debugging_pct"), time_breakdown.get("tooling_workaround_pct"),
-                discovered_beads_count, has_experience_report, output_dir or None,
+                discovered_beads_count, has_experience_report, output_dir or None, librarian_type,
             ),
         )
         conn.commit()

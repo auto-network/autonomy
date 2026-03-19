@@ -18,6 +18,7 @@ Usage:
     python -m agents.dispatcher --loop --interval 30
     python -m agents.dispatcher --dry-run        # Show what would be dispatched
     python -m agents.dispatcher --max-concurrent 3  # Run up to 3 agents at once
+    python -m agents.dispatcher --max-concurrent-librarians 2  # Run up to 2 librarians
 """
 
 from __future__ import annotations
@@ -31,7 +32,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import importlib
+import shutil
+
 from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running
+from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
@@ -47,6 +52,15 @@ DEFAULT_IMAGE = "autonomy-agent"
 
 # Kill containers exceeding this runtime (seconds)
 MAX_AGENT_RUNTIME = 600
+
+# Librarian agent type registry — maps job_type to prompt + primer
+LIBRARIAN_DIR = Path(__file__).parent / "librarians"
+LIBRARIAN_TYPES: dict[str, dict] = {
+    "review_report": {
+        "prompt_path": LIBRARIAN_DIR / "experience_reviewer" / "prompt.md",
+        "primer_module": "agents.librarians.experience_reviewer.primer",
+    },
+}
 
 
 @dataclass
@@ -80,8 +94,23 @@ class RunningAgent:
 
 
 @dataclass
+class RunningLibrarian:
+    """Tracks a launched librarian container that hasn't been collected yet."""
+    job_id: str
+    job_type: str
+    container_name: str
+    container_id: str
+    output_dir: str
+    started_at: float
+    jsonl_offset: int = 0
+    prev_cpu_usec: int = 0
+    prev_cpu_poll_time: float = 0.0
+
+
+@dataclass
 class DispatcherConfig:
     max_concurrent: int = 1
+    max_concurrent_librarians: int = 1
     label_filter: str | None = None  # Optional queue label to narrow dispatch
     dry_run: bool = False
     interval: int = 60  # Seconds between dispatch cycles
@@ -1005,6 +1034,204 @@ def _record_run(agent: RunningAgent, result: DispatchResult) -> None:
         print(f"  WARNING: Failed to record run to SQLite: {e}", file=sys.stderr)
 
 
+# ── Librarian launch / collect ───────────────────────────────────
+
+
+def _build_librarian_prompt(job_type: str, payload: dict) -> str:
+    """Assemble full prompt for a librarian agent: dynamic primer + static role definition."""
+    config = LIBRARIAN_TYPES.get(job_type)
+    if not config:
+        raise ValueError(f"Unknown librarian job type: {job_type!r}")
+
+    module = importlib.import_module(config["primer_module"])
+    primer = module.build_primer(payload)
+
+    static = config["prompt_path"].read_text()
+
+    return primer + "\n\n---\n\n" + static
+
+
+def _get_auth_docker_args(output_dir: str) -> list[str] | None:
+    """Resolve Claude credentials and return docker auth args.
+
+    Returns a list of docker args, or None if no credentials found.
+    May copy credentials file into output_dir for the container lifetime.
+    """
+    claude_creds = Path(os.environ.get("CLAUDE_CREDENTIALS_DIR",
+                                       str(Path.home() / ".claude")))
+    setup_token_file = claude_creds / ".setup-token"
+    creds_file = claude_creds / ".credentials.json"
+
+    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+    if not oauth_token and setup_token_file.exists():
+        try:
+            oauth_token = setup_token_file.read_text().strip()
+        except OSError:
+            pass
+
+    if oauth_token:
+        return ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={oauth_token}"]
+
+    if creds_file.exists():
+        creds_copy = str(Path(output_dir) / ".credentials.json")
+        shutil.copy2(str(creds_file), creds_copy)
+        return ["-v", f"{creds_copy}:/home/agent/.claude/.credentials.json:ro"]
+
+    return None
+
+
+def start_librarian(job: dict) -> RunningLibrarian | None:
+    """Launch a librarian container in detached mode. Returns immediately.
+
+    Launches directly via docker run -d (no worktree, no git branch).
+    Container mounts:
+    - Repo: read-only
+    - Graph DB: read-write
+    - Beads: read-write (Dolt on host network)
+
+    Returns RunningLibrarian on success, None on failure.
+    """
+    job_id = job["id"]
+    job_type = job["job_type"]
+
+    payload: dict = {}
+    if job.get("payload"):
+        try:
+            payload = json.loads(job["payload"])
+        except json.JSONDecodeError:
+            pass
+
+    print(f"  Starting librarian: {job_type} (job {job_id[:8]})")
+
+    try:
+        prompt = _build_librarian_prompt(job_type, payload)
+    except Exception as e:
+        print(f"  ERROR: failed to build librarian prompt for {job_type}: {e}",
+              file=sys.stderr)
+        return None
+
+    # Prepare output dir
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_id = f"librarian-{job_type}-{job_id[:8]}-{ts}"
+    output_dir = str(REPO_ROOT / "data" / "agent-runs" / run_id)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    session_dir = Path(output_dir) / "sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write prompt to persistent file (needed for container lifetime)
+    prompt_file = Path(output_dir) / ".prompt.md"
+    prompt_file.write_text(prompt)
+
+    # Resolve auth
+    auth_args = _get_auth_docker_args(output_dir)
+    if auth_args is None:
+        print("  ERROR: No Claude credentials found for librarian", file=sys.stderr)
+        return None
+
+    container_name = f"librarian-{job_type}-{os.getpid()}-{job_id[:8]}"
+
+    cmd = [
+        "docker", "run", "-d",
+        "--name", container_name,
+        "--network=host",
+        "-e", f"BD_ACTOR=librarian:{container_name}",
+        "-e", "BD_READONLY=0",
+        "-e", f"GRAPH_DB=/home/agent/graph.db",
+        *auth_args,
+        # Repo: read-only (no code changes)
+        "-v", f"{REPO_ROOT}:/workspace/repo:ro",
+        # Graph DB: read-write (librarians write notes/beads)
+        "-v", f"{REPO_ROOT}/data/graph.db:/home/agent/graph.db",
+        # Beads: read-write
+        "-v", f"{REPO_ROOT}/.beads:/data/.beads",
+        # Output and session dirs
+        "-v", f"{output_dir}:/workspace/output",
+        "-v", f"{str(session_dir)}:/home/agent/.claude/projects",
+        # Prompt file (read-only reference)
+        "-v", f"{str(prompt_file)}:/tmp/prompt.md:ro",
+        "--entrypoint", "claude",
+        DEFAULT_IMAGE,
+        "--dangerously-skip-permissions",
+        "--print",
+        prompt,
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print(f"  ERROR: docker run -d timed out for librarian {job_id[:8]}",
+              file=sys.stderr)
+        return None
+
+    if result.returncode != 0:
+        print(f"  ERROR: docker run -d failed for librarian {job_id[:8]}: {result.stderr}",
+              file=sys.stderr)
+        return None
+
+    container_id = result.stdout.strip()
+    if not container_id:
+        print(f"  ERROR: docker run returned empty container ID for librarian {job_id[:8]}",
+              file=sys.stderr)
+        return None
+
+    print(f"  Librarian container started: {container_name} ({container_id[:12]})")
+
+    return RunningLibrarian(
+        job_id=job_id,
+        job_type=job_type,
+        container_name=container_name,
+        container_id=container_id,
+        output_dir=output_dir,
+        started_at=time.time(),
+    )
+
+
+def _record_librarian_launch(lib: RunningLibrarian) -> None:
+    """Record a RUNNING row for a librarian at launch time. Best-effort."""
+    try:
+        run_id = Path(lib.output_dir).name if lib.output_dir else lib.job_id
+        insert_launch_run(
+            run_id=run_id,
+            bead_id="",  # No bead — librarian is job-driven
+            started_at=lib.started_at,
+            branch="",
+            branch_base="",
+            image=DEFAULT_IMAGE,
+            container_name=lib.container_name,
+            output_dir=lib.output_dir,
+            librarian_type=lib.job_type,
+        )
+    except Exception as e:
+        print(f"  WARNING: Failed to record librarian launch to SQLite: {e}",
+              file=sys.stderr)
+
+
+def _record_librarian_run(lib: RunningLibrarian, exit_code: int, status: str) -> None:
+    """Record librarian completion to dispatch_runs. Best-effort."""
+    try:
+        run_id = Path(lib.output_dir).name if lib.output_dir else lib.job_id
+        insert_run(
+            run_id=run_id,
+            bead_id="",
+            started_at=lib.started_at,
+            completed_at=time.time(),
+            status=status,
+            reason=f"Librarian {lib.job_type} job {lib.job_id[:8]} completed",
+            decision=None,
+            commit_hash="",
+            branch="",
+            branch_base="",
+            image=DEFAULT_IMAGE,
+            container_name=lib.container_name,
+            exit_code=exit_code,
+            output_dir=lib.output_dir,
+            librarian_type=lib.job_type,
+        )
+    except Exception as e:
+        print(f"  WARNING: Failed to record librarian run to SQLite: {e}",
+              file=sys.stderr)
+
+
 # ── Poll and collect ─────────────────────────────────────────────
 
 
@@ -1049,9 +1276,27 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
         print(f"  Collecting: {agent.bead_id} (container: {agent.container_name})")
         try:
             result = collect_results(agent, exit_code)
+            decision_status = (result.decision or {}).get("status", "")
             process_decision(result)
             _record_run(agent, result)
             _ingest_session(result)
+            # Enqueue review_report job after a successful DONE dispatch (best-effort)
+            if decision_status == "DONE":
+                try:
+                    run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+                    report_path = str(Path(agent.output_dir) / "experience_report.md")
+                    decision_path = str(Path(agent.output_dir) / "decision.json")
+                    payload = json.dumps({
+                        "bead_id": agent.bead_id,
+                        "report_path": report_path,
+                        "decision_path": decision_path,
+                        "run_id": run_id,
+                    })
+                    job_id = enqueue_job("review_report", payload=payload)
+                    print(f"  Enqueued review_report job {job_id[:8]} for {agent.bead_id}")
+                except Exception as eq_err:
+                    print(f"  WARNING: enqueue review_report failed for {agent.bead_id}: {eq_err}",
+                          file=sys.stderr)
         except Exception as e:
             error_msg = f"Collection error: {type(e).__name__}: {e}"
             print(f"  ERROR collecting {agent.bead_id}: {error_msg}")
@@ -1087,24 +1332,154 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             cleanup_worktree(agent.worktree_path)
 
 
+def poll_and_collect_librarians(running_librarians: list[RunningLibrarian]) -> None:
+    """Poll running librarian containers and collect results for completed ones.
+
+    Modifies the running_librarians list in place. No merge or worktree cleanup.
+    Updates job status to done/failed and ingests session into graph.
+    """
+    completed: list[tuple[RunningLibrarian, int]] = []
+    timed_out: list[RunningLibrarian] = []
+
+    for lib in running_librarians:
+        elapsed = time.time() - lib.started_at
+        finished, exit_code = poll_container(lib.container_id)
+
+        if finished:
+            print(f"  Librarian completed: {lib.job_type}/{lib.job_id[:8]} "
+                  f"(exit={exit_code}, {elapsed:.0f}s)")
+            completed.append((lib, exit_code))
+        elif elapsed > MAX_AGENT_RUNTIME:
+            jsonl_file = _find_jsonl_file(lib.output_dir)
+            stale = True
+            if jsonl_file:
+                try:
+                    stale_secs = time.time() - jsonl_file.stat().st_mtime
+                    stale = stale_secs > 300
+                except OSError:
+                    pass
+            if stale:
+                print(f"  Librarian timeout: {lib.job_type}/{lib.job_id[:8]} "
+                      f"({elapsed:.0f}s, JSONL stale)")
+                timed_out.append(lib)
+            else:
+                print(f"  Librarian {lib.job_id[:8]}: {elapsed:.0f}s elapsed, JSONL active")
+                _collect_live_stats_for_librarian(lib)
+        else:
+            _collect_live_stats_for_librarian(lib)
+
+    for lib, exit_code in completed:
+        running_librarians.remove(lib)
+        status = "DONE" if exit_code == 0 else "FAILED"
+        try:
+            remove_container(lib.container_name)
+            _record_librarian_run(lib, exit_code, status)
+            _ingest_session(DispatchResult(
+                bead_id=lib.job_id,
+                exit_code=exit_code,
+                output_dir=lib.output_dir,
+            ))
+            complete_job(lib.job_id, status="done" if exit_code == 0 else "failed")
+            print(f"  Librarian collected: {lib.job_type}/{lib.job_id[:8]} → {status}")
+        except Exception as e:
+            print(f"  ERROR collecting librarian {lib.job_id[:8]}: {e}")
+            try:
+                fail_job(lib.job_id)
+                _record_librarian_run(lib, exit_code, "FAILED")
+            except Exception:
+                pass
+
+    for lib in timed_out:
+        running_librarians.remove(lib)
+        print(f"  Killing timed-out librarian: {lib.container_name}")
+        kill_container(lib.container_name)
+        try:
+            remove_container(lib.container_name)
+            fail_job(lib.job_id)
+            _record_librarian_run(lib, -1, "FAILED")
+        except Exception as e:
+            print(f"  ERROR handling timed-out librarian {lib.job_id[:8]}: {e}")
+
+
+def _collect_live_stats_for_librarian(lib: RunningLibrarian) -> None:
+    """Collect live stats for a running librarian container (same as bead agents)."""
+    try:
+        run_id = Path(lib.output_dir).name if lib.output_dir else lib.job_id
+
+        snippet: str | None = None
+        token_delta = 0
+        tool_delta = 0
+        turn_delta = 0
+        last_activity: str | None = None
+
+        jsonl_file = _find_jsonl_file(lib.output_dir)
+        if jsonl_file:
+            snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
+                jsonl_file, lib.jsonl_offset
+            )
+            lib.jsonl_offset = new_offset
+
+        mem_mb = _read_cgroup_mem_mb(lib.container_id)
+
+        cpu_usec = _read_cgroup_cpu_usec(lib.container_id)
+        cpu_pct: float | None = None
+        now = time.time()
+        if cpu_usec is not None and lib.prev_cpu_usec > 0:
+            elapsed_usec = (now - lib.prev_cpu_poll_time) * 1_000_000
+            if elapsed_usec > 0:
+                cpu_pct = (cpu_usec - lib.prev_cpu_usec) / elapsed_usec * 100.0
+                cpu_pct = max(0.0, cpu_pct)
+        if cpu_usec is not None:
+            lib.prev_cpu_usec = cpu_usec
+            lib.prev_cpu_poll_time = now
+
+        update_live_stats(
+            run_id=run_id,
+            last_snippet=snippet,
+            token_delta=token_delta,
+            tool_delta=tool_delta,
+            turn_delta=turn_delta,
+            cpu_pct=cpu_pct,
+            cpu_usec=cpu_usec,
+            mem_mb=mem_mb,
+            last_activity=last_activity,
+            jsonl_offset=lib.jsonl_offset,
+        )
+    except Exception as e:
+        print(f"  WARNING: live stats failed for librarian {lib.job_id[:8]}: {e}",
+              file=sys.stderr)
+
+
 # ── Dispatch cycle ──────────────────────────────────────────────
 
 
-def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int:
+def dispatch_cycle(
+    config: DispatcherConfig,
+    running: list[RunningAgent],
+    running_librarians: list[RunningLibrarian],
+) -> int:
     """Run one dispatch cycle. Non-blocking.
 
-    Phase 1: Poll running agents for completion, collect results.
-    Phase 2: Launch new agents if under max_concurrent.
+    Phase 1: Poll running bead agents for completion, collect results.
+    Phase 2: Poll running librarian agents, collect results.
+    Phase 3: Launch new bead agents if under max_concurrent.
+    Phase 4: Launch new librarian agents from queue if slots available.
 
     Returns number of beads newly dispatched this cycle.
     """
     timestamp = datetime.now().strftime("%H:%M:%S")
     queue_info = f"queue: {config.label_filter}" if config.label_filter else "all approved"
     running_ids = ", ".join(a.bead_id for a in running) if running else "none"
-    print(f"\n[{timestamp}] pid={os.getpid()} cycle ({queue_info}, {len(running)} running: [{running_ids}])")
+    lib_ids = ", ".join(f"{l.job_type}/{l.job_id[:8]}" for l in running_librarians) if running_librarians else "none"
+    print(f"\n[{timestamp}] pid={os.getpid()} cycle ({queue_info}, "
+          f"{len(running)} beads: [{running_ids}], "
+          f"{len(running_librarians)} librarians: [{lib_ids}])")
 
-    # ── Phase 1: Poll running agents ──────────────────────────
+    # ── Phase 1: Poll running bead agents ─────────────────────
     poll_and_collect(running)
+
+    # ── Phase 2: Poll running librarian agents ─────────────────
+    poll_and_collect_librarians(running_librarians)
 
     # ── Phase 2: Launch new agents ────────────────────────────
     slots = config.max_concurrent - len(running)
@@ -1177,6 +1552,25 @@ def dispatch_cycle(config: DispatcherConfig, running: list[RunningAgent]) -> int
             wt = find_worktree_for_bead(bead_id)
             if wt:
                 cleanup_worktree(wt)
+
+    # ── Phase 4: Launch librarian agents from queue ────────────
+    lib_slots = config.max_concurrent_librarians - len(running_librarians)
+    if lib_slots > 0 and not config.dry_run:
+        try:
+            job = dequeue(config.max_concurrent_librarians)
+            if job:
+                lib = start_librarian(job)
+                if lib:
+                    _record_librarian_launch(lib)
+                    running_librarians.append(lib)
+                    print(f"  Librarian dispatched: {lib.job_type}/{lib.job_id[:8]} → {lib.container_name}")
+                else:
+                    print(f"  Librarian launch failed for job {job['id'][:8]}")
+                    fail_job(job["id"])
+        except Exception as e:
+            print(f"  WARNING: librarian queue check failed: {e}", file=sys.stderr)
+    elif lib_slots <= 0:
+        print(f"  Librarian pool at capacity ({len(running_librarians)}/{config.max_concurrent_librarians})")
 
     return dispatched
 
@@ -1408,10 +1802,13 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Show what would be dispatched")
     parser.add_argument("--queue", default=None, help="Optional label to narrow dispatch (default: all approved)")
     parser.add_argument("--max-concurrent", type=int, default=1, help="Max concurrent agents (default: 1)")
+    parser.add_argument("--max-concurrent-librarians", type=int, default=1,
+                        help="Max concurrent librarian agents (default: 1)")
 
     args = parser.parse_args()
     config = DispatcherConfig(
         max_concurrent=args.max_concurrent,
+        max_concurrent_librarians=args.max_concurrent_librarians,
         label_filter=args.queue,
         dry_run=args.dry_run,
         interval=args.interval,
@@ -1422,6 +1819,7 @@ def main():
     print(f"Autonomy Dispatcher (pid={pid})")
     print(f"  Queue: {config.label_filter or 'all approved'}")
     print(f"  Max concurrent: {config.max_concurrent}")
+    print(f"  Max concurrent librarians: {config.max_concurrent_librarians}")
     print(f"  Loop: {config.loop} (interval: {config.interval}s)")
 
     # Ensure only one dispatcher runs at a time
@@ -1449,13 +1847,16 @@ def main():
         for agent in running:
             _record_launch(agent)  # Ensure RUNNING row exists in DB
 
+    # Librarians are not recovered across restarts (stateless job queue handles re-run)
+    running_librarians: list[RunningLibrarian] = []
+
     # Reconcile all state locations — clean up orphaned rows, beads, and worktrees
     reconcile_state(running)
 
     if config.loop:
         while True:
             try:
-                dispatch_cycle(config, running)
+                dispatch_cycle(config, running, running_librarians)
                 time.sleep(config.interval)
             except KeyboardInterrupt:
                 print(f"\nDispatcher stopped. {len(running)} agent(s) still running.")
@@ -1466,12 +1867,14 @@ def main():
                 break
     else:
         # Single-shot: launch, then poll until all agents complete
-        dispatch_cycle(config, running)
-        if running:
-            print(f"\nWaiting for {len(running)} agent(s) to complete...")
-            while running:
+        dispatch_cycle(config, running, running_librarians)
+        if running or running_librarians:
+            print(f"\nWaiting for {len(running)} agent(s) and "
+                  f"{len(running_librarians)} librarian(s) to complete...")
+            while running or running_librarians:
                 time.sleep(5)
                 poll_and_collect(running)
+                poll_and_collect_librarians(running_librarians)
 
 
 if __name__ == "__main__":
