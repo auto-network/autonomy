@@ -1606,8 +1606,6 @@ async function renderBeadDetailFragment(id) {
   }
 }
 
-let timelineInterval = null;
-
 // ── Dispatch Page (Jinja2 fragment + Alpine) ──────────────────
 
 const _fragmentCache = new Map();
@@ -1630,372 +1628,40 @@ async function renderDispatchFragment() {
 }
 
 
-// ── Timeline Page ────────────────────────────────────────────
+// ── Timeline Page (Jinja2 fragment + Alpine) ──────────────────
 
-function _timelineStarRating(score, max = 5) {
-  if (score == null) return '<span class="text-xs text-gray-600">--</span>';
-  const filled = Math.round(score);
-  let html = '';
-  for (let i = 1; i <= max; i++) {
-    html += i <= filled
-      ? '<span class="tl-star-on">&#9733;</span>'
-      : '<span class="tl-star-off">&#9733;</span>';
-  }
-  return html;
-}
-
-function _timelineDuration(secs) {
-  if (secs == null) return '--';
-  if (secs < 60) return Math.round(secs) + 's';
-  if (secs < 3600) return Math.round(secs / 60) + 'm';
-  const h = Math.floor(secs / 3600);
-  const m = Math.round((secs % 3600) / 60);
-  return h + 'h ' + m + 'm';
-}
-
-function _timelineOutcomeBadge(status) {
-  if (status === 'DONE') return '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded-full font-semibold">DONE</span>';
-  if (status === 'BLOCKED') return '<span class="px-2 py-0.5 bg-amber-900 text-amber-300 text-xs rounded-full font-semibold">BLOCKED</span>';
-  if (status === 'FAILED') return '<span class="px-2 py-0.5 bg-red-900 text-red-300 text-xs rounded-full font-semibold">FAILED</span>';
-  return '<span class="px-2 py-0.5 bg-gray-700 text-gray-400 text-xs rounded-full font-semibold">' + (status || '?') + '</span>';
-}
-
-function _timelineBreakdownBar(tb) {
-  if (!tb) return '';
-  const r = tb.research_pct || 0;
-  const c = tb.coding_pct || 0;
-  const d = tb.debugging_pct || 0;
-  const t = tb.tooling_workaround_pct || 0;
-  if (r + c + d + t === 0) return '';
-  let legend = '<div class="tl-legend">';
-  if (r) legend += `<span class="tl-lr">research ${r}%</span>`;
-  if (c) legend += `<span class="tl-lc">coding ${c}%</span>`;
-  if (d) legend += `<span class="tl-ld">debug ${d}%</span>`;
-  if (t) legend += `<span class="tl-lt">tooling ${t}%</span>`;
-  legend += '</div>';
-  let bar = '<div class="tl-stacked-bar">';
-  if (r) bar += `<div class="tl-bar-r" style="width:${r}%"></div>`;
-  if (c) bar += `<div class="tl-bar-c" style="width:${c}%"></div>`;
-  if (d) bar += `<div class="tl-bar-d" style="width:${d}%"></div>`;
-  if (t) bar += `<div class="tl-bar-t" style="width:${t}%"></div>`;
-  bar += '</div>';
-  return { legend, bar };
-}
-
-function _timelineTypeIcon(status) {
-  if (status === 'DONE') return '<span class="text-green-400">&#10003;</span>';
-  if (status === 'BLOCKED') return '<span class="text-amber-400">&#9888;</span>';
-  if (status === 'FAILED') return '<span class="text-red-400">&#10007;</span>';
-  return '<span class="text-gray-500">&#9679;</span>';
-}
-
-async function renderTimeline() {
+async function renderTimelineFragment() {
   pageTitle.textContent = 'Timeline';
-  if (timelineInterval) clearInterval(timelineInterval);
-
-  let currentRange = '1d';
-
-  function rangeToParam(r) {
-    if (r === '1D') return '1d';
-    if (r === '1W') return '7d';
-    if (r === '1M') return '30d';
-    if (r === 'All') return '';
-    return '1d';
+  let html;
+  if (_fragmentCache.has('/pages/timeline')) {
+    html = _fragmentCache.get('/pages/timeline');
+  } else {
+    const res = await fetch('/pages/timeline');
+    html = await res.text();
+    _fragmentCache.set('/pages/timeline', html);
   }
-
-  async function refresh() {
-    const rangeParam = rangeToParam(currentRange);
-    let statsUrl = '/api/timeline/stats';
-    let feedUrl = '/api/timeline';
-    const qs = rangeParam ? '?range=' + rangeParam : '';
-    statsUrl += qs;
-    feedUrl += qs;
-
-    const [stats, entries] = await Promise.all([api(statsUrl), api(feedUrl)]);
-
-    let html = '';
-
-    // Timeframe toggle
-    html += '<div class="flex items-center gap-2 mb-6">';
-    html += '<div class="inline-flex rounded-lg bg-gray-800 border border-gray-700 p-0.5">';
-    for (const r of ['1D', '1W', '1M', 'All']) {
-      const active = r === currentRange;
-      const cls = active
-        ? 'bg-indigo-600 text-white'
-        : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700';
-      html += `<button onclick="window._timelineSetRange('${r}')" class="px-3 py-1 text-sm font-medium rounded-md transition-colors ${cls}">${r}</button>`;
-    }
-    html += '</div>';
-    html += '</div>';
-
-    // Stats tiles
-    html += '<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">';
-
-    // Completed + success rate
-    const successPct = stats.success_rate != null ? (stats.success_rate * 100).toFixed(0) + '%' : '--';
-    html += `<div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div class="text-xs text-gray-500 mb-1">Completed</div>
-      <div class="text-2xl font-bold text-green-400">${stats.completed_count || 0}</div>
-      <div class="text-xs text-gray-500 mt-1">${successPct} success</div>
-    </div>`;
-
-    // Failed + Blocked
-    const failBlocked = (stats.failed_count || 0) + (stats.blocked_count || 0);
-    html += `<div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div class="text-xs text-gray-500 mb-1">Failed / Blocked</div>
-      <div class="text-2xl font-bold text-red-400">${failBlocked}</div>
-      <div class="text-xs text-gray-500 mt-1">${stats.failed_count || 0} failed, ${stats.blocked_count || 0} blocked</div>
-    </div>`;
-
-    // Avg Duration
-    html += `<div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div class="text-xs text-gray-500 mb-1">Avg Duration</div>
-      <div class="text-2xl font-bold text-indigo-400">${_timelineDuration(stats.avg_duration)}</div>
-    </div>`;
-
-    // Avg Tooling Score
-    html += `<div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div class="text-xs text-gray-500 mb-1">Avg Tooling</div>
-      <div class="text-lg mt-1">${_timelineStarRating(stats.avg_tooling_score)}</div>
-      <div class="text-xs text-gray-500 mt-1">${stats.avg_tooling_score != null ? stats.avg_tooling_score.toFixed(1) + '/5' : '--'}</div>
-    </div>`;
-
-    // Avg Confidence Score
-    html += `<div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div class="text-xs text-gray-500 mb-1">Avg Confidence</div>
-      <div class="text-lg mt-1">${_timelineStarRating(stats.avg_confidence_score)}</div>
-      <div class="text-xs text-gray-500 mt-1">${stats.avg_confidence_score != null ? stats.avg_confidence_score.toFixed(1) + '/5' : '--'}</div>
-    </div>`;
-
-    html += '</div>';
-
-    // Feed
-    html += '<div class="mb-4"><h2 class="text-lg font-semibold text-indigo-400">Feed</h2></div>';
-
-    if (!Array.isArray(entries) || entries.length === 0) {
-      html += '<div class="text-gray-500 text-sm">No timeline entries for this period</div>';
-    } else {
-      html += '<div>';
-      for (const e of entries) {
-        const rawTs = e.completed_at || e.started_at || '';
-        const ts = rawTs ? new Date(rawTs).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '';
-        const cardId = 'tl-card-' + (e.bead_id || '').replace(/[^a-zA-Z0-9-]/g, '');
-
-        // Dot color by status
-        const dotCls = e.status === 'DONE' ? 'tl-dot-done'
-          : e.status === 'FAILED' ? 'tl-dot-failed'
-          : e.status === 'BLOCKED' ? 'tl-dot-blocked'
-          : 'tl-dot-default';
-
-        // Priority badge
-        const prio = e.priority != null ? e.priority : '';
-        const prioCls = prio === 0 ? 'tl-ft-p0' : prio === 1 ? 'tl-ft-p1' : prio === 2 ? 'tl-ft-p2' : 'tl-ft-p3';
-        const prioBadge = prio !== '' ? `<span class="tl-ft ${prioCls}">P${prio}</span>` : '';
-
-        // Status badge
-        const stCls = e.status === 'DONE' ? 'tl-ft-done'
-          : e.status === 'FAILED' ? 'tl-ft-failed'
-          : e.status === 'BLOCKED' ? 'tl-ft-blocked'
-          : 'tl-ft-p3';
-        const stBadge = `<span class="tl-ft ${stCls}">${_esc(e.status || '?')}</span>`;
-
-        // Blended star rating (collapsed)
-        let avgHtml = '';
-        let expScores = '';
-        if (e.scores) {
-          const avg = (e.scores.tooling + e.scores.clarity + e.scores.confidence) / 3;
-          avgHtml = `<span class="tl-avg-wrap">${_timelineStarRating(Math.round(avg))} <span class="tl-avg-num">(${avg.toFixed(1)})</span></span>`;
-          expScores =
-            `<span><span class="tl-exp-label">Tooling</span>${_timelineStarRating(e.scores.tooling)}</span>` +
-            `<span><span class="tl-exp-label">Clarity</span>${_timelineStarRating(e.scores.clarity)}</span>` +
-            `<span><span class="tl-exp-label">Confidence</span>${_timelineStarRating(e.scores.confidence)}</span>`;
-        }
-
-        // Diff stats
-        let diffHtml = '';
-        if (e.lines_added != null || e.lines_removed != null) {
-          if (e.lines_added != null) diffHtml += `<span class="tl-diff-add">+${e.lines_added}</span>`;
-          if (e.lines_removed != null) diffHtml += ` <span class="tl-diff-del">-${e.lines_removed}</span>`;
-        }
-
-        // Breakdown bar + legend
-        const breakdown = _timelineBreakdownBar(e.time_breakdown);
-        const legendHtml = breakdown ? breakdown.legend : '';
-        const barHtml = breakdown ? breakdown.bar : '';
-
-        // Bottom section (legend + stats row + bar)
-        let bottomHtml = '';
-        if (breakdown || avgHtml || diffHtml || e.duration_secs != null) {
-          bottomHtml = '<div class="tl-bottom"><div class="tl-bottom-row">' + legendHtml +
-            '<div class="tl-stats-right">' +
-            (e.duration_secs != null ? `<span>&#9201; ${_timelineDuration(e.duration_secs)}</span>` : '') +
-            (diffHtml ? diffHtml : '') +
-            avgHtml +
-            '</div></div>' + barHtml + '</div>';
-        }
-
-        // Expanded detail: links left, scores right
-        let expDetail = '<div class="tl-exp-detail"><div class="tl-exp-row">' +
-          '<div class="tl-exp-links">' +
-          `<a class="tl-exp-link" href="/dispatch/trace/${_esc(e.bead_id)}" onclick="event.stopPropagation()">Trace &#8594;</a>` +
-          `<a class="tl-exp-link" href="/bead/${_esc(e.bead_id)}" onclick="event.stopPropagation()">Bead &#8594;</a>` +
-          '</div>';
-        if (expScores) {
-          expDetail += `<div class="tl-exp-scores" style="margin-left:auto">${expScores}</div>`;
-        }
-        expDetail += '</div>';
-        if (e.failure_category) {
-          expDetail += `<div class="text-xs text-red-400 mt-1">Failure: ${_esc(e.failure_category)}</div>`;
-        }
-        if (e.discovered_beads_count) {
-          expDetail += `<div class="text-xs text-purple-400 mt-1">${e.discovered_beads_count} bead(s) discovered</div>`;
-        }
-        expDetail += '</div>';
-
-        html += `<div class="tl-card" id="${cardId}" onclick="this.classList.toggle('open')">` +
-
-          // Row 1: dot · title · (bead-id) time
-          '<div class="tl-row1">' +
-          `<span class="tl-dot ${dotCls}"></span>` +
-          `<span class="tl-title">${_esc(e.title || e.bead_id)}</span>` +
-          '<div class="tl-top-right">' +
-          `<span class="tl-bead-id">(${_esc(e.bead_id)})</span>` +
-          `<span class="tl-ts">${_esc(ts)}</span>` +
-          '</div>' +
-          '</div>' +
-
-          // Row 2: reason (truncated) · priority + status badges
-          '<div class="tl-row2">' +
-          `<div class="tl-reason">${_esc(e.reason || '')}</div>` +
-          '<div class="tl-row2-badges">' + prioBadge + stBadge + '</div>' +
-          '</div>' +
-
-          // Expanded detail (CSS-driven via .tl-card.open)
-          expDetail +
-
-          // Bottom: legend + stats row + stacked bar
-          bottomHtml +
-
-          '</div>';
-      }
-      html += '</div>';
-    }
-
-    content.innerHTML = html;
+  content.innerHTML = html;
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
   }
-
-  window._timelineSetRange = function(r) {
-    currentRange = r;
-    refresh();
-  };
-
-  await refresh();
-  timelineInterval = setInterval(refresh, 15000); // slower poll — historical data
 }
 
-async function renderTrace(runName) {
-  pageTitle.textContent = `Trace: ${runName}`;
-  const trace = await api(`/api/dispatch/trace/${runName}`);
-  if (trace.error) {
-    content.innerHTML = `<div class="text-red-400">${_esc(trace.error)}</div>`;
-    return;
+// ── Trace Page (Jinja2 fragment + Alpine) ──────────────────────
+
+async function renderTraceFragment() {
+  pageTitle.textContent = 'Trace';
+  let html;
+  if (_fragmentCache.has('/pages/trace')) {
+    html = _fragmentCache.get('/pages/trace');
+  } else {
+    const res = await fetch('/pages/trace');
+    html = await res.text();
+    _fragmentCache.set('/pages/trace', html);
   }
-
-  // Use the resolved run directory name (slug may be a bead ID)
-  const resolvedRun = trace.run || runName;
-
-  // If this is a live/running dispatch, show live view instead of trace
-  if (trace.is_live) {
-    const bead = Array.isArray(trace.bead) ? trace.bead[0] : trace.bead;
-    content.innerHTML = `
-      <div class="mb-6">
-        <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">← Back to Dispatch</a>
-        <h1 class="text-2xl font-bold mb-2">${_esc(bead?.title || trace.bead_id)}</h1>
-        <div class="flex gap-2 items-center mb-4">
-          <a href="/bead/${trace.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline">${_esc(trace.bead_id)}</a>
-          ${bead ? priorityBadge(bead.priority) : ''}
-          <span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded font-mono animate-pulse">RUNNING</span>
-        </div>
-      </div>
-      <div style="height: 20rem;"></div>`;
-    showLivePanel(resolvedRun);
-    return;
-  }
-
-  const bead = Array.isArray(trace.bead) ? trace.bead[0] : trace.bead;
-  const decision = trace.decision || {};
-  const status = decision.status || '?';
-  const statusColor = status === 'DONE' ? 'green' : status === 'BLOCKED' ? 'yellow' : 'red';
-
-  let html = `
-    <div class="mb-6">
-      <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">← Back to Dispatch</a>
-      <h1 class="text-2xl font-bold mb-2">${_esc(bead?.title || trace.bead_id)}</h1>
-      <div class="flex gap-2 items-center mb-4">
-        <a href="/bead/${trace.bead_id}" class="font-mono text-sm text-indigo-400 hover:underline">${_esc(trace.bead_id)}</a>
-        ${bead ? priorityBadge(bead.priority) : ''}
-        <span class="badge badge-${statusColor === 'green' ? 'closed' : 'open'}">${_esc(status)}</span>
-        ${trace.commit_hash ? `<span class="font-mono text-xs text-gray-400">${trace.commit_hash.slice(0, 10)}</span>` : ''}
-      </div>
-    </div>`;
-
-  // Decision
-  html += `<div class="mb-6">
-    <h2 class="text-lg font-semibold mb-2 text-${statusColor}-400">Decision</h2>
-    <div class="bg-gray-800 rounded-lg p-4">
-      <div class="text-sm mb-2"><strong>Status:</strong> ${_esc(status)}</div>
-      <div class="text-sm mb-2"><strong>Reason:</strong> ${_esc(decision.reason || 'none')}</div>
-      ${decision.notes ? `<div class="text-sm mb-2"><strong>Notes:</strong> ${_esc(decision.notes)}</div>` : ''}
-      ${decision.artifacts?.length ? `<div class="text-sm"><strong>Artifacts:</strong> ${_esc(decision.artifacts.join(', '))}</div>` : ''}
-    </div>
-  </div>`;
-
-  // Discovered beads
-  if (decision.discovered_beads?.length) {
-    html += `<div class="mb-6">
-      <h2 class="text-lg font-semibold mb-2 text-blue-400">Discovered Work</h2>`;
-    for (const b of decision.discovered_beads) {
-      html += `<div class="bg-gray-800 rounded-lg p-3 mb-2">
-        <div class="font-semibold text-sm">${_esc(b.title)}</div>
-        <div class="text-xs text-gray-400 mt-1">${_esc(b.description?.slice(0, 200) || '')}</div>
-      </div>`;
-    }
-    html += `</div>`;
-  }
-
-  // Git diff
-  if (trace.diff) {
-    html += `<div class="mb-6">
-      <h2 class="text-lg font-semibold mb-2 text-purple-400">Diff</h2>
-      <pre class="bg-gray-800 rounded-lg p-4 text-xs overflow-x-auto max-h-96 overflow-y-auto"><code>${escapeHtml(trace.diff)}</code></pre>
-    </div>`;
-  }
-
-  // Experience report
-  if (trace.experience_report) {
-    html += `<div class="mb-6">
-      <h2 class="text-lg font-semibold mb-2 text-yellow-400">Experience Report</h2>
-      <div id="experience-content"></div>
-    </div>`;
-  }
-
-  // Session log — opens in bottom-docked panel
-  if (trace.has_session) {
-    html += `<div class="mb-6">
-      <button onclick="showCompletedPanel('${resolvedRun}')"
-              class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300">
-        View Session Log
-      </button>
-    </div>`;
-  }
-
   content.innerHTML = html;
-
-  if (trace.experience_report) {
-    document.getElementById('experience-content').appendChild(renderMd(trace.experience_report));
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
   }
-
-  // Session log now opens in the bottom-docked panel via showCompletedPanel()
 }
 
 async function loadSessionLog(runName) {
@@ -3753,8 +3419,7 @@ function route() {
   const headerActions = document.getElementById('header-actions');
   if (headerActions) headerActions.innerHTML = '';
 
-  // Clear any auto-refresh intervals from previous page
-  if (timelineInterval) { clearInterval(timelineInterval); timelineInterval = null; }
+  // Clear any auto-refresh intervals from previous page (managed by Alpine lifecycle)
 
   // Remove bead search listener when leaving beads page
   globalSearch.removeEventListener('input', _beadsSearchHandler);
@@ -3770,13 +3435,13 @@ function route() {
   if (path === '/' || path === '/beads') {
     renderBeads();
   } else if (path.startsWith('/dispatch/trace/')) {
-    renderTrace(path.split('/dispatch/trace/')[1]);
+    renderTraceFragment();
   } else if (path === '/dispatch' || path === '/dispatch/alpine' || path === '/dispatch/lit') {
     renderDispatchFragment();
   } else if (path.startsWith('/bead/')) {
     renderBeadDetailFragment(path.split('/bead/')[1]);
   } else if (path === '/timeline') {
-    renderTimeline();
+    renderTimelineFragment();
   } else if (path === '/sessions') {
     renderSessionsFragment();
   } else if (path === '/search') {
