@@ -2740,7 +2740,6 @@ async function renderTerminal(cmd, attach) {
     attach = activeTerminalId;
   }
   pageTitle.textContent = attach ? `Attached: ${attach}` : 'Terminal';
-  if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
 
   // Ensure the persistent terminal page layout exists
   _ensureTerminalPageLayout();
