@@ -83,7 +83,9 @@ cat > /tmp/fixtures.json << 'EOF'
 EOF
 
 # Boot on a different port — no Dolt or SQLite needed
-DASHBOARD_MOCK=/tmp/fixtures.json PYTHONPATH=/workspace/repo \
+> /tmp/events.jsonl  # create empty events file
+DASHBOARD_MOCK=/tmp/fixtures.json DASHBOARD_MOCK_EVENTS=/tmp/events.jsonl \
+  PYTHONPATH=/workspace/repo \
   uvicorn tools.dashboard.server:app --host 0.0.0.0 --port 8081 &
 ```
 
@@ -97,7 +99,18 @@ The mock reads the JSON file fresh on every request. Edit the file, refresh the 
 
 **Fixture format:** Bead dicts need at minimum `id`, `title`, `status`, `priority`. Missing fields are auto-filled with sensible defaults. See `tools/dashboard/dao/mock.py` for the full defaults and supported keys.
 
-**Coverage note:** The mock covers DAO-backed endpoints (`dao_beads.*`, `dao_dispatch.*`). Pages still using `bd` CLI subprocess calls (e.g. `api_beads_list`, `api_bead_show`) won't use mock data until they are migrated to the DAO layer — which is part of the Alpine migration work.
+**Mock SSE events — test real-time UI updates:**
+Append JSONL lines to the events file to push SSE updates to connected browsers:
+```bash
+# Push a nav update — badges update in real time
+echo '{"topic":"nav","data":{"open_beads":42,"running_agents":3}}' >> /tmp/events.jsonl
+
+# Push a dispatch update — active/waiting/blocked sections update
+echo '{"topic":"dispatch","data":{"active":[],"waiting":[],"blocked":[]}}' >> /tmp/events.jsonl
+```
+The mock watcher tails the file every 0.5s and broadcasts new lines to the event bus. No restart needed.
+
+**Coverage note:** The mock covers DAO-backed endpoints (`dao_beads.*`, `dao_dispatch.*`) and SSE events. Pages still using `bd` CLI subprocess calls (e.g. `api_beads_list`, `api_bead_show`) won't use mock data until they are migrated to the DAO layer — which is part of the Alpine migration work.
 
 ## Dashboard-Specific Gotchas
 

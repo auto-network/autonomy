@@ -2092,6 +2092,9 @@ routes = [
 
 async def _on_startup():
     asyncio.create_task(_dispatch_watcher())
+    if os.environ.get("DASHBOARD_MOCK_EVENTS"):
+        from tools.dashboard.dao.mock import mock_event_watcher
+        asyncio.create_task(mock_event_watcher())
 
 app = Starlette(routes=routes, on_startup=[_on_startup])
 
