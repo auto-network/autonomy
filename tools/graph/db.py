@@ -383,7 +383,20 @@ class GraphDB:
     # ── Source Reading ─────────────────────────────────────────
 
     def get_source(self, source_id: str) -> dict | None:
+        """Look up a source by ID, prefix, or session UUID (stored in metadata)."""
+        # Exact match
         row = self.conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+        if row:
+            return dict(row)
+        # Prefix match
+        row = self.conn.execute("SELECT * FROM sources WHERE id LIKE ? LIMIT 1", (f"{source_id}%",)).fetchone()
+        if row:
+            return dict(row)
+        # Session UUID match (stored in metadata JSON)
+        row = self.conn.execute(
+            """SELECT * FROM sources WHERE json_extract(metadata, '$.session_id') LIKE ? LIMIT 1""",
+            (f"{source_id}%",),
+        ).fetchone()
         return dict(row) if row else None
 
     def get_source_content(self, source_id: str) -> list[dict]:

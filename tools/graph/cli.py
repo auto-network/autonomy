@@ -138,12 +138,6 @@ def _resolve_source(db, source_arg, first=False):
     """Resolve a source by ID, prefix, or title search. Returns dict or None."""
     source = db.get_source(source_arg)
     if not source:
-        row = db.conn.execute(
-            "SELECT * FROM sources WHERE id LIKE ? LIMIT 1", (f"{source_arg}%",)
-        ).fetchone()
-        if row:
-            source = dict(row)
-    if not source:
         sources = db.find_sources(source_arg, limit=5)
         scope = _get_scope()
         if scope:
@@ -269,13 +263,6 @@ def cmd_context(args):
 
     # Find the source
     source = db.get_source(args.source)
-    if not source:
-        row = db.conn.execute(
-            "SELECT * FROM sources WHERE id LIKE ? LIMIT 1", (f"{args.source}%",)
-        ).fetchone()
-        if row:
-            source = dict(row)
-
     if not source:
         print(f"Source not found: {args.source}")
         db.close()
@@ -565,13 +552,6 @@ def cmd_bead(args):
     # If source + turns provided, create the conceived_at link
     if args.source and args.turns:
         source = db.get_source(args.source)
-        if not source:
-            row = db.conn.execute(
-                "SELECT * FROM sources WHERE id LIKE ? LIMIT 1", (f"{args.source}%",)
-            ).fetchone()
-            if row:
-                source = dict(row)
-
         if source:
             turn_range = {}
             parts = args.turns.split("-")
@@ -613,14 +593,8 @@ def cmd_link(args):
         elif len(parts) == 1:
             turn_range = {"from": int(parts[0]), "to": int(parts[0])}
 
-    # Find source by ID prefix
+    # Find source by ID prefix or session UUID
     source = db.get_source(args.source)
-    if not source:
-        row = db.conn.execute(
-            "SELECT * FROM sources WHERE id LIKE ? LIMIT 1", (f"{args.source}%",)
-        ).fetchone()
-        if row:
-            source = dict(row)
     if not source:
         print(f"Source not found: {args.source}")
         db.close()
