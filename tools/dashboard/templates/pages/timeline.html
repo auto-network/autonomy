@@ -1,0 +1,197 @@
+<section x-data="timelinePage()" aria-label="Timeline">
+
+  <!-- Timeframe Toggle -->
+  <div class="flex items-center gap-2 mb-6">
+    <div class="inline-flex rounded-lg bg-gray-800 border border-gray-700 p-0.5">
+      <template x-for="r in ['1D', '1W', '1M', 'All']" :key="r">
+        <button
+          @click="setRange(r)"
+          :class="range === r ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'"
+          class="px-3 py-1 text-sm font-medium rounded-md transition-colors"
+          x-text="r"
+        ></button>
+      </template>
+    </div>
+  </div>
+
+  <!-- Stats Tiles -->
+  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
+
+    <div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div class="text-xs text-gray-500 mb-1">Completed</div>
+      <div class="text-2xl font-bold text-green-400" x-text="stats.completed_count || 0"></div>
+      <div class="text-xs text-gray-500 mt-1">
+        <span x-text="stats.success_rate != null ? (stats.success_rate * 100).toFixed(0) + '%' : '--'"></span> success
+      </div>
+    </div>
+
+    <div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div class="text-xs text-gray-500 mb-1">Failed / Blocked</div>
+      <div class="text-2xl font-bold text-red-400" x-text="(stats.failed_count || 0) + (stats.blocked_count || 0)"></div>
+      <div class="text-xs text-gray-500 mt-1" x-text="(stats.failed_count || 0) + ' failed, ' + (stats.blocked_count || 0) + ' blocked'"></div>
+    </div>
+
+    <div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div class="text-xs text-gray-500 mb-1">Avg Duration</div>
+      <div class="text-2xl font-bold text-indigo-400" x-text="fmtDuration(stats.avg_duration)"></div>
+    </div>
+
+    <div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div class="text-xs text-gray-500 mb-1">Avg Tooling</div>
+      <div class="text-lg mt-1">
+        <template x-if="stats.avg_tooling_score != null">
+          <span>
+            <template x-for="(on, i) in starsFor(stats.avg_tooling_score)" :key="i">
+              <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
+            </template>
+          </span>
+        </template>
+        <span x-show="stats.avg_tooling_score == null" class="text-xs text-gray-600">--</span>
+      </div>
+      <div class="text-xs text-gray-500 mt-1" x-text="stats.avg_tooling_score != null ? stats.avg_tooling_score.toFixed(1) + '/5' : '--'"></div>
+    </div>
+
+    <div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div class="text-xs text-gray-500 mb-1">Avg Confidence</div>
+      <div class="text-lg mt-1">
+        <template x-if="stats.avg_confidence_score != null">
+          <span>
+            <template x-for="(on, i) in starsFor(stats.avg_confidence_score)" :key="i">
+              <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
+            </template>
+          </span>
+        </template>
+        <span x-show="stats.avg_confidence_score == null" class="text-xs text-gray-600">--</span>
+      </div>
+      <div class="text-xs text-gray-500 mt-1" x-text="stats.avg_confidence_score != null ? stats.avg_confidence_score.toFixed(1) + '/5' : '--'"></div>
+    </div>
+
+  </div>
+
+  <!-- Feed header -->
+  <div class="mb-4">
+    <h2 class="text-lg font-semibold text-indigo-400">Feed</h2>
+  </div>
+
+  <!-- Empty state -->
+  <template x-if="!loading && entries.length === 0">
+    <div class="text-gray-500 text-sm">No timeline entries for this period</div>
+  </template>
+
+  <!-- Feed cards -->
+  <div>
+    <template x-for="e in entries" :key="e._key">
+      <div class="tl-card" @click="e._open = !e._open">
+
+        <!-- Row 1: dot · title · (bead-id) · time -->
+        <div class="tl-row1">
+          <span class="tl-dot" :class="e._dotCls"></span>
+          <span class="tl-title" x-text="e.title || e.bead_id"></span>
+          <div class="tl-top-right">
+            <span class="tl-bead-id" x-text="'(' + e.bead_id + ')'"></span>
+            <span class="tl-ts" x-text="e._ts"></span>
+          </div>
+        </div>
+
+        <!-- Row 2: reason (truncated when collapsed) · priority + status badges -->
+        <div class="tl-row2">
+          <div
+            class="tl-reason"
+            :style="e._open ? 'white-space: normal; overflow: visible; text-overflow: clip;' : ''"
+            x-text="e.reason || ''"
+          ></div>
+          <div class="tl-row2-badges">
+            <template x-if="e.priority != null">
+              <span class="tl-ft" :class="e._prioCls" x-text="'P' + e.priority"></span>
+            </template>
+            <span class="tl-ft" :class="e._stCls" x-text="e.status || '?'"></span>
+          </div>
+        </div>
+
+        <!-- Expanded detail: links left, scores right -->
+        <div class="tl-exp-detail" x-show="e._open" @click.stop style="display:none">
+          <div class="tl-exp-row">
+            <div class="tl-exp-links">
+              <a class="tl-exp-link" :href="'/dispatch/trace/' + e.bead_id">Trace &#8594;</a>
+              <a class="tl-exp-link" :href="'/bead/' + e.bead_id">Bead &#8594;</a>
+            </div>
+            <template x-if="e.scores">
+              <div class="tl-exp-scores" style="margin-left:auto">
+                <span>
+                  <span class="tl-exp-label">Tooling</span>
+                  <template x-for="(on, i) in e._starsTooling" :key="i">
+                    <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
+                  </template>
+                </span>
+                <span>
+                  <span class="tl-exp-label">Clarity</span>
+                  <template x-for="(on, i) in e._starsClarity" :key="i">
+                    <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
+                  </template>
+                </span>
+                <span>
+                  <span class="tl-exp-label">Confidence</span>
+                  <template x-for="(on, i) in e._starsConfidence" :key="i">
+                    <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
+                  </template>
+                </span>
+              </div>
+            </template>
+          </div>
+          <template x-if="e.failure_category">
+            <div class="text-xs text-red-400 mt-1" x-text="'Failure: ' + e.failure_category"></div>
+          </template>
+          <template x-if="e.discovered_beads_count">
+            <div class="text-xs text-purple-400 mt-1" x-text="e.discovered_beads_count + ' bead(s) discovered'"></div>
+          </template>
+        </div>
+
+        <!-- Bottom: legend + stats row + stacked bar -->
+        <template x-if="e._hasBottom">
+          <div class="tl-bottom">
+            <div class="tl-bottom-row">
+              <template x-if="e._hasBreakdown">
+                <div class="tl-legend">
+                  <template x-if="e._barR"><span class="tl-lr" x-text="'research ' + e._barR + '%'"></span></template>
+                  <template x-if="e._barC"><span class="tl-lc" x-text="'coding ' + e._barC + '%'"></span></template>
+                  <template x-if="e._barD"><span class="tl-ld" x-text="'debug ' + e._barD + '%'"></span></template>
+                  <template x-if="e._barT"><span class="tl-lt" x-text="'tooling ' + e._barT + '%'"></span></template>
+                </div>
+              </template>
+              <div class="tl-stats-right">
+                <template x-if="e.duration_secs != null">
+                  <span x-text="'⏱ ' + fmtDuration(e.duration_secs)"></span>
+                </template>
+                <template x-if="e.lines_added != null">
+                  <span class="tl-diff-add" x-text="'+' + e.lines_added"></span>
+                </template>
+                <template x-if="e.lines_removed != null">
+                  <span class="tl-diff-del" x-text="'-' + e.lines_removed"></span>
+                </template>
+                <template x-if="e.scores">
+                  <span class="tl-avg-wrap" x-show="!e._open">
+                    <template x-for="(on, i) in e._starsAvg" :key="i">
+                      <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
+                    </template>
+                    <span class="tl-avg-num" x-text="' (' + e._avgFormatted + ')'"></span>
+                  </span>
+                </template>
+              </div>
+            </div>
+            <!-- Stacked time breakdown bar -->
+            <template x-if="e._hasBreakdown">
+              <div class="tl-stacked-bar">
+                <div x-show="e._barR" class="tl-bar-r" :style="'width:' + e._barR + '%'"></div>
+                <div x-show="e._barC" class="tl-bar-c" :style="'width:' + e._barC + '%'"></div>
+                <div x-show="e._barD" class="tl-bar-d" :style="'width:' + e._barD + '%'"></div>
+                <div x-show="e._barT" class="tl-bar-t" :style="'width:' + e._barT + '%'"></div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+      </div>
+    </template>
+  </div>
+
+</section>

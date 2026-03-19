@@ -1,0 +1,167 @@
+<section x-data="tracePage()" aria-label="Trace">
+
+  <!-- Loading -->
+  <div x-show="loading" class="text-gray-400">Loading...</div>
+
+  <!-- Error -->
+  <div x-show="!loading && error" class="text-red-400" x-text="error"></div>
+
+  <!-- Live (running) dispatch -->
+  <template x-if="!loading && !error && trace && trace.is_live">
+    <div>
+      <div class="mb-6">
+        <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">&#8592; Back to Dispatch</a>
+        <h1 class="text-2xl font-bold mb-2" x-text="bead ? bead.title : trace.bead_id"></h1>
+        <div class="flex gap-2 items-center mb-4">
+          <a :href="'/bead/' + trace.bead_id" class="font-mono text-sm text-indigo-400 hover:underline" x-text="trace.bead_id"></a>
+          <template x-if="bead">
+            <span class="badge" :class="'badge-p' + bead.priority" x-text="'P' + bead.priority"></span>
+          </template>
+          <span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded font-mono animate-pulse">RUNNING</span>
+        </div>
+      </div>
+      <div style="height: 20rem;"></div>
+    </div>
+  </template>
+
+  <!-- Completed dispatch -->
+  <template x-if="!loading && !error && trace && !trace.is_live">
+    <div>
+
+      <!-- Header: back link · title · bead link · priority · status · commit -->
+      <div class="mb-6">
+        <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">&#8592; Back to Dispatch</a>
+        <h1 class="text-2xl font-bold mb-2" x-text="bead ? bead.title : trace.bead_id"></h1>
+        <div class="flex gap-2 items-center mb-4">
+          <a :href="'/bead/' + trace.bead_id" class="font-mono text-sm text-indigo-400 hover:underline" x-text="trace.bead_id"></a>
+          <template x-if="bead">
+            <span class="badge" :class="'badge-p' + bead.priority" x-text="'P' + bead.priority"></span>
+          </template>
+          <span class="badge" :class="statusBadgeClass(decision.status)" x-text="decision.status || '?'"></span>
+          <template x-if="trace.commit_hash">
+            <span class="font-mono text-xs text-gray-400" x-text="trace.commit_hash.slice(0, 10)"></span>
+          </template>
+        </div>
+      </div>
+
+      <!-- Decision -->
+      <section class="mb-6" aria-label="Decision">
+        <h2 class="text-lg font-semibold mb-2" :class="decisionHeadingClass(decision.status)">Decision</h2>
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="text-sm mb-2"><strong>Status:</strong> <span x-text="decision.status || '?'"></span></div>
+          <div class="text-sm mb-2"><strong>Reason:</strong> <span x-text="decision.reason || 'none'"></span></div>
+          <template x-if="decision.notes">
+            <div class="text-sm mb-2"><strong>Notes:</strong> <span x-text="decision.notes"></span></div>
+          </template>
+          <template x-if="decision.artifacts && decision.artifacts.length">
+            <div class="text-sm"><strong>Artifacts:</strong> <span x-text="decision.artifacts.join(', ')"></span></div>
+          </template>
+
+          <!-- Scores -->
+          <template x-if="decision.scores">
+            <div class="mt-3 flex flex-wrap gap-4 text-sm font-mono text-gray-400">
+              <span>
+                Tooling
+                <template x-for="(on, i) in starsFor(decision.scores.tooling)" :key="i">
+                  <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
+                </template>
+              </span>
+              <span>
+                Clarity
+                <template x-for="(on, i) in starsFor(decision.scores.clarity)" :key="i">
+                  <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
+                </template>
+              </span>
+              <span>
+                Confidence
+                <template x-for="(on, i) in starsFor(decision.scores.confidence)" :key="i">
+                  <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
+                </template>
+              </span>
+            </div>
+          </template>
+
+          <!-- Diff stats + duration -->
+          <div class="mt-3 flex gap-4 text-xs font-mono">
+            <template x-if="trace.duration_secs != null">
+              <span class="text-gray-500">&#9201; <span x-text="fmtDuration(trace.duration_secs)"></span></span>
+            </template>
+            <template x-if="trace.lines_added != null">
+              <span class="tl-diff-add" x-text="'+' + trace.lines_added"></span>
+            </template>
+            <template x-if="trace.lines_removed != null">
+              <span class="tl-diff-del" x-text="'-' + trace.lines_removed"></span>
+            </template>
+          </div>
+
+          <!-- Time breakdown bar -->
+          <template x-if="decision.time_breakdown">
+            <div class="mt-3">
+              <div class="tl-legend mb-1">
+                <template x-if="decision.time_breakdown.research_pct">
+                  <span class="tl-lr" x-text="'research ' + decision.time_breakdown.research_pct + '%'"></span>
+                </template>
+                <template x-if="decision.time_breakdown.coding_pct">
+                  <span class="tl-lc" x-text="'coding ' + decision.time_breakdown.coding_pct + '%'"></span>
+                </template>
+                <template x-if="decision.time_breakdown.debugging_pct">
+                  <span class="tl-ld" x-text="'debug ' + decision.time_breakdown.debugging_pct + '%'"></span>
+                </template>
+                <template x-if="decision.time_breakdown.tooling_workaround_pct">
+                  <span class="tl-lt" x-text="'tooling ' + decision.time_breakdown.tooling_workaround_pct + '%'"></span>
+                </template>
+              </div>
+              <div class="tl-stacked-bar">
+                <div x-show="decision.time_breakdown.research_pct" class="tl-bar-r" :style="'width:' + (decision.time_breakdown.research_pct || 0) + '%'"></div>
+                <div x-show="decision.time_breakdown.coding_pct" class="tl-bar-c" :style="'width:' + (decision.time_breakdown.coding_pct || 0) + '%'"></div>
+                <div x-show="decision.time_breakdown.debugging_pct" class="tl-bar-d" :style="'width:' + (decision.time_breakdown.debugging_pct || 0) + '%'"></div>
+                <div x-show="decision.time_breakdown.tooling_workaround_pct" class="tl-bar-t" :style="'width:' + (decision.time_breakdown.tooling_workaround_pct || 0) + '%'"></div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- Discovered work -->
+      <template x-if="decision.discovered_beads && decision.discovered_beads.length">
+        <section class="mb-6" aria-label="Discovered Work">
+          <h2 class="text-lg font-semibold mb-2 text-blue-400">Discovered Work</h2>
+          <template x-for="(b, i) in decision.discovered_beads" :key="i">
+            <div class="bg-gray-800 rounded-lg p-3 mb-2">
+              <div class="font-semibold text-sm" x-text="b.title"></div>
+              <div class="text-xs text-gray-400 mt-1" x-text="(b.description || '').slice(0, 200)"></div>
+            </div>
+          </template>
+        </section>
+      </template>
+
+      <!-- Git diff -->
+      <template x-if="trace.diff">
+        <section class="mb-6" aria-label="Diff">
+          <h2 class="text-lg font-semibold mb-2 text-purple-400">Diff</h2>
+          <pre class="bg-gray-800 rounded-lg p-4 text-xs overflow-x-auto max-h-96 overflow-y-auto"><code x-text="trace.diff"></code></pre>
+        </section>
+      </template>
+
+      <!-- Experience report -->
+      <template x-if="trace.experience_report">
+        <section class="mb-6" aria-label="Experience Report">
+          <h2 class="text-lg font-semibold mb-2 text-yellow-400">Experience Report</h2>
+          <div class="markdown-body" x-html="marked.parse(trace.experience_report)"></div>
+        </section>
+      </template>
+
+      <!-- Session log -->
+      <template x-if="trace.has_session">
+        <div class="mb-6">
+          <button
+            @click="openSessionLog()"
+            class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300"
+          >View Session Log</button>
+        </div>
+      </template>
+
+    </div>
+  </template>
+
+</section>
