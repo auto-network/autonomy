@@ -3497,7 +3497,8 @@ window.addEventListener('popstate', route);
 // ── Init ─────────────────────────────────────────────────────
 
 // Live dispatch badge via SSE nav topic
-connectEvents(['nav'], {
+connectEvents(['nav', 'dispatch'], {
+  dispatch: () => {},  // cache-only — Alpine component handles rendering
   nav: (data) => {
     const running = data.running_agents || 0;
     const waiting = data.approved_waiting || 0;
