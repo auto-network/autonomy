@@ -3397,10 +3397,14 @@ async function captureTabScreenshot(expId) {
   if (!_captureVideo || !_displayStream) return;
   const track = _displayStream.getVideoTracks()[0];
   if (!track || track.readyState !== 'live') return;
+  // Wait for video to have dimensions (first frame may not be ready yet)
+  for (let i = 0; i < 10 && !_captureVideo.videoWidth; i++) {
+    await new Promise(r => setTimeout(r, 300));
+  }
   const canvas = document.createElement('canvas');
   canvas.width = _captureVideo.videoWidth;
   canvas.height = _captureVideo.videoHeight;
-  if (!canvas.width || !canvas.height) return; // video not ready yet
+  if (!canvas.width || !canvas.height) return;
   canvas.getContext('2d').drawImage(_captureVideo, 0, 0);
   const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
   if (!blob) return;
@@ -3646,7 +3650,7 @@ async function renderExperiment(expId) {
     );
     doc.open();
     doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
-<script src="https://cdn.tailwindcss.com"><\/script>
+<link rel="stylesheet" href="/static/tailwind.css">
 <style>${_parentCSS}</style>
 <style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;}</style>
 </head><body>
@@ -3662,18 +3666,17 @@ ${_safeHtml}
         iframe.style.height = Math.max(200, Math.min(h, 800)) + 'px';
       } catch(e) {}
     };
-    iframe.addEventListener('load', () => {
-      resizeIframe();
-      _iframeLoadCount++;
-      // Capture screenshot once the last iframe finishes loading.
-      // Debounce with a short delay so Tailwind can finish processing classes.
-      if (_iframeLoadCount >= variants.length) {
-        if (_screenshotTimer) clearTimeout(_screenshotTimer);
-        _screenshotTimer = setTimeout(() => captureTabScreenshot(expId), 800);
-      }
-    });
+    iframe.addEventListener('load', resizeIframe);
+    // doc.write/doc.close doesn't fire 'load' reliably — use setTimeout
     setTimeout(resizeIframe, 200);
     setTimeout(resizeIframe, 600);
+    _iframeLoadCount++;
+    if (_iframeLoadCount >= variants.length) {
+      // Capture screenshot once all iframes have been written.
+      // Delay gives CSS time to render.
+      if (_screenshotTimer) clearTimeout(_screenshotTimer);
+      _screenshotTimer = setTimeout(() => captureTabScreenshot(expId), 1500);
+    }
   });
 
   // Subscribe to series SSE topic so gallery auto-updates when a new variant is posted
