@@ -7,6 +7,8 @@
 //   window.connectEvents     — legacy compat: (topics, handlers) -> { close() }
 //   window.registerHandler   — (topic, fn) — add a per-topic handler
 //   window.unregisterHandler — (topic, fn) — remove a per-topic handler
+//   window.registerTopic     — (topic) — open a dedicated EventSource for a dynamic topic
+//   window.unregisterTopic   — (topic) — close and remove the dynamic EventSource
 
 (function () {
   window._sseCache = {};
@@ -91,11 +93,51 @@
     };
   }
 
+  // Dynamic topic registry — one dedicated EventSource per dynamic topic.
+  // Use this for topics like "experiments:{id}" that aren't known at page load.
+  const _dynamicSources = {}; // topic -> EventSource
+
+  function registerTopic(topic) {
+    if (_dynamicSources[topic]) return; // already connected
+    const url = '/api/events?topics=' + encodeURIComponent(topic);
+    const es = new EventSource(url);
+    es.addEventListener(topic, (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        window._sseCache[topic] = data;
+        const set = _handlers[topic];
+        if (set) {
+          set.forEach(fn => {
+            try { fn(data); } catch (err) {
+              console.warn('[EventBus] handler error for topic', topic, err);
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('[EventBus] parse error for topic', topic, err);
+      }
+    });
+    es.onerror = (e) => {
+      console.warn('[EventBus] SSE error for dynamic topic', topic, e);
+    };
+    _dynamicSources[topic] = es;
+  }
+
+  function unregisterTopic(topic) {
+    const es = _dynamicSources[topic];
+    if (es) {
+      es.close();
+      delete _dynamicSources[topic];
+    }
+  }
+
   // Expose API first, connect after — so app.js can register handlers
   // before the initial SSE event arrives.
   window.connectEvents = connectEvents;
   window.registerHandler = registerHandler;
   window.unregisterHandler = unregisterHandler;
+  window.registerTopic = registerTopic;
+  window.unregisterTopic = unregisterTopic;
 
   // Defer connection to next microtask so synchronous handler registrations
   // in app.js (loaded immediately after this script) are in place.
