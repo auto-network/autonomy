@@ -147,7 +147,7 @@
       <template x-if="trace.experience_report">
         <section class="mb-6" aria-label="Experience Report">
           <h2 class="text-lg font-semibold mb-2 text-yellow-400">Experience Report</h2>
-          <div class="markdown-body" x-html="marked.parse(trace.experience_report)"></div>
+          <div x-markdown="trace.experience_report"></div>
         </section>
       </template>
 
