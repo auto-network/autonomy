@@ -1146,7 +1146,7 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
         "-v", f"{REPO_ROOT}/.beads:/data/.beads",
         # Output and session dirs
         "-v", f"{output_dir}:/workspace/output",
-        "-v", f"{str(session_dir)}:/home/agent/.claude/projects",
+        "-v", f"{str(Path.home() / '.claude' / 'projects')}:/home/agent/.claude/projects",
         # Prompt file (read-only reference)
         "-v", f"{str(prompt_file)}:/tmp/prompt.md:ro",
         "--entrypoint", "claude",
