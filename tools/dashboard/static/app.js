@@ -6,6 +6,11 @@ const pageTitle = document.getElementById('page-title');
 const statsSummary = document.getElementById('stats-summary');
 const globalSearch = document.getElementById('global-search');
 
+// ── Screenshot Capture (Design Studio) ───────────────────────
+// Persistent MediaStream for tab capture; survives page navigations within SPA.
+let _displayStream = null;
+let _captureVideo = null;
+
 // ── Markdown Rendering ───────────────────────────────────────
 
 function renderMd(md) {
@@ -3225,6 +3230,129 @@ async function getLiveSnippet(runDir) {
 
 // ── Experiment Gallery ────────────────────────────────────────
 
+/**
+ * Request a tab display stream once per session.
+ * getDisplayMedia requires a user gesture OR page load in some browsers.
+ * Falls back gracefully if unavailable or denied.
+ */
+async function initDisplayCapture(expId) {
+  if (_displayStream) return; // already have a live stream
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    console.warn('[screenshot] getDisplayMedia not available (non-HTTPS?)');
+    _updateScreenshotStatus(expId, 'Auto-capture unavailable — use Capture button');
+    return;
+  }
+  try {
+    _displayStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: 'browser' },
+      audio: false,
+    });
+    _captureVideo = document.createElement('video');
+    _captureVideo.srcObject = _displayStream;
+    _captureVideo.muted = true;
+    _captureVideo.play().catch(() => {});
+    _displayStream.getVideoTracks()[0]?.addEventListener('ended', () => {
+      _displayStream = null;
+      _captureVideo = null;
+      _updateScreenshotStatus(expId, 'Capture stream ended — click Capture to restart');
+    });
+    _updateScreenshotStatus(expId, 'Auto-capture active');
+  } catch (e) {
+    console.warn('[screenshot] getDisplayMedia denied or failed:', e.message);
+    _displayStream = null;
+    _captureVideo = null;
+    _updateScreenshotStatus(expId, 'Auto-capture denied — use Capture button');
+  }
+}
+
+function _updateScreenshotStatus(expId, msg) {
+  const el = document.getElementById('exp-screenshot-status');
+  if (el) el.textContent = msg;
+}
+
+/** Grab a frame from the active display stream and POST to server. */
+async function captureTabScreenshot(expId) {
+  if (!_captureVideo || !_displayStream) return;
+  const track = _displayStream.getVideoTracks()[0];
+  if (!track || track.readyState !== 'live') return;
+  const canvas = document.createElement('canvas');
+  canvas.width = _captureVideo.videoWidth;
+  canvas.height = _captureVideo.videoHeight;
+  if (!canvas.width || !canvas.height) return; // video not ready yet
+  canvas.getContext('2d').drawImage(_captureVideo, 0, 0);
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+  if (!blob) return;
+  try {
+    const res = await fetch(`/api/experiments/${expId}/screenshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: blob,
+    });
+    if (res.ok) {
+      const now = new Date().toLocaleTimeString();
+      _updateScreenshotStatus(expId, `Screenshot saved ${now}`);
+    }
+  } catch (e) {
+    console.warn('[screenshot] Upload failed:', e.message);
+  }
+}
+
+/** Fallback: capture visible page using html2canvas (same-origin, no getDisplayMedia needed). */
+async function _captureWithHtml2Canvas(expId) {
+  if (!window.html2canvas) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1/dist/html2canvas.min.js';
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  try {
+    const canvas = await window.html2canvas(document.getElementById('content'), {
+      useCORS: true, allowTaint: true, logging: false,
+    });
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) return;
+    const res = await fetch(`/api/experiments/${expId}/screenshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: blob,
+    });
+    if (res.ok) {
+      const now = new Date().toLocaleTimeString();
+      _updateScreenshotStatus(expId, `Screenshot (fallback) saved ${now}`);
+    }
+  } catch (e) {
+    console.warn('[screenshot] html2canvas fallback failed:', e.message);
+    _updateScreenshotStatus(expId, 'Capture failed — check console');
+  }
+}
+
+/**
+ * Manual capture button handler.
+ * Uses active stream if available; otherwise tries to acquire one (user gesture
+ * helps on some browsers). Falls back to html2canvas if stream cannot be obtained.
+ */
+async function manualCaptureScreenshot(expId) {
+  _updateScreenshotStatus(expId, 'Capturing...');
+  if (_displayStream) {
+    await captureTabScreenshot(expId);
+    return;
+  }
+  // Try to acquire stream via user gesture
+  try {
+    await initDisplayCapture(expId);
+    if (_displayStream) {
+      await new Promise(r => setTimeout(r, 300)); // let video initialize
+      await captureTabScreenshot(expId);
+      return;
+    }
+  } catch (e) { /* fall through */ }
+  // Fall back to html2canvas
+  await _captureWithHtml2Canvas(expId);
+}
+
 async function renderExperiment(expId) {
   pageTitle.textContent = 'Experiment';
   content.innerHTML = '<div class="text-gray-400">Loading experiment...</div>';
@@ -3269,6 +3397,13 @@ async function renderExperiment(expId) {
       ${seriesNav}
       ${exp.description ? `<p class="text-gray-400 text-sm mb-4">${_esc(exp.description)}</p>` : ''}
       ${isCompleted ? '<p class="text-green-400 text-sm mb-4 font-semibold">Results submitted</p>' : ''}
+      <div class="flex items-center gap-2 mb-3 text-xs">
+        <span id="exp-screenshot-status" class="text-gray-500">Requesting display permission...</span>
+        <button onclick="manualCaptureScreenshot('${expId}')"
+                class="text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
+          Capture
+        </button>
+      </div>
       <div id="exp-variants">`;
 
   variants.forEach(v => {
@@ -3313,6 +3448,8 @@ async function renderExperiment(expId) {
   // Inject fixture + HTML into iframes (with Tailwind + dashboard CSS so variants
   // use identical markup to the main app — winning variant drops in with zero rework)
   const _parentCSS = document.querySelector('style')?.textContent || '';
+  let _iframeLoadCount = 0;
+  let _screenshotTimer = null;
   variants.forEach(v => {
     const iframe = content.querySelector(`iframe[data-variant="${v.id}"]`);
     if (!iframe) return;
@@ -3343,10 +3480,24 @@ ${_safeHtml}
         iframe.style.height = Math.max(200, Math.min(h, 800)) + 'px';
       } catch(e) {}
     };
-    iframe.addEventListener('load', resizeIframe);
+    iframe.addEventListener('load', () => {
+      resizeIframe();
+      _iframeLoadCount++;
+      // Capture screenshot once the last iframe finishes loading.
+      // Debounce with a short delay so Tailwind can finish processing classes.
+      if (_iframeLoadCount >= variants.length) {
+        if (_screenshotTimer) clearTimeout(_screenshotTimer);
+        _screenshotTimer = setTimeout(() => captureTabScreenshot(expId), 800);
+      }
+    });
     setTimeout(resizeIframe, 200);
     setTimeout(resizeIframe, 600);
   });
+
+  // Initiate display capture (async — prompt appears, iframes still loading in parallel)
+  if (!isCompleted) {
+    initDisplayCapture(expId).catch(() => {});
+  }
 
   if (isCompleted) {
     // Show rank badges on completed variants
