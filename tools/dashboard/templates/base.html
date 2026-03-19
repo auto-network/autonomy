@@ -154,6 +154,15 @@
       font-size: 0.75rem; line-height: 1; padding: 0; border-radius: 0.25rem;
     }
     .sidebar-exp-dismiss:hover { color: #f87171; background: rgba(248,113,113,0.15); }
+    .exp-dismiss-confirm {
+      display: flex; align-items: center; gap: 0.2rem; font-size: 0.7rem; color: #e5e7eb; flex-shrink: 0;
+    }
+    .exp-dismiss-confirm button {
+      padding: 0 0.25rem; font-size: 0.68rem; border-radius: 0.2rem;
+      border: 1px solid #6b7280; background: transparent; color: #e5e7eb; cursor: pointer; line-height: 1.4;
+    }
+    .exp-dismiss-confirm .exp-dismiss-yes:hover { border-color: #f87171; color: #f87171; }
+    .exp-dismiss-confirm .exp-dismiss-no:hover { border-color: #818cf8; color: #818cf8; }
     @keyframes sidebar-exp-in {
       from { opacity: 0; transform: translateY(-0.25rem); }
       to { opacity: 1; transform: translateY(0); }
