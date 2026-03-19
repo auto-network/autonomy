@@ -51,7 +51,7 @@
       <template x-if="bead.description">
         <section aria-label="Description" class="mb-6">
           <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Description</h2>
-          <div class="prose prose-invert prose-sm max-w-none" x-html="mdHtml(bead.description)"></div>
+          <div class="markdown-body" x-html="mdHtml(bead.description)"></div>
         </section>
       </template>
 
@@ -59,7 +59,7 @@
       <template x-if="bead.acceptance_criteria">
         <section aria-label="Acceptance Criteria" class="mb-6">
           <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Acceptance Criteria</h2>
-          <div class="prose prose-invert prose-sm max-w-none" x-html="mdHtml(bead.acceptance_criteria)"></div>
+          <div class="markdown-body" x-html="mdHtml(bead.acceptance_criteria)"></div>
         </section>
       </template>
 
@@ -67,7 +67,7 @@
       <template x-if="bead.design">
         <section aria-label="Design Notes" class="mb-6">
           <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Design Notes</h2>
-          <div class="prose prose-invert prose-sm max-w-none" x-html="mdHtml(bead.design)"></div>
+          <div class="markdown-body" x-html="mdHtml(bead.design)"></div>
         </section>
       </template>
 
