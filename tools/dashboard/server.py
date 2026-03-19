@@ -42,9 +42,11 @@ from tools.dashboard.event_bus import event_bus
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
+    from tools.dashboard.dao import mock as dao_sessions
 else:
     from tools.dashboard.dao import beads as dao_beads
     from tools.dashboard.dao import dispatch as dao_dispatch
+    from tools.dashboard.dao import sessions as dao_sessions
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -1830,6 +1832,20 @@ async def page_dispatch_fragment(request):
 async def page_sessions(request):
     return HTMLResponse(_load_template("base.html"))
 
+async def page_sessions_fragment(request):
+    """Return the Sessions page as an HTML fragment for SPA injection."""
+    return templates.TemplateResponse(request, "pages/sessions.html")
+
+async def api_dao_active_sessions(request):
+    threshold = int(request.query_params.get("threshold", "600"))
+    sessions = await asyncio.to_thread(dao_sessions.get_active_sessions, threshold)
+    return JSONResponse(sessions)
+
+async def api_dao_recent_sessions(request):
+    limit = int(request.query_params.get("limit", "20"))
+    sessions = await asyncio.to_thread(dao_sessions.get_recent_sessions, limit)
+    return JSONResponse(sessions)
+
 async def page_search(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -2030,6 +2046,7 @@ routes = [
     Route("/dispatch/lit", page_dispatch),
     Route("/pages/dispatch", page_dispatch_fragment),
     Route("/sessions", page_sessions),
+    Route("/pages/sessions", page_sessions_fragment),
     Route("/search", page_search),
     Route("/source/{id}", page_source),
     Route("/bead/{id}", page_bead),
@@ -2063,6 +2080,8 @@ routes = [
     Route("/api/stats", api_stats),
     Route("/api/attention", api_attention),
     Route("/api/active", api_active_sessions),
+    Route("/api/dao/active_sessions", api_dao_active_sessions),
+    Route("/api/dao/recent_sessions", api_dao_recent_sessions),
     Route("/api/terminals", api_terminals),
     Route("/api/terminal/{id}/kill", api_terminal_kill),
     Route("/api/terminal/{id}/rename", api_terminal_rename, methods=["POST"]),

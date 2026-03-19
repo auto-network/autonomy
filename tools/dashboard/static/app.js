@@ -2214,69 +2214,21 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-let sessionsInterval = null;
-
-async function renderSessions() {
+async function renderSessionsFragment() {
   pageTitle.textContent = 'Sessions';
-  if (sessionsInterval) clearInterval(sessionsInterval);
-
-  async function refresh() {
-    const active = await api('/api/active?threshold=600');
-    const historical = await api('/api/sources?type=session&limit=20');
-
-    let html = '';
-
-    // Active sessions
-    if (Array.isArray(active) && active.length > 0) {
-      html += '<h2 class="text-lg font-semibold mb-3 text-green-400">● Active Sessions</h2>';
-      html += '<div class="space-y-2 mb-8">';
-      for (const s of active) {
-        const ageStr = s.age_seconds < 60 ? `${s.age_seconds}s ago` : `${Math.round(s.age_seconds/60)}m ago`;
-        const sizeStr = (s.size_bytes / 1024 / 1024).toFixed(1) + ' MB';
-        const pulse = s.active ? 'animate-pulse' : '';
-        const project = s.project.replace(/-home-jeremy-?/, '').replace(/workspace-/, '') || 'home';
-        html += `
-          <div class="p-4 bg-gray-800 rounded-lg border border-green-700 ${pulse}">
-            <div class="flex items-center gap-3 mb-2">
-              <span class="w-2 h-2 rounded-full ${s.active ? 'bg-green-400' : 'bg-yellow-400'}"></span>
-              <span class="font-mono text-sm text-gray-400">${s.session_id.slice(0, 12)}</span>
-              <span class="text-xs text-indigo-400">[${project}]</span>
-              <span class="text-xs text-gray-500">${sizeStr}</span>
-              <span class="text-xs text-gray-500 ml-auto">${ageStr}</span>
-            </div>
-            <div class="text-sm text-gray-300 truncate">${s.latest || '...'}</div>
-          </div>`;
-      }
-      html += '</div>';
-    }
-
-    // Historical sessions
-    const lines = (historical?.results || '').trim().split('\n').filter(l => l.trim());
-    if (lines.length > 0) {
-      html += '<h2 class="text-lg font-semibold mb-3 text-gray-400">Recent Sessions</h2>';
-      html += '<div class="space-y-2">';
-      for (const line of lines) {
-        const match = line.trim().match(/^(\S+)\s+(\S+)\s+(\S+)\s+(.*?)(\[.*\])?$/);
-        if (match) {
-          const [, id, type, date, title, project] = match;
-          html += `
-            <div class="flex items-center gap-3 p-3 bg-gray-800 rounded-lg hover:bg-gray-750 cursor-pointer border border-gray-700"
-                 onclick="navigateTo('/source/${id}')">
-              <span class="font-mono text-xs text-gray-500">${id}</span>
-              <span class="text-xs text-gray-400">${date}</span>
-              <span class="flex-1 truncate">${title || ''}</span>
-              <span class="text-xs text-indigo-400">${project || ''}</span>
-            </div>`;
-        }
-      }
-      html += '</div>';
-    }
-
-    content.innerHTML = html || '<div class="text-gray-400">No sessions found</div>';
+  let html;
+  if (_fragmentCache.has('/pages/sessions')) {
+    html = _fragmentCache.get('/pages/sessions');
+  } else {
+    const res = await fetch('/pages/sessions');
+    html = await res.text();
+    _fragmentCache.set('/pages/sessions', html);
   }
+  content.innerHTML = html;
 
-  await refresh();
-  sessionsInterval = setInterval(refresh, 5000);  // Auto-refresh every 5s
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
 }
 
 async function renderSearch(query, project) {
@@ -3974,7 +3926,6 @@ function route() {
   }
 
   // Clear any auto-refresh intervals from previous page
-  if (sessionsInterval) { clearInterval(sessionsInterval); sessionsInterval = null; }
   if (timelineInterval) { clearInterval(timelineInterval); timelineInterval = null; }
 
   // Remove bead search listener when leaving beads page
@@ -3999,7 +3950,7 @@ function route() {
   } else if (path === '/timeline') {
     renderTimeline();
   } else if (path === '/sessions') {
-    renderSessions();
+    renderSessionsFragment();
   } else if (path === '/search') {
     const params = new URLSearchParams(window.location.search);
     renderSearch(params.get('q'), params.get('project'));
