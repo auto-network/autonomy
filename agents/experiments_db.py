@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS experiments (
   description TEXT,
   fixture TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
+  series_id TEXT,
+  series_seq INTEGER,
   created_at DATETIME DEFAULT (datetime('now'))
 )
 """
@@ -51,6 +53,19 @@ def init_db() -> None:
     try:
         conn.execute(CREATE_EXPERIMENTS)
         conn.execute(CREATE_VARIANTS)
+        # Migrations: add series columns if they don't exist yet
+        for stmt in [
+            "ALTER TABLE experiments ADD COLUMN series_id TEXT",
+            "ALTER TABLE experiments ADD COLUMN series_seq INTEGER",
+        ]:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        # Migrate existing rows: standalone experiments get series_id = id, series_seq = 1
+        conn.execute(
+            "UPDATE experiments SET series_id = id, series_seq = 1 WHERE series_id IS NULL"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -62,14 +77,30 @@ def create_experiment(
     description: str | None = None,
     fixture: str | None = None,
     variants: list[dict],
+    series_id: str | None = None,
 ) -> str:
-    """Create an experiment with variants. Returns the experiment UUID."""
+    """Create an experiment with variants. Returns the experiment UUID.
+
+    If series_id is provided the new experiment is appended to that series
+    with series_seq = MAX(series_seq) + 1.  If omitted the experiment is
+    standalone: series_id = its own id, series_seq = 1.
+    """
     exp_id = str(uuid.uuid4())
     conn = _get_conn()
     try:
+        if series_id:
+            row = conn.execute(
+                "SELECT MAX(series_seq) FROM experiments WHERE series_id = ?",
+                (series_id,),
+            ).fetchone()
+            series_seq = (row[0] or 0) + 1
+        else:
+            series_id = exp_id
+            series_seq = 1
         conn.execute(
-            "INSERT INTO experiments (id, title, description, fixture) VALUES (?, ?, ?, ?)",
-            (exp_id, title, description, fixture),
+            "INSERT INTO experiments (id, title, description, fixture, series_id, series_seq)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (exp_id, title, description, fixture, series_id, series_seq),
         )
         for v in variants:
             conn.execute(
@@ -83,7 +114,7 @@ def create_experiment(
 
 
 def get_experiment(exp_id: str) -> dict | None:
-    """Get experiment with its variants."""
+    """Get experiment with its variants, series info, and sibling_ids."""
     conn = _get_conn()
     try:
         row = conn.execute(
@@ -97,6 +128,13 @@ def get_experiment(exp_id: str) -> dict | None:
             (exp_id,),
         ).fetchall()
         exp["variants"] = [{k: v[k] for k in v.keys()} for v in variants]
+        # Populate sibling_ids (all experiments in same series, ordered by seq)
+        sid = exp.get("series_id") or exp_id
+        siblings = conn.execute(
+            "SELECT id FROM experiments WHERE series_id = ? ORDER BY series_seq",
+            (sid,),
+        ).fetchall()
+        exp["sibling_ids"] = [s["id"] for s in siblings]
         return exp
     finally:
         conn.close()
@@ -138,14 +176,37 @@ def submit_results(exp_id: str, selections: list[dict]) -> bool:
 
 
 def list_pending() -> list[dict]:
-    """List experiments with status='pending'."""
+    """List pending experiments grouped by series.
+
+    Returns one entry per series with:
+      - id: the latest (highest series_seq) pending experiment ID
+      - series_id: the series identifier
+      - iteration_count: number of pending experiments in the series
+      - title/description/status/created_at from the latest entry
+    """
     conn = _get_conn()
     try:
         rows = conn.execute(
-            "SELECT id, title, description, status, created_at FROM experiments "
-            "WHERE status = 'pending' ORDER BY created_at DESC"
+            "SELECT id, title, description, status, created_at, series_id, series_seq"
+            " FROM experiments WHERE status = 'pending' ORDER BY series_seq DESC, created_at DESC"
         ).fetchall()
-        return [{k: r[k] for k in r.keys()} for r in rows]
+        # Group by series_id; first row encountered per series is the latest (highest seq)
+        series_map: dict = {}
+        for r in rows:
+            r_dict = {k: r[k] for k in r.keys()}
+            sid = r_dict.get("series_id") or r_dict["id"]
+            if sid not in series_map:
+                series_map[sid] = {
+                    "id": r_dict["id"],
+                    "series_id": sid,
+                    "title": r_dict["title"],
+                    "description": r_dict["description"],
+                    "status": r_dict["status"],
+                    "created_at": r_dict["created_at"],
+                    "iteration_count": 0,
+                }
+            series_map[sid]["iteration_count"] += 1
+        return list(series_map.values())
     finally:
         conn.close()
 
