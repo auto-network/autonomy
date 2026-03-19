@@ -1587,200 +1587,22 @@ window.dagResetView = function() {
   renderBeadResults(document.getElementById('global-search')?.value?.trim() || '');
 };
 
-function _escHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
+// ── Bead Detail Page (Jinja2 fragment + Alpine) ─────────────────
 
-function _renderPrimerSection(title, contentHtml) {
-  if (!contentHtml) return '';
-  return `
-    <div class="mb-6">
-      <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">${_escHtml(title)}</h2>
-      ${contentHtml}
-    </div>`;
-}
-
-function _renderStructuredPrimer(primer) {
-  if (!primer || primer.error) return '';
-  let html = '';
-
-  // Bead description & acceptance criteria (render as markdown)
-  const b = primer.bead;
-  if (b) {
-    if (b.description) {
-      html += _renderPrimerSection('Description', renderMd(b.description).outerHTML);
-    }
-    if (b.acceptance_criteria) {
-      html += _renderPrimerSection('Acceptance Criteria', renderMd(b.acceptance_criteria).outerHTML);
-    }
-    if (b.design) {
-      html += _renderPrimerSection('Design Notes', renderMd(b.design).outerHTML);
-    }
-  }
-
-  // Provenance
-  if (primer.provenance && primer.provenance.length) {
-    let provHtml = '';
-    for (const prov of primer.provenance) {
-      const srcLink = `<a href="/source/${prov.source_id}" onclick="event.preventDefault(); navigateTo('/source/${prov.source_id}')" class="text-indigo-400 hover:underline font-mono text-xs">${prov.source_id.slice(0, 12)}</a>`;
-      if (prov.note) {
-        provHtml += `<div class="mb-2 text-sm text-gray-300"><span class="text-gray-500">${_escHtml(prov.relation)}:</span> ${_escHtml(prov.note)}</div>`;
-      }
-      for (const turn of (prov.turns || [])) {
-        const roleColor = turn.role === 'USER' ? 'text-blue-400' : 'text-green-400';
-        provHtml += `
-          <div class="ml-3 mb-2 pl-3 border-l-2 border-gray-700">
-            <div class="text-xs ${roleColor} mb-1">Turn ${turn.turn_number} — ${turn.role}</div>
-            <div class="text-sm text-gray-300">${_escHtml(turn.content_preview || turn.content || '')}</div>
-          </div>`;
-      }
-      provHtml += `<div class="text-xs text-gray-500 mb-3">Source: ${srcLink}</div>`;
-    }
-    html += _renderPrimerSection('Background — Original Discussions', provHtml);
-  }
-
-  // Related notes
-  if (primer.related_notes && primer.related_notes.length) {
-    let notesHtml = '<div class="space-y-2">';
-    for (const note of primer.related_notes) {
-      const srcLink = `<a href="/source/${note.source_id}" onclick="event.preventDefault(); navigateTo('/source/${note.source_id}')" class="text-indigo-400 hover:underline font-mono text-xs">${note.source_id.slice(0, 12)}</a>`;
-      const tags = (note.tags || []).map(t => `<span class="px-1.5 py-0.5 bg-gray-700 text-gray-400 text-xs rounded">${_escHtml(t)}</span>`).join(' ');
-      notesHtml += `
-        <div class="p-2 bg-gray-800 rounded border border-gray-700">
-          <div class="text-sm text-gray-300 mb-1">${_escHtml(note.content_preview || '')}</div>
-          <div class="flex items-center gap-2">${srcLink} ${tags}</div>
-        </div>`;
-    }
-    notesHtml += '</div>';
-    html += _renderPrimerSection('Related Notes', notesHtml);
-  }
-
-  // Pitfalls
-  if (primer.pitfalls && primer.pitfalls.length) {
-    let pitHtml = '<div class="space-y-2">';
-    for (const p of primer.pitfalls) {
-      const srcLink = `<a href="/source/${p.source_id}" onclick="event.preventDefault(); navigateTo('/source/${p.source_id}')" class="text-indigo-400 hover:underline font-mono text-xs">${p.source_id.slice(0, 12)}</a>`;
-      const tags = (p.tags || []).map(t => `<span class="px-1.5 py-0.5 bg-gray-700 text-gray-400 text-xs rounded">${_escHtml(t)}</span>`).join(' ');
-      pitHtml += `
-        <div class="p-2 bg-yellow-900/20 rounded border border-yellow-800/30">
-          <div class="text-sm text-gray-300 mb-1">${_escHtml(p.content_preview || '')}</div>
-          <div class="flex items-center gap-2">${srcLink} ${tags}</div>
-        </div>`;
-    }
-    pitHtml += '</div>';
-    html += _renderPrimerSection('Known Pitfalls', pitHtml);
-  }
-
-  // Related beads (semantic similarity)
-  if (primer.related_beads && primer.related_beads.length) {
-    let rbHtml = '<div class="space-y-1">';
-    for (const rb of primer.related_beads) {
-      const bid = rb.bead_id || rb.id || '?';
-      const sim = rb.similarity != null ? `<span class="text-xs text-gray-500">${(rb.similarity * 100).toFixed(0)}% similar</span>` : '';
-      rbHtml += `
-        <div class="flex items-center gap-2 p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 cursor-pointer"
-             onclick="navigateTo('/bead/${bid}')">
-          ${statusBadge(rb.status)} ${priorityBadge(rb.priority)}
-          <span class="font-mono text-xs text-gray-500">${_escHtml(bid)}</span>
-          <span class="text-sm text-gray-200 flex-1">${_escHtml(rb.title)}</span>
-          ${sim}
-        </div>`;
-    }
-    rbHtml += '</div>';
-    html += _renderPrimerSection('Similar Beads', rbHtml);
-  }
-
-  return html;
-}
-
-async function renderBeadDetail(id) {
+async function renderBeadDetailFragment(id) {
   pageTitle.textContent = `Bead: ${id}`;
-  const data = await api(`/api/bead/${id}`);
-  if (data.error) {
-    content.innerHTML = `<div class="text-red-400">${data.error}</div>`;
-    return;
+  let html;
+  if (_fragmentCache.has('/pages/bead')) {
+    html = _fragmentCache.get('/pages/bead');
+  } else {
+    const res = await fetch('/pages/bead');
+    html = await res.text();
+    _fragmentCache.set('/pages/bead', html);
   }
-  const bead = Array.isArray(data) ? data[0] : data;
-  if (!bead) {
-    content.innerHTML = '<div class="text-gray-400">Bead not found</div>';
-    return;
-  }
-
-  // Fetch structured primer data
-  const primer = await api(`/api/primer/${id}`);
-
-  const labels = bead.labels || [];
-  const isApproved = labels.includes('readiness:approved');
-  const isClosed = bead.status === 'closed';
-  const approveBtn = (!isApproved && !isClosed)
-    ? `<button id="approve-btn-${bead.id}" onclick="approveBead('${bead.id}', event)" class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded">Approve for Dispatch</button>`
-    : isApproved
-    ? `<span class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded">Approved</span>`
-    : '';
-
-  let html = `
-    <div class="mb-6">
-      <h1 class="text-2xl font-bold mb-2">${_escHtml(bead.title)}</h1>
-      <div class="flex gap-2 items-center mb-4">
-        <span class="font-mono text-sm text-gray-500">${_escHtml(bead.id)}</span>
-        ${priorityBadge(bead.priority)}
-        ${statusBadge(bead.status)}
-        <span class="text-sm text-gray-400">${_escHtml(bead.issue_type || '')}</span>
-        ${approveBtn}
-      </div>
-      ${labels.length ? `<div class="flex gap-1 mb-2">${labels.map(l => `<span class="px-2 py-0.5 bg-gray-700 text-gray-300 text-xs rounded">${_escHtml(l)}</span>`).join('')}</div>` : ''}
-    </div>`;
-
-  // Render structured primer sections (or fall back to markdown for old API)
-  if (primer && !primer.error && primer.bead) {
-    html += _renderStructuredPrimer(primer);
-  } else if (primer && primer.content) {
-    // Backward compatibility: raw markdown from old API format
-    html += '<div class="mt-6" id="primer-content"></div>';
-  }
-
-  // Render comments from bead data (below description/primer sections)
-  const comments = bead.comments || [];
-  if (comments.length) {
-    let commentsHtml = '<div class="space-y-3">';
-    for (const c of comments) {
-      const ts = c.created_at ? new Date(c.created_at).toLocaleString() : '';
-      const mdEl = document.createElement('div');
-      mdEl.innerHTML = marked.parse(c.text || '');
-      commentsHtml += `
-        <div class="pl-4 border-l-2 border-indigo-700/50">
-          <div class="text-xs text-gray-500 mb-1">${_escHtml(c.author || '?')} · ${_escHtml(ts)}</div>
-          <div class="text-sm text-gray-300 prose prose-invert prose-sm max-w-none">${mdEl.innerHTML}</div>
-        </div>`;
-    }
-    commentsHtml += '</div>';
-    html += _renderPrimerSection('Comments', commentsHtml);
-  }
-
-  // Add padding at bottom if live panel might open
-  const isRunning = labels.some(l => l.startsWith('dispatch:running') || l.startsWith('dispatch:launching') || l.startsWith('dispatch:collecting'));
-  if (isRunning) {
-    html += '<div style="height: 20rem;"></div>';  // spacer for live panel
-  }
-
   content.innerHTML = html;
 
-  // Backward compat: render markdown if structured data wasn't available
-  if (primer && primer.content && !primer.bead) {
-    const el = document.getElementById('primer-content');
-    if (el) el.appendChild(renderMd(primer.content));
-  }
-
-  // Auto-open live panel if dispatch is running
-  if (isRunning) {
-    const runs = await api('/api/dispatch/runs');
-    const runsList = Array.isArray(runs) ? runs : [];
-    const beadRun = runsList.find(r => r.bead_id === id);
-    if (beadRun) {
-      showLivePanel(beadRun.dir);
-    }
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
   }
 }
 
@@ -3945,7 +3767,7 @@ function route() {
   } else if (path === '/dispatch' || path === '/dispatch/alpine' || path === '/dispatch/lit') {
     renderDispatchFragment();
   } else if (path.startsWith('/bead/')) {
-    renderBeadDetail(path.split('/bead/')[1]);
+    renderBeadDetailFragment(path.split('/bead/')[1]);
   } else if (path === '/timeline') {
     renderTimeline();
   } else if (path === '/sessions') {
