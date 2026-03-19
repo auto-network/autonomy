@@ -1642,6 +1642,19 @@ async def ws_terminal(websocket: WebSocket):
 async def page_timeline(request):
     return HTMLResponse(_load_template("base.html"))
 
+async def page_timeline_fragment(request):
+    """Return the Timeline page as an HTML fragment for SPA injection."""
+    return templates.TemplateResponse(request, "pages/timeline.html")
+
+async def page_trace_fragment(request):
+    """Return the Trace page as an HTML fragment for SPA injection.
+
+    The fragment is injected into #content by the client router, then
+    Alpine.initTree() initialises the x-data="tracePage()" component.
+    The component reads the run name from window.location.pathname on init.
+    """
+    return templates.TemplateResponse(request, "pages/trace.html")
+
 async def page_terminal(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -2043,6 +2056,8 @@ routes = [
     Route("/sessions", page_sessions),
     Route("/pages/sessions", page_sessions_fragment),
     Route("/pages/bead", page_bead_fragment),
+    Route("/pages/timeline", page_timeline_fragment),
+    Route("/pages/trace", page_trace_fragment),
     Route("/search", page_search),
     Route("/source/{id}", page_source),
     Route("/bead/{id}", page_bead),
