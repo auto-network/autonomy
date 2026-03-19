@@ -26,12 +26,10 @@
       es.addEventListener(topic, (e) => {
         try {
           const data = JSON.parse(e.data);
-          console.log('[EventBus] received', topic, data);
           // Update global cache so pages can read on mount.
           window._sseCache[topic] = data;
           // Dispatch to all registered handlers.
           const set = _handlers[topic];
-          console.log('[EventBus] handlers for', topic, set ? set.size : 0);
           if (set) {
             set.forEach(fn => {
               try { fn(data); } catch (err) {
