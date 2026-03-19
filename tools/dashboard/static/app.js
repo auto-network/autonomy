@@ -3476,6 +3476,12 @@ async function manualCaptureScreenshot(expId) {
 }
 
 async function renderExperiment(expId) {
+  // Clean up any previous experiment SSE subscription
+  if (window._expSeriesCleanup) {
+    window._expSeriesCleanup();
+    window._expSeriesCleanup = null;
+  }
+
   pageTitle.textContent = 'Experiment';
   content.innerHTML = '<div class="text-gray-400">Loading experiment...</div>';
   destroyChatWith();
@@ -3658,6 +3664,25 @@ ${_safeHtml}
     setTimeout(resizeIframe, 200);
     setTimeout(resizeIframe, 600);
   });
+
+  // Subscribe to series SSE topic so gallery auto-updates when a new variant is posted
+  const seriesId = exp.series_id;
+  if (seriesId) {
+    const seriesTopic = `experiments:${seriesId}`;
+    registerTopic(seriesTopic);
+
+    function _onNewSeriesExperiment(data) {
+      // Ignore replays of the current experiment
+      const currentId = window.location.pathname.split('/experiments/')[1];
+      if (!currentId || data.experiment_id === currentId) return;
+      // Only act if still on an experiment page (user may have navigated away)
+      if (!window.location.pathname.startsWith('/experiments/')) return;
+      navigateTo(`/experiments/${data.experiment_id}`);
+    }
+
+    registerHandler(seriesTopic, _onNewSeriesExperiment);
+    window._expSeriesCleanup = () => unregisterHandler(seriesTopic, _onNewSeriesExperiment);
+  }
 
   // Initiate display capture (async — prompt appears, iframes still loading in parallel)
   if (!isCompleted) {
