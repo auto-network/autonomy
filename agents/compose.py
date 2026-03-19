@@ -17,13 +17,23 @@ from pathlib import Path
 SHARED_DIR = Path(__file__).parent / "shared"
 
 
-def load_shared_blocks() -> list[str]:
-    """Load all markdown files from agents/shared/ in sorted order."""
+def load_shared_blocks(labels: list[str] | None = None) -> list[str]:
+    """Load shared markdown blocks.
+
+    Always loads agents/shared/*.md. If the bead has labels matching
+    subdirectory names (e.g. label "dashboard" → agents/shared/dashboard/),
+    those are included too.
+    """
     blocks = []
     if not SHARED_DIR.exists():
         return blocks
     for md_file in sorted(SHARED_DIR.glob("*.md")):
         blocks.append(md_file.read_text().strip())
+    for label in (labels or []):
+        subdir = SHARED_DIR / label
+        if subdir.is_dir():
+            for md_file in sorted(subdir.glob("*.md")):
+                blocks.append(md_file.read_text().strip())
     return blocks
 
 
@@ -42,6 +52,7 @@ def compose_prompt(bead_id: str) -> str:
     # Import here to avoid circular deps when running outside the repo
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from tools.graph.primer import collect_primer_data, format_for_agent
+    from tools.dashboard.dao.beads import get_bead
 
     sections = []
 
@@ -56,7 +67,11 @@ def compose_prompt(bead_id: str) -> str:
     #    - Workspace location, graph CLI, bd readonly commands
     #    - Decision file schema (status, scores, time_breakdown, etc.)
     #    - Working style guidance
-    shared = load_shared_blocks()
+    #    Label-matched subdirs (e.g. shared/dashboard/) are included when
+    #    the bead has a matching label.
+    bead = get_bead(bead_id)
+    labels = bead.get("labels", []) if bead else []
+    shared = load_shared_blocks(labels)
     if shared:
         sections.append("\n---\n")
         sections.extend(shared)
