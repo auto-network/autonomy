@@ -2641,6 +2641,8 @@ async function spawnChatWith(expId) {
     }
     if (btn) { btn.disabled = false; btn.textContent = 'Reconnect'; }
     connectChatWithTerminal(result.session_name);
+    // Start display capture now that Chat With is active
+    initDisplayCapture(expId).catch(() => {});
   } catch(e) {
     if (btn) { btn.disabled = false; btn.textContent = 'Chat With'; }
     if (statusEl) { statusEl.textContent = 'spawn failed'; statusEl.className = 'text-xs text-red-400 ml-2'; }
@@ -3632,6 +3634,8 @@ async function renderExperiment(expId) {
         const btn = document.getElementById('chatwith-btn');
         if (btn) btn.textContent = 'Reconnect';
         connectChatWithTerminal(sessionName);
+        // Active Chat With session — init display capture for screenshots
+        initDisplayCapture(expId).catch(() => {});
       }
     } catch(e) { /* ignore — check is best-effort */ }
   })();
@@ -3701,9 +3705,10 @@ ${_safeHtml}
     window._expSeriesCleanup = () => unregisterHandler(seriesTopic, _onNewSeriesExperiment);
   }
 
-  // Initiate display capture (async — prompt appears, iframes still loading in parallel)
-  if (!isCompleted) {
-    initDisplayCapture(expId).catch(() => {});
+  // Display capture is initiated when Chat With spawns, not on page load.
+  // If a stream is already active (from a previous Chat With), auto-capture.
+  if (!isCompleted && _displayStream) {
+    setTimeout(() => captureTabScreenshot(expId), 1500);
   }
 
   if (isCompleted) {
