@@ -956,6 +956,22 @@ async def api_chatwith_check(request):
     return JSONResponse({"exists": exists, "session_name": session_name})
 
 
+async def api_chatwith_sessions(request):
+    """List all active Chat With tmux sessions.
+
+    GET /api/chatwith/sessions
+    Returns {sessions: [session_name, ...]} for all tmux sessions prefixed 'chatwith-'.
+    """
+    result = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return JSONResponse({"sessions": []})
+    sessions = [s for s in result.stdout.strip().split("\n") if s.startswith("chatwith-")]
+    return JSONResponse({"sessions": sessions})
+
+
 # ── Live Session Tailing ──────────────────────────────────────
 
 
@@ -2060,6 +2076,7 @@ routes = [
     Route("/api/chatwith/primer/{page_type}", api_chatwith_primer),
     Route("/api/chatwith/spawn", api_chatwith_spawn, methods=["POST"]),
     Route("/api/chatwith/check", api_chatwith_check),
+    Route("/api/chatwith/sessions", api_chatwith_sessions),
     Route("/api/dispatch/tail/{run}", api_dispatch_tail),
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
     Route("/api/timeline", api_timeline),
