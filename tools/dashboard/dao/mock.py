@@ -1,4 +1,4 @@
-"""Mock DAO layer — reads fixture data from a JSON file.
+"""Mock DAO layer + event watcher — file-driven testing without databases.
 
 Activated by setting DASHBOARD_MOCK=path/to/fixtures.json before starting
 the server. Every DAO call reads the file fresh, so agents can edit the
@@ -13,6 +13,13 @@ Fixture file format:
 
 Bead dicts must have at minimum: id, title, status, priority.
 See FIXTURE_DEFAULTS below for fields that get auto-filled if omitted.
+
+SSE events: Set DASHBOARD_MOCK_EVENTS=path/to/events.jsonl. The mock
+event watcher tails this file and broadcasts each new line to the event
+bus. Agents append JSONL lines to push SSE updates:
+
+  echo '{"topic":"dispatch","data":{"active":[],"waiting":[],"blocked":[]}}' >> events.jsonl
+  echo '{"topic":"nav","data":{"open_beads":5,"running_agents":1}}' >> events.jsonl
 """
 
 from __future__ import annotations
@@ -141,3 +148,46 @@ def get_run(run_id: str) -> dict | None:
 
 def get_runs_for_bead(bead_id: str) -> list[dict]:
     return [r for r in _runs() if r.get("bead_id") == bead_id]
+
+
+# ── Mock event watcher (replaces _dispatch_watcher) ─────────────────
+
+EVENTS_PATH = Path(os.environ.get("DASHBOARD_MOCK_EVENTS", ""))
+
+
+async def mock_event_watcher():
+    """Tail a JSONL file and broadcast each new line to the event bus.
+
+    Each line must be: {"topic": "...", "data": {...}}
+    Agents append lines to push SSE updates to connected browsers.
+    Polls every 0.5s for new lines. Silently ignores missing file or
+    malformed lines.
+    """
+    from tools.dashboard.event_bus import event_bus
+
+    if not EVENTS_PATH or not str(EVENTS_PATH):
+        return
+
+    import asyncio
+    lines_read = 0
+    while True:
+        try:
+            if EVENTS_PATH.exists():
+                all_lines = EVENTS_PATH.read_text().splitlines()
+                new_lines = all_lines[lines_read:]
+                lines_read = len(all_lines)
+                for line in new_lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        topic = event.get("topic")
+                        data = event.get("data")
+                        if topic and data is not None:
+                            await event_bus.broadcast(topic, data)
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
