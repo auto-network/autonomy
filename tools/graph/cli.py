@@ -917,21 +917,23 @@ def cmd_ui_exp(args):
     print(f"  Screenshot: {dir_path}/screenshot.png (auto-updated from browser)")
     print(f"\n  Watching {dir_path}/ for changes... (Ctrl+C to stop)\n")
 
-    import shutil as _shutil
-    latest_exp_id = exp_id  # Track latest experiment for screenshot polling
-    screenshot_dest = dir_path / "screenshot.png"
-    _screenshot_captured = False  # True once we have the screenshot for latest_exp_id
+    latest_exp_id = exp_id
+    screenshot_link = dir_path / "screenshot.png"
+    _screenshot_linked = False  # True once symlink points to current experiment
 
-    def _check_screenshot():
-        """Check if a screenshot exists for the latest experiment, copy it in."""
-        nonlocal _screenshot_captured
-        if _screenshot_captured:
+    def _link_screenshot():
+        """Symlink screenshot.png to the latest experiment's screenshot."""
+        nonlocal _screenshot_linked
+        if _screenshot_linked:
             return
         src = Path(f"data/experiments/{latest_exp_id}/screenshot.png")
         if src.exists():
-            _shutil.copy2(str(src), str(screenshot_dest))
-            print(f"  📸 screenshot.png updated")
-            _screenshot_captured = True
+            abs_src = src.resolve()
+            if screenshot_link.is_symlink() or screenshot_link.exists():
+                screenshot_link.unlink()
+            screenshot_link.symlink_to(abs_src)
+            print(f"  📸 screenshot.png → {abs_src}")
+            _screenshot_linked = True
 
     prev_states = _file_states()
 
@@ -940,7 +942,7 @@ def cmd_ui_exp(args):
             _time.sleep(1)
 
             # Check for screenshot until we have one for the current experiment
-            _check_screenshot()
+            _link_screenshot()
 
             curr_states = _file_states()
 
@@ -984,7 +986,7 @@ def cmd_ui_exp(args):
                 result = _post("/api/experiments", exp_data)
                 new_id = result["id"]
                 latest_exp_id = new_id
-                _screenshot_captured = False  # New experiment, need fresh screenshot
+                _screenshot_linked = False  # New experiment, need fresh symlink
                 print(f"  → {new_id} ({len(variants)} variants)")
             except Exception as e:
                 print(f"  ERROR: {e}", file=sys.stderr)
