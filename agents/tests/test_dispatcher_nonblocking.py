@@ -354,7 +354,7 @@ class TestDispatchCycle:
         mock_claimed.return_value = set()
         mock_start.return_value = _make_running_agent(bead_id="auto-abc")
 
-        dispatched = dispatch_cycle(config, running)
+        dispatched = dispatch_cycle(config, running, [])
 
         assert dispatched == 1
         assert len(running) == 1
@@ -367,7 +367,7 @@ class TestDispatchCycle:
         running = [_make_running_agent()]
         config = DispatcherConfig(max_concurrent=1)
 
-        dispatched = dispatch_cycle(config, running)
+        dispatched = dispatch_cycle(config, running, [])
 
         assert dispatched == 0
         mock_ready.assert_not_called()  # Shouldn't even query beads
@@ -393,7 +393,7 @@ class TestDispatchCycle:
             _make_running_agent(bead_id="auto-b"),
         ]
 
-        dispatched = dispatch_cycle(config, running)
+        dispatched = dispatch_cycle(config, running, [])
 
         assert dispatched == 2
         assert len(running) == 2
@@ -407,7 +407,7 @@ class TestDispatchCycle:
 
         mock_ready.return_value = []
 
-        dispatched = dispatch_cycle(config, running)
+        dispatched = dispatch_cycle(config, running, [])
         assert dispatched == 0
 
     @patch("agents.dispatcher.start_agent")
@@ -426,7 +426,7 @@ class TestDispatchCycle:
         ]
         mock_claimed.return_value = set()
 
-        dispatched = dispatch_cycle(config, running)
+        dispatched = dispatch_cycle(config, running, [])
 
         assert dispatched == 0
         mock_start.assert_not_called()
@@ -453,7 +453,7 @@ class TestDispatchCycle:
         mock_start.return_value = None
         mock_find_wt.return_value = ""
 
-        dispatch_cycle(config, running)
+        dispatch_cycle(config, running, [])
 
         assert len(running) == 0
         mock_release.assert_called_once_with(
@@ -604,7 +604,7 @@ class TestDispatchCycleDependencyFiltering:
             {"id": "auto-prereq", "status": "open", "dependency_type": "blocks"}
         ]
 
-        dispatched = dispatch_cycle(config, running)
+        dispatched = dispatch_cycle(config, running, [])
 
         # Only auto-free should be dispatched
         assert dispatched == 1
@@ -635,7 +635,7 @@ class TestDispatchCycleDependencyFiltering:
             {"id": "auto-prereq", "status": "open", "dependency_type": "blocks"}
         ]
 
-        dispatched = dispatch_cycle(config, running)
+        dispatched = dispatch_cycle(config, running, [])
 
         assert dispatched == 0
         assert len(running) == 0
@@ -662,7 +662,7 @@ class TestDispatchCycleDependencyFiltering:
         mock_open_deps.return_value = []  # All deps closed
         mock_start.return_value = _make_running_agent(bead_id="auto-ok")
 
-        dispatched = dispatch_cycle(config, running)
+        dispatched = dispatch_cycle(config, running, [])
 
         assert dispatched == 1
         assert len(running) == 1
@@ -691,7 +691,7 @@ class TestDispatchCycleDependencyFiltering:
             {"id": "auto-dep", "status": "open", "dependency_type": "blocks"}
         ]
 
-        dispatched = dispatch_cycle(config, running)
+        dispatched = dispatch_cycle(config, running, [])
 
         assert dispatched == 0
         mock_open_deps.assert_called_once_with("auto-inline")
