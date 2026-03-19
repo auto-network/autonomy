@@ -83,7 +83,7 @@ def get_recent_sessions(limit: int = 20) -> list[dict]:
                 "type": r["type"],
                 "date": (r["created_at"] or "")[:10],
                 "title": r["title"] or "",
-                "project": f"[{r['project']}]" if r.get("project") else "",
+                "project": f"[{r['project']}]" if r["project"] else "",
             }
             for r in rows
         ]
