@@ -81,20 +81,28 @@
   <!-- Feed cards -->
   <div>
     <template x-for="e in entries" :key="e._key">
-      <div class="tl-card" @click="e._open = !e._open">
+      <div
+        class="tl-card"
+        :class="{'tl-card-lib': e._isLibrarian, 'open': e._open}"
+        @click="e._open = !e._open"
+      >
 
-        <!-- Row 1: dot · title · (bead-id) · time -->
+        <!-- Row 1: dot/icon · title · (bead-id) · time -->
         <div class="tl-row1">
-          <span class="tl-dot" :class="e._dotCls"></span>
-          <span class="tl-title" x-text="e.title || e.bead_id"></span>
+          <!-- Librarian: book icon -->
+          <span x-show="e._isLibrarian" class="tl-lib-icon" style="display:none">📚</span>
+          <!-- Dispatch: status dot -->
+          <span x-show="!e._isLibrarian" class="tl-dot" :class="e._dotCls"></span>
+
+          <span class="tl-title" x-text="e._isLibrarian ? e._libTitle : (e.title || e.bead_id)"></span>
           <div class="tl-top-right">
-            <span class="tl-bead-id" x-text="'(' + e.bead_id + ')'"></span>
+            <span x-show="!e._isLibrarian && e.bead_id" class="tl-bead-id" x-text="'(' + e.bead_id + ')'" style="display:none"></span>
             <span class="tl-ts" x-text="e._ts"></span>
           </div>
         </div>
 
-        <!-- Row 2: reason (truncated when collapsed) · priority + status badges -->
-        <div class="tl-row2">
+        <!-- Row 2 (dispatch): reason + priority/status badges -->
+        <div class="tl-row2" x-show="!e._isLibrarian">
           <div
             class="tl-reason"
             :style="e._open ? 'white-space: normal; overflow: visible; text-overflow: clip;' : ''"
@@ -108,8 +116,16 @@
           </div>
         </div>
 
-        <!-- Expanded detail: links left, scores right -->
-        <div class="tl-exp-detail" x-show="e._open" @click.stop style="display:none">
+        <!-- Row 2 (librarian): summary + status badge -->
+        <div class="tl-row2" x-show="e._isLibrarian" style="display:none">
+          <div class="tl-reason" x-text="e.librarian_review && e.librarian_review.summary ? e.librarian_review.summary : (e.reason || '')"></div>
+          <div class="tl-row2-badges">
+            <span class="tl-ft" :class="e._stCls" x-text="e.status || '?'"></span>
+          </div>
+        </div>
+
+        <!-- Expanded detail (dispatch card) -->
+        <div class="tl-exp-detail" x-show="e._open && !e._isLibrarian" @click.stop style="display:none">
           <div class="tl-exp-row">
             <div class="tl-exp-links">
               <a class="tl-exp-link" :href="'/dispatch/trace/' + e.bead_id">Trace &#8594;</a>
@@ -144,6 +160,85 @@
           <template x-if="e.discovered_beads_count">
             <div class="text-xs text-purple-400 mt-1" x-text="e.discovered_beads_count + ' bead(s) discovered'"></div>
           </template>
+
+          <!-- Librarian review section (expanded dispatch card, review complete) -->
+          <template x-if="e.librarian_review && e.librarian_review.status !== 'running'">
+            <div class="tl-review-detail" @click.stop>
+              <div class="tl-review-header">
+                <span>📚 Librarian Review</span>
+                <span x-show="e._reviewCollapsed" class="tl-review-count" x-text="e._reviewCollapsed" style="display:none"></span>
+              </div>
+              <!-- Structured items (experience_reviewer results.json) -->
+              <template x-if="e._reviewItems">
+                <div class="tl-review-items">
+                  <template x-for="(item, i) in e._reviewItems" :key="i">
+                    <div class="tl-review-item">
+                      <span class="tl-lib-dot" :class="'tl-lib-dot-' + (item.type || 'skip')">●</span>
+                      <span x-text="item.description || ''"></span>
+                      <template x-if="item.source_id">
+                        <a class="tl-lib-link" :href="'/source/' + item.source_id" @click.stop x-text="item.source_id.slice(0,8)"></a>
+                      </template>
+                      <template x-if="item.bead_id">
+                        <a class="tl-lib-link" :href="'/bead/' + item.bead_id" @click.stop x-text="item.bead_id"></a>
+                      </template>
+                      <template x-if="item.reason">
+                        <span class="tl-lib-reason" x-text="'— ' + item.reason"></span>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <!-- Generic fallback: show notes/reason text -->
+              <template x-if="!e._reviewItems && e.librarian_review.notes">
+                <div class="tl-review-notes" x-text="e.librarian_review.notes"></div>
+              </template>
+            </div>
+          </template>
+        </div>
+
+        <!-- Expanded detail (librarian card: experience_reviewer custom template) -->
+        <div class="tl-exp-detail" x-show="e._open && e._isLibrarian && e.librarian_type === 'review_report'" @click.stop style="display:none">
+          <template x-if="e._reviewItems">
+            <div class="tl-review-items">
+              <template x-for="(item, i) in e._reviewItems" :key="i">
+                <div class="tl-review-item">
+                  <span class="tl-lib-dot" :class="'tl-lib-dot-' + (item.type || 'skip')">●</span>
+                  <span x-text="item.description || ''"></span>
+                  <template x-if="item.source_id">
+                    <a class="tl-lib-link" :href="'/source/' + item.source_id" @click.stop x-text="item.source_id.slice(0,8)"></a>
+                  </template>
+                  <template x-if="item.bead_id">
+                    <a class="tl-lib-link" :href="'/bead/' + item.bead_id" @click.stop x-text="item.bead_id"></a>
+                  </template>
+                  <template x-if="item.reason">
+                    <span class="tl-lib-reason" x-text="'— ' + item.reason"></span>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+          <template x-if="!e._reviewItems">
+            <div class="tl-exp-row">
+              <div class="tl-exp-links">
+                <a class="tl-exp-link" :href="'/dispatch/trace/' + e.run_id">Trace &#8594;</a>
+              </div>
+              <template x-if="e.librarian_review && e.librarian_review.notes">
+                <div class="tl-review-notes" style="margin-top:4px" x-text="e.librarian_review.notes"></div>
+              </template>
+            </div>
+          </template>
+        </div>
+
+        <!-- Expanded detail (librarian card: generic template) -->
+        <div class="tl-exp-detail" x-show="e._open && e._isLibrarian && e.librarian_type !== 'review_report'" @click.stop style="display:none">
+          <div class="tl-exp-row">
+            <div class="tl-exp-links">
+              <a class="tl-exp-link" :href="'/dispatch/trace/' + e.run_id">Trace &#8594;</a>
+            </div>
+          </div>
+          <template x-if="e.librarian_review && e.librarian_review.notes">
+            <div class="tl-review-notes" x-text="e.librarian_review.notes"></div>
+          </template>
         </div>
 
         <!-- Bottom: legend + stats row + stacked bar -->
@@ -159,16 +254,23 @@
                 </div>
               </template>
               <div class="tl-stats-right">
+                <!-- ⏱ duration (purple icon) -->
                 <template x-if="e.duration_secs != null">
-                  <span x-text="'⏱ ' + fmtDuration(e.duration_secs)"></span>
+                  <span><span class="tl-icon-time">⏱</span><span x-text="fmtDuration(e.duration_secs)"></span></span>
                 </template>
+                <!-- ✦ token count (sky blue) -->
+                <template x-if="e._tokenFmt">
+                  <span class="tl-tokens" x-text="'✦ ' + e._tokenFmt"></span>
+                </template>
+                <!-- +added -removed -->
                 <template x-if="e.lines_added != null">
                   <span class="tl-diff-add" x-text="'+' + e.lines_added"></span>
                 </template>
                 <template x-if="e.lines_removed != null">
                   <span class="tl-diff-del" x-text="'-' + e.lines_removed"></span>
                 </template>
-                <template x-if="e.scores">
+                <!-- ⭐ avg rating (collapsed only, dispatch cards) -->
+                <template x-if="e.scores && !e._isLibrarian">
                   <span class="tl-avg-wrap" x-show="!e._open">
                     <template x-for="(on, i) in e._starsAvg" :key="i">
                       <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
@@ -187,6 +289,22 @@
                 <div x-show="e._barT" class="tl-bar-t" :style="'width:' + e._barT + '%'"></div>
               </div>
             </template>
+
+            <!-- Review summary (collapsed dispatch cards with a completed review) -->
+            <div
+              class="tl-review-summary"
+              x-show="!e._isLibrarian && e.librarian_review && !e._open"
+              style="display:none"
+            >
+              <!-- Running state: pulsing indicator -->
+              <template x-if="e.librarian_review && e.librarian_review.status === 'running'">
+                <span class="tl-review-running">📚 Reviewing...</span>
+              </template>
+              <!-- Done state: count summary -->
+              <template x-if="e.librarian_review && e.librarian_review.status !== 'running'">
+                <span>📚 Reviewed<template x-if="e._reviewCollapsed"><span x-text="' · ' + e._reviewCollapsed"></span></template></span>
+              </template>
+            </div>
           </div>
         </template>
 
