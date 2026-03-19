@@ -3811,11 +3811,15 @@ function _esc(s) {
 // ── Sidebar Experiment Indicator ─────────────────────────────
 
 async function dismissExperiment(expId, seriesKey, triggerEl) {
-  // Show inline confirmation in place of the dismiss button
+  const sessionName = `chatwith-${seriesKey}`;
+  const toastEl = triggerEl.closest('[data-exp-id]');
+  const hasChatWith = toastEl && toastEl.dataset.hasChatwith === 'true';
+  const confirmMsg = hasChatWith ? 'End experiment and Chat With session?' : 'End?';
+
   const confirmed = await new Promise(resolve => {
     const confirm = document.createElement('span');
     confirm.className = 'exp-dismiss-confirm';
-    confirm.innerHTML = 'End? <button class="exp-dismiss-yes">Yes</button><button class="exp-dismiss-no">No</button>';
+    confirm.innerHTML = `${confirmMsg} <button class="exp-dismiss-yes">Yes</button><button class="exp-dismiss-no">No</button>`;
     triggerEl.replaceWith(confirm);
     confirm.querySelector('.exp-dismiss-yes').onclick = (e) => { e.stopPropagation(); resolve(true); };
     confirm.querySelector('.exp-dismiss-no').onclick = (e) => { e.stopPropagation(); confirm.replaceWith(triggerEl); resolve(false); };
@@ -3826,7 +3830,33 @@ async function dismissExperiment(expId, seriesKey, triggerEl) {
   } catch (e) {
     console.warn('[dismiss] Failed to dismiss experiment:', e);
   }
+  if (hasChatWith) {
+    try {
+      await fetch(`/api/terminal/${sessionName}/kill`);
+    } catch (e) {
+      console.warn('[dismiss] Failed to kill Chat With session:', e);
+    }
+  }
   const el = document.querySelector(`[data-exp-id="${seriesKey}"]`);
+  if (el) el.remove();
+}
+
+async function dismissOrphanSession(sessionName, orphanKey, triggerEl) {
+  const confirmed = await new Promise(resolve => {
+    const confirm = document.createElement('span');
+    confirm.className = 'exp-dismiss-confirm';
+    confirm.innerHTML = 'Kill session? <button class="exp-dismiss-yes">Yes</button><button class="exp-dismiss-no">No</button>';
+    triggerEl.replaceWith(confirm);
+    confirm.querySelector('.exp-dismiss-yes').onclick = (e) => { e.stopPropagation(); resolve(true); };
+    confirm.querySelector('.exp-dismiss-no').onclick = (e) => { e.stopPropagation(); confirm.replaceWith(triggerEl); resolve(false); };
+  });
+  if (!confirmed) return;
+  try {
+    await fetch(`/api/terminal/${sessionName}/kill`);
+  } catch (e) {
+    console.warn('[dismiss] Failed to kill orphan Chat With session:', e);
+  }
+  const el = document.querySelector(`[data-exp-id="${orphanKey}"]`);
   if (el) el.remove();
 }
 
@@ -3834,32 +3864,57 @@ async function checkPendingExperiments() {
   const container = document.getElementById('sidebar-experiments');
   if (!container) return;
   try {
-    const pending = await api('/api/experiments/pending');
+    const [pending, chatData] = await Promise.all([
+      api('/api/experiments/pending'),
+      api('/api/chatwith/sessions').catch(() => ({ sessions: [] })),
+    ]);
+    // Build a mutable set of active chatwith session names; we'll delete matched ones
+    // to find orphaned sessions afterward.
+    const activeSessions = new Set((chatData && chatData.sessions) || []);
     const keys = new Set();
+
     if (Array.isArray(pending)) {
       pending.forEach(exp => {
         // Use series_id as the stable key so the toast represents the whole series
         const seriesKey = exp.series_id || exp.id;
         keys.add(seriesKey);
+        const sessionName = `chatwith-${seriesKey}`;
+        const hasChatWith = activeSessions.has(sessionName);
+        // Consume session so it isn't treated as orphaned below
+        activeSessions.delete(sessionName);
+
         const iterLabel = exp.iteration_count > 1
           ? `${_esc(exp.title)} <span class="text-gray-500 text-xs">(${exp.iteration_count} iterations)</span>`
           : _esc(exp.title);
         const existing = container.querySelector(`[data-exp-id="${seriesKey}"]`);
         if (existing) {
-          // Update link target and label in case a new iteration was added
+          // Update link target, label, and Chat With indicator
+          existing.dataset.hasChatwith = hasChatWith ? 'true' : 'false';
           existing.href = `/experiments/${exp.id}`;
           existing.onclick = (e) => { e.preventDefault(); navigateTo(`/experiments/${exp.id}`); };
           const textEl = existing.querySelector('.sidebar-exp-text');
           if (textEl) textEl.innerHTML = iterLabel;
+          // Sync pulsing dot
+          let dot = existing.querySelector('.sidebar-exp-chat-dot');
+          if (hasChatWith && !dot) {
+            dot = document.createElement('span');
+            dot.className = 'sidebar-exp-chat-dot';
+            const icon = existing.querySelector('.sidebar-exp-icon');
+            existing.insertBefore(dot, icon ? icon.nextSibling : textEl);
+          } else if (!hasChatWith && dot) {
+            dot.remove();
+          }
           return;
         }
         const link = document.createElement('a');
         link.className = 'sidebar-exp';
         link.dataset.expId = seriesKey;
+        link.dataset.hasChatwith = hasChatWith ? 'true' : 'false';
         // Navigate to latest iteration (exp.id is already the latest from the API)
         link.href = `/experiments/${exp.id}`;
         link.onclick = (e) => { e.preventDefault(); navigateTo(`/experiments/${exp.id}`); };
-        link.innerHTML = `<span class="sidebar-exp-icon">\uD83E\uDDEA</span><span class="sidebar-exp-text">${iterLabel}</span>`;
+        const chatDot = hasChatWith ? '<span class="sidebar-exp-chat-dot"></span>' : '';
+        link.innerHTML = `<span class="sidebar-exp-icon">\uD83E\uDDEA</span>${chatDot}<span class="sidebar-exp-text">${iterLabel}</span>`;
         const btn = document.createElement('button');
         btn.className = 'sidebar-exp-dismiss';
         btn.title = 'Dismiss';
@@ -3869,6 +3924,29 @@ async function checkPendingExperiments() {
         container.appendChild(link);
       });
     }
+
+    // Orphaned Chat With sessions: active tmux sessions with no matching pending experiment
+    for (const sessionName of activeSessions) {
+      if (!sessionName.startsWith('chatwith-')) continue;
+      const orphanKey = `orphan-${sessionName}`;
+      keys.add(orphanKey);
+      if (container.querySelector(`[data-exp-id="${orphanKey}"]`)) continue;
+      const link = document.createElement('a');
+      link.className = 'sidebar-exp';
+      link.dataset.expId = orphanKey;
+      link.dataset.hasChatwith = 'true';
+      link.href = '#';
+      link.onclick = (e) => e.preventDefault();
+      link.innerHTML = `<span class="sidebar-exp-icon">\uD83D\uDCAC</span><span class="sidebar-exp-chat-dot"></span><span class="sidebar-exp-text">${_esc(sessionName)}</span>`;
+      const btn = document.createElement('button');
+      btn.className = 'sidebar-exp-dismiss';
+      btn.title = 'Kill session';
+      btn.textContent = '\u00d7';
+      btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); dismissOrphanSession(sessionName, orphanKey, btn); };
+      link.appendChild(btn);
+      container.appendChild(link);
+    }
+
     // Remove indicators for series that are no longer pending (server is source of truth)
     container.querySelectorAll('[data-exp-id]').forEach(el => {
       if (!keys.has(el.dataset.expId)) el.remove();
