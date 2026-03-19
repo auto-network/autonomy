@@ -402,7 +402,7 @@ def update_live_stats(
     *,
     run_id: str,
     last_snippet: str | None = None,
-    token_delta: int = 0,
+    context_tokens: int = 0,
     tool_delta: int = 0,
     turn_delta: int = 0,
     cpu_pct: float | None = None,
@@ -417,9 +417,10 @@ def update_live_stats(
     Best-effort — silently ignores all errors so a stats failure never
     disrupts the dispatch loop.
 
-    token_delta, tool_delta, and turn_delta are added to the cumulative
-    counts (not replaced). All other fields replace the previous value
-    when provided. Fields left at their default (None / 0) are not touched.
+    context_tokens replaces token_count with the latest context window size.
+    tool_delta and turn_delta are added to cumulative counts.
+    All other fields replace the previous value when provided.
+    Fields left at their default (None / 0) are not touched.
     """
     updates: list[str] = []
     params: list = []
@@ -428,9 +429,9 @@ def update_live_stats(
         updates.append("last_snippet = ?")
         params.append(last_snippet)
 
-    if token_delta > 0:
-        updates.append("token_count = COALESCE(token_count, 0) + ?")
-        params.append(token_delta)
+    if context_tokens > 0:
+        updates.append("token_count = ?")
+        params.append(context_tokens)
 
     if tool_delta > 0:
         updates.append("tool_count = COALESCE(tool_count, 0) + ?")

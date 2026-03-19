@@ -769,17 +769,17 @@ def _read_jsonl_incremental(
 ) -> tuple[str | None, int, int, int, int, str | None]:
     """Read new JSONL lines starting at byte offset.
 
-    Returns (snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity_iso).
+    Returns (snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity_iso).
 
-    snippet      — last assistant/user text seen (first 300 chars), or None
-    token_delta  — sum of input+output tokens in new lines
-    new_offset   — byte offset after last complete line consumed
-    tool_delta   — count of tool_use entries in new lines
-    turn_delta   — count of assistant + thinking entries in new lines
+    snippet        — last assistant/user text seen (first 300 chars), or None
+    context_tokens — total input tokens from the last assistant turn (context window usage)
+    new_offset     — byte offset after last complete line consumed
+    tool_delta     — count of tool_use entries in new lines
+    turn_delta     — count of assistant + thinking entries in new lines
     last_activity_iso — ISO timestamp of last entry seen, or None
     """
     snippet: str | None = None
-    token_delta = 0
+    context_tokens = 0
     tool_delta = 0
     turn_delta = 0
     last_activity: str | None = None
@@ -787,7 +787,7 @@ def _read_jsonl_incremental(
     try:
         file_size = jsonl_path.stat().st_size
         if file_size <= offset:
-            return snippet, token_delta, offset, tool_delta, turn_delta, last_activity
+            return snippet, context_tokens, offset, tool_delta, turn_delta, last_activity
 
         with open(jsonl_path, "rb") as fh:
             fh.seek(offset)
@@ -796,7 +796,7 @@ def _read_jsonl_incremental(
         # Only process up to the last complete line (ends with \n)
         last_nl = data.rfind(b"\n")
         if last_nl == -1:
-            return snippet, token_delta, offset, tool_delta, turn_delta, last_activity
+            return snippet, context_tokens, offset, tool_delta, turn_delta, last_activity
 
         complete = data[: last_nl + 1]
         new_offset = offset + last_nl + 1
@@ -829,10 +829,14 @@ def _read_jsonl_incremental(
 
             msg = entry.get("message", {})
 
-            # Accumulate tokens
+            # Track context size: total input tokens from the latest assistant turn
             usage = msg.get("usage", {})
-            token_delta += usage.get("input_tokens", 0)
-            token_delta += usage.get("output_tokens", 0)
+            if etype == "assistant" and usage:
+                ctx = (usage.get("input_tokens", 0)
+                       + usage.get("cache_creation_input_tokens", 0)
+                       + usage.get("cache_read_input_tokens", 0))
+                if ctx > 0:
+                    context_tokens = ctx
 
             # Extract text for snippet
             content = msg.get("content", "")
@@ -849,10 +853,10 @@ def _read_jsonl_incremental(
             if text:
                 snippet = text[:300]
 
-        return snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity
+        return snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity
 
     except OSError:
-        return snippet, token_delta, offset, tool_delta, turn_delta, last_activity
+        return snippet, context_tokens, offset, tool_delta, turn_delta, last_activity
 
 
 def _read_cgroup_mem_mb(container_id: str) -> int | None:
@@ -901,14 +905,14 @@ def _collect_live_stats(agent: RunningAgent) -> None:
 
         # --- JSONL: incremental read ---
         snippet: str | None = None
-        token_delta = 0
+        context_tokens = 0
         tool_delta = 0
         turn_delta = 0
         last_activity: str | None = None
 
         jsonl_file = _find_jsonl_file(agent.output_dir)
         if jsonl_file:
-            snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
+            snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
                 jsonl_file, agent.jsonl_offset
             )
             agent.jsonl_offset = new_offset
@@ -935,7 +939,7 @@ def _collect_live_stats(agent: RunningAgent) -> None:
         update_live_stats(
             run_id=run_id,
             last_snippet=snippet,
-            token_delta=token_delta,
+            context_tokens=context_tokens,
             tool_delta=tool_delta,
             turn_delta=turn_delta,
             cpu_pct=cpu_pct,
@@ -1330,14 +1334,14 @@ def _collect_live_stats_for_librarian(lib: RunningLibrarian) -> None:
         run_id = Path(lib.output_dir).name if lib.output_dir else lib.job_id
 
         snippet: str | None = None
-        token_delta = 0
+        context_tokens = 0
         tool_delta = 0
         turn_delta = 0
         last_activity: str | None = None
 
         jsonl_file = _find_jsonl_file(lib.output_dir)
         if jsonl_file:
-            snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
+            snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
                 jsonl_file, lib.jsonl_offset
             )
             lib.jsonl_offset = new_offset
@@ -1359,7 +1363,7 @@ def _collect_live_stats_for_librarian(lib: RunningLibrarian) -> None:
         update_live_stats(
             run_id=run_id,
             last_snippet=snippet,
-            token_delta=token_delta,
+            context_tokens=context_tokens,
             tool_delta=tool_delta,
             turn_delta=turn_delta,
             cpu_pct=cpu_pct,
