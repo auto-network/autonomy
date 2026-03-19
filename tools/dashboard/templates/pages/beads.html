@@ -1,0 +1,429 @@
+<div x-data="beadsPage()" class="h-full flex flex-col">
+
+  <!-- View switcher tabs -->
+  <div role="tablist" class="flex gap-1 border-b border-gray-700 mb-4 flex-shrink-0">
+    <template x-for="v in [
+      {key:'list',  label:'▤ List'},
+      {key:'board', label:'▦ Board'},
+      {key:'tree',  label:'🌳 Tree'},
+      {key:'deps',  label:'🔗 Deps'}
+    ]" :key="v.key">
+      <button role="tab" :aria-selected="view === v.key"
+              :class="view === v.key
+                ? 'border-indigo-500 text-indigo-400'
+                : 'border-transparent text-gray-400 hover:text-gray-200 hover:border-gray-500'"
+              class="px-3 py-2 text-sm font-medium border-b-2 transition-colors"
+              @click="switchView(v.key)"
+              x-text="v.label"></button>
+    </template>
+  </div>
+
+  <!-- Filter bar (hidden when bulk-selecting in list view) -->
+  <div x-show="!(selectedCount > 0 && view === 'list')" class="mb-4 space-y-2 flex-shrink-0">
+    <div class="flex items-center gap-3 flex-wrap text-xs">
+
+      <!-- Priority chips -->
+      <span class="text-gray-500 font-medium">Priority</span>
+      <div class="flex gap-1">
+        <template x-for="p in [0,1,2,3,4]" :key="p">
+          <button :aria-pressed="fPriority.includes(p)"
+                  :class="fPriority.includes(p) ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'"
+                  class="px-2 py-0.5 rounded-full text-xs font-medium transition-colors"
+                  @click="togglePriority(p)" x-text="'P' + p"></button>
+        </template>
+      </div>
+
+      <span class="text-gray-600">|</span>
+
+      <!-- Phase chips -->
+      <span class="text-gray-500 font-medium">Phase</span>
+      <div class="flex gap-1">
+        <template x-for="ph in ['idea','draft','specified','approved']" :key="ph">
+          <button :aria-pressed="fPhase.includes(ph)"
+                  :class="fPhase.includes(ph) ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'"
+                  class="px-2 py-0.5 rounded-full text-xs font-medium transition-colors"
+                  @click="togglePhase(ph)" x-text="ph"></button>
+        </template>
+      </div>
+
+      <span class="text-gray-600">|</span>
+
+      <!-- Type chips -->
+      <span class="text-gray-500 font-medium">Type</span>
+      <div class="flex gap-1">
+        <template x-for="t in ['epic','task','bug','feature']" :key="t">
+          <button :aria-pressed="fType.includes(t)"
+                  :class="fType.includes(t) ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'"
+                  class="px-2 py-0.5 rounded-full text-xs font-medium transition-colors"
+                  @click="toggleType(t)" x-text="t"></button>
+        </template>
+      </div>
+
+      <span class="text-gray-600">|</span>
+
+      <!-- Blocked chips -->
+      <div class="flex gap-1">
+        <button :aria-pressed="fBlocked === 'yes'"
+                :class="fBlocked === 'yes' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'"
+                class="px-2 py-0.5 rounded-full text-xs font-medium transition-colors"
+                @click="setBlocked('yes')">Blocked</button>
+        <button :aria-pressed="fBlocked === 'no'"
+                :class="fBlocked === 'no' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'"
+                class="px-2 py-0.5 rounded-full text-xs font-medium transition-colors"
+                @click="setBlocked('no')">Not blocked</button>
+      </div>
+
+      <span class="text-gray-600">|</span>
+
+      <!-- Labels dropdown -->
+      <template x-if="allLabels.length">
+        <div class="relative inline-block" @click.outside="labelDropdownOpen = false">
+          <button class="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 text-gray-300 hover:bg-gray-600"
+                  @click="labelDropdownOpen = !labelDropdownOpen"
+                  x-text="'Labels' + (fLabels.length ? ' (' + fLabels.length + ')' : '') + ' ▾'"></button>
+          <div x-show="labelDropdownOpen" class="absolute z-20 mt-1 bg-gray-800 border border-gray-600 rounded shadow-lg max-h-48 overflow-y-auto w-48">
+            <!-- AND/OR toggle -->
+            <div class="p-1 border-b border-gray-700 flex items-center gap-1">
+              <span class="text-xs text-gray-400">Mode:</span>
+              <button :class="fLabelMode === 'or' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300'"
+                      class="px-1.5 py-0.5 rounded text-xs" @click="fLabelMode = 'or'">OR</button>
+              <button :class="fLabelMode === 'and' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300'"
+                      class="px-1.5 py-0.5 rounded text-xs" @click="fLabelMode = 'and'">AND</button>
+            </div>
+            <template x-for="l in allLabels" :key="l">
+              <label class="flex items-center gap-2 px-2 py-1 hover:bg-gray-700 cursor-pointer text-xs">
+                <input type="checkbox" :checked="fLabels.includes(l)" @change="toggleLabel(l)" class="rounded">
+                <span class="truncate" x-text="l"></span>
+              </label>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- Epic dropdown -->
+      <template x-if="epics.length">
+        <select class="px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-300 border-none focus:ring-1 focus:ring-indigo-500"
+                :value="fEpic" @change="fEpic = $event.target.value">
+          <option value="">All epics</option>
+          <template x-for="e in epics" :key="e.id">
+            <option :value="e.id" :selected="fEpic === e.id" x-text="e.title"></option>
+          </template>
+        </select>
+      </template>
+    </div>
+
+    <!-- Active filter chips (removable) -->
+    <template x-if="hasFilters">
+      <div class="flex items-center gap-1 flex-wrap mt-2">
+        <span class="text-xs text-gray-500">Active:</span>
+        <template x-for="p in fPriority" :key="'p'+p">
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">
+            <span x-text="'P' + p"></span>
+            <button class="ml-0.5 hover:text-white" @click="togglePriority(p)">&times;</button>
+          </span>
+        </template>
+        <template x-for="ph in fPhase" :key="'ph'+ph">
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">
+            <span x-text="ph"></span>
+            <button class="ml-0.5 hover:text-white" @click="togglePhase(ph)">&times;</button>
+          </span>
+        </template>
+        <template x-for="t in fType" :key="'t'+t">
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">
+            <span x-text="t"></span>
+            <button class="ml-0.5 hover:text-white" @click="toggleType(t)">&times;</button>
+          </span>
+        </template>
+        <template x-for="l in fLabels" :key="'l'+l">
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">
+            <span x-text="l"></span>
+            <button class="ml-0.5 hover:text-white" @click="toggleLabel(l)">&times;</button>
+          </span>
+        </template>
+        <template x-if="fBlocked">
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">
+            <span x-text="fBlocked === 'yes' ? 'Blocked' : 'Not blocked'"></span>
+            <button class="ml-0.5 hover:text-white" @click="fBlocked = ''">&times;</button>
+          </span>
+        </template>
+        <template x-if="fEpic">
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">
+            <span x-text="'Epic: ' + (allBeads.find(b => b.id === fEpic)?.title || fEpic)"></span>
+            <button class="ml-0.5 hover:text-white" @click="fEpic = ''">&times;</button>
+          </span>
+        </template>
+        <button class="text-xs text-gray-400 hover:text-white ml-1 underline" @click="clearFilters()">Clear all</button>
+      </div>
+    </template>
+  </div>
+
+  <!-- Bulk action bar (list view with selected items) -->
+  <div x-show="selectedCount > 0 && view === 'list'" class="mb-4 flex-shrink-0">
+    <div class="bulk-action-bar">
+      <span class="text-sm font-medium" x-text="selectedCount + ' selected'"></span>
+      <button @click="bulkApprove()" class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-xs rounded font-semibold transition-colors">Approve</button>
+      <button @click="clearSelection()" class="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded font-semibold transition-colors ml-auto">Clear Selection</button>
+    </div>
+  </div>
+
+  <!-- Loading -->
+  <div x-show="loading" class="text-gray-400 text-sm">Loading beads...</div>
+
+  <!-- Empty state -->
+  <template x-if="!loading && showEmpty">
+    <div class="text-center py-12 text-gray-400">
+      <div class="text-4xl mb-3">🔍</div>
+      <div class="text-lg mb-1" x-text="'No beads match ' + (query ? '&quot;' + query + '&quot;' : 'the active filters')"></div>
+      <div class="text-sm" x-text="(hasFilters ? 'Try removing some filters or ' : '') + 'Try different keywords or check spelling'"></div>
+    </div>
+  </template>
+
+  <!-- Result count -->
+  <div x-show="!loading && showCount && !showEmpty" class="text-sm text-gray-400 mb-3 flex-shrink-0" x-text="countText"></div>
+
+  <!-- ── LIST VIEW ─────────────────────────────────────── -->
+  <div x-show="!loading && view === 'list' && !showEmpty" class="overflow-x-auto">
+    <table class="bead-table w-full">
+      <thead>
+        <tr>
+          <th class="bead-th bead-th-cb p-0">
+            <label class="flex items-center justify-center w-10 h-10 cursor-pointer">
+              <input type="checkbox" class="rounded cursor-pointer size-4"
+                     :checked="selectedCount > 0 && selectedCount === sortedList.length"
+                     :indeterminate.prop="selectedCount > 0 && selectedCount < sortedList.length"
+                     @click="toggleSelectAll()">
+            </label>
+          </th>
+          <template x-for="col in [
+            {key:'title',      label:'Title'},
+            {key:'id',         label:'ID'},
+            {key:'priority',   label:'Pri'},
+            {key:'phase',      label:'Phase'},
+            {key:'type',       label:'Type'},
+            {key:'epic',       label:'Epic'},
+            {key:'labels',     label:'Labels'},
+            {key:'updated_at', label:'Updated'}
+          ]" :key="col.key">
+            <th :class="'bead-th bead-th-' + col.key" @click="sortByCol(col.key)" :title="'Sort by ' + col.label">
+              <span x-text="col.label"></span>
+              <span x-show="sortCol !== col.key" class="text-gray-600 ml-0.5">&#x2195;</span>
+              <span x-show="sortCol === col.key && sortDir === 'asc'" class="text-indigo-400 ml-0.5">&#x25B2;</span>
+              <span x-show="sortCol === col.key && sortDir === 'desc'" class="text-indigo-400 ml-0.5">&#x25BC;</span>
+            </th>
+          </template>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="(b, idx) in sortedList" :key="b.id">
+          <tr class="bead-table-row hover:bg-gray-700 transition-colors"
+              :class="idx % 2 === 0 ? 'bead-tr-even' : 'bead-tr-odd'"
+              :data-bead-id="b.id">
+            <td class="bead-td bead-td-cb p-0" @click.stop>
+              <label class="flex items-center justify-center w-10 h-10 cursor-pointer">
+                <input type="checkbox" class="rounded cursor-pointer size-4"
+                       :checked="!!selected[b.id]"
+                       @click.stop="toggleSelect(b.id)">
+              </label>
+            </td>
+            <td class="bead-td bead-td-title">
+              <a :href="'/bead/' + b.id" class="hover:text-indigo-300 block truncate max-w-[400px]"
+                 x-html="highlightText(b.title || '', terms)"></a>
+            </td>
+            <td class="bead-td bead-td-id font-mono text-xs text-gray-400">
+              <a :href="'/bead/' + b.id" class="hover:text-indigo-300" x-text="b.id"></a>
+            </td>
+            <td class="bead-td bead-td-priority" x-html="priorityBadgeHtml(b.priority)"></td>
+            <td class="bead-td bead-td-phase text-xs" x-text="getPhase(b.labels) || ''"></td>
+            <td class="bead-td bead-td-type text-xs" x-text="b.issue_type || ''"></td>
+            <td class="bead-td bead-td-epic text-xs text-gray-400 truncate max-w-[120px]"
+                :title="epicTitleMap[getEpicParent(b)] || ''"
+                x-text="epicTitleMap[getEpicParent(b)] || ''"></td>
+            <td class="bead-td bead-td-labels">
+              <div class="flex gap-1 flex-wrap">
+                <template x-for="l in visibleLabels(b)" :key="l">
+                  <span class="px-1 py-0 bg-gray-700 text-gray-300 text-xs rounded whitespace-nowrap" x-text="l"></span>
+                </template>
+              </div>
+            </td>
+            <td class="bead-td bead-td-updated_at text-xs text-gray-500 whitespace-nowrap"
+                x-text="fmtDate(b.updated_at || b.created_at)"></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ── BOARD VIEW ────────────────────────────────────── -->
+  <div x-show="!loading && view === 'board' && !showEmpty"
+       class="board-container flex gap-4 overflow-x-auto pb-4">
+    <template x-for="col in boardColumns" :key="col.key">
+      <div class="board-column flex-1 min-w-[260px] flex flex-col">
+        <div class="border-t-2 pt-2 mb-3 flex-shrink-0" :class="col.color">
+          <h3 class="text-sm font-semibold text-gray-300">
+            <span x-text="col.title"></span>
+            <span class="text-gray-500" x-text="' (' + col.items.length + ')'"></span>
+          </h3>
+        </div>
+        <div class="space-y-2 overflow-y-auto flex-1 pr-1 board-column-scroll">
+          <template x-if="col.items.length === 0">
+            <div class="text-xs text-gray-600 italic py-2">No beads</div>
+          </template>
+          <template x-for="b in col.items" :key="b.id">
+            <a :href="'/bead/' + b.id" :data-bead-id="b.id"
+               class="p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-500 transition-colors block">
+              <!-- Epic parent name -->
+              <template x-if="epicTitleMap[getEpicParent(b)]">
+                <div class="text-xs text-gray-500 truncate mb-1" x-text="epicTitleMap[getEpicParent(b)]"></div>
+              </template>
+              <!-- Title -->
+              <div class="flex items-start gap-2 mb-2">
+                <span class="flex-shrink-0" x-text="typeIcon(b.issue_type)"></span>
+                <span class="text-sm leading-snug" x-html="highlightText(b.title || '', terms)"></span>
+              </div>
+              <!-- Meta row -->
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <span class="font-mono text-xs text-gray-500" x-text="b.id"></span>
+                <span class="badge" :class="'badge-p' + b.priority" x-text="'P' + b.priority"></span>
+                <template x-for="l in visibleLabels(b)" :key="l">
+                  <span class="px-1.5 py-0.5 bg-gray-700 text-gray-300 text-xs rounded" x-text="l"></span>
+                </template>
+              </div>
+              <!-- Approve button (specified column only) -->
+              <template x-if="col.key === 'specified'">
+                <button @click.prevent.stop="approveBead(b.id, $event.target)"
+                        class="mt-2 w-full px-2 py-1 bg-green-700 hover:bg-green-600 text-white text-xs rounded font-semibold transition-colors">
+                  Approve
+                </button>
+              </template>
+            </a>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- ── TREE VIEW ─────────────────────────────────────── -->
+  <div x-show="!loading && view === 'tree' && !showEmpty">
+    <!-- Expand/collapse toggle -->
+    <div class="flex items-center gap-2 mb-3">
+      <button @click="treeToggleAll()"
+              class="text-xs px-2 py-1 bg-gray-800 border border-gray-700 rounded hover:bg-gray-700 text-gray-300"
+              x-text="treeExpandedAll ? 'Collapse all' : 'Expand all'"></button>
+      <span class="text-xs text-gray-500">
+        <span x-text="treeGroups.groups.length"></span> epic<span x-show="treeGroups.groups.length !== 1">s</span><span x-show="treeGroups.orphans.length">, <span x-text="treeGroups.orphans.length"></span> ungrouped</span>
+      </span>
+    </div>
+
+    <!-- Epic groups -->
+    <template x-for="g in treeGroups.groups" :key="g.epicId">
+      <div class="tree-group mb-2">
+        <div class="cursor-pointer py-2 px-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-600 flex items-center gap-2"
+             @click="toggleTreeGroup(g.epicId)">
+          <span class="tree-chevron text-gray-500 text-xs flex-shrink-0 transition-transform"
+                :class="treeOpen[g.epicId] ? 'rotate-90' : ''">&#9654;</span>
+          <span class="flex-shrink-0">📦</span>
+          <a :href="'/bead/' + g.epicId" @click.stop
+             class="font-semibold text-sm truncate hover:text-indigo-400"
+             x-html="highlightText(g.epic?.title || g.epicId, terms)"></a>
+          <span class="font-mono text-xs text-gray-600" x-text="g.epicId"></span>
+          <span x-show="g.epic" class="badge" :class="'badge-p' + g.epic?.priority" x-text="'P' + g.epic?.priority"></span>
+          <template x-if="g.epic && getPhase(g.epic.labels)">
+            <span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium"
+                  :class="phaseBadgeClass(getPhase(g.epic.labels))"
+                  x-text="getPhase(g.epic.labels)"></span>
+          </template>
+          <span class="text-xs text-gray-500" x-text="'(' + g.countLabel + ')'"></span>
+          <!-- Progress bar -->
+          <template x-if="g.total > 0">
+            <div class="inline-flex items-center gap-1.5 ml-2">
+              <div class="w-20 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                <div class="h-full rounded-full transition-all" :class="g.barColor" :style="'width:' + g.pct + '%'"></div>
+              </div>
+              <span class="text-xs text-gray-400" x-text="g.closed + '/' + g.total"></span>
+            </div>
+          </template>
+        </div>
+        <div x-show="treeOpen[g.epicId]" class="ml-4 mt-1 border-l-2 border-gray-700 pl-3">
+          <template x-if="g.children.length === 0">
+            <div class="text-xs text-gray-600 italic py-2 pl-2">No matching children</div>
+          </template>
+          <template x-for="child in g.children" :key="child.id">
+            <a :href="'/bead/' + child.id" :data-bead-id="child.id"
+               class="tree-node flex items-start gap-2 py-1.5 px-2 rounded hover:bg-gray-800 group block">
+              <span class="text-sm flex-shrink-0 mt-0.5" x-text="typeIcon(child.issue_type)"></span>
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <span class="text-sm truncate" x-html="highlightText(child.title || '', terms)"></span>
+                  <span class="font-mono text-xs text-gray-600" x-text="child.id"></span>
+                  <span class="badge" :class="'badge-p' + child.priority" x-text="'P' + child.priority"></span>
+                  <template x-if="getPhase(child.labels)">
+                    <span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium"
+                          :class="phaseBadgeClass(getPhase(child.labels))"
+                          x-text="getPhase(child.labels)"></span>
+                  </template>
+                </div>
+              </div>
+            </a>
+          </template>
+        </div>
+      </div>
+    </template>
+
+    <!-- Orphans -->
+    <template x-if="treeGroups.orphans.length > 0">
+      <div class="tree-group mb-2 mt-4">
+        <div class="cursor-pointer py-2 px-3 bg-gray-800/50 rounded-lg border border-dashed border-gray-700 hover:border-gray-600 flex items-center gap-2"
+             @click="toggleTreeGroup('__orphans__')">
+          <span class="tree-chevron text-gray-500 text-xs flex-shrink-0 transition-transform"
+                :class="treeOpen['__orphans__'] ? 'rotate-90' : ''">&#9654;</span>
+          <span class="font-semibold text-sm text-gray-400">Ungrouped</span>
+          <span class="text-xs text-gray-500" x-text="'(' + treeGroups.orphans.length + ')'"></span>
+        </div>
+        <div x-show="treeOpen['__orphans__']" class="ml-4 mt-1 border-l-2 border-gray-700/50 pl-3">
+          <template x-for="b in treeGroups.orphans" :key="b.id">
+            <a :href="'/bead/' + b.id" :data-bead-id="b.id"
+               class="tree-node flex items-start gap-2 py-1.5 px-2 rounded hover:bg-gray-800 group block">
+              <span class="text-sm flex-shrink-0 mt-0.5" x-text="typeIcon(b.issue_type)"></span>
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <span class="text-sm truncate" x-html="highlightText(b.title || '', terms)"></span>
+                  <span class="font-mono text-xs text-gray-600" x-text="b.id"></span>
+                  <span class="badge" :class="'badge-p' + b.priority" x-text="'P' + b.priority"></span>
+                </div>
+              </div>
+            </a>
+          </template>
+        </div>
+      </div>
+    </template>
+
+    <!-- Empty tree -->
+    <template x-if="!treeGroups.groups.length && !treeGroups.orphans.length">
+      <div class="text-gray-500 text-center py-8">No beads to display in tree view</div>
+    </template>
+  </div>
+
+  <!-- ── DEPS VIEW ─────────────────────────────────────── -->
+  <div x-show="!loading && view === 'deps' && !showEmpty">
+    <!-- Mode toggle + stats -->
+    <div class="flex items-center gap-4 mb-4 flex-wrap">
+      <div class="flex items-center gap-2">
+        <button @click="depsMode = 'dag'"
+                :class="depsMode === 'dag' ? 'bg-indigo-600 text-white' : 'bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700'"
+                class="text-xs px-2 py-1 rounded">DAG</button>
+        <button @click="depsMode = 'flat'"
+                :class="depsMode === 'flat' ? 'bg-indigo-600 text-white' : 'bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700'"
+                class="text-xs px-2 py-1 rounded">Flat</button>
+      </div>
+      <div class="flex items-center gap-3 text-xs">
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-green-500"></span> Ready: <span x-text="depsStats.ready"></span></span>
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-500"></span> Blocked: <span x-text="depsStats.blocked"></span></span>
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-purple-500"></span> Active: <span x-text="depsStats.active"></span></span>
+        <span class="text-gray-500"><span x-text="depsStats.total"></span> in graph, <span x-text="depsStats.isolated"></span> independent</span>
+      </div>
+    </div>
+    <!-- Rendered deps HTML (DAG SVG or flat list) -->
+    <div x-html="depsHtml"></div>
+  </div>
+
+</div>
