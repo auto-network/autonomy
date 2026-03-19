@@ -1610,19 +1610,13 @@ function _renderStructuredPrimer(primer) {
   const b = primer.bead;
   if (b) {
     if (b.description) {
-      const descEl = document.createElement('div');
-      descEl.innerHTML = marked.parse(b.description);
-      html += _renderPrimerSection('Description', descEl.innerHTML);
+      html += _renderPrimerSection('Description', renderMd(b.description).outerHTML);
     }
     if (b.acceptance_criteria) {
-      const acEl = document.createElement('div');
-      acEl.innerHTML = marked.parse(b.acceptance_criteria);
-      html += _renderPrimerSection('Acceptance Criteria', acEl.innerHTML);
+      html += _renderPrimerSection('Acceptance Criteria', renderMd(b.acceptance_criteria).outerHTML);
     }
     if (b.design) {
-      const dsEl = document.createElement('div');
-      dsEl.innerHTML = marked.parse(b.design);
-      html += _renderPrimerSection('Design Notes', dsEl.innerHTML);
+      html += _renderPrimerSection('Design Notes', renderMd(b.design).outerHTML);
     }
   }
 
