@@ -893,6 +893,7 @@ async def api_chatwith_spawn(request):
         else:
             creds = str(Path.home() / ".claude" / ".credentials.json")
             auth_arg = f" -v {creds}:/home/agent/.claude/.credentials.json:ro"
+        claude_projects = str(Path.home() / ".claude" / "projects")
         docker_cmd = (
             f"docker run -it --rm --name {session_name}"
             f" --network=host"
@@ -901,6 +902,7 @@ async def api_chatwith_spawn(request):
             f" -v {repo_root}/data/graph.db:/home/agent/graph.db"
             f" -v {repo_root}/.beads:/data/.beads"
             f" -v {repo_root}:/workspace/repo:ro"
+            f" -v {claude_projects}:/home/agent/.claude/projects"
             f" -w /workspace/repo"
             f" autonomy-agent"
             f" --dangerously-skip-permissions"
@@ -1507,6 +1509,7 @@ async def ws_terminal(websocket: WebSocket):
             claude_auth_arg = f" -e CLAUDE_CODE_OAUTH_TOKEN={setup_token}"
         else:
             claude_auth_arg = f" -v {claude_creds_file}:/home/agent/.claude/.credentials.json:ro"
+        claude_projects = str(Path.home() / ".claude" / "projects")
         if cmd_str == "autonomy-agent-claude":
             cmd_str = (
                 f"docker run -it --rm --name {tmux_name}"
@@ -1516,6 +1519,7 @@ async def ws_terminal(websocket: WebSocket):
                 f" -v {repo_root}/data/graph.db:/home/agent/graph.db"
                 f" -v {repo_root}/.beads:/data/.beads"
                 f" -v {repo_root}:/workspace/repo:ro"
+                f" -v {claude_projects}:/home/agent/.claude/projects"
                 f" -w /workspace/repo"
                 f" autonomy-agent"
                 f" --dangerously-skip-permissions"
