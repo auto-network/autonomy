@@ -3379,6 +3379,8 @@ async function initDisplayCapture(expId) {
       _updateScreenshotStatus(expId, 'Capture stream ended — click Capture to restart');
     });
     _updateScreenshotStatus(expId, 'Auto-capture active');
+    // Stream is now ready — capture after a short delay for rendering
+    setTimeout(() => captureTabScreenshot(expId), 1500);
   } catch (e) {
     console.warn('[screenshot] getDisplayMedia denied or failed:', e.message);
     _displayStream = null;
@@ -3672,8 +3674,6 @@ ${_safeHtml}
     setTimeout(resizeIframe, 600);
     _iframeLoadCount++;
     if (_iframeLoadCount >= variants.length) {
-      // Capture screenshot once all iframes have been written.
-      // Delay gives CSS time to render.
       if (_screenshotTimer) clearTimeout(_screenshotTimer);
       _screenshotTimer = setTimeout(() => captureTabScreenshot(expId), 1500);
     }
