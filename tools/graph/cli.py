@@ -917,22 +917,31 @@ def cmd_ui_exp(args):
     print(f"  Screenshot: {dir_path}/screenshot.png (auto-updated from browser)")
     print(f"\n  Watching {dir_path}/ for changes... (Ctrl+C to stop)\n")
 
-    # Wait for initial screenshot from browser
-    screenshot_src = Path(f"data/experiments/{exp_id}/screenshot.png")
-    for _ in range(10):
-        import time as _time_init
-        _time_init.sleep(0.5)
-        if screenshot_src.exists():
-            import shutil
-            shutil.copy2(str(screenshot_src), str(dir_path / "screenshot.png"))
-            print(f"  📸 initial screenshot.png captured")
-            break
+    import shutil as _shutil
+    latest_exp_id = exp_id  # Track latest experiment for screenshot polling
+    screenshot_dest = dir_path / "screenshot.png"
+    _screenshot_captured = False  # True once we have the screenshot for latest_exp_id
+
+    def _check_screenshot():
+        """Check if a screenshot exists for the latest experiment, copy it in."""
+        nonlocal _screenshot_captured
+        if _screenshot_captured:
+            return
+        src = Path(f"data/experiments/{latest_exp_id}/screenshot.png")
+        if src.exists():
+            _shutil.copy2(str(src), str(screenshot_dest))
+            print(f"  📸 screenshot.png updated")
+            _screenshot_captured = True
 
     prev_states = _file_states()
 
     try:
         while True:
             _time.sleep(1)
+
+            # Check for screenshot until we have one for the current experiment
+            _check_screenshot()
+
             curr_states = _file_states()
 
             if curr_states == prev_states:
@@ -974,17 +983,9 @@ def cmd_ui_exp(args):
             try:
                 result = _post("/api/experiments", exp_data)
                 new_id = result["id"]
+                latest_exp_id = new_id
+                _screenshot_captured = False  # New experiment, need fresh screenshot
                 print(f"  → {new_id} ({len(variants)} variants)")
-                # Wait for browser to auto-capture screenshot, then copy it into the watched dir
-                screenshot_src = Path(f"data/experiments/{new_id}/screenshot.png")
-                for _ in range(10):
-                    _time.sleep(0.5)
-                    if screenshot_src.exists():
-                        import shutil
-                        dest = dir_path / "screenshot.png"
-                        shutil.copy2(str(screenshot_src), str(dest))
-                        print(f"  📸 screenshot.png updated")
-                        break
             except Exception as e:
                 print(f"  ERROR: {e}", file=sys.stderr)
 
