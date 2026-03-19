@@ -3304,25 +3304,28 @@ async function renderExperiment(expId) {
         : `<span class="text-gray-600">Next \u2192</span>`}
     </div>` : '';
 
+  // Populate header action buttons (sticky top nav)
+  const headerActions = document.getElementById('header-actions');
+  if (headerActions) {
+    headerActions.innerHTML = `
+      <span id="exp-screenshot-status" class="text-xs text-gray-500"></span>
+      <button onclick="manualCaptureScreenshot('${_esc(expId)}')"
+              class="text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
+        Capture
+      </button>
+      <button id="chatwith-btn" onclick="spawnChatWith('${_esc(expId)}')"
+              class="px-3 py-1 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white">
+        Chat With
+      </button>
+    `;
+  }
+
   let html = `
     <div class="max-w-6xl mx-auto">
-      <div class="flex items-center gap-3 mb-1">
-        <h2 class="text-xl font-bold text-indigo-400">${_esc(exp.title)}</h2>
-        <button id="chatwith-btn" onclick="spawnChatWith('${_esc(expId)}')"
-                class="ml-auto px-3 py-1 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white">
-          Chat With
-        </button>
-      </div>
+      <h2 class="text-xl font-bold text-indigo-400 mb-1">${_esc(exp.title)}</h2>
       ${seriesNav}
       ${exp.description ? `<p class="text-gray-400 text-sm mb-4">${_esc(exp.description)}</p>` : ''}
       ${isCompleted ? '<p class="text-green-400 text-sm mb-4 font-semibold">Results submitted</p>' : ''}
-      <div class="flex items-center gap-2 mb-3 text-xs">
-        <span id="exp-screenshot-status" class="text-gray-500">Requesting display permission...</span>
-        <button onclick="manualCaptureScreenshot('${expId}')"
-                class="text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
-          Capture
-        </button>
-      </div>
       <div id="exp-variants">`;
 
   variants.forEach(v => {
@@ -3745,6 +3748,10 @@ function route() {
     termPage.style.display = 'none';
     content.style.display = '';
   }
+
+  // Clear header action buttons from previous page
+  const headerActions = document.getElementById('header-actions');
+  if (headerActions) headerActions.innerHTML = '';
 
   // Clear any auto-refresh intervals from previous page
   if (timelineInterval) { clearInterval(timelineInterval); timelineInterval = null; }
