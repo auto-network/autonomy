@@ -397,9 +397,11 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         if val is not None:
             time_breakdown[out_key] = val
 
+    librarian_type = row["librarian_type"] or None
     return {
+        "run_id": row["id"] or "",
         "bead_id": row["bead_id"] or "",
-        "title": row["bead_id"] or "",  # title derived from bead_id for now
+        "title": librarian_type or row["bead_id"] or "",  # librarian type or bead_id
         "priority": None,  # not stored in dispatch_runs
         "status": row["status"] or "",
         "reason": row["reason"] or "",
@@ -416,7 +418,92 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         "started_at": (row["started_at"] + "Z") if row["started_at"] else None,
         "completed_at": (row["completed_at"] + "Z") if row["completed_at"] else None,
         "has_experience_report": bool(row["has_experience_report"]),
+        "token_count": row["token_count"],
+        "librarian_type": librarian_type,
+        "librarian_review": None,  # populated by _enrich_with_librarian_data
+        "_output_dir": row["output_dir"] or "",  # internal field, stripped before response
     }
+
+
+def _read_librarian_results(output_dir: str | None) -> dict | None:
+    """Read results JSON from a librarian's output directory.
+
+    Tries results.json first (structured output), then decision.json (fallback).
+    Returns None if neither file exists or is readable.
+    """
+    if not output_dir:
+        return None
+    base = Path(output_dir)
+    for filename in ("results.json", "decision.json"):
+        path = base / filename
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+    return None
+
+
+def _enrich_with_librarian_data(
+    conn: sqlite3.Connection, entries: list[dict]
+) -> None:
+    """Enrich timeline entries with librarian review data in-place.
+
+    For regular dispatch entries (librarian_type=None): queries librarian_jobs
+    for any review_report job whose payload.run_id matches the dispatch run,
+    then reads results JSON from the librarian's output directory.
+
+    For standalone librarian entries (librarian_type set): reads results JSON
+    from the entry's own output_dir (stored in _output_dir).
+    """
+    # Standalone librarian entries — read results from their own output_dir
+    for entry in entries:
+        if entry.get("librarian_type"):
+            entry["librarian_review"] = _read_librarian_results(entry.get("_output_dir"))
+
+    # Regular dispatch entries — bulk-query librarian_jobs for review results
+    regular_run_ids = [
+        e["run_id"] for e in entries
+        if not e.get("librarian_type") and e.get("run_id")
+    ]
+    if not regular_run_ids:
+        return
+
+    placeholders = ",".join("?" * len(regular_run_ids))
+    sql = f"""
+        SELECT
+            json_extract(lj.payload, '$.run_id') AS dispatch_run_id,
+            lj.status AS job_status,
+            dr.output_dir AS lib_output_dir
+        FROM librarian_jobs lj
+        LEFT JOIN dispatch_runs dr ON (
+            dr.librarian_type = lj.job_type
+            AND dr.id LIKE 'librarian-' || lj.job_type || '-' || substr(lj.id, 1, 8) || '-%'
+        )
+        WHERE lj.job_type = 'review_report'
+        AND json_extract(lj.payload, '$.run_id') IN ({placeholders})
+    """
+    try:
+        rows = conn.execute(sql, regular_run_ids).fetchall()
+    except Exception:
+        return
+
+    reviews: dict[str, dict] = {}
+    for row in rows:
+        run_id = row["dispatch_run_id"]
+        if run_id in reviews:
+            continue  # keep first match
+        if row["job_status"] == "running":
+            reviews[run_id] = {"status": "running"}
+        elif row["job_status"] == "done":
+            results = _read_librarian_results(row["lib_output_dir"])
+            reviews[run_id] = results if results is not None else {"status": "done"}
+
+    for entry in entries:
+        if not entry.get("librarian_type"):
+            entry["librarian_review"] = reviews.get(entry["run_id"])
 
 
 async def api_timeline(request):
@@ -445,7 +532,11 @@ async def api_timeline(request):
         conn = _timeline_conn()
         try:
             rows = conn.execute(sql, params).fetchall()
-            return [_row_to_timeline_entry(r) for r in rows]
+            entries = [_row_to_timeline_entry(r) for r in rows]
+            _enrich_with_librarian_data(conn, entries)
+            for e in entries:
+                e.pop("_output_dir", None)
+            return entries
         finally:
             conn.close()
 
