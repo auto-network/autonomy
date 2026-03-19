@@ -230,9 +230,13 @@ def launch_session(
         cmd.insert(2, "-it")
 
     # Entrypoint, image, and arguments
+    # Write prompt to file instead of passing on command line — avoids the
+    # prompt text appearing in /proc/cmdline where pkill -f can match it.
     if prompt is not None:
-        cmd += ["--entrypoint", "claude", image,
-                "--dangerously-skip-permissions", "--print", prompt]
+        prompt_file = run_dir / ".prompt.md"
+        prompt_file.write_text(prompt)
+        cmd += ["--entrypoint", "sh", image,
+                "-c", "cat /workspace/output/.prompt.md | claude --dangerously-skip-permissions -p"]
     else:
         cmd += [image, "--dangerously-skip-permissions"]
 
