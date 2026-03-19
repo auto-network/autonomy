@@ -175,6 +175,30 @@ def submit_results(exp_id: str, selections: list[dict]) -> bool:
         conn.close()
 
 
+def dismiss_experiment(exp_id: str) -> bool:
+    """Mark an experiment and all pending siblings in its series as dismissed.
+
+    Returns True if the experiment was found.
+    """
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT series_id FROM experiments WHERE id = ?", (exp_id,)
+        ).fetchone()
+        if not row:
+            return False
+        series_id = row["series_id"] or exp_id
+        conn.execute(
+            "UPDATE experiments SET status = 'dismissed'"
+            " WHERE series_id = ? AND status = 'pending'",
+            (series_id,),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
 def list_pending() -> list[dict]:
     """List pending experiments grouped by series.
 
