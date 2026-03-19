@@ -1,0 +1,59 @@
+<div x-data="terminalPage()" class="flex flex-col h-full">
+
+  <!-- Launch buttons + session pills + status indicator -->
+  <section aria-label="Terminal controls" class="flex gap-2 mb-3 flex-wrap">
+    <button @click="launchClaude()"
+            aria-label="Launch Claude on host"
+            class="px-3 py-1 bg-indigo-600 rounded text-sm hover:bg-indigo-500">Claude (host)</button>
+    <button @click="launchClaudeContainer()"
+            aria-label="Launch Claude in container"
+            class="px-3 py-1 bg-purple-600 rounded text-sm hover:bg-purple-500">Claude (container)</button>
+    <button @click="launchBash()"
+            aria-label="Launch bash shell"
+            class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Bash</button>
+    <button @click="launchBashContainer()"
+            aria-label="Launch bash in container"
+            class="px-3 py-1 bg-gray-600 rounded text-sm hover:bg-gray-500">Bash (container)</button>
+
+    <!-- Separator shown only when sessions exist -->
+    <template x-if="sessions.length > 0">
+      <span class="text-gray-600 self-center">|</span>
+    </template>
+
+    <!-- Session pills — one per active tmux session -->
+    <template x-for="t in sessions" :key="t.id">
+      <div class="flex items-center rounded overflow-hidden"
+           :class="t.id === activeId ? 'border-2 border-indigo-500' : 'border-2 border-gray-700'">
+        <button @click="pillClick(t.id)"
+                :aria-pressed="t.id === activeId"
+                aria-label="Switch to terminal session"
+                :class="t.id === activeId ? 'bg-indigo-900' : 'bg-gray-700'"
+                class="px-3 py-1 text-sm hover:bg-gray-600 flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-green-400"></span>
+          <span x-text="t._icon"></span>
+          <span class="pill-name"
+                @dblclick.stop.prevent="startRename($event, t.id)"
+                x-text="t.name || t.id"></span>
+          <span class="text-xs text-gray-500" x-text="t._label"></span>
+          <span class="text-xs text-gray-600">&middot;</span>
+          <span x-text="t._envLabel"
+                :class="t._isContainer ? 'text-xs text-purple-400 font-medium' : 'text-xs text-gray-500'"></span>
+        </button>
+        <button @click="kill(t.id)"
+                aria-label="Kill session"
+                class="px-2 py-1 bg-red-900 text-xs hover:bg-red-700 self-stretch">&#x2715;</button>
+      </div>
+    </template>
+
+    <span class="text-xs text-gray-600 self-center"
+          title="Hold Shift to select text, Ctrl+Shift+V to paste">Shift+drag to select</span>
+    <span id="term-status"
+          class="ml-auto self-center"
+          :class="statusClass"
+          x-text="status"></span>
+  </section>
+
+  <!-- Terminal canvas — xterm.js attaches here; Alpine does not manage this element -->
+  <div role="application" id="terminal-container" style="height: calc(100vh - 10rem);"></div>
+
+</div>
