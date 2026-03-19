@@ -191,46 +191,52 @@ def _format_experiment_primer(data: dict) -> str:
 
     # Show series_id in the example if we have one
     series_example = f'\n  "series_id": "{series_id}",' if series_id else ""
-    fixture_example = (
-        "\n  // Same fixture as current experiment — include it in every iteration"
-        if fixture is not None
-        else ""
-    )
 
-    lines.append("```")
-    lines.append("POST /api/experiments")
-    lines.append("Content-Type: application/json")
-    lines.append("")
-    lines.append("{")
-    lines.append('  "title": "Iteration N: <brief description of change>",')
-    lines.append('  "description": "What changed and why",')
-    if series_id:
-        lines.append(f'  "series_id": "{series_id}",')
-    else:
-        lines.append('  "series_id": "<optional — group iterations under a series>",')
-    lines.append('  "fixture": { /* same fixture JSON as above */ },')
-    if fixture_example:
-        lines.append(f"  {fixture_example.strip()}")
+    series_field = f'"series_id": "{series_id}",' if series_id else '"series_id": "<optional>",'
+    lines.append("```bash")
+    lines.append("curl -sk https://localhost:8080/api/experiments \\")
+    lines.append("  -X POST -H 'Content-Type: application/json' \\")
+    lines.append("  -d '{")
+    lines.append(f'  "title": "Iteration N: <brief description>",')
+    lines.append(f'  "description": "What changed and why",')
+    lines.append(f'  {series_field}')
+    lines.append('  "fixture": { ... },')
     lines.append('  "variants": [')
-    lines.append('    { "id": "variant-a", "html": "<full self-contained HTML>" },')
-    lines.append('    { "id": "variant-b", "html": "<alternative HTML>" }')
-    lines.append('  ]')
-    lines.append("}")
+    lines.append('    {"id": "variant-a", "html": "<full self-contained HTML>"}')
+    lines.append("  ]")
+    lines.append("}'")
     lines.append("```\n")
     lines.append("Returns: `{\"id\": \"<new-experiment-uuid>\"}`\n")
+
+    # ── Screenshots ──────────────────────────────────────────
+    lines.append("### Screenshots\n")
+    lines.append(
+        "The user's browser auto-captures a screenshot of the experiment page after each "
+        "variant loads. Screenshots are saved to:\n\n"
+        "  `data/experiments/{experiment_id}/screenshot.png`\n\n"
+        "When a new screenshot is captured, you will see a notification in this session: "
+        "`Screenshot saved: /path/to/screenshot.png`\n\n"
+        "You can read any screenshot with the Read tool to see exactly what the user sees.\n"
+    )
+    # Check if a screenshot already exists for the current experiment
+    screenshot_path = Path(f"data/experiments/{exp_id}/screenshot.png")
+    if screenshot_path.exists():
+        abs_path = str(screenshot_path.resolve())
+        lines.append(f"**A screenshot already exists — read it now:** `{abs_path}`\n")
     lines.append("---\n")
 
     # ── Workflow ──────────────────────────────────────────────
     lines.append("## Workflow\n")
     lines.append(
-        "1. Study the fixture and current variant HTML above.\n"
-        "2. Ask the user what aspect of the design they want to refine.\n"
-        "3. Generate improved variant HTML based on their feedback.\n"
-        "4. POST to `/api/experiments` to create the next iteration — "
-        "the gallery updates automatically.\n"
-        "5. The user reviews the new variants and gives feedback.\n"
-        "6. Repeat until the user approves a variant.\n"
-        "7. **When approved:** run `graph bead` to create an implementation bead with "
+        "1. **First:** Read the latest screenshot (if one exists above) to see what the user sees.\n"
+        "2. Study the fixture and current variant HTML above.\n"
+        "3. Ask the user what aspect of the design they want to refine.\n"
+        "4. Generate improved variant HTML based on their feedback.\n"
+        "5. POST to the experiments API using the curl command above to create the next iteration — "
+        "the gallery updates automatically and a new screenshot will be captured.\n"
+        "6. When notified of a new screenshot, read it to verify your changes rendered correctly.\n"
+        "7. The user reviews and gives feedback. Repeat.\n"
+        "8. **When approved:** run `graph bead` to create an implementation bead with "
         "the winning variant's full HTML, all design decisions, and context from this session.\n"
     )
 
