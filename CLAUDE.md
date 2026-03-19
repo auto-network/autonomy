@@ -59,7 +59,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 |---------|------|---------|
 | `bd ready` | Show beads with no blockers | |
 | `bd show <id>` | Show bead details | `bd show auto-5kj` |
-| `graph bead "title"` | Create bead with provenance link (preferred over `bd create`) | `graph bead "Fix X" -p 1 --source 8cdc1d85 --turns 286` |
+| `graph bead "title"` | Create bead with provenance link (preferred over `bd create`) | `graph bead "Fix X" -p 1 --source 8cdc1d85 --turns 286 -d - < desc.txt` |
 | `bd dep tree <id>` | Show dependency tree | |
 | `bd close <id> --reason "..."` | Close a completed bead | |
 
@@ -70,7 +70,8 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 graph sessions --all                          # refresh (107ms)
 graph search "the key phrase"                 # find the turn
 graph bead "Title" -p 1 \                     # create bead with provenance
-  --source <src_id> --turns <N>
+  --source <src_id> --turns <N> \
+  -d - < /tmp/desc.txt                         # use -d - for long descriptions (avoids shell quoting)
 ```
 
 ### When you learn a pitfall or operational insight
