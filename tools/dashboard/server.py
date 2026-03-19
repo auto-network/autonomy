@@ -781,11 +781,19 @@ async def api_terminals(request):
     ])
 
 async def api_terminal_kill(request):
-    """Kill a terminal session."""
+    """Kill a terminal session. If it's a Chat With session, ingest it into the graph."""
     name = request.path_params["id"]
     if _tmux_session_exists(name):
         subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
         _active_terminals.pop(name, None)
+        # Ingest the completed session into the graph (fire-and-forget)
+        if name.startswith("chatwith-"):
+            asyncio.create_task(asyncio.to_thread(
+                subprocess.run,
+                ["graph", "sessions", "--all"],
+                capture_output=True, timeout=30,
+                cwd=str(Path(__file__).parents[2]),
+            ))
         return JSONResponse({"status": "killed", "id": name})
     return JSONResponse({"status": "not_found", "id": name})
 
