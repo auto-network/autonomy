@@ -242,12 +242,17 @@ def build_experiment_primer(experiment_id: str) -> dict:
 
     Returns {"primer_text": str, "session_name": str}.
     Raises ValueError if the experiment is not found.
+
+    Session name uses series_id when available so all iterations in a
+    series share one persistent Chat With session.
     """
     data = _collect_experiment_data(experiment_id)
     primer_text = _format_experiment_primer(data)
+    # One session per series — use series_id as the session key when available
+    session_context = data["series_id"] or experiment_id
     return {
         "primer_text": primer_text,
-        "session_name": f"chatwith-{experiment_id}",
+        "session_name": f"chatwith-{session_context}",
     }
 
 
