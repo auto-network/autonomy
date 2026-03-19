@@ -1839,49 +1839,27 @@ async def page_bead(request):
 # ── SSE EventBus endpoint ─────────────────────────────────────
 
 async def api_events(request):
-    """Server-Sent Events endpoint — topic-based pub/sub.
+    """Server-Sent Events endpoint — global broadcast.
 
-    GET /api/events?topics=dispatch,nav
+    GET /api/events
 
-    Each event is sent as:
+    Every connected client receives ALL topics. Each event is sent as:
         event: {topic}
         data: {json}
 
     The browser EventSource API handles reconnection automatically.
     """
-    topics_param = request.query_params.get("topics", "")
-    topics = [t.strip() for t in topics_param.split(",") if t.strip()]
-    if not topics:
-        return JSONResponse({"error": "topics parameter required"}, status_code=400)
-
-    queues = {topic: event_bus.subscribe(topic) for topic in topics}
-
-    # Merge all topic queues into one tagged queue to avoid
-    # creating/cancelling futures every iteration (which leaks tasks).
-    merged: asyncio.Queue = asyncio.Queue()
-
-    async def _relay(topic: str, src: asyncio.Queue):
-        try:
-            while True:
-                data = await src.get()
-                await merged.put((topic, data))
-        except asyncio.CancelledError:
-            pass
-
-    relay_tasks = [asyncio.create_task(_relay(t, q)) for t, q in queues.items()]
+    queue = event_bus.subscribe()
 
     async def event_generator():
         try:
             while True:
-                topic, data = await merged.get()
+                topic, data = await queue.get()
                 yield {"event": topic, "data": json.dumps(data)}
         except asyncio.CancelledError:
             pass
         finally:
-            for t in relay_tasks:
-                t.cancel()
-            for q in queues.values():
-                event_bus.unsubscribe(q)
+            event_bus.unsubscribe(queue)
 
     return EventSourceResponse(event_generator())
 
@@ -2005,34 +1983,33 @@ async def _dispatch_watcher():
     see a consistent snapshot. Nav counts are derived directly from the dispatch
     lists (running_agents=len(active), approved_waiting=len(waiting),
     approved_blocked=len(blocked)) plus open_count from get_bead_counts().
+
+    Always collects and broadcasts regardless of subscriber count — this keeps
+    the EventBus cache warm so newly-connecting clients receive cached data
+    immediately on subscribe().
     """
     while True:
         try:
-            has_dispatch = event_bus.subscriber_count("dispatch") > 0
-            has_nav = event_bus.subscriber_count("nav") > 0
-            if has_dispatch or has_nav:
-                dispatch_data, counts, active_sessions, terminal_count, today_done = (
-                    await asyncio.gather(
-                        _collect_dispatch_data(),
-                        asyncio.to_thread(dao_beads.get_bead_counts),
-                        asyncio.to_thread(_count_active_sessions),
-                        asyncio.to_thread(_count_terminals),
-                        asyncio.to_thread(_count_today_done),
-                    )
+            dispatch_data, counts, active_sessions, terminal_count, today_done = (
+                await asyncio.gather(
+                    _collect_dispatch_data(),
+                    asyncio.to_thread(dao_beads.get_bead_counts),
+                    asyncio.to_thread(_count_active_sessions),
+                    asyncio.to_thread(_count_terminals),
+                    asyncio.to_thread(_count_today_done),
                 )
-                nav_data = {
-                    "open_beads": counts.get("open_count", 0),
-                    "running_agents": len(dispatch_data["active"]),
-                    "approved_waiting": len(dispatch_data["waiting"]),
-                    "approved_blocked": len(dispatch_data["blocked"]),
-                    "active_sessions": active_sessions,
-                    "terminal_count": terminal_count,
-                    "today_done": today_done,
-                }
-                if has_dispatch:
-                    await event_bus.broadcast("dispatch", dispatch_data)
-                if has_nav:
-                    await event_bus.broadcast("nav", nav_data)
+            )
+            nav_data = {
+                "open_beads": counts.get("open_count", 0),
+                "running_agents": len(dispatch_data["active"]),
+                "approved_waiting": len(dispatch_data["waiting"]),
+                "approved_blocked": len(dispatch_data["blocked"]),
+                "active_sessions": active_sessions,
+                "terminal_count": terminal_count,
+                "today_done": today_done,
+            }
+            await event_bus.broadcast("dispatch", dispatch_data)
+            await event_bus.broadcast("nav", nav_data)
         except Exception:
             pass
         await asyncio.sleep(_DISPATCH_WATCHER_INTERVAL)

@@ -3690,7 +3690,6 @@ ${_safeHtml}
   const seriesId = exp.series_id;
   if (seriesId) {
     const seriesTopic = `experiments:${seriesId}`;
-    registerTopic(seriesTopic);
 
     function _onNewSeriesExperiment(data) {
       // Ignore replays of the current experiment

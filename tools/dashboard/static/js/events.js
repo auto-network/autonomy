@@ -1,5 +1,6 @@
 // EventBus SSE client utility.
 // Maintains ONE persistent EventSource for the app lifetime — never torn down.
+// The server broadcasts ALL topics on every connection; the client filters locally.
 // Pages register handlers for topics; the connection is shared across all pages.
 //
 // Globals exposed:
@@ -7,43 +8,45 @@
 //   window.connectEvents     — legacy compat: (topics, handlers) -> { close() }
 //   window.registerHandler   — (topic, fn) — add a per-topic handler
 //   window.unregisterHandler — (topic, fn) — remove a per-topic handler
-//   window.registerTopic     — (topic) — open a dedicated EventSource for a dynamic topic
-//   window.unregisterTopic   — (topic) — close and remove the dynamic EventSource
 
 (function () {
   window._sseCache = {};
-  const _handlers = {};  // topic -> Set<fn>
+  const _handlers = {};       // topic -> Set<fn>
+  const _topicListening = new Set(); // topics with an ES listener already attached
+  let _es = null;             // the single global EventSource
 
-  // All topics the persistent connection subscribes to.
-  // Add new topics here as pages are added.
-  const _TOPICS = ['dispatch', 'nav'];
+  // Attach a named-event listener for `topic` to the global EventSource.
+  // No-op if the EventSource isn't open yet (called again from _connect).
+  function _addTopicListener(topic) {
+    if (!_es || _topicListening.has(topic)) return;
+    _topicListening.add(topic);
+    _es.addEventListener(topic, (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        window._sseCache[topic] = data;
+        const set = _handlers[topic];
+        if (set) {
+          set.forEach(fn => {
+            try { fn(data); } catch (err) {
+              console.warn('[EventBus] handler error for topic', topic, err);
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('[EventBus] parse error for topic', topic, err);
+      }
+    });
+  }
 
   function _connect() {
-    const url = '/api/events?topics=' + _TOPICS.join(',');
-    const es = new EventSource(url);
+    _es = new EventSource('/api/events');
 
-    for (const topic of _TOPICS) {
-      es.addEventListener(topic, (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          // Update global cache so pages can read on mount.
-          window._sseCache[topic] = data;
-          // Dispatch to all registered handlers.
-          const set = _handlers[topic];
-          if (set) {
-            set.forEach(fn => {
-              try { fn(data); } catch (err) {
-                console.warn('[EventBus] handler error for topic', topic, err);
-              }
-            });
-          }
-        } catch (err) {
-          console.warn('[EventBus] parse error for topic', topic, err);
-        }
-      });
+    // Attach listeners for any topics already registered before _connect ran.
+    for (const topic of Object.keys(_handlers)) {
+      _addTopicListener(topic);
     }
 
-    es.onerror = (e) => {
+    _es.onerror = (e) => {
       // Browser EventSource auto-reconnects; just log.
       console.warn('[EventBus] SSE error, will reconnect', e);
     };
@@ -52,7 +55,9 @@
   function registerHandler(topic, fn) {
     if (!_handlers[topic]) _handlers[topic] = new Set();
     _handlers[topic].add(fn);
-    // Replay cached data so late-registered handlers get the initial state
+    // Ensure a listener is attached to the EventSource for this topic.
+    _addTopicListener(topic);
+    // Replay cached data so late-registered handlers get the initial state.
     if (window._sseCache[topic]) {
       try { fn(window._sseCache[topic]); } catch (err) {
         console.warn('[EventBus] handler replay error for topic', topic, err);
@@ -91,51 +96,11 @@
     };
   }
 
-  // Dynamic topic registry — one dedicated EventSource per dynamic topic.
-  // Use this for topics like "experiments:{id}" that aren't known at page load.
-  const _dynamicSources = {}; // topic -> EventSource
-
-  function registerTopic(topic) {
-    if (_dynamicSources[topic]) return; // already connected
-    const url = '/api/events?topics=' + encodeURIComponent(topic);
-    const es = new EventSource(url);
-    es.addEventListener(topic, (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        window._sseCache[topic] = data;
-        const set = _handlers[topic];
-        if (set) {
-          set.forEach(fn => {
-            try { fn(data); } catch (err) {
-              console.warn('[EventBus] handler error for topic', topic, err);
-            }
-          });
-        }
-      } catch (err) {
-        console.warn('[EventBus] parse error for topic', topic, err);
-      }
-    });
-    es.onerror = (e) => {
-      console.warn('[EventBus] SSE error for dynamic topic', topic, e);
-    };
-    _dynamicSources[topic] = es;
-  }
-
-  function unregisterTopic(topic) {
-    const es = _dynamicSources[topic];
-    if (es) {
-      es.close();
-      delete _dynamicSources[topic];
-    }
-  }
-
   // Expose API first, connect after — so app.js can register handlers
   // before the initial SSE event arrives.
   window.connectEvents = connectEvents;
   window.registerHandler = registerHandler;
   window.unregisterHandler = unregisterHandler;
-  window.registerTopic = registerTopic;
-  window.unregisterTopic = unregisterTopic;
 
   // Defer connection to next microtask so synchronous handler registrations
   // in app.js (loaded immediately after this script) are in place.
