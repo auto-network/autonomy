@@ -1925,8 +1925,20 @@ async def api_dao_recent_sessions(request):
 async def page_search(request):
     return HTMLResponse(_load_template("base.html"))
 
+async def page_search_fragment(request):
+    """Return the Search page as an HTML fragment for SPA injection."""
+    return templates.TemplateResponse(request, "pages/search.html")
+
 async def page_source(request):
     return HTMLResponse(_load_template("base.html"))
+
+async def page_source_fragment(request):
+    """Return the Source/Context page as an HTML fragment for SPA injection.
+
+    Handles both /source/{id} (full source) and /source/{id}?turn=N (context view).
+    The Alpine sourcePage component reads URL params on init to select the right mode.
+    """
+    return templates.TemplateResponse(request, "pages/source.html")
 
 async def page_bead(request):
     return HTMLResponse(_load_template("base.html"))
@@ -2152,7 +2164,9 @@ routes = [
     Route("/pages/timeline", page_timeline_fragment),
     Route("/pages/trace", page_trace_fragment),
     Route("/search", page_search),
+    Route("/pages/search", page_search_fragment),
     Route("/source/{id}", page_source),
+    Route("/pages/source", page_source_fragment),
     Route("/bead/{id}", page_bead),
     Route("/timeline", page_timeline),
     Route("/terminal", page_terminal),
