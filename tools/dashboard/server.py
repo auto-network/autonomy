@@ -880,12 +880,33 @@ async def api_chatwith_spawn(request):
     already_exists = _tmux_session_exists(session_name)
     if not already_exists:
         # Launch Claude in a container (read-only repo, isolated from host)
+        # Build the same docker run command that ws_terminal uses for
+        # "autonomy-agent-claude" — can't pass that magic string to tmux directly.
+        repo_root = str(Path(__file__).parents[2])
+        setup_token_file = Path.home() / ".claude" / ".setup-token"
+        setup_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+        if not setup_token and setup_token_file.exists():
+            setup_token = setup_token_file.read_text().strip()
+        if setup_token:
+            auth_arg = f" -e CLAUDE_CODE_OAUTH_TOKEN={setup_token}"
+        else:
+            creds = str(Path.home() / ".claude" / ".credentials.json")
+            auth_arg = f" -v {creds}:/home/agent/.claude/.credentials.json:ro"
+        docker_cmd = (
+            f"docker run -it --rm --name {session_name}"
+            f" --network=host"
+            f" -e GRAPH_DB=/home/agent/graph.db"
+            f"{auth_arg}"
+            f" -v {repo_root}/data/graph.db:/home/agent/graph.db"
+            f" -v {repo_root}/.beads:/data/.beads"
+            f" -v {repo_root}:/workspace/repo:ro"
+            f" -w /workspace/repo"
+            f" autonomy-agent"
+            f" --dangerously-skip-permissions"
+        )
         subprocess.run(
-            [
-                "tmux", "new-session", "-d", "-s", session_name,
-                "-x", "220", "-y", "50",
-                "autonomy-agent-claude",
-            ],
+            ["tmux", "new-session", "-d", "-s", session_name,
+             "-x", "220", "-y", "50", docker_cmd],
             env={**os.environ, "TERM": "xterm-256color"},
         )
         subprocess.run(
