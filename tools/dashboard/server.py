@@ -16,6 +16,7 @@ import struct
 import subprocess
 import sys
 import termios
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1750,7 +1751,10 @@ async def _collect_dispatch_data() -> dict:
             "cpu_pct": run.get("cpu_pct"),
             "cpu_usec": run.get("cpu_usec"),
             "mem_mb": run.get("mem_mb"),
-            "duration_secs": run.get("duration_secs"),
+            "duration_secs": run.get("duration_secs") or (
+                int(time.time() - datetime.fromisoformat(run["started_at"]).replace(tzinfo=timezone.utc).timestamp())
+                if run.get("started_at") else None
+            ),
             "last_activity": run.get("last_activity"),
         })
 
