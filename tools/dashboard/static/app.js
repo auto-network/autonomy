@@ -3496,6 +3496,10 @@ async function renderExperiment(expId) {
   const variants = exp.variants || [];
   const isCompleted = exp.status === 'completed';
 
+  // Session context: use series_id when available so all series iterations
+  // share one persistent Chat With session ("chatwith-{series_id}")
+  const sessionCtx = exp.series_id || expId;
+
   // Series navigation
   const siblingIds = exp.sibling_ids || [expId];
   const seriesIdx = siblingIds.indexOf(expId);
@@ -3587,7 +3591,7 @@ async function renderExperiment(expId) {
         <span id="chatwith-status" class="text-xs text-gray-500 ml-2"></span>
         <div class="ml-auto flex items-center gap-2" onclick="event.stopPropagation()">
           <button id="chatwith-kill-btn"
-                  onclick="killChatWithSession('${_esc(expId)}')"
+                  onclick="killChatWithSession('${_esc(sessionCtx)}')"
                   class="text-xs text-red-400 hover:text-red-300 px-2 py-0.5 rounded border border-red-800 hover:border-red-600"
                   style="display:none;">Kill</button>
           <button id="chatwith-toggle-btn"
@@ -3603,15 +3607,22 @@ async function renderExperiment(expId) {
   html += `</div>`;
   content.innerHTML = html;
 
-  // Auto-reconnect Chat With panel if session already exists (fire-and-forget)
+  // Auto-reconnect Chat With panel if session already exists (fire-and-forget).
+  // For experiments in a series, also auto-show the panel so the user sees the
+  // Chat With button without needing to scroll — one click starts the session.
   (async () => {
-    const sessionName = `chatwith-${expId}`;
+    const sessionName = `chatwith-${sessionCtx}`;
     try {
       const check = await api(`/api/chatwith/check?session=${encodeURIComponent(sessionName)}`);
       if (check && check.exists) {
         const btn = document.getElementById('chatwith-btn');
         if (btn) btn.textContent = 'Reconnect';
         connectChatWithTerminal(sessionName);
+      } else if (exp.series_id) {
+        // Auto-reveal the panel header for series experiments so the Chat With
+        // button is immediately visible — the terminal body stays hidden until spawned.
+        const panel = document.getElementById('chatwith-panel');
+        if (panel) panel.style.display = '';
       }
     } catch(e) { /* ignore — check is best-effort */ }
   })();
