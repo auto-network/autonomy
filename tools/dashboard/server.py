@@ -1596,6 +1596,7 @@ async def ws_terminal(websocket: WebSocket):
                 name=tmux_name,
                 prompt=None,
                 detach=False,
+                image="autonomy-agent:dashboard",
             )
             if launched:
                 cmd_str = launched
