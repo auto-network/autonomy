@@ -1481,53 +1481,48 @@ def dispatch_cycle(
     # ── Phase 2: Poll running librarian agents ─────────────────
     poll_and_collect_librarians(running_librarians)
 
-    # ── Phase 2: Launch new agents ────────────────────────────
+    # ── Phase 3: Launch new bead agents ─────────────────────────
+    dispatched = 0
     slots = config.max_concurrent - len(running)
     if slots <= 0:
         print(f"  At capacity ({len(running)}/{config.max_concurrent})")
-        return 0
+        slots = 0
 
-    # Get ready beads
-    ready = get_ready_beads(config.label_filter)
-    if not ready:
-        print("  No approved beads found")
-        return 0
-
-    # Filter out already-claimed and currently-running beads
-    claimed = get_claimed_beads()
-    running_ids = {a.bead_id for a in running}
-    candidates = [b for b in ready
-                  if b.get("id") not in claimed
-                  and b.get("id") not in running_ids]
-
-    if not candidates:
-        print(f"  {len(ready)} ready but all claimed or running")
-        return 0
-
-    # Filter out beads whose blocking dependencies are not yet closed
     available = []
-    for bead in candidates:
-        bead_id = bead.get("id", "")
-        # Skip dependency check if bead has no dependencies at all
-        if bead.get("dependency_count", 0) == 0 and "dependencies" not in bead:
-            available.append(bead)
-            continue
-        open_deps = get_open_dependencies(bead_id)
-        if open_deps:
-            dep_ids = ", ".join(d.get("id", "?") for d in open_deps)
-            print(f"  Skipping {bead_id}: blocked by open dependencies [{dep_ids}]")
+    if slots > 0:
+        ready = get_ready_beads(config.label_filter)
+        if not ready:
+            print("  No approved beads found")
         else:
-            available.append(bead)
+            # Filter out already-claimed and currently-running beads
+            claimed = get_claimed_beads()
+            running_bead_ids = {a.bead_id for a in running}
+            candidates = [b for b in ready
+                          if b.get("id") not in claimed
+                          and b.get("id") not in running_bead_ids]
 
-    if not available:
-        print(f"  {len(candidates)} candidate(s) but all blocked by dependencies")
-        return 0
+            if not candidates:
+                print(f"  {len(ready)} ready but all claimed or running")
+            else:
+                # Filter out beads whose blocking dependencies are not yet closed
+                for bead in candidates:
+                    bead_id = bead.get("id", "")
+                    if bead.get("dependency_count", 0) == 0 and "dependencies" not in bead:
+                        available.append(bead)
+                        continue
+                    open_deps = get_open_dependencies(bead_id)
+                    if open_deps:
+                        dep_ids = ", ".join(d.get("id", "?") for d in open_deps)
+                        print(f"  Skipping {bead_id}: blocked by open dependencies [{dep_ids}]")
+                    else:
+                        available.append(bead)
 
-    print(f"  {len(available)} available beads, {slots} slot(s) open")
+                if not available:
+                    print(f"  {len(candidates)} candidate(s) but all blocked by dependencies")
 
-    # Sort by priority and dispatch up to available slots
-    available.sort(key=lambda b: b.get("priority", 99))
-    dispatched = 0
+    if available:
+        print(f"  {len(available)} available beads, {slots} slot(s) open")
+        available.sort(key=lambda b: b.get("priority", 99))
 
     for bead in available[:slots]:
         bead_id = bead["id"]
