@@ -80,6 +80,20 @@ RUN_DEFAULTS: dict[str, Any] = {
     "snippet": None,
     "tokens": None,
     "cost": None,
+    # Fields needed for timeline/trace rendering
+    "title": None,
+    "priority": None,
+    "duration_secs": None,
+    "commit_hash": None,
+    "commit_message": None,
+    "lines_added": None,
+    "lines_removed": None,
+    "files_changed": None,
+    "scores": None,
+    "time_breakdown": None,
+    "failure_category": None,
+    "discovered_beads_count": 0,
+    "has_experience_report": False,
 }
 
 
