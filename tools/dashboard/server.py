@@ -1885,6 +1885,16 @@ async def api_experiments_screenshot(request):
 async def page_experiment(request):
     return HTMLResponse(_load_template("base.html"))
 
+async def page_experiment_fragment(request):
+    """Return the Experiment page as an HTML fragment for SPA injection.
+
+    Rendered via Jinja2 so {% include %} partials work.
+    The fragment is injected into #content by the client router, then
+    Alpine.initTree() initialises the x-data="experimentPage()" component.
+    The component reads the experiment ID from window.location.pathname on init.
+    """
+    return templates.TemplateResponse(request, "pages/experiment.html")
+
 
 # ── HTML Pages ────────────────────────────────────────────────
 
@@ -2176,6 +2186,7 @@ routes = [
     Route("/terminal", page_terminal),
     Route("/terminal/{session_id}", page_terminal),
     Route("/pages/terminal", page_terminal_fragment),
+    Route("/pages/experiment", page_experiment_fragment),
 
     # WebSocket
     WebSocketRoute("/ws/terminal", ws_terminal),
