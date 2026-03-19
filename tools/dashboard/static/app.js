@@ -3810,19 +3810,23 @@ function _esc(s) {
 
 // ── Sidebar Experiment Indicator ─────────────────────────────
 
-function getDismissedExperiments() {
+async function dismissExperiment(expId, seriesKey, triggerEl) {
+  // Show inline confirmation in place of the dismiss button
+  const confirmed = await new Promise(resolve => {
+    const confirm = document.createElement('span');
+    confirm.className = 'exp-dismiss-confirm';
+    confirm.innerHTML = 'End? <button class="exp-dismiss-yes">Yes</button><button class="exp-dismiss-no">No</button>';
+    triggerEl.replaceWith(confirm);
+    confirm.querySelector('.exp-dismiss-yes').onclick = (e) => { e.stopPropagation(); resolve(true); };
+    confirm.querySelector('.exp-dismiss-no').onclick = (e) => { e.stopPropagation(); confirm.replaceWith(triggerEl); resolve(false); };
+  });
+  if (!confirmed) return;
   try {
-    return JSON.parse(localStorage.getItem('dismissed-experiments') || '[]');
-  } catch { return []; }
-}
-
-function dismissExperiment(expId) {
-  const dismissed = getDismissedExperiments();
-  if (!dismissed.includes(expId)) {
-    dismissed.push(expId);
-    localStorage.setItem('dismissed-experiments', JSON.stringify(dismissed));
+    await fetch(`/api/experiments/${expId}/dismiss`, { method: 'POST' });
+  } catch (e) {
+    console.warn('[dismiss] Failed to dismiss experiment:', e);
   }
-  const el = document.querySelector(`[data-exp-id="${expId}"]`);
+  const el = document.querySelector(`[data-exp-id="${seriesKey}"]`);
   if (el) el.remove();
 }
 
@@ -3831,13 +3835,11 @@ async function checkPendingExperiments() {
   if (!container) return;
   try {
     const pending = await api('/api/experiments/pending');
-    const dismissed = getDismissedExperiments();
     const keys = new Set();
     if (Array.isArray(pending)) {
       pending.forEach(exp => {
         // Use series_id as the stable key so the toast represents the whole series
         const seriesKey = exp.series_id || exp.id;
-        if (dismissed.includes(seriesKey)) return;
         keys.add(seriesKey);
         const iterLabel = exp.iteration_count > 1
           ? `${_esc(exp.title)} <span class="text-gray-500 text-xs">(${exp.iteration_count} iterations)</span>`
@@ -3862,12 +3864,12 @@ async function checkPendingExperiments() {
         btn.className = 'sidebar-exp-dismiss';
         btn.title = 'Dismiss';
         btn.textContent = '\u00d7';
-        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); dismissExperiment(seriesKey); };
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); dismissExperiment(exp.id, seriesKey, btn); };
         link.appendChild(btn);
         container.appendChild(link);
       });
     }
-    // Remove indicators for series that are no longer pending (or dismissed)
+    // Remove indicators for series that are no longer pending (server is source of truth)
     container.querySelectorAll('[data-exp-id]').forEach(el => {
       if (!keys.has(el.dataset.expId)) el.remove();
     });
