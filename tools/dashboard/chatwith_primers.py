@@ -192,21 +192,46 @@ def _format_experiment_primer(data: dict) -> str:
     # Show series_id in the example if we have one
     series_example = f'\n  "series_id": "{series_id}",' if series_id else ""
 
+    lines.append("### Preferred: `graph ui-exp` file watcher\n")
+    lines.append(
+        "Write each variant as an HTML file in a working directory. "
+        "The `graph ui-exp` tool watches the directory and auto-posts changes to the "
+        "experiment API. The browser updates in real-time via SSE.\n\n"
+        "```bash\n"
+        "# Set up a working directory with one .html file per variant\n"
+        "mkdir -p /tmp/variants\n"
+        "# Write your variant HTML files:\n"
+        "#   /tmp/variants/variant-a.html\n"
+        "#   /tmp/variants/variant-b.html\n"
+        "# Each filename (without .html) becomes the variant ID.\n"
+        "\n"
+    )
+    if series_id:
+        lines.append(f"# Start watching (appends to this experiment's series):\n")
+        lines.append(f"graph ui-exp \"Iteration N: <description>\" /tmp/variants/ --series {series_id}\n")
+    else:
+        lines.append(f"# Start watching (creates a new series):\n")
+        lines.append(f"graph ui-exp \"<experiment title>\" /tmp/variants/\n")
+    lines.append(
+        "```\n\n"
+        "The watcher runs in the foreground. Edit any .html file and save — the browser "
+        "auto-updates. Add new .html files for new variants. Delete files to remove variants. "
+        "Ctrl+C to stop watching.\n\n"
+        "**Important:** Each variant must be a complete self-contained HTML document with "
+        "`<link rel=\"stylesheet\" href=\"/static/tailwind.css\">` in the head for Tailwind styling.\n"
+    )
+    lines.append("### Alternative: direct API\n")
+    lines.append(
+        "```bash\n"
+        "curl -sk https://localhost:8080/api/experiments \\\n"
+        "  -X POST -H 'Content-Type: application/json' \\\n"
+        "  -d '{\n"
+    )
     series_field = f'"series_id": "{series_id}",' if series_id else '"series_id": "<optional>",'
-    lines.append("```bash")
-    lines.append("curl -sk https://localhost:8080/api/experiments \\")
-    lines.append("  -X POST -H 'Content-Type: application/json' \\")
-    lines.append("  -d '{")
-    lines.append(f'  "title": "Iteration N: <brief description>",')
-    lines.append(f'  "description": "What changed and why",')
-    lines.append(f'  {series_field}')
-    lines.append('  "fixture": { ... },')
-    lines.append('  "variants": [')
-    lines.append('    {"id": "variant-a", "html": "<full self-contained HTML>"}')
-    lines.append("  ]")
-    lines.append("}'")
-    lines.append("```\n")
-    lines.append("Returns: `{\"id\": \"<new-experiment-uuid>\"}`\n")
+    lines.append(f'  "title": "Iteration N: <description>",\n')
+    lines.append(f'  {series_field}\n')
+    lines.append('  "variants": [{"id": "variant-a", "html": "<full HTML>"}]\n')
+    lines.append("  }'\n```\n")
 
     # ── Screenshots ──────────────────────────────────────────
     lines.append("### Screenshots\n")
@@ -231,11 +256,11 @@ def _format_experiment_primer(data: dict) -> str:
         "1. **First:** Read the latest screenshot (if one exists above) to see what the user sees.\n"
         "2. Study the fixture and current variant HTML above.\n"
         "3. Ask the user what aspect of the design they want to refine.\n"
-        "4. Generate improved variant HTML based on their feedback.\n"
-        "5. POST to the experiments API using the curl command above to create the next iteration — "
-        "the gallery updates automatically and a new screenshot will be captured.\n"
-        "6. When notified of a new screenshot, read it to verify your changes rendered correctly.\n"
-        "7. The user reviews and gives feedback. Repeat.\n"
+        "4. Start `graph ui-exp` watching a variants directory (see Tools above).\n"
+        "5. Write improved variant HTML to .html files in the watched directory — "
+        "the browser updates automatically on every save.\n"
+        "6. Read the latest screenshot to verify your changes rendered correctly.\n"
+        "7. The user reviews and gives feedback. Edit the files and save again. Repeat.\n"
         "8. **When approved:** run `graph bead` to create an implementation bead with "
         "the winning variant's full HTML, all design decisions, and context from this session.\n"
     )
