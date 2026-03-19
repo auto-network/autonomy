@@ -52,6 +52,23 @@ BEAD_DEFAULTS: dict[str, Any] = {
     "comments": [],
 }
 
+SESSION_DEFAULTS: dict[str, Any] = {
+    "session_id": "session000000",
+    "project": "default",
+    "size_bytes": 1024000,
+    "age_seconds": 120,
+    "active": False,
+    "latest": "",
+}
+
+RECENT_SESSION_DEFAULTS: dict[str, Any] = {
+    "id": "src-000000000000",
+    "type": "session",
+    "date": "2026-01-01",
+    "title": "",
+    "project": "",
+}
+
 RUN_DEFAULTS: dict[str, Any] = {
     "status": "COMPLETED",
     "bead_id": "auto-test",
@@ -129,6 +146,18 @@ def get_bead_title_priority(bead_ids: list[str]) -> dict[str, dict]:
         b["id"]: {"id": b["id"], "title": b["title"], "priority": b["priority"], "labels": b.get("labels", [])}
         for b in beads if b["id"] in bead_ids
     }
+
+
+# ── sessions DAO interface ───────────────────────────────────────────
+
+def get_active_sessions(threshold: int = 600) -> list[dict]:
+    data = _load()
+    return [_fill(s, SESSION_DEFAULTS) for s in data.get("active_sessions", [])]
+
+
+def get_recent_sessions(limit: int = 20) -> list[dict]:
+    data = _load()
+    return [_fill(s, RECENT_SESSION_DEFAULTS) for s in data.get("recent_sessions", [])][:limit]
 
 
 # ── dispatch DAO interface ───────────────────────────────────────────
