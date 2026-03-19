@@ -1,0 +1,164 @@
+<div x-data="experimentPage()" class="max-w-6xl mx-auto">
+
+  <!-- Loading state -->
+  <template x-if="state === 'loading'">
+    <div class="text-gray-400">Loading experiment...</div>
+  </template>
+
+  <!-- Error state -->
+  <template x-if="state === 'error'">
+    <div class="text-red-400">Experiment not found</div>
+  </template>
+
+  <!-- Main content -->
+  <template x-if="state === 'ready'">
+    <div>
+
+      <!-- Header action row: screenshot + chat-with buttons -->
+      <section aria-label="Experiment actions" class="flex items-center gap-2 mb-4">
+        <span class="text-xs text-gray-500 mr-auto" x-text="screenshotStatus"></span>
+        <button @click="captureScreenshot()"
+                aria-label="Capture screenshot"
+                class="text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
+          Capture
+        </button>
+        <button @click="chatWithBtnText === 'Reconnect' ? reconnectChatWith() : spawnChatWith()"
+                :disabled="chatWithBtnDisabled"
+                aria-label="Open Chat With Claude panel"
+                class="px-3 py-1 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white disabled:opacity-50"
+                x-text="chatWithBtnText">
+        </button>
+      </section>
+
+      <!-- Title -->
+      <h2 class="text-xl font-bold text-indigo-400 mb-1" x-text="exp.title"></h2>
+
+      <!-- Series navigation -->
+      <template x-if="isInSeries">
+        <section aria-label="Series navigation" class="flex items-center gap-3 mb-3 text-sm">
+          <template x-if="prevId">
+            <a :href="'/experiments/' + prevId"
+               class="text-indigo-400 hover:text-indigo-300">&larr; Prev</a>
+          </template>
+          <template x-if="!prevId">
+            <span class="text-gray-600">&larr; Prev</span>
+          </template>
+          <span class="text-gray-400" x-text="`Iteration ${seriesIdx + 1} of ${seriesTotal}`"></span>
+          <template x-if="nextId">
+            <a :href="'/experiments/' + nextId"
+               class="text-indigo-400 hover:text-indigo-300">Next &rarr;</a>
+          </template>
+          <template x-if="!nextId">
+            <span class="text-gray-600">Next &rarr;</span>
+          </template>
+        </section>
+      </template>
+
+      <!-- Description -->
+      <template x-if="exp.description">
+        <p class="text-gray-400 text-sm mb-4" x-text="exp.description"></p>
+      </template>
+
+      <!-- Completion status -->
+      <template x-if="isCompleted">
+        <p class="text-green-400 text-sm mb-4 font-semibold">Results submitted</p>
+      </template>
+
+      <!-- Variant cards -->
+      <section aria-label="Experiment variants" id="exp-variants">
+        <template x-for="v in variants" :key="v.id">
+          <div class="exp-variant" role="group" :aria-label="'Variant ' + v.id">
+            <div class="exp-variant-header">
+              <span class="exp-variant-label" x-text="v.id"></span>
+              <div class="flex items-center gap-2">
+
+                <!-- Rank dropdown (shown when 2+ variants selected) -->
+                <span x-show="showRankFor(v.id)" class="flex items-center">
+                  <label class="text-xs text-gray-400 mr-1">Rank</label>
+                  <select class="exp-rank-select"
+                          :disabled="isCompleted"
+                          :value="variantRank(v.id)"
+                          @change="setRank(v.id, $event.target.value)">
+                    <template x-for="r in v._rankOptions" :key="r">
+                      <option :value="r"
+                              :selected="variantRank(v.id) === r"
+                              x-text="r"></option>
+                    </template>
+                  </select>
+                </span>
+
+                <!-- Select / deselect button -->
+                <button class="exp-select-btn"
+                        :class="{ 'selected': isVariantSelected(v.id) }"
+                        :aria-pressed="isVariantSelected(v.id)"
+                        :aria-label="'Select variant ' + v.id"
+                        :disabled="isCompleted"
+                        @click="toggleVariant(v.id)"
+                        title="Select this variant">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="3,8 7,12 13,4"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <!-- iframe — Alpine renders the skeleton; _injectIframes() fills the content -->
+            <iframe class="exp-variant-iframe"
+                    :data-variant="v.id"
+                    style="min-height:300px;"></iframe>
+          </div>
+        </template>
+      </section>
+
+      <!-- Submit bar (not shown for completed experiments) -->
+      <template x-if="!isCompleted">
+        <div class="exp-submit-bar">
+          <span class="text-sm text-gray-400" x-text="selectionHint"></span>
+          <button class="exp-submit-btn"
+                  :disabled="!canSubmit"
+                  @click="submit()"
+                  x-text="submitBtnText">
+          </button>
+        </div>
+      </template>
+
+      <!-- Chat With terminal panel -->
+      <div x-show="chatWithVisible"
+           class="mt-6 border border-gray-700 rounded overflow-hidden">
+
+        <!-- Panel header — click anywhere on header to toggle -->
+        <div class="flex items-center px-3 py-2 bg-gray-800 border-b border-gray-700 cursor-pointer"
+             @click="toggleChatWithPanel()">
+          <span class="text-sm font-semibold text-indigo-400">Chat With Claude</span>
+          <span :class="chatWithStatusClass" x-text="chatWithStatus"></span>
+          <div class="ml-auto flex items-center gap-2" @click.stop>
+            <button x-show="chatWithReconnectVisible"
+                    @click="reconnectChatWith()"
+                    aria-label="Reconnect Chat With terminal"
+                    class="text-xs text-indigo-400 hover:text-indigo-300 px-2 py-0.5 rounded border border-indigo-800 hover:border-indigo-600">
+              Reconnect
+            </button>
+            <button x-show="chatWithKillVisible"
+                    @click="killChatWith()"
+                    aria-label="Kill Chat With session"
+                    class="text-xs text-red-400 hover:text-red-300 px-2 py-0.5 rounded border border-red-800 hover:border-red-600">
+              Kill
+            </button>
+            <button @click="toggleChatWithPanel()"
+                    aria-label="Toggle Chat With panel"
+                    class="text-xs text-gray-400 hover:text-white px-2"
+                    x-text="chatWithCollapsed ? '&#9658;' : '&#9662;'">
+            </button>
+          </div>
+        </div>
+
+        <!-- Terminal body — xterm.js attaches to #chatwith-container -->
+        <div x-show="!chatWithCollapsed" style="height:300px;">
+          <div id="chatwith-container" style="height:300px;"></div>
+        </div>
+
+      </div>
+
+    </div>
+  </template>
+
+</div>
