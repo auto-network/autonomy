@@ -1734,30 +1734,7 @@ async def api_experiments_screenshot(request):
 
     abs_path = str(screenshot_path.resolve())
 
-    # Fire-and-forget tmux notification — don't block the response
-    series_id = exp.get("series_id") or exp_id
-    asyncio.create_task(_notify_screenshot_tmux(series_id, exp_id, abs_path))
-
     return JSONResponse({"path": abs_path})
-
-
-async def _notify_screenshot_tmux(series_id: str, exp_id: str, screenshot_path: str) -> None:
-    """Inject a screenshot notification into a Chat With tmux session if one exists.
-
-    Checks chatwith-{series_id} first (covers the whole design series),
-    then chatwith-{exp_id} as fallback (single-experiment sessions).
-    """
-    for session_id in [series_id, exp_id]:
-        session_name = f"chatwith-{session_id}"
-        exists = await asyncio.to_thread(_tmux_session_exists, session_name)
-        if exists:
-            msg = f"Screenshot saved: {screenshot_path}"
-            await asyncio.to_thread(
-                subprocess.run,
-                ["tmux", "send-keys", "-t", session_name, msg, "Enter"],
-                capture_output=True,
-            )
-            return  # notify only the first matching session
 
 
 async def page_experiment(request):
