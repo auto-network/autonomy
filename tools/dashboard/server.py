@@ -26,6 +26,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
@@ -2127,7 +2128,25 @@ async def _on_startup():
         from tools.dashboard.dao.mock import mock_event_watcher
         asyncio.create_task(mock_event_watcher())
 
+class _CSPMiddleware(BaseHTTPMiddleware):
+    """Phase 1 CSP: blocks dangerous injections while permitting existing inline scripts."""
+
+    _CSP = (
+        "default-src 'self'; "
+        "script-src 'self' cdn.jsdelivr.net 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self' ws:; "
+        "frame-ancestors 'none'"
+    )
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = self._CSP
+        return response
+
+
 app = Starlette(routes=routes, on_startup=[_on_startup])
+app.add_middleware(_CSPMiddleware)
 
 
 def main():

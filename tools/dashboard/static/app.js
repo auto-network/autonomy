@@ -13,8 +13,22 @@ let _captureVideo = null;
 
 // ── Markdown Rendering ───────────────────────────────────────
 
+// DOMPurify config — mirrors SECURE_CONFIG in markdown.js.
+// Defined here so renderMd() doesn't depend on markdown.js load order.
+const MARKDOWN_SECURE_CONFIG = {
+  ALLOWED_TAGS: ['h1','h2','h3','h4','h5','h6','p','br','hr','ul','ol','li',
+                 'blockquote','pre','code','em','strong','del','a','img',
+                 'table','thead','tbody','tr','th','td','sup','sub','details','summary'],
+  ALLOWED_ATTR: ['href','src','alt','title','class','id','colspan','rowspan','align'],
+  ALLOW_DATA_ATTR: false,
+  ADD_ATTR: ['target'],
+  FORBID_TAGS: ['script','style','iframe','object','embed','form','input',
+                'textarea','select','meta','link'],
+  FORBID_ATTR: ['onerror','onload','onclick','onmouseover','onfocus','onblur','style'],
+};
+
 function renderMd(md) {
-  const html = marked.parse(md || '');
+  const html = DOMPurify.sanitize(marked.parse(md || ''), MARKDOWN_SECURE_CONFIG);
   const el = document.createElement('div');
   el.className = 'markdown-body';
   el.innerHTML = html;
