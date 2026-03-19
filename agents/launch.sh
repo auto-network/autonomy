@@ -119,36 +119,12 @@ if $DRY_RUN; then
     exit 0
 fi
 
-# ── Prepare temp files ───────────────────────────────
-# In detach mode, store in output dir so they persist for container lifetime.
-# In foreground mode, use temp files with cleanup trap.
-if $DETACH; then
-    PROMPT_FILE="$OUTPUT_DIR/.prompt.md"
-else
-    PROMPT_FILE=$(mktemp)
-    cleanup() {
-        rm -f "$PROMPT_FILE"
-        [[ "${AUTH_MODE}" == "creds_file" ]] && rm -f "$CREDS_COPY"
-        # Don't remove worktree here — dispatcher decides after validation
-    }
-    trap cleanup EXIT
-fi
-
+# ── Write prompt file ─────────────────────────────────
+PROMPT_FILE="$OUTPUT_DIR/.prompt.md"
 echo "$PROMPT" > "$PROMPT_FILE"
 
-# Prepare credential mount/env for docker — only copy file if using creds_file mode
-if [[ "$AUTH_MODE" == "creds_file" ]]; then
-    if $DETACH; then
-        CREDS_COPY="$OUTPUT_DIR/.credentials.json"
-    else
-        CREDS_COPY=$(mktemp)
-    fi
-    cp "$CLAUDE_CREDS/.credentials.json" "$CREDS_COPY"
-    chmod 644 "$CREDS_COPY"
-    AUTH_DOCKER_ARGS=(-v "$CREDS_COPY:/home/agent/.claude/.credentials.json:ro")
-else
-    AUTH_DOCKER_ARGS=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
-fi
+# Mount .git at the same absolute path so worktree's .git file reference resolves
+GIT_DIR="$REPO_ROOT/.git"
 
 # ── Launch ────────────────────────────────────────────
 echo "==> Launching agent container: $CONTAINER_NAME"
@@ -156,35 +132,25 @@ echo "    Image: $IMAGE"
 echo "    Branch: $BRANCH"
 echo "    Output: $OUTPUT_DIR"
 
-# Mount .git at the same absolute path so worktree's .git file reference resolves
-GIT_DIR="$REPO_ROOT/.git"
-
-# Agent session logs written here — visible to host for live tailing and graph ingestion
-SESSION_DIR="$OUTPUT_DIR/sessions"
-mkdir -p "$SESSION_DIR"
-
 if $DETACH; then
-    # ── Detached mode: launch in background, return immediately ──
-    # No --rm: dispatcher removes container after collecting results.
-    CONTAINER_ID=$(docker run -d \
+    # ── Detached mode: delegate to Python launch_session_cli ──
+    LAUNCH_OUTPUT=$("$REPO_ROOT/.venv/bin/python" -m agents.launch_session_cli \
+        --session-type dispatch \
         --name "$CONTAINER_NAME" \
-        --network=host \
-        -e BD_ACTOR="agent:$CONTAINER_NAME" \
-        -e BD_READONLY="${BD_READONLY:-0}" \
-        -e GRAPH_DB=/home/agent/graph.db \
-        "${AUTH_DOCKER_ARGS[@]}" \
-        -v "$GIT_DIR:$GIT_DIR" \
-        -v "$REPO_ROOT/data/graph.db:/home/agent/graph.db" \
-        -v "$REPO_ROOT/.beads:/data/.beads" \
-        -v "$WORKTREE_DIR:/workspace/repo" \
-        -v "$OUTPUT_DIR:/workspace/output" \
-        -v "$SESSION_DIR:/home/agent/.claude/projects" \
-        -v "$PROMPT_FILE:/tmp/prompt.md:ro" \
-        --entrypoint claude \
-        "$IMAGE" \
-        --dangerously-skip-permissions \
-        --print \
-        "$(cat "$PROMPT_FILE")")
+        --prompt-file "$PROMPT_FILE" \
+        --bead-id "$BEAD_ID" \
+        --worktree "$WORKTREE_DIR" \
+        --git-dir "$GIT_DIR" \
+        --output-dir "$OUTPUT_DIR" \
+        --image "$IMAGE" \
+        --detach)
+
+    if [[ $? -ne 0 ]]; then
+        echo "ERROR: launch_session_cli failed" >&2
+        exit 1
+    fi
+
+    CONTAINER_ID=$(echo "$LAUNCH_OUTPUT" | grep "^CONTAINER_ID=" | cut -d= -f2-)
 
     # Write metadata for dispatcher polling/collection
     echo "$CONTAINER_ID" > "$OUTPUT_DIR/.container_id"
@@ -202,27 +168,16 @@ if $DETACH; then
     exit 0
 fi
 
-# ── Foreground mode: existing behavior ───────────────
-docker run \
+# ── Foreground mode: delegate to Python launch_session_cli ───
+"$REPO_ROOT/.venv/bin/python" -m agents.launch_session_cli \
+    --session-type dispatch \
     --name "$CONTAINER_NAME" \
-    --rm \
-    --network=host \
-    -e BD_ACTOR="agent:$CONTAINER_NAME" \
-    -e BD_READONLY="${BD_READONLY:-0}" \
-    -e GRAPH_DB=/home/agent/graph.db \
-    "${AUTH_DOCKER_ARGS[@]}" \
-    -v "$GIT_DIR:$GIT_DIR" \
-    -v "$REPO_ROOT/data/graph.db:/home/agent/graph.db" \
-    -v "$REPO_ROOT/.beads:/data/.beads" \
-    -v "$WORKTREE_DIR:/workspace/repo" \
-    -v "$OUTPUT_DIR:/workspace/output" \
-    -v "$SESSION_DIR:/home/agent/.claude/projects" \
-    -v "$PROMPT_FILE:/tmp/prompt.md:ro" \
-    --entrypoint claude \
-    "$IMAGE" \
-    --dangerously-skip-permissions \
-    --print \
-    "$(cat "$PROMPT_FILE")"
+    --prompt-file "$PROMPT_FILE" \
+    --bead-id "$BEAD_ID" \
+    --worktree "$WORKTREE_DIR" \
+    --git-dir "$GIT_DIR" \
+    --output-dir "$OUTPUT_DIR" \
+    --image "$IMAGE"
 
 EXIT_CODE=$?
 
