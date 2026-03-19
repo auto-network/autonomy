@@ -1902,10 +1902,9 @@ async function killChatWithSession(expId) {
 let activeTerm = null;
 let activeWs = null;
 let activeTerminalId = null;
-let _pillClickTimer = null;
 let _terminalFitAddon = null;
 let _terminalResizeObserver = null;
-let _terminalPageRendered = false;
+let _terminalFragmentInit = false;
 
 function destroyTerminal() {
   if (_terminalResizeObserver) { _terminalResizeObserver.disconnect(); _terminalResizeObserver = null; }
@@ -1914,104 +1913,29 @@ function destroyTerminal() {
   _terminalFitAddon = null;
 }
 
-function _ensureTerminalPageLayout() {
-  if (_terminalPageRendered) return;
-  const termPage = document.getElementById('terminal-page');
-  termPage.innerHTML = `
-    <div class="flex gap-2 mb-3 flex-wrap">
-      <button onclick="launchClaude()" class="px-3 py-1 bg-indigo-600 rounded text-sm hover:bg-indigo-500">Claude (host)</button>
-      <button onclick="launchClaudeContainer()" class="px-3 py-1 bg-purple-600 rounded text-sm hover:bg-purple-500">Claude (container)</button>
-      <button onclick="launchBash()" class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Bash</button>
-      <button onclick="launchBashContainer()" class="px-3 py-1 bg-gray-600 rounded text-sm hover:bg-gray-500">Bash (container)</button>
-      <span id="terminal-pills" class="contents"></span>
-      <span class="text-xs text-gray-600 self-center" title="Hold Shift to select text, Ctrl+Shift+V to paste">Shift+drag to select</span>
-      <span class="text-xs text-gray-500 ml-auto self-center" id="term-status">ready</span>
-    </div>
-    <div id="terminal-container" style="height: calc(100vh - 10rem);"></div>`;
-  _terminalPageRendered = true;
-}
-
-async function refreshTerminalPills() {
-  const pillBar = document.getElementById('terminal-pills');
-  if (!pillBar) return;
-  const terminals = await api('/api/terminals');
-  if (Array.isArray(terminals) && terminals.length > 0) {
-    pillBar.innerHTML = '<span class="text-gray-600 self-center">|</span>' +
-      terminals.map(t => {
-        const cmd = (t.cmd || '').toLowerCase();
-        const isClaude = cmd.includes('claude') || cmd.includes('autonomy-agent-claude');
-        const isContainer = t.env === 'container' || cmd.includes('docker') || cmd.includes('autonomy-agent');
-        const icon = isClaude ? '🤖' : '⬛';
-        const label = isClaude ? 'claude' : 'bash';
-        const active = t.id === activeTerminalId;
-        const border = active ? 'border-2 border-indigo-500' : 'border-2 border-gray-700';
-        const bgClass = active ? 'bg-indigo-900' : 'bg-gray-700';
-        const displayName = escapeHtml(t.name || t.id);
-        const envBadge = isContainer
-          ? '<span class="text-xs text-purple-400 font-medium">container</span>'
-          : '<span class="text-xs text-gray-500">host</span>';
-        return `
-          <div class="flex items-center ${border} rounded overflow-hidden">
-            <div onclick="pillSingleClick('${t.id}')"
-                 class="px-3 py-1 ${bgClass} text-sm hover:bg-gray-600 flex items-center gap-2 cursor-pointer">
-              <span class="w-2 h-2 rounded-full bg-green-400"></span>
-              ${icon}
-              <span class="pill-name" ondblclick="startRenameTerminal(event, '${t.id}')">${displayName}</span>
-              <span class="text-xs text-gray-500">${label}</span>
-              <span class="text-xs text-gray-600">&middot;</span>
-              ${envBadge}
-            </div>
-            <button onclick="killTerminal('${t.id}')"
-                    class="px-2 py-1 bg-red-900 text-xs hover:bg-red-700 self-stretch">✕</button>
-          </div>`;
-      }).join('');
-  } else {
-    pillBar.innerHTML = '';
-  }
-}
-
-function pillSingleClick(id) {
-  clearTimeout(_pillClickTimer);
-  _pillClickTimer = setTimeout(() => {
-    _pillClickTimer = null;
-    reconnectTerminal(id);
-  }, 250);
-}
-
-function startRenameTerminal(event, id) {
-  clearTimeout(_pillClickTimer);
-  _pillClickTimer = null;
-  event.stopPropagation();
-  event.preventDefault();
-  const span = event.target.closest('.pill-name');
-  if (!span) return;
-  const currentName = span.textContent;
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.value = currentName;
-  input.className = 'bg-gray-800 text-white text-sm px-1 w-24 rounded outline-none border border-indigo-500';
-  input.style.minWidth = '3rem';
-  input.addEventListener('click', (e) => e.stopPropagation());
-  const finish = async (save) => {
-    if (save) {
-      const newName = input.value.trim();
-      if (newName && newName !== currentName) {
-        await fetch(`/api/terminal/${id}/rename`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({name: newName}),
-        });
-      }
+async function renderTerminalFragment() {
+  if (_terminalFragmentInit) {
+    // Alpine already initialized — sync state and refresh pills
+    if (window._terminalPage) {
+      window._terminalPage.activeId = activeTerminalId;
+      await window._terminalPage.refresh();
     }
-    refreshTerminalPills();
-  };
-  input.addEventListener('blur', () => finish(true));
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-    if (e.key === 'Escape') { e.preventDefault(); finish(false); }
-  });
-  span.replaceWith(input);
-  setTimeout(() => { input.focus(); input.select(); }, 0);
+    return;
+  }
+  let html;
+  if (_fragmentCache.has('/pages/terminal')) {
+    html = _fragmentCache.get('/pages/terminal');
+  } else {
+    const res = await fetch('/pages/terminal');
+    html = await res.text();
+    _fragmentCache.set('/pages/terminal', html);
+  }
+  const termPage = document.getElementById('terminal-page');
+  termPage.innerHTML = html;
+  if (window.Alpine) {
+    Alpine.initTree(termPage.firstElementChild);
+  }
+  _terminalFragmentInit = true;
 }
 
 async function renderTerminal(cmd, attach) {
@@ -2021,26 +1945,26 @@ async function renderTerminal(cmd, attach) {
   }
   pageTitle.textContent = attach ? `Attached: ${attach}` : 'Terminal';
 
-  // Ensure the persistent terminal page layout exists
-  _ensureTerminalPageLayout();
+  // Ensure Alpine chrome is rendered (idempotent after first call)
+  await renderTerminalFragment();
 
   // If we already have an active connection to the requested session, just re-fit
   if (!cmd && attach && activeTerm && activeWs && activeWs.readyState === WebSocket.OPEN
       && activeTerminalId === attach) {
-    await refreshTerminalPills();
     if (_terminalFitAddon) _terminalFitAddon.fit();
     activeTerm.focus();
     return;
   }
 
   // Update active terminal ID
-  if (attach) activeTerminalId = attach;
-  else if (cmd) activeTerminalId = null;
+  if (attach) {
+    activeTerminalId = attach;
+    if (window._terminalPage) window._terminalPage.setActiveId(attach);
+  } else if (cmd) {
+    activeTerminalId = null;
+    if (window._terminalPage) window._terminalPage.setActiveId(null);
+  }
 
-  // Show existing pills
-  await refreshTerminalPills();
-
-  // If we have an attach target, connect immediately
   if (!attach && !cmd) return;
 
   // Need to create or switch session — destroy previous
@@ -2048,9 +1972,9 @@ async function renderTerminal(cmd, attach) {
 
   const termContainer = document.getElementById('terminal-container');
   termContainer.innerHTML = '';
-  const statusEl = document.getElementById('term-status');
-  statusEl.textContent = 'connecting...';
-  statusEl.className = 'text-xs text-yellow-400 ml-auto self-center';
+  if (window._terminalPage) {
+    window._terminalPage.setStatus('connecting...', 'text-xs text-yellow-400');
+  }
 
   const term = new Terminal({
     cursorBlink: true,
@@ -2088,10 +2012,8 @@ async function renderTerminal(cmd, attach) {
   activeTerm = term;
 
   ws.onopen = async () => {
-    const s = document.getElementById('term-status');
-    if (s) {
-      s.textContent = 'connected';
-      s.className = 'text-xs text-green-400 ml-auto self-center';
+    if (window._terminalPage) {
+      window._terminalPage.setStatus('connected', 'text-xs text-green-400');
     }
     // Send initial size
     const dims = fitAddon.proposeDimensions();
@@ -2104,10 +2026,11 @@ async function renderTerminal(cmd, attach) {
       if (Array.isArray(terms) && terms.length > 0) {
         const newest = terms.reduce((a, b) => (b.started || 0) > (a.started || 0) ? b : a);
         activeTerminalId = newest.id;
+        if (window._terminalPage) window._terminalPage.setActiveId(newest.id);
       }
     }
     // Refresh pill bar now that tmux session exists
-    await refreshTerminalPills();
+    if (window._terminalPage) await window._terminalPage.refresh();
     term.focus();
   };
 
@@ -2116,19 +2039,15 @@ async function renderTerminal(cmd, attach) {
   };
 
   ws.onclose = () => {
-    const s = document.getElementById('term-status');
-    if (s) {
-      s.textContent = 'disconnected';
-      s.className = 'text-xs text-red-400 ml-auto self-center';
+    if (window._terminalPage) {
+      window._terminalPage.setStatus('disconnected', 'text-xs text-red-400');
     }
     term.write('\r\n\x1b[90m--- session ended ---\x1b[0m\r\n');
   };
 
   ws.onerror = () => {
-    const s = document.getElementById('term-status');
-    if (s) {
-      s.textContent = 'error';
-      s.className = 'text-xs text-red-400 ml-auto self-center';
+    if (window._terminalPage) {
+      window._terminalPage.setStatus('error', 'text-xs text-red-400');
     }
   };
 
@@ -2229,42 +2148,6 @@ async function renderTerminal(cmd, attach) {
     }
   });
   _terminalResizeObserver.observe(termContainer);
-}
-
-function launchClaude() {
-  renderTerminal('claude --dangerously-skip-permissions');
-}
-
-function launchClaudeContainer() {
-  renderTerminal('autonomy-agent-claude');
-}
-
-function launchBash() {
-  renderTerminal('/bin/bash');
-}
-
-function launchBashContainer() {
-  renderTerminal('autonomy-agent-bash');
-}
-
-function reconnectTerminal(name) {
-  // Skip if already connected to this session
-  if (name === activeTerminalId && activeWs?.readyState === WebSocket.OPEN) {
-    return;
-  }
-  renderTerminal(null, name);
-}
-
-async function killTerminal(name) {
-  await api(`/api/terminal/${name}/kill`);
-  if (activeTerminalId === name) {
-    activeTerminalId = null;
-    destroyTerminal();
-    // Clear the terminal container since the session was killed
-    const tc = document.getElementById('terminal-container');
-    if (tc) tc.innerHTML = '';
-  }
-  renderTerminal(null, null);
 }
 
 // ── Live Session Panel ───────────────────────────────────────

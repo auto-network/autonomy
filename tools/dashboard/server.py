@@ -1751,6 +1751,10 @@ async def page_trace_fragment(request):
 async def page_terminal(request):
     return HTMLResponse(_load_template("base.html"))
 
+async def page_terminal_fragment(request):
+    """Return the Terminal page chrome as an HTML fragment for SPA injection."""
+    return templates.TemplateResponse(request, "pages/terminal.html")
+
 
 # ── Experiments API ────────────────────────────────────────────
 
@@ -2171,6 +2175,7 @@ routes = [
     Route("/timeline", page_timeline),
     Route("/terminal", page_terminal),
     Route("/terminal/{session_id}", page_terminal),
+    Route("/pages/terminal", page_terminal_fragment),
 
     # WebSocket
     WebSocketRoute("/ws/terminal", ws_terminal),
