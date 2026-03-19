@@ -3624,11 +3624,6 @@ async function renderExperiment(expId) {
         const btn = document.getElementById('chatwith-btn');
         if (btn) btn.textContent = 'Reconnect';
         connectChatWithTerminal(sessionName);
-      } else if (exp.series_id) {
-        // Auto-reveal the panel header for series experiments so the Chat With
-        // button is immediately visible — the terminal body stays hidden until spawned.
-        const panel = document.getElementById('chatwith-panel');
-        if (panel) panel.style.display = '';
       }
     } catch(e) { /* ignore — check is best-effort */ }
   })();
