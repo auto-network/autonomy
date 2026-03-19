@@ -524,10 +524,16 @@ def cmd_bead(args):
     # First, refresh the graph to capture latest turns
     subprocess.run(["graph", "sessions", "--all"], capture_output=True, timeout=30)
 
+    # Read description from stdin if -d -
+    desc = args.desc
+    if desc == "-":
+        import sys as _sys
+        desc = _sys.stdin.read().strip()
+
     # Build bd create command — always set readiness:idea as pipeline entry point
     cmd = ["bd", "create", args.title, "-p", str(args.priority), "-l", "readiness:idea"]
-    if args.desc:
-        cmd += ["-d", args.desc]
+    if desc:
+        cmd += ["-d", desc]
     if args.type:
         cmd += ["-t", args.type]
 
