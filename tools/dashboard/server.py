@@ -36,6 +36,7 @@ from sse_starlette.sse import EventSourceResponse
 from agents.dispatch_db import list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH
 from agents.experiments_db import (
     create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
+    dismiss_experiment,
 )
 from tools.dashboard.event_bus import event_bus
 from tools.dashboard.dao import beads as dao_beads
@@ -1730,6 +1731,15 @@ async def api_experiments_pending(request):
     return JSONResponse(pending)
 
 
+async def api_experiments_dismiss(request):
+    """Dismiss an experiment and all pending siblings in its series."""
+    exp_id = request.path_params["id"]
+    ok = await asyncio.to_thread(dismiss_experiment, exp_id)
+    if not ok:
+        return JSONResponse({"error": "experiment not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
 async def api_experiments_screenshot(request):
     """Save a screenshot blob for an experiment.
 
@@ -2060,6 +2070,7 @@ routes = [
     Route("/api/experiments/pending", api_experiments_pending),
     Route("/api/experiments/{id}", api_experiments_poll),
     Route("/api/experiments/{id}/full", api_experiments_get),
+    Route("/api/experiments/{id}/dismiss", api_experiments_dismiss, methods=["POST"]),
     Route("/api/experiments/{id}/submit", api_experiments_submit, methods=["POST"]),
     Route("/api/experiments/{id}/screenshot", api_experiments_screenshot, methods=["POST"]),
     Route("/experiments/{id}", page_experiment),
