@@ -1907,6 +1907,14 @@ async def page_index(request):
 async def page_beads(request):
     return HTMLResponse(_load_template("base.html"))
 
+async def page_beads_fragment(request):
+    """Return the Beads page as an HTML fragment for SPA injection.
+
+    Rendered via Jinja2. The fragment is injected into #content by the client
+    router, then Alpine.initTree() initialises the x-data="beadsPage()" component.
+    """
+    return templates.TemplateResponse(request, "pages/beads.html")
+
 async def page_dispatch(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -2168,6 +2176,7 @@ routes = [
     # Pages
     Route("/", page_index),
     Route("/beads", page_beads),
+    Route("/pages/beads", page_beads_fragment),
     Route("/dispatch", page_dispatch),
     Route("/dispatch/alpine", page_dispatch),
     Route("/dispatch/lit", page_dispatch),
