@@ -2,12 +2,23 @@
 # Build the autonomy-agent container image.
 # Stages tool binaries into a temp dir, then builds.
 #
-# Usage: ./agents/build.sh [--no-cache]
+# Usage: ./agents/build.sh [--no-cache] [--dashboard]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$SCRIPT_DIR/.build"
+
+# Parse flags
+NO_CACHE=""
+DASHBOARD=false
+for arg in "$@"; do
+    case "$arg" in
+        --no-cache)  NO_CACHE="--no-cache" ;;
+        --dashboard) DASHBOARD=true ;;
+        *) echo "Unknown flag: $arg"; exit 1 ;;
+    esac
+done
 
 echo "==> Staging binaries..."
 rm -rf "$BUILD_DIR"
@@ -56,10 +67,19 @@ cp graph/*.py context/graph/
 # Copy Dockerfile
 cp "$SCRIPT_DIR/Dockerfile" context/
 
-docker build ${1:+"$1"} -t autonomy-agent context/
+docker build $NO_CACHE -t autonomy-agent context/
+
+echo "==> Done. Image: autonomy-agent"
+docker images autonomy-agent:latest --format "  Size: {{.Size}}"
+
+# ── Dashboard variant ──
+if [[ "$DASHBOARD" == true ]]; then
+    echo ""
+    echo "==> Building dashboard variant..."
+    docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.dashboard" -t autonomy-agent:dashboard context/
+    echo "==> Done. Image: autonomy-agent:dashboard"
+    docker images autonomy-agent:dashboard --format "  Size: {{.Size}}"
+fi
 
 echo "==> Cleanup..."
 rm -rf "$BUILD_DIR"
-
-echo "==> Done. Image: autonomy-agent"
-docker images autonomy-agent --format "  Size: {{.Size}}"
