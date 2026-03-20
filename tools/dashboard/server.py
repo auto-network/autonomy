@@ -262,10 +262,29 @@ async def api_dispatch_pause_state(request):
 
 
 def _get_dispatcher_state() -> dict:
-    """Read dispatcher pause state from SQLite for SSE broadcast."""
+    """Read dispatcher pause state and merge health from SQLite/git for SSE broadcast."""
     paused = is_paused()
     reason = get_pause_reason() if paused else None
-    return {"paused": paused, "reason": reason}
+
+    # Check for UU (unmerged) files that block all merges
+    merge_health: dict = {"status": "ok"}
+    try:
+        porcelain = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(_REPO_ROOT),
+        ).stdout
+        uu_files = [line for line in porcelain.splitlines() if line[:2] == "UU"]
+        if uu_files:
+            merge_health = {
+                "status": "blocked",
+                "reason": f"UU: {uu_files[0][3:].strip()}",
+                "count": len(uu_files),
+            }
+    except Exception:
+        pass  # Non-critical — don't break SSE on git failure
+
+    return {"paused": paused, "reason": reason, "merge_health": merge_health}
 
 
 async def api_dispatch_status(request):
