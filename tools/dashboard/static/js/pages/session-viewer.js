@@ -26,6 +26,10 @@
       // Tool ID tracking (for matching tool_result to tool_use)
       _toolMap: {},
 
+      // Input
+      inputText: '',
+      sending: false,
+
       // API paths set from URL params
       _tailUrl: '',
 
@@ -50,6 +54,29 @@
         this.autoScroll = true;
         const el = this.$refs.entriesContainer;
         if (el) el.scrollTop = el.scrollHeight;
+      },
+
+      async sendMessage() {
+        const text = this.inputText.trim();
+        if (!text || this.sending) return;
+        this.sending = true;
+        try {
+          const res = await fetch('/api/session/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: text, tmux_session: this._tmuxSession }),
+          });
+          const data = await res.json();
+          if (data.ok) {
+            this.inputText = '';
+          } else {
+            console.warn('[sessionViewer] send error:', data.error);
+          }
+        } catch (e) {
+          console.warn('[sessionViewer] send failed:', e);
+        } finally {
+          this.sending = false;
+        }
       },
 
       async _poll() {
@@ -110,6 +137,19 @@
         this.projectLabel = _formatProject(this.project);
 
         this._tailUrl = `/api/session/${encodeURIComponent(this.project)}/${encodeURIComponent(this.sessionId)}/tail`;
+
+        // tmux session name: from query param, or auto-detect from /api/terminals
+        const params = new URLSearchParams(window.location.search);
+        this._tmuxSession = params.get('tmux') || '';
+        if (!this._tmuxSession) {
+          try {
+            const terms = await fetch('/api/terminals').then(r => r.json());
+            if (Array.isArray(terms)) {
+              const claude = terms.find(t => t.cmd && t.cmd.includes('claude'));
+              if (claude) this._tmuxSession = claude.id;
+            }
+          } catch (_) {}
+        }
 
         // First poll (immediate)
         await this._poll();
