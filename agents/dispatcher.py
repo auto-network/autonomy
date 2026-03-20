@@ -60,6 +60,10 @@ DEFAULT_IMAGE = "autonomy-agent"
 # Kill containers exceeding this runtime (seconds)
 MAX_AGENT_RUNTIME = 600
 
+# Auto-pause after this many consecutive cross-bead merge failures
+MERGE_FAILURE_PAUSE_THRESHOLD = 3
+_consecutive_merge_failures = 0
+
 # Librarian agent type registry — maps job_type to prompt + primer
 LIBRARIAN_DIR = Path(__file__).parent / "librarians"
 LIBRARIAN_TYPES: dict[str, dict] = {
@@ -661,6 +665,13 @@ def merge_branch(branch: str, bead_id: str, reason: str) -> tuple[bool, str]:
     stashed = False
 
     if not is_clean:
+        # Detect UU (unmerged) files — these can't be stashed and indicate
+        # a persistent problem requiring manual resolution
+        uu_files = [line.strip() for line in dirty_files.split(";")
+                    if line.strip().startswith("UU ")]
+        if uu_files:
+            return False, f"UNMERGED_FILES: {'; '.join(uu_files[:3])}"
+
         print(f"  Working tree is dirty: {dirty_files}")
         print(f"  Attempting git stash before merge...")
         stash_result = subprocess.run(
@@ -1460,6 +1471,39 @@ def _record_librarian_run(lib: RunningLibrarian, exit_code: int, status: str) ->
               file=sys.stderr)
 
 
+# ── Merge failure tracking ────────────────────────────────────────
+
+
+def _update_merge_failure_counter(effective_status: str, result: DispatchResult) -> None:
+    """Track consecutive cross-bead merge failures and auto-pause dispatcher.
+
+    Increments on MERGE_FAILED, resets on DONE. When the threshold is reached,
+    pauses the dispatcher globally so the operator can fix the working tree.
+    """
+    global _consecutive_merge_failures
+
+    if effective_status == "MERGE_FAILED":
+        _consecutive_merge_failures += 1
+        merge_err = (result.decision or {}).get("reason", "")
+        print(f"  Merge failure #{_consecutive_merge_failures} "
+              f"(threshold: {MERGE_FAILURE_PAUSE_THRESHOLD})")
+        if _consecutive_merge_failures >= MERGE_FAILURE_PAUSE_THRESHOLD:
+            set_dispatcher_paused({
+                "reason": "merge_blocked",
+                "paused_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "message": (
+                    f"{_consecutive_merge_failures} consecutive merge failures "
+                    f"— working tree may need manual cleanup"
+                ),
+                "last_error": merge_err[:200],
+            })
+            print(f"  AUTO-PAUSED: {_consecutive_merge_failures} consecutive merge failures")
+    elif effective_status == "DONE":
+        if _consecutive_merge_failures > 0:
+            print(f"  Merge failure counter reset (was {_consecutive_merge_failures})")
+        _consecutive_merge_failures = 0
+
+
 # ── Poll and collect ─────────────────────────────────────────────
 
 
@@ -1506,6 +1550,9 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             result = collect_results(agent, exit_code)
             decision_status = (result.decision or {}).get("status", "")
             process_decision(result)
+            # Track consecutive merge failures across beads for auto-pause
+            effective_status = (result.decision or {}).get("status", "")
+            _update_merge_failure_counter(effective_status, result)
             _record_run(agent, result)
             _ingest_session(result)
             # Enqueue review_report job after a successful DONE dispatch (best-effort)
