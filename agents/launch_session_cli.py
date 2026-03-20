@@ -40,7 +40,7 @@ def main() -> int:
     parser.add_argument("--git-dir", default="", help="Git dir path (absolute, same on host+container)")
     parser.add_argument("--output-dir", default="", help="Pre-created output directory")
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Docker image")
-    parser.add_argument("--model", default="claude-opus-4-6", help="Claude model to use")
+    parser.add_argument("--model", default="claude-opus-4-6[1m]", help="Claude model to use")
     parser.add_argument("--detach", action="store_true", help="Run container in background")
     args = parser.parse_args()
 
