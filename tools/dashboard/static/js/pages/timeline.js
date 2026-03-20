@@ -23,6 +23,7 @@
 //   _libTitle:          string          — human-readable librarian type name
 //   _reviewCollapsed:   string|null     — collapsed review label e.g. "📚 Reviewed"
 //   _reviewItems:       array|null      — extracted items from experience_reviewer results
+//   _smokeIcon:         {cls,icon,tip}|null — smoke test collapsed icon (✓/✗/~)
 //   _smokeBadge:        {cls,label}|null — smoke test result pill
 //   _hiddenByParent:    boolean         — true when parent dispatch entry exists in batch (matched via parent_run_id)
 //   _supportsIntegratedLibrarian: boolean — true for dispatch entries that can show integrated librarian sub-row
@@ -74,25 +75,30 @@
     return null;
   }
 
-  // Build smoke badge from smoke_result.json payload.
-  function _formatSmokeBadge(smoke) {
-    if (!smoke) return null;
+  // Shared tier counting for smoke_result payloads.
+  function _smokeTierInfo(smoke) {
     const t1 = smoke.tier1;
     const t2 = smoke.tier2;
-    const durS = smoke.duration_ms != null ? (smoke.duration_ms / 1000).toFixed(1) + 's' : null;
-
-    // tier2-only skip (no tier1 at all)
-    if (!t1 && t2 && t2.skipped) {
-      return { cls: 'smoke-skip', label: '~ Smoke skipped (' + (t2.reason || 'tier2') + ')' };
-    }
-
     const t1Checks = (t1 && t1.checks) ? t1.checks : [];
     const t1Pass = t1Checks.filter(c => c.pass).length;
     const t1Total = t1Checks.length;
     const t2Pages = (t2 && !t2.skipped && t2.pages) ? t2.pages : null;
     const t2Pass = t2Pages ? t2Pages.filter(p => p.pass).length : null;
     const t2Total = t2Pages ? t2Pages.length : null;
-    const t2Skipped = t2 && t2.skipped;
+    const t2Skipped = !!(t2 && t2.skipped);
+    return { t1, t2, t1Checks, t1Pass, t1Total, t2Pages, t2Pass, t2Total, t2Skipped };
+  }
+
+  // Build smoke badge from smoke_result.json payload (expanded card).
+  function _formatSmokeBadge(smoke) {
+    if (!smoke) return null;
+    const { t1, t2, t1Checks, t1Pass, t1Total, t2Pages, t2Pass, t2Total, t2Skipped } = _smokeTierInfo(smoke);
+    const durS = smoke.duration_ms != null ? (smoke.duration_ms / 1000).toFixed(1) + 's' : null;
+
+    // tier2-only skip (no tier1 at all)
+    if (!t1 && t2 && t2Skipped) {
+      return { cls: 'smoke-skip', label: '~ Smoke skipped (' + (t2.reason || 'tier2') + ')' };
+    }
 
     if (smoke.pass) {
       const parts = ['✓ Smoke PASS'];
@@ -115,6 +121,36 @@
       if (t2Pages) parts.push('tier2 ' + t2Pass + '/' + t2Total);
       if (failDetail) parts.push(failDetail);
       return { cls: 'smoke-fail', label: parts.join('  ') };
+    }
+  }
+
+  // Build collapsed smoke icon from smoke_result.json payload.
+  function _formatSmokeIcon(smoke) {
+    if (!smoke) return null;
+    const { t1, t2, t1Checks, t1Pass, t1Total, t2Pages, t2Pass, t2Total, t2Skipped } = _smokeTierInfo(smoke);
+
+    // tier2-only skip (no tier1 at all)
+    if (!t1 && t2 && t2Skipped) {
+      return { cls: 'tl-smoke-skip', icon: '~', tip: 'Smoke skipped (' + (t2.reason || 'tier2') + ')' };
+    }
+
+    const tipParts = [];
+    if (t1Total > 0) tipParts.push('tier1 ' + t1Pass + '/' + t1Total);
+    if (t2Pages) tipParts.push('tier2 ' + t2Pass + '/' + t2Total);
+    else if (t2Skipped) tipParts.push('tier2 skipped');
+
+    if (smoke.pass) {
+      return { cls: 'tl-smoke-pass', icon: '✓', tip: tipParts.join(', ') };
+    } else {
+      const failingCheck = t1Checks.find(c => !c.pass);
+      let failDetail = '';
+      if (failingCheck) failDetail = failingCheck.detail || failingCheck.name;
+      else if (t2Pages) {
+        const failPage = t2Pages.find(p => !p.pass);
+        if (failPage) failDetail = failPage.detail || failPage.page;
+      }
+      if (failDetail) tipParts.push(failDetail);
+      return { cls: 'tl-smoke-fail', icon: '✗', tip: tipParts.join(', ') };
     }
   }
 
@@ -167,7 +203,8 @@
     const barT = (tb && tb.tooling_workaround_pct) || 0;
     const hasBreakdown = barR + barC + barD + barT > 0;
     const tokenFmt = _fmtTokens(e.token_count);
-    const hasBottom = hasBreakdown || scores != null || e.lines_added != null || e.lines_removed != null || e.duration_secs != null || tokenFmt != null;
+    const smokeIcon = _formatSmokeIcon(e.smoke_result);
+    const hasBottom = hasBreakdown || scores != null || e.lines_added != null || e.lines_removed != null || e.duration_secs != null || tokenFmt != null || e.smoke_result != null;
 
     const isLibrarian = !!e.librarian_type;
     const libTitle = isLibrarian ? (_LIB_NAMES[e.librarian_type] || e.librarian_type) : '';
@@ -207,6 +244,7 @@
       _tokenFmt: tokenFmt,
       _reviewCollapsed: _reviewCollapsedLabel(e.librarian_review),
       _reviewItems: reviewItems,
+      _smokeIcon: smokeIcon,
       _smokeBadge: _formatSmokeBadge(e.smoke_result),
       _hiddenByParent: false,
       _supportsIntegratedLibrarian: !isLibrarian,
