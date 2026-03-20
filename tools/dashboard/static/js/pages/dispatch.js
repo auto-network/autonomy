@@ -143,6 +143,7 @@
       waiting: [],
       blocked: [],
       paused: {},          // { label: bool } — plain object for Alpine reactivity
+      reasons: {},         // { label: string } — why each label is paused (e.g. smoke failure)
       dispatcherState: { paused: false, reason: null },  // SQLite dispatcher pause (auth failure etc.)
       _dispatchHandler: null,
       _pauseHandler: null,
@@ -155,10 +156,20 @@
         if (data.paused != null) {
           this.paused = { ...data.paused };
         }
+        if (data.pause_reasons != null) {
+          this.reasons = { ...data.pause_reasons };
+        }
       },
 
       applyPause(pauseState) {
-        this.paused = { ...pauseState };
+        // dispatch_pause SSE now sends {paused: {...}, reasons: {...}}
+        if (pauseState.paused != null) {
+          this.paused = { ...pauseState.paused };
+          this.reasons = { ...(pauseState.reasons || {}) };
+        } else {
+          // Backwards compat: plain {label: bool} map
+          this.paused = { ...pauseState };
+        }
       },
 
       applyDispatcherState(state) {
@@ -178,6 +189,11 @@
         const nowPaused = !this.paused[label];
         // Optimistic UI update
         this.paused = { ...this.paused, [label]: nowPaused };
+        if (!nowPaused) {
+          // Optimistically clear reason on unpause
+          const { [label]: _, ...rest } = this.reasons;
+          this.reasons = rest;
+        }
         try {
           const resp = await fetch('/api/dispatch/pause', {
             method: 'POST',
@@ -187,6 +203,7 @@
           if (resp.ok) {
             const data = await resp.json();
             this.paused = { ...data.paused };
+            this.reasons = { ...(data.reasons || {}) };
           } else {
             // Revert on failure
             this.paused = { ...this.paused, [label]: !nowPaused };
