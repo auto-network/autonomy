@@ -1611,10 +1611,6 @@ async def api_session_tail(request):
                 is_live = True
         except (json.JSONDecodeError, OSError):
             pass
-    if not is_live:
-        # Fallback: mtime check for sessions without tmux metadata
-        is_live = (_time.time() - session_file.stat().st_mtime) < 120
-
     if after >= file_size:
         return JSONResponse({"entries": [], "offset": file_size, "is_live": is_live})
 

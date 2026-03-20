@@ -7,6 +7,8 @@
 // (badge update is handled by the nav handler in app.js, not here).
 
 (function () {
+  const _INTERACTIVE_TYPES = new Set(['host', 'chatwith', 'terminal']);
+
   function _formatAge(secs) {
     if (secs < 60) return secs + 's ago';
     return Math.round(secs / 60) + 'm ago';
@@ -31,7 +33,8 @@
 
   document.addEventListener('alpine:init', () => {
     Alpine.data('sessionsPage', () => ({
-      active: [],
+      interactive: [],
+      agents: [],
       recent: [],
       loading: true,
 
@@ -41,7 +44,9 @@
             fetch('/api/dao/active_sessions?threshold=600').then(r => r.json()),
             fetch('/api/dao/recent_sessions?limit=20').then(r => r.json()),
           ]);
-          this.active = (Array.isArray(activeData) ? activeData : []).map(_mapActive);
+          const mapped = (Array.isArray(activeData) ? activeData : []).map(_mapActive);
+          this.interactive = mapped.filter(s => _INTERACTIVE_TYPES.has(s.type));
+          this.agents = mapped.filter(s => !_INTERACTIVE_TYPES.has(s.type));
           this.recent = Array.isArray(recentData) ? recentData : [];
         } catch (e) {
           console.warn('[sessionsPage] fetch error', e);

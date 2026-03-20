@@ -84,7 +84,7 @@
           const res = await fetch(`${this._tailUrl}?after=${this.offset}`);
           const data = await res.json();
 
-          this.isLive = data.is_live || !!this._tmuxSession;
+          this.isLive = data.is_live;
           if (data.offset !== undefined) this.offset = data.offset;
 
           if (data.entries && data.entries.length > 0) {

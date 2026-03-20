@@ -75,15 +75,18 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
                         "active": age < 60,
                         "latest": latest,
                     }
-                    # Read tmux_session from .session_meta.json if available
+                    # Read tmux_session and type from .session_meta.json if available
                     meta_path = jsonl.parent.parent / ".session_meta.json"
                     if meta_path.exists():
                         try:
                             meta = json.loads(meta_path.read_text())
                             if meta.get("tmux_session"):
                                 entry["tmux_session"] = meta["tmux_session"]
+                            entry["type"] = meta.get("type", "host")
                         except (json.JSONDecodeError, OSError):
-                            pass
+                            entry["type"] = "host"
+                    else:
+                        entry["type"] = "host"
                     sessions.append(entry)
             except OSError:
                 continue

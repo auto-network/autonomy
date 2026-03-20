@@ -1,13 +1,13 @@
 <div x-data="sessionsPage()">
 
-  <!-- Active Sessions -->
+  <!-- Active Sessions (interactive: host, chatwith, terminal) -->
   <section aria-label="Active Sessions" class="mb-8">
     <h2 class="text-lg font-semibold mb-3 text-green-400">● Active Sessions</h2>
-    <template x-if="active.length === 0">
+    <template x-if="interactive.length === 0">
       <div class="text-gray-500 text-sm">No active sessions</div>
     </template>
     <div class="space-y-2">
-      <template x-for="s in active" :key="s.session_id">
+      <template x-for="s in interactive" :key="s.session_id">
         <a :href="'/session/' + encodeURIComponent(s.project) + '/' + s.session_id + (s.tmux_session ? '?tmux=' + encodeURIComponent(s.tmux_session) : '')"
            class="block p-4 bg-gray-800 rounded-lg border border-green-700 no-underline hover:bg-gray-750"
            :data-session-id="s.session_id">
@@ -15,6 +15,31 @@
             <span class="w-2 h-2 rounded-full" :class="s.active ? 'bg-green-400' : 'bg-yellow-400'"></span>
             <span class="font-mono text-sm text-gray-400" x-text="s.session_id.slice(0, 12)"></span>
             <span class="text-xs text-indigo-400" x-text="'[' + s._project + ']'"></span>
+            <span class="text-xs text-gray-500" x-text="s._sizeStr"></span>
+            <span class="text-xs text-gray-500 ml-auto" x-text="s._ageStr"></span>
+          </div>
+          <div class="text-sm text-gray-300 truncate" x-text="s.latest || '...'"></div>
+        </a>
+      </template>
+    </div>
+  </section>
+
+  <!-- Running Agents (dispatch, librarian) -->
+  <section aria-label="Running Agents" class="mb-8">
+    <h2 class="text-lg font-semibold mb-3 text-blue-400">⚙ Running Agents</h2>
+    <template x-if="agents.length === 0">
+      <div class="text-gray-500 text-sm">No running agents</div>
+    </template>
+    <div class="space-y-2">
+      <template x-for="s in agents" :key="s.session_id">
+        <a :href="'/session/' + encodeURIComponent(s.project) + '/' + s.session_id"
+           class="block p-4 bg-gray-800 rounded-lg border border-blue-800 no-underline hover:bg-gray-750"
+           :data-session-id="s.session_id">
+          <div class="flex items-center gap-3 mb-2">
+            <span class="w-2 h-2 rounded-full" :class="s.active ? 'bg-blue-400' : 'bg-gray-500'"></span>
+            <span class="font-mono text-sm text-gray-400" x-text="s.session_id.slice(0, 12)"></span>
+            <span class="text-xs text-indigo-400" x-text="'[' + s._project + ']'"></span>
+            <span class="text-xs text-gray-500" x-text="s.type"></span>
             <span class="text-xs text-gray-500" x-text="s._sizeStr"></span>
             <span class="text-xs text-gray-500 ml-auto" x-text="s._ageStr"></span>
           </div>
@@ -44,7 +69,7 @@
     </div>
   </section>
 
-  <template x-if="active.length === 0 && recent.length === 0 && !loading">
+  <template x-if="interactive.length === 0 && agents.length === 0 && recent.length === 0 && !loading">
     <div class="text-gray-400">No sessions found</div>
   </template>
 
