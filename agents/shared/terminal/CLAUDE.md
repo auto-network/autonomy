@@ -26,13 +26,13 @@ graph bead "title" --source <id>      # create a bead with provenance
 graph dispatch approve <bead-id>      # approve bead(s) for dispatch (accepts multiple IDs)
 graph dispatch runs                   # running/queued agent activity
 graph dispatch status                 # compact one-liner
-graph wait <bead-id> &               # BACKGROUND: get notified when bead completes
+graph wait <bead-id>                 # block until bead completes (background it in your shell)
 ```
 Run `graph --help` for full reference.
 
 **Dispatch workflow:**
 1. `graph dispatch approve <bead-id>` — release bead for dispatch
-2. `graph wait <bead-id> &` — immediately background-wait for completion notification
+2. `graph wait <bead-id>` — block until dispatched bead completes
 3. `graph dispatch status` — check overall queue at any time
 
 ### bd — Beads Issue Tracker
