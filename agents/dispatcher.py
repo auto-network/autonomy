@@ -415,7 +415,8 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
               f"(intended status: {status})", file=sys.stderr)
         return False
 
-    print(f"  Close: OK → {bead_id} closed")
+    action = "closed" if status == "DONE" else "reopened"
+    print(f"  Close: OK → {bead_id} {action}")
     return True
 
 
@@ -862,8 +863,8 @@ def _is_dashboard_dispatch_paused() -> bool:
 # ── Decision processing ─────────────────────────────────────────
 
 
-def process_decision(dispatch_result: DispatchResult) -> None:
-    """Process agent decision and update bead state."""
+def process_decision(dispatch_result: DispatchResult) -> str:
+    """Process agent decision and update bead state. Returns effective status."""
     bead_id = dispatch_result.bead_id
     decision = dispatch_result.decision
 
@@ -879,7 +880,7 @@ def process_decision(dispatch_result: DispatchResult) -> None:
         print(f"  No decision file from {bead_id} (exit code {dispatch_result.exit_code})")
         release_bead(bead_id, "FAILED", f"No decision file. Exit code: {dispatch_result.exit_code}")
         cleanup_worktree(dispatch_result.worktree_path)
-        return
+        return "FAILED"
 
     status = decision.get("status", "FAILED")
     reason = decision.get("reason", "No reason provided")
@@ -999,9 +1000,6 @@ def process_decision(dispatch_result: DispatchResult) -> None:
                     f"merge failed on {dispatch_result.branch}: {merge_err}"])
             status = "MERGE_FAILED"
             reason = f"Merge conflict (will retry): {merge_err[:200]}"
-            # Update decision so _record_run picks up the effective status
-            decision["status"] = status
-            decision["reason"] = reason
 
     # Release the bead with appropriate state
     release_bead(bead_id, status, reason)
@@ -1016,6 +1014,8 @@ def process_decision(dispatch_result: DispatchResult) -> None:
             capture_output=True, text=True, timeout=5,
             cwd=str(REPO_ROOT),
         )
+
+    return status
 
 
 # ── Live stats collection ────────────────────────────────────────
@@ -1283,14 +1283,14 @@ def _record_launch(agent: RunningAgent) -> None:
         print(f"  WARNING: Failed to record launch to SQLite: {e}", file=sys.stderr)
 
 
-def _record_run(agent: RunningAgent, result: DispatchResult) -> None:
+def _record_run(agent: RunningAgent, result: DispatchResult, *, effective_status: str | None = None) -> None:
     """Record dispatch run metadata to SQLite. Best-effort — never raises."""
     try:
         # Derive run_id from output dir name (e.g. auto-ahd-20260316-234902)
         run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
 
         decision = result.decision or {}
-        status = decision.get("status", "FAILED")
+        status = effective_status or decision.get("status", "FAILED")
         reason = decision.get("reason", "No decision file")
 
         # Classify agent-side failures (non-zero exit, no decision, or decision != DONE)
@@ -1504,12 +1504,11 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
         print(f"  Collecting: {agent.bead_id} (container: {agent.container_name})")
         try:
             result = collect_results(agent, exit_code)
-            decision_status = (result.decision or {}).get("status", "")
-            process_decision(result)
-            _record_run(agent, result)
+            effective_status = process_decision(result)
+            _record_run(agent, result, effective_status=effective_status)
             _ingest_session(result)
             # Enqueue review_report job after a successful DONE dispatch (best-effort)
-            if decision_status == "DONE":
+            if effective_status == "DONE":
                 try:
                     run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
                     report_path = str(Path(agent.output_dir) / "experience_report.md")
@@ -1530,7 +1529,8 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             print(f"  ERROR collecting {agent.bead_id}: {error_msg}")
             release_bead(agent.bead_id, "FAILED", error_msg[:200])
             _record_run(agent, DispatchResult(
-                bead_id=agent.bead_id, exit_code=exit_code, error=error_msg))
+                bead_id=agent.bead_id, exit_code=exit_code, error=error_msg),
+                effective_status="FAILED")
             cleanup_worktree(agent.worktree_path)
 
     # Handle timed-out agents — kill, then try to recover results
@@ -1543,20 +1543,21 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             result = collect_results(agent, -1)
             if result.decision or result.commit_hash:
                 print(f"  Recovered results from timed-out {agent.bead_id}")
-                process_decision(result)
-                _record_run(agent, result)
+                effective_status = process_decision(result)
+                _record_run(agent, result, effective_status=effective_status)
             else:
                 print(f"  No results from timed-out {agent.bead_id}, marking FAILED")
                 release_bead(agent.bead_id, "FAILED",
                              f"Agent timeout ({MAX_AGENT_RUNTIME}s)")
-                _record_run(agent, result)
+                _record_run(agent, result, effective_status="FAILED")
                 cleanup_worktree(agent.worktree_path)
         except Exception as e:
             error_msg = f"Timeout collection error: {type(e).__name__}: {e}"
             print(f"  ERROR collecting timed-out {agent.bead_id}: {error_msg}")
             release_bead(agent.bead_id, "FAILED", error_msg[:200])
             _record_run(agent, DispatchResult(
-                bead_id=agent.bead_id, exit_code=-1, error=error_msg))
+                bead_id=agent.bead_id, exit_code=-1, error=error_msg),
+                effective_status="FAILED")
             cleanup_worktree(agent.worktree_path)
 
 
