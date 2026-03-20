@@ -168,8 +168,9 @@ def run_tier1(base_url: str) -> dict:
         return True
     checks.append(_check("session_send_unknown_session", check_session_send_unknown_session))
 
-    # 12. SSE delivers nav event within 10 seconds
-    def check_sse_nav_event():
+    # 12. SSE delivers all expected event types within 12 seconds
+    def _read_sse_events(timeout_s=12):
+        """Read SSE stream and return dict of {event_type: parsed_data}."""
         import http.client
         import ssl
         from urllib.parse import urlparse
@@ -181,35 +182,88 @@ def run_tier1(base_url: str) -> dict:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-            conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=12)
+            conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=timeout_s + 2)
         else:
-            conn = http.client.HTTPConnection(host, port, timeout=12)
+            conn = http.client.HTTPConnection(host, port, timeout=timeout_s + 2)
         try:
             conn.request("GET", "/api/events", headers={"Accept": "text/event-stream"})
             resp = conn.getresponse()
             if resp.status != 200:
-                return f"HTTP {resp.status}"
-            deadline = time.monotonic() + 10
+                raise RuntimeError(f"HTTP {resp.status}")
+            deadline = time.monotonic() + timeout_s
             buf = b""
+            received = {}
+            expected_types = {"dispatch", "nav", "dispatcher_state"}
             while time.monotonic() < deadline:
-                chunk = resp.read(4096)
+                chunk = resp.read(1)
                 if not chunk:
                     break
                 buf += chunk
-                if b"event: nav" in buf:
-                    for line in buf.decode(errors="replace").split("\n"):
-                        if line.startswith("data:"):
-                            data = json.loads(line[5:].strip())
-                            expected = {"open_beads", "running_agents", "active_sessions", "terminal_count", "today_done"}
-                            missing = expected - set(data.keys())
-                            if missing:
-                                return f"nav event missing fields: {missing}"
-                            return True
-                    return True
-            return "no nav event received within 10s"
+                # Parse complete SSE blocks (separated by blank lines).
+                # sse_starlette uses \r\n; normalize to \n for parsing.
+                buf = buf.replace(b"\r\n", b"\n")
+                while b"\n\n" in buf:
+                    block, buf = buf.split(b"\n\n", 1)
+                    event_type = None
+                    data_str = None
+                    for line in block.decode(errors="replace").split("\n"):
+                        if line.startswith("event:"):
+                            event_type = line[6:].strip()
+                        elif line.startswith("data:"):
+                            data_str = line[5:].strip()
+                    if event_type and data_str and event_type in expected_types:
+                        try:
+                            received[event_type] = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            received[event_type] = data_str
+                    if expected_types <= set(received):
+                        return received
+            return received
         finally:
             conn.close()
-    checks.append(_check("sse_nav_event", check_sse_nav_event))
+
+    # Collect all SSE events once, then validate each type
+    sse_events = {}
+    def _collect_sse():
+        nonlocal sse_events
+        sse_events = _read_sse_events()
+        missing = {"dispatch", "nav", "dispatcher_state"} - set(sse_events)
+        if missing:
+            return f"missing event types within timeout: {missing}"
+        return True
+    checks.append(_check("sse_all_events_received", _collect_sse))
+
+    def check_sse_dispatch():
+        data = sse_events.get("dispatch")
+        if not isinstance(data, dict):
+            return f"dispatch event not received or not a dict: {data!r}"
+        required = {"active", "waiting", "blocked", "paused"}
+        missing = required - set(data.keys())
+        if missing:
+            return f"dispatch event missing fields: {missing}"
+        return True
+    checks.append(_check("sse_dispatch", check_sse_dispatch))
+
+    def check_sse_nav():
+        data = sse_events.get("nav")
+        if not isinstance(data, dict):
+            return f"nav event not received or not a dict: {data!r}"
+        required = {"open_beads", "running_agents", "active_sessions", "terminal_count", "today_done"}
+        missing = required - set(data.keys())
+        if missing:
+            return f"nav event missing fields: {missing}"
+        return True
+    checks.append(_check("sse_nav", check_sse_nav))
+
+    def check_sse_dispatcher_state():
+        data = sse_events.get("dispatcher_state")
+        if not isinstance(data, dict):
+            return f"dispatcher_state event not received or not a dict: {data!r}"
+        if "paused" not in data:
+            return f"dispatcher_state missing 'paused' field: {data}"
+        return True
+    checks.append(_check("sse_dispatcher_state", check_sse_dispatcher_state))
+
 
     passed = all(c["pass"] for c in checks)
     for c in checks:
