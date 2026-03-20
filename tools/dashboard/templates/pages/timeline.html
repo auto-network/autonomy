@@ -326,12 +326,16 @@
               </div>
             </template>
 
-            <!-- Review summary (collapsed dispatch cards with a completed review) -->
+            <!-- Review + smoke summary (collapsed dispatch cards) -->
             <div
               class="tl-review-summary"
-              x-show="!e._isLibrarian && e.librarian_review && !e._open"
+              x-show="!e._isLibrarian && (e.librarian_review || e._smokeIcon) && !e._open"
               style="display:none"
             >
+              <!-- Smoke icon -->
+              <span x-show="e._smokeIcon" :class="e._smokeIcon?.cls"
+                    :title="e._smokeIcon?.tip"
+                    class="tl-smoke-icon" x-text="e._smokeIcon?.icon"></span>
               <!-- Running state: pulsing indicator -->
               <template x-if="e.librarian_review && e.librarian_review.status === 'running'">
                 <span class="tl-review-running">📖 Reviewing...</span>
