@@ -1707,7 +1707,7 @@ async def api_session_send(request):
             capture_output=True,
         )
         subprocess.run(
-            ["tmux", "paste-buffer", "-b", buf_name, "-t", tmux_session],
+            ["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", tmux_session],
             capture_output=True,
         )
         await asyncio.sleep(0.1)
