@@ -709,7 +709,7 @@ def _read_review_from_session(output_dir: str) -> dict | None:
         return None
 
     jsonl_files = sorted(
-        sessions_dir.glob("*.jsonl"),
+        sessions_dir.glob("**/*.jsonl"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
