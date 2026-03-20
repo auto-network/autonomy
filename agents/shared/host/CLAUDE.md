@@ -22,6 +22,7 @@ graph context <src_id> <turn>         # turns around a search hit
 graph sessions --all                  # ingest latest session data before searching
 graph note "text" --tags tag          # persist an insight or pitfall for future agents
 graph bead "title" --source <id>      # create a bead with provenance
+graph primer <bead-id>                # full context primer: description + pitfalls + provenance
 graph dispatch approve <bead-id>      # approve bead(s) for dispatch (accepts multiple IDs)
 graph dispatch status                 # compact one-liner
 graph dispatch runs                   # running/queued agent activity
