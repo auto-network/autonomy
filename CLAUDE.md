@@ -53,6 +53,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph agent-runs` | Discover and ingest subagent traces | `graph agent-runs --list` |
 | `graph sessions --all` | Ingest latest session data (107ms) | Run before searching for recent content |
 | `graph wait <bead-id>` | Block until a dispatched bead completes | `graph wait auto-x7wr --timeout 900` |
+| `graph dispatch` | Show running/queued dispatch state | `graph dispatch runs --failed` |
 
 ### Beads (`bd`)
 | Command | What | Example |

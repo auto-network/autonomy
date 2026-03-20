@@ -53,6 +53,7 @@ from .watch import watch_sessions
 from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
+from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status
 
 
 def cmd_ingest(args):
@@ -1389,6 +1390,23 @@ def main():
     p.add_argument("--fixture", help="Path to fixture JSON file")
     p.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
     p.set_defaults(func=cmd_ui_exp)
+
+    # dispatch
+    p_dispatch = sub.add_parser("dispatch", help="Show dispatch state (running/queued/history)")
+    p_dispatch.add_argument("--json", action="store_true", help="Output as JSON")
+    p_dispatch.set_defaults(func=cmd_dispatch_default)
+    dispatch_sub = p_dispatch.add_subparsers(dest="dispatch_subcmd")
+
+    p_runs = dispatch_sub.add_parser("runs", help="Recent run history")
+    p_runs.add_argument("--running", action="store_true", help="Only active runs")
+    p_runs.add_argument("--failed", action="store_true", help="Only failures")
+    p_runs.add_argument("--limit", type=int, default=20, help="Max results (default 20)")
+    p_runs.add_argument("--json", action="store_true", help="Output as JSON")
+    p_runs.set_defaults(func=cmd_dispatch_runs)
+
+    p_dstatus = dispatch_sub.add_parser("status", help="Compact one-liner summary")
+    p_dstatus.add_argument("--json", action="store_true", help="Output as JSON")
+    p_dstatus.set_defaults(func=cmd_dispatch_status)
 
     args = parser.parse_args()
 
