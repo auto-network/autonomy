@@ -1710,9 +1710,9 @@ async def api_session_send(request):
             ["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", tmux_session],
             capture_output=True,
         )
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
         subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_session, "", "Enter"],
+            ["tmux", "send-keys", "-t", tmux_session, "\r"],
             capture_output=True,
         )
     except FileNotFoundError:
