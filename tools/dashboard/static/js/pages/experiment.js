@@ -60,11 +60,13 @@
       init() {
         window._experimentPage = this;
         this.expId = _expIdFromPath();
+        this._injectHeaderActions();
         this._load();
       },
 
       destroy() {
         if (window._experimentPage === this) window._experimentPage = null;
+        this._clearHeaderActions();
         if (window._expSeriesCleanup) {
           window._expSeriesCleanup();
           window._expSeriesCleanup = null;
@@ -393,6 +395,54 @@ ${_safeHtml}
         };
         registerHandler(seriesTopic, handler);
         window._expSeriesCleanup = () => unregisterHandler(seriesTopic, handler);
+      },
+
+      // ── Header-actions injection ───────────────────────────────────
+
+      _injectHeaderActions() {
+        const ha = document.getElementById('header-actions');
+        if (!ha) return;
+        ha.innerHTML = `
+          <span id="ha-screenshot-status" class="text-xs text-gray-400"></span>
+          <button id="ha-capture-btn"
+                  aria-label="Capture screenshot"
+                  class="text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
+            Capture
+          </button>
+          <button id="ha-chatwith-btn"
+                  aria-label="Open Chat With Claude panel"
+                  class="px-3 py-1 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white disabled:opacity-50">
+          </button>
+        `;
+
+        // Wire click handlers via the component instance
+        document.getElementById('ha-capture-btn').onclick = () => this.captureScreenshot();
+        const cwBtn = document.getElementById('ha-chatwith-btn');
+        cwBtn.onclick = () => {
+          if (this.chatWithBtnText === 'Reconnect') this.reconnectChatWith();
+          else this.spawnChatWith();
+        };
+
+        // Sync reactive state to injected DOM via $watch
+        cwBtn.textContent = this.chatWithBtnText;
+        cwBtn.disabled = this.chatWithBtnDisabled;
+        this.$watch('screenshotStatus', (val) => {
+          const el = document.getElementById('ha-screenshot-status');
+          if (el) el.textContent = val;
+        });
+        this.$watch('chatWithBtnText', (val) => {
+          const el = document.getElementById('ha-chatwith-btn');
+          if (el) el.textContent = val;
+        });
+        this.$watch('chatWithBtnDisabled', (val) => {
+          const el = document.getElementById('ha-chatwith-btn');
+          if (el) el.disabled = val;
+        });
+      },
+
+      _clearHeaderActions() {
+        const ha = document.getElementById('header-actions');
+        if (ha) ha.innerHTML = '';
       },
 
     }));
