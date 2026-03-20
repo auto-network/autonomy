@@ -7,7 +7,6 @@
 // (badge update is handled by the nav handler in app.js, not here).
 
 (function () {
-  const _INTERACTIVE_TYPES = new Set(['host', 'chatwith', 'terminal']);
 
   function _formatAge(secs) {
     if (secs < 60) return secs + 's ago';
@@ -45,8 +44,16 @@
             fetch('/api/dao/recent_sessions?limit=20').then(r => r.json()),
           ]);
           const mapped = (Array.isArray(activeData) ? activeData : []).map(_mapActive);
-          this.interactive = mapped.filter(s => _INTERACTIVE_TYPES.has(s.type));
-          this.agents = mapped.filter(s => !_INTERACTIVE_TYPES.has(s.type));
+          this.interactive = mapped.filter(s =>
+            s.tmux_session && (s.type === 'terminal' || s.type === 'chatwith')
+          );
+          this.agents = mapped.filter(s =>
+            !s.tmux_session || (s.type !== 'terminal' && s.type !== 'chatwith')
+          ).filter(s =>
+            s.type !== 'host' || s.age_seconds < 600
+          ).filter(s =>
+            !s.session_id.startsWith('agent-') && s.project !== 'subagents'
+          );
           this.recent = Array.isArray(recentData) ? recentData : [];
         } catch (e) {
           console.warn('[sessionsPage] fetch error', e);
