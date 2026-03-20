@@ -30,11 +30,10 @@
       inputText: '',
       sending: false,
 
-      // Upload
+      // Multi-attach
       uploading: false,
-      uploadPreview: '',
-      uploadFilename: '',
-      uploadPath: '',
+      attachments: [],
+      _nextAttachId: 0,
 
       // Session type (host or container)
       sessionType: '',
@@ -72,50 +71,57 @@
         if (el) el.scrollTop = el.scrollHeight;
       },
 
-      async onFileSelected(event) {
-        const file = event.target.files && event.target.files[0];
-        if (!file) return;
-        this.uploadFilename = file.name;
+      addFiles(fileList) {
+        for (const file of fileList) {
+          const id = ++this._nextAttachId;
+          const isImage = file.type.startsWith('image/');
+          const att = { id, name: file.name, isImage, dataUrl: null, path: null };
+          this.attachments.push(att);
 
-        // Show preview for images (use FileReader for mobile Safari compatibility)
-        if (file.type.startsWith('image/')) {
-          const reader = new FileReader();
-          reader.onload = (e) => { this.uploadPreview = e.target.result; };
-          reader.readAsDataURL(file);
-        } else {
-          this.uploadPreview = '';
-        }
+          // FileReader for preview (mobile Safari compat — NOT URL.createObjectURL)
+          if (isImage) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              const found = this.attachments.find(a => a.id === id);
+              if (found) found.dataUrl = e.target.result;
+            };
+            reader.readAsDataURL(file);
+          }
 
-        this.uploading = true;
-        try {
+          // Upload to server
+          this.uploading = true;
           const form = new FormData();
           form.append('file', file);
           if (this._tmuxSession) form.append('tmux_session', this._tmuxSession);
-          const res = await fetch('/api/upload', { method: 'POST', body: form });
-          const data = await res.json();
-          if (data.ok) {
-            this.uploadPath = data.path;
-          } else {
-            console.warn('[sessionViewer] upload error:', data.error);
-          }
-        } catch (e) {
-          console.warn('[sessionViewer] upload failed:', e);
-        } finally {
-          this.uploading = false;
-          // Reset file input so the same file can be re-selected
-          if (this.$refs.fileInput) this.$refs.fileInput.value = '';
+          fetch('/api/upload', { method: 'POST', body: form })
+            .then(r => r.json())
+            .then(data => {
+              if (data.ok) {
+                const found = this.attachments.find(a => a.id === id);
+                if (found) found.path = data.path;
+              } else {
+                console.warn('[sessionViewer] upload error:', data.error);
+              }
+            })
+            .catch(e => console.warn('[sessionViewer] upload failed:', e))
+            .finally(() => {
+              const pending = this.attachments.some(a => !a.path);
+              if (!pending) this.uploading = false;
+            });
         }
       },
 
-      clearUpload() {
-        this.uploadPreview = '';
-        this.uploadFilename = '';
-        this.uploadPath = '';
+      removeAttachment(id) {
+        this.attachments = this.attachments.filter(a => a.id !== id);
+      },
+
+      clearAttachments() {
+        this.attachments = [];
       },
 
       async sendMessage() {
         const text = this.inputText.trim();
-        if ((!text && !this.uploadPath) || this.sending) return;
+        if ((this.attachments.length === 0 && !text) || this.sending) return;
         this.sending = true;
         try {
           const _send = async (msg) => {
@@ -127,23 +133,18 @@
             return res.json();
           };
 
-          if (this.uploadPath) {
-            // Send image path first so Claude Code injects it as an image content block
-            const pathData = await _send(this.uploadPath);
+          // Two-send strategy: each attachment path sent bare with 200ms gaps, text last
+          for (const att of this.attachments) {
+            if (!att.path) continue;
+            const pathData = await _send(att.path);
             if (!pathData.ok) {
               console.warn('[sessionViewer] send error (path):', pathData.error);
               return;
             }
-            // Send follow-up text only if there is any
-            if (text) {
-              await new Promise(r => setTimeout(r, 200));
-              const textData = await _send(text);
-              if (!textData.ok) {
-                console.warn('[sessionViewer] send error (text):', textData.error);
-                return;
-              }
-            }
-          } else {
+            await new Promise(r => setTimeout(r, 200));
+          }
+
+          if (text) {
             const data = await _send(text);
             if (!data.ok) {
               console.warn('[sessionViewer] send error:', data.error);
@@ -152,9 +153,13 @@
           }
 
           this.inputText = '';
-          this.clearUpload();
-          // Dismiss mobile keyboard
-          if (this.$refs.messageInput) this.$refs.messageInput.blur();
+          this.clearAttachments();
+          // Dismiss mobile keyboard + reset textarea height
+          if (this.$refs.messageInput) {
+            this.$refs.messageInput.style.height = '';
+            this.$refs.messageInput.style.overflowY = 'hidden';
+            this.$refs.messageInput.blur();
+          }
         } catch (e) {
           console.warn('[sessionViewer] send failed:', e);
         } finally {
@@ -298,6 +303,25 @@
 
         // Start polling interval
         this._pollTimer = setInterval(() => this._poll(), 1500);
+
+        // Clipboard paste support — attach pasted files
+        this.$nextTick(() => {
+          const ta = this.$refs.messageInput;
+          if (ta) {
+            ta.addEventListener('paste', (e) => {
+              const items = e.clipboardData && e.clipboardData.items;
+              if (!items) return;
+              const files = [];
+              for (let i = 0; i < items.length; i++) {
+                if (items[i].kind === 'file') {
+                  const f = items[i].getAsFile();
+                  if (f) files.push(f);
+                }
+              }
+              if (files.length) { e.preventDefault(); this.addFiles(files); }
+            });
+          }
+        });
       },
 
       destroy() {
