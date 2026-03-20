@@ -156,7 +156,22 @@ def cmd_read(args):
     db = GraphDB(args.db)
     import json as _json
 
-    result = _resolve_source(db, args.source, first=args.first)
+    # Parse @N version suffix
+    source_arg = args.source
+    version_req = None
+    if "@" in source_arg:
+        source_arg, version_part = source_arg.rsplit("@", 1)
+        if version_part == "":
+            version_req = "list"
+        else:
+            try:
+                version_req = int(version_part)
+            except ValueError:
+                print(f"Error: invalid version '{version_part}' (must be integer)", file=sys.stderr)
+                db.close()
+                return
+
+    result = _resolve_source(db, source_arg, first=args.first)
     if result is None:
         print(f"No source found matching '{args.source}'")
         db.close()
@@ -170,6 +185,36 @@ def cmd_read(args):
         db.close()
         return
     source = result
+
+    # Handle version requests for notes
+    if version_req is not None:
+        if version_req == "list":
+            versions = db.list_note_versions(source["id"])
+            if not versions:
+                print(f"No version history for {source['id'][:12]} (note has not been updated)")
+            else:
+                print(f"Versions for {source['id'][:12]}:")
+                for v in versions:
+                    preview = v["content"][:60].replace("\n", " ")
+                    if len(v["content"]) > 60:
+                        preview += "…"
+                    print(f"  v{v['version']}  {v['created_at'][:16]}  {preview}")
+            db.close()
+            return
+        else:
+            ver = db.get_note_version(source["id"], version_req)
+            if not ver:
+                print(f"Version {version_req} not found for {source['id'][:12]}", file=sys.stderr)
+                db.close()
+                return
+            proj = f" [{source['project']}]" if source.get('project') else ""
+            print(f"Source: {source['id'][:12]}  {source['type']}{proj}  (version {version_req})")
+            print(f"Title:  {source.get('title', '?')}")
+            print(f"Date:   {ver['created_at'][:10]}")
+            print(f"{'─' * 72}")
+            print(f"\n{ver['content']}")
+            db.close()
+            return
 
     entries = db.get_source_content(source["id"])
 
@@ -236,6 +281,18 @@ def cmd_read(args):
 
         print(f"\n## Turn {turn} — {label}")
         print(content)
+
+    # Append comments for note sources
+    if source.get("type") == "note":
+        include_integrated = getattr(args, 'all_comments', False)
+        comments = db.get_comments(source["id"], include_integrated=include_integrated)
+        if comments:
+            print(f"\n{'─' * 72}")
+            print(f"## Comments ({len(comments)})")
+            for c in comments:
+                status = " [integrated]" if c["integrated"] else ""
+                print(f"\n**{c['actor']}** · {c['created_at'][:16]}{status}  (id:{c['id'][:12]})")
+                print(c["content"])
 
     db.close()
 
@@ -713,10 +770,30 @@ def cmd_attention(args):
     db.close()
 
 
+def cmd_note_router(args):
+    """Route 'graph note ...' to create or update."""
+    if args.text and args.text[0] == "update":
+        # graph note update <src_id> [text...]
+        if len(args.text) < 2:
+            print("Error: usage: graph note update <source_id> <new text...>", file=sys.stderr)
+            sys.exit(1)
+        args.source = args.text[1]
+        args.text = args.text[2:]
+        cmd_note_update(args)
+    else:
+        cmd_note(args)
+
+
 def cmd_note(args):
     """Drop a searchable trail marker into the graph."""
+    if getattr(args, 'content_stdin', None) == "-":
+        text = sys.stdin.read().strip()
+    elif args.text:
+        text = " ".join(args.text)
+    else:
+        print("Error: note text required", file=sys.stderr)
+        sys.exit(1)
     db = GraphDB(args.db)
-    text = " ".join(args.text)
     tags = args.tags.split(",") if args.tags else []
 
     from .models import Source, Thought, new_id, now_iso
@@ -747,6 +824,145 @@ def cmd_note(args):
 
     db.commit()
     print(f"  ✓ Note saved (src:{source.id[:12]})")
+    db.close()
+
+
+def cmd_comment_router(args):
+    """Route 'graph comment ...' to add or integrate."""
+    positionals = args.args or []
+    if positionals and positionals[0] == "integrate":
+        if len(positionals) < 2:
+            print("Error: usage: graph comment integrate <comment_id>", file=sys.stderr)
+            sys.exit(1)
+        args.comment_id = positionals[1]
+        cmd_comment_integrate(args)
+    else:
+        # add mode: first arg is source, rest is text
+        args.source = positionals[0] if positionals else None
+        args.text = positionals[1:] if len(positionals) > 1 else []
+        cmd_comment_add(args)
+
+
+def cmd_comment_add(args):
+    """Add a comment to a note source."""
+    db = GraphDB(args.db)
+
+    # Resolve content
+    if getattr(args, 'content_stdin', None) == "-":
+        content = sys.stdin.read().strip()
+    else:
+        content = " ".join(args.text) if args.text else ""
+
+    if not content:
+        print("Error: no comment content provided", file=sys.stderr)
+        sys.exit(1)
+
+    if not args.source:
+        print("Error: source ID required", file=sys.stderr)
+        sys.exit(1)
+
+    result = _resolve_source(db, args.source, first=True)
+    if result is None:
+        print(f"No source found matching '{args.source}'", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+    source = result if isinstance(result, dict) else result[0]
+
+    if source.get("type") != "note":
+        print(f"Error: comments are only supported on notes (source is type '{source.get('type')}')", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+
+    comment = db.insert_comment(source["id"], content, actor=args.actor)
+    print(f"  ✓ Comment added (id:{comment['id'][:12]}) on {source['id'][:12]}")
+    db.close()
+
+
+def cmd_comment_integrate(args):
+    """Mark a comment as integrated into the note body."""
+    db = GraphDB(args.db)
+
+    # Check if already integrated
+    row = db.conn.execute("SELECT * FROM note_comments WHERE id = ? OR id LIKE ?",
+                          (args.comment_id, f"{args.comment_id}%")).fetchone()
+    if not row:
+        print(f"Error: comment not found: {args.comment_id}", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+
+    comment = dict(row)
+    if comment["integrated"]:
+        print(f"  Comment {comment['id'][:12]} is already integrated")
+        db.close()
+        return
+
+    db.integrate_comment(comment["id"])
+    print(f"  ✓ Comment {comment['id'][:12]} marked as integrated")
+    db.close()
+
+
+def cmd_note_update(args):
+    """Update a note with versioned history."""
+    db = GraphDB(args.db)
+
+    # Resolve content
+    if getattr(args, 'content_stdin', None) == "-":
+        new_content = sys.stdin.read().strip()
+    else:
+        new_content = " ".join(args.text) if args.text else ""
+
+    if not new_content:
+        print("Error: no content provided", file=sys.stderr)
+        sys.exit(1)
+
+    result = _resolve_source(db, args.source, first=True)
+    if result is None:
+        print(f"No source found matching '{args.source}'", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+    source = result if isinstance(result, dict) else result[0]
+
+    if source.get("type") != "note":
+        print(f"Error: can only update notes (source is type '{source.get('type')}')", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+
+    source_id = source["id"]
+
+    # Get current thought (turn 1)
+    thoughts = db.get_thoughts_by_source(source_id)
+    if not thoughts:
+        print(f"Error: no thought found for source {source_id[:12]}", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+    thought = thoughts[0]
+
+    # Determine versioning
+    current_max = db.get_max_note_version(source_id)
+    if current_max == 0:
+        # Backfill version 1 with current content
+        db.insert_note_version(source_id, 1, thought["content"])
+        next_version = 2
+    else:
+        next_version = current_max + 1
+
+    # Insert new version
+    db.insert_note_version(source_id, next_version, new_content)
+
+    # Update the live thought content (FTS trigger handles re-indexing)
+    db.update_thought_content(thought["id"], new_content)
+
+    # Update source title
+    db.conn.execute("UPDATE sources SET title = ? WHERE id = ?", (new_content[:80], source_id))
+
+    # Re-extract entities for the new content
+    from .ingest import extract_entities
+    for name, etype in extract_entities(new_content):
+        eid = db.upsert_entity(name, etype)
+        db.add_mention(eid, thought["id"], "thought")
+
+    db.commit()
+    print(f"  ✓ Note updated to version {next_version} (src:{source_id[:12]})")
     db.close()
 
 
@@ -1225,10 +1441,11 @@ def main():
 
     # read
     p = sub.add_parser("read", help="Read full content of a source")
-    p.add_argument("source", help="Source ID (or prefix) or title search term")
+    p.add_argument("source", help="Source ID (or prefix) or title search term. Use @N for version, @ to list versions")
     p.add_argument("--first", action="store_true", help="Read first match if multiple")
     p.add_argument("--max-chars", type=int, default=0, help="Max chars per turn (0=unlimited)")
     p.add_argument("--json", action="store_true", help="Output as structured JSON (source + entries + edges)")
+    p.add_argument("--all-comments", action="store_true", help="Include integrated comments")
     p.set_defaults(func=cmd_read)
 
     # sources
@@ -1344,13 +1561,21 @@ def main():
     p.add_argument("--search", "-s", help="Filter to messages containing this text")
     p.set_defaults(func=cmd_attention)
 
-    # note
-    p = sub.add_parser("note", help="Drop a searchable trail marker into the graph")
-    p.add_argument("text", nargs="+", help="Note text")
-    p.add_argument("--project", "-p", help="Project to tag with")
-    p.add_argument("--tags", "-t", help="Comma-separated tags")
-    p.add_argument("--author", help="Who wrote this (default: user)")
-    p.set_defaults(func=cmd_note)
+    # note (handles both create and update)
+    p_note = sub.add_parser("note", help="Create or update trail marker notes")
+    p_note.add_argument("text", nargs="*", help="Note text, or 'update <src_id> <new text>'")
+    p_note.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None, help="Read content from stdin")
+    p_note.add_argument("--project", "-p", help="Project to tag with")
+    p_note.add_argument("--tags", "-t", help="Comma-separated tags")
+    p_note.add_argument("--author", help="Who wrote this (default: user)")
+    p_note.set_defaults(func=cmd_note_router)
+
+    # comment (handles both add and integrate)
+    p_comment = sub.add_parser("comment", help="Add or manage comments on notes")
+    p_comment.add_argument("args", nargs="*", help="<source_id> <text...> or 'integrate <comment_id>'")
+    p_comment.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None, help="Read content from stdin")
+    p_comment.add_argument("--actor", default="user", help="Who is commenting")
+    p_comment.set_defaults(func=cmd_comment_router)
 
     # agent-runs
     p = sub.add_parser("agent-runs", help="Discover and ingest subagent traces")
