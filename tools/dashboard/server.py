@@ -1654,19 +1654,50 @@ async def api_session_tail(request):
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
     file_size = session_file.stat().st_size
-    # Check liveness: prefer tmux session check over mtime heuristic
+    # Determine session type from resolved path
+    home_projects = Path.home() / ".claude" / "projects"
+    session_type = "host" if session_file.is_relative_to(home_projects) else "container"
+
+    # Check liveness: try multiple meta locations + mtime fallback
     is_live = False
+    tmux_name = ""
+
+    # 1. Container-style: .session_meta.json in parent's parent
     meta_path = session_file.parent.parent / ".session_meta.json"
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text())
-            tmux_name = meta.get("tmux_session")
+            tmux_name = meta.get("tmux_session", "")
             if tmux_name and _tmux_session_exists(tmux_name):
                 is_live = True
         except (json.JSONDecodeError, OSError):
             pass
+
+    # 2. Host-style: per-file {session_id}.meta.json alongside the JSONL
+    if not tmux_name:
+        per_file_meta = session_file.with_suffix(".meta.json")
+        if per_file_meta.exists():
+            try:
+                meta = json.loads(per_file_meta.read_text())
+                tmux_name = meta.get("tmux_session", "")
+                if tmux_name and _tmux_session_exists(tmux_name):
+                    is_live = True
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # 3. Fallback: if JSONL was modified recently, consider it live (handles orphaned sessions)
+    if not is_live and session_type == "host":
+        import time as _time2
+        age = _time2.time() - session_file.stat().st_mtime
+        if age < 120:
+            is_live = True
+
+    base_resp = {"entries": [], "offset": file_size, "is_live": is_live,
+                 "type": session_type}
+    if tmux_name:
+        base_resp["tmux_session"] = tmux_name
     if after >= file_size:
-        return JSONResponse({"entries": [], "offset": file_size, "is_live": is_live})
+        return JSONResponse(base_resp)
 
     entries = []
     with open(session_file, "rb") as f:
@@ -1686,7 +1717,11 @@ async def api_session_tail(request):
             else:
                 entries.append(parsed)
 
-    return JSONResponse({"entries": entries, "offset": new_offset, "is_live": is_live})
+    resp = {"entries": entries, "offset": new_offset, "is_live": is_live,
+            "type": session_type}
+    if tmux_name:
+        resp["tmux_session"] = tmux_name
+    return JSONResponse(resp)
 
 
 async def api_session_send(request):
@@ -1770,6 +1805,143 @@ async def api_session_send(request):
             os.unlink(tmp_path)
 
     return JSONResponse({"ok": True, "tmux_session": tmux_session})
+
+
+async def api_terminal_unclaimed(request):
+    """Return unclaimed host tmux sessions for orphaned session recovery.
+
+    GET /api/terminal/unclaimed
+    Returns list of host tmux sessions from _active_terminals that aren't already
+    claimed by a .meta.json in ~/.claude/projects/.
+    """
+    claimed = set()
+    home_projects = Path.home() / ".claude" / "projects"
+    if home_projects.exists():
+        for meta in home_projects.rglob("*.meta.json"):
+            try:
+                data = json.loads(meta.read_text())
+                if data.get("tmux_session"):
+                    claimed.add(data["tmux_session"])
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    result = []
+    for name, info in _active_terminals.items():
+        if info.get("env") != "host":
+            continue
+        if name in claimed:
+            continue
+        try:
+            alive = subprocess.run(
+                ["tmux", "has-session", "-t", name],
+                capture_output=True,
+            ).returncode == 0
+        except OSError:
+            alive = False
+        if not alive:
+            continue
+        elapsed = int(asyncio.get_event_loop().time() - info.get("started", 0))
+        result.append({
+            "tmux_session": name,
+            "elapsed_seconds": elapsed,
+            "cmd": info.get("cmd", ""),
+        })
+    return JSONResponse(result)
+
+
+async def api_session_send_handshake(request):
+    """Send a handshake string to a candidate tmux session for link confirmation.
+
+    POST /api/session/send-handshake
+    Body: {"tmux_session": "auto-t6"}
+    Returns: {"ok": true, "handshake": "<the string sent>"}
+    """
+    import tempfile
+    import os
+
+    body = await request.json()
+    tmux_session = (body.get("tmux_session") or "").strip()
+    if not tmux_session:
+        return JSONResponse({"error": "tmux_session is required"}, status_code=400)
+
+    handshake = "[dashboard] confirming terminal link \u2014 please reply with I SEE IT"
+
+    try:
+        exists = _tmux_session_exists(tmux_session)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": "tmux is not available in this environment"},
+            status_code=503,
+        )
+    if not exists:
+        return JSONResponse(
+            {"error": f"tmux session '{tmux_session}' not found"},
+            status_code=404,
+        )
+
+    # Inject via paste-buffer (same pattern as api_session_send)
+    buf_name = "api_send"
+    tmp_path = None
+    logger.warning("[send-handshake] tmux=%r", tmux_session)
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(handshake)
+            tmp_path = f.name
+        subprocess.run(
+            ["tmux", "load-buffer", "-b", buf_name, tmp_path],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", tmux_session],
+            capture_output=True,
+        )
+        await asyncio.sleep(0.2)
+        subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_session, "\r"],
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": "tmux is not available in this environment"},
+            status_code=503,
+        )
+    finally:
+        if tmp_path:
+            os.unlink(tmp_path)
+
+    return JSONResponse({"ok": True, "handshake": handshake})
+
+
+async def api_session_confirm_link(request):
+    """Confirm a terminal link after handshake — writes .meta.json.
+
+    POST /api/session/confirm-link
+    Body: {"project": "-workspace-repo", "session_id": "0b8992ca-...", "tmux_session": "auto-t6"}
+    Returns: {"ok": true}
+    """
+    body = await request.json()
+    project = (body.get("project") or "").strip()
+    session_id = (body.get("session_id") or "").strip()
+    tmux_session = (body.get("tmux_session") or "").strip()
+
+    if not project or not session_id or not tmux_session:
+        return JSONResponse(
+            {"error": "project, session_id, and tmux_session are required"},
+            status_code=400,
+        )
+
+    session_file = _session_file_path(project, session_id)
+    if session_file is None:
+        return JSONResponse({"error": "Invalid project or session_id"}, status_code=400)
+    if not session_file.exists():
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+
+    from tools.dashboard.dao.sessions import _write_host_session_meta
+    _write_host_session_meta(session_file, tmux_session)
+
+    return JSONResponse({"ok": True})
 
 
 async def api_upload(request):
@@ -2668,6 +2840,9 @@ routes = [
     Route("/api/chatwith/sessions", api_chatwith_sessions),
     Route("/api/dispatch/tail/{run}", api_dispatch_tail),
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
+    Route("/api/terminal/unclaimed", api_terminal_unclaimed),
+    Route("/api/session/send-handshake", api_session_send_handshake, methods=["POST"]),
+    Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
     Route("/api/session/send", api_session_send, methods=["POST"]),
     Route("/api/session/{project}/{session_id}/tail", api_session_tail),
     Route("/api/session/{project}/{session_id}/send", api_session_send, methods=["POST"]),
