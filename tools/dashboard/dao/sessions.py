@@ -198,6 +198,8 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
                             meta = json.loads(meta_path.read_text())
                             if meta.get("tmux_session"):
                                 entry["tmux_session"] = meta["tmux_session"]
+                            if meta.get("bead_id"):
+                                entry["bead_id"] = meta["bead_id"]
                             entry["type"] = meta.get("type", "host")
                         except (json.JSONDecodeError, OSError):
                             pass
