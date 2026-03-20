@@ -37,7 +37,10 @@ from starlette.templating import Jinja2Templates
 from starlette.websockets import WebSocket
 from sse_starlette.sse import EventSourceResponse
 
-from agents.dispatch_db import list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH
+from agents.dispatch_db import (
+    list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH,
+    clear_paused, is_paused, get_pause_reason,
+)
 from agents.session_launcher import launch_session
 from agents.experiments_db import (
     create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
@@ -209,6 +212,21 @@ async def api_dispatch_pause_post(request):
     # Broadcast updated pause state via SSE dispatch topic
     await event_bus.broadcast("dispatch_pause", new_pause)
     return JSONResponse({"paused": new_pause})
+
+
+async def api_dispatch_resume(request):
+    """POST /api/dispatch/resume — clear auth-failure pause so dispatcher resumes launching."""
+    was_paused = is_paused()
+    reason = get_pause_reason() if was_paused else None
+    clear_paused()
+    return JSONResponse({"ok": True, "was_paused": was_paused, "cleared_reason": reason})
+
+
+async def api_dispatch_pause_state(request):
+    """GET /api/dispatch/pause-state — return dispatcher pause state from SQLite."""
+    paused = is_paused()
+    reason = get_pause_reason() if paused else None
+    return JSONResponse({"paused": paused, "reason": reason})
 
 
 async def api_dispatch_status(request):
@@ -2558,6 +2576,8 @@ routes = [
     Route("/api/bead/{id}/approve", api_bead_approve, methods=["POST"]),
     Route("/api/dispatch/pause", api_dispatch_pause_get),
     Route("/api/dispatch/pause", api_dispatch_pause_post, methods=["POST"]),
+    Route("/api/dispatch/resume", api_dispatch_resume, methods=["POST"]),
+    Route("/api/dispatch/pause-state", api_dispatch_pause_state),
     Route("/api/dispatch/status", api_dispatch_status),
     Route("/api/dispatch/approved", api_dispatch_approved),
     Route("/api/dispatch/runs", api_dispatch_runs),
