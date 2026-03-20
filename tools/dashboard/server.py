@@ -1845,6 +1845,41 @@ async def api_upload(request):
 _active_terminals: dict[str, dict] = {}
 _term_counter = 0
 
+# Per-project locks to serialise host session JSONL watchers
+_host_launch_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_host_launch_lock(project_folder: str) -> asyncio.Lock:
+    if project_folder not in _host_launch_locks:
+        _host_launch_locks[project_folder] = asyncio.Lock()
+    return _host_launch_locks[project_folder]
+
+
+async def _watch_for_host_session_jsonl(
+    projects_dir: Path, tmux_name: str, timeout: float = 10.0
+) -> None:
+    """Watch for a new JSONL to appear after a host Claude session starts.
+
+    Polls every 500ms for up to `timeout` seconds. Writes .meta.json alongside
+    the new file so get_active_sessions() can find the tmux association.
+    """
+    lock = _get_host_launch_lock(projects_dir.name)
+    async with lock:
+        existing = set(projects_dir.glob("*.jsonl")) if projects_dir.exists() else set()
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            if not projects_dir.exists():
+                continue
+            current = set(projects_dir.glob("*.jsonl"))
+            new_files = current - existing
+            if new_files:
+                new_jsonl = min(new_files, key=lambda p: p.stat().st_mtime)
+                from tools.dashboard.dao.sessions import _write_host_session_meta
+                _write_host_session_meta(new_jsonl, tmux_name)
+                return
+        # Timeout — degrade silently, mtime-based visibility still works
+
 
 def _tmux_session_exists(name: str) -> bool:
     return subprocess.run(["tmux", "has-session", "-t", name],
@@ -1976,6 +2011,14 @@ async def ws_terminal(websocket: WebSocket):
         # Paste is handled at the xterm.js layer using the browser clipboard API.
         subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
                         capture_output=True)
+
+        # For host Claude sessions, watch for the JSONL file and write .meta.json
+        if not is_container_cmd and "claude" in cmd_str.lower():
+            project_folder = str(_REPO_ROOT).replace("/", "-")
+            projects_dir = Path.home() / ".claude" / "projects" / project_folder
+            asyncio.create_task(
+                _watch_for_host_session_jsonl(projects_dir, tmux_name)
+            )
 
     # Track it — only set cmd/env on initial creation, not re-attach
     if tmux_name not in _active_terminals:
