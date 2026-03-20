@@ -219,6 +219,8 @@ async def api_dispatch_resume(request):
     was_paused = is_paused()
     reason = get_pause_reason() if was_paused else None
     clear_paused()
+    # Broadcast cleared state so all clients update immediately
+    await event_bus.broadcast("dispatcher_state", {"paused": False, "reason": None})
     return JSONResponse({"ok": True, "was_paused": was_paused, "cleared_reason": reason})
 
 
@@ -227,6 +229,13 @@ async def api_dispatch_pause_state(request):
     paused = is_paused()
     reason = get_pause_reason() if paused else None
     return JSONResponse({"paused": paused, "reason": reason})
+
+
+def _get_dispatcher_state() -> dict:
+    """Read dispatcher pause state from SQLite for SSE broadcast."""
+    paused = is_paused()
+    reason = get_pause_reason() if paused else None
+    return {"paused": paused, "reason": reason}
 
 
 async def api_dispatch_status(request):
@@ -2507,13 +2516,14 @@ async def _dispatch_watcher():
     """
     while True:
         try:
-            dispatch_data, counts, active_sessions, terminal_count, today_done = (
+            dispatch_data, counts, active_sessions, terminal_count, today_done, dispatcher_state = (
                 await asyncio.gather(
                     _collect_dispatch_data(),
                     asyncio.to_thread(dao_beads.get_bead_counts),
                     asyncio.to_thread(_count_active_sessions),
                     asyncio.to_thread(_count_terminals),
                     asyncio.to_thread(_count_today_done),
+                    asyncio.to_thread(_get_dispatcher_state),
                 )
             )
             nav_data = {
@@ -2527,6 +2537,7 @@ async def _dispatch_watcher():
             }
             await event_bus.broadcast("dispatch", dispatch_data)
             await event_bus.broadcast("nav", nav_data)
+            await event_bus.broadcast("dispatcher_state", dispatcher_state)
         except Exception:
             pass
         await asyncio.sleep(_DISPATCH_WATCHER_INTERVAL)

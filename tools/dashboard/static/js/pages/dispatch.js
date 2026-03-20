@@ -143,8 +143,10 @@
       waiting: [],
       blocked: [],
       paused: {},          // { label: bool } — plain object for Alpine reactivity
+      dispatcherState: { paused: false, reason: null },  // SQLite dispatcher pause (auth failure etc.)
       _dispatchHandler: null,
       _pauseHandler: null,
+      _dispatcherStateHandler: null,
 
       applyDispatch(data) {
         this.waiting = (data.waiting || []).map(_mapWaiting);
@@ -157,6 +159,19 @@
 
       applyPause(pauseState) {
         this.paused = { ...pauseState };
+      },
+
+      applyDispatcherState(state) {
+        this.dispatcherState = { ...state };
+      },
+
+      async resumeDispatcher() {
+        try {
+          const resp = await fetch('/api/dispatch/resume', { method: 'POST' });
+          if (resp.ok) {
+            this.dispatcherState = { paused: false, reason: null };
+          }
+        } catch (_) {}
       },
 
       async togglePause(label) {
@@ -192,8 +207,10 @@
         // Register for live dispatch + pause updates via the shared persistent connection.
         this._dispatchHandler = data => this.applyDispatch(data);
         this._pauseHandler = data => this.applyPause(data);
+        this._dispatcherStateHandler = data => this.applyDispatcherState(data);
         registerHandler('dispatch', this._dispatchHandler);
         registerHandler('dispatch_pause', this._pauseHandler);
+        registerHandler('dispatcher_state', this._dispatcherStateHandler);
       },
 
       destroy() {
@@ -205,6 +222,10 @@
         if (this._pauseHandler) {
           unregisterHandler('dispatch_pause', this._pauseHandler);
           this._pauseHandler = null;
+        }
+        if (this._dispatcherStateHandler) {
+          unregisterHandler('dispatcher_state', this._dispatcherStateHandler);
+          this._dispatcherStateHandler = null;
         }
       },
     }));
