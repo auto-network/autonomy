@@ -1,5 +1,28 @@
 <div x-data="dispatchPage()">
 
+  <!-- Dispatcher pause banner (auth failure etc.) -->
+  <template x-if="dispatcherState.paused && dispatcherState.reason">
+    <div
+      class="mb-4 px-4 py-3 rounded-lg border flex items-center justify-between gap-3 bg-red-900/30 border-red-600 text-red-200"
+    >
+      <div class="flex items-center gap-2">
+        <span class="text-lg">&#x26D4;</span>
+        <span x-show="dispatcherState.reason.reason === 'auth'">
+          <strong>Dispatcher paused:</strong> Auth failed &mdash; re-authenticate then resume
+        </span>
+        <span x-show="dispatcherState.reason.reason !== 'auth'">
+          <strong>Dispatcher paused:</strong> <span x-text="dispatcherState.reason.message || dispatcherState.reason.reason"></span>
+        </span>
+      </div>
+      <button
+        @click="resumeDispatcher()"
+        class="px-3 py-1 rounded-md text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors flex-shrink-0"
+      >
+        Resume
+      </button>
+    </div>
+  </template>
+
   <!-- Queue pause toggles + stats header -->
   <div class="flex flex-wrap items-center gap-3 mb-6">
     <template x-for="(isPaused, label) in paused" :key="label">
