@@ -7,6 +7,7 @@ then updates it on completion via insert_run() (upsert).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
@@ -101,6 +102,14 @@ CREATE_LIBRARIAN_JOBS_INDEX = """\
 CREATE INDEX IF NOT EXISTS idx_librarian_jobs_status ON librarian_jobs(status, priority DESC, created_at ASC)
 """
 
+CREATE_DISPATCHER_STATE = """\
+CREATE TABLE IF NOT EXISTS dispatcher_state (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 
 def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -121,6 +130,7 @@ def init_db() -> None:
         conn.execute(CREATE_INDEX)
         conn.execute(CREATE_LIBRARIAN_JOBS)
         conn.execute(CREATE_LIBRARIAN_JOBS_INDEX)
+        conn.execute(CREATE_DISPATCHER_STATE)
         for stmt in _MIGRATIONS:
             try:
                 conn.execute(stmt)
@@ -518,3 +528,61 @@ def update_live_stats(
             conn.close()
     except Exception:
         pass
+
+
+# ── Dispatcher pause/resume ──────────────────────────────────────
+
+
+def set_dispatcher_paused(reason_json: dict) -> None:
+    """Write pause state to dispatcher_state table.
+
+    reason_json should contain: reason, paused_at, bead_id, message.
+    """
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO dispatcher_state (key, value, updated_at) "
+            "VALUES ('paused', ?, datetime('now'))",
+            (json.dumps(reason_json),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def clear_paused() -> None:
+    """Remove the paused key from dispatcher_state."""
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM dispatcher_state WHERE key = 'paused'")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def is_paused() -> bool:
+    """Return True if the dispatcher is paused."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM dispatcher_state WHERE key = 'paused' LIMIT 1"
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def get_pause_reason() -> dict | None:
+    """Return the pause reason dict, or None if not paused."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT value FROM dispatcher_state WHERE key = 'paused' LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
+    except (json.JSONDecodeError, IndexError):
+        return None
+    finally:
+        conn.close()
