@@ -67,9 +67,11 @@
         if (!file) return;
         this.uploadFilename = file.name;
 
-        // Show preview for images
+        // Show preview for images (use FileReader for mobile Safari compatibility)
         if (file.type.startsWith('image/')) {
-          this.uploadPreview = URL.createObjectURL(file);
+          const reader = new FileReader();
+          reader.onload = (e) => { this.uploadPreview = e.target.result; };
+          reader.readAsDataURL(file);
         } else {
           this.uploadPreview = '';
         }
