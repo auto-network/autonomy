@@ -1727,6 +1727,55 @@ async def api_session_send(request):
     return JSONResponse({"ok": True, "tmux_session": tmux_session})
 
 
+async def api_upload(request):
+    """Upload a file to the workspace.
+
+    POST /api/upload
+    Multipart form: file field required, optional path param for target directory.
+    Saves to data/uploads/ by default (or the specified subdirectory of repo root).
+    Returns: {"ok": true, "path": "/workspace/repo/data/uploads/filename.jpg", "filename": "filename.jpg"}
+    """
+    try:
+        form = await request.form()
+    except Exception:
+        return JSONResponse({"error": "invalid multipart form"}, status_code=400)
+
+    upload = form.get("file")
+    if upload is None:
+        return JSONResponse({"error": "file field is required"}, status_code=400)
+
+    filename = Path(upload.filename).name if upload.filename else "upload"
+    # Sanitize filename — strip path separators, limit length
+    filename = re.sub(r"[^\w.\-]", "_", filename)[:200] or "upload"
+
+    # Target directory: optional `path` param, default data/uploads
+    target_dir_param = (form.get("path") or "").strip()
+    if target_dir_param:
+        # Resolve relative to repo root, prevent path traversal
+        target_dir = (_REPO_ROOT / target_dir_param).resolve()
+        if not str(target_dir).startswith(str(_REPO_ROOT)):
+            return JSONResponse({"error": "invalid path"}, status_code=400)
+    else:
+        target_dir = _REPO_ROOT / "data" / "uploads"
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Avoid clobbering existing files by appending a counter
+    dest = target_dir / filename
+    if dest.exists():
+        stem = dest.stem
+        suffix = dest.suffix
+        counter = 1
+        while dest.exists():
+            dest = target_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+
+    contents = await upload.read()
+    dest.write_bytes(contents)
+
+    return JSONResponse({"ok": True, "path": str(dest), "filename": dest.name})
+
+
 # ── WebSocket Terminal ─────────────────────────────────────────
 
 # Track active terminal sessions
@@ -2509,6 +2558,7 @@ routes = [
     Route("/api/session/send", api_session_send, methods=["POST"]),
     Route("/api/session/{project}/{session_id}/tail", api_session_tail),
     Route("/api/session/{project}/{session_id}/send", api_session_send, methods=["POST"]),
+    Route("/api/upload", api_upload, methods=["POST"]),
     Route("/api/timeline", api_timeline),
     Route("/api/timeline/stats", api_timeline_stats),
     Route("/api/version", api_version),
