@@ -26,7 +26,7 @@ graph dispatch approve <bead-id>  # Approve bead(s) for dispatch (accepts multip
 
 **Dispatch workflow:**
 1. `graph dispatch approve <bead-id>` — release bead for dispatch
-2. `graph wait <bead-id> &` — immediately background-wait for completion notification
+2. `graph wait <bead-id>` — block until dispatched bead completes
 3. `graph dispatch status` — check overall queue at any time
 
 ## Beads (`bd`)
