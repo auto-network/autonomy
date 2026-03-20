@@ -113,7 +113,7 @@
         </button>
       </div>
 
-      <!-- Input bar -->
+      <!-- Input bar (shown when linked to a tmux session) -->
       <template x-if="isLive && _tmuxSession">
         <div class="flex flex-col gap-1 px-2 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0">
 
@@ -162,6 +162,75 @@
               <span x-text="sending ? '...' : 'Send'"></span>
             </button>
           </div>
+        </div>
+      </template>
+
+      <!-- Link Terminal UI (shown for orphaned host sessions with no tmux link) -->
+      <template x-if="isLive && !_tmuxSession && sessionType === 'host'">
+        <div class="px-2 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0">
+
+          <!-- Idle: show Link Terminal button -->
+          <template x-if="linkState === 'idle'">
+            <button @click="showLinkPicker()"
+                    class="w-full min-h-[44px] bg-amber-700 hover:bg-amber-600 text-white rounded-lg text-sm font-medium">
+              Link Terminal
+            </button>
+          </template>
+
+          <!-- Picking: show candidate list -->
+          <template x-if="linkState === 'picking'">
+            <div class="space-y-2">
+              <div class="text-xs text-gray-400 font-medium">Select a tmux session to link:</div>
+
+              <template x-if="linkCandidates.length === 0">
+                <div class="text-xs text-gray-500 py-2">No unclaimed terminals available</div>
+              </template>
+
+              <template x-for="(c, ci) in linkCandidates" :key="c.tmux_session">
+                <label class="flex items-center gap-2 p-2 rounded cursor-pointer hover:bg-gray-700"
+                       :class="selectedTmux === c.tmux_session ? 'bg-gray-700 ring-1 ring-amber-500' : ''">
+                  <input type="radio" name="link-tmux" :value="c.tmux_session"
+                         x-model="selectedTmux" class="accent-amber-500">
+                  <span class="text-sm text-gray-200 font-mono" x-text="c.tmux_session"></span>
+                  <span class="text-xs text-gray-500" x-text="Math.floor(c.elapsed_seconds / 60) + 'm ago'"></span>
+                  <span class="text-xs text-gray-600 truncate max-w-[200px]" x-text="c.cmd"></span>
+                </label>
+              </template>
+
+              <div class="flex gap-2">
+                <button @click="resetLink()"
+                        class="flex-1 min-h-[44px] bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm">
+                  Cancel
+                </button>
+                <button @click="confirmLink()"
+                        :disabled="!selectedTmux"
+                        class="flex-1 min-h-[44px] bg-amber-700 hover:bg-amber-600 text-white rounded-lg text-sm font-medium
+                               disabled:opacity-50 disabled:cursor-not-allowed">
+                  Confirm Link
+                </button>
+              </div>
+            </div>
+          </template>
+
+          <!-- Handshaking: spinner -->
+          <template x-if="linkState === 'handshaking'">
+            <div class="flex items-center justify-center gap-2 py-3">
+              <span class="animate-spin text-amber-400">&#x21BB;</span>
+              <span class="text-sm text-gray-400">Sending handshake&hellip;</span>
+            </div>
+          </template>
+
+          <!-- Failed: error + retry -->
+          <template x-if="linkState === 'failed'">
+            <div class="space-y-2">
+              <div class="text-sm text-red-400" x-text="linkError"></div>
+              <button @click="resetLink()"
+                      class="w-full min-h-[44px] bg-amber-700 hover:bg-amber-600 text-white rounded-lg text-sm font-medium">
+                Try Again
+              </button>
+            </div>
+          </template>
+
         </div>
       </template>
 
