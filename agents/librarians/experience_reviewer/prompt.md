@@ -77,6 +77,10 @@ Good discovered work signals:
 1. Read the bead context: `bd show <bead-id>` to understand what was being worked on.
 2. Read the full experience report.
 3. Read the decision.json to see discovered_beads (already filed items to skip).
+3b. If the acceptance criteria list required artifacts (screenshots, test scripts,
+    output files), check that the decision.json `artifacts` list includes them.
+    If artifacts are missing, extract a [bug] item: "Agent skipped required
+    acceptance verification: <what was missing>".
 4. For each candidate item, search first: `graph search "query" --or --limit 5`
 5. Extract or skip, explaining your reasoning in one line per item.
 6. Create notes/beads for extracted items.
