@@ -191,21 +191,39 @@ def _get_pause_state() -> dict:
     raw = _read_dispatch_state()
     result = {label: bool(raw.get(label, False)) for label in _KNOWN_PAUSE_LABELS}
     for label, paused in raw.items():
+        if label.endswith("_reason"):
+            continue  # Skip reason keys — handled by _get_pause_reasons
         if label not in result:
             result[label] = bool(paused)
     return result
 
 
+def _get_pause_reasons() -> dict:
+    """Return pause reasons for labels that have them.
+
+    Reads {label}_reason keys from dispatch.state and returns {label: reason_string}.
+    Only includes labels that are currently paused AND have a reason stored.
+    """
+    raw = _read_dispatch_state()
+    reasons = {}
+    for key, value in raw.items():
+        if key.endswith("_reason") and isinstance(value, str) and value:
+            label = key[:-len("_reason")]
+            if raw.get(label):  # Only include if label is actually paused
+                reasons[label] = value
+    return reasons
+
+
 async def api_dispatch_pause_get(request):
     """GET /api/dispatch/pause — return current pause state for all label queues."""
-    return JSONResponse({"paused": _get_pause_state()})
+    return JSONResponse({"paused": _get_pause_state(), "reasons": _get_pause_reasons()})
 
 
 async def api_dispatch_pause_post(request):
     """POST /api/dispatch/pause — set pause state for a label queue.
 
     Body: {"label": "dashboard", "paused": true}
-    Returns updated full pause state.
+    Returns updated full pause state with reasons.
     """
     body = await request.json()
     label = body.get("label")
@@ -217,11 +235,13 @@ async def api_dispatch_pause_post(request):
         state[label] = True
     else:
         state.pop(label, None)
+        state.pop(f"{label}_reason", None)  # Clear reason on unpause
     _write_dispatch_state(state)
     new_pause = _get_pause_state()
-    # Broadcast updated pause state via SSE dispatch topic
-    await event_bus.broadcast("dispatch_pause", new_pause)
-    return JSONResponse({"paused": new_pause})
+    new_reasons = _get_pause_reasons()
+    # Broadcast updated pause state + reasons via SSE
+    await event_bus.broadcast("dispatch_pause", {"paused": new_pause, "reasons": new_reasons})
+    return JSONResponse({"paused": new_pause, "reasons": new_reasons})
 
 
 async def api_dispatch_resume(request):
@@ -3058,6 +3078,7 @@ async def _collect_dispatch_data() -> dict:
         "waiting": waiting,
         "blocked": blocked,
         "paused": _get_pause_state(),
+        "pause_reasons": _get_pause_reasons(),
     }
 
 
