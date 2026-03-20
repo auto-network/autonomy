@@ -3109,24 +3109,44 @@ async def _collect_dispatch_data() -> dict:
 def _count_active_sessions() -> int:
     """Count active Claude Code sessions using tmux liveness check.
 
-    A session is active only if its .session_meta.json has a tmux_session field
-    pointing to a currently-running tmux session. Sessions without tmux metadata
-    (e.g. host interactive sessions) count as inactive.
+    Scans two locations:
+    1. data/agent-runs/*/sessions/.session_meta.json  (container sessions)
+    2. ~/.claude/projects/**/*.meta.json               (host sessions)
+
+    A session is active only if its meta file has a tmux_session field
+    pointing to a currently-running tmux session.
     """
-    agent_runs = _REPO_ROOT / "data" / "agent-runs"
-    if not agent_runs.exists():
-        return 0
     count = 0
-    for run_dir in agent_runs.iterdir():
-        meta_path = run_dir / "sessions" / ".session_meta.json"
-        if meta_path.exists():
+    seen_tmux: set[str] = set()
+
+    # 1. Container sessions
+    agent_runs = _REPO_ROOT / "data" / "agent-runs"
+    if agent_runs.exists():
+        for run_dir in agent_runs.iterdir():
+            meta_path = run_dir / "sessions" / ".session_meta.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text())
+                    tmux_name = meta.get("tmux_session")
+                    if tmux_name and tmux_name not in seen_tmux and _tmux_session_exists(tmux_name):
+                        seen_tmux.add(tmux_name)
+                        count += 1
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+    # 2. Host sessions with live tmux links
+    home_projects = Path.home() / ".claude" / "projects"
+    if home_projects.exists():
+        for meta_path in home_projects.rglob("*.meta.json"):
             try:
-                meta = json.loads(meta_path.read_text())
-                tmux_name = meta.get("tmux_session")
-                if tmux_name and _tmux_session_exists(tmux_name):
+                data = json.loads(meta_path.read_text())
+                tmux_name = data.get("tmux_session")
+                if tmux_name and tmux_name not in seen_tmux and _tmux_session_exists(tmux_name):
+                    seen_tmux.add(tmux_name)
                     count += 1
             except (json.JSONDecodeError, OSError):
                 pass
+
     return count
 
 
