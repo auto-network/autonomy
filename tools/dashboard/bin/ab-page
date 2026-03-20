@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# ab-page — one-shot full-page dashboard screenshot
+#
+# Usage:
+#   ab-page /sessions                         # saves to /tmp/screenshots/sessions-<ts>.png
+#   ab-page /sessions /tmp/out.png            # saves to specified path
+#   ab-page /experiments/<id> /tmp/exp.png    # works with any dashboard path
+#   ab-page /timeline --no-unclip             # skip overflow removal
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ab-page <path> [output] [--no-unclip]
+
+  path         Dashboard path (e.g. /sessions, /dispatch, /timeline)
+  output       Output PNG path (default: /tmp/screenshots/<page>-<timestamp>.png)
+  --no-unclip  Skip overflow container unclipping (rare)
+EOF
+  exit 1
+}
+
+# --- Parse arguments ---
+DASH_PATH=""
+OUTPUT=""
+NO_UNCLIP=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-unclip) NO_UNCLIP=true ;;
+    --help|-h)   usage ;;
+    *)
+      if [ -z "$DASH_PATH" ]; then
+        DASH_PATH="$arg"
+      elif [ -z "$OUTPUT" ]; then
+        OUTPUT="$arg"
+      fi
+      ;;
+  esac
+done
+
+[ -z "$DASH_PATH" ] && usage
+
+# --- Default output path ---
+if [ -z "$OUTPUT" ]; then
+  mkdir -p /tmp/screenshots
+  PAGE_NAME=$(echo "$DASH_PATH" | sed 's|^/||; s|/|-|g; s|[^a-zA-Z0-9_-]||g')
+  [ -z "$PAGE_NAME" ] && PAGE_NAME="index"
+  OUTPUT="/tmp/screenshots/${PAGE_NAME}-$(date +%Y%m%d-%H%M%S).png"
+fi
+
+# Ensure output directory exists
+mkdir -p "$(dirname "$OUTPUT")"
+
+BASE_URL="https://localhost:8080"
+
+# --- Step 1-2: Navigate to dashboard page ---
+agent-browser open "${BASE_URL}${DASH_PATH}" --ignore-https-errors >/dev/null
+agent-browser wait --load networkidle >/dev/null
+
+# Brief pause for Alpine hydration
+sleep 0.5
+
+# --- Step 3-4: Remove overflow clipping for full-page capture ---
+if [ "$NO_UNCLIP" = false ]; then
+  agent-browser eval "(() => {
+    const saved = {};
+
+    // Body: remove h-screen (height: 100vh) constraint
+    saved.bodyH = document.body.style.height;
+    saved.bodyO = document.body.style.overflow;
+    document.body.style.height = 'auto';
+    document.body.style.overflow = 'visible';
+
+    // Main wrapper div: remove overflow-hidden
+    const wrapper = document.body.querySelector(':scope > div > .flex-1.flex.flex-col') ||
+                    document.querySelector('.flex-1.flex-col.overflow-hidden');
+    if (wrapper) {
+      saved.wrapO = wrapper.style.overflow;
+      saved.wrapH = wrapper.style.height;
+      wrapper.style.overflow = 'visible';
+      wrapper.style.height = 'auto';
+    }
+
+    // Content main: remove overflow-auto, allow natural height
+    const main = document.getElementById('content');
+    if (main) {
+      saved.mainO = main.style.overflow;
+      saved.mainH = main.style.height;
+      saved.mainF = main.style.flex;
+      main.style.overflow = 'visible';
+      main.style.height = 'auto';
+      main.style.flex = 'none';
+    }
+
+    // Terminal page (if visible)
+    const tp = document.getElementById('terminal-page');
+    if (tp && tp.style.display !== 'none') {
+      saved.tpO = tp.style.overflow;
+      saved.tpH = tp.style.height;
+      saved.tpF = tp.style.flex;
+      tp.style.overflow = 'visible';
+      tp.style.height = 'auto';
+      tp.style.flex = 'none';
+    }
+
+    // Board columns: remove max-height constraints
+    document.querySelectorAll('.board-column').forEach(c => {
+      c.style.maxHeight = 'none';
+    });
+    document.querySelectorAll('.board-column-scroll').forEach(c => {
+      c.style.maxHeight = 'none';
+      c.style.overflow = 'visible';
+    });
+
+    // Sidebar: hide for cleaner capture
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) {
+      saved.sideD = sidebar.style.display;
+      sidebar.style.display = 'none';
+    }
+
+    // Live panel: hide if present
+    const lp = document.getElementById('live-panel');
+    if (lp) {
+      saved.lpD = lp.style.display;
+      lp.style.display = 'none';
+    }
+
+    window.__abPageSaved = saved;
+    return 'unclipped';
+  })()" >/dev/null
+fi
+
+# --- Step 5: Take full-page screenshot ---
+agent-browser screenshot --full "$OUTPUT" >/dev/null
+
+# --- Step 6: Restore original styles ---
+if [ "$NO_UNCLIP" = false ]; then
+  agent-browser eval "(() => {
+    const s = window.__abPageSaved || {};
+
+    document.body.style.height = s.bodyH || '';
+    document.body.style.overflow = s.bodyO || '';
+
+    const wrapper = document.body.querySelector(':scope > div > .flex-1.flex.flex-col') ||
+                    document.querySelector('.flex-1.flex-col.overflow-hidden');
+    if (wrapper) {
+      wrapper.style.overflow = s.wrapO || '';
+      wrapper.style.height = s.wrapH || '';
+    }
+
+    const main = document.getElementById('content');
+    if (main) {
+      main.style.overflow = s.mainO || '';
+      main.style.height = s.mainH || '';
+      main.style.flex = s.mainF || '';
+    }
+
+    const tp = document.getElementById('terminal-page');
+    if (tp && s.tpO !== undefined) {
+      tp.style.overflow = s.tpO || '';
+      tp.style.height = s.tpH || '';
+      tp.style.flex = s.tpF || '';
+    }
+
+    document.querySelectorAll('.board-column').forEach(c => {
+      c.style.maxHeight = '';
+    });
+    document.querySelectorAll('.board-column-scroll').forEach(c => {
+      c.style.maxHeight = '';
+      c.style.overflow = '';
+    });
+
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) sidebar.style.display = s.sideD || '';
+
+    const lp = document.getElementById('live-panel');
+    if (lp) lp.style.display = s.lpD || '';
+
+    delete window.__abPageSaved;
+    return 'restored';
+  })()" >/dev/null
+fi
+
+# --- Step 7: Print saved path ---
+echo "$OUTPUT"
