@@ -54,6 +54,8 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph sessions --all` | Ingest latest session data (107ms) | Run before searching for recent content |
 | `graph wait <bead-id>` | Block until a dispatched bead completes | `graph wait auto-x7wr --timeout 900` |
 | `graph dispatch` | Show running/queued dispatch state | `graph dispatch runs --failed` |
+| `graph dispatch runs --completed` | Filter to completed (DONE) runs only | `graph dispatch runs --completed --limit 10` |
+| `graph dispatch runs --primer` | Rich per-run output: title, commit, diff, scores, merge state | `graph dispatch runs --primer --completed` |
 | `graph primer <bead-id>` | Dynamic context primer for a bead (description + pitfalls + provenance) | `graph primer auto-n9qa` |
 | `graph ui-exp "title" <dir>` | Create UI experiment from HTML files + live-watch for changes | `graph ui-exp "Input redesign" /tmp/cards/` |
 

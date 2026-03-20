@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import ssl
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -129,11 +130,17 @@ def cmd_dispatch_runs(args):
         runs = [r for r in runs if r.get("status") == "RUNNING"]
     elif args.failed:
         runs = [r for r in runs if r.get("status") in ("FAILED", "BLOCKED")]
+    elif args.completed:
+        runs = [r for r in runs if r.get("status") == "DONE"]
 
     runs = runs[:args.limit]
 
     if args.json:
         print(json.dumps(runs, default=str))
+        return
+
+    if args.primer:
+        _print_primer(runs, args)
         return
 
     for r in runs:
@@ -151,6 +158,147 @@ def cmd_dispatch_runs(args):
         if reason:
             line += f"  {reason}"
         print(line)
+
+
+def _is_merged(commit_hash: str) -> bool:
+    """Check if a commit is an ancestor of HEAD (i.e., merged)."""
+    if not commit_hash:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", commit_hash, "HEAD"],
+            capture_output=True, timeout=10,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _print_primer(runs: list, args):
+    """Rich per-run output for orientation."""
+    base = _get_dashboard_url()
+    ctx = _make_ssl_ctx()
+
+    # Build title map from beads API
+    title_map: dict[str, str] = {}
+    try:
+        all_beads = _api_call(base, "/api/beads/list", ctx)
+        for b in all_beads:
+            title_map[b.get("id", "")] = b.get("title", "")
+    except Exception:
+        pass
+
+    # Filter out librarian rows unless --failed
+    if not args.failed:
+        runs = [r for r in runs if r.get("bead_id")]
+
+    counts = {"completed": 0, "failed": 0, "running": 0, "unmerged": 0}
+
+    for r in runs:
+        status = r.get("status", "?")
+        bead_id = r.get("bead_id") or ""
+        duration = _format_duration(r.get("duration_secs"))
+        commit_hash = r.get("commit_hash") or ""
+        branch = r.get("branch") or ""
+
+        # Count by status
+        if status == "DONE":
+            counts["completed"] += 1
+        elif status in ("FAILED", "BLOCKED"):
+            counts["failed"] += 1
+        elif status == "RUNNING":
+            counts["running"] += 1
+
+        # Merge state
+        merged = _is_merged(commit_hash) if commit_hash else False
+        if status == "DONE" and commit_hash and not merged:
+            merge_label = "unmerged"
+            counts["unmerged"] += 1
+        elif status == "DONE" and merged:
+            merge_label = "merged"
+        else:
+            merge_label = ""
+
+        # Header line
+        status_extra = f" ({merge_label})" if merge_label else ""
+        label = bead_id if bead_id else "(librarian)"
+        print(f"\u2500\u2500 {label} \u2500\u2500 {status}{status_extra} \u2500\u2500 {duration} " + "\u2500" * 30)
+
+        # Title
+        title = title_map.get(bead_id, "")
+        if title:
+            print(f"Title:   {title}")
+
+        # Commit info
+        if commit_hash:
+            short_hash = commit_hash[:7]
+            merge_flag = "" if merged else " !! NOT MERGED"
+            print(f"Commit:  {short_hash} ({branch}){merge_flag}")
+            commit_msg = r.get("commit_message") or ""
+            if commit_msg:
+                print(f"         {commit_msg}")
+
+        # Diff stats
+        lines_added = r.get("lines_added")
+        lines_removed = r.get("lines_removed")
+        files_changed = r.get("files_changed")
+        if lines_added is not None or lines_removed is not None:
+            la = lines_added or 0
+            lr = lines_removed or 0
+            fc = files_changed or 0
+            print(f"Changed: +{la} -{lr} across {fc} file{'s' if fc != 1 else ''}")
+
+        # Scores
+        decision = r.get("decision") or {}
+        scores = decision.get("scores") if isinstance(decision, dict) else None
+        if scores and isinstance(scores, dict):
+            parts = []
+            for key in ("tooling", "clarity", "confidence"):
+                val = scores.get(key)
+                if val is not None:
+                    parts.append(f"{key}={val}")
+            if parts:
+                print(f"Scores:  {' '.join(parts)}")
+
+        # Smoke result
+        smoke = r.get("smoke_result")
+        if smoke and isinstance(smoke, dict):
+            passed = smoke.get("pass", False)
+            dur_ms = smoke.get("duration_ms", "?")
+            label_s = "PASS" if passed else "FAIL"
+            print(f"Smoke:   {label_s} ({dur_ms}ms)")
+
+        # Librarian review
+        lib_review = r.get("librarian_review")
+        if lib_review and isinstance(lib_review, dict):
+            lib_status = lib_review.get("status", "?")
+            findings = lib_review.get("findings", [])
+            skipped = lib_review.get("skipped", 0)
+            if findings:
+                print(f"Review:  {len(findings)} extracted" + (f" \u00b7 {skipped} skipped" if skipped else ""))
+            else:
+                print(f"Review:  {lib_status}")
+
+        # Reason (for failures)
+        if status in ("FAILED", "BLOCKED"):
+            reason = decision.get("reason", "") if isinstance(decision, dict) else ""
+            if reason:
+                print(f"Reason:  {reason[:80]}")
+
+        print()
+
+    # Summary line
+    parts = []
+    if counts["completed"]:
+        parts.append(f"{counts['completed']} completed")
+    if counts["failed"]:
+        parts.append(f"{counts['failed']} failed")
+    if counts["running"]:
+        parts.append(f"{counts['running']} running")
+    if counts["unmerged"]:
+        parts.append(f"{counts['unmerged']} unmerged")
+    if parts:
+        print(", ".join(parts))
 
 
 def cmd_dispatch_approve(args):
