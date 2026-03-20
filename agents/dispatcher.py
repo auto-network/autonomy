@@ -825,8 +825,12 @@ def _maybe_restart_dashboard(branch_base: str) -> None:
         pass
 
 
-def _pause_dashboard_dispatch() -> None:
-    """Write dashboard=true pause flag to data/dispatch.state."""
+def _pause_dashboard_dispatch(reason: str = "") -> None:
+    """Write dashboard=true pause flag to data/dispatch.state.
+
+    If reason is provided, also stores it as dashboard_reason so the
+    dashboard UI can show WHY the queue was paused.
+    """
     try:
         state: dict = {}
         if _DISPATCH_STATE_PATH.exists():
@@ -835,6 +839,8 @@ def _pause_dashboard_dispatch() -> None:
             except (json.JSONDecodeError, OSError):
                 pass
         state["dashboard"] = True
+        if reason:
+            state["dashboard_reason"] = reason
         _DISPATCH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _DISPATCH_STATE_PATH.write_text(json.dumps(state))
         print(f"  Dashboard dispatch paused — {_DISPATCH_STATE_PATH}", file=sys.stderr)
@@ -969,8 +975,16 @@ def process_decision(dispatch_result: DispatchResult) -> None:
                         run_bd(["update", bead_id, "--append-notes",
                                 f"smoke test FAILED: {smoke}"])
                         status = "BLOCKED"
+                        # Build a human-readable reason with bead ID and failing checks
+                        failed_checks = [
+                            c.get("name", "?") for c in smoke.get("checks", [])
+                            if not c.get("pass")
+                        ]
+                        smoke_reason = f"smoke failed on {bead_id}"
+                        if failed_checks:
+                            smoke_reason += f": {' '.join(failed_checks)}"
                         reason = "Post-merge smoke test failed — dashboard dispatch paused"
-                        _pause_dashboard_dispatch()
+                        _pause_dashboard_dispatch(reason=smoke_reason)
                     else:
                         print(f"  Smoke test PASSED ({smoke.get('duration_ms', '?')}ms)")
                 except Exception as smoke_err:
