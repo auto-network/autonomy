@@ -114,6 +114,7 @@ def launch_session(
     working_dir: str = "/workspace/repo",
     extra_env: dict | None = None,
     output_dir: str | None = None,
+    model: str = "claude-opus-4-6",
 ) -> str | None:
     """Launch a Claude agent container session.
 
@@ -136,6 +137,7 @@ def launch_session(
         extra_env: Additional environment variables {key: value}.
         output_dir: Pre-created output directory. If None, a new directory under
                     data/agent-runs/ is created using name + UTC timestamp.
+        model: Claude model to pass via --model flag. Defaults to claude-opus-4-6.
 
     Returns:
         detach=True:  container_id string on success, None on failure.
@@ -236,9 +238,9 @@ def launch_session(
         prompt_file = run_dir / ".prompt.md"
         prompt_file.write_text(prompt)
         cmd += ["--entrypoint", "sh", image,
-                "-c", "cat /workspace/output/.prompt.md | claude --dangerously-skip-permissions -p"]
+                "-c", f"cat /workspace/output/.prompt.md | claude --dangerously-skip-permissions --model {model} -p"]
     else:
-        cmd += [image, "--dangerously-skip-permissions"]
+        cmd += [image, "--dangerously-skip-permissions", "--model", model]
 
     # ── Execute or return ──────────────────────────────────────
     if detach:
