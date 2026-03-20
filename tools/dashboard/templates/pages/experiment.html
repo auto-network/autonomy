@@ -105,7 +105,7 @@
         </div>
       </template>
 
-      <!-- Chat With terminal panel -->
+      <!-- Chat With rich panel (replaces xterm.js terminal) -->
       <div x-show="chatWithVisible"
            class="mt-6 border border-gray-700 rounded overflow-hidden">
 
@@ -115,12 +115,12 @@
           <span class="text-sm font-semibold text-indigo-400">Chat With Claude</span>
           <span :class="chatWithStatusClass" x-text="chatWithStatus"></span>
           <div class="ml-auto flex items-center gap-2" @click.stop>
-            <button x-show="chatWithReconnectVisible"
-                    @click="reconnectChatWith()"
-                    aria-label="Reconnect Chat With terminal"
-                    class="text-xs text-indigo-400 hover:text-indigo-300 px-2 py-0.5 rounded border border-indigo-800 hover:border-indigo-600">
-              Reconnect
-            </button>
+            <template x-if="chatWithPanelRef && chatWithPanelRef.isLive">
+              <span class="flex items-center gap-1">
+                <span class="live-pulse"></span>
+                <span class="text-xs text-green-400">Live</span>
+              </span>
+            </template>
             <button x-show="chatWithKillVisible"
                     @click="killChatWith()"
                     aria-label="Kill Chat With session"
@@ -135,9 +135,12 @@
           </div>
         </div>
 
-        <!-- Terminal body — xterm.js attaches to #chatwith-container -->
-        <div x-show="!chatWithCollapsed" style="height:300px;">
-          <div id="chatwith-container" style="height:300px;"></div>
+        <!-- Rich message feed + input bar -->
+        <div x-show="!chatWithCollapsed"
+             x-data="chatWithPanel()" x-ref="chatWithPanelInner"
+             x-init="$nextTick(() => { $el._cwPanel = $data; if (window._experimentPage) window._experimentPage.chatWithPanelRef = $data; })"
+             class="flex flex-col" style="height:400px;">
+          {% include 'partials/chatwith-panel.html' %}
         </div>
 
       </div>
