@@ -12,7 +12,7 @@
 
   <!-- Main viewer -->
   <template x-if="state === 'ready'">
-    <div class="flex flex-col h-[calc(100vh-8rem)]">
+    <div class="flex flex-col h-[calc(100dvh-8rem)]">
 
       <!-- Sticky header: session info + stats -->
       <div class="flex items-center gap-3 px-2 py-2 bg-gray-800 rounded-t-lg border-b border-gray-700 flex-shrink-0 flex-wrap">
@@ -149,8 +149,13 @@
             <textarea x-model="inputText"
                       x-ref="messageInput"
                       @keydown.ctrl.enter.prevent="sendMessage()"
+                      @input="$event.target.style.height='auto'; $event.target.style.height=Math.min($event.target.scrollHeight,160)+'px'"
                       placeholder="Send a message… (Ctrl+Enter to send)"
-                      rows="2"
+                      rows="1"
+                      autocomplete="off"
+                      autocorrect="off"
+                      autocapitalize="sentences"
+                      enterkeyhint="send"
                       class="flex-1 bg-gray-700 text-gray-100 px-3 py-2 rounded-lg text-sm
                              resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
 
