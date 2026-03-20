@@ -963,6 +963,19 @@ def cmd_note_update(args):
 
     db.commit()
     print(f"  ✓ Note updated to version {next_version} (src:{source_id[:12]})")
+
+    # Integrate specified comments
+    for cid in (args.integrate_ids or []):
+        row = db.conn.execute(
+            "SELECT id FROM note_comments WHERE (id = ? OR id LIKE ?) AND source_id = ?",
+            (cid, f"{cid}%", source_id),
+        ).fetchone()
+        if row:
+            db.integrate_comment(row["id"])
+            print(f"  ✓ Comment {row['id'][:12]} integrated")
+        else:
+            print(f"  ⚠ Comment {cid} not found on this note", file=sys.stderr)
+
     db.close()
 
 
@@ -1568,6 +1581,7 @@ def main():
     p_note.add_argument("--project", "-p", help="Project to tag with")
     p_note.add_argument("--tags", "-t", help="Comma-separated tags")
     p_note.add_argument("--author", help="Who wrote this (default: user)")
+    p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
     p_note.set_defaults(func=cmd_note_router)
 
     # comment (handles both add and integrate)
