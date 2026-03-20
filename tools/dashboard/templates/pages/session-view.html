@@ -115,19 +115,53 @@
 
       <!-- Input bar -->
       <template x-if="isLive && _tmuxSession">
-        <div class="flex gap-2 px-2 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0">
-          <input type="text"
-                 x-model="inputText"
-                 @keydown.enter="sendMessage()"
-                 placeholder="Send a message..."
-                 class="flex-1 bg-gray-700 text-gray-100 px-3 py-2 rounded-lg text-sm
-                        focus:outline-none focus:ring-2 focus:ring-indigo-500">
-          <button @click="sendMessage()"
-                  :disabled="!inputText.trim() || sending"
-                  class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm
-                         disabled:opacity-50 disabled:cursor-not-allowed">
-            <span x-text="sending ? '...' : 'Send'"></span>
-          </button>
+        <div class="flex flex-col gap-1 px-2 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0">
+
+          <!-- Upload preview thumbnail -->
+          <template x-if="uploadPreview">
+            <div class="flex items-center gap-2 px-1">
+              <img :src="uploadPreview" class="h-12 w-12 object-cover rounded border border-gray-600">
+              <span class="text-xs text-gray-400 truncate max-w-[200px]" x-text="uploadFilename"></span>
+              <button @click="clearUpload()" class="text-gray-500 hover:text-gray-300 ml-auto text-xs">✕</button>
+            </div>
+          </template>
+
+          <div class="flex gap-2 items-end">
+            <!-- Hidden file input -->
+            <input type="file"
+                   x-ref="fileInput"
+                   accept="image/*,*/*"
+                   class="hidden"
+                   @change="onFileSelected($event)">
+
+            <!-- Upload button -->
+            <button @click="$refs.fileInput.click()"
+                    :disabled="uploading"
+                    title="Attach file"
+                    class="flex-shrink-0 min-w-[44px] min-h-[44px] flex items-center justify-center
+                           bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-lg
+                           disabled:opacity-50 disabled:cursor-not-allowed">
+              <span x-show="!uploading">📎</span>
+              <span x-show="uploading" class="text-sm animate-spin">⟳</span>
+            </button>
+
+            <!-- Message textarea -->
+            <textarea x-model="inputText"
+                      x-ref="messageInput"
+                      @keydown.ctrl.enter.prevent="sendMessage()"
+                      placeholder="Send a message… (Ctrl+Enter to send)"
+                      rows="2"
+                      class="flex-1 bg-gray-700 text-gray-100 px-3 py-2 rounded-lg text-sm
+                             resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+
+            <!-- Send button -->
+            <button @click="sendMessage()"
+                    :disabled="(!inputText.trim() && !uploadPath) || sending"
+                    class="flex-shrink-0 px-4 min-h-[44px] bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm
+                           disabled:opacity-50 disabled:cursor-not-allowed self-end">
+              <span x-text="sending ? '...' : 'Send'"></span>
+            </button>
+          </div>
         </div>
       </template>
 
