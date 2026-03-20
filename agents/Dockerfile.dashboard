@@ -1,34 +1,15 @@
 # Dashboard Agent Container
-# Extends base autonomy-agent with agent-browser + Chrome for self-validation.
-# Dashboard beads can open the running dashboard, snapshot DOM, screenshot, diff.
+# Extends base autonomy-agent with Python deps for dashboard API contract tests.
+# Chrome/agent-browser/tmux are already in the base image.
 #
 # Build:  ./agents/build.sh --dashboard
 # Run:    see agents/launch.sh (dispatcher routes dashboard-labeled beads here)
 
 FROM autonomy-agent
 
-# ── Chrome system dependencies (24 missing shared libs from ldd) ──
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libglib2.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 \
-        libxfixes3 libxrandr2 libxkbcommon0 libgbm1 libcairo2 libpango-1.0-0 \
-        libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libdbus-1-3 libcups2 \
-        libnss3 libnspr4 libasound2t64 npm tmux \
-    && rm -rf /var/lib/apt/lists/*
-
 # ── Dashboard Python deps (Starlette TestClient / API contract tests) ──
+USER root
 RUN pip install --break-system-packages --no-cache-dir \
         starlette httpx uvicorn jinja2 pymysql sse-starlette
-
-# ── agent-browser + Chrome binary ──
-RUN npm install -g agent-browser \
-    && su agent -c "agent-browser install"
-
-# ── Pre-configure agent-browser for container use ──
-RUN mkdir -p /home/agent/.agent-browser \
-    && echo '{"colorScheme":"dark","screenshotFormat":"png","screenshotDir":"/tmp/screenshots","args":"--no-sandbox,--disable-dev-shm-usage"}' \
-       > /home/agent/.agent-browser/config.json \
-    && chown -R agent:agent /home/agent/.agent-browser
-
 USER agent
 ENTRYPOINT ["claude", "--dangerously-skip-permissions"]

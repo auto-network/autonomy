@@ -41,6 +41,22 @@ bd search "query"                 # Search beads
 bd dep tree <id>                  # View dependency tree
 ```
 
+## Browser (`agent-browser`)
+
+Headless Chrome for visual validation. Available in all containers.
+
+```
+agent-browser open <url> --ignore-https-errors   # Open page
+agent-browser wait --load networkidle             # Wait for load
+agent-browser snapshot -i                         # DOM snapshot with refs
+agent-browser screenshot --annotate               # Visual screenshot
+agent-browser eval "js expression"                # Execute JS
+agent-browser close                               # Close session
+```
+
+Dashboard at `https://localhost:8080` (self-signed TLS, use `--ignore-https-errors` on `open`).
+See `agents/shared/dashboard/agent-browser-primer.md` for patterns and gotchas.
+
 ## Decision File
 
 When you complete your work, write a decision file to `/workspace/output/decision.json`:
