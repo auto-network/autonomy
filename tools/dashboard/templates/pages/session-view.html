@@ -114,7 +114,7 @@
       </div>
 
       <!-- Input bar -->
-      <template x-if="isLive">
+      <template x-if="isLive && _tmuxSession">
         <div class="flex gap-2 px-2 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0">
           <input type="text"
                  x-model="inputText"
