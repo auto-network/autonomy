@@ -36,7 +36,7 @@ import importlib
 
 import re
 
-from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running
+from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running, get_consecutive_failures
 from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
 from agents.session_launcher import launch_session
 
@@ -398,6 +398,9 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
         elif status == "FAILED":
             _retry_bd(["update", bead_id, "-s", "open"])
             run_bd(["update", bead_id, "--append-notes", f"Failed: {reason}"])
+        elif status == "MERGE_FAILED":
+            _retry_bd(["update", bead_id, "-s", "open"])
+            run_bd(["update", bead_id, "--append-notes", f"Merge failed (will retry): {reason}"])
         else:
             # Unknown status — log and release
             _retry_bd(["update", bead_id, "-s", "open"])
@@ -976,9 +979,11 @@ def process_decision(dispatch_result: DispatchResult) -> None:
             print(f"  Merge: FAILED — {merge_err}")
             run_bd(["update", bead_id, "--append-notes",
                     f"merge failed on {dispatch_result.branch}: {merge_err}"])
-            # Do NOT change status to BLOCKED — close the bead regardless.
-            # The code is on the branch and can be manually merged later.
-            # Leaving status as DONE prevents the infinite re-dispatch loop.
+            status = "MERGE_FAILED"
+            reason = f"Merge conflict (will retry): {merge_err[:200]}"
+            # Update decision so _record_run picks up the effective status
+            decision["status"] = status
+            decision["reason"] = reason
 
     # Release the bead with appropriate state
     release_bead(bead_id, status, reason)
@@ -1271,8 +1276,11 @@ def _record_run(agent: RunningAgent, result: DispatchResult) -> None:
         reason = decision.get("reason", "No decision file")
 
         # Classify agent-side failures (non-zero exit, no decision, or decision != DONE)
+        # MERGE_FAILED is a dispatcher-side issue, not an agent failure — skip classification
         fc: str | None = None
-        if result.exit_code != 0 or not result.decision or status != "DONE":
+        if status not in ("DONE", "MERGE_FAILED") and (
+            result.exit_code != 0 or not result.decision
+        ):
             duration = time.time() - agent.started_at
             fc = classify_failure(agent.output_dir, duration)
 
@@ -1743,6 +1751,23 @@ def dispatch_cycle(
 
         if dashboard_paused and "dashboard" in bead_labels:
             print(f"  Skipping {bead_id}: dashboard dispatch paused (smoke test failure)")
+            continue
+
+        # Circuit breaker: skip beads with too many consecutive failures
+        agent_fails, merge_fails = get_consecutive_failures(bead_id)
+        if agent_fails >= 3:
+            print(f"  Circuit breaker: {bead_id} has {agent_fails} consecutive "
+                  f"agent failures, blocking")
+            run_bd(["set-state", bead_id, "readiness=blocked",
+                    "--reason", "Circuit breaker: 3 consecutive failures "
+                    "— needs human review"])
+            continue
+        if merge_fails >= 5:
+            print(f"  Circuit breaker: {bead_id} has {merge_fails} consecutive "
+                  f"merge failures, blocking")
+            run_bd(["set-state", bead_id, "readiness=blocked",
+                    "--reason", "Circuit breaker: 5 consecutive merge failures "
+                    "— needs human review"])
             continue
 
         if config.dry_run:

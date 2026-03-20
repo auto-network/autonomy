@@ -515,3 +515,87 @@ def test_read_jsonl_incremental_no_new_data(tmp_path):
     assert token_delta == 0
     assert new_offset == file_size
     assert last_activity is None
+
+
+# ── get_consecutive_failures tests ─────────────────────────────
+
+
+def _insert_run_simple(bead_id: str, status: str, started_at: float):
+    """Helper: insert a minimal completed run row."""
+    run_id = f"{bead_id}-{int(started_at)}"
+    db.insert_run(
+        run_id=run_id, bead_id=bead_id,
+        started_at=started_at, completed_at=started_at + 60,
+        status=status, reason=f"test {status}",
+        decision={"status": status}, commit_hash="", branch="",
+        branch_base="", image="", container_name="",
+        exit_code=0 if status == "DONE" else 1, output_dir="",
+    )
+
+
+def test_consecutive_failures_empty():
+    """No runs at all returns (0, 0)."""
+    _use_temp_db()
+    assert db.get_consecutive_failures("auto-xxx") == (0, 0)
+
+
+def test_consecutive_failures_all_done():
+    """All DONE runs returns (0, 0)."""
+    _use_temp_db()
+    _insert_run_simple("auto-ok", "DONE", 1000)
+    _insert_run_simple("auto-ok", "DONE", 2000)
+    assert db.get_consecutive_failures("auto-ok") == (0, 0)
+
+
+def test_consecutive_failures_agent_failures():
+    """Counts FAILED and BLOCKED as agent failures."""
+    _use_temp_db()
+    _insert_run_simple("auto-af", "DONE", 1000)
+    _insert_run_simple("auto-af", "FAILED", 2000)
+    _insert_run_simple("auto-af", "BLOCKED", 3000)
+    _insert_run_simple("auto-af", "FAILED", 4000)
+    assert db.get_consecutive_failures("auto-af") == (3, 0)
+
+
+def test_consecutive_failures_stops_at_done():
+    """Counter resets at first DONE (scanning most recent first)."""
+    _use_temp_db()
+    _insert_run_simple("auto-sd", "FAILED", 1000)
+    _insert_run_simple("auto-sd", "DONE", 2000)
+    _insert_run_simple("auto-sd", "FAILED", 3000)
+    _insert_run_simple("auto-sd", "FAILED", 4000)
+    # Most recent first: FAILED(4000), FAILED(3000), DONE(2000) → stops
+    assert db.get_consecutive_failures("auto-sd") == (2, 0)
+
+
+def test_consecutive_failures_merge_failures():
+    """MERGE_FAILED counted separately from agent failures."""
+    _use_temp_db()
+    _insert_run_simple("auto-mf", "MERGE_FAILED", 1000)
+    _insert_run_simple("auto-mf", "MERGE_FAILED", 2000)
+    _insert_run_simple("auto-mf", "FAILED", 3000)
+    _insert_run_simple("auto-mf", "MERGE_FAILED", 4000)
+    assert db.get_consecutive_failures("auto-mf") == (1, 3)
+
+
+def test_consecutive_failures_merge_does_not_count_as_agent():
+    """MERGE_FAILED does not increment agent failure counter."""
+    _use_temp_db()
+    _insert_run_simple("auto-mn", "FAILED", 1000)
+    _insert_run_simple("auto-mn", "MERGE_FAILED", 2000)
+    _insert_run_simple("auto-mn", "FAILED", 3000)
+    # Most recent: FAILED, MERGE_FAILED, FAILED → 2 agent, 1 merge
+    assert db.get_consecutive_failures("auto-mn") == (2, 1)
+
+
+def test_consecutive_failures_skips_running():
+    """RUNNING rows are ignored in the count."""
+    _use_temp_db()
+    _insert_run_simple("auto-rn", "FAILED", 1000)
+    _insert_run_simple("auto-rn", "FAILED", 2000)
+    # Insert a RUNNING row
+    db.insert_launch_run(
+        run_id="auto-rn-3000", bead_id="auto-rn", started_at=3000,
+        branch="", branch_base="", image="", container_name="", output_dir="",
+    )
+    assert db.get_consecutive_failures("auto-rn") == (2, 0)
