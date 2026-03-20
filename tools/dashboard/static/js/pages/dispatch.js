@@ -142,12 +142,43 @@
       active: [],
       waiting: [],
       blocked: [],
+      paused: {},          // { label: bool } — plain object for Alpine reactivity
       _dispatchHandler: null,
+      _pauseHandler: null,
 
       applyDispatch(data) {
         this.waiting = (data.waiting || []).map(_mapWaiting);
         this.blocked = (data.blocked || []).map(_mapBlocked);
         this.active  = (data.active  || []).map(_mapActive);
+        if (data.paused != null) {
+          this.paused = { ...data.paused };
+        }
+      },
+
+      applyPause(pauseState) {
+        this.paused = { ...pauseState };
+      },
+
+      async togglePause(label) {
+        const nowPaused = !this.paused[label];
+        // Optimistic UI update
+        this.paused = { ...this.paused, [label]: nowPaused };
+        try {
+          const resp = await fetch('/api/dispatch/pause', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label, paused: nowPaused }),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            this.paused = { ...data.paused };
+          } else {
+            // Revert on failure
+            this.paused = { ...this.paused, [label]: !nowPaused };
+          }
+        } catch (_) {
+          this.paused = { ...this.paused, [label]: !nowPaused };
+        }
       },
 
       // Alpine lifecycle — called automatically when the component initialises.
@@ -158,9 +189,11 @@
         if (window._sseCache && window._sseCache.dispatch) {
           this.applyDispatch(window._sseCache.dispatch);
         }
-        // Register for live updates via the shared persistent connection.
+        // Register for live dispatch + pause updates via the shared persistent connection.
         this._dispatchHandler = data => this.applyDispatch(data);
+        this._pauseHandler = data => this.applyPause(data);
         registerHandler('dispatch', this._dispatchHandler);
+        registerHandler('dispatch_pause', this._pauseHandler);
       },
 
       destroy() {
@@ -168,6 +201,10 @@
         if (this._dispatchHandler) {
           unregisterHandler('dispatch', this._dispatchHandler);
           this._dispatchHandler = null;
+        }
+        if (this._pauseHandler) {
+          unregisterHandler('dispatch_pause', this._pauseHandler);
+          this._pauseHandler = null;
         }
       },
     }));
