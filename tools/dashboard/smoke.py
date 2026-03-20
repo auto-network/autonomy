@@ -168,6 +168,49 @@ def run_tier1(base_url: str) -> dict:
         return True
     checks.append(_check("session_send_unknown_session", check_session_send_unknown_session))
 
+    # 12. SSE delivers nav event within 10 seconds
+    def check_sse_nav_event():
+        import http.client
+        import ssl
+        from urllib.parse import urlparse
+        parsed = urlparse(base_url)
+        use_ssl = parsed.scheme == "https"
+        host = parsed.hostname or "localhost"
+        port = parsed.port or (443 if use_ssl else 80)
+        if use_ssl:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=12)
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=12)
+        try:
+            conn.request("GET", "/api/events", headers={"Accept": "text/event-stream"})
+            resp = conn.getresponse()
+            if resp.status != 200:
+                return f"HTTP {resp.status}"
+            deadline = time.monotonic() + 10
+            buf = b""
+            while time.monotonic() < deadline:
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                if b"event: nav" in buf:
+                    for line in buf.decode(errors="replace").split("\n"):
+                        if line.startswith("data:"):
+                            data = json.loads(line[5:].strip())
+                            expected = {"open_beads", "running_agents", "active_sessions", "terminal_count", "today_done"}
+                            missing = expected - set(data.keys())
+                            if missing:
+                                return f"nav event missing fields: {missing}"
+                            return True
+                    return True
+            return "no nav event received within 10s"
+        finally:
+            conn.close()
+    checks.append(_check("sse_nav_event", check_sse_nav_event))
+
     passed = all(c["pass"] for c in checks)
     for c in checks:
         status = "PASS" if c["pass"] else "FAIL"
@@ -246,6 +289,27 @@ def run_tier2(base_url: str) -> dict:
         detail = f" — {page_detail}" if page_detail else ""
         print(f"  [{status}] {page}{detail}", file=sys.stderr)
         page_results.append({"page": page, "pass": page_pass, "detail": page_detail})
+
+    # Nav badge check — open beads page, wait for SSE, check badges render
+    def check_nav_badges():
+        url = f"{base_url}/beads"
+        r = subprocess.run(["agent-browser", "open", url, "--ignore-https-errors"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return f"open failed: {r.stderr.strip()}"
+        # Wait for SSE to deliver nav data (up to 8 seconds)
+        time.sleep(8)
+        r = subprocess.run(
+            ["agent-browser", "eval",
+             'JSON.stringify(Object.fromEntries(Array.from(document.querySelectorAll(".nav-badge")).map(el => [el.id, el.textContent])))'],
+            capture_output=True, text=True, timeout=10,
+        )
+        badges = json.loads(r.stdout.strip())
+        if not badges.get("badge-beads"):
+            return f"badge-beads is empty — SSE not delivering nav data. All badges: {badges}"
+        return True
+
+    page_results.append({"page": "/nav-badges", **_check("nav_badges", check_nav_badges)})
 
     passed = all(p["pass"] for p in page_results)
     return {"pass": passed, "skipped": False, "pages": page_results}

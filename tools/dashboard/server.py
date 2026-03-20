@@ -2598,6 +2598,12 @@ async def api_events(request):
 
 _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
 
+_WATCHER_HELPERS = [
+    "collect_dispatch_data", "get_bead_counts", "count_active_sessions",
+    "count_terminals", "count_today_done", "get_dispatcher_state",
+]
+_watcher_errors: dict[str, str] = {}  # helper_name -> last error string
+
 
 async def _collect_dispatch_data() -> dict:
     """Collect data for the 'dispatch' topic: active, waiting, blocked.
@@ -2728,29 +2734,43 @@ def _count_today_done() -> int:
 
 
 async def _dispatch_watcher():
-    """Background task: poll dispatch state and broadcast to 'dispatch' and 'nav' topics.
+    """Background task: poll dispatch state and broadcast to SSE topics.
 
-    Both topics are derived from the same data collection pass so they always
-    see a consistent snapshot. Nav counts are derived directly from the dispatch
-    lists (running_agents=len(active), approved_waiting=len(waiting),
-    approved_blocked=len(blocked)) plus open_count from get_bead_counts().
-
-    Always collects and broadcasts regardless of subscriber count — this keeps
-    the EventBus cache warm so newly-connecting clients receive cached data
-    immediately on subscribe().
+    Uses return_exceptions=True so one failing helper doesn't kill the rest.
+    Logs errors on state change only (first failure / recovery).
     """
     while True:
         try:
-            dispatch_data, counts, active_sessions, terminal_count, today_done, dispatcher_state = (
-                await asyncio.gather(
-                    _collect_dispatch_data(),
-                    asyncio.to_thread(dao_beads.get_bead_counts),
-                    asyncio.to_thread(_count_active_sessions),
-                    asyncio.to_thread(_count_terminals),
-                    asyncio.to_thread(_count_today_done),
-                    asyncio.to_thread(_get_dispatcher_state),
-                )
+            results = await asyncio.gather(
+                _collect_dispatch_data(),
+                asyncio.to_thread(dao_beads.get_bead_counts),
+                asyncio.to_thread(_count_active_sessions),
+                asyncio.to_thread(_count_terminals),
+                asyncio.to_thread(_count_today_done),
+                asyncio.to_thread(_get_dispatcher_state),
+                return_exceptions=True,
             )
+
+            # Log per-helper errors on state change (avoid spam)
+            for name, result in zip(_WATCHER_HELPERS, results):
+                if isinstance(result, BaseException):
+                    err_str = f"{type(result).__name__}: {result}"
+                    if _watcher_errors.get(name) != err_str:
+                        logger.error("[dispatch_watcher] %s failed: %s", name, err_str)
+                        _watcher_errors[name] = err_str
+                else:
+                    if name in _watcher_errors:
+                        logger.info("[dispatch_watcher] %s recovered", name)
+                        del _watcher_errors[name]
+
+            # Unpack with safe defaults for failed helpers
+            dispatch_data = results[0] if not isinstance(results[0], BaseException) else {"active": [], "waiting": [], "blocked": [], "paused": {}}
+            counts = results[1] if not isinstance(results[1], BaseException) else {}
+            active_sessions = results[2] if not isinstance(results[2], BaseException) else 0
+            terminal_count = results[3] if not isinstance(results[3], BaseException) else 0
+            today_done = results[4] if not isinstance(results[4], BaseException) else 0
+            dispatcher_state = results[5] if not isinstance(results[5], BaseException) else {"paused": False, "reason": None}
+
             nav_data = {
                 "open_beads": counts.get("open_count", 0),
                 "running_agents": len(dispatch_data["active"]),
@@ -2764,7 +2784,7 @@ async def _dispatch_watcher():
             await event_bus.broadcast("nav", nav_data)
             await event_bus.broadcast("dispatcher_state", dispatcher_state)
         except Exception:
-            pass
+            logger.exception("[dispatch_watcher] unexpected top-level error")
         await asyncio.sleep(_DISPATCH_WATCHER_INTERVAL)
 
 
