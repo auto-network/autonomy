@@ -135,6 +135,30 @@ def cmd_search(args):
     db.close()
 
 
+def _in_container() -> bool:
+    """Fast container detection — /.dockerenv exists in Docker containers."""
+    return Path("/.dockerenv").exists()
+
+
+def _mark_read(source_id: str):
+    """Drop a marker file recording that this source was read in this container session."""
+    if _in_container():
+        marker_dir = Path.home() / ".graph" / "reads"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        (marker_dir / source_id).touch()
+
+
+def _require_read(source_id_prefix: str, label: str):
+    """Gate: refuse to proceed if the agent hasn't read the required note."""
+    if not _in_container():
+        return
+    marker_dir = Path.home() / ".graph" / "reads"
+    if not marker_dir.exists() or not any(marker_dir.glob(f"{source_id_prefix}*")):
+        print(f"REQUIRED READING: {label}", file=sys.stderr)
+        print(f"Run:  graph read {source_id_prefix}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _resolve_source(db, source_arg, first=False):
     """Resolve a source by ID, prefix, or title search. Returns dict or None."""
     source = db.get_source(source_arg)
@@ -185,6 +209,7 @@ def cmd_read(args):
         db.close()
         return
     source = result
+    _mark_read(source["id"])
 
     # Handle version requests for notes
     if version_req is not None:
@@ -903,6 +928,7 @@ def cmd_comment_integrate(args):
 
 def cmd_note_update(args):
     """Update a note with versioned history."""
+    _require_read("bf3a848c", "Agents must read the Note Revision Protocol before updating notes.\n  See: graph://bf3a848c-8b5")
     db = GraphDB(args.db)
 
     # Resolve content
