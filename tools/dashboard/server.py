@@ -1773,7 +1773,25 @@ async def api_upload(request):
     contents = await upload.read()
     dest.write_bytes(contents)
 
-    return JSONResponse({"ok": True, "path": str(dest), "filename": dest.name})
+    host_path = str(dest)
+    agent_path = host_path
+
+    tmux_session = (form.get("tmux_session") or "").strip()
+    if tmux_session:
+        inspect = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", tmux_session],
+            capture_output=True, text=True,
+        )
+        if inspect.returncode == 0 and inspect.stdout.strip() == "true":
+            container_path = f"/tmp/{dest.name}"
+            cp = subprocess.run(
+                ["docker", "cp", host_path, f"{tmux_session}:{container_path}"],
+                capture_output=True, text=True,
+            )
+            if cp.returncode == 0:
+                agent_path = container_path
+
+    return JSONResponse({"ok": True, "path": agent_path, "host_path": host_path, "filename": dest.name})
 
 
 # ── WebSocket Terminal ─────────────────────────────────────────

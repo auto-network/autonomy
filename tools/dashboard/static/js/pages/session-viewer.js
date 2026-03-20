@@ -78,6 +78,7 @@
         try {
           const form = new FormData();
           form.append('file', file);
+          if (this._tmuxSession) form.append('tmux_session', this._tmuxSession);
           const res = await fetch('/api/upload', { method: 'POST', body: form });
           const data = await res.json();
           if (data.ok) {
