@@ -75,6 +75,16 @@
 
       <span class="text-gray-600">|</span>
 
+      <!-- Creator chips -->
+      <div class="flex gap-1">
+        <button :aria-pressed="fCreator === 'librarian'"
+                :class="fCreator === 'librarian' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'"
+                class="px-2 py-0.5 rounded-full text-xs font-medium transition-colors"
+                @click="setCreator('librarian')">📖 Librarian</button>
+      </div>
+
+      <span class="text-gray-600">|</span>
+
       <!-- Labels dropdown -->
       <template x-if="allLabels.length">
         <div class="relative inline-block" @click.outside="labelDropdownOpen = false">
@@ -146,6 +156,12 @@
             <button class="ml-0.5 hover:text-white" @click="fBlocked = ''">&times;</button>
           </span>
         </template>
+        <template x-if="fCreator">
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">
+            <span x-text="'📖 Librarian'"></span>
+            <button class="ml-0.5 hover:text-white" @click="fCreator = ''">&times;</button>
+          </span>
+        </template>
         <template x-if="fEpic">
           <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-900 text-indigo-200 text-xs rounded-full">
             <span x-text="'Epic: ' + (allBeads.find(b => b.id === fEpic)?.title || fEpic)"></span>
@@ -199,7 +215,7 @@
             {key:'id',         label:'ID'},
             {key:'priority',   label:'Pri'},
             {key:'phase',      label:'Phase'},
-            {key:'type',       label:'Type'},
+            {key:'creator',    label:'Creator'},
             {key:'epic',       label:'Epic'},
             {key:'labels',     label:'Labels'},
             {key:'updated_at', label:'Updated'}
@@ -229,14 +245,15 @@
               </label>
             </td>
             <td class="bead-td bead-td-title" @click.stop>
+              <span class="flex-shrink-0" x-text="typeIcon(b.issue_type)"></span>
               <a :href="'/bead/' + b.id" @click.prevent.stop="goToBead(b.id)"
-                 class="hover:text-indigo-300 hover:underline block truncate max-w-[400px]"
+                 class="hover:text-indigo-300 hover:underline truncate max-w-[400px]"
                  x-html="highlightText(b.title || '', terms)"></a>
             </td>
             <td class="bead-td bead-td-id font-mono text-xs text-gray-400" x-text="b.id"></td>
             <td class="bead-td bead-td-priority" x-html="priorityBadgeHtml(b.priority)"></td>
             <td class="bead-td bead-td-phase text-xs" x-text="getPhase(b.labels) || ''"></td>
-            <td class="bead-td bead-td-type text-xs" x-text="b.issue_type || ''"></td>
+            <td class="bead-td bead-td-creator text-xs" x-text="creatorIcon(b.created_by)"></td>
             <td class="bead-td bead-td-epic text-xs text-gray-400 truncate max-w-[120px]"
                 :title="epicTitleMap[getEpicParent(b)] || ''"
                 x-text="epicTitleMap[getEpicParent(b)] || ''"></td>
@@ -292,6 +309,7 @@
               <div class="flex items-center gap-1.5 flex-wrap">
                 <span class="font-mono text-xs text-gray-500" x-text="b.id"></span>
                 <span class="badge" :class="'badge-p' + b.priority" x-text="'P' + b.priority"></span>
+                <span class="text-xs" x-show="creatorIcon(b.created_by)" x-text="creatorIcon(b.created_by)"></span>
                 <template x-for="l in visibleLabels(b)" :key="l">
                   <span class="px-1.5 py-0.5 bg-gray-700 text-gray-300 text-xs rounded" x-text="l"></span>
                 </template>
