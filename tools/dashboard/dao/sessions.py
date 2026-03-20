@@ -46,20 +46,33 @@ def _project_folder_to_path(folder_name: str) -> str:
     return folder_name.replace("-", "/", 1).replace("-", "/")
 
 
+def _write_host_session_meta(jsonl_path: Path, tmux_name: str) -> None:
+    """Persist the matched tmux session name alongside the JSONL file."""
+    meta = jsonl_path.with_suffix(".meta.json")
+    try:
+        meta.write_text(json.dumps({"tmux_session": tmux_name}))
+    except OSError:
+        pass
+
+
 def _enrich_tmux_sessions(entries: list[dict]) -> None:
     """Match entries to live tmux sessions by pane cwd. Sets tmux_session in-place."""
     try:
         result = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}"],
+            ["tmux", "list-panes", "-a", "-F",
+             "#{session_name}\t#{pane_current_path}\t#{pane_start_path}"],
             capture_output=True, text=True, timeout=2,
         )
         if result.returncode != 0:
             return
-        pane_cwds: list[tuple[str, str]] = []
+        pane_cwds: list[tuple[str, str, str]] = []
         for line in result.stdout.strip().split("\n"):
-            if "\t" in line:
-                name, cwd = line.split("\t", 1)
-                pane_cwds.append((name.strip(), cwd.strip()))
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                name = parts[0].strip()
+                current = parts[1].strip()
+                start = parts[2].strip() if len(parts) > 2 else ""
+                pane_cwds.append((name, current, start))
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return
 
@@ -67,11 +80,14 @@ def _enrich_tmux_sessions(entries: list[dict]) -> None:
         if entry.get("tmux_session"):
             continue
         project_path = _project_folder_to_path(entry["project"])
-        for tmux_name, pane_cwd in pane_cwds:
-            if pane_cwd and (
-                pane_cwd == project_path or pane_cwd.startswith(project_path + "/")
-            ):
-                entry["tmux_session"] = tmux_name
+        for tmux_name, current_cwd, start_cwd in pane_cwds:
+            for cwd in (current_cwd, start_cwd):
+                if cwd and (cwd == project_path or cwd.startswith(project_path + "/")):
+                    entry["tmux_session"] = tmux_name
+                    if entry.get("_jsonl_path"):
+                        _write_host_session_meta(entry["_jsonl_path"], tmux_name)
+                    break
+            if entry.get("tmux_session"):
                 break
 
 
@@ -104,7 +120,7 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
                     continue
                 seen_ids.add(sid)
                 latest = _read_latest_msg(jsonl, stat)
-                host_entries.append({
+                entry: dict = {
                     "session_id": sid,
                     "project": jsonl.parent.name,
                     "size_bytes": stat.st_size,
@@ -112,7 +128,18 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
                     "active": age < 60,
                     "latest": latest,
                     "type": "host",
-                })
+                    "_jsonl_path": jsonl,
+                }
+                # Load persisted tmux session name from meta file if present
+                meta_file = jsonl.with_suffix(".meta.json")
+                if meta_file.exists():
+                    try:
+                        meta = json.loads(meta_file.read_text())
+                        if meta.get("tmux_session"):
+                            entry["tmux_session"] = meta["tmux_session"]
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                host_entries.append(entry)
             except OSError:
                 continue
 
@@ -121,8 +148,34 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
 
     # Include if tmux-alive (regardless of idle time) OR recently active
     for entry in host_entries:
-        if entry.get("tmux_session") or entry["age_seconds"] < threshold:
+        tmux = entry.get("tmux_session")
+        if tmux:
+            # Verify the tmux session is still alive
+            try:
+                alive = subprocess.run(
+                    ["tmux", "has-session", "-t", tmux],
+                    capture_output=True,
+                ).returncode == 0
+            except (FileNotFoundError, OSError):
+                alive = False
+            if alive:
+                sessions.append(entry)
+                continue
+            # Dead tmux — clear stale meta so it doesn't block re-match
+            meta_file = entry.get("_jsonl_path")
+            if meta_file is not None:
+                stale = Path(meta_file).with_suffix(".meta.json")
+                try:
+                    stale.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            entry.pop("tmux_session", None)
+        if entry["age_seconds"] < threshold:
             sessions.append(entry)
+
+    # Strip internal-only fields before returning
+    for s in sessions:
+        s.pop("_jsonl_path", None)
 
     # ── Container sessions: data/agent-runs/*/sessions/ ────────────────────
     agent_runs = Path(__file__).parents[3] / "data" / "agent-runs"
