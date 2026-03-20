@@ -1400,6 +1400,8 @@ def main():
     p_runs = dispatch_sub.add_parser("runs", help="Recent run history")
     p_runs.add_argument("--running", action="store_true", help="Only active runs")
     p_runs.add_argument("--failed", action="store_true", help="Only failures")
+    p_runs.add_argument("--completed", action="store_true", help="Only completed (DONE) runs")
+    p_runs.add_argument("--primer", action="store_true", help="Rich per-run output with scores, merge state, etc.")
     p_runs.add_argument("--limit", type=int, default=20, help="Max results (default 20)")
     p_runs.add_argument("--json", action="store_true", help="Output as JSON")
     p_runs.set_defaults(func=cmd_dispatch_runs)
