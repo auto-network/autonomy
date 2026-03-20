@@ -1904,6 +1904,7 @@ async def ws_terminal(websocket: WebSocket):
                 detach=False,
                 image="autonomy-agent:dashboard",
                 metadata={"tmux_session": tmux_name},
+                global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
             )
             if launched:
                 cmd_str = launched
