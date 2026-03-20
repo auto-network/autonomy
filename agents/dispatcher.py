@@ -36,7 +36,11 @@ import importlib
 
 import re
 
-from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running, get_consecutive_failures
+from agents.dispatch_db import (
+    init_db, insert_run, insert_launch_run, update_live_stats,
+    get_currently_running, get_consecutive_failures,
+    set_dispatcher_paused, is_paused as db_is_paused, get_pause_reason,
+)
 from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
 from agents.session_launcher import launch_session
 
@@ -1284,6 +1288,21 @@ def _record_run(agent: RunningAgent, result: DispatchResult) -> None:
             duration = time.time() - agent.started_at
             fc = classify_failure(agent.output_dir, duration)
 
+        # Auth failures are non-retryable — pause the entire dispatcher immediately
+        if fc == "auth":
+            pause_reason = {
+                "reason": "auth",
+                "paused_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "bead_id": agent.bead_id,
+                "message": reason[:200],
+            }
+            set_dispatcher_paused(pause_reason)
+            print(
+                f"  AUTH FAILURE — dispatcher paused. "
+                f"Resume via Dashboard or POST /api/dispatch/resume",
+                file=sys.stderr,
+            )
+
         insert_run(
             run_id=run_id,
             bead_id=agent.bead_id,
@@ -1675,6 +1694,13 @@ def dispatch_cycle(
 
     # ── Phase 2: Poll running librarian agents ─────────────────
     poll_and_collect_librarians(running_librarians)
+
+    # ── Pause gate: auth failure halts all new launches ────────
+    if db_is_paused():
+        reason = get_pause_reason() or {}
+        print(f"  PAUSED ({reason.get('reason', '?')}): skipping new launches. "
+              f"Resume via Dashboard or POST /api/dispatch/resume")
+        return 0
 
     # ── Phase 3: Launch new bead agents ─────────────────────────
     dispatched = 0
