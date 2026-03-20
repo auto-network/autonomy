@@ -1102,8 +1102,33 @@ function _updateScreenshotStatus(expId, msg) {
   }
 }
 
+/**
+ * Build screenshot API URL, optionally including tmux_session for two-send injection.
+ */
+function _screenshotUrl(expId, sessionName) {
+  let url = `/api/experiments/${expId}/screenshot`;
+  if (sessionName) url += `?tmux_session=${encodeURIComponent(sessionName)}`;
+  return url;
+}
+
+/**
+ * Handle screenshot response — update status and trigger panel indicator.
+ */
+function _handleScreenshotResponse(expId, data) {
+  const now = new Date().toLocaleTimeString();
+  if (data.injected) {
+    _updateScreenshotStatus(expId, `Screenshot injected ${now}`);
+    // Show indicator in the Chat With panel
+    if (window._experimentPage && window._experimentPage.chatWithPanelRef) {
+      window._experimentPage.chatWithPanelRef.showScreenshotInjected();
+    }
+  } else {
+    _updateScreenshotStatus(expId, `Screenshot saved ${now}`);
+  }
+}
+
 /** Grab a frame from the active display stream and POST to server. */
-async function captureTabScreenshot(expId) {
+async function captureTabScreenshot(expId, sessionName) {
   if (!_captureVideo || !_displayStream) return;
   const track = _displayStream.getVideoTracks()[0];
   if (!track || track.readyState !== 'live') return;
@@ -1119,14 +1144,14 @@ async function captureTabScreenshot(expId) {
   const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
   if (!blob) return;
   try {
-    const res = await fetch(`/api/experiments/${expId}/screenshot`, {
+    const res = await fetch(_screenshotUrl(expId, sessionName), {
       method: 'POST',
       headers: { 'Content-Type': 'image/png' },
       body: blob,
     });
     if (res.ok) {
-      const now = new Date().toLocaleTimeString();
-      _updateScreenshotStatus(expId, `Screenshot saved ${now}`);
+      const data = await res.json();
+      _handleScreenshotResponse(expId, data);
     }
   } catch (e) {
     console.warn('[screenshot] Upload failed:', e.message);
@@ -1151,7 +1176,7 @@ async function _ensureHtml2Canvas(doc, win) {
  * Works on mobile (iOS Safari) where getDisplayMedia is unavailable.
  * Returns true on success, false on failure.
  */
-async function _captureViaIframeHtml2Canvas(expId) {
+async function _captureViaIframeHtml2Canvas(expId, sessionName) {
   const iframe = document.querySelector('iframe.exp-variant-iframe[data-variant]');
   if (!iframe) return false;
   try {
@@ -1165,14 +1190,14 @@ async function _captureViaIframeHtml2Canvas(expId) {
     });
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
     if (!blob) return false;
-    const res = await fetch(`/api/experiments/${expId}/screenshot`, {
+    const res = await fetch(_screenshotUrl(expId, sessionName), {
       method: 'POST',
       headers: { 'Content-Type': 'image/png' },
       body: blob,
     });
     if (res.ok) {
-      const now = new Date().toLocaleTimeString();
-      _updateScreenshotStatus(expId, `Screenshot saved ${now}`);
+      const data = await res.json();
+      _handleScreenshotResponse(expId, data);
     }
     return true;
   } catch (e) {
@@ -1182,9 +1207,9 @@ async function _captureViaIframeHtml2Canvas(expId) {
 }
 
 /** Fallback: capture visible page using html2canvas (same-origin, no getDisplayMedia needed). */
-async function _captureWithHtml2Canvas(expId) {
+async function _captureWithHtml2Canvas(expId, sessionName) {
   // Try iframe-based capture first (works on mobile where parent can't see into iframes)
-  if (await _captureViaIframeHtml2Canvas(expId)) return;
+  if (await _captureViaIframeHtml2Canvas(expId, sessionName)) return;
   // Fall back to parent-page capture
   try {
     const h2c = await _ensureHtml2Canvas(document, window);
@@ -1193,14 +1218,14 @@ async function _captureWithHtml2Canvas(expId) {
     });
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
     if (!blob) return;
-    const res = await fetch(`/api/experiments/${expId}/screenshot`, {
+    const res = await fetch(_screenshotUrl(expId, sessionName), {
       method: 'POST',
       headers: { 'Content-Type': 'image/png' },
       body: blob,
     });
     if (res.ok) {
-      const now = new Date().toLocaleTimeString();
-      _updateScreenshotStatus(expId, `Screenshot (fallback) saved ${now}`);
+      const data = await res.json();
+      _handleScreenshotResponse(expId, data);
     }
   } catch (e) {
     console.warn('[screenshot] html2canvas fallback failed:', e.message);
@@ -1213,10 +1238,10 @@ async function _captureWithHtml2Canvas(expId) {
  * Uses active stream if available; otherwise tries to acquire one (user gesture
  * helps on some browsers). Falls back to html2canvas if stream cannot be obtained.
  */
-async function manualCaptureScreenshot(expId) {
+async function manualCaptureScreenshot(expId, sessionName) {
   _updateScreenshotStatus(expId, 'Capturing...');
   if (_displayStream) {
-    await captureTabScreenshot(expId);
+    await captureTabScreenshot(expId, sessionName);
     return;
   }
   // Try to acquire stream via user gesture
@@ -1224,12 +1249,12 @@ async function manualCaptureScreenshot(expId) {
     await initDisplayCapture(expId);
     if (_displayStream) {
       await new Promise(r => setTimeout(r, 300)); // let video initialize
-      await captureTabScreenshot(expId);
+      await captureTabScreenshot(expId, sessionName);
       return;
     }
   } catch (e) { /* fall through */ }
   // Fall back to html2canvas
-  await _captureWithHtml2Canvas(expId);
+  await _captureWithHtml2Canvas(expId, sessionName);
 }
 
 async function renderExperiment(expId) {

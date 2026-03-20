@@ -1,0 +1,154 @@
+{# Chat With panel — rich message feed + multimodal input bar.
+   Replaces xterm.js terminal for Chat With sessions on experiment pages.
+   Include inside a parent x-data scope that initializes chatWithPanel(). #}
+
+<!-- Scrollable entries -->
+<div class="flex-1 overflow-y-auto px-2 py-3 space-y-3" x-ref="cwEntriesContainer"
+     @scroll="onScroll()">
+
+  <!-- Waiting state — shown while JSONL hasn't delivered entries yet -->
+  <template x-if="state === 'waiting' && entries.length === 0">
+    <div class="text-gray-500 text-xs text-center py-4">Connecting to session...</div>
+  </template>
+
+  <template x-for="(entry, idx) in entries" :key="idx">
+    <div class="live-entry"
+         :class="{
+           'live-entry-user': entry.type === 'user',
+           'live-entry-assistant': entry.type === 'assistant_text',
+           'live-entry-tool': entry.type === 'tool_use' || entry.type === 'tool_result',
+           'live-entry-thinking': entry.type === 'thinking',
+         }">
+
+      <!-- User message -->
+      <template x-if="entry.type === 'user'">
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-xs text-blue-400 font-semibold">USER</span>
+            <span class="live-entry-time" x-text="formatTime(entry.timestamp)"></span>
+          </div>
+          <div class="text-sm text-gray-300" x-text="entry.content || ''"></div>
+        </div>
+      </template>
+
+      <!-- Assistant text (markdown) -->
+      <template x-if="entry.type === 'assistant_text'">
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-xs text-indigo-400 font-semibold">ASSISTANT</span>
+            <span class="live-entry-time" x-text="formatTime(entry.timestamp)"></span>
+          </div>
+          <div class="text-sm" x-markdown="entry.content || ''"></div>
+        </div>
+      </template>
+
+      <!-- Tool use (collapsible) -->
+      <template x-if="entry.type === 'tool_use'">
+        <details class="text-sm">
+          <summary class="live-tool-toggle text-purple-400 text-xs font-mono cursor-pointer select-none min-h-[44px] flex items-center">
+            <strong x-text="entry.tool_name || ''"></strong>
+            <span class="ml-1 text-gray-400" x-text="entry.tool_headline || ''"></span>
+            <span class="live-entry-time ml-2" x-text="formatTime(entry.timestamp)"></span>
+          </summary>
+          <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-32 overflow-y-auto bg-gray-800 rounded p-2"
+               x-text="entry.content || ''"></pre>
+        </details>
+      </template>
+
+      <!-- Tool result (collapsible) -->
+      <template x-if="entry.type === 'tool_result'">
+        <details class="text-sm">
+          <summary class="live-tool-toggle text-gray-500 text-xs font-mono cursor-pointer select-none min-h-[44px] flex items-center">
+            <span x-text="toolLabel(entry.tool_id)"></span>
+            <span class="text-gray-600 ml-1" x-text="(entry.content || '').slice(0, 80).replace(/\n/g, ' ')"></span>
+            <span class="live-entry-time ml-2" x-text="formatTime(entry.timestamp)"></span>
+          </summary>
+          <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-48 overflow-y-auto bg-gray-800 rounded p-2"
+               x-text="entry.content || ''"></pre>
+        </details>
+      </template>
+
+      <!-- Thinking (collapsed by default) -->
+      <template x-if="entry.type === 'thinking'">
+        <details class="text-sm">
+          <summary class="live-tool-toggle text-gray-600 text-xs min-h-[44px] flex items-center">
+            thinking...
+            <span class="live-entry-time ml-2" x-text="formatTime(entry.timestamp)"></span>
+          </summary>
+          <div class="text-xs text-gray-500 mt-1 italic" x-text="entry.content || ''"></div>
+        </details>
+      </template>
+
+    </div>
+  </template>
+
+  <!-- Resume auto-scroll button -->
+  <button x-show="!autoScroll && entries.length > 0"
+          @click="resumeScroll()"
+          class="live-resume-btn" style="display:block;">
+    Resume auto-scroll
+  </button>
+</div>
+
+<!-- Screenshot injected indicator -->
+<div x-show="screenshotInjected" x-transition
+     class="px-2 py-1 bg-green-900/50 text-green-400 text-xs text-center flex-shrink-0">
+  Screenshot injected into agent context
+</div>
+
+<!-- Input bar (shown when tmux session is known and session is live) -->
+<template x-if="isLive && _tmuxSession">
+  <div class="flex flex-col gap-1 px-2 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0">
+
+    <!-- Upload preview thumbnail -->
+    <template x-if="uploadPreview">
+      <div class="flex items-center gap-2 px-1">
+        <img :src="uploadPreview" class="h-12 w-12 object-cover rounded border border-gray-600">
+        <span class="text-xs text-gray-400 truncate max-w-[200px]" x-text="uploadFilename"></span>
+        <button @click="clearUpload()" class="text-gray-500 hover:text-gray-300 ml-auto text-xs">&times;</button>
+      </div>
+    </template>
+
+    <div class="flex gap-2 items-end">
+      <!-- Hidden file input -->
+      <input type="file"
+             x-ref="cwFileInput"
+             accept="image/*,*/*"
+             class="hidden"
+             @change="onFileSelected($event)">
+
+      <!-- Upload button -->
+      <button @click="$refs.cwFileInput.click()"
+              :disabled="uploading"
+              title="Attach file"
+              class="flex-shrink-0 min-w-[44px] min-h-[44px] flex items-center justify-center
+                     bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-lg
+                     disabled:opacity-50 disabled:cursor-not-allowed">
+        <span x-show="!uploading">&#x1F4CE;</span>
+        <span x-show="uploading" class="text-sm animate-spin">&#x27F3;</span>
+      </button>
+
+      <!-- Message textarea -->
+      <textarea x-model="inputText"
+                x-ref="cwMessageInput"
+                @keydown.ctrl.enter.prevent="sendMessage()"
+                @input="$event.target.style.height='auto'; $event.target.style.height=Math.min($event.target.scrollHeight,160)+'px'"
+                placeholder="Send a message... (Ctrl+Enter to send)"
+                rows="1"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="sentences"
+                enterkeyhint="send"
+                class="flex-1 bg-gray-700 text-gray-100 px-3 py-2 rounded-lg text-sm
+                       resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+
+      <!-- Send button -->
+      <button @click="sendMessage()"
+              :disabled="(!inputText.trim() && !uploadPath) || sending"
+              class="flex-shrink-0 px-4 min-h-[44px] bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm
+                     disabled:opacity-50 disabled:cursor-not-allowed self-end">
+        <span x-text="sending ? '...' : 'Send'"></span>
+      </button>
+    </div>
+  </div>
+</template>
