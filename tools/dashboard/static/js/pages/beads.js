@@ -776,6 +776,8 @@
 
       clearSelection() { this.selected = {}; },
 
+      goToBead(id) { navigateTo('/bead/' + id); },
+
       // Tree expand/collapse
       _initTreeOpen() {
         const o = {};
@@ -813,6 +815,19 @@
       phaseBadgeClass(phase) {
         const m = { idea: 'bg-gray-600 text-gray-200', draft: 'bg-blue-900 text-blue-300', specified: 'bg-indigo-900 text-indigo-300', approved: 'bg-green-900 text-green-300' };
         return m[phase] || 'bg-gray-700 text-gray-300';
+      },
+
+      async bulkApprove() {
+        const ids = Object.keys(this.selected);
+        if (!ids.length) return;
+        const results = await Promise.all(
+          ids.map(id => fetch(`/api/bead/${id}/approve`, { method: 'POST' }).then(r => r.json()))
+        );
+        const failed = results.filter(r => !r.ok);
+        if (failed.length) alert(`${failed.length} of ${ids.length} failed to approve`);
+        const fresh = await fetch('/api/beads/list').then(r => r.json());
+        this.allBeads = Array.isArray(fresh) ? fresh : [];
+        this.selected = {};
       },
 
       // Approve a bead (board / list view inline button)

@@ -19,7 +19,7 @@
   </div>
 
   <!-- Filter bar (hidden when bulk-selecting in list view) -->
-  <div x-show="!(selectedCount > 0 && view === 'list')" class="mb-4 space-y-2 flex-shrink-0">
+  <div x-show="selectedCount === 0" class="mb-4 space-y-2 flex-shrink-0">
     <div class="flex items-center gap-3 flex-wrap text-xs">
 
       <!-- Priority chips -->
@@ -158,7 +158,7 @@
   </div>
 
   <!-- Bulk action bar (list view with selected items) -->
-  <div x-show="selectedCount > 0 && view === 'list'" class="mb-4 flex-shrink-0">
+  <div x-show="selectedCount > 0" class="mb-4 flex-shrink-0">
     <div class="bulk-action-bar">
       <span class="text-sm font-medium" x-text="selectedCount + ' selected'"></span>
       <button @click="bulkApprove()" class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-xs rounded font-semibold transition-colors">Approve</button>
@@ -215,9 +215,12 @@
       </thead>
       <tbody>
         <template x-for="(b, idx) in sortedList" :key="b.id">
-          <tr class="bead-table-row hover:bg-gray-700 transition-colors"
-              :class="idx % 2 === 0 ? 'bead-tr-even' : 'bead-tr-odd'"
-              :data-bead-id="b.id">
+          <tr class="bead-table-row transition-colors cursor-pointer"
+              :class="selected[b.id]
+                ? 'bg-indigo-950 hover:bg-indigo-900'
+                : (idx % 2 === 0 ? 'bead-tr-even' : 'bead-tr-odd') + ' hover:bg-gray-700'"
+              :data-bead-id="b.id"
+              @click="toggleSelect(b.id)">
             <td class="bead-td bead-td-cb p-0" @click.stop>
               <label class="flex items-center justify-center w-10 h-10 cursor-pointer">
                 <input type="checkbox" class="rounded cursor-pointer size-4"
@@ -225,13 +228,12 @@
                        @click.stop="toggleSelect(b.id)">
               </label>
             </td>
-            <td class="bead-td bead-td-title">
-              <a :href="'/bead/' + b.id" class="hover:text-indigo-300 block truncate max-w-[400px]"
+            <td class="bead-td bead-td-title" @click.stop>
+              <a :href="'/bead/' + b.id" @click.prevent.stop="goToBead(b.id)"
+                 class="hover:text-indigo-300 hover:underline block truncate max-w-[400px]"
                  x-html="highlightText(b.title || '', terms)"></a>
             </td>
-            <td class="bead-td bead-td-id font-mono text-xs text-gray-400">
-              <a :href="'/bead/' + b.id" class="hover:text-indigo-300" x-text="b.id"></a>
-            </td>
+            <td class="bead-td bead-td-id font-mono text-xs text-gray-400" x-text="b.id"></td>
             <td class="bead-td bead-td-priority" x-html="priorityBadgeHtml(b.priority)"></td>
             <td class="bead-td bead-td-phase text-xs" x-text="getPhase(b.labels) || ''"></td>
             <td class="bead-td bead-td-type text-xs" x-text="b.issue_type || ''"></td>
@@ -269,8 +271,12 @@
             <div class="text-xs text-gray-600 italic py-2">No beads</div>
           </template>
           <template x-for="b in col.items" :key="b.id">
-            <a :href="'/bead/' + b.id" :data-bead-id="b.id"
-               class="p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-500 transition-colors block">
+            <div :data-bead-id="b.id"
+                 @click="toggleSelect(b.id)"
+                 class="p-3 rounded-lg border transition-colors block cursor-pointer"
+                 :class="selected[b.id]
+                   ? 'bg-indigo-950 border-indigo-500 hover:bg-indigo-900'
+                   : 'bg-gray-800 border-gray-700 hover:border-gray-500'">
               <!-- Epic parent name -->
               <template x-if="epicTitleMap[getEpicParent(b)]">
                 <div class="text-xs text-gray-500 truncate mb-1" x-text="epicTitleMap[getEpicParent(b)]"></div>
@@ -278,7 +284,9 @@
               <!-- Title -->
               <div class="flex items-start gap-2 mb-2">
                 <span class="flex-shrink-0" x-text="typeIcon(b.issue_type)"></span>
-                <span class="text-sm leading-snug" x-html="highlightText(b.title || '', terms)"></span>
+                <a :href="'/bead/' + b.id" @click.prevent.stop="goToBead(b.id)"
+                   class="text-sm leading-snug hover:text-indigo-300 hover:underline"
+                   x-html="highlightText(b.title || '', terms)"></a>
               </div>
               <!-- Meta row -->
               <div class="flex items-center gap-1.5 flex-wrap">
@@ -295,7 +303,7 @@
                   Approve
                 </button>
               </template>
-            </a>
+            </div>
           </template>
         </div>
       </div>
