@@ -240,6 +240,22 @@ async function renderSessionsFragment() {
   }
 }
 
+async function renderSessionViewFragment() {
+  pageTitle.textContent = 'Session';
+  let html;
+  if (_fragmentCache.has('/pages/session-view')) {
+    html = _fragmentCache.get('/pages/session-view');
+  } else {
+    const res = await fetch('/pages/session-view');
+    html = await res.text();
+    _fragmentCache.set('/pages/session-view', html);
+  }
+  content.innerHTML = html;
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
+}
+
 async function renderSearchFragment() {
   const params = new URLSearchParams(window.location.search);
   const q = params.get('q');
@@ -1683,6 +1699,8 @@ function route() {
     renderTimelineFragment();
   } else if (path === '/sessions') {
     renderSessionsFragment();
+  } else if (path.match(/^\/session\/[^/]+\/.+$/)) {
+    renderSessionViewFragment();
   } else if (path === '/search') {
     renderSearchFragment();
   } else if (path.startsWith('/source/')) {
