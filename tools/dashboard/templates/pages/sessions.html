@@ -8,9 +8,9 @@
     </template>
     <div class="space-y-2">
       <template x-for="s in active" :key="s.session_id">
-        <div class="p-4 bg-gray-800 rounded-lg border border-green-700"
-             :class="s.active ? 'animate-pulse' : ''"
-             :data-session-id="s.session_id">
+        <a :href="'/session/' + encodeURIComponent(s.project) + '/' + s.session_id"
+           class="block p-4 bg-gray-800 rounded-lg border border-green-700 no-underline hover:bg-gray-750"
+           :data-session-id="s.session_id">
           <div class="flex items-center gap-3 mb-2">
             <span class="w-2 h-2 rounded-full" :class="s.active ? 'bg-green-400' : 'bg-yellow-400'"></span>
             <span class="font-mono text-sm text-gray-400" x-text="s.session_id.slice(0, 12)"></span>
@@ -19,7 +19,7 @@
             <span class="text-xs text-gray-500 ml-auto" x-text="s._ageStr"></span>
           </div>
           <div class="text-sm text-gray-300 truncate" x-text="s.latest || '...'"></div>
-        </div>
+        </a>
       </template>
     </div>
   </section>

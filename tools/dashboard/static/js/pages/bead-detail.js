@@ -39,6 +39,7 @@
       isApproved: false,
       isRunning: false,
       approving: false,
+      runDir: null,
 
       formatTs(ts) {
         return _formatTs(ts);
@@ -122,6 +123,7 @@
               const beadRun = runsList.find(r => r.bead_id === this.id);
               if (beadRun) {
                 showLivePanel(beadRun.dir);
+                this.runDir = beadRun.dir;
               }
             } catch (_) {
               // Live panel is best-effort

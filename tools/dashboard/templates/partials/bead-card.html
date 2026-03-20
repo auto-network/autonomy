@@ -12,9 +12,14 @@
     <span class="text-sm font-medium truncate flex-1" x-text="b.title"></span>
     <span class="flex-shrink-0 font-mono text-xs" style="color:#4b5563" x-text="'(' + b.id + ')'"></span>
     <template x-if="b._runDir">
-      <button @click.prevent.stop="showLivePanel(b._runDir)"
-              class="flex-shrink-0 inline-flex items-center px-2 rounded text-xs"
-              style="height:18px; background:#312e81; color:#a5b4fc; white-space:nowrap;">View Live</button>
+      <span class="flex-shrink-0 flex items-center gap-1">
+        <button @click.prevent.stop="showLivePanel(b._runDir)"
+                class="inline-flex items-center px-2 rounded text-xs"
+                style="height:18px; background:#312e81; color:#a5b4fc; white-space:nowrap;">Live</button>
+        <a :href="'/dispatch/trace/' + b._runDir" @click.stop
+           class="inline-flex items-center px-2 rounded text-xs no-underline"
+           style="height:18px; background:#1e3a5f; color:#93c5fd; white-space:nowrap;">Trace</a>
+      </span>
     </template>
   </div>
 
