@@ -1,5 +1,31 @@
 <div x-data="dispatchPage()">
 
+  <!-- Queue pause toggles + stats header -->
+  <div class="flex flex-wrap items-center gap-3 mb-6">
+    <template x-for="(isPaused, label) in paused" :key="label">
+      <button
+        @click="togglePause(label)"
+        class="flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium border transition-colors"
+        :class="isPaused
+          ? 'bg-red-900/40 border-red-600 text-red-300 hover:bg-red-900/60'
+          : 'bg-green-900/40 border-green-600 text-green-300 hover:bg-green-900/60'"
+        :title="isPaused ? label + ': paused — click to resume' : label + ': running — click to pause'"
+      >
+        <span
+          class="inline-block w-2 h-2 rounded-full"
+          :class="isPaused ? 'bg-red-500' : 'bg-green-500'"
+        ></span>
+        <span x-text="label"></span>
+      </button>
+    </template>
+    <span class="text-gray-500 text-sm" x-show="active.length > 0">
+      running: <span class="text-green-400" x-text="active.length"></span>
+    </span>
+    <span class="text-gray-500 text-sm" x-show="waiting.length > 0">
+      queued: <span class="text-blue-400" x-text="waiting.length"></span>
+    </span>
+  </div>
+
   <!-- Active Dispatches -->
   <div class="mb-8">
     <h2 class="text-lg font-semibold mb-3 text-green-400">Active Dispatches</h2>

@@ -54,6 +54,10 @@ STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
+DISPATCH_STATE_PATH = _REPO_ROOT / "data" / "dispatch.state"
+# Labels always shown in pause UI even if not in dispatch.state
+_KNOWN_PAUSE_LABELS = ["dashboard"]
+
 
 # ── CLI Subprocess Helper ─────────────────────────────────────
 
@@ -145,6 +149,62 @@ async def api_bead_approve(request):
     if rc != 0:
         return JSONResponse({"error": stderr.strip(), "ok": False}, status_code=400)
     return JSONResponse({"ok": True, "bead_id": bead_id})
+
+# ── Dispatch pause state helpers ──────────────────────────────
+
+def _read_dispatch_state() -> dict:
+    """Read dispatch.state file. Returns {} if missing or invalid."""
+    try:
+        return json.loads(DISPATCH_STATE_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _write_dispatch_state(state: dict) -> None:
+    """Write dispatch.state atomically via rename."""
+    DISPATCH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DISPATCH_STATE_PATH.with_suffix(".state.tmp")
+    tmp.write_text(json.dumps(state))
+    tmp.rename(DISPATCH_STATE_PATH)
+
+
+def _get_pause_state() -> dict:
+    """Return pause state for all known labels (always includes _KNOWN_PAUSE_LABELS)."""
+    raw = _read_dispatch_state()
+    result = {label: bool(raw.get(label, False)) for label in _KNOWN_PAUSE_LABELS}
+    for label, paused in raw.items():
+        if label not in result:
+            result[label] = bool(paused)
+    return result
+
+
+async def api_dispatch_pause_get(request):
+    """GET /api/dispatch/pause — return current pause state for all label queues."""
+    return JSONResponse({"paused": _get_pause_state()})
+
+
+async def api_dispatch_pause_post(request):
+    """POST /api/dispatch/pause — set pause state for a label queue.
+
+    Body: {"label": "dashboard", "paused": true}
+    Returns updated full pause state.
+    """
+    body = await request.json()
+    label = body.get("label")
+    paused = bool(body.get("paused", False))
+    if not label:
+        return JSONResponse({"error": "label required"}, status_code=400)
+    state = _read_dispatch_state()
+    if paused:
+        state[label] = True
+    else:
+        state.pop(label, None)
+    _write_dispatch_state(state)
+    new_pause = _get_pause_state()
+    # Broadcast updated pause state via SSE dispatch topic
+    await event_bus.broadcast("dispatch_pause", new_pause)
+    return JSONResponse({"paused": new_pause})
+
 
 async def api_dispatch_status(request):
     """Show dispatched beads with their dispatch state.
@@ -2103,7 +2163,12 @@ async def _collect_dispatch_data() -> dict:
         if b["id"] not in running_ids
     ]
 
-    return {"active": active, "waiting": waiting, "blocked": blocked}
+    return {
+        "active": active,
+        "waiting": waiting,
+        "blocked": blocked,
+        "paused": _get_pause_state(),
+    }
 
 
 def _count_active_sessions(threshold: int = 600) -> int:
@@ -2210,6 +2275,8 @@ routes = [
     Route("/api/bead/{id}", api_bead_show),
     Route("/api/bead/{id}/tree", api_bead_tree),
     Route("/api/bead/{id}/approve", api_bead_approve, methods=["POST"]),
+    Route("/api/dispatch/pause", api_dispatch_pause_get),
+    Route("/api/dispatch/pause", api_dispatch_pause_post, methods=["POST"]),
     Route("/api/dispatch/status", api_dispatch_status),
     Route("/api/dispatch/approved", api_dispatch_approved),
     Route("/api/dispatch/runs", api_dispatch_runs),
