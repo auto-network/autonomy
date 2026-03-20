@@ -40,6 +40,7 @@ def main() -> int:
     parser.add_argument("--git-dir", default="", help="Git dir path (absolute, same on host+container)")
     parser.add_argument("--output-dir", default="", help="Pre-created output directory")
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Docker image")
+    parser.add_argument("--model", default="claude-opus-4-6", help="Claude model to use")
     parser.add_argument("--detach", action="store_true", help="Run container in background")
     args = parser.parse_args()
 
@@ -77,6 +78,7 @@ def main() -> int:
             detach=True,
             image=args.image,
             output_dir=output_dir,
+            model=args.model,
         )
         if not container_id:
             return 1
@@ -159,9 +161,9 @@ def main() -> int:
 
         if prompt is not None:
             cmd += ["--entrypoint", "claude", args.image,
-                    "--dangerously-skip-permissions", "--print", prompt]
+                    "--dangerously-skip-permissions", "--model", args.model, "--print", prompt]
         else:
-            cmd += [args.image, "--dangerously-skip-permissions"]
+            cmd += [args.image, "--dangerously-skip-permissions", "--model", args.model]
 
         result = subprocess.run(cmd)
 
