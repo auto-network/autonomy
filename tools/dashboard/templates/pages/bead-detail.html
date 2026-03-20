@@ -202,6 +202,16 @@
         </div>
       </template>
 
+      <!-- Trace link for completed beads -->
+      <template x-if="!isRunning && runDir">
+        <div class="mb-6">
+          <a :href="'/dispatch/trace/' + runDir"
+             class="inline-flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg text-sm no-underline">
+            View Trace
+          </a>
+        </div>
+      </template>
+
     </div>
   </template>
 
