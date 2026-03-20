@@ -67,65 +67,30 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
                     if sid in seen_ids:
                         continue
                     seen_ids.add(sid)
-                    sessions.append({
+                    entry = {
                         "session_id": sid,
                         "project": jsonl.parent.name,
                         "size_bytes": stat.st_size,
                         "age_seconds": round(age),
                         "active": age < 60,
                         "latest": latest,
-                    })
+                    }
+                    # Read tmux_session from .session_meta.json if available
+                    meta_path = jsonl.parent.parent / ".session_meta.json"
+                    if meta_path.exists():
+                        try:
+                            meta = json.loads(meta_path.read_text())
+                            if meta.get("tmux_session"):
+                                entry["tmux_session"] = meta["tmux_session"]
+                        except (json.JSONDecodeError, OSError):
+                            pass
+                    sessions.append(entry)
             except OSError:
                 continue
 
     sessions.sort(key=lambda s: s["age_seconds"])
 
-    # Attach available tmux sessions for input support
-    _attach_tmux_sessions(sessions)
-
     return sessions
-
-
-def _attach_tmux_sessions(sessions: list[dict]) -> None:
-    """Best-effort: find tmux sessions running claude/docker and attach to
-    active sessions. When we can't determine which tmux maps to which JSONL,
-    attach all available tmux names so the viewer can auto-detect."""
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if result.returncode != 0:
-            return
-        tmux_names = [n.strip() for n in result.stdout.strip().split("\n") if n.strip()]
-
-        claude_tmux = []
-        for name in tmux_names:
-            try:
-                cmd_result = subprocess.run(
-                    ["tmux", "display-message", "-p", "-t", name, "#{pane_current_command}"],
-                    capture_output=True, text=True, timeout=2,
-                )
-                pane_cmd = cmd_result.stdout.strip().lower()
-                if cmd_result.returncode == 0 and pane_cmd in ("claude", "docker"):
-                    claude_tmux.append({"name": name, "cmd": pane_cmd})
-            except Exception:
-                continue
-
-        if not claude_tmux:
-            return
-
-        # Simple 1:1 match
-        if len(claude_tmux) == 1 and len(sessions) == 1:
-            sessions[0]["tmux_session"] = claude_tmux[0]["name"]
-        else:
-            # Can't determine mapping — attach all available to each session
-            all_names = [t["name"] for t in claude_tmux]
-            for s in sessions:
-                s["tmux_sessions_available"] = all_names
-    except (FileNotFoundError, Exception):
-        pass
 
 
 def get_recent_sessions(limit: int = 20) -> list[dict]:
