@@ -82,6 +82,7 @@
   <div>
     <template x-for="e in entries" :key="e._key">
       <div
+        x-show="!e._hiddenByParent"
         class="tl-card"
         :class="{'tl-card-lib': e._isLibrarian, 'open': e._open}"
         @click="e._open = !e._open"
@@ -159,6 +160,11 @@
           </template>
           <template x-if="e.discovered_beads_count">
             <div class="text-xs text-purple-400 mt-1" x-text="e.discovered_beads_count + ' bead(s) discovered'"></div>
+          </template>
+          <template x-if="e._smokeBadge">
+            <div class="mt-1">
+              <span :class="['tl-smoke-badge', e._smokeBadge.cls]" x-text="e._smokeBadge.label"></span>
+            </div>
           </template>
 
           <!-- Librarian review section (expanded dispatch card, review complete) -->
