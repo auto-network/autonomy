@@ -130,6 +130,17 @@ async function renderBeadDetailFragment(id) {
 // ── Dispatch Page (Jinja2 fragment + Alpine) ──────────────────
 
 const _fragmentCache = new Map();
+let _serverVersion = null;
+
+async function _checkVersion() {
+  try {
+    const { version } = await fetch('/api/version').then(r => r.json());
+    if (_serverVersion && _serverVersion !== version) {
+      _fragmentCache.clear();
+    }
+    _serverVersion = version;
+  } catch (_) {}
+}
 
 async function renderDispatchFragment() {
   pageTitle.textContent = 'Dispatch';
@@ -1660,6 +1671,7 @@ function navigateTo(path) {
 }
 
 function route() {
+  _checkVersion();
   const path = window.location.pathname;
   const isTerminalPage = path === '/terminal' || path.startsWith('/terminal/');
 
