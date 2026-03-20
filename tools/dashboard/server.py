@@ -1912,11 +1912,13 @@ async def ws_terminal(websocket: WebSocket):
 
         # Create detached tmux session running the command
         # Enable set-clipboard so OSC 52 passes through to xterm.js
-        subprocess.run([
-            "tmux", "new-session", "-d", "-s", tmux_name,
-            "-x", "120", "-y", "40",
-            cmd_str,
-        ], env={**os.environ, "TERM": "xterm-256color"})
+        is_container_cmd = cmd_str.startswith("docker run")
+        start_dir = None if is_container_cmd else str(_REPO_ROOT)
+        tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40"]
+        if start_dir:
+            tmux_cmd += ["-c", start_dir]
+        tmux_cmd.append(cmd_str)
+        subprocess.run(tmux_cmd, env={**os.environ, "TERM": "xterm-256color"})
         # Enable OSC 52 clipboard passthrough in this session
         subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"],
                         capture_output=True)
