@@ -4,4 +4,5 @@ no-git-ops: true
 # reach the host's dolt instance reliably without port-file discovery.
 # Prevents bd from auto-starting a second dolt inside agent containers,
 # which would overwrite .beads/dolt-server.port and .pid on the shared mount.
-dolt-server-port: 3306
+dolt:
+  port: 3306
