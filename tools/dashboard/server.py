@@ -1934,6 +1934,14 @@ async def page_terminal_fragment(request):
     return templates.TemplateResponse(request, "pages/terminal.html")
 
 
+async def page_session_view(request):
+    return HTMLResponse(_load_template("base.html"))
+
+async def page_session_view_fragment(request):
+    """Return the Session Viewer page as an HTML fragment for SPA injection."""
+    return templates.TemplateResponse(request, "pages/session-view.html")
+
+
 # ── Experiments API ────────────────────────────────────────────
 
 async def api_experiments_create(request):
@@ -2379,6 +2387,8 @@ routes = [
     Route("/terminal/{session_id}", page_terminal),
     Route("/pages/terminal", page_terminal_fragment),
     Route("/pages/experiment", page_experiment_fragment),
+    Route("/session/{project}/{session_id}", page_session_view),
+    Route("/pages/session-view", page_session_view_fragment),
 
     # WebSocket
     WebSocketRoute("/ws/terminal", ws_terminal),
