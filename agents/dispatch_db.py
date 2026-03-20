@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS dispatch_runs (
   mem_mb INTEGER,
   last_activity DATETIME,
   jsonl_offset INTEGER DEFAULT 0,
-  librarian_type TEXT
+  librarian_type TEXT,
+  failure_class TEXT
 )
 """
 
@@ -72,6 +73,7 @@ _MIGRATIONS = [
     "ALTER TABLE dispatch_runs ADD COLUMN tool_count INTEGER",
     "ALTER TABLE dispatch_runs ADD COLUMN turn_count INTEGER",
     "ALTER TABLE dispatch_runs ADD COLUMN librarian_type TEXT",
+    "ALTER TABLE dispatch_runs ADD COLUMN failure_class TEXT",
 ]
 
 CREATE_INDEX = """\
@@ -253,6 +255,7 @@ def insert_run(
     exit_code: int,
     output_dir: str,
     librarian_type: str | None = None,
+    failure_class: str | None = None,
 ) -> None:
     """Upsert a dispatch run row on completion.
 
@@ -292,7 +295,8 @@ def insert_run(
                 lines_added, lines_removed, files_changed,
                 score_tooling, score_clarity, score_confidence,
                 time_research_pct, time_coding_pct, time_debugging_pct, time_tooling_pct,
-                discovered_beads_count, has_experience_report, output_dir, librarian_type
+                discovered_beads_count, has_experience_report, output_dir, librarian_type,
+                failure_class
             ) VALUES (
                 ?, ?, ?, ?, ?,
                 ?, ?, ?,
@@ -301,7 +305,8 @@ def insert_run(
                 ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, ?, ?, ?
+                ?, ?, ?, ?,
+                ?
             )
             """,
             (
@@ -314,6 +319,7 @@ def insert_run(
                 time_breakdown.get("research_pct"), time_breakdown.get("coding_pct"),
                 time_breakdown.get("debugging_pct"), time_breakdown.get("tooling_workaround_pct"),
                 discovered_beads_count, has_experience_report, output_dir or None, librarian_type,
+                failure_class,
             ),
         )
         conn.commit()
