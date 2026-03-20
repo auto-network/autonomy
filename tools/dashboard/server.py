@@ -2886,6 +2886,8 @@ routes = [
 ]
 
 async def _on_startup():
+    from agents.dispatch_db import init_db
+    init_db()  # ensure schema exists (idempotent — all CREATE IF NOT EXISTS)
     asyncio.create_task(_dispatch_watcher())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
