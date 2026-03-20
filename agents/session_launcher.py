@@ -114,7 +114,7 @@ def launch_session(
     working_dir: str = "/workspace/repo",
     extra_env: dict | None = None,
     output_dir: str | None = None,
-    model: str = "claude-opus-4-6",
+    model: str = "claude-opus-4-6[1m]",
     global_claude_md: Path | str | None = None,
 ) -> str | None:
     """Launch a Claude agent container session.
