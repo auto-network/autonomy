@@ -38,6 +38,13 @@
       loading: true,
 
       async init() {
+        await this._refresh();
+        this._refreshTimer = setInterval(() => this._refresh(), 5000);
+      },
+
+      async _refresh() {
+        if (this._refreshing) return;
+        this._refreshing = true;
         try {
           const [activeData, recentData] = await Promise.all([
             fetch('/api/dao/active_sessions?threshold=600').then(r => r.json()),
@@ -56,13 +63,16 @@
           );
           this.recent = Array.isArray(recentData) ? recentData : [];
         } catch (e) {
-          console.warn('[sessionsPage] fetch error', e);
+          console.warn('[sessionsPage] refresh error', e);
         } finally {
+          this._refreshing = false;
           this.loading = false;
         }
       },
 
-      destroy() {},
+      destroy() {
+        if (this._refreshTimer) clearInterval(this._refreshTimer);
+      },
     }));
   });
 })();
