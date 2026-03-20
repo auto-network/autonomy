@@ -127,7 +127,7 @@ def run_tier1(base_url: str) -> dict:
     for c in checks:
         status = "PASS" if c["pass"] else "FAIL"
         detail = f" — {c['detail']}" if c.get("detail") else ""
-        print(f"  [{status}] {c['name']}{detail}")
+        print(f"  [{status}] {c['name']}{detail}", file=sys.stderr)
 
     return {"pass": passed, "checks": checks}
 
@@ -135,7 +135,7 @@ def run_tier1(base_url: str) -> dict:
 def run_tier2(base_url: str) -> dict:
     """Run Tier 2 browser sweep using agent-browser."""
     if not shutil.which("agent-browser"):
-        print("  WARN: agent-browser not on PATH — skipping tier 2")
+        print("  WARN: agent-browser not on PATH — skipping tier 2", file=sys.stderr)
         return {"pass": True, "skipped": True, "reason": "agent-browser not found"}
 
     pages = ["/dispatch", "/timeline", "/beads"]
@@ -143,7 +143,7 @@ def run_tier2(base_url: str) -> dict:
 
     for page in pages:
         url = f"{base_url}{page}"
-        print(f"  Sweeping {page}...")
+        print(f"  Sweeping {page}...", file=sys.stderr)
         page_pass = False
         page_detail = None
 
@@ -199,7 +199,7 @@ def run_tier2(base_url: str) -> dict:
 
         status = "PASS" if page_pass else "FAIL"
         detail = f" — {page_detail}" if page_detail else ""
-        print(f"  [{status}] {page}{detail}")
+        print(f"  [{status}] {page}{detail}", file=sys.stderr)
         page_results.append({"page": page, "pass": page_pass, "detail": page_detail})
 
     passed = all(p["pass"] for p in page_results)
@@ -224,17 +224,17 @@ def main():
 
     # Tier 1
     if args.tier in ("all", "tier1"):
-        print("=== Tier 1: API Sanity ===")
+        print("=== Tier 1: API Sanity ===", file=sys.stderr)
         tier1_result = run_tier1(args.base_url)
-        print(f"Tier 1: {'PASS' if tier1_result['pass'] else 'FAIL'}")
+        print(f"Tier 1: {'PASS' if tier1_result['pass'] else 'FAIL'}", file=sys.stderr)
 
     # Tier 2 — only if tier1 passed (or tier2 requested explicitly)
     if args.tier == "tier2" or (args.tier == "all" and tier1_result and tier1_result["pass"]):
-        print("=== Tier 2: Browser Sweep ===")
+        print("=== Tier 2: Browser Sweep ===", file=sys.stderr)
         tier2_result = run_tier2(args.base_url)
-        print(f"Tier 2: {'PASS' if tier2_result['pass'] else 'FAIL'}")
+        print(f"Tier 2: {'PASS' if tier2_result['pass'] else 'FAIL'}", file=sys.stderr)
     elif args.tier == "all" and tier1_result and not tier1_result["pass"]:
-        print("=== Tier 2: SKIPPED (tier 1 failed) ===")
+        print("=== Tier 2: SKIPPED (tier 1 failed) ===", file=sys.stderr)
         tier2_result = {"pass": False, "skipped": True, "reason": "tier1 failed"}
 
     # Compute overall pass
