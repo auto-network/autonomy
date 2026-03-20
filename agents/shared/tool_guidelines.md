@@ -21,7 +21,13 @@ graph note "text" --tags x,y      # Drop a searchable trail marker
 graph link <bead> <src> -r rel    # Create provenance edge
 graph attention --last N          # Show recent human input
 graph ui-exp "title" <dir>        # Create UI experiment from HTML files + live-watch for changes
+graph dispatch approve <bead-id>  # Approve bead(s) for dispatch (accepts multiple IDs)
 ```
+
+**Dispatch workflow:**
+1. `graph dispatch approve <bead-id>` — release bead for dispatch
+2. `graph wait <bead-id> &` — immediately background-wait for completion notification
+3. `graph dispatch status` — check overall queue at any time
 
 ## Beads (`bd`)
 
