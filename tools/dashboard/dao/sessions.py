@@ -103,6 +103,37 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
             except OSError:
                 continue
 
+    # ── Dedup: one session per tmux_session, freshest wins ──────────────
+    # A tmux pane runs ONE session. Keep only the freshest entry per
+    # tmux_session. Delete stale .meta.json so they don't return next call.
+    _freshest: dict[str, dict] = {}
+    for entry in host_entries:
+        ts = entry.get("tmux_session")
+        if not ts:
+            continue
+        prev = _freshest.get(ts)
+        if prev is None or entry["age_seconds"] < prev["age_seconds"]:
+            _freshest[ts] = entry
+    _deleted_count = 0
+    for entry in host_entries:
+        ts = entry.get("tmux_session")
+        if ts and entry is not _freshest.get(ts):
+            entry.pop("tmux_session", None)
+            # Delete the stale .meta.json so it doesn't keep coming back
+            jsonl_path = entry.get("_jsonl_path")
+            if jsonl_path:
+                stale_meta = Path(jsonl_path).with_suffix(".meta.json")
+                try:
+                    stale_meta.unlink(missing_ok=True)
+                    _deleted_count += 1
+                except OSError:
+                    pass
+    for ts, winner in _freshest.items():
+        logger.info(
+            "sessions dedup: keeping %s for tmux=%s, deleted %d stale metas",
+            winner["session_id"][:12], ts, _deleted_count,
+        )
+
     # Include if tmux-alive (regardless of idle time) OR recently active
     for entry in host_entries:
         tmux = entry.get("tmux_session")
