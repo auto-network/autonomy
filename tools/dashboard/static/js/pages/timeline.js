@@ -24,7 +24,9 @@
 //   _reviewCollapsed:   string|null     — collapsed review label e.g. "📚 Reviewed"
 //   _reviewItems:       array|null      — extracted items from experience_reviewer results
 //   _smokeBadge:        {cls,label}|null — smoke test result pill
-//   _hiddenByParent:    boolean         — true when a non-librarian entry with same bead_id exists in batch
+//   _hiddenByParent:    boolean         — true when parent dispatch entry exists in batch (matched via parent_run_id)
+//   _supportsIntegratedLibrarian: boolean — true for dispatch entries that can show integrated librarian sub-row
+//   _integratedLibrarian: object|null   — forwarded librarian data {duration_secs, token_count, _tokenFmt, _reviewItems, _countSummary, run_id}
 
 (function () {
   function _starsBool(score) {
@@ -206,6 +208,8 @@
       _reviewItems: reviewItems,
       _smokeBadge: _formatSmokeBadge(e.smoke_result),
       _hiddenByParent: false,
+      _supportsIntegratedLibrarian: !isLibrarian,
+      _integratedLibrarian: null,
     };
   }
 
@@ -247,13 +251,47 @@
         ]);
         this.stats = stats;
         const mapped = Array.isArray(entries) ? entries.map(_mapEntry) : [];
-        // Hide librarian rows when their parent bead dispatch entry is in the same batch
-        const beadIdsWithDispatch = new Set(
-          mapped.filter(e => !e._isLibrarian && e.bead_id).map(e => e.bead_id)
+        // Hide librarian rows when their parent dispatch entry is in the same batch.
+        // Match on parent_run_id (populated by server from librarian_jobs.payload.run_id)
+        // instead of bead_id, which is empty on librarian dispatch_runs rows.
+        const runIdsInBatch = new Set(
+          mapped.filter(e => !e._isLibrarian && e.run_id).map(e => e.run_id)
         );
         for (const e of mapped) {
-          if (e._isLibrarian && e.bead_id && beadIdsWithDispatch.has(e.bead_id)) {
+          if (e._isLibrarian && e.parent_run_id && runIdsInBatch.has(e.parent_run_id)) {
             e._hiddenByParent = true;
+          }
+        }
+        // Forward hidden librarian data to parent as _integratedLibrarian
+        const parentRunMap = {};
+        for (const e of mapped) {
+          if (!e._isLibrarian && e.run_id) parentRunMap[e.run_id] = e;
+        }
+        for (const e of mapped) {
+          if (e._isLibrarian && e._hiddenByParent && e.parent_run_id) {
+            const parent = parentRunMap[e.parent_run_id];
+            if (parent && parent._supportsIntegratedLibrarian) {
+              // Count review items by type for header summary
+              let countParts = [];
+              if (e._reviewItems) {
+                const counts = {};
+                for (const item of e._reviewItems) {
+                  const t = item.type || 'other';
+                  counts[t] = (counts[t] || 0) + 1;
+                }
+                if (counts.pitfall) countParts.push(counts.pitfall + ' pitfall' + (counts.pitfall > 1 ? 's' : ''));
+                if (counts.bead) countParts.push(counts.bead + ' bead' + (counts.bead > 1 ? 's' : ''));
+                if (counts.skip) countParts.push(counts.skip + ' skipped');
+              }
+              parent._integratedLibrarian = {
+                duration_secs: e.duration_secs,
+                token_count: e.token_count,
+                _tokenFmt: e._tokenFmt,
+                _reviewItems: e._reviewItems,
+                _countSummary: countParts.join(', '),
+                run_id: e.run_id,
+              };
+            }
           }
         }
         this.entries = mapped;
