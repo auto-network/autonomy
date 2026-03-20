@@ -337,12 +337,12 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
             _retry_bd(["update", bead_id, "-s", "open"])
             run_bd(["update", bead_id, "--append-notes", f"Released (unknown status {status}): {reason}"])
     except BdCommandError as e:
-        print(f"  MANUAL CLEANUP NEEDED: {bead_id} release failed "
-              f"(status={status}): {e}", file=sys.stderr)
+        print(f"  Close: FAILED — bd close returned: {e}", file=sys.stderr)
         print(f"  STALE BEAD WARNING: {bead_id} may need manual cleanup "
               f"(intended status: {status})", file=sys.stderr)
         return False
 
+    print(f"  Close: OK → {bead_id} closed")
     return True
 
 
@@ -852,7 +852,7 @@ def process_decision(dispatch_result: DispatchResult) -> None:
                 capture_output=True, text=True, timeout=5,
                 cwd=str(REPO_ROOT),
             ).stdout.strip()
-            print(f"  Merged to master: {merge_hash[:10]}")
+            print(f"  Merge: OK → master ({merge_hash[:10]})")
             run_bd(["update", bead_id, "--append-notes",
                     f"merged: {merge_hash}"])
 
@@ -892,11 +892,12 @@ def process_decision(dispatch_result: DispatchResult) -> None:
                     run_bd(["update", bead_id, "--append-notes",
                             f"smoke test errored (non-blocking): {smoke_err}"])
         else:
-            print(f"  Merge failed: {merge_err}")
+            print(f"  Merge: FAILED — {merge_err}")
             run_bd(["update", bead_id, "--append-notes",
                     f"merge failed on {dispatch_result.branch}: {merge_err}"])
-            status = "BLOCKED"
-            reason = merge_err
+            # Do NOT change status to BLOCKED — close the bead regardless.
+            # The code is on the branch and can be manually merged later.
+            # Leaving status as DONE prevents the infinite re-dispatch loop.
 
     # Release the bead with appropriate state
     release_bead(bead_id, status, reason)
@@ -1125,11 +1126,15 @@ def _collect_live_stats(agent: RunningAgent) -> None:
 
 def _ingest_session(result: DispatchResult) -> None:
     """Ingest agent session into the knowledge graph and link to bead."""
-    subprocess.run(
+    ingest_proc = subprocess.run(
         ["graph", "sessions", "--all"],
         capture_output=True, text=True, timeout=30,
         cwd=str(REPO_ROOT),
     )
+    if ingest_proc.returncode == 0:
+        print(f"  Ingest: OK")
+    else:
+        print(f"  Ingest: FAILED — {ingest_proc.stderr.strip()}", file=sys.stderr)
 
     if result.output_dir:
         session_dir = Path(result.output_dir) / "sessions"
@@ -1200,8 +1205,9 @@ def _record_run(agent: RunningAgent, result: DispatchResult) -> None:
             exit_code=result.exit_code,
             output_dir=agent.output_dir,
         )
+        print(f"  Record: OK → {run_id}")
     except Exception as e:
-        print(f"  WARNING: Failed to record run to SQLite: {e}", file=sys.stderr)
+        print(f"  Record: FAILED — {e}", file=sys.stderr)
 
 
 # ── Librarian launch / collect ───────────────────────────────────
