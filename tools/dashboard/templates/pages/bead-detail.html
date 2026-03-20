@@ -182,9 +182,24 @@
         </section>
       </template>
 
-      <!-- Live panel spacer (shown when dispatch is running) -->
+      <!-- Live session link + spacer (shown when dispatch is running) -->
       <template x-if="isRunning">
-        <div style="height: 20rem;"></div>
+        <div class="mb-6">
+          <template x-if="runDir">
+            <div class="flex items-center gap-3 mb-4">
+              <a :href="'/dispatch/trace/' + runDir"
+                 class="inline-flex items-center gap-2 px-4 py-2 bg-indigo-700 hover:bg-indigo-600 text-white rounded-lg text-sm no-underline">
+                <span class="live-pulse"></span>
+                View Live Session
+              </a>
+              <button @click="showLivePanel(runDir)"
+                      class="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm">
+                Open Panel
+              </button>
+            </div>
+          </template>
+          <div style="height: 20rem;"></div>
+        </div>
       </template>
 
     </div>
