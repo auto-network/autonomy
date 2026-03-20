@@ -123,6 +123,51 @@ def run_tier1(base_url: str) -> dict:
         return True
     checks.append(_check("csp_header", check_csp_header))
 
+    # 9. Session send — missing tmux_session returns 400
+    def check_session_send_no_session():
+        r = session.post(
+            f"{base_url}/api/session/send",
+            json={"message": "hello"},
+            timeout=10,
+        )
+        if r.status_code != 400:
+            return f"expected 400, got {r.status_code}"
+        d = r.json()
+        if "error" not in d:
+            return "no error field in 400 response"
+        return True
+    checks.append(_check("session_send_no_session", check_session_send_no_session))
+
+    # 10. Session send — empty message returns 400
+    def check_session_send_empty_message():
+        r = session.post(
+            f"{base_url}/api/session/send",
+            json={"tmux_session": "nonexistent-session", "message": ""},
+            timeout=10,
+        )
+        if r.status_code != 400:
+            return f"expected 400, got {r.status_code}"
+        d = r.json()
+        if "error" not in d:
+            return "no error field in 400 response"
+        return True
+    checks.append(_check("session_send_empty_message", check_session_send_empty_message))
+
+    # 11. Session send — unknown tmux session returns 404 or 503 (tmux not available)
+    def check_session_send_unknown_session():
+        r = session.post(
+            f"{base_url}/api/session/send",
+            json={"tmux_session": "no-such-session-xyzzy", "message": "test"},
+            timeout=10,
+        )
+        if r.status_code not in (404, 503):
+            return f"expected 404 or 503, got {r.status_code}"
+        d = r.json()
+        if "error" not in d:
+            return "no error field in response"
+        return True
+    checks.append(_check("session_send_unknown_session", check_session_send_unknown_session))
+
     passed = all(c["pass"] for c in checks)
     for c in checks:
         status = "PASS" if c["pass"] else "FAIL"
