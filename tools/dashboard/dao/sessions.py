@@ -61,7 +61,54 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
             continue
 
     sessions.sort(key=lambda s: s["age_seconds"])
+
+    # Enrich with tmux session names for input support
+    _enrich_tmux_names(sessions)
+
     return sessions
+
+
+def _enrich_tmux_names(sessions: list[dict]) -> None:
+    """Best-effort: match active sessions to tmux sessions by checking
+    which tmux panes are running claude and writing to matching project dirs."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode != 0:
+            return
+        tmux_names = [n.strip() for n in result.stdout.strip().split("\n") if n.strip()]
+
+        for name in tmux_names:
+            try:
+                cmd_result = subprocess.run(
+                    ["tmux", "display-message", "-p", "-t", name, "#{pane_current_command}"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                if cmd_result.returncode != 0 or "claude" not in cmd_result.stdout.lower():
+                    continue
+                # This tmux session runs claude — try to match to an active session
+                # by checking the pane's cwd
+                cwd_result = subprocess.run(
+                    ["tmux", "display-message", "-p", "-t", name, "#{pane_current_path}"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                if cwd_result.returncode != 0:
+                    continue
+                pane_cwd = cwd_result.stdout.strip()
+                # Match by project name in the session's project field
+                for s in sessions:
+                    if not s.get("tmux_session"):
+                        project_path = s["project"].replace("-", "/").lstrip("/")
+                        if project_path and project_path in pane_cwd:
+                            s["tmux_session"] = name
+                            break
+            except Exception:
+                continue
+    except (FileNotFoundError, Exception):
+        pass
 
 
 def get_recent_sessions(limit: int = 20) -> list[dict]:

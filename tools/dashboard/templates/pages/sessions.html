@@ -8,7 +8,7 @@
     </template>
     <div class="space-y-2">
       <template x-for="s in active" :key="s.session_id">
-        <a :href="'/session/' + encodeURIComponent(s.project) + '/' + s.session_id"
+        <a :href="'/session/' + encodeURIComponent(s.project) + '/' + s.session_id + (s.tmux_session ? '?tmux=' + encodeURIComponent(s.tmux_session) : '')"
            class="block p-4 bg-gray-800 rounded-lg border border-green-700 no-underline hover:bg-gray-750"
            :data-session-id="s.session_id">
           <div class="flex items-center gap-3 mb-2">
