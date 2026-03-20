@@ -53,7 +53,7 @@ from .watch import watch_sessions
 from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
-from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status
+from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve
 
 
 def cmd_ingest(args):
@@ -1407,6 +1407,10 @@ def main():
     p_dstatus = dispatch_sub.add_parser("status", help="Compact one-liner summary")
     p_dstatus.add_argument("--json", action="store_true", help="Output as JSON")
     p_dstatus.set_defaults(func=cmd_dispatch_status)
+
+    p_approve = dispatch_sub.add_parser("approve", help="Approve bead(s) for dispatch")
+    p_approve.add_argument("bead_ids", nargs="+", help="One or more bead IDs")
+    p_approve.set_defaults(func=cmd_dispatch_approve)
 
     args = parser.parse_args()
 

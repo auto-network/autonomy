@@ -153,6 +153,24 @@ def cmd_dispatch_runs(args):
         print(line)
 
 
+def cmd_dispatch_approve(args):
+    """Set readiness=approved on one or more beads, releasing them for dispatch."""
+    import subprocess
+    failures = 0
+    for bead_id in args.bead_ids:
+        result = subprocess.run(
+            ["bd", "set-state", bead_id, "readiness=approved"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print(f"✓ {bead_id} approved for dispatch")
+        else:
+            print(f"✗ {bead_id}: {result.stderr.strip()}", file=sys.stderr)
+            failures += 1
+    if failures:
+        sys.exit(1)
+
+
 def cmd_dispatch_status(args):
     """Print compact one-liner summary."""
     base = _get_dashboard_url()
