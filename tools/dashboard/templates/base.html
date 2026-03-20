@@ -173,6 +173,35 @@
       from { opacity: 0; transform: translateY(-0.25rem); }
       to { opacity: 1; transform: translateY(0); }
     }
+    /* Toast notifications */
+    #toast-container {
+      position: fixed; top: 1rem; right: 1rem; z-index: 100;
+      display: flex; flex-direction: column; gap: 0.5rem;
+      pointer-events: none;
+    }
+    .toast {
+      pointer-events: auto;
+      padding: 0.75rem 1rem; border-radius: 0.5rem;
+      font-size: 0.8125rem; max-width: 24rem;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      animation: toast-in 0.3s ease-out;
+      display: flex; align-items: center; gap: 0.5rem;
+      cursor: pointer;
+    }
+    .toast-error {
+      background: #7f1d1d; border: 1px solid #dc2626; color: #fecaca;
+    }
+    .toast-warning {
+      background: #78350f; border: 1px solid #d97706; color: #fef3c7;
+    }
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateX(1rem); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes toast-out {
+      from { opacity: 1; transform: translateX(0); }
+      to { opacity: 0; transform: translateX(1rem); }
+    }
     /* Experiment gallery */
     .exp-variant {
       border: 1px solid #374151; border-radius: 0.5rem; margin-bottom: 1.5rem;
@@ -302,6 +331,9 @@
   <!-- Sidebar overlay (mobile) -->
   <div id="sidebar-overlay" class="hidden fixed inset-0 bg-black/50 z-30 md:hidden"
        onclick="document.getElementById('sidebar').classList.add('-translate-x-full'); this.classList.add('hidden')"></div>
+
+  <!-- Toast container (global, all pages) -->
+  <div id="toast-container"></div>
 
   <!-- Sidebar -->
   <nav id="sidebar" class="w-56 bg-gray-800 p-4 flex flex-col flex-shrink-0 border-r border-gray-700

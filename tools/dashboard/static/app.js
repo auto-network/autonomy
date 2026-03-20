@@ -1820,5 +1820,47 @@ api('/api/stats').then(data => {
 checkPendingExperiments();
 setInterval(checkPendingExperiments, 10000);
 
+// ── Toast notifications ──────────────────────────────────────
+
+function showToast(message, type) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + (type || 'error');
+  el.textContent = message;
+  el.onclick = () => {
+    el.style.animation = 'toast-out 0.2s ease-in forwards';
+    el.addEventListener('animationend', () => el.remove());
+  };
+  container.appendChild(el);
+  setTimeout(() => {
+    if (el.parentNode) {
+      el.style.animation = 'toast-out 0.2s ease-in forwards';
+      el.addEventListener('animationend', () => el.remove());
+    }
+  }, 8000);
+}
+
+// ── Dispatcher state watcher (global, all pages) ─────────────
+
+(function () {
+  let _prevPaused = null;
+  registerHandler('dispatcher_state', function (state) {
+    const nowPaused = !!state.paused;
+    // Detect false→true transition (skip first load if already paused)
+    if (_prevPaused === false && nowPaused && state.reason) {
+      const reason = state.reason;
+      let msg = 'Dispatcher paused';
+      if (reason.reason === 'auth') {
+        msg = 'Dispatcher paused: authentication failed';
+      } else if (reason.message) {
+        msg = 'Dispatcher paused: ' + reason.message;
+      }
+      showToast(msg, 'error');
+    }
+    _prevPaused = nowPaused;
+  });
+})();
+
 // Initial route
 route();
