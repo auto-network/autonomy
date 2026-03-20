@@ -404,6 +404,41 @@ def get_currently_running() -> list[dict]:
         conn.close()
 
 
+def get_consecutive_failures(bead_id: str) -> tuple[int, int]:
+    """Count consecutive failures for a bead, stopping at first DONE.
+
+    Scans dispatch_runs in reverse chronological order (most recent first).
+    Counts agent failures (FAILED/BLOCKED) and merge failures (MERGE_FAILED)
+    separately. Both counters reset at the first DONE.
+    RUNNING rows are skipped (in-flight agents don't affect the count).
+
+    Returns (agent_failures, merge_failures).
+    """
+    conn = _get_conn()
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT status FROM dispatch_runs "
+            "WHERE bead_id = ? ORDER BY started_at DESC",
+            (bead_id,),
+        ).fetchall()
+
+        agent_failures = 0
+        merge_failures = 0
+        for row in rows:
+            status = row["status"]
+            if status == "DONE":
+                break
+            elif status == "MERGE_FAILED":
+                merge_failures += 1
+            elif status in ("FAILED", "BLOCKED"):
+                agent_failures += 1
+            # RUNNING rows are skipped
+        return agent_failures, merge_failures
+    finally:
+        conn.close()
+
+
 def update_live_stats(
     *,
     run_id: str,
