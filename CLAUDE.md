@@ -54,6 +54,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph sessions --all` | Ingest latest session data (107ms) | Run before searching for recent content |
 | `graph wait <bead-id>` | Block until a dispatched bead completes | `graph wait auto-x7wr --timeout 900` |
 | `graph dispatch` | Show running/queued dispatch state | `graph dispatch runs --failed` |
+| `graph primer <bead-id>` | Dynamic context primer for a bead (description + pitfalls + provenance) | `graph primer auto-n9qa` |
 | `graph ui-exp "title" <dir>` | Create UI experiment from HTML files + live-watch for changes | `graph ui-exp "Input redesign" /tmp/cards/` |
 
 ### Beads (`bd`)
@@ -79,6 +80,12 @@ graph bead "Title" -p 1 \                     # create bead with provenance
 ### When you learn a pitfall or operational insight
 ```bash
 graph note "description of the pitfall" --tags pitfall,topic --project autonomy
+```
+
+### Before working on a bead — get the full primer
+```bash
+graph primer <bead-id>                        # description + pitfalls + provenance turns
+# Read the primer BEFORE writing code — pitfalls often contain exact solutions
 ```
 
 ### Before creating any bead — research first
