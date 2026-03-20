@@ -40,6 +40,7 @@ from agents.session_launcher import launch_session
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
+DISPATCH_STATE_PATH = REPO_ROOT / "data" / "dispatch.state"
 
 # Map labels to container images. Beads with these labels get dispatched
 # to specialized images with the right dependencies baked in.
@@ -230,6 +231,28 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
         return []
 
     return beads
+
+
+def _read_dispatch_state() -> dict:
+    """Read data/dispatch.state. Returns {} if missing or invalid."""
+    try:
+        return json.loads(DISPATCH_STATE_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def is_label_paused(label: str | None) -> bool:
+    """Return True if the given queue label is paused in dispatch.state."""
+    if not label:
+        return False
+    state = _read_dispatch_state()
+    return bool(state.get(label, False))
+
+
+def get_paused_labels() -> set[str]:
+    """Return the set of all labels currently paused."""
+    state = _read_dispatch_state()
+    return {label for label, paused in state.items() if paused}
 
 
 _claimed_cache: set[str] = set()
@@ -1560,6 +1583,11 @@ def dispatch_cycle(
 
     available = []
     if slots > 0:
+        # Check if the entire queue is paused
+        if is_label_paused(config.label_filter):
+            print(f"  Queue '{config.label_filter}' is paused — skipping dispatch")
+            slots = 0
+    if slots > 0:
         ready = get_ready_beads(config.label_filter)
         if not ready:
             print("  No approved beads found")
@@ -1570,6 +1598,19 @@ def dispatch_cycle(
             candidates = [b for b in ready
                           if b.get("id") not in claimed
                           and b.get("id") not in running_bead_ids]
+
+            # When no queue filter, also skip beads whose labels are paused
+            if config.label_filter is None:
+                paused_labels = get_paused_labels()
+                if paused_labels:
+                    before = len(candidates)
+                    candidates = [
+                        b for b in candidates
+                        if not paused_labels.intersection(set(b.get("labels") or []))
+                    ]
+                    skipped = before - len(candidates)
+                    if skipped:
+                        print(f"  Skipped {skipped} bead(s) whose labels are paused: {paused_labels}")
 
             if not candidates:
                 print(f"  {len(ready)} ready but all claimed or running")
