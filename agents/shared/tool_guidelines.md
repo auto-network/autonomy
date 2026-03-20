@@ -20,6 +20,7 @@ graph sources                     # List sources (--project X --type Y)
 graph note "text" --tags x,y      # Drop a searchable trail marker
 graph link <bead> <src> -r rel    # Create provenance edge
 graph attention --last N          # Show recent human input
+graph ui-exp "title" <dir>        # Create UI experiment from HTML files + live-watch for changes
 ```
 
 ## Beads (`bd`)
