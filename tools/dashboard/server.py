@@ -484,6 +484,7 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         "token_count": row["token_count"],
         "librarian_type": librarian_type,
         "librarian_review": None,  # populated by _enrich_with_librarian_data
+        "smoke_result": _read_smoke_result(row["output_dir"]),
         "_output_dir": row["output_dir"] or "",  # internal field, stripped before response
     }
 
@@ -507,6 +508,17 @@ def _read_librarian_results(output_dir: str | None) -> dict | None:
         except (OSError, json.JSONDecodeError):
             pass
     return None
+
+
+def _read_smoke_result(output_dir: str | None) -> dict | None:
+    """Read smoke_result.json from a run's output directory. Returns None if absent."""
+    if not output_dir:
+        return None
+    smoke_path = Path(output_dir) / "smoke_result.json"
+    try:
+        return json.loads(smoke_path.read_text()) if smoke_path.exists() else None
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _enrich_with_librarian_data(

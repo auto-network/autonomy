@@ -23,6 +23,8 @@
 //   _libTitle:          string          — human-readable librarian type name
 //   _reviewCollapsed:   string|null     — collapsed review label e.g. "📚 Reviewed"
 //   _reviewItems:       array|null      — extracted items from experience_reviewer results
+//   _smokeBadge:        {cls,label}|null — smoke test result pill
+//   _hiddenByParent:    boolean         — true when a non-librarian entry with same bead_id exists in batch
 
 (function () {
   function _starsBool(score) {
@@ -67,6 +69,50 @@
     }
     // Generic — just say "Reviewed"
     return 'Reviewed';
+  }
+
+  // Build smoke badge from smoke_result.json payload.
+  function _formatSmokeBadge(smoke) {
+    if (!smoke) return null;
+    const t1 = smoke.tier1;
+    const t2 = smoke.tier2;
+    const durS = smoke.duration_ms != null ? (smoke.duration_ms / 1000).toFixed(1) + 's' : null;
+
+    // tier2-only skip (no tier1 at all)
+    if (!t1 && t2 && t2.skipped) {
+      return { cls: 'smoke-skip', label: '~ Smoke skipped (' + (t2.reason || 'tier2') + ')' };
+    }
+
+    const t1Checks = (t1 && t1.checks) ? t1.checks : [];
+    const t1Pass = t1Checks.filter(c => c.pass).length;
+    const t1Total = t1Checks.length;
+    const t2Pages = (t2 && !t2.skipped && t2.pages) ? t2.pages : null;
+    const t2Pass = t2Pages ? t2Pages.filter(p => p.pass).length : null;
+    const t2Total = t2Pages ? t2Pages.length : null;
+    const t2Skipped = t2 && t2.skipped;
+
+    if (smoke.pass) {
+      const parts = ['✓ Smoke PASS'];
+      if (t1Total > 0) parts.push('tier1 ' + t1Pass + '/' + t1Total);
+      if (t2Pages) parts.push('tier2 ' + t2Pass + '/' + t2Total);
+      else if (t2Skipped) parts.push('tier2 skipped');
+      if (durS) parts.push(durS);
+      return { cls: 'smoke-pass', label: parts.join('  ') };
+    } else {
+      let failDetail = '';
+      const failingCheck = t1Checks.find(c => !c.pass);
+      if (failingCheck) {
+        failDetail = failingCheck.detail || failingCheck.name;
+      } else if (t2Pages) {
+        const failPage = t2Pages.find(p => !p.pass);
+        if (failPage) failDetail = failPage.detail || failPage.page;
+      }
+      const parts = ['✗ Smoke FAIL'];
+      if (t1Total > 0) parts.push('tier1 ' + t1Pass + '/' + t1Total);
+      if (t2Pages) parts.push('tier2 ' + t2Pass + '/' + t2Total);
+      if (failDetail) parts.push(failDetail);
+      return { cls: 'smoke-fail', label: parts.join('  ') };
+    }
   }
 
   function _mapEntry(e, idx) {
@@ -158,6 +204,8 @@
       _tokenFmt: tokenFmt,
       _reviewCollapsed: _reviewCollapsedLabel(e.librarian_review),
       _reviewItems: reviewItems,
+      _smokeBadge: _formatSmokeBadge(e.smoke_result),
+      _hiddenByParent: false,
     };
   }
 
@@ -198,7 +246,17 @@
           fetch('/api/timeline' + qs).then(r => r.json()),
         ]);
         this.stats = stats;
-        this.entries = Array.isArray(entries) ? entries.map(_mapEntry) : [];
+        const mapped = Array.isArray(entries) ? entries.map(_mapEntry) : [];
+        // Hide librarian rows when their parent bead dispatch entry is in the same batch
+        const beadIdsWithDispatch = new Set(
+          mapped.filter(e => !e._isLibrarian && e.bead_id).map(e => e.bead_id)
+        );
+        for (const e of mapped) {
+          if (e._isLibrarian && e.bead_id && beadIdsWithDispatch.has(e.bead_id)) {
+            e._hiddenByParent = true;
+          }
+        }
+        this.entries = mapped;
         this.loading = false;
       },
 
