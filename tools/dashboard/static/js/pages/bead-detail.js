@@ -45,6 +45,22 @@
         return _formatTs(ts);
       },
 
+      creatorIcon(created_by) {
+        if (!created_by) return '';
+        if (created_by.startsWith('librarian:')) return '📖';
+        if (created_by.startsWith('terminal:')) return '💻';
+        if (created_by.startsWith('dispatch:')) return '🤖';
+        return '🧑';
+      },
+
+      creatorLabel(created_by) {
+        if (!created_by) return '';
+        if (created_by.startsWith('librarian:')) return 'Librarian';
+        if (created_by.startsWith('terminal:')) return created_by;
+        if (created_by.startsWith('dispatch:')) return created_by;
+        return created_by;
+      },
+
       async approve() {
         this.approving = true;
         try {

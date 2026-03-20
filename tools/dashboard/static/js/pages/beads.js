@@ -49,6 +49,14 @@
     return '📋';
   }
 
+  function _creatorIcon(created_by) {
+    if (!created_by) return '';
+    if (created_by.startsWith('librarian:')) return '📖';
+    if (created_by.startsWith('terminal:')) return '💻';
+    if (created_by.startsWith('dispatch:')) return '🤖';
+    return '🧑';
+  }
+
   function _priorityBadgeHtml(p) {
     return `<span class="badge badge-p${p}">P${p}</span>`;
   }
@@ -82,6 +90,8 @@
           return mult * (va - vb);
         case 'type':
           return mult * (a.issue_type || '').localeCompare(b.issue_type || '');
+        case 'creator':
+          return mult * (a.created_by || '').localeCompare(b.created_by || '');
         case 'epic':
           va = (_getEpicParent(a) || '').toLowerCase();
           vb = (_getEpicParent(b) || '').toLowerCase();
@@ -410,6 +420,7 @@
       fLabelMode: 'or',
       fEpic: '',
       fBlocked: '',
+      fCreator: '',
 
       // Dropdown open state
       labelDropdownOpen: false,
@@ -473,6 +484,7 @@
         this.$watch('fLabelMode', () => this._syncURL());
         this.$watch('fEpic', () => this._syncURL());
         this.$watch('fBlocked', () => this._syncURL());
+        this.$watch('fCreator', () => this._syncURL());
       },
 
       destroy() {
@@ -491,6 +503,7 @@
         this.fLabelMode = p.get('labelMode') || 'or';
         this.fEpic = p.get('epic') || '';
         this.fBlocked = p.get('blocked') || '';
+        this.fCreator = p.get('creator') || '';
       },
 
       _syncURL() {
@@ -503,6 +516,7 @@
         if (this.fLabelMode !== 'or') p.set('labelMode', this.fLabelMode);
         if (this.fEpic) p.set('epic', this.fEpic);
         if (this.fBlocked) p.set('blocked', this.fBlocked);
+        if (this.fCreator) p.set('creator', this.fCreator);
         const qs = p.toString();
         history.replaceState({}, '', window.location.pathname + (qs ? '?' + qs : ''));
       },
@@ -511,7 +525,7 @@
 
       get hasFilters() {
         return this.fPriority.length || this.fPhase.length || this.fType.length ||
-               this.fLabels.length || this.fEpic || this.fBlocked;
+               this.fLabels.length || this.fEpic || this.fBlocked || this.fCreator;
       },
 
       get filtered() {
@@ -549,6 +563,8 @@
         // Blocked
         if (this.fBlocked === 'yes') beads = beads.filter(b => _isBlocked(b));
         if (this.fBlocked === 'no') beads = beads.filter(b => !_isBlocked(b));
+        // Creator
+        if (this.fCreator === 'librarian') beads = beads.filter(b => b.created_by && b.created_by.startsWith('librarian:'));
         return beads;
       },
 
@@ -747,10 +763,14 @@
         this.fBlocked = this.fBlocked === val ? '' : val;
       },
 
+      setCreator(val) {
+        this.fCreator = this.fCreator === val ? '' : val;
+      },
+
       clearFilters() {
         this.fPriority = []; this.fPhase = []; this.fType = [];
         this.fLabels = []; this.fLabelMode = 'or';
-        this.fEpic = ''; this.fBlocked = '';
+        this.fEpic = ''; this.fBlocked = ''; this.fCreator = '';
       },
 
       // List view: toggle row selection
@@ -804,6 +824,7 @@
       getPhase: _getPhase,
       getEpicParent: _getEpicParent,
       typeIcon: _typeIcon,
+      creatorIcon: _creatorIcon,
       highlightText: _highlightText,
       priorityBadgeHtml: _priorityBadgeHtml,
       fmtDate: _fmtDate,
