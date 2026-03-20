@@ -578,6 +578,32 @@ def _enrich_with_librarian_data(
         if entry.get("librarian_type"):
             entry["librarian_review"] = _read_librarian_results(entry.get("_output_dir"))
 
+    # Populate parent_run_id on librarian entries (for timeline hiding logic)
+    lib_run_ids = [
+        e["run_id"] for e in entries
+        if e.get("librarian_type") and e.get("run_id")
+    ]
+    if lib_run_ids:
+        lib_ph = ",".join("?" * len(lib_run_ids))
+        parent_sql = f"""
+            SELECT dr.id AS lib_run_id,
+                   json_extract(lj.payload, '$.run_id') AS parent_run_id
+            FROM dispatch_runs dr
+            JOIN librarian_jobs lj ON (
+                dr.librarian_type = lj.job_type
+                AND dr.id LIKE 'librarian-' || lj.job_type || '-' || substr(lj.id, 1, 8) || '-%'
+            )
+            WHERE dr.id IN ({lib_ph})
+        """
+        try:
+            parent_rows = conn.execute(parent_sql, lib_run_ids).fetchall()
+            parent_map = {r["lib_run_id"]: r["parent_run_id"] for r in parent_rows}
+            for entry in entries:
+                if entry.get("librarian_type"):
+                    entry["parent_run_id"] = parent_map.get(entry["run_id"])
+        except Exception:
+            pass
+
     # Regular dispatch entries — bulk-query librarian_jobs for review results
     regular_run_ids = [
         e["run_id"] for e in entries
