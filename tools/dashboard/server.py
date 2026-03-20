@@ -336,6 +336,65 @@ async def api_dispatch_approved(request):
 
 AGENT_RUNS_DIR = Path(__file__).parent.parent.parent / "data" / "agent-runs"
 
+
+def _enrich_dispatch_runs(runs: list[dict]) -> None:
+    """Add smoke_result and librarian_review to dispatch run dicts in-place."""
+    # Smoke results — read from each run's output directory
+    for run in runs:
+        run["smoke_result"] = _read_smoke_result(run.get("_output_dir") or None)
+
+    # Librarian entries — read review from their own output_dir
+    for run in runs:
+        if run.get("_librarian_type"):
+            run["librarian_review"] = _read_librarian_results(
+                run.get("_output_dir") or None
+            )
+
+    # Regular dispatch entries — bulk-query librarian_jobs for review results
+    regular_runs = [
+        r for r in runs
+        if not r.get("_librarian_type") and r.get("_run_id")
+    ]
+    if not regular_runs:
+        return
+
+    run_ids = [r["_run_id"] for r in regular_runs]
+    placeholders = ",".join("?" * len(run_ids))
+    sql = f"""
+        SELECT
+            json_extract(lj.payload, '$.run_id') AS dispatch_run_id,
+            lj.status AS job_status,
+            dr.output_dir AS lib_output_dir
+        FROM librarian_jobs lj
+        LEFT JOIN dispatch_runs dr ON (
+            dr.librarian_type = lj.job_type
+            AND dr.id LIKE 'librarian-' || lj.job_type || '-' || substr(lj.id, 1, 8) || '-%'
+        )
+        WHERE lj.job_type = 'review_report'
+        AND json_extract(lj.payload, '$.run_id') IN ({placeholders})
+    """
+    try:
+        conn = _timeline_conn()
+        rows = conn.execute(sql, run_ids).fetchall()
+        conn.close()
+    except Exception:
+        return
+
+    reviews: dict[str, dict] = {}
+    for row in rows:
+        run_id = row["dispatch_run_id"]
+        if run_id in reviews:
+            continue
+        if row["job_status"] == "running":
+            reviews[run_id] = {"status": "running"}
+        elif row["job_status"] == "done":
+            results = _read_librarian_results(row["lib_output_dir"])
+            reviews[run_id] = results if results is not None else {"status": "done"}
+
+    for run in regular_runs:
+        run["librarian_review"] = reviews.get(run["_run_id"])
+
+
 async def api_dispatch_runs(request):
     """List dispatch runs from SQLite (includes RUNNING rows)."""
     db_rows = await asyncio.to_thread(list_runs)
@@ -397,7 +456,21 @@ async def api_dispatch_runs(request):
             "lines_removed": row.get("lines_removed"),
             "files_changed": row.get("files_changed"),
             "commit_message": row.get("commit_message") or "",
+            "smoke_result": None,
+            "librarian_review": None,
+            # internal fields for enrichment — stripped before response
+            "_run_id": row.get("id", ""),
+            "_output_dir": row.get("output_dir") or "",
+            "_librarian_type": row.get("librarian_type"),
         })
+
+    await asyncio.to_thread(_enrich_dispatch_runs, runs)
+
+    for run in runs:
+        run.pop("_run_id", None)
+        run.pop("_output_dir", None)
+        run.pop("_librarian_type", None)
+
     return JSONResponse(runs)
 
 
