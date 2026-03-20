@@ -171,11 +171,41 @@
           <template x-if="e.librarian_review && e.librarian_review.status !== 'running'">
             <div class="tl-review-detail" @click.stop>
               <div class="tl-review-header">
-                <span>📚 Librarian Review</span>
-                <span x-show="e._reviewCollapsed" class="tl-review-count" x-text="e._reviewCollapsed" style="display:none"></span>
+                <span>📖 Librarian Review</span>
+                <template x-if="e._integratedLibrarian && e._integratedLibrarian._countSummary">
+                  <span class="tl-review-count" x-text="e._integratedLibrarian._countSummary"></span>
+                </template>
+                <template x-if="!(e._integratedLibrarian && e._integratedLibrarian._countSummary) && e._reviewCollapsed">
+                  <span class="tl-review-count" x-text="e._reviewCollapsed"></span>
+                </template>
+                <template x-if="e._integratedLibrarian && e._integratedLibrarian.duration_secs != null">
+                  <span class="tl-review-meta"><span class="tl-icon-time">⏱</span><span x-text="fmtDuration(e._integratedLibrarian.duration_secs)"></span></span>
+                </template>
+                <template x-if="e._integratedLibrarian && e._integratedLibrarian._tokenFmt">
+                  <span class="tl-review-meta tl-tokens" x-text="'✦ ' + e._integratedLibrarian._tokenFmt"></span>
+                </template>
               </div>
-              <!-- Structured items (experience_reviewer results.json) -->
-              <template x-if="e._reviewItems">
+              <!-- Structured items: prefer integrated librarian items, fall back to parent review items -->
+              <template x-if="e._integratedLibrarian && e._integratedLibrarian._reviewItems">
+                <div class="tl-review-items">
+                  <template x-for="(item, i) in e._integratedLibrarian._reviewItems" :key="i">
+                    <div class="tl-review-item">
+                      <span class="tl-lib-dot" :class="'tl-lib-dot-' + (item.type || 'skip')">●</span>
+                      <span x-text="item.description || ''"></span>
+                      <template x-if="item.source_id">
+                        <a class="tl-lib-link" :href="'/source/' + item.source_id" @click.stop x-text="item.source_id.slice(0,8)"></a>
+                      </template>
+                      <template x-if="item.bead_id">
+                        <a class="tl-lib-link" :href="'/bead/' + item.bead_id" @click.stop x-text="item.bead_id"></a>
+                      </template>
+                      <template x-if="item.reason">
+                        <span class="tl-lib-reason" x-text="'— ' + item.reason"></span>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <template x-if="!(e._integratedLibrarian && e._integratedLibrarian._reviewItems) && e._reviewItems">
                 <div class="tl-review-items">
                   <template x-for="(item, i) in e._reviewItems" :key="i">
                     <div class="tl-review-item">
@@ -195,7 +225,7 @@
                 </div>
               </template>
               <!-- Generic fallback: show notes/reason text -->
-              <template x-if="!e._reviewItems && e.librarian_review.notes">
+              <template x-if="!(e._integratedLibrarian && e._integratedLibrarian._reviewItems) && !e._reviewItems && e.librarian_review.notes">
                 <div class="tl-review-notes" x-text="e.librarian_review.notes"></div>
               </template>
             </div>
@@ -304,11 +334,11 @@
             >
               <!-- Running state: pulsing indicator -->
               <template x-if="e.librarian_review && e.librarian_review.status === 'running'">
-                <span class="tl-review-running">📚 Reviewing...</span>
+                <span class="tl-review-running">📖 Reviewing...</span>
               </template>
               <!-- Done state: count summary -->
               <template x-if="e.librarian_review && e.librarian_review.status !== 'running'">
-                <span>📚 Reviewed<template x-if="e._reviewCollapsed"><span x-text="' · ' + e._reviewCollapsed"></span></template></span>
+                <span>📖 Reviewed<template x-if="e._reviewCollapsed"><span x-text="' · ' + e._reviewCollapsed"></span></template></span>
               </template>
             </div>
           </div>
