@@ -2,13 +2,9 @@
 // Manages experiment comparison UI: series navigation, variant cards,
 // selection/ranking, Chat With panel toggle, screenshot status.
 //
-// Exposes window._experimentPage so imperative functions (connectChatWithTerminal,
-// screenshot capture) can push reactive state updates without depending on Alpine
-// internals — the same bridge pattern as window._terminalPage.
-//
-// Iframe injection, xterm.js Chat With terminal, display capture, and SSE
-// subscription are kept imperative; Alpine manages the chrome (button states,
-// panel visibility, selection/ranking logic, status text).
+// The Chat With panel uses the rich chatWithPanel component (JSONL polling,
+// multimodal input bar, markdown rendering) instead of xterm.js terminal.
+// Screenshot capture triggers two-send image injection via the server.
 
 (function () {
 
@@ -49,8 +45,8 @@
       chatWithStatusClass: 'text-xs text-gray-500 ml-2',
       chatWithBtnText: 'Chat With',
       chatWithBtnDisabled: false,
-      chatWithReconnectVisible: false,
       chatWithKillVisible: false,
+      chatWithPanelRef: null,  // reference to the chatWithPanel Alpine component
 
       // Screenshot
       screenshotStatus: '',
@@ -66,12 +62,18 @@
 
       destroy() {
         if (window._experimentPage === this) window._experimentPage = null;
-        this._clearHeaderActions();
+        // Note: don't call _clearHeaderActions() here — Alpine's MutationObserver
+        // fires destroy() asynchronously, which races with the new component's
+        // init() that injects header buttons. The router clears header-actions
+        // synchronously before dispatching, so cleanup is already handled.
         if (window._expSeriesCleanup) {
           window._expSeriesCleanup();
           window._expSeriesCleanup = null;
         }
-        destroyChatWith();
+        if (this.chatWithPanelRef) {
+          this.chatWithPanelRef.destroy();
+          this.chatWithPanelRef = null;
+        }
         this.chatWithVisible = false;
       },
 
@@ -89,7 +91,6 @@
           this.state = 'ready';
 
           // Post-render: inject iframe content once Alpine has rendered the skeleton.
-          // $nextTick waits for Alpine's DOM flush before running the callback.
           this.$nextTick(() => this._injectIframes());
 
           // Auto-reconnect Chat With if a session already exists
@@ -218,7 +219,10 @@
           window._expSeriesCleanup();
           window._expSeriesCleanup = null;
         }
-        destroyChatWith();
+        if (this.chatWithPanelRef) {
+          this.chatWithPanelRef.destroy();
+          this.chatWithPanelRef = null;
+        }
         this.chatWithVisible = false;
         this.chatWithBtnText = 'Chat With';
         this.chatWithBtnDisabled = false;
@@ -236,10 +240,19 @@
 
       toggleChatWithPanel() {
         this.chatWithCollapsed = !this.chatWithCollapsed;
-        if (!this.chatWithCollapsed) {
-          // Re-fit xterm.js after expanding; _fitChatWithAddon is a helper in app.js
-          setTimeout(() => _fitChatWithAddon(), 50);
-        }
+      },
+
+      _configureChatWithPanel(sessionName) {
+        // Configure the chatWithPanel inner component once it's rendered.
+        // Uses $nextTick to wait for Alpine to render the panel DOM.
+        this.$nextTick(() => {
+          if (this.chatWithPanelRef) {
+            this.chatWithPanelRef.configure({
+              tailUrl: `/api/chatwith/${encodeURIComponent(sessionName)}/tail`,
+              tmuxSession: sessionName,
+            });
+          }
+        });
       },
 
       async spawnChatWith() {
@@ -260,9 +273,11 @@
             this.setChatWithStatus(`Error: ${result.error}`, 'text-xs text-red-400 ml-2');
             return;
           }
-          this.chatWithBtnText = 'Reconnect';
+          this.chatWithBtnText = 'Chat With';
           this.chatWithBtnDisabled = false;
-          connectChatWithTerminal(result.session_name);
+          this.chatWithKillVisible = true;
+          this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
+          this._configureChatWithPanel(result.session_name);
           initDisplayCapture(this.expId).catch(() => {});
         } catch (e) {
           this.chatWithBtnText = 'Chat With';
@@ -274,7 +289,9 @@
 
       async killChatWith() {
         const name = this.sessionName;
-        destroyChatWith();
+        if (this.chatWithPanelRef) {
+          this.chatWithPanelRef.destroy();
+        }
         this.chatWithVisible = false;
         this.chatWithKillVisible = false;
         this.chatWithBtnText = 'Chat With';
@@ -287,18 +304,20 @@
       },
 
       reconnectChatWith() {
-        connectChatWithTerminal(this.sessionName);
+        this.chatWithVisible = true;
+        this.chatWithKillVisible = true;
+        this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
+        this._configureChatWithPanel(this.sessionName);
       },
 
       // ── Screenshot ────────────────────────────────────────────────────
+      // Now triggers two-send image injection via server when tmux session exists.
 
       async captureScreenshot() {
-        await manualCaptureScreenshot(this.expId);
+        await manualCaptureScreenshot(this.expId, this.sessionName);
       },
 
       // ── Imperative → Alpine bridge ────────────────────────────────────
-      // These methods are called by connectChatWithTerminal() and screenshot
-      // functions in app.js to push state back into Alpine.
 
       setChatWithStatus(text, cls) {
         this.chatWithStatus = text;
@@ -309,7 +328,6 @@
         this.chatWithVisible = true;
       },
 
-      setReconnectVisible(v) { this.chatWithReconnectVisible = v; },
       setKillVisible(v) { this.chatWithKillVisible = v; },
       setScreenshotStatus(msg) { this.screenshotStatus = msg; },
 
@@ -374,8 +392,11 @@ ${_safeHtml}
             `/api/chatwith/check?session=${encodeURIComponent(sessionName)}`
           ).then(r => r.json());
           if (check && check.exists) {
-            this.chatWithBtnText = 'Reconnect';
-            connectChatWithTerminal(sessionName);
+            this.chatWithBtnText = 'Chat With';
+            this.chatWithVisible = true;
+            this.chatWithKillVisible = true;
+            this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
+            this._configureChatWithPanel(sessionName);
             initDisplayCapture(this.expId).catch(() => {});
           }
         } catch (e) { /* best-effort — session check is non-critical */ }
@@ -419,7 +440,7 @@ ${_safeHtml}
         document.getElementById('ha-capture-btn').onclick = () => this.captureScreenshot();
         const cwBtn = document.getElementById('ha-chatwith-btn');
         cwBtn.onclick = () => {
-          if (this.chatWithBtnText === 'Reconnect') this.reconnectChatWith();
+          if (this.chatWithVisible) this.reconnectChatWith();
           else this.spawnChatWith();
         };
 
