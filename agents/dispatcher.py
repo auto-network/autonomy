@@ -28,7 +28,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -73,6 +73,8 @@ class DispatchResult:
     commit_hash: str = ""
     worktree_path: str = ""
     branch: str = ""
+    branch_base: str = ""
+    labels: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -87,6 +89,7 @@ class RunningAgent:
     branch_base: str
     image: str
     started_at: float
+    labels: list[str] = field(default_factory=list)
     # Live stats tracking — accumulated each poll cycle, persisted to dispatch_runs
     jsonl_offset: int = 0          # byte offset into the session JSONL file
     prev_cpu_usec: int = 0         # previous cpu.stat usage_usec reading
@@ -491,6 +494,8 @@ def collect_results(agent: RunningAgent, exit_code: int) -> DispatchResult:
         commit_hash=commit_hash,
         worktree_path=agent.worktree_path,
         branch=agent.branch,
+        branch_base=agent.branch_base,
+        labels=list(agent.labels),
     )
 
 
@@ -635,6 +640,108 @@ def find_worktree_for_bead(bead_id: str) -> str:
     return str(candidates[0]) if candidates else ""
 
 
+# ── Smoke test helpers ──────────────────────────────────────────
+
+_DASHBOARD_WATCH_PATHS = (
+    "tools/dashboard/server.py",
+    "tools/dashboard/static/",
+    "tools/dashboard/templates/",
+    "tools/dashboard/dao/",
+)
+
+_DISPATCH_STATE_PATH = REPO_ROOT / "data" / "dispatch.state"
+_START_DASHBOARD_SCRIPT = REPO_ROOT / "tools" / "dashboard" / "start-dashboard.sh"
+
+
+def _dashboard_files_changed(branch_base: str) -> bool:
+    """Return True if the merged commit touched any dashboard-owned paths."""
+    if not branch_base:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{branch_base}..HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(REPO_ROOT),
+        )
+        changed = result.stdout.strip().splitlines()
+        for path in changed:
+            for watch in _DASHBOARD_WATCH_PATHS:
+                if path == watch or path.startswith(watch):
+                    return True
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return False
+
+
+def _maybe_restart_dashboard(branch_base: str) -> None:
+    """Restart the dashboard server if merged commit touched dashboard files."""
+    if not _dashboard_files_changed(branch_base):
+        return
+
+    print("  Dashboard files changed — restarting server...", file=sys.stderr)
+
+    if not _START_DASHBOARD_SCRIPT.exists():
+        print("  WARN: start-dashboard.sh not found, skipping restart", file=sys.stderr)
+        return
+
+    try:
+        subprocess.run(
+            [str(_START_DASHBOARD_SCRIPT), "--restart"],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(REPO_ROOT),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  WARN: dashboard restart failed: {e}", file=sys.stderr)
+        return
+
+    # Poll /api/stats up to 10s for readiness
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    try:
+        import requests as _requests
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                r = _requests.get("https://localhost:8080/api/stats", verify=False, timeout=2)
+                if r.status_code == 200:
+                    print("  Dashboard ready.", file=sys.stderr)
+                    return
+            except Exception:
+                pass
+            time.sleep(0.5)
+        print("  WARN: dashboard did not become ready within 10s", file=sys.stderr)
+    except ImportError:
+        pass
+
+
+def _pause_dashboard_dispatch() -> None:
+    """Write dashboard=true pause flag to data/dispatch.state."""
+    try:
+        state: dict = {}
+        if _DISPATCH_STATE_PATH.exists():
+            try:
+                state = json.loads(_DISPATCH_STATE_PATH.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        state["dashboard"] = True
+        _DISPATCH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _DISPATCH_STATE_PATH.write_text(json.dumps(state))
+        print(f"  Dashboard dispatch paused — {_DISPATCH_STATE_PATH}", file=sys.stderr)
+    except OSError as e:
+        print(f"  WARN: could not write dispatch.state: {e}", file=sys.stderr)
+
+
+def _is_dashboard_dispatch_paused() -> bool:
+    """Return True if dashboard dispatch is paused via data/dispatch.state."""
+    try:
+        if _DISPATCH_STATE_PATH.exists():
+            state = json.loads(_DISPATCH_STATE_PATH.read_text())
+            return bool(state.get("dashboard"))
+    except (json.JSONDecodeError, OSError):
+        pass
+    return False
+
+
 # ── Decision processing ─────────────────────────────────────────
 
 
@@ -725,6 +832,42 @@ def process_decision(dispatch_result: DispatchResult) -> None:
             print(f"  Merged to master: {merge_hash[:10]}")
             run_bd(["update", bead_id, "--append-notes",
                     f"merged: {merge_hash}"])
+
+            # ── Post-merge smoke test (dashboard beads only) ────────────────
+            # Bootstrap guard: smoke.py won't exist until auto-mzbx merges.
+            # The first merge (introducing smoke.py) skips self-gating.
+            smoke_script = REPO_ROOT / "tools/dashboard/smoke.py"
+            if "dashboard" in dispatch_result.labels and smoke_script.exists():
+                try:
+                    _maybe_restart_dashboard(dispatch_result.branch_base)
+                    smoke_raw = subprocess.run(
+                        [sys.executable, str(smoke_script)],
+                        capture_output=True, text=True,
+                        cwd=str(REPO_ROOT), timeout=60,
+                    )
+                    smoke = (
+                        json.loads(smoke_raw.stdout)
+                        if smoke_raw.stdout
+                        else {"pass": False, "error": "no output"}
+                    )
+                    if dispatch_result.output_dir:
+                        (Path(dispatch_result.output_dir) / "smoke_result.json").write_text(
+                            json.dumps(smoke)
+                        )
+                    if not smoke.get("pass"):
+                        run_bd(["update", bead_id, "--append-notes",
+                                f"smoke test FAILED: {smoke}"])
+                        status = "BLOCKED"
+                        reason = "Post-merge smoke test failed — dashboard dispatch paused"
+                        _pause_dashboard_dispatch()
+                    else:
+                        print(f"  Smoke test PASSED ({smoke.get('duration_ms', '?')}ms)")
+                except Exception as smoke_err:
+                    # Crash must not prevent bead from closing as DONE
+                    print(f"  WARN: smoke test error for {bead_id}: {smoke_err}",
+                          file=sys.stderr)
+                    run_bd(["update", bead_id, "--append-notes",
+                            f"smoke test errored (non-blocking): {smoke_err}"])
         else:
             print(f"  Merge failed: {merge_err}")
             run_bd(["update", bead_id, "--append-notes",
@@ -1451,11 +1594,21 @@ def dispatch_cycle(
         print(f"  {len(available)} available beads, {slots} slot(s) open")
         available.sort(key=lambda b: b.get("priority", 99))
 
+    dashboard_paused = _is_dashboard_dispatch_paused()
+    if dashboard_paused:
+        print("  WARN: dashboard dispatch paused (data/dispatch.state) — "
+              "dashboard-labeled beads will be skipped")
+
     for bead in available[:slots]:
         bead_id = bead["id"]
         title = bead.get("title", "?")
+        bead_labels = bead.get("labels") or []
         image = image_for_bead(bead)
         print(f"  Selected: {bead_id} — {title} (P{bead.get('priority', '?')}) [{image}]")
+
+        if dashboard_paused and "dashboard" in bead_labels:
+            print(f"  Skipping {bead_id}: dashboard dispatch paused (smoke test failure)")
+            continue
 
         if config.dry_run:
             print("  [DRY RUN] Would dispatch this bead")
@@ -1464,6 +1617,7 @@ def dispatch_cycle(
         # Launch agent container (blocks until container starts)
         agent = start_agent(bead_id, image=image)
         if agent:
+            agent.labels = bead.get("labels") or []
             _record_launch(agent)
             running.append(agent)
             dispatched += 1
