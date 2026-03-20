@@ -138,18 +138,9 @@
 
         this._tailUrl = `/api/session/${encodeURIComponent(this.project)}/${encodeURIComponent(this.sessionId)}/tail`;
 
-        // tmux session name: from query param, or auto-detect from /api/terminals
+        // tmux session name: from query param only (no auto-detect — avoids misfiring to wrong session)
         const params = new URLSearchParams(window.location.search);
         this._tmuxSession = params.get('tmux') || '';
-        if (!this._tmuxSession) {
-          try {
-            const terms = await fetch('/api/terminals').then(r => r.json());
-            if (Array.isArray(terms)) {
-              const claude = terms.find(t => t.cmd && t.cmd.includes('claude'));
-              if (claude) this._tmuxSession = claude.id;
-            }
-          } catch (_) {}
-        }
 
         // First poll (immediate)
         await this._poll();
