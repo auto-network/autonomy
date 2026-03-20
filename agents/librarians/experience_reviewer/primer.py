@@ -111,11 +111,61 @@ def _format_decision(decision: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_smoke_result(smoke: dict) -> str:
+    """Format smoke_result.json as a readable one-liner summary."""
+    if not smoke:
+        return ""
+    t1 = smoke.get("tier1")
+    t2 = smoke.get("tier2")
+    dur_s = (smoke["duration_ms"] / 1000) if smoke.get("duration_ms") is not None else None
+    dur_str = f"{dur_s:.1f}s" if dur_s is not None else ""
+
+    if not t1 and t2 and t2.get("skipped"):
+        return f"~ Smoke skipped ({t2.get('reason', 'tier2')})"
+
+    t1_checks = (t1 or {}).get("checks", [])
+    t1_pass = sum(1 for c in t1_checks if c.get("pass"))
+    t1_total = len(t1_checks)
+    t2_pages = (t2 or {}).get("pages") if t2 and not t2.get("skipped") else None
+    t2_pass = sum(1 for p in t2_pages if p.get("pass")) if t2_pages else None
+    t2_total = len(t2_pages) if t2_pages else None
+    t2_skipped = t2 and t2.get("skipped")
+
+    if smoke.get("pass"):
+        parts = ["PASS"]
+        if t1_total:
+            parts.append(f"tier1 {t1_pass}/{t1_total}")
+        if t2_pages:
+            parts.append(f"tier2 {t2_pass}/{t2_total}")
+        elif t2_skipped:
+            parts.append("tier2 skipped")
+        if dur_str:
+            parts.append(dur_str)
+        return "✓ Smoke " + "  ".join(parts)
+    else:
+        fail_detail = ""
+        failing = next((c for c in t1_checks if not c.get("pass")), None)
+        if failing:
+            fail_detail = failing.get("detail") or failing.get("name", "")
+        elif t2_pages:
+            fail_page = next((p for p in t2_pages if not p.get("pass")), None)
+            if fail_page:
+                fail_detail = fail_page.get("detail") or fail_page.get("page", "")
+        parts = ["FAIL"]
+        if t1_total:
+            parts.append(f"tier1 {t1_pass}/{t1_total}")
+        if t2_pages:
+            parts.append(f"tier2 {t2_pass}/{t2_total}")
+        if fail_detail:
+            parts.append(fail_detail)
+        return "✗ Smoke " + "  ".join(parts)
+
+
 def build_primer(payload: dict) -> str:
     """Build a context primer for the experience reviewer agent.
 
-    Reads bead details, experience report, and decision.json from the
-    payload paths and assembles a structured markdown briefing.
+    Reads bead details, experience report, decision.json, and smoke_result.json
+    from the payload paths and assembles a structured markdown briefing.
 
     Args:
         payload: dict with keys bead_id, report_path, decision_path, run_id
@@ -164,7 +214,19 @@ def build_primer(payload: dict) -> str:
         sections.append(f"\n## Agent Decision")
         sections.append(f"(No decision.json found at `{decision_path}`)")
 
-    # ── 3. Experience report ─────────────────────────────────────
+    # ── 3. Smoke result ───────────────────────────────────────────
+    smoke_path = Path(decision_path).parent / "smoke_result.json" if decision_path else None
+    smoke_text = _read_file(smoke_path)
+    if smoke_text:
+        try:
+            smoke = json.loads(smoke_text)
+            smoke_summary = _format_smoke_result(smoke)
+            sections.append(f"\n## Smoke Test Result")
+            sections.append(smoke_summary)
+        except json.JSONDecodeError:
+            pass
+
+    # ── 4. Experience report ─────────────────────────────────────
     report_text = _read_file(report_path)
     if report_text:
         sections.append(f"\n## Experience Report")
@@ -179,7 +241,7 @@ def build_primer(payload: dict) -> str:
         else:
             sections.append("(No report_path provided in payload.)")
 
-    # ── 4. Instructions ──────────────────────────────────────────
+    # ── 5. Instructions ──────────────────────────────────────────
     sections.append(f"""
 ## Your Task
 
