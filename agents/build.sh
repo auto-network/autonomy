@@ -72,10 +72,10 @@ docker build $NO_CACHE -t autonomy-agent context/
 echo "==> Done. Image: autonomy-agent"
 docker images autonomy-agent:latest --format "  Size: {{.Size}}"
 
-# ── Dashboard variant ──
+# ── Dashboard variant (adds Python deps for API contract tests) ──
 if [[ "$DASHBOARD" == true ]]; then
     echo ""
-    echo "==> Building dashboard variant..."
+    echo "==> Building dashboard variant (Python deps only — Chrome/agent-browser in base)..."
     docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.dashboard" -t autonomy-agent:dashboard context/
     echo "==> Done. Image: autonomy-agent:dashboard"
     docker images autonomy-agent:dashboard --format "  Size: {{.Size}}"
