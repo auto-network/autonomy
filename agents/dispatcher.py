@@ -34,6 +34,8 @@ from pathlib import Path
 
 import importlib
 
+import re
+
 from agents.dispatch_db import init_db, insert_run, insert_launch_run, update_live_stats, get_currently_running
 from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
 from agents.session_launcher import launch_session
@@ -203,6 +205,70 @@ def _retry_bd(args: list[str], max_retries: int = 2, timeout: int = 15) -> str:
           f"{max_retries + 1} attempts: {last_err}",
           file=sys.stderr)
     raise last_err
+
+
+# ── Failure classification ────────────────────────────────────────
+
+_AUTH_ERROR_PATTERNS = re.compile(
+    r"authentication_error|OAuth token has expired|Invalid authentication credentials|"
+    r'"type"\s*:\s*"authentication_error"|401',
+    re.IGNORECASE,
+)
+
+
+def _has_auth_error(output_dir: str) -> bool:
+    """Check session JSONL tail and docker stderr for auth error patterns.
+
+    Reads the last 4KB of the session JSONL file and the .docker-stderr
+    file (captured before container removal) looking for known auth
+    failure signatures.
+    """
+    # Check session JSONL (last 4KB)
+    session_dir = Path(output_dir) / "sessions"
+    if session_dir.exists():
+        jsonl_files = list(session_dir.glob("**/*.jsonl"))
+        if jsonl_files:
+            try:
+                fsize = jsonl_files[0].stat().st_size
+                with open(jsonl_files[0], "rb") as fh:
+                    offset = max(0, fsize - 4096)
+                    fh.seek(offset)
+                    tail = fh.read().decode("utf-8", errors="replace")
+                if _AUTH_ERROR_PATTERNS.search(tail):
+                    return True
+            except OSError:
+                pass
+
+    # Check docker stderr (fallback for 5-second crash runs)
+    stderr_path = Path(output_dir) / ".docker-stderr"
+    if stderr_path.exists():
+        try:
+            stderr_text = stderr_path.read_text(errors="replace")
+            if _AUTH_ERROR_PATTERNS.search(stderr_text):
+                return True
+        except OSError:
+            pass
+
+    return False
+
+
+def classify_failure(output_dir: str, duration_secs: float) -> str:
+    """Classify an agent failure into one of: auth, fast_crash, timeout, agent_failure.
+
+    Called after collecting results from a non-zero exit or missing/failed decision.
+    """
+    if _has_auth_error(output_dir):
+        return "auth"
+
+    if duration_secs < 15:
+        decision_path = Path(output_dir) / "decision.json"
+        if not decision_path.exists():
+            return "fast_crash"
+
+    if duration_secs >= MAX_AGENT_RUNTIME:
+        return "timeout"
+
+    return "agent_failure"
 
 
 # ── Bead queries ─────────────────────────────────────────────────
@@ -498,6 +564,21 @@ def collect_results(agent: RunningAgent, exit_code: int) -> DispatchResult:
         (Path(output_dir) / ".commit_hash").write_text(commit_hash)
     (Path(output_dir) / ".worktree_path").write_text(agent.worktree_path)
     (Path(output_dir) / ".branch").write_text(agent.branch)
+
+    # Capture docker stderr before removing the container (fallback for
+    # fast crashes where session JSONL may not have been written yet)
+    if exit_code != 0:
+        try:
+            logs_result = subprocess.run(
+                ["docker", "logs", "--tail", "20", agent.container_name],
+                capture_output=True, text=True, timeout=10,
+            )
+            if logs_result.stderr.strip():
+                (Path(output_dir) / ".docker-stderr").write_text(
+                    logs_result.stderr[-4096:]  # cap at 4KB
+                )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
 
     # Remove the stopped container (no --rm in detach mode)
     remove_container(agent.container_name)
@@ -1189,6 +1270,12 @@ def _record_run(agent: RunningAgent, result: DispatchResult) -> None:
         status = decision.get("status", "FAILED")
         reason = decision.get("reason", "No decision file")
 
+        # Classify agent-side failures (non-zero exit, no decision, or decision != DONE)
+        fc: str | None = None
+        if result.exit_code != 0 or not result.decision or status != "DONE":
+            duration = time.time() - agent.started_at
+            fc = classify_failure(agent.output_dir, duration)
+
         insert_run(
             run_id=run_id,
             bead_id=agent.bead_id,
@@ -1204,8 +1291,9 @@ def _record_run(agent: RunningAgent, result: DispatchResult) -> None:
             container_name=agent.container_name,
             exit_code=result.exit_code,
             output_dir=agent.output_dir,
+            failure_class=fc,
         )
-        print(f"  Record: OK → {run_id}")
+        print(f"  Record: OK → {run_id}" + (f" [failure_class={fc}]" if fc else ""))
     except Exception as e:
         print(f"  Record: FAILED — {e}", file=sys.stderr)
 
