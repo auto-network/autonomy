@@ -14,22 +14,6 @@
   <template x-if="state === 'ready'">
     <div>
 
-      <!-- Header action row: screenshot + chat-with buttons -->
-      <section aria-label="Experiment actions" class="flex items-center gap-2 mb-4">
-        <span class="text-xs text-gray-500 mr-auto" x-text="screenshotStatus"></span>
-        <button @click="captureScreenshot()"
-                aria-label="Capture screenshot"
-                class="text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
-          Capture
-        </button>
-        <button @click="chatWithBtnText === 'Reconnect' ? reconnectChatWith() : spawnChatWith()"
-                :disabled="chatWithBtnDisabled"
-                aria-label="Open Chat With Claude panel"
-                class="px-3 py-1 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white disabled:opacity-50"
-                x-text="chatWithBtnText">
-        </button>
-      </section>
-
       <!-- Title -->
       <h2 class="text-xl font-bold text-indigo-400 mb-1" x-text="exp.title"></h2>
 
