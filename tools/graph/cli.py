@@ -292,6 +292,18 @@ def cmd_read(args):
     print(f"Source: {source['id'][:12]}  {source['type']}{proj}")
     print(f"Title:  {source.get('title', '?')}")
     print(f"Date:   {source.get('created_at', '?')[:10]}")
+    # Show author for notes when it's not the default "user"
+    if source.get("type") == "note":
+        meta = source.get("metadata") or {}
+        if isinstance(meta, str):
+            import json as _json2
+            try:
+                meta = _json2.loads(meta)
+            except Exception:
+                meta = {}
+        author = meta.get("author", "")
+        if author and author != "user":
+            print(f"Author: {author}")
     print(f"{'─' * 72}")
 
     for e in entries:
@@ -829,7 +841,7 @@ def cmd_note(args):
         project=args.project or _get_scope(),
         title=text[:80],
         file_path=source_key,
-        metadata={"tags": tags, "author": args.author or "user"},
+        metadata={"tags": tags, "author": args.author or os.environ.get("BD_ACTOR", "user")},
     )
     db.insert_source(source)
 
