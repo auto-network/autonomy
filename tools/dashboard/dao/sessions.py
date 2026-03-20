@@ -80,15 +80,16 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
 
     sessions.sort(key=lambda s: s["age_seconds"])
 
-    # Enrich with tmux session names for input support
-    _enrich_tmux_names(sessions)
+    # Attach available tmux sessions for input support
+    _attach_tmux_sessions(sessions)
 
     return sessions
 
 
-def _enrich_tmux_names(sessions: list[dict]) -> None:
-    """Best-effort: match active sessions to tmux sessions by checking
-    which tmux panes are running claude and writing to matching project dirs."""
+def _attach_tmux_sessions(sessions: list[dict]) -> None:
+    """Best-effort: find tmux sessions running claude/docker and attach to
+    active sessions. When we can't determine which tmux maps to which JSONL,
+    attach all available tmux names so the viewer can auto-detect."""
     import subprocess
     try:
         result = subprocess.run(
@@ -99,32 +100,30 @@ def _enrich_tmux_names(sessions: list[dict]) -> None:
             return
         tmux_names = [n.strip() for n in result.stdout.strip().split("\n") if n.strip()]
 
+        claude_tmux = []
         for name in tmux_names:
             try:
                 cmd_result = subprocess.run(
                     ["tmux", "display-message", "-p", "-t", name, "#{pane_current_command}"],
                     capture_output=True, text=True, timeout=2,
                 )
-                if cmd_result.returncode != 0 or "claude" not in cmd_result.stdout.lower():
-                    continue
-                # This tmux session runs claude — try to match to an active session
-                # by checking the pane's cwd
-                cwd_result = subprocess.run(
-                    ["tmux", "display-message", "-p", "-t", name, "#{pane_current_path}"],
-                    capture_output=True, text=True, timeout=2,
-                )
-                if cwd_result.returncode != 0:
-                    continue
-                pane_cwd = cwd_result.stdout.strip()
-                # Match by project name in the session's project field
-                for s in sessions:
-                    if not s.get("tmux_session"):
-                        project_path = s["project"].replace("-", "/").lstrip("/")
-                        if project_path and project_path in pane_cwd:
-                            s["tmux_session"] = name
-                            break
+                pane_cmd = cmd_result.stdout.strip().lower()
+                if cmd_result.returncode == 0 and pane_cmd in ("claude", "docker"):
+                    claude_tmux.append({"name": name, "cmd": pane_cmd})
             except Exception:
                 continue
+
+        if not claude_tmux:
+            return
+
+        # Simple 1:1 match
+        if len(claude_tmux) == 1 and len(sessions) == 1:
+            sessions[0]["tmux_session"] = claude_tmux[0]["name"]
+        else:
+            # Can't determine mapping — attach all available to each session
+            all_names = [t["name"] for t in claude_tmux]
+            for s in sessions:
+                s["tmux_sessions_available"] = all_names
     except (FileNotFoundError, Exception):
         pass
 
