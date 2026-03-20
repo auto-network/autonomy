@@ -1556,6 +1556,124 @@ async def api_dispatch_latest(request):
     return JSONResponse({"text": "", "timestamp": "", "type": "", "is_live": is_live, "file_size_bytes": file_size})
 
 
+# ── Session Tail & Send API ────────────────────────────────────
+
+def _session_file_path(project: str, session_id: str) -> Path | None:
+    """Resolve the JSONL path for a session, guarding against path traversal."""
+    # Neither component may contain path separators
+    if "/" in project or "\\" in project or "/" in session_id or "\\" in session_id:
+        return None
+    return Path.home() / ".claude" / "projects" / project / f"{session_id}.jsonl"
+
+
+async def api_session_tail(request):
+    """Tail JSONL entries for any session by project/session_id.
+
+    GET /api/session/{project}/{session_id}/tail?after=N
+    Returns {entries: [...], offset: N, is_live: bool}.
+    Increment `after` with each poll to receive only new entries.
+    """
+    import time as _time
+
+    project = request.path_params["project"]
+    session_id = request.path_params["session_id"]
+    after = int(request.query_params.get("after", "0"))
+
+    session_file = _session_file_path(project, session_id)
+    if session_file is None:
+        return JSONResponse({"error": "Invalid project or session_id"}, status_code=400)
+    if not session_file.exists():
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+
+    file_size = session_file.stat().st_size
+    is_live = (_time.time() - session_file.stat().st_mtime) < 120
+
+    if after >= file_size:
+        return JSONResponse({"entries": [], "offset": file_size, "is_live": is_live})
+
+    entries = []
+    with open(session_file, "rb") as f:
+        f.seek(after)
+        data = f.read()
+        new_offset = after + len(data)
+        text = data.decode("utf-8", errors="replace")
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            parsed = _parse_jsonl_entry(line)
+            if parsed is None:
+                continue
+            if isinstance(parsed, list):
+                entries.extend(parsed)
+            else:
+                entries.append(parsed)
+
+    return JSONResponse({"entries": entries, "offset": new_offset, "is_live": is_live})
+
+
+async def api_session_send(request):
+    """Send a message to a tmux-managed session via paste-buffer injection.
+
+    POST /api/session/{project}/{session_id}/send
+    Body: {"message": "text", "tmux_session": "auto-t2"}
+
+    Only works for tmux-managed sessions (terminal, chatwith, dispatch agents).
+    Host interactive sessions have no stdin injection path — returns 404.
+    Returns 400 if tmux_session is not provided.
+    Returns 404 if the tmux session does not exist.
+    """
+    import tempfile
+    import os
+
+    body = await request.json()
+    message = (body.get("message") or "")
+    tmux_session = (body.get("tmux_session") or "").strip()
+
+    if not tmux_session:
+        return JSONResponse(
+            {"error": "tmux_session is required. "
+                       "Host interactive sessions have no stdin injection path."},
+            status_code=400,
+        )
+    if not message:
+        return JSONResponse({"error": "message is required"}, status_code=400)
+
+    if not _tmux_session_exists(tmux_session):
+        return JSONResponse(
+            {"error": f"tmux session '{tmux_session}' not found"},
+            status_code=404,
+        )
+
+    # Write message to a temp file and inject via paste-buffer (same pattern as
+    # chatwith primer injection, server.py lines 1074-1089).
+    buf_name = "api_send"
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(message)
+        tmp_path = f.name
+
+    try:
+        subprocess.run(
+            ["tmux", "load-buffer", "-b", buf_name, tmp_path],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["tmux", "paste-buffer", "-b", buf_name, "-t", tmux_session],
+            capture_output=True,
+        )
+        await asyncio.sleep(0.1)
+        subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_session, "", "Enter"],
+            capture_output=True,
+        )
+    finally:
+        os.unlink(tmp_path)
+
+    return JSONResponse({"ok": True, "tmux_session": tmux_session})
+
+
 # ── WebSocket Terminal ─────────────────────────────────────────
 
 # Track active terminal sessions
@@ -2303,6 +2421,8 @@ routes = [
     Route("/api/chatwith/sessions", api_chatwith_sessions),
     Route("/api/dispatch/tail/{run}", api_dispatch_tail),
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
+    Route("/api/session/{project}/{session_id}/tail", api_session_tail),
+    Route("/api/session/{project}/{session_id}/send", api_session_send, methods=["POST"]),
     Route("/api/timeline", api_timeline),
     Route("/api/timeline/stats", api_timeline_stats),
 
