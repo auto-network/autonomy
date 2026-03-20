@@ -23,13 +23,17 @@ graph context <src_id> <turn>         # turns around a search hit
 graph sessions --all                  # ingest latest session data before searching
 graph note "text" --tags tag          # persist an insight or pitfall for future agents
 graph bead "title" --source <id>      # create a bead with provenance
+graph dispatch approve <bead-id>      # approve bead(s) for dispatch (accepts multiple IDs)
 graph dispatch runs                   # running/queued agent activity
 graph dispatch status                 # compact one-liner
 graph wait <bead-id> &               # BACKGROUND: get notified when bead completes
 ```
 Run `graph --help` for full reference.
 
-**Dispatch pattern:** After dispatching a bead, immediately run `graph wait <bead-id> &` in the background — you will be notified when it completes without blocking the terminal.
+**Dispatch workflow:**
+1. `graph dispatch approve <bead-id>` — release bead for dispatch
+2. `graph wait <bead-id> &` — immediately background-wait for completion notification
+3. `graph dispatch status` — check overall queue at any time
 
 ### bd — Beads Issue Tracker
 Work tracking. Dolt-backed, read-write in this session.
