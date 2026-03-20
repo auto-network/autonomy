@@ -1600,7 +1600,20 @@ async def api_session_tail(request):
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
     file_size = session_file.stat().st_size
-    is_live = (_time.time() - session_file.stat().st_mtime) < 120
+    # Check liveness: prefer tmux session check over mtime heuristic
+    is_live = False
+    meta_path = session_file.parent.parent / ".session_meta.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            tmux_name = meta.get("tmux_session")
+            if tmux_name and _tmux_session_exists(tmux_name):
+                is_live = True
+        except (json.JSONDecodeError, OSError):
+            pass
+    if not is_live:
+        # Fallback: mtime check for sessions without tmux metadata
+        is_live = (_time.time() - session_file.stat().st_mtime) < 120
 
     if after >= file_size:
         return JSONResponse({"entries": [], "offset": file_size, "is_live": is_live})
