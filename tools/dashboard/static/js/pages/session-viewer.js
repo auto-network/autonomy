@@ -36,6 +36,16 @@
       uploadFilename: '',
       uploadPath: '',
 
+      // Session type (host or container)
+      sessionType: '',
+
+      // Link terminal state
+      linkState: 'idle',   // 'idle' | 'picking' | 'handshaking' | 'confirmed' | 'failed'
+      linkCandidates: [],
+      selectedTmux: '',
+      linkError: '',
+      HANDSHAKE_STRING: '[dashboard] confirming terminal link \u2014 please reply with I SEE IT',
+
       // API paths set from URL params
       _tailUrl: '',
 
@@ -152,6 +162,65 @@
         }
       },
 
+      async showLinkPicker() {
+        try {
+          const res = await fetch('/api/terminal/unclaimed');
+          this.linkCandidates = await res.json();
+        } catch (e) {
+          this.linkCandidates = [];
+        }
+        this.selectedTmux = '';
+        this.linkError = '';
+        this.linkState = 'picking';
+      },
+
+      async confirmLink() {
+        if (!this.selectedTmux) return;
+        this.linkState = 'handshaking';
+        try {
+          await fetch('/api/session/send-handshake', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tmux_session: this.selectedTmux }),
+          });
+          // Poll JSONL for handshake string to appear (up to 10s)
+          const deadline = Date.now() + 10000;
+          while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 1500));
+            await this._poll();
+            const found = this.entries.slice(-5).some(
+              e => e.type === 'user' && (e.content || '').includes(this.HANDSHAKE_STRING)
+            );
+            if (found) {
+              await fetch('/api/session/confirm-link', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  project: this.project,
+                  session_id: this.sessionId,
+                  tmux_session: this.selectedTmux,
+                }),
+              });
+              this._tmuxSession = this.selectedTmux;
+              this.linkState = 'confirmed';
+              return;
+            }
+          }
+          this.linkState = 'failed';
+          this.linkError = 'Handshake timed out \u2014 handshake message did not appear in session log';
+        } catch (e) {
+          this.linkState = 'failed';
+          this.linkError = 'Error during handshake: ' + (e.message || e);
+        }
+      },
+
+      resetLink() {
+        this.linkState = 'idle';
+        this.selectedTmux = '';
+        this.linkError = '';
+        this.linkCandidates = [];
+      },
+
       async _poll() {
         try {
           const res = await fetch(`${this._tailUrl}?after=${this.offset}`);
@@ -159,6 +228,12 @@
 
           this.isLive = data.is_live;
           if (data.offset !== undefined) this.offset = data.offset;
+
+          // Set session type from first response
+          if (data.type && !this.sessionType) this.sessionType = data.type;
+
+          // Auto-detect tmux session from per-file meta (handles page reload after linking)
+          if (data.tmux_session && !this._tmuxSession) this._tmuxSession = data.tmux_session;
 
           if (data.entries && data.entries.length > 0) {
             // Track tool_use IDs for result matching
