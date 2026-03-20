@@ -60,7 +60,17 @@ STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
-_STATIC_VERSION = str(int(time.time()))
+def _static_version() -> str:
+    import time as _time
+    t0 = _time.monotonic()
+    try:
+        mtimes = [p.stat().st_mtime for p in (Path(__file__).parent / "static").rglob("*") if p.is_file()]
+        version = str(int(max(mtimes))) if mtimes else str(int(_time.time()))
+    except Exception:
+        version = str(int(_time.time()))
+    elapsed_ms = (_time.monotonic() - t0) * 1000
+    logger.warning("[static_version] computed in %.1fms → %s", elapsed_ms, version)
+    return version
 
 DISPATCH_STATE_PATH = _REPO_ROOT / "data" / "dispatch.state"
 # Labels always shown in pause UI even if not in dispatch.state
@@ -2245,11 +2255,11 @@ async def page_experiment_fragment(request):
 
 def _load_template(name: str) -> str:
     content = (TEMPLATE_DIR / name).read_text()
-    return content.replace("__STATIC_VERSION__", _STATIC_VERSION)
+    return content.replace("__STATIC_VERSION__", _static_version())
 
 
 async def api_version(request):
-    return JSONResponse({"version": _STATIC_VERSION})
+    return JSONResponse({"version": _static_version()})
 
 async def page_index(request):
     return RedirectResponse(url="/beads")
