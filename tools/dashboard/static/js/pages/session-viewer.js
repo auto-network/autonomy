@@ -83,9 +83,6 @@
           const data = await res.json();
           if (data.ok) {
             this.uploadPath = data.path;
-            // Append path to message input
-            const sep = this.inputText.trim() ? '\n' : '';
-            this.inputText = this.inputText + sep + data.path;
           } else {
             console.warn('[sessionViewer] upload error:', data.error);
           }
@@ -109,20 +106,43 @@
         if ((!text && !this.uploadPath) || this.sending) return;
         this.sending = true;
         try {
-          const res = await fetch('/api/session/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: this.inputText.trim(), tmux_session: this._tmuxSession }),
-          });
-          const data = await res.json();
-          if (data.ok) {
-            this.inputText = '';
-            this.clearUpload();
-            // Dismiss mobile keyboard
-            if (this.$refs.messageInput) this.$refs.messageInput.blur();
+          const _send = async (msg) => {
+            const res = await fetch('/api/session/send', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: msg, tmux_session: this._tmuxSession }),
+            });
+            return res.json();
+          };
+
+          if (this.uploadPath) {
+            // Send image path first so Claude Code injects it as an image content block
+            const pathData = await _send(this.uploadPath);
+            if (!pathData.ok) {
+              console.warn('[sessionViewer] send error (path):', pathData.error);
+              return;
+            }
+            // Send follow-up text only if there is any
+            if (text) {
+              await new Promise(r => setTimeout(r, 200));
+              const textData = await _send(text);
+              if (!textData.ok) {
+                console.warn('[sessionViewer] send error (text):', textData.error);
+                return;
+              }
+            }
           } else {
-            console.warn('[sessionViewer] send error:', data.error);
+            const data = await _send(text);
+            if (!data.ok) {
+              console.warn('[sessionViewer] send error:', data.error);
+              return;
+            }
           }
+
+          this.inputText = '';
+          this.clearUpload();
+          // Dismiss mobile keyboard
+          if (this.$refs.messageInput) this.$refs.messageInput.blur();
         } catch (e) {
           console.warn('[sessionViewer] send failed:', e);
         } finally {
