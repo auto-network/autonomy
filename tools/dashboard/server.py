@@ -602,24 +602,148 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
     }
 
 
-def _read_librarian_results(output_dir: str | None) -> dict | None:
-    """Read results JSON from a librarian's output directory.
+def _parse_review_summary(text: str) -> dict | None:
+    """Parse experience reviewer markdown summary into structured data.
 
-    Tries results.json first (structured output), then decision.json (fallback).
-    Returns None if neither file exists or is readable.
+    Expected format (from experience_reviewer/prompt.md):
+        ### Extracted
+        - [pitfall] description → graph note created (note-id)
+        - [bug] description → bead created (bead-id)
+        ### Skipped
+        - description — reason: why skipped
+
+    Returns dict with extracted/skipped lists, or None if no parseable content.
+    """
+    ext_match = re.search(
+        r"###\s*Extracted\s*\n(.*?)(?=\n###|\Z)", text, re.DOTALL
+    )
+    skip_match = re.search(
+        r"###\s*Skipped\s*\n(.*?)(?=\n###|\Z)", text, re.DOTALL
+    )
+    if not ext_match and not skip_match:
+        return None
+
+    extracted: list[dict] = []
+    if ext_match:
+        for line in ext_match.group(1).strip().splitlines():
+            line = line.strip()
+            if not line.startswith("- "):
+                continue
+            line = line[2:]
+            m = re.match(r"\[(\w+)\]\s+(.*?)(?:\s*→\s*(.*))?$", line)
+            if not m:
+                continue
+            item: dict = {"type": m.group(1), "description": m.group(2).strip()}
+            prov = m.group(3) or ""
+            bead_m = re.search(r"bead created \(([^)]+)\)", prov)
+            if bead_m:
+                item["bead_id"] = bead_m.group(1)
+            note_m = re.search(r"note created \(([^)]+)\)", prov)
+            if note_m:
+                item["source_id"] = note_m.group(1)
+            extracted.append(item)
+
+    skipped: list[dict] = []
+    if skip_match:
+        for line in skip_match.group(1).strip().splitlines():
+            line = line.strip()
+            if not line.startswith("- "):
+                continue
+            line = line[2:]
+            parts = line.split(" — reason: ", 1)
+            item = {"description": parts[0].strip()}
+            if len(parts) > 1:
+                item["reason"] = parts[1].strip()
+            skipped.append(item)
+
+    return {"status": "done", "extracted": extracted, "skipped": skipped}
+
+
+def _read_review_from_session(output_dir: str) -> dict | None:
+    """Extract review summary from librarian session JSONL.
+
+    Scans assistant messages for the experience reviewer's markdown summary
+    (### Extracted / ### Skipped sections) and parses into structured data.
+    """
+    sessions_dir = Path(output_dir) / "sessions"
+    if not sessions_dir.is_dir():
+        return None
+
+    jsonl_files = sorted(
+        sessions_dir.glob("*.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not jsonl_files:
+        return None
+
+    last_summary: str | None = None
+    try:
+        with open(jsonl_files[0]) as f:
+            for raw_line in f:
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    entry = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") != "assistant":
+                    continue
+                content = entry.get("message", {}).get("content", "")
+                if isinstance(content, list):
+                    content = "\n".join(
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                if not isinstance(content, str):
+                    continue
+                if "### Extracted" in content or "### Skipped" in content:
+                    last_summary = content
+    except OSError:
+        return None
+
+    if not last_summary:
+        return None
+    return _parse_review_summary(last_summary)
+
+
+def _read_librarian_results(output_dir: str | None) -> dict | None:
+    """Read results from a librarian's output directory.
+
+    Tries in order:
+    1. results.json — structured output (written by future experience_reviewer enhancement)
+    2. Session JSONL — parse review summary from assistant messages
+    3. decision.json — fallback for basic status
     """
     if not output_dir:
         return None
     base = Path(output_dir)
-    for filename in ("results.json", "decision.json"):
-        path = base / filename
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-        except (OSError, json.JSONDecodeError):
-            pass
+
+    # 1. Structured results.json (preferred)
+    try:
+        with open(base / "results.json") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    # 2. Parse review summary from session JSONL
+    session_results = _read_review_from_session(output_dir)
+    if session_results is not None:
+        return session_results
+
+    # 3. Fallback to decision.json
+    try:
+        with open(base / "decision.json") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+
     return None
 
 
