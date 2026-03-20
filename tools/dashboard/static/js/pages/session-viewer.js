@@ -30,6 +30,12 @@
       inputText: '',
       sending: false,
 
+      // Upload
+      uploading: false,
+      uploadPreview: '',
+      uploadFilename: '',
+      uploadPath: '',
+
       // API paths set from URL params
       _tailUrl: '',
 
@@ -56,19 +62,63 @@
         if (el) el.scrollTop = el.scrollHeight;
       },
 
+      async onFileSelected(event) {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        this.uploadFilename = file.name;
+
+        // Show preview for images
+        if (file.type.startsWith('image/')) {
+          this.uploadPreview = URL.createObjectURL(file);
+        } else {
+          this.uploadPreview = '';
+        }
+
+        this.uploading = true;
+        try {
+          const form = new FormData();
+          form.append('file', file);
+          const res = await fetch('/api/upload', { method: 'POST', body: form });
+          const data = await res.json();
+          if (data.ok) {
+            this.uploadPath = data.path;
+            // Append path to message input
+            const sep = this.inputText.trim() ? '\n' : '';
+            this.inputText = this.inputText + sep + data.path;
+          } else {
+            console.warn('[sessionViewer] upload error:', data.error);
+          }
+        } catch (e) {
+          console.warn('[sessionViewer] upload failed:', e);
+        } finally {
+          this.uploading = false;
+          // Reset file input so the same file can be re-selected
+          if (this.$refs.fileInput) this.$refs.fileInput.value = '';
+        }
+      },
+
+      clearUpload() {
+        this.uploadPreview = '';
+        this.uploadFilename = '';
+        this.uploadPath = '';
+      },
+
       async sendMessage() {
         const text = this.inputText.trim();
-        if (!text || this.sending) return;
+        if ((!text && !this.uploadPath) || this.sending) return;
         this.sending = true;
         try {
           const res = await fetch('/api/session/send', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text, tmux_session: this._tmuxSession }),
+            body: JSON.stringify({ message: this.inputText.trim(), tmux_session: this._tmuxSession }),
           });
           const data = await res.json();
           if (data.ok) {
             this.inputText = '';
+            this.clearUpload();
+            // Dismiss mobile keyboard
+            if (this.$refs.messageInput) this.$refs.messageInput.blur();
           } else {
             console.warn('[sessionViewer] send error:', data.error);
           }
