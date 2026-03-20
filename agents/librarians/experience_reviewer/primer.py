@@ -195,6 +195,9 @@ def build_primer(payload: dict) -> str:
         desc = bead.get("description", "")
         if desc:
             sections.append(f"\n**Description:**\n{desc}")
+        ac = bead.get("acceptance_criteria", "")
+        if ac:
+            sections.append(f"\n**Acceptance Criteria:**\n{ac}")
     else:
         sections.append(f"\n## Dispatched Bead")
         sections.append(f"(Could not fetch bead details for {bead_id} — bd show returned nothing)")
