@@ -147,6 +147,13 @@ CREATE TRIGGER IF NOT EXISTS thoughts_ad AFTER DELETE ON thoughts BEGIN
     VALUES ('delete', old.rowid, old.id, old.content, old.tags);
 END;
 
+CREATE TRIGGER IF NOT EXISTS thoughts_au AFTER UPDATE ON thoughts BEGIN
+    INSERT INTO thoughts_fts(thoughts_fts, rowid, id, content, tags)
+    VALUES ('delete', old.rowid, old.id, old.content, old.tags);
+    INSERT INTO thoughts_fts(rowid, id, content, tags)
+    VALUES (new.rowid, new.id, new.content, new.tags);
+END;
+
 CREATE TRIGGER IF NOT EXISTS derivations_ai AFTER INSERT ON derivations BEGIN
     INSERT INTO derivations_fts(rowid, id, content)
     VALUES (new.rowid, new.id, new.content);
@@ -183,3 +190,29 @@ CREATE TABLE IF NOT EXISTS node_refs (
     metadata    TEXT DEFAULT '{}',
     PRIMARY KEY (node_id, ref_id)
 );
+
+-- ============================================================
+-- NOTE COMMENTS — annotations on note sources
+-- ============================================================
+CREATE TABLE IF NOT EXISTS note_comments (
+    id          TEXT PRIMARY KEY,
+    source_id   TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    content     TEXT NOT NULL,
+    actor       TEXT DEFAULT 'user',
+    integrated  INTEGER DEFAULT 0,    -- 0=active, 1=integrated (content rolled into note body)
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_note_comments_source ON note_comments(source_id);
+
+-- ============================================================
+-- NOTE VERSIONS — append-only version history for notes
+-- ============================================================
+CREATE TABLE IF NOT EXISTS note_versions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id   TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    version     INTEGER NOT NULL,
+    content     TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE(source_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_note_versions_source ON note_versions(source_id);

@@ -435,5 +435,75 @@ class GraphDB:
         rows = self.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
+    # ── Note Comments ───────────────────────────────────────
+
+    def insert_comment(self, source_id: str, content: str, actor: str = "user") -> dict:
+        cid = new_id()
+        self.conn.execute(
+            """INSERT INTO note_comments (id, source_id, content, actor)
+               VALUES (?, ?, ?, ?)""",
+            (cid, source_id, content, actor),
+        )
+        self.conn.commit()
+        row = self.conn.execute("SELECT * FROM note_comments WHERE id = ?", (cid,)).fetchone()
+        return dict(row)
+
+    def get_comments(self, source_id: str, include_integrated: bool = False) -> list[dict]:
+        if include_integrated:
+            rows = self.conn.execute(
+                "SELECT * FROM note_comments WHERE source_id = ? ORDER BY created_at ASC",
+                (source_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM note_comments WHERE source_id = ? AND integrated = 0 ORDER BY created_at ASC",
+                (source_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def integrate_comment(self, comment_id: str) -> bool:
+        cur = self.conn.execute(
+            "UPDATE note_comments SET integrated = 1 WHERE id = ? AND integrated = 0",
+            (comment_id,),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    # ── Note Versions ─────────────────────────────────────
+
+    def insert_note_version(self, source_id: str, version: int, content: str):
+        self.conn.execute(
+            """INSERT INTO note_versions (source_id, version, content)
+               VALUES (?, ?, ?)""",
+            (source_id, version, content),
+        )
+
+    def get_note_version(self, source_id: str, version: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM note_versions WHERE source_id = ? AND version = ?",
+            (source_id, version),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_note_versions(self, source_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM note_versions WHERE source_id = ? ORDER BY version ASC",
+            (source_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_max_note_version(self, source_id: str) -> int:
+        row = self.conn.execute(
+            "SELECT MAX(version) as max_v FROM note_versions WHERE source_id = ?",
+            (source_id,),
+        ).fetchone()
+        return row["max_v"] or 0
+
+    def update_thought_content(self, thought_id: str, content: str):
+        self.conn.execute(
+            "UPDATE thoughts SET content = ? WHERE id = ?",
+            (content, thought_id),
+        )
+
     def commit(self):
         self.conn.commit()
