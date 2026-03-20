@@ -7,6 +7,7 @@ Every view the dashboard shows, an agent can also produce via CLI.
 import asyncio
 import fcntl
 import json
+import logging
 import os
 import pty
 import re
@@ -17,6 +18,8 @@ import subprocess
 import sys
 import termios
 import time
+
+logger = logging.getLogger(__name__)
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1696,25 +1699,30 @@ async def api_session_send(request):
     # chatwith primer injection, server.py lines 1074-1089).
     buf_name = "api_send"
     tmp_path = None
+    logger.warning("[session-send] tmux=%r message=%r", tmux_session, message)
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", delete=False, encoding="utf-8"
         ) as f:
             f.write(message)
             tmp_path = f.name
-        subprocess.run(
+        logger.warning("[session-send] tmp_path=%r contents=%r", tmp_path, message)
+        r1 = subprocess.run(
             ["tmux", "load-buffer", "-b", buf_name, tmp_path],
             capture_output=True,
         )
-        subprocess.run(
+        logger.warning("[session-send] load-buffer rc=%d stderr=%r", r1.returncode, r1.stderr)
+        r2 = subprocess.run(
             ["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", tmux_session],
             capture_output=True,
         )
+        logger.warning("[session-send] paste-buffer rc=%d stderr=%r", r2.returncode, r2.stderr)
         await asyncio.sleep(0.2)
-        subprocess.run(
+        r3 = subprocess.run(
             ["tmux", "send-keys", "-t", tmux_session, "\r"],
             capture_output=True,
         )
+        logger.warning("[session-send] send-keys rc=%d stderr=%r", r3.returncode, r3.stderr)
     except FileNotFoundError:
         return JSONResponse(
             {"error": "tmux is not available in this environment"},
