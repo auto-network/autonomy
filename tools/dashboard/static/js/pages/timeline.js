@@ -60,14 +60,22 @@
   function _reviewCollapsedLabel(review) {
     if (!review) return null;
     if (review.status === 'running') return null; // shown separately
-    // Structured results.json from experience_reviewer
+    // Structured extracted/skipped arrays from experience_reviewer
     if (Array.isArray(review.extracted) || Array.isArray(review.skipped)) {
-      const nExt = (review.extracted || []).length;
+      const counts = {};
+      for (const item of (review.extracted || [])) {
+        const t = item.type || 'other';
+        counts[t] = (counts[t] || 0) + 1;
+      }
       const nSkip = (review.skipped || []).length;
       const parts = [];
-      if (nExt > 0) parts.push(nExt + ' extracted');
+      if (counts.pitfall) parts.push(counts.pitfall + ' pitfall' + (counts.pitfall > 1 ? 's' : ''));
+      if (counts.bead || counts.bug || counts.work) {
+        const n = (counts.bead || 0) + (counts.bug || 0) + (counts.work || 0);
+        parts.push(n + ' bead' + (n > 1 ? 's' : ''));
+      }
       if (nSkip > 0) parts.push(nSkip + ' skipped');
-      return parts.length > 0 ? parts.join(' · ') : 'Reviewed';
+      return parts.length > 0 ? parts.join(', ') : 'Reviewed';
     }
     // Generic — no structured data, return null so template shows just "📖 Reviewed"
     // without appending " · Reviewed" redundantly.
