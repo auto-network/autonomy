@@ -146,6 +146,22 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
     # Enrich with live tmux session names matched by pane cwd
     _enrich_tmux_sessions(host_entries)
 
+    # Dedup: a tmux pane runs ONE session at a time — keep only the freshest
+    # entry per tmux_session, strip the tag from all others so they fall
+    # through to the age-based filter below.
+    _freshest: dict[str, dict] = {}
+    for entry in host_entries:
+        ts = entry.get("tmux_session")
+        if not ts:
+            continue
+        prev = _freshest.get(ts)
+        if prev is None or entry["age_seconds"] < prev["age_seconds"]:
+            _freshest[ts] = entry
+    for entry in host_entries:
+        ts = entry.get("tmux_session")
+        if ts and entry is not _freshest.get(ts):
+            entry.pop("tmux_session", None)
+
     # Include if tmux-alive (regardless of idle time) OR recently active
     for entry in host_entries:
         tmux = entry.get("tmux_session")
