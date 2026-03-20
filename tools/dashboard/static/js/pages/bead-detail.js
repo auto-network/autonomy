@@ -115,20 +115,18 @@
 
           this.state = 'ready';
 
-          // Auto-open live panel if dispatch is running
-          if (this.isRunning && window.showLivePanel) {
-            try {
-              const runs = await fetch('/api/dispatch/runs').then(r => r.json());
-              const runsList = Array.isArray(runs) ? runs : [];
-              const beadRun = runsList.find(r => r.bead_id === this.id);
-              if (beadRun) {
+          // Fetch runDir for all dispatched beads (trace link for completed, live panel for running)
+          try {
+            const runs = await fetch('/api/dispatch/runs').then(r => r.json());
+            const runsList = Array.isArray(runs) ? runs : [];
+            const beadRun = runsList.find(r => r.bead_id === this.id);
+            if (beadRun) {
+              this.runDir = beadRun.dir;
+              if (this.isRunning && window.showLivePanel) {
                 showLivePanel(beadRun.dir);
-                this.runDir = beadRun.dir;
               }
-            } catch (_) {
-              // Live panel is best-effort
             }
-          }
+          } catch (_) {}
         } catch (e) {
           this.errorMsg = e.message || 'Failed to load bead';
           this.state = 'error';
