@@ -11,54 +11,72 @@ _GRAPH_DB = Path(__file__).parents[3] / "data" / "graph.db"
 
 
 def get_active_sessions(threshold: int = 600) -> list[dict]:
-    """Find active Claude Code sessions (JSONL files modified within threshold seconds)."""
-    projects_dir = Path.home() / ".claude" / "projects"
+    """Find active Claude Code sessions (JSONL files modified within threshold seconds).
+
+    Scans two locations:
+    - ~/.claude/projects/ — host interactive sessions
+    - data/agent-runs/*/sessions/ — container sessions (terminal, dispatch, chatwith)
+    """
+    scan_dirs = [Path.home() / ".claude" / "projects"]
+    # Add container session directories
+    agent_runs = Path(__file__).parents[3] / "data" / "agent-runs"
+    if agent_runs.exists():
+        for run_dir in agent_runs.iterdir():
+            sess_dir = run_dir / "sessions"
+            if sess_dir.is_dir():
+                scan_dirs.append(sess_dir)
+
     now = time.time()
     sessions = []
+    seen_ids: set[str] = set()  # dedupe by session_id
 
-    if not projects_dir.exists():
-        return sessions
-
-    for jsonl in projects_dir.rglob("*.jsonl"):
-        try:
-            stat = jsonl.stat()
-            age = now - stat.st_mtime
-            if age < threshold:
-                last_chunk = ""
-                with open(jsonl, "rb") as f:
-                    f.seek(max(0, stat.st_size - 2000))
-                    last_chunk = f.read().decode("utf-8", errors="replace")
-
-                latest = ""
-                for line in reversed(last_chunk.strip().split("\n")):
-                    try:
-                        e = json.loads(line)
-                        if e.get("type") in ("user", "assistant") and not e.get("isSidechain"):
-                            msg = e.get("message", {})
-                            content = msg.get("content", "")
-                            if isinstance(content, str) and len(content) > 5:
-                                latest = content[:150]
-                                break
-                            elif isinstance(content, list):
-                                for c in content:
-                                    if isinstance(c, dict) and c.get("type") == "text":
-                                        latest = c["text"][:150]
-                                        break
-                                if latest:
-                                    break
-                    except json.JSONDecodeError:
-                        continue
-
-                sessions.append({
-                    "session_id": jsonl.stem,
-                    "project": jsonl.parent.name,
-                    "size_bytes": stat.st_size,
-                    "age_seconds": round(age),
-                    "active": age < 60,
-                    "latest": latest,
-                })
-        except OSError:
+    for projects_dir in scan_dirs:
+        if not projects_dir.exists():
             continue
+        for jsonl in projects_dir.rglob("*.jsonl"):
+            try:
+                stat = jsonl.stat()
+                age = now - stat.st_mtime
+                if age < threshold:
+                    last_chunk = ""
+                    with open(jsonl, "rb") as f:
+                        f.seek(max(0, stat.st_size - 2000))
+                        last_chunk = f.read().decode("utf-8", errors="replace")
+
+                    latest = ""
+                    for line in reversed(last_chunk.strip().split("\n")):
+                        try:
+                            e = json.loads(line)
+                            if e.get("type") in ("user", "assistant") and not e.get("isSidechain"):
+                                msg = e.get("message", {})
+                                content = msg.get("content", "")
+                                if isinstance(content, str) and len(content) > 5:
+                                    latest = content[:150]
+                                    break
+                                elif isinstance(content, list):
+                                    for c in content:
+                                        if isinstance(c, dict) and c.get("type") == "text":
+                                            latest = c["text"][:150]
+                                            break
+                                    if latest:
+                                        break
+                        except json.JSONDecodeError:
+                            continue
+
+                    sid = jsonl.stem
+                    if sid in seen_ids:
+                        continue
+                    seen_ids.add(sid)
+                    sessions.append({
+                        "session_id": sid,
+                        "project": jsonl.parent.name,
+                        "size_bytes": stat.st_size,
+                        "age_seconds": round(age),
+                        "active": age < 60,
+                        "latest": latest,
+                    })
+            except OSError:
+                continue
 
     sessions.sort(key=lambda s: s["age_seconds"])
 
