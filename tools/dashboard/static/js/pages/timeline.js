@@ -69,8 +69,9 @@
       if (nSkip > 0) parts.push(nSkip + ' skipped');
       return parts.length > 0 ? parts.join(' · ') : 'Reviewed';
     }
-    // Generic — just say "Reviewed"
-    return 'Reviewed';
+    // Generic — no structured data, return null so template shows just "📖 Reviewed"
+    // without appending " · Reviewed" redundantly.
+    return null;
   }
 
   // Build smoke badge from smoke_result.json payload.
