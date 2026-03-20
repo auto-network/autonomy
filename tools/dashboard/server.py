@@ -54,6 +54,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
+_STATIC_VERSION = str(int(time.time()))
+
 DISPATCH_STATE_PATH = _REPO_ROOT / "data" / "dispatch.state"
 # Labels always shown in pause UI even if not in dispatch.state
 _KNOWN_PAUSE_LABELS = ["dashboard"]
@@ -2125,7 +2127,12 @@ async def page_experiment_fragment(request):
 # ── HTML Pages ────────────────────────────────────────────────
 
 def _load_template(name: str) -> str:
-    return (TEMPLATE_DIR / name).read_text()
+    content = (TEMPLATE_DIR / name).read_text()
+    return content.replace("__STATIC_VERSION__", _STATIC_VERSION)
+
+
+async def api_version(request):
+    return JSONResponse({"version": _STATIC_VERSION})
 
 async def page_index(request):
     return RedirectResponse(url="/beads")
@@ -2476,6 +2483,7 @@ routes = [
     Route("/api/session/{project}/{session_id}/send", api_session_send, methods=["POST"]),
     Route("/api/timeline", api_timeline),
     Route("/api/timeline/stats", api_timeline_stats),
+    Route("/api/version", api_version),
 
     # Experiments
     Route("/api/experiments", api_experiments_create, methods=["POST"]),
