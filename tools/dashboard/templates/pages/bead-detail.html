@@ -45,6 +45,12 @@
             </template>
           </div>
         </template>
+        <!-- Creator -->
+        <template x-if="bead.created_by">
+          <div class="text-sm text-gray-400 mb-2">
+            Creator: <span x-text="creatorIcon(bead.created_by) + ' ' + creatorLabel(bead.created_by)"></span>
+          </div>
+        </template>
       </section>
 
       <!-- Description -->
