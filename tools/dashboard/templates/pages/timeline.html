@@ -167,6 +167,17 @@
             </div>
           </template>
 
+          <!-- Librarian review section (expanded dispatch card, review in progress) -->
+          <template x-if="e.librarian_review && e.librarian_review.status === 'running'">
+            <div class="tl-review-detail" @click.stop>
+              <div class="tl-review-header">
+                <span class="tl-review-running">📖 Reviewing...</span>
+                <template x-if="e._integratedLibrarian && (e._integratedLibrarian.duration_secs != null || e._integratedLibrarian._tokenFmt)">
+                  <span class="tl-review-meta"><template x-if="e._integratedLibrarian.duration_secs != null"><span><span class="tl-icon-time">⏱</span><span x-text="fmtDuration(e._integratedLibrarian.duration_secs)"></span></span></template><template x-if="e._integratedLibrarian.duration_secs != null && e._integratedLibrarian._tokenFmt"><span> · </span></template><template x-if="e._integratedLibrarian._tokenFmt"><span class="tl-tokens" x-text="'✦ ' + e._integratedLibrarian._tokenFmt"></span></template></span>
+                </template>
+              </div>
+            </div>
+          </template>
           <!-- Librarian review section (expanded dispatch card, review complete) -->
           <template x-if="e.librarian_review && e.librarian_review.status !== 'running'">
             <div class="tl-review-detail" @click.stop>
@@ -178,11 +189,8 @@
                 <template x-if="!(e._integratedLibrarian && e._integratedLibrarian._countSummary) && e._reviewCollapsed">
                   <span class="tl-review-count" x-text="e._reviewCollapsed"></span>
                 </template>
-                <template x-if="e._integratedLibrarian && e._integratedLibrarian.duration_secs != null">
-                  <span class="tl-review-meta"><span class="tl-icon-time">⏱</span><span x-text="fmtDuration(e._integratedLibrarian.duration_secs)"></span></span>
-                </template>
-                <template x-if="e._integratedLibrarian && e._integratedLibrarian._tokenFmt">
-                  <span class="tl-review-meta tl-tokens" x-text="'✦ ' + e._integratedLibrarian._tokenFmt"></span>
+                <template x-if="e._integratedLibrarian && (e._integratedLibrarian.duration_secs != null || e._integratedLibrarian._tokenFmt)">
+                  <span class="tl-review-meta"><template x-if="e._integratedLibrarian.duration_secs != null"><span><span class="tl-icon-time">⏱</span><span x-text="fmtDuration(e._integratedLibrarian.duration_secs)"></span></span></template><template x-if="e._integratedLibrarian.duration_secs != null && e._integratedLibrarian._tokenFmt"><span> · </span></template><template x-if="e._integratedLibrarian._tokenFmt"><span class="tl-tokens" x-text="'✦ ' + e._integratedLibrarian._tokenFmt"></span></template></span>
                 </template>
               </div>
               <!-- Structured items: prefer integrated librarian items, fall back to parent review items -->
@@ -340,9 +348,13 @@
               <template x-if="e.librarian_review && e.librarian_review.status === 'running'">
                 <span class="tl-review-running">📖 Reviewing...</span>
               </template>
-              <!-- Done state: count summary + integrated librarian meta -->
+              <!-- Done state: review label + counts -->
               <template x-if="e.librarian_review && e.librarian_review.status !== 'running'">
-                <span>📖 Reviewed<template x-if="e._integratedLibrarian && e._integratedLibrarian._countSummary"><span x-text="' · ' + e._integratedLibrarian._countSummary"></span></template><template x-if="!(e._integratedLibrarian && e._integratedLibrarian._countSummary) && e._reviewCollapsed"><span x-text="' · ' + e._reviewCollapsed"></span></template><template x-if="e._integratedLibrarian && e._integratedLibrarian.duration_secs != null"><span class="tl-review-meta" style="margin-left:6px"><span class="tl-icon-time">⏱</span><span x-text="fmtDuration(e._integratedLibrarian.duration_secs)"></span></span></template></span>
+                <span>📖 Reviewed<template x-if="e._integratedLibrarian && e._integratedLibrarian._countSummary"><span x-text="' · ' + e._integratedLibrarian._countSummary"></span></template><template x-if="!(e._integratedLibrarian && e._integratedLibrarian._countSummary) && e._reviewCollapsed"><span x-text="' · ' + e._reviewCollapsed"></span></template></span>
+              </template>
+              <!-- Right-aligned meta: duration + tokens (both running and done states) -->
+              <template x-if="e.librarian_review && e._integratedLibrarian && (e._integratedLibrarian.duration_secs != null || e._integratedLibrarian._tokenFmt)">
+                <span class="tl-review-meta" style="margin-left:auto"><template x-if="e._integratedLibrarian.duration_secs != null"><span><span class="tl-icon-time">⏱</span><span x-text="fmtDuration(e._integratedLibrarian.duration_secs)"></span></span></template><template x-if="e._integratedLibrarian.duration_secs != null && e._integratedLibrarian._tokenFmt"><span> · </span></template><template x-if="e._integratedLibrarian._tokenFmt"><span class="tl-tokens" x-text="'✦ ' + e._integratedLibrarian._tokenFmt"></span></template></span>
               </template>
             </div>
           </div>

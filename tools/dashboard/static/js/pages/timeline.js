@@ -212,7 +212,7 @@
     const hasBreakdown = barR + barC + barD + barT > 0;
     const tokenFmt = _fmtTokens(e.token_count);
     const smokeIcon = _formatSmokeIcon(e.smoke_result);
-    const hasBottom = hasBreakdown || scores != null || e.lines_added != null || e.lines_removed != null || e.duration_secs != null || tokenFmt != null || e.smoke_result != null;
+    const hasBottom = hasBreakdown || scores != null || e.lines_added != null || e.lines_removed != null || e.duration_secs != null || tokenFmt != null || e.smoke_result != null || e.librarian_review != null;
 
     const isLibrarian = !!e.librarian_type;
     const libTitle = isLibrarian ? (_LIB_NAMES[e.librarian_type] || e.librarian_type) : '';
