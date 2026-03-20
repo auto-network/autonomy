@@ -2344,12 +2344,28 @@ async def _collect_dispatch_data() -> dict:
     }
 
 
-def _count_active_sessions(threshold: int = 600) -> int:
-    """Count active Claude Code sessions (JSONL files modified within threshold seconds)."""
-    import time as _time
-    now = _time.time()
-    return sum(1 for f in (Path.home() / ".claude" / "projects").rglob("*.jsonl")
-               if now - f.stat().st_mtime < threshold)
+def _count_active_sessions() -> int:
+    """Count active Claude Code sessions using tmux liveness check.
+
+    A session is active only if its .session_meta.json has a tmux_session field
+    pointing to a currently-running tmux session. Sessions without tmux metadata
+    (e.g. host interactive sessions) count as inactive.
+    """
+    agent_runs = _REPO_ROOT / "data" / "agent-runs"
+    if not agent_runs.exists():
+        return 0
+    count = 0
+    for run_dir in agent_runs.iterdir():
+        meta_path = run_dir / "sessions" / ".session_meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+                tmux_name = meta.get("tmux_session")
+                if tmux_name and _tmux_session_exists(tmux_name):
+                    count += 1
+            except (json.JSONDecodeError, OSError):
+                pass
+    return count
 
 
 def _count_terminals() -> int:
