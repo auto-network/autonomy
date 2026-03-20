@@ -115,6 +115,7 @@ def launch_session(
     extra_env: dict | None = None,
     output_dir: str | None = None,
     model: str = "claude-opus-4-6",
+    global_claude_md: Path | str | None = None,
 ) -> str | None:
     """Launch a Claude agent container session.
 
@@ -138,6 +139,9 @@ def launch_session(
         output_dir: Pre-created output directory. If None, a new directory under
                     data/agent-runs/ is created using name + UTC timestamp.
         model: Claude model to pass via --model flag. Defaults to claude-opus-4-6.
+        global_claude_md: Host path to mount as the Claude global user-level
+                    CLAUDE.md (~/.claude/CLAUDE.md) inside the container.
+                    None (default) skips the mount.
 
     Returns:
         detach=True:  container_id string on success, None on failure.
@@ -217,6 +221,9 @@ def launch_session(
 
     for host_path, container_spec in default_mounts.items():
         cmd.extend(["-v", f"{host_path}:{container_spec}"])
+
+    if global_claude_md is not None:
+        cmd.extend(["-v", f"{global_claude_md}:/home/agent/.claude/CLAUDE.md:ro"])
 
     if extra_env:
         for k, v in extra_env.items():
