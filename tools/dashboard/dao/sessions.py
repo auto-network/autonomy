@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import subprocess
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _GRAPH_DB = Path(__file__).parents[3] / "data" / "graph.db"
 
@@ -37,58 +40,14 @@ def _read_latest_msg(jsonl: Path, stat) -> str:
     return ""
 
 
-def _project_folder_to_path(folder_name: str) -> str:
-    """Convert Claude project folder name to filesystem path.
-
-    e.g. '-workspace-repo'        -> '/workspace/repo'
-         '-home-user-workspace'   -> '/home/user/workspace'
-    """
-    return folder_name.replace("-", "/", 1).replace("-", "/")
-
-
 def _write_host_session_meta(jsonl_path: Path, tmux_name: str) -> None:
     """Persist the matched tmux session name alongside the JSONL file."""
     meta = jsonl_path.with_suffix(".meta.json")
     try:
         meta.write_text(json.dumps({"tmux_session": tmux_name}))
+        logger.info("Wrote meta %s  tmux=%s", meta, tmux_name)
     except OSError:
-        pass
-
-
-def _enrich_tmux_sessions(entries: list[dict]) -> None:
-    """Match entries to live tmux sessions by pane cwd. Sets tmux_session in-place."""
-    try:
-        result = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F",
-             "#{session_name}\t#{pane_current_path}\t#{pane_start_path}"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if result.returncode != 0:
-            return
-        pane_cwds: list[tuple[str, str, str]] = []
-        for line in result.stdout.strip().split("\n"):
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                name = parts[0].strip()
-                current = parts[1].strip()
-                start = parts[2].strip() if len(parts) > 2 else ""
-                pane_cwds.append((name, current, start))
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return
-
-    for entry in entries:
-        if entry.get("tmux_session"):
-            continue
-        project_path = _project_folder_to_path(entry["project"])
-        for tmux_name, current_cwd, start_cwd in pane_cwds:
-            for cwd in (current_cwd, start_cwd):
-                if cwd and (cwd == project_path or cwd.startswith(project_path + "/")):
-                    entry["tmux_session"] = tmux_name
-                    if entry.get("_jsonl_path"):
-                        _write_host_session_meta(entry["_jsonl_path"], tmux_name)
-                    break
-            if entry.get("tmux_session"):
-                break
+        logger.warning("Failed to write meta %s", meta, exc_info=True)
 
 
 def get_active_sessions(threshold: int = 600) -> list[dict]:
@@ -98,8 +57,9 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
     - ~/.claude/projects/ — host interactive sessions (tmux-first liveness)
     - data/agent-runs/*/sessions/ — container sessions (mtime threshold only)
 
-    For host sessions: a session is included if it was recently modified (age <
-    threshold) OR a live tmux session's pane cwd maps to its project directory.
+    For host sessions: a session is included if it has a live tmux session
+    (via .meta.json written by the JSONL watcher) OR was recently modified
+    (age < threshold).
 
     For container sessions: strict mtime threshold applies (no tmux).
     """
@@ -142,25 +102,6 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
                 host_entries.append(entry)
             except OSError:
                 continue
-
-    # Enrich with live tmux session names matched by pane cwd
-    _enrich_tmux_sessions(host_entries)
-
-    # Dedup: a tmux pane runs ONE session at a time — keep only the freshest
-    # entry per tmux_session, strip the tag from all others so they fall
-    # through to the age-based filter below.
-    _freshest: dict[str, dict] = {}
-    for entry in host_entries:
-        ts = entry.get("tmux_session")
-        if not ts:
-            continue
-        prev = _freshest.get(ts)
-        if prev is None or entry["age_seconds"] < prev["age_seconds"]:
-            _freshest[ts] = entry
-    for entry in host_entries:
-        ts = entry.get("tmux_session")
-        if ts and entry is not _freshest.get(ts):
-            entry.pop("tmux_session", None)
 
     # Include if tmux-alive (regardless of idle time) OR recently active
     for entry in host_entries:
@@ -234,6 +175,12 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
                     continue
 
     sessions.sort(key=lambda s: s["age_seconds"])
+    host_count = sum(1 for s in sessions if s.get("type") == "host")
+    container_count = len(sessions) - host_count
+    logger.debug(
+        "get_active_sessions: %d total (%d host, %d container)",
+        len(sessions), host_count, container_count,
+    )
     return sessions
 
 

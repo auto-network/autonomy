@@ -2355,6 +2355,7 @@ async def _watch_for_host_session_jsonl(
     lock = _get_host_launch_lock(projects_dir.name)
     async with lock:
         existing = set(projects_dir.glob("*.jsonl")) if projects_dir.exists() else set()
+        logger.info("JSONL watcher started  tmux=%s  existing=%d", tmux_name, len(existing))
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(0.5)
@@ -2364,10 +2365,11 @@ async def _watch_for_host_session_jsonl(
             new_files = current - existing
             if new_files:
                 new_jsonl = min(new_files, key=lambda p: p.stat().st_mtime)
+                logger.info("JSONL watcher found new session  uuid=%s  tmux=%s", new_jsonl.stem, tmux_name)
                 from tools.dashboard.dao.sessions import _write_host_session_meta
                 _write_host_session_meta(new_jsonl, tmux_name)
                 return
-        # Timeout — degrade silently, mtime-based visibility still works
+        logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
 
 
 def _tmux_session_exists(name: str) -> bool:
@@ -2503,11 +2505,14 @@ async def ws_terminal(websocket: WebSocket):
 
         # For host Claude sessions, watch for the JSONL file and write .meta.json
         if not is_container_cmd and "claude" in cmd_str.lower():
+            logger.info("ws_terminal: starting host Claude session  tmux=%s", tmux_name)
             project_folder = str(_REPO_ROOT).replace("/", "-")
             projects_dir = Path.home() / ".claude" / "projects" / project_folder
             asyncio.create_task(
                 _watch_for_host_session_jsonl(projects_dir, tmux_name)
             )
+        elif is_container_cmd:
+            logger.info("ws_terminal: starting container session  tmux=%s", tmux_name)
 
     # Track it — only set cmd/env on initial creation, not re-attach
     if tmux_name not in _active_terminals:
