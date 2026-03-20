@@ -1133,19 +1133,62 @@ async function captureTabScreenshot(expId) {
   }
 }
 
+/** Load html2canvas script into a document (parent or iframe). Returns the html2canvas function. */
+async function _ensureHtml2Canvas(doc, win) {
+  if (win.html2canvas) return win.html2canvas;
+  await new Promise((resolve, reject) => {
+    const s = doc.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1/dist/html2canvas.min.js';
+    s.onload = resolve;
+    s.onerror = reject;
+    (doc.head || doc.documentElement).appendChild(s);
+  });
+  return win.html2canvas;
+}
+
+/**
+ * Capture experiment variant by running html2canvas inside the same-origin iframe.
+ * Works on mobile (iOS Safari) where getDisplayMedia is unavailable.
+ * Returns true on success, false on failure.
+ */
+async function _captureViaIframeHtml2Canvas(expId) {
+  const iframe = document.querySelector('iframe.exp-variant-iframe[data-variant]');
+  if (!iframe) return false;
+  try {
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    const iframeWin = iframe.contentWindow;
+    if (!iframeDoc || !iframeWin) return false;
+    const h2c = await _ensureHtml2Canvas(iframeDoc, iframeWin);
+    if (!h2c) return false;
+    const canvas = await h2c(iframeDoc.body, {
+      useCORS: true, allowTaint: true, logging: false,
+    });
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) return false;
+    const res = await fetch(`/api/experiments/${expId}/screenshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: blob,
+    });
+    if (res.ok) {
+      const now = new Date().toLocaleTimeString();
+      _updateScreenshotStatus(expId, `Screenshot saved ${now}`);
+    }
+    return true;
+  } catch (e) {
+    console.warn('[screenshot] iframe html2canvas failed:', e.message);
+    return false;
+  }
+}
+
 /** Fallback: capture visible page using html2canvas (same-origin, no getDisplayMedia needed). */
 async function _captureWithHtml2Canvas(expId) {
-  if (!window.html2canvas) {
-    await new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1/dist/html2canvas.min.js';
-      s.onload = resolve;
-      s.onerror = reject;
-      document.head.appendChild(s);
-    });
-  }
+  // Try iframe-based capture first (works on mobile where parent can't see into iframes)
+  if (await _captureViaIframeHtml2Canvas(expId)) return;
+  // Fall back to parent-page capture
   try {
-    const canvas = await window.html2canvas(document.getElementById('content'), {
+    const h2c = await _ensureHtml2Canvas(document, window);
+    const canvas = await h2c(document.getElementById('content'), {
       useCORS: true, allowTaint: true, logging: false,
     });
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
@@ -1387,7 +1430,14 @@ ${_safeHtml}
     _iframeLoadCount++;
     if (_iframeLoadCount >= variants.length) {
       if (_screenshotTimer) clearTimeout(_screenshotTimer);
-      _screenshotTimer = setTimeout(() => captureTabScreenshot(expId), 1500);
+      _screenshotTimer = setTimeout(async () => {
+        // Try display stream capture first; fall back to iframe html2canvas (mobile)
+        if (_displayStream) {
+          await captureTabScreenshot(expId);
+        } else {
+          await _captureViaIframeHtml2Canvas(expId);
+        }
+      }, 1500);
     }
   });
 
