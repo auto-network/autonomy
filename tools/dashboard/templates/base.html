@@ -365,7 +365,7 @@
         padding-top: calc(0.75rem + env(safe-area-inset-top));
       }
       main#content, #terminal-page {
-        padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));
+        padding-bottom: env(safe-area-inset-bottom);
         padding-right: calc(1.5rem + env(safe-area-inset-right));
       }
       #live-panel {
@@ -394,11 +394,7 @@
       /* On mobile: tighter layout for session viewer — cancel main#content padding */
       .session-viewer-container {
         height: calc(100dvh - 5rem);
-        margin: -0.75rem -1.5rem -1.5rem;
-      }
-      /* When session viewer is present, remove double safe-area from main */
-      main#content:has(.session-viewer-container) {
-        padding-bottom: 0 !important;
+        margin: -0.75rem -1.5rem 0;
       }
     }
   </style>
@@ -472,7 +468,7 @@
     </header>
 
     <!-- Content -->
-    <main class="flex-1 overflow-auto p-6" id="content">
+    <main class="flex-1 overflow-auto pt-6 px-6" id="content">
       <div class="text-gray-400">Loading...</div>
     </main>
 
