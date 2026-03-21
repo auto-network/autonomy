@@ -50,16 +50,17 @@ class EventBus:
         except ValueError:
             pass
 
-    async def broadcast(self, topic: str, data: Any) -> int:
+    async def broadcast(self, topic: str, data: Any, dedup: bool = True) -> int:
         """Broadcast data to all subscribers tagged with topic name.
 
         Skips the broadcast if the serialised data is identical to the last
-        broadcast for this topic (dedup).
+        broadcast for this topic (dedup).  Pass ``dedup=False`` for topics
+        where every message is unique (e.g. streaming session entries).
 
         Returns the number of subscribers that received the message.
         """
         serialised = json.dumps(data, separators=(",", ":"), sort_keys=True)
-        if self._last.get(topic) == serialised:
+        if dedup and self._last.get(topic) == serialised:
             return 0
         self._last[topic] = serialised
 

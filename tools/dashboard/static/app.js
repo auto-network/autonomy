@@ -935,7 +935,7 @@ async function _livePollTail() {
  * Render parsed session entries into a container element.
  * Shared by the live panel and the trace view session log.
  */
-// Map tool_id -> {tool_name, tool_headline} for linking results to calls
+// Map tool_id -> {tool_name} for linking results to calls
 const _toolIdMap = {};
 
 function _renderSessionEntries(entries, container) {
@@ -974,20 +974,17 @@ function _renderSessionEntries(entries, container) {
       if (entry.tool_id) {
         _toolIdMap[entry.tool_id] = {
           tool_name: entry.tool_name,
-          tool_headline: entry.tool_headline || '',
         };
       }
       const details = document.createElement('details');
       details.className = 'text-sm';
-      const headline = entry.tool_headline
-        ? ' ' + entry.tool_headline.replace(/`([^`]+)`/g, '<code class="text-purple-300 bg-gray-800 px-1 rounded">$1</code>')
-        : '';
+      const inputStr = entry.input ? JSON.stringify(entry.input, null, 2) : '';
       details.innerHTML = `
         <summary class="live-tool-toggle text-purple-400 text-xs font-mono cursor-pointer select-none">
-          <strong>${escapeHtml(entry.tool_name)}</strong>${headline}
+          <strong>${escapeHtml(entry.tool_name)}</strong>
           <span class="live-entry-time ml-2">${timeStr}</span>
         </summary>
-        <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-32 overflow-y-auto bg-gray-800 rounded p-2">${escapeHtml(entry.content)}</pre>`;
+        <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-32 overflow-y-auto bg-gray-800 rounded p-2">${escapeHtml(inputStr)}</pre>`;
       el.appendChild(details);
 
     } else if (entry.type === 'tool_result') {
