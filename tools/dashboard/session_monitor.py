@@ -112,6 +112,7 @@ class SessionMonitor:
         self._tailer_task: asyncio.Task | None = None
         self._liveness_task: asyncio.Task | None = None
         self._event_bus = None  # set in start()
+        self._entry_parser = None  # set in start()
         self._started = False
 
     # ── Registration ──────────────────────────────────────────────
@@ -204,12 +205,19 @@ class SessionMonitor:
 
     # ── Background tasks ──────────────────────────────────────────
 
-    async def start(self, event_bus=None) -> None:
-        """Start background tailer and liveness tasks."""
+    async def start(self, event_bus=None, entry_parser=None) -> None:
+        """Start background tailer and liveness tasks.
+
+        Args:
+            event_bus: EventBus for SSE broadcasting.
+            entry_parser: Callable (str -> dict | list | None) that parses a
+                raw JSONL line into display entries for per-session SSE push.
+        """
         if self._started:
             return
         self._started = True
         self._event_bus = event_bus
+        self._entry_parser = entry_parser
         self._tailer_task = asyncio.create_task(self._tailer_loop())
         self._liveness_task = asyncio.create_task(self._liveness_loop())
         logger.info("session_monitor: background tasks started")
@@ -227,22 +235,33 @@ class SessionMonitor:
         """Check all registered sessions for new JSONL content every 1s."""
         while True:
             try:
-                changed = False
+                summary_changed = False
                 sessions = list(self._sessions.values())
                 for state in sessions:
                     if not state.is_live:
                         continue
-                    did_change = await asyncio.to_thread(self._tail_one, state)
+                    did_change, new_entries = await asyncio.to_thread(self._tail_one, state)
                     if did_change:
-                        changed = True
-                if changed:
+                        summary_changed = True
+                    if new_entries and self._event_bus:
+                        await self._event_bus.broadcast(
+                            f"session:{state.session_id}",
+                            {"entries": new_entries, "is_live": state.is_live},
+                            dedup=False,
+                        )
+                if summary_changed:
                     await self._broadcast()
             except Exception:
                 logger.exception("session_monitor: tailer error")
             await asyncio.sleep(1)
 
-    def _tail_one(self, state: SessionState) -> bool:
-        """Incremental read of one session's JSONL. Returns True if state changed."""
+    def _tail_one(self, state: SessionState) -> tuple[bool, list]:
+        """Incremental read of one session's JSONL.
+
+        Returns (changed, parsed_entries) where *changed* indicates summary
+        state was updated and *parsed_entries* is a list of display-ready
+        dicts to broadcast via SSE.
+        """
         # Resolve directory path to actual JSONL file
         if state._path_is_dir and state.jsonl_path is not None:
             resolved = self._resolve_jsonl_in_dir(state.jsonl_path)
@@ -256,19 +275,19 @@ class SessionMonitor:
                     state.tmux_name, resolved.stem, state.project,
                 )
             else:
-                return False
+                return False, []
 
         if state.jsonl_path is None or not state.jsonl_path.exists():
-            return False
+            return False, []
 
         try:
             st = state.jsonl_path.stat()
         except OSError:
-            return False
+            return False, []
 
         # No growth since last check
         if st.st_size <= state.file_offset and st.st_mtime <= state.last_activity:
-            return False
+            return False, []
 
         changed = False
 
@@ -278,7 +297,7 @@ class SessionMonitor:
             changed = True
 
         if st.st_size <= state.file_offset:
-            return changed
+            return changed, []
 
         # Read new data from offset
         try:
@@ -286,16 +305,17 @@ class SessionMonitor:
                 fh.seek(state.file_offset)
                 data = fh.read()
         except OSError:
-            return changed
+            return changed, []
 
         # Only process complete lines
         last_nl = data.rfind(b"\n")
         if last_nl == -1:
-            return changed
+            return changed, []
 
         complete = data[:last_nl + 1]
         new_offset = state.file_offset + last_nl + 1
-        new_entries = 0
+        new_entry_count = 0
+        parsed_entries: list = []
 
         for raw_line in complete.splitlines():
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -306,18 +326,29 @@ class SessionMonitor:
             except json.JSONDecodeError:
                 continue
 
-            new_entries += 1
+            new_entry_count += 1
             text = _extract_message_text(entry)
             if text:
                 state.last_message = text
 
-        if new_entries > 0:
-            state.entry_count += new_entries
+            # Parse full entry for SSE broadcast
+            if self._entry_parser:
+                try:
+                    parsed = self._entry_parser(line)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, list):
+                    parsed_entries.extend(parsed)
+                elif parsed is not None:
+                    parsed_entries.append(parsed)
+
+        if new_entry_count > 0:
+            state.entry_count += new_entry_count
             state.last_activity = st.st_mtime
             changed = True
 
         state.file_offset = new_offset
-        return changed
+        return changed, parsed_entries
 
     @staticmethod
     def _resolve_jsonl_in_dir(directory: Path) -> Path | None:
