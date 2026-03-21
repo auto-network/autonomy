@@ -928,7 +928,8 @@ def cmd_note(args):
         db.add_mention(eid, t.id, "thought")
 
     db.commit()
-    print(f"  ✓ Note saved (src:{source.id[:12]})")
+    _lines = text.count("\n") + (1 if text else 0)
+    print(f"  ✓ Note saved (src:{source.id[:12]}) — {_lines} lines, {len(text)} chars")
     db.close()
 
 
@@ -1068,7 +1069,8 @@ def cmd_note_update(args):
         db.add_mention(eid, thought["id"], "thought")
 
     db.commit()
-    print(f"  ✓ Note updated to version {next_version} (src:{source_id[:12]})")
+    _lines = new_content.count("\n") + (1 if new_content else 0)
+    print(f"  ✓ Note updated to version {next_version} (src:{source_id[:12]}) — {_lines} lines, {len(new_content)} chars")
 
     # Integrate specified comments
     for cid in (args.integrate_ids or []):
