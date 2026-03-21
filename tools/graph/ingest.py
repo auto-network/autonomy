@@ -672,6 +672,19 @@ def ingest_claude_code_session(
             "ended_at": meta.get("ended_at"),
             "file_size": current_size,
         })
+        # Backfill session_uuid if missing
+        if "session_uuid" not in existing_meta:
+            existing_meta["session_uuid"] = file_path.stem
+        # Read per-file .meta.json for tmux_session (may appear after first ingest)
+        if "tmux_session" not in existing_meta:
+            host_meta_path = file_path.with_suffix(".meta.json")
+            if host_meta_path.exists():
+                try:
+                    host_meta = json.loads(host_meta_path.read_text())
+                    if host_meta.get("tmux_session"):
+                        existing_meta["tmux_session"] = host_meta["tmux_session"]
+                except (json.JSONDecodeError, OSError):
+                    pass
         db.update_source_metadata(source_id, existing_meta)
         db.commit()
 
@@ -699,6 +712,7 @@ def ingest_claude_code_session(
 
     source_meta = {
         "session_id": meta["session_id"],
+        "session_uuid": file_path.stem,
         "model": meta.get("model"),
         "total_input_tokens": meta.get("total_input_tokens", 0),
         "total_output_tokens": meta.get("total_output_tokens", 0),
@@ -711,6 +725,16 @@ def ingest_claude_code_session(
                 "container_name", "launched_at"):
         if key in session_meta:
             source_meta[f"session_{key}" if key == "type" else key] = session_meta[key]
+
+    # Read per-file .meta.json (written by dashboard) for tmux_session
+    host_meta_path = file_path.with_suffix(".meta.json")
+    if host_meta_path.exists():
+        try:
+            host_meta = json.loads(host_meta_path.read_text())
+            if host_meta.get("tmux_session"):
+                source_meta["tmux_session"] = host_meta["tmux_session"]
+        except (json.JSONDecodeError, OSError):
+            pass
 
     source = Source(
         type="session",
