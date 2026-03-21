@@ -30,8 +30,9 @@
         <span class="text-xs text-gray-500 ml-auto" x-show="!isLive" x-text="entries.length + ' total'"></span>
       </div>
 
-      <!-- Scrollable entries -->
+      <!-- Scrollable entries — extra bottom padding when live to clear fixed input bar -->
       <div class="flex-1 overflow-y-auto px-2 py-3 space-y-3" x-ref="entriesContainer"
+           :style="isLive ? 'padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px))' : ''"
            @scroll="onScroll()">
 
         <template x-for="(entry, idx) in entries" :key="idx">
@@ -113,10 +114,10 @@
         </button>
       </div>
 
-      <!-- Input bar (shown when linked to a tmux session) -->
+      <!-- Input bar (shown when linked to a tmux session) — fixed to viewport bottom -->
       <template x-if="isLive && _tmuxSession">
-        <div class="flex flex-col px-2 bg-gray-800 border-t border-gray-700 flex-shrink-0"
-             style="padding-top:6px; padding-bottom:calc(6px + env(safe-area-inset-bottom, 0px));"
+        <div class="flex flex-col px-2 bg-gray-800 border-t border-gray-700"
+             style="position:fixed; bottom:0; left:0; right:0; z-index:20; padding-top:6px; padding-bottom:calc(6px + env(safe-area-inset-bottom, 0px));"
              @dragenter.prevent="$el.classList.add('drop-highlight')"
              @dragover.prevent="$el.classList.add('drop-highlight')"
              @dragleave.prevent="$el.classList.remove('drop-highlight')"
@@ -206,9 +207,10 @@
         </div>
       </template>
 
-      <!-- Link Terminal UI (shown for orphaned host sessions with no tmux link) -->
+      <!-- Link Terminal UI (shown for orphaned host sessions with no tmux link) — fixed to viewport bottom -->
       <template x-if="isLive && !_tmuxSession && sessionType === 'host'">
-        <div class="px-2 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0">
+        <div class="px-2 py-2 bg-gray-800 border-t border-gray-700"
+             style="position:fixed; bottom:0; left:0; right:0; z-index:20; padding-bottom:calc(0.5rem + env(safe-area-inset-bottom, 0px));">
 
           <!-- Idle: show Link Terminal button -->
           <template x-if="linkState === 'idle'">
