@@ -142,6 +142,11 @@ class SessionMonitor:
             _path_is_dir=path_is_dir,
         )
         async with self._lock:
+            # Dedup: if another session has this tmux_name, remove it
+            for existing_id, existing in list(self._sessions.items()):
+                if existing.tmux_name == tmux_name and existing_id != session_id:
+                    del self._sessions[existing_id]
+                    logger.info("session_monitor: dedup removed %s (same tmux=%s)", existing_id, tmux_name)
             self._sessions[session_id] = state
         logger.info(
             "session_monitor: registered %s  tmux=%s  type=%s  project=%s",
@@ -245,9 +250,10 @@ class SessionMonitor:
                 state.jsonl_path = resolved
                 state._path_is_dir = False
                 state.session_id = resolved.stem
+                state.project = resolved.parent.name
                 logger.info(
-                    "session_monitor: resolved JSONL for tmux=%s → %s",
-                    state.tmux_name, resolved.stem,
+                    "session_monitor: resolved JSONL for tmux=%s → %s  project=%s",
+                    state.tmux_name, resolved.stem, state.project,
                 )
             else:
                 return False
