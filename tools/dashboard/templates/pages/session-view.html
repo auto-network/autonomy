@@ -87,7 +87,17 @@
                          x-text="headline(entry)"></div>
                     <!-- Detail panel (expanded) -->
                     <template x-if="isExpanded(idx)">
-                      <pre class="sc-detail" x-text="expandContent(entry)"></pre>
+                      <div @click.stop>
+                        <div class="sc-detail-tabs" @click="toggleView(idx)">
+                          <span class="sc-detail-tab"
+                                :class="expandViewMode(idx) === 'output' ? 'sc-detail-tab-active' : ''"
+                                >Output</span>
+                          <span class="sc-detail-tab"
+                                :class="expandViewMode(idx) === 'input' ? 'sc-detail-tab-active' : ''"
+                                >Input</span>
+                        </div>
+                        <pre class="sc-detail" x-text="expandContent(entry, idx)"></pre>
+                      </div>
                     </template>
                   </div>
                 </template>
