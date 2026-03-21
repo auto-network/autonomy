@@ -1610,32 +1610,60 @@ def _parse_jsonl_entry(line: str) -> dict | None:
 
     if entry_type == "user":
         text = ""
+        tool_results = []
         if isinstance(content_raw, str):
             text = content_raw
         elif isinstance(content_raw, list):
             for block in content_raw:
-                if isinstance(block, dict) and block.get("type") == "text":
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if btype == "text":
                     text += block.get("text", "")
-        if not text:
+                elif btype == "tool_result":
+                    result_content = block.get("content", "")
+                    if isinstance(result_content, list):
+                        result_content = "".join(
+                            b.get("text", "") for b in result_content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    if len(result_content) > 2000:
+                        result_content = result_content[:2000] + "\n... (truncated)"
+                    tool_results.append({
+                        "type": "tool_result",
+                        "role": "tool",
+                        "tool_id": block.get("tool_use_id", ""),
+                        "content": result_content,
+                        "is_error": block.get("is_error", False),
+                        "timestamp": timestamp,
+                    })
+
+        entries = []
+
+        if text:
+            # Detect harness-injected system messages masquerading as user entries
+            sys_info = _classify_system_message(text)
+            if sys_info:
+                entries.append({
+                    "type": "system",
+                    "role": "system",
+                    "content": sys_info["summary"],
+                    "tag": sys_info["tag"],
+                    "timestamp": timestamp,
+                })
+            else:
+                entries.append({
+                    "type": "user",
+                    "role": "user",
+                    "content": text[:2000],
+                    "timestamp": timestamp,
+                })
+
+        entries.extend(tool_results)
+
+        if not entries:
             return None
-
-        # Detect harness-injected system messages masquerading as user entries
-        sys_info = _classify_system_message(text)
-        if sys_info:
-            return {
-                "type": "system",
-                "role": "system",
-                "content": sys_info["summary"],
-                "tag": sys_info["tag"],
-                "timestamp": timestamp,
-            }
-
-        return {
-            "type": "user",
-            "role": "user",
-            "content": text[:2000],
-            "timestamp": timestamp,
-        }
+        return entries if len(entries) > 1 else entries[0]
 
     if entry_type == "assistant" and isinstance(content_raw, list):
         # Expand assistant content blocks into sub-entries
