@@ -44,6 +44,9 @@
       entries: [],
       offset: 0,
       isLive: false,
+      loadProgress: 0,      // 0-100
+      loadedMB: '0',
+      totalMB: '0',
       autoScroll: true,
       _pollTimer: null,
 
@@ -500,8 +503,14 @@
 
       async _poll() {
         try {
-          const res = await fetch(`${this._tailUrl}?after=${this.offset}`);
-          const data = await res.json();
+          const data = await window.fetchWithProgress(
+            `${this._tailUrl}?after=${this.offset}`,
+            (received, total) => {
+              this.loadProgress = Math.round(received / total * 100);
+              this.loadedMB = (received / 1048576).toFixed(1);
+              this.totalMB = (total / 1048576).toFixed(1);
+            }
+          );
 
           this.isLive = data.is_live;
           if (data.offset !== undefined) this.offset = data.offset;

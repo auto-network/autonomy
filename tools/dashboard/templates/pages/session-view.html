@@ -2,7 +2,18 @@
 
   <!-- Loading -->
   <template x-if="state === 'loading'">
-    <div class="text-gray-500 text-sm p-4">Connecting to session...</div>
+    <div class="text-gray-500 text-sm p-4">
+      <template x-if="loadProgress > 0">
+        <span>
+          Loading session...
+          <span x-text="loadedMB + ' / ' + totalMB + ' MB'"></span>
+          <span x-text="'(' + loadProgress + '%)'"></span>
+        </span>
+      </template>
+      <template x-if="loadProgress === 0">
+        <span>Connecting to session...</span>
+      </template>
+    </div>
   </template>
 
   <!-- Error -->
