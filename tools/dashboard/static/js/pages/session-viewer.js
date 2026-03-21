@@ -1,7 +1,12 @@
 (function () {
 
   function _formatProject(project) {
-    return project.replace(/-home-jeremy-?/, '').replace(/workspace-/, '') || 'home';
+    // Strip /home/<user>/workspace/ path prefix (encoded as dashes)
+    const cleaned = project
+      .replace(/^-home-[^-]+-workspace-/, '')
+      .replace(/^-home-[^-]+-/, '')
+      .replace(/^-+/, '');
+    return cleaned || 'home';
   }
 
   document.addEventListener('alpine:init', () => {
@@ -19,7 +24,6 @@
       entries: [],
       offset: 0,
       isLive: false,
-      entryCount: 0,
       autoScroll: true,
       _pollTimer: null,
 
@@ -251,7 +255,6 @@
               }
             }
             this.entries = [...this.entries, ...data.entries];
-            this.entryCount = this.entries.length;
 
             // Auto-scroll
             if (this.autoScroll) {
