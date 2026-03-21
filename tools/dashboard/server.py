@@ -46,6 +46,11 @@ from agents.experiments_db import (
     create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
     dismiss_experiment,
 )
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
+
 from tools.dashboard.event_bus import event_bus
 from tools.dashboard.session_monitor import session_monitor
 if os.environ.get("DASHBOARD_MOCK"):
