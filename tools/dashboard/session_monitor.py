@@ -61,6 +61,8 @@ class SessionState:
     _path_is_dir: bool = False
     # Cooldown timestamp: when is_live turned False
     _dead_since: float = 0.0
+    # Broadcast sequence number (monotonically increasing per session)
+    _broadcast_seq: int = 0
 
 
 def _extract_message_text(entry: dict) -> str:
@@ -244,9 +246,10 @@ class SessionMonitor:
                     if did_change:
                         summary_changed = True
                     if new_entries and self._event_bus:
+                        state._broadcast_seq += 1
                         await self._event_bus.broadcast(
                             f"session:{state.session_id}",
-                            {"entries": new_entries, "is_live": state.is_live},
+                            {"entries": new_entries, "is_live": state.is_live, "seq": state._broadcast_seq},
                             dedup=False,
                         )
                 if summary_changed:
