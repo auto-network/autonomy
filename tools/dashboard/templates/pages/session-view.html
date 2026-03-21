@@ -1,39 +1,37 @@
-<div x-data="sessionViewerPage()">
+<div x-data="sessionViewerPage()" class="session-viewer">
 
   <!-- Loading -->
   <template x-if="state === 'loading'">
-    <div class="text-gray-500 text-sm">Connecting to session...</div>
+    <div class="text-gray-500 text-sm p-4">Connecting to session...</div>
   </template>
 
   <!-- Error -->
   <template x-if="state === 'error'">
-    <div class="text-red-400" x-text="errorMsg"></div>
+    <div class="text-red-400 p-4" x-text="errorMsg"></div>
   </template>
 
   <!-- Main viewer -->
   <template x-if="state === 'ready'">
-    <div class="flex flex-col session-viewer-container">
+    <div class="sv-ready">
 
-      <!-- Scrollable entries — extra bottom padding when live to clear fixed input bar -->
-      <div class="flex-1 overflow-y-auto px-2 py-3 space-y-3" x-ref="entriesContainer"
-           :style="isLive ? 'padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px))' : ''"
-           @scroll="onScroll()">
+      <!-- ZONE 2: Session header — flex child, always visible at top -->
+      <div class="sv-header">
+        <span class="text-xs font-mono text-gray-500" x-text="sessionId.slice(0, 12)"></span>
+        <span class="text-xs text-indigo-400" x-text="'[' + projectLabel + ']'"></span>
+        <template x-if="isLive">
+          <span class="flex items-center gap-1">
+            <span class="live-pulse"></span>
+            <span class="badge badge-open text-xs">Live</span>
+          </span>
+        </template>
+        <template x-if="!isLive">
+          <span class="badge badge-closed text-xs">Complete</span>
+        </template>
+        <span class="text-xs text-gray-500 ml-auto" x-show="!isLive" x-text="entries.length + ' total'"></span>
+      </div>
 
-        <!-- Sticky header: session info + stats (must be first child of scroll container) -->
-        <div class="flex items-center gap-3 px-2 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0 flex-wrap sticky top-0 z-10">
-          <span class="text-xs font-mono text-gray-500" x-text="sessionId.slice(0, 12)"></span>
-          <span class="text-xs text-indigo-400" x-text="'[' + projectLabel + ']'"></span>
-          <template x-if="isLive">
-            <span class="flex items-center gap-1">
-              <span class="live-pulse"></span>
-              <span class="badge badge-open text-xs">Live</span>
-            </span>
-          </template>
-          <template x-if="!isLive">
-            <span class="badge badge-closed text-xs">Complete</span>
-          </template>
-          <span class="text-xs text-gray-500 ml-auto" x-show="!isLive" x-text="entries.length + ' total'"></span>
-        </div>
+      <!-- ZONE 3: Scrollable entries — fills all remaining space -->
+      <div class="sv-entries" x-ref="entriesContainer" @scroll="onScroll()">
 
         <template x-for="(entry, idx) in entries" :key="idx">
           <div class="live-entry"
@@ -124,10 +122,9 @@
         </button>
       </div>
 
-      <!-- Input bar (shown when linked to a tmux session) — fixed to viewport bottom -->
+      <!-- ZONE 4: Input bar — flex child at bottom (shown when linked to tmux) -->
       <template x-if="isLive && _tmuxSession">
-        <div class="flex flex-col px-2 bg-gray-800 border-t border-gray-700"
-             style="position:fixed; bottom:0; left:0; right:0; z-index:20; padding-top:6px; padding-bottom:calc(6px + env(safe-area-inset-bottom, 0px));"
+        <div class="sv-input"
              @dragenter.prevent="$el.classList.add('drop-highlight')"
              @dragover.prevent="$el.classList.add('drop-highlight')"
              @dragleave.prevent="$el.classList.remove('drop-highlight')"
@@ -154,7 +151,7 @@
             </template>
           </div>
 
-          <div class="flex gap-2 items-end">
+          <div class="sv-input-row">
             <!-- Hidden file input -->
             <input type="file"
                    x-ref="fileInput"
@@ -217,10 +214,9 @@
         </div>
       </template>
 
-      <!-- Link Terminal UI (shown for orphaned host sessions with no tmux link) — fixed to viewport bottom -->
+      <!-- ZONE 4 alt: Link Terminal — flex child at bottom -->
       <template x-if="isLive && !_tmuxSession && sessionType === 'host'">
-        <div class="px-2 py-2 bg-gray-800 border-t border-gray-700"
-             style="position:fixed; bottom:0; left:0; right:0; z-index:20; padding-bottom:calc(0.5rem + env(safe-area-inset-bottom, 0px));">
+        <div class="sv-input">
 
           <!-- Idle: show Link Terminal button -->
           <template x-if="linkState === 'idle'">
