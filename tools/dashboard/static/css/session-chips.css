@@ -1,0 +1,208 @@
+/* Session Chips — two-line tool card layout for session viewer
+   Chip colors, borders, transitions, expand/collapse, detail panels. */
+
+/* ── Chip label badges ──────────────────────────────────────── */
+.sc-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.sc-chip-bash   { background: #1e3a5f; color: #93c5fd; }
+.sc-chip-read   { background: #14532d; color: #86efac; }
+.sc-chip-write  { background: #78350f; color: #fde68a; }
+.sc-chip-edit   { background: #78350f; color: #fde68a; }
+.sc-chip-grep   { background: #3b0764; color: #d8b4fe; }
+.sc-chip-glob   { background: #3b0764; color: #d8b4fe; }
+.sc-chip-agent  { background: #164e63; color: #67e8f9; }
+/* Fallback for unknown tools */
+.sc-chip-default { background: #1f2937; color: #9ca3af; }
+
+/* ── Entry card ─────────────────────────────────────────────── */
+.sc-entry {
+  position: relative;
+  padding: 4px 8px 4px 10px;
+  border-left: 3px solid transparent;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}
+
+/* ── Border colors per tool ─────────────────────────────────── */
+.sc-border-bash    { border-left-color: #3b82f6; }
+.sc-border-read    { border-left-color: #22c55e; }
+.sc-border-write   { border-left-color: #f59e0b; }
+.sc-border-edit    { border-left-color: #f59e0b; }
+.sc-border-grep    { border-left-color: #a855f7; }
+.sc-border-glob    { border-left-color: #a855f7; }
+.sc-border-agent   { border-left-color: #22d3ee; }
+.sc-border-default { border-left-color: #4b5563; }
+
+/* Role-specific borders */
+.sc-border-user      { border-left-color: #f59e0b; }
+.sc-border-assistant { border-left-color: #6366f1; }
+.sc-border-thinking  { border-left-color: #374151; }
+.sc-border-system    { border-left-color: #4b5563; }
+
+/* ── Role-specific entry styling ────────────────────────────── */
+.sc-entry-user .sc-user-label {
+  color: #f59e0b;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.sc-entry-user .sc-user-content {
+  color: #e5e7eb;
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+.sc-entry-assistant .sc-asst-label {
+  color: #6366f1;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+.sc-entry-assistant .sc-asst-content {
+  font-size: 0.8125rem;
+  color: #d1d5db;
+}
+
+.sc-entry-thinking {
+  opacity: 0.4;
+}
+.sc-entry-thinking .sc-think-label {
+  color: #6b7280;
+  font-size: 0.6875rem;
+  font-style: italic;
+}
+
+.sc-entry-system {
+  opacity: 0.6;
+}
+.sc-entry-system .sc-sys-icon {
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+.sc-entry-system .sc-sys-label {
+  color: #9ca3af;
+  font-size: 0.75rem;
+}
+
+/* ── Tool card: two-line layout ─────────────────────────────── */
+.sc-tool-card {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Line 1: chip + meta stats + timestamp */
+.sc-line1 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+}
+
+.sc-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.6875rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.sc-meta-gray  { color: #6b7280; }
+.sc-meta-green { color: #22c55e; }
+.sc-meta-red   { color: #ef4444; }
+
+.sc-timestamp {
+  margin-left: auto;
+  font-size: 0.625rem;
+  color: #4b5563;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Line 2: headline — truncated when collapsed, wraps when expanded */
+.sc-line2 {
+  font-size: 0.75rem;
+  color: #9ca3af;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 1.35;
+  margin-top: 1px;
+}
+.sc-line2-truncated {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-line2-expanded {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── Detail panel (expanded content) ────────────────────────── */
+.sc-detail {
+  background: #0d1117;
+  border-radius: 4px;
+  margin-top: 4px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 6px 8px;
+  font-size: 0.6875rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #8b949e;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.4;
+}
+/* Bidirectional scroll for wide content */
+.sc-detail-wide {
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* Edit diff styling in detail panel */
+.sc-diff-old {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.1);
+  display: block;
+  padding: 2px 4px;
+  border-radius: 2px;
+  margin-bottom: 4px;
+}
+.sc-diff-new {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.1);
+  display: block;
+  padding: 2px 4px;
+  border-radius: 2px;
+  margin-bottom: 4px;
+}
+.sc-diff-label {
+  font-size: 0.625rem;
+  font-weight: 600;
+  opacity: 0.7;
+  margin-bottom: 2px;
+}
+
+/* ── Spacing rules ──────────────────────────────────────────── */
+/* No gap within an assistant turn — entries connect via left borders */
+.sv-entries .sc-entry + .sc-entry {
+  margin-top: 0;
+}
+/* Gap at role transitions (user ↔ assistant/tool) */
+.sv-entries .sc-entry.sc-gap {
+  margin-top: 14px;
+}
+
+/* ── Markdown in assistant entries ──────────────────────────── */
+.sc-entry-assistant .markdown-body {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
