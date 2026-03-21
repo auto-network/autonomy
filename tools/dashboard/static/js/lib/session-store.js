@@ -58,7 +58,7 @@
       }
     }
 
-    store.entries = store.entries.concat(data.entries);
+    for (var j = 0; j < data.entries.length; j++) store.entries.push(data.entries[j]);
     return data.entries.length;
   };
 
