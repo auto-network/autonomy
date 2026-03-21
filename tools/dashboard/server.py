@@ -1539,6 +1539,7 @@ async def api_chatwith_tail(request):
             else:
                 entries.append(parsed)
 
+    _enrich_entries(entries)
     return JSONResponse({
         "entries": entries, "offset": new_offset, "is_live": is_live,
         "tmux_session": session_name,
@@ -1698,6 +1699,28 @@ def _parse_jsonl_entry(line: str) -> dict | None:
     return None
 
 
+def _enrich_entries(entries: list[dict]) -> None:
+    """Post-process parsed entries: pair tool_results with tool_uses.
+
+    Enriches Agent tool_results with subagent tool call counts when the
+    subagent JSONL file can be discovered.  Mutates entries in place.
+    """
+    tool_names: dict[str, str] = {}  # tool_id → tool_name
+    for entry in entries:
+        if entry.get("type") == "tool_use" and entry.get("tool_id"):
+            tool_names[entry["tool_id"]] = entry.get("tool_name", "")
+        elif entry.get("type") == "tool_result" and entry.get("tool_id"):
+            name = tool_names.get(entry["tool_id"], "")
+            if name == "Agent" and "tool_calls" not in entry:
+                # Best-effort: count tool_use lines in the result content
+                # (subagent JSONL is not accessible from here — approximate
+                # from the text summary the Agent tool returns)
+                content = entry.get("content", "")
+                count = content.count('"type": "tool_use"') + content.count('"type":"tool_use"')
+                if count > 0:
+                    entry["tool_calls"] = count
+
+
 def _find_session_files(run_name: str) -> list[Path]:
     """Find JSONL session files for a run, checking multiple locations."""
     # 1. Run directory sessions — use rglob because Claude Code writes JSONL
@@ -1760,6 +1783,7 @@ async def api_dispatch_tail(request):
             else:
                 entries.append(parsed)
 
+    _enrich_entries(entries)
     return JSONResponse({
         "entries": entries,
         "offset": new_offset,
@@ -2071,6 +2095,7 @@ async def api_session_tail(request):
             else:
                 entries.append(parsed)
 
+    _enrich_entries(entries)
     resp = {"entries": entries, "offset": new_offset, "is_live": is_live,
             "type": session_type, "seq": seq}
     if tmux_name:
@@ -3335,7 +3360,7 @@ async def _on_startup():
     init_db()  # ensure schema exists (idempotent — all CREATE IF NOT EXISTS)
     # Recover active sessions from filesystem, then start background tasks
     await session_monitor.recover()
-    await session_monitor.start(event_bus=event_bus, entry_parser=_parse_jsonl_entry)
+    await session_monitor.start(event_bus=event_bus, entry_parser=_parse_jsonl_entry, entry_enricher=_enrich_entries)
     asyncio.create_task(_dispatch_watcher())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher

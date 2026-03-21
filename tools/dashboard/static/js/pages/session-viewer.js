@@ -9,6 +9,26 @@
     return cleaned || 'home';
   }
 
+  // ── Tool color tables ────────────────────────────────────────
+  const TOOL_CHIPS = {
+    Bash:  'sc-chip-bash',
+    Read:  'sc-chip-read',
+    Write: 'sc-chip-write',
+    Edit:  'sc-chip-edit',
+    Grep:  'sc-chip-grep',
+    Glob:  'sc-chip-glob',
+    Agent: 'sc-chip-agent',
+  };
+  const TOOL_BORDERS = {
+    Bash:  'sc-border-bash',
+    Read:  'sc-border-read',
+    Write: 'sc-border-write',
+    Edit:  'sc-border-edit',
+    Grep:  'sc-border-grep',
+    Glob:  'sc-border-glob',
+    Agent: 'sc-border-agent',
+  };
+
   document.addEventListener('alpine:init', () => {
     Alpine.data('sessionViewerPage', () => ({
       // State machine
@@ -29,6 +49,10 @@
 
       // Tool ID tracking (for matching tool_result to tool_use)
       _toolMap: {},
+      // tool_id → tool_result entry (for pairing — chip metadata)
+      _resultMap: {},
+      // Expand/collapse state: index → boolean
+      _expanded: {},
 
       // Input
       inputText: '',
@@ -57,9 +81,207 @@
       // API paths set from URL params
       _tailUrl: '',
 
+      // ── Render helpers ─────────────────────────────────────────
+
       formatTime(ts) {
         if (!ts) return '';
         try { return new Date(ts).toLocaleTimeString(); } catch (_) { return ''; }
+      },
+
+      fmtDuration(seconds) {
+        if (seconds == null || seconds < 0) return '';
+        if (seconds < 1) return Math.round(seconds * 1000) + 'ms';
+        if (seconds < 60) return seconds.toFixed(1) + 's';
+        return Math.floor(seconds / 60) + 'm ' + Math.round(seconds % 60) + 's';
+      },
+
+      chipClass(toolName) {
+        return TOOL_CHIPS[toolName] || 'sc-chip-default';
+      },
+
+      borderClass(entry) {
+        if (entry.type === 'tool_use') return TOOL_BORDERS[entry.tool_name] || 'sc-border-default';
+        if (entry.type === 'user') return 'sc-border-user';
+        if (entry.type === 'assistant_text') return 'sc-border-assistant';
+        if (entry.type === 'thinking') return 'sc-border-thinking';
+        if (entry.type === 'system') return 'sc-border-system';
+        return 'sc-border-default';
+      },
+
+      headline(entry) {
+        if (entry.type !== 'tool_use') return '';
+        const inp = entry.input || {};
+        const name = entry.tool_name || '';
+        switch (name) {
+          case 'Bash':
+            return this._smartPath(inp.command || '');
+          case 'Read':
+            return this._smartPath(inp.file_path || '');
+          case 'Write':
+            return this._smartPath(inp.file_path || '');
+          case 'Edit':
+            return this._smartPath(inp.file_path || '');
+          case 'Grep':
+            return (inp.pattern || '') + (inp.path ? ' in ' + this._smartPath(inp.path) : '');
+          case 'Glob':
+            return inp.pattern || '';
+          case 'Agent':
+            return inp.description || inp.prompt?.slice(0, 60) || '';
+          default:
+            // Generic: show first string value from input
+            for (const v of Object.values(inp)) {
+              if (typeof v === 'string' && v.length > 0) return v.slice(0, 80);
+            }
+            return name;
+        }
+      },
+
+      metaDisplay(entry) {
+        if (entry.type !== 'tool_use') return [];
+        const name = entry.tool_name || '';
+        const result = this._resultMap[entry.tool_id];
+        const badges = [];
+
+        switch (name) {
+          case 'Bash': {
+            const dur = this._duration(entry, result);
+            if (dur != null) badges.push({ text: this.fmtDuration(dur), cls: 'sc-meta-gray' });
+            if (result && result.is_error) badges.push({ text: '\u2717', cls: 'sc-meta-red' });
+            break;
+          }
+          case 'Read': {
+            if (result && result.content) {
+              const n = this._countLines(result.content);
+              badges.push({ text: '+' + n, cls: 'sc-meta-green' });
+            }
+            break;
+          }
+          case 'Write': {
+            const inp = entry.input || {};
+            if (inp.content) {
+              const n = this._countLines(inp.content);
+              badges.push({ text: '+' + n, cls: 'sc-meta-green' });
+            }
+            break;
+          }
+          case 'Edit': {
+            const inp = entry.input || {};
+            if (inp.new_string) {
+              const added = this._countLines(inp.new_string);
+              badges.push({ text: '+' + added, cls: 'sc-meta-green' });
+            }
+            if (inp.old_string) {
+              const removed = this._countLines(inp.old_string);
+              badges.push({ text: '\u2212' + removed, cls: 'sc-meta-red' });
+            }
+            break;
+          }
+          case 'Agent': {
+            const dur = this._duration(entry, result);
+            if (dur != null) badges.push({ text: this.fmtDuration(dur), cls: 'sc-meta-gray' });
+            if (result && result.tool_calls != null) {
+              badges.push({ text: result.tool_calls + ' calls', cls: 'sc-meta-gray' });
+            }
+            break;
+          }
+        }
+        return badges;
+      },
+
+      expandContent(entry) {
+        if (entry.type === 'tool_use') {
+          const result = this._resultMap[entry.tool_id];
+          const name = entry.tool_name || '';
+          if (name === 'Edit') {
+            // Show old/new diff then result
+            const inp = entry.input || {};
+            let parts = [];
+            if (inp.old_string) parts.push('--- old\n' + inp.old_string);
+            if (inp.new_string) parts.push('+++ new\n' + inp.new_string);
+            if (result && result.content) parts.push('--- result\n' + result.content);
+            return parts.join('\n\n');
+          }
+          // For other tools: show result content, fallback to input JSON
+          if (result && result.content) return result.content;
+          return JSON.stringify(entry.input || {}, null, 2);
+        }
+        if (entry.type === 'thinking') return entry.content || '';
+        if (entry.type === 'system') return entry.content || '';
+        return '';
+      },
+
+      isExpanded(idx) {
+        return !!this._expanded[idx];
+      },
+
+      toggleExpand(idx) {
+        this._expanded[idx] = !this._expanded[idx];
+        // Force Alpine reactivity
+        this._expanded = { ...this._expanded };
+      },
+
+      /** Returns true if a role-transition gap should precede this entry. */
+      hasGap(idx) {
+        if (idx === 0) return false;
+        const prev = this.entries[idx - 1];
+        const curr = this.entries[idx];
+        if (!prev || !curr) return false;
+        // Skip hidden entries (tool_result) for gap calculation
+        // Gap when transitioning from user to non-user, or non-user to user
+        const prevIsUser = prev.type === 'user';
+        const currIsUser = curr.type === 'user';
+        return prevIsUser !== currIsUser;
+      },
+
+      /** System entry: success or failure icon. */
+      sysIcon(entry) {
+        const c = (entry.content || '').toLowerCase();
+        if (c.includes('fail') || c.includes('error') || c.includes('block')) return '\u2717';
+        return '\u2713';
+      },
+
+      sysIconColor(entry) {
+        const c = (entry.content || '').toLowerCase();
+        if (c.includes('fail') || c.includes('error') || c.includes('block')) return 'color: #ef4444';
+        return 'color: #22c55e';
+      },
+
+      // ── Internal helpers ───────────────────────────────────────
+
+      _smartPath(path) {
+        if (!path || typeof path !== 'string') return '';
+        // Strip common prefix
+        let p = path.replace(/^\/workspace\/repo\//, '');
+        // Collapse leading segments if too long
+        if (p.length > 40) {
+          const parts = p.split('/');
+          if (parts.length > 2) {
+            const file = parts[parts.length - 1];
+            const dir = parts[parts.length - 2];
+            p = '\u2026/' + dir + '/' + file;
+          }
+        }
+        return p;
+      },
+
+      _duration(entry, result) {
+        if (!result || !entry.timestamp || !result.timestamp) return null;
+        try {
+          const t0 = new Date(entry.timestamp).getTime();
+          const t1 = new Date(result.timestamp).getTime();
+          const diff = (t1 - t0) / 1000;
+          return diff >= 0 ? diff : null;
+        } catch (_) { return null; }
+      },
+
+      _countLines(str) {
+        if (!str) return 0;
+        // Count newlines + 1 (unless empty)
+        let n = 1;
+        for (let i = 0; i < str.length; i++) {
+          if (str.charCodeAt(i) === 10) n++;
+        }
+        return n;
       },
 
       toolLabel(toolId) {
@@ -263,13 +485,16 @@
         }
       },
 
-      /** Track tool IDs, append entries, auto-scroll. Shared by _poll and SSE. */
+      /** Track tool IDs, pair results, append entries, auto-scroll. Shared by _poll and SSE. */
       _ingestEntries(entries) {
         for (const entry of entries) {
           if (entry.type === 'tool_use' && entry.tool_id) {
             this._toolMap[entry.tool_id] = {
               tool_name: entry.tool_name || '?',
             };
+          }
+          if (entry.type === 'tool_result' && entry.tool_id) {
+            this._resultMap[entry.tool_id] = entry;
           }
         }
         this.entries = [...this.entries, ...entries];

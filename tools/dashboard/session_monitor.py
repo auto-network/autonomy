@@ -115,6 +115,7 @@ class SessionMonitor:
         self._liveness_task: asyncio.Task | None = None
         self._event_bus = None  # set in start()
         self._entry_parser = None  # set in start()
+        self._entry_enricher = None  # set in start()
         self._started = False
 
     # ── Registration ──────────────────────────────────────────────
@@ -207,19 +208,22 @@ class SessionMonitor:
 
     # ── Background tasks ──────────────────────────────────────────
 
-    async def start(self, event_bus=None, entry_parser=None) -> None:
+    async def start(self, event_bus=None, entry_parser=None, entry_enricher=None) -> None:
         """Start background tailer and liveness tasks.
 
         Args:
             event_bus: EventBus for SSE broadcasting.
             entry_parser: Callable (str -> dict | list | None) that parses a
                 raw JSONL line into display entries for per-session SSE push.
+            entry_enricher: Optional callable (list[dict] -> None) that enriches
+                parsed entries in place (e.g. Agent tool_calls count).
         """
         if self._started:
             return
         self._started = True
         self._event_bus = event_bus
         self._entry_parser = entry_parser
+        self._entry_enricher = entry_enricher
         self._tailer_task = asyncio.create_task(self._tailer_loop())
         self._liveness_task = asyncio.create_task(self._liveness_loop())
         logger.info("session_monitor: background tasks started")
@@ -245,6 +249,12 @@ class SessionMonitor:
                     did_change, new_entries = await asyncio.to_thread(self._tail_one, state)
                     if did_change:
                         summary_changed = True
+                    if new_entries:
+                        if self._entry_enricher:
+                            try:
+                                self._entry_enricher(new_entries)
+                            except Exception:
+                                pass
                     if new_entries and self._event_bus:
                         state._broadcast_seq += 1
                         await self._event_bus.broadcast(
