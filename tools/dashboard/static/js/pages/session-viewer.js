@@ -604,6 +604,12 @@
           this._resultMap = store.resultMap;
 
           if (this.state === 'loading') this.state = 'ready';
+
+          // Auto-scroll to bottom (matches cached path above)
+          this.$nextTick(() => {
+            var el = this.$refs.entriesContainer;
+            if (el) el.scrollTop = el.scrollHeight;
+          });
         }
 
         // Ensure SSE subscription (idempotent — for already-loaded live sessions)
