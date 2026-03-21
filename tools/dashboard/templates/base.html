@@ -61,7 +61,7 @@
     .badge-in_progress { background: #a855f7; color: white; }
     /* Board view — independent column scrolling */
     .board-container { min-height: 0; }
-    .board-column { max-height: calc(100vh - 16rem); }
+    .board-column { max-height: calc(100dvh - 16rem); }
     .board-column-scroll { scrollbar-width: thin; scrollbar-color: #4b5563 transparent; }
     .board-column-scroll::-webkit-scrollbar { width: 4px; }
     .board-column-scroll::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 2px; }
@@ -402,7 +402,7 @@
       padding-bottom: 0;
       display: flex;
       flex-direction: column;
-      background: #1f2937;
+      background: #111827;
       z-index: 15;
       overflow: hidden;
       overscroll-behavior: none;
@@ -470,7 +470,7 @@
     }
   </style>
 </head>
-<body class="bg-gray-900 text-gray-100 h-screen flex">
+<body class="bg-gray-900 text-gray-100 h-dvh flex">
   <!-- Mobile nav toggle -->
   <button id="nav-toggle" onclick="document.getElementById('sidebar').classList.toggle('-translate-x-full')"
           class="md:hidden fixed top-3 left-3 z-50 bg-gray-800 p-2 rounded-lg border border-gray-700">
