@@ -18,7 +18,12 @@
   }
 
   function _formatProject(project) {
-    return project.replace(/-home-jeremy-?/, '').replace(/workspace-/, '') || 'home';
+    // Strip /home/<user>/workspace/ path prefix (encoded as dashes)
+    const cleaned = project
+      .replace(/^-home-[^-]+-workspace-/, '')
+      .replace(/^-home-[^-]+-/, '')
+      .replace(/^-+/, '');
+    return cleaned || 'home';
   }
 
   function _mapActive(s) {

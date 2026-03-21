@@ -27,7 +27,7 @@
         <template x-if="!isLive">
           <span class="badge badge-closed text-xs">Complete</span>
         </template>
-        <span class="text-xs text-gray-500 ml-auto" x-text="entryCount + ' entries'"></span>
+        <span class="text-xs text-gray-500 ml-auto" x-show="!isLive" x-text="entries.length + ' total'"></span>
       </div>
 
       <!-- Scrollable entries -->
@@ -116,7 +116,7 @@
       <!-- Input bar (shown when linked to a tmux session) -->
       <template x-if="isLive && _tmuxSession">
         <div class="flex flex-col px-2 bg-gray-800 border-t border-gray-700 flex-shrink-0"
-             style="padding-top:6px; padding-bottom:6px;"
+             style="padding-top:6px; padding-bottom:calc(6px + env(safe-area-inset-bottom, 0px));"
              @dragenter.prevent="$el.classList.add('drop-highlight')"
              @dragover.prevent="$el.classList.add('drop-highlight')"
              @dragleave.prevent="$el.classList.remove('drop-highlight')"
@@ -175,7 +175,7 @@
                       @keydown.ctrl.enter.prevent="sendMessage()"
                       @keydown.meta.enter.prevent="sendMessage()"
                       @input="$el.style.height='auto'; let c=Math.min($el.scrollHeight,160); $el.style.height=c+'px'; $el.style.overflowY=$el.scrollHeight>160?'auto':'hidden'"
-                      placeholder="Message&#x2026; (Ctrl+Enter to send)"
+                      :placeholder="'ontouchstart' in window ? 'Message\u2026' : 'Message\u2026 (Ctrl+Enter to send)'"
                       rows="1"
                       autocomplete="off"
                       autocorrect="off"
