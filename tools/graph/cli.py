@@ -118,19 +118,42 @@ def cmd_search(args):
 
     width = args.width
     for r in results:
-        rtype = r["result_type"][0].upper()  # T or D
-        source = r.get("source_title") or "?"
+        rtype = r["result_type"]
         project = r.get("project", "")
-        turn = r.get("turn_number", "?")
-        sid = r.get("source_id", "?")[:12]
-        content = r["content"]
-        if len(content) > width:
-            content = content[:width] + "…"
-        lines = content.replace("\n", "\n    ").rstrip()
         proj_tag = f" [{project}]" if project else ""
-        print(f"  [{rtype}] {source[:50]} t{turn} (src:{sid}){proj_tag}")
-        print(f"    {lines}")
-        print()
+        sid = r.get("source_id", "?")[:12]
+
+        if rtype == "source":
+            # Direct source match
+            stype = r.get("source_type", "")
+            platform = r.get("platform", "")
+            created = (r.get("created_at") or "")[:10]
+            print(f"  [S] {r.get('source_title', '?')[:60]} (src:{sid}){proj_tag}")
+            detail_parts = [p for p in [stype, platform, created] if p]
+            print(f"    {' | '.join(detail_parts)}")
+            print()
+        elif rtype == "edge":
+            # Linked source via edge
+            direction = r.get("direction", "→")
+            relation = r.get("relation", "linked")
+            title = r.get("source_title") or "?"
+            turn = r.get("turn_number")
+            turn_tag = f" t{turn}" if turn else ""
+            print(f"  [{direction}] {title[:50]}{turn_tag} (src:{sid}){proj_tag}")
+            print(f"    relation: {relation}")
+            print()
+        else:
+            # Normal thought/derivation FTS result
+            tag = rtype[0].upper()  # T or D
+            source = r.get("source_title") or "?"
+            turn = r.get("turn_number", "?")
+            content = r["content"]
+            if len(content) > width:
+                content = content[:width] + "…"
+            lines = content.replace("\n", "\n    ").rstrip()
+            print(f"  [{tag}] {source[:50]} t{turn} (src:{sid}){proj_tag}")
+            print(f"    {lines}")
+            print()
 
     db.close()
 
