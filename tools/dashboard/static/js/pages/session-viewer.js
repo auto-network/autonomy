@@ -53,6 +53,8 @@
       _resultMap: {},
       // Expand/collapse state: index → boolean
       _expanded: {},
+      // Expand view mode: index → 'output' | 'input'
+      _expandView: {},
 
       // Input
       inputText: '',
@@ -114,7 +116,7 @@
         const name = entry.tool_name || '';
         switch (name) {
           case 'Bash':
-            return this._smartPath(inp.command || '');
+            return inp.description || inp.command || '';
           case 'Read':
             return this._smartPath(inp.file_path || '');
           case 'Write':
@@ -188,26 +190,65 @@
         return badges;
       },
 
-      expandContent(entry) {
+      expandViewMode(idx) {
+        return this._expandView[idx] || 'output';
+      },
+
+      toggleView(idx) {
+        const current = this._expandView[idx] || 'output';
+        this._expandView[idx] = current === 'output' ? 'input' : 'output';
+        this._expandView = { ...this._expandView };
+      },
+
+      expandContent(entry, idx) {
         if (entry.type === 'tool_use') {
           const result = this._resultMap[entry.tool_id];
-          const name = entry.tool_name || '';
-          if (name === 'Edit') {
-            // Show old/new diff then result
-            const inp = entry.input || {};
-            let parts = [];
-            if (inp.old_string) parts.push('--- old\n' + inp.old_string);
-            if (inp.new_string) parts.push('+++ new\n' + inp.new_string);
-            if (result && result.content) parts.push('--- result\n' + result.content);
-            return parts.join('\n\n');
+          const mode = this._expandView[idx] || 'output';
+
+          if (mode === 'input') {
+            return this._inputSummary(entry);
           }
-          // For other tools: show result content, fallback to input JSON
+          // Output mode: show result content, fallback to input summary
           if (result && result.content) return result.content;
-          return JSON.stringify(entry.input || {}, null, 2);
+          return this._inputSummary(entry);
         }
         if (entry.type === 'thinking') return entry.content || '';
         if (entry.type === 'system') return entry.content || '';
         return '';
+      },
+
+      _inputSummary(entry) {
+        const inp = entry.input || {};
+        const name = entry.tool_name || '';
+        switch (name) {
+          case 'Bash':
+            return inp.command || '';
+          case 'Edit': {
+            const parts = [];
+            if (inp.old_string) parts.push('--- old\n' + inp.old_string);
+            if (inp.new_string) parts.push('+++ new\n' + inp.new_string);
+            return parts.join('\n\n') || inp.file_path || '';
+          }
+          case 'Read':
+            return inp.file_path || '';
+          case 'Write':
+            return (inp.file_path || '') + (inp.content ? '\n' + inp.content : '');
+          case 'Grep':
+            return (inp.pattern || '') + (inp.path ? '\nin ' + inp.path : '');
+          case 'Glob':
+            return (inp.pattern || '') + (inp.path ? '\nin ' + inp.path : '');
+          case 'Agent':
+            return inp.prompt || '';
+          default: {
+            const parts = [];
+            for (const [k, v] of Object.entries(inp)) {
+              if (typeof v === 'string' && v.length > 0 && k !== 'description') {
+                parts.push(v);
+              }
+            }
+            return parts.join('\n') || name;
+          }
+        }
       },
 
       isExpanded(idx) {
