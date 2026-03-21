@@ -167,6 +167,32 @@
   overflow-x: auto;
 }
 
+/* Detail panel toggle tabs */
+.sc-detail-tabs {
+  display: flex;
+  gap: 2px;
+  margin-top: 4px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.sc-detail-tab {
+  font-size: 0.625rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 2px 8px;
+  border-radius: 4px 4px 0 0;
+  color: #6b7280;
+  background: transparent;
+}
+.sc-detail-tab-active {
+  color: #d1d5db;
+  background: #0d1117;
+}
+.sc-detail-tabs + .sc-detail {
+  margin-top: 0;
+  border-radius: 0 4px 4px 4px;
+}
+
 /* Edit diff styling in detail panel */
 .sc-diff-old {
   color: #f87171;
