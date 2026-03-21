@@ -245,38 +245,34 @@
           if (data.tmux_session && !this._tmuxSession) this._tmuxSession = data.tmux_session;
 
           if (data.entries && data.entries.length > 0) {
-            // Track tool_use IDs for result matching
-            for (const entry of data.entries) {
-              if (entry.type === 'tool_use' && entry.tool_id) {
-                this._toolMap[entry.tool_id] = {
-                  tool_name: entry.tool_name || '?',
-                  tool_headline: entry.tool_headline || '',
-                };
-              }
-            }
-            this.entries = [...this.entries, ...data.entries];
-
-            // Auto-scroll
-            if (this.autoScroll) {
-              this.$nextTick(() => {
-                const el = this.$refs.entriesContainer;
-                if (el) el.scrollTop = el.scrollHeight;
-              });
-            }
+            this._ingestEntries(data.entries);
           }
 
           if (this.state === 'loading') this.state = 'ready';
-
-          // Stop polling if session is complete and no new entries
-          if (!data.is_live && this.offset > 0 && (!data.entries || data.entries.length === 0)) {
-            clearInterval(this._pollTimer);
-            this._pollTimer = null;
-          }
         } catch (e) {
           if (this.state === 'loading') {
             this.errorMsg = 'Failed to connect to session';
             this.state = 'error';
           }
+        }
+      },
+
+      /** Track tool IDs, append entries, auto-scroll. Shared by _poll and SSE. */
+      _ingestEntries(entries) {
+        for (const entry of entries) {
+          if (entry.type === 'tool_use' && entry.tool_id) {
+            this._toolMap[entry.tool_id] = {
+              tool_name: entry.tool_name || '?',
+            };
+          }
+        }
+        this.entries = [...this.entries, ...entries];
+
+        if (this.autoScroll) {
+          this.$nextTick(() => {
+            const el = this.$refs.entriesContainer;
+            if (el) el.scrollTop = el.scrollHeight;
+          });
         }
       },
 
@@ -298,14 +294,23 @@
         const params = new URLSearchParams(window.location.search);
         this._tmuxSession = params.get('tmux') || '';
 
-        // First poll (immediate)
+        // Fetch full backlog once
         await this._poll();
 
         // If no entries came back and state is still loading, set ready (empty session)
         if (this.state === 'loading') this.state = 'ready';
 
-        // Start polling interval
-        this._pollTimer = setInterval(() => this._poll(), 1500);
+        // Subscribe to SSE for live updates (replaces polling)
+        var sseTopic = 'session:' + this.sessionId;
+        this._sseHandler = (data) => {
+          if (data.entries && data.entries.length > 0) {
+            this._ingestEntries(data.entries);
+          }
+          if (data.is_live !== undefined) {
+            this.isLive = data.is_live;
+          }
+        };
+        window.registerHandler(sseTopic, this._sseHandler);
 
         // Clipboard paste support — attach pasted files
         this.$nextTick(() => {
@@ -328,6 +333,10 @@
       },
 
       destroy() {
+        if (this._sseHandler) {
+          window.unregisterHandler('session:' + this.sessionId, this._sseHandler);
+          this._sseHandler = null;
+        }
         if (this._pollTimer) {
           clearInterval(this._pollTimer);
           this._pollTimer = null;

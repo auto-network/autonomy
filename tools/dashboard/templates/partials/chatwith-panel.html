@@ -48,11 +48,10 @@
         <details class="text-sm">
           <summary class="live-tool-toggle text-purple-400 text-xs font-mono cursor-pointer select-none min-h-[44px] flex items-center">
             <strong x-text="entry.tool_name || ''"></strong>
-            <span class="ml-1 text-gray-400" x-text="entry.tool_headline || ''"></span>
             <span class="live-entry-time ml-2" x-text="formatTime(entry.timestamp)"></span>
           </summary>
           <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-32 overflow-y-auto bg-gray-800 rounded p-2"
-               x-text="entry.content || ''"></pre>
+               x-text="JSON.stringify(entry.input || {}, null, 2)"></pre>
         </details>
       </template>
 

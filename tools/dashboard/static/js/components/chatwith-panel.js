@@ -227,7 +227,6 @@
               if (entry.type === 'tool_use' && entry.tool_id) {
                 this._toolMap[entry.tool_id] = {
                   tool_name: entry.tool_name || '?',
-                  tool_headline: entry.tool_headline || '',
                 };
               }
             }
