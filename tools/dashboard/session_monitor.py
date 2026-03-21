@@ -413,7 +413,7 @@ class SessionMonitor:
         repo_root = Path(__file__).resolve().parent.parent.parent
         agent_runs = repo_root / "data" / "agent-runs"
         if agent_runs.exists():
-            for run_dir in agent_runs.iterdir():
+            for run_dir in sorted(agent_runs.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
                 meta_path = run_dir / "sessions" / ".session_meta.json"
                 if not meta_path.exists():
                     continue
