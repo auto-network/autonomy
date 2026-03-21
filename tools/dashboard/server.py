@@ -1579,6 +1579,44 @@ def _tool_headline(name: str, inp: dict) -> str:
     return ""
 
 
+def _classify_system_message(text: str) -> dict | None:
+    """Detect harness-injected system messages in user entries.
+
+    Returns a compact dict with type 'system' and a summary, or None if the
+    text is a normal user message.
+    """
+    stripped = text.strip()
+
+    # --- task-notification: extract status + summary -----------------------
+    if "<task-notification>" in stripped:
+        summary = ""
+        status = ""
+        m_summary = re.search(r"<summary>(.*?)</summary>", stripped, re.DOTALL)
+        m_status = re.search(r"<status>(.*?)</status>", stripped, re.DOTALL)
+        if m_summary:
+            summary = m_summary.group(1).strip()
+        if m_status:
+            status = m_status.group(1).strip()
+        label = summary if summary else f"Task {status}" if status else "Task notification"
+        return {"summary": label, "tag": "task-notification"}
+
+    # --- system-reminder: hide the verbose content -------------------------
+    if "<system-reminder>" in stripped:
+        return {"summary": "System reminder", "tag": "system-reminder"}
+
+    # --- local-command-stdout: summarise -----------------------------------
+    if "<local-command-stdout>" in stripped:
+        return {"summary": "Command output", "tag": "local-command-stdout"}
+
+    # --- command-name: summarise -------------------------------------------
+    if "<command-name>" in stripped:
+        m = re.search(r"<command-name>(.*?)</command-name>", stripped, re.DOTALL)
+        name = m.group(1).strip() if m else "command"
+        return {"summary": f"Command: {name}", "tag": "command-name"}
+
+    return None
+
+
 def _parse_jsonl_entry(line: str) -> dict | None:
     """Parse a single JSONL line into a display entry."""
     try:
@@ -1610,6 +1648,18 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                     text += block.get("text", "")
         if not text:
             return None
+
+        # Detect harness-injected system messages masquerading as user entries
+        sys_info = _classify_system_message(text)
+        if sys_info:
+            return {
+                "type": "system",
+                "role": "system",
+                "content": sys_info["summary"],
+                "tag": sys_info["tag"],
+                "timestamp": timestamp,
+            }
+
         return {
             "type": "user",
             "role": "user",
