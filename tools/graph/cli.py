@@ -175,6 +175,58 @@ def _resolve_source(db, source_arg, first=False):
     return source
 
 
+def _resolve_current_source(db):
+    """Find the graph source for the session we're running inside.
+
+    Detection order:
+    1. Ask tmux for our session name, look up by tmux_session in metadata
+    2. (future: other detection methods)
+
+    Returns source dict or None.
+    """
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-p", "#{session_name}"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode != 0:
+            return None
+        tmux_name = r.stdout.strip()
+        if not tmux_name:
+            return None
+        return db.get_source_by_tmux(tmux_name)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _resolve_source_for_link(db, source_arg):
+    """Strict source resolution for bead/link commands.
+
+    Returns (source_dict, error_message). One of them is always None.
+    On success, prints the resolution path so mistakes are visible.
+    """
+    result = db.resolve_source_strict(source_arg)
+
+    if result is None:
+        return None, f"No source found matching '{source_arg}'"
+
+    if isinstance(result, list):
+        lines = [f"Multiple sources match '{source_arg}':"]
+        for s in result[:10]:
+            meta = json.loads(s["metadata"]) if s.get("metadata") else {}
+            title = (s.get("title") or "?")[:60]
+            tmux = meta.get("tmux_session", "")
+            tmux_str = f"  tmux={tmux}" if tmux else ""
+            lines.append(f"  {s['id'][:12]}  {title}{tmux_str}")
+        lines.append("\nUse a longer prefix to disambiguate.")
+        return None, "\n".join(lines)
+
+    # Single match — print resolution
+    title = (result.get("title") or "?")[:60]
+    print(f"  Resolved: {source_arg} → {result['id'][:12]} \"{title}\"")
+    return result, None
+
+
 def cmd_read(args):
     """Read full content of a source by ID or title search."""
     db = GraphDB(args.db)
@@ -650,32 +702,48 @@ def cmd_bead(args):
 
     print(result.stdout.strip())
 
-    # If source + turns provided, create the conceived_at link
-    if args.source and args.turns:
-        source = db.get_source(args.source)
+    # Resolve source for provenance link
+    source = None
+    if args.source:
+        # Explicit --source: strict resolution
+        source, err = _resolve_source_for_link(db, args.source)
+        if err:
+            print(err, file=sys.stderr)
+            db.close()
+            return
+    elif args.turns:
+        # --turns given without --source: auto-detect current session
+        source = _resolve_current_source(db)
         if source:
-            turn_range = {}
-            parts = args.turns.split("-")
-            if len(parts) == 2:
-                turn_range = {"from": int(parts[0]), "to": int(parts[1])}
-            elif len(parts) == 1:
-                turn_range = {"from": int(parts[0]), "to": int(parts[0])}
+            title = (source.get("title") or "?")[:60]
+            print(f"  Auto-detected source: {source['id'][:12]} \"{title}\"")
+        else:
+            print("  Warning: --turns given but no --source and could not auto-detect current session",
+                  file=sys.stderr)
 
-            metadata = {"turns": turn_range}
-            if args.note:
-                metadata["note"] = args.note
+    if source and args.turns:
+        turn_range = {}
+        parts = args.turns.split("-")
+        if len(parts) == 2:
+            turn_range = {"from": int(parts[0]), "to": int(parts[1])}
+        elif len(parts) == 1:
+            turn_range = {"from": int(parts[0]), "to": int(parts[0])}
 
-            db.insert_edge(Edge(
-                source_id=bead_id,
-                source_type="bead",
-                target_id=source["id"],
-                target_type="source",
-                relation="conceived_at",
-                metadata=metadata,
-            ))
-            db.commit()
-            turns_str = f" turns {args.turns}" if args.turns else ""
-            print(f"  ✓ linked: {bead_id} —[conceived_at]→ {source['id'][:12]}{turns_str}")
+        metadata = {"turns": turn_range}
+        if args.note:
+            metadata["note"] = args.note
+
+        db.insert_edge(Edge(
+            source_id=bead_id,
+            source_type="bead",
+            target_id=source["id"],
+            target_type="source",
+            relation="conceived_at",
+            metadata=metadata,
+        ))
+        db.commit()
+        turns_str = f" turns {args.turns}" if args.turns else ""
+        print(f"  ✓ linked: {bead_id} —[conceived_at]→ {source['id'][:12]}{turns_str}")
 
     db.close()
 
@@ -694,10 +762,10 @@ def cmd_link(args):
         elif len(parts) == 1:
             turn_range = {"from": int(parts[0]), "to": int(parts[0])}
 
-    # Find source by ID prefix or session UUID
-    source = db.get_source(args.source)
-    if not source:
-        print(f"Source not found: {args.source}")
+    # Strict source resolution
+    source, err = _resolve_source_for_link(db, args.source)
+    if err:
+        print(err, file=sys.stderr)
         db.close()
         return
 
