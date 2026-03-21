@@ -2042,8 +2042,12 @@ async def api_session_tail(request):
         if age < 120:
             is_live = True
 
+    # Look up current broadcast seq from monitor
+    monitor_state = session_monitor.get_one(session_id)
+    seq = monitor_state._broadcast_seq if monitor_state else 0
+
     base_resp = {"entries": [], "offset": file_size, "is_live": is_live,
-                 "type": session_type}
+                 "type": session_type, "seq": seq}
     if tmux_name:
         base_resp["tmux_session"] = tmux_name
     if after >= file_size:
@@ -2068,7 +2072,7 @@ async def api_session_tail(request):
                 entries.append(parsed)
 
     resp = {"entries": entries, "offset": new_offset, "is_live": is_live,
-            "type": session_type}
+            "type": session_type, "seq": seq}
     if tmux_name:
         resp["tmux_session"] = tmux_name
     return JSONResponse(resp)

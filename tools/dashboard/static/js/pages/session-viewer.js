@@ -42,6 +42,11 @@
       // Session type (host or container)
       sessionType: '',
 
+      // SSE dedup sequence number
+      _lastSeq: 0,
+      _initialLoadDone: false,
+      _pendingSSE: [],
+
       // Link terminal state
       linkState: 'idle',   // 'idle' | 'picking' | 'handshaking' | 'confirmed' | 'failed'
       linkCandidates: [],
@@ -237,6 +242,7 @@
 
           this.isLive = data.is_live;
           if (data.offset !== undefined) this.offset = data.offset;
+          if (data.seq !== undefined) this._lastSeq = data.seq;
 
           // Set session type from first response
           if (data.type && !this.sessionType) this.sessionType = data.type;
@@ -294,15 +300,18 @@
         const params = new URLSearchParams(window.location.search);
         this._tmuxSession = params.get('tmux') || '';
 
-        // Fetch full backlog once
-        await this._poll();
-
-        // If no entries came back and state is still loading, set ready (empty session)
-        if (this.state === 'loading') this.state = 'ready';
-
-        // Subscribe to SSE for live updates (replaces polling)
+        // Subscribe to SSE BEFORE fetching so we don't miss anything
+        this._lastSeq = 0;
+        this._initialLoadDone = false;
+        this._pendingSSE = [];
         var sseTopic = 'session:' + this.sessionId;
         this._sseHandler = (data) => {
+          if (!this._initialLoadDone) {
+            this._pendingSSE.push(data);
+            return;
+          }
+          if (data.seq !== undefined && data.seq <= this._lastSeq) return;
+          if (data.seq !== undefined) this._lastSeq = data.seq;
           if (data.entries && data.entries.length > 0) {
             this._ingestEntries(data.entries);
           }
@@ -311,6 +320,26 @@
           }
         };
         window.registerHandler(sseTopic, this._sseHandler);
+
+        // Fetch full backlog
+        await this._poll();
+
+        // If no entries came back and state is still loading, set ready (empty session)
+        if (this.state === 'loading') this.state = 'ready';
+
+        // Process any SSE events that arrived during fetch
+        this._initialLoadDone = true;
+        for (const pending of this._pendingSSE) {
+          if (pending.seq !== undefined && pending.seq <= this._lastSeq) continue;
+          if (pending.seq !== undefined) this._lastSeq = pending.seq;
+          if (pending.entries && pending.entries.length > 0) {
+            this._ingestEntries(pending.entries);
+          }
+          if (pending.is_live !== undefined) {
+            this.isLive = pending.is_live;
+          }
+        }
+        this._pendingSSE = [];
 
         // Clipboard paste support — attach pasted files
         this.$nextTick(() => {
