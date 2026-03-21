@@ -2,9 +2,8 @@
 // Registered via alpine:init so it's available when the fragment is injected and
 // Alpine.initTree() is called by the SPA router.
 //
-// Fetches active and recent sessions from DAO-backed endpoints on init().
-// Subscribes to SSE 'nav' topic so the Sessions nav badge stays current
-// (badge update is handled by the nav handler in app.js, not here).
+// Subscribes to SSE 'sessions' topic for active sessions (pushed by session monitor).
+// Fetches recent sessions from DAO endpoint on init + periodic refresh.
 
 (function () {
 
@@ -42,41 +41,58 @@
       recent: [],
       loading: true,
 
-      async init() {
-        await this._refresh();
-        this._refreshTimer = setInterval(() => this._refresh(), 5000);
-      },
-
-      async _refresh() {
-        if (this._refreshing) return;
-        this._refreshing = true;
-        try {
-          const [activeData, recentData] = await Promise.all([
-            fetch('/api/dao/active_sessions?threshold=600').then(r => r.json()),
-            fetch('/api/dao/recent_sessions?limit=20').then(r => r.json()),
-          ]);
-          const mapped = (Array.isArray(activeData) ? activeData : []).map(_mapActive);
+      init() {
+        // Subscribe to SSE 'sessions' topic for active session data
+        this._sseHandler = (data) => {
+          const mapped = (Array.isArray(data) ? data : []).map(_mapActive);
           this.interactive = mapped.filter(s =>
             s.tmux_session && (s.type === 'terminal' || s.type === 'chatwith')
           );
           this.agents = mapped.filter(s =>
             !s.tmux_session || (s.type !== 'terminal' && s.type !== 'chatwith')
           ).filter(s =>
-            s.type !== 'host' || s.age_seconds < 600
-          ).filter(s =>
             !s.session_id.startsWith('agent-') && s.project !== 'subagents'
           );
-          this.recent = Array.isArray(recentData) ? recentData : [];
-        } catch (e) {
-          console.warn('[sessionsPage] refresh error', e);
-        } finally {
-          this._refreshing = false;
           this.loading = false;
+        };
+        window.registerHandler('sessions', this._sseHandler);
+
+        // Fetch recent sessions (from graph.db, not monitor)
+        this._fetchRecent();
+        this._recentTimer = setInterval(() => this._fetchRecent(), 30000);
+
+        // If SSE hasn't delivered data yet, do one initial fetch for active sessions
+        // as a fallback (e.g., first page load before monitor broadcasts)
+        if (!window._sseCache || !window._sseCache.sessions) {
+          this._fetchActiveFallback();
+        }
+      },
+
+      async _fetchRecent() {
+        try {
+          const data = await fetch('/api/dao/recent_sessions?limit=20').then(r => r.json());
+          this.recent = Array.isArray(data) ? data : [];
+        } catch (e) {
+          console.warn('[sessionsPage] recent fetch error', e);
+        }
+      },
+
+      async _fetchActiveFallback() {
+        try {
+          const data = await fetch('/api/dao/active_sessions').then(r => r.json());
+          if (data && (!this.interactive.length && !this.agents.length)) {
+            this._sseHandler(data);
+          }
+        } catch (e) {
+          console.warn('[sessionsPage] fallback fetch error', e);
         }
       },
 
       destroy() {
-        if (this._refreshTimer) clearInterval(this._refreshTimer);
+        if (this._sseHandler) {
+          window.unregisterHandler('sessions', this._sseHandler);
+        }
+        if (this._recentTimer) clearInterval(this._recentTimer);
       },
     }));
   });
