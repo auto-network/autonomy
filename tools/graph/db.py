@@ -12,6 +12,16 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 DEFAULT_DB = Path(__file__).parents[2] / "data" / "graph.db"
 
 
+import re as _re
+
+_SOURCE_ID_RE = _re.compile(r'^[0-9a-f]{6,}(-[0-9a-f]+)?$', _re.IGNORECASE)
+
+
+def _is_source_id(query: str) -> bool:
+    """Return True if *query* looks like a source ID (hex prefix, 6+ chars)."""
+    return bool(_SOURCE_ID_RE.match(query.strip()))
+
+
 def _sanitize_fts_query(query: str, or_mode: bool = False) -> str:
     """Sanitize a user query for safe use in FTS5 MATCH expressions.
 
@@ -259,7 +269,15 @@ class GraphDB:
     # ── Search ───────────────────────────────────────────────
 
     def search(self, query: str, limit: int = 20, project: str | None = None, or_mode: bool = False) -> list[dict]:
-        """Full-text search across thoughts and derivations. Optionally filter by project."""
+        """Full-text search across thoughts and derivations. Optionally filter by project.
+
+        If *query* looks like a hex source ID (6+ hex chars), resolves it
+        directly via prefix lookup and returns the source plus linked sources
+        before falling back to FTS for content mentions.
+        """
+        if _is_source_id(query):
+            return self._search_source_id(query.strip(), limit=limit, project=project)
+
         results = []
         fts_query = _sanitize_fts_query(query, or_mode=or_mode)
 
@@ -328,6 +346,143 @@ class GraphDB:
 
         # Sort by rank
         results.sort(key=lambda r: r.get("rank", 0))
+        return results[:limit]
+
+    def _search_source_id(self, query: str, limit: int = 20, project: str | None = None) -> list[dict]:
+        """Resolve a source-ID-shaped query directly.
+
+        Returns:
+            1. The source itself (prefix match)
+            2. Sources linked TO it (edges where target_id matches)
+            3. Sources linked FROM it (edges where source_id matches)
+            4. FTS fallback — thoughts/derivations whose content mentions the ID
+        """
+        results: list[dict] = []
+        seen_source_ids: set[str] = set()
+
+        # 1. Direct prefix lookup
+        source = self.get_source(query)
+        if source:
+            if project and source.get("project") != project:
+                source = None  # skip if wrong project
+
+        if source:
+            sid = source["id"]
+            seen_source_ids.add(sid)
+            meta = source.get("metadata")
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except (json.JSONDecodeError, TypeError):
+                    meta = {}
+            results.append({
+                "id": sid,
+                "content": source.get("title") or sid,
+                "turn_number": None,
+                "source_id": sid,
+                "source_title": source.get("title") or sid,
+                "platform": source.get("platform"),
+                "project": source.get("project"),
+                "result_type": "source",
+                "rank": -1000,  # always first
+                "source_type": source.get("type"),
+                "created_at": source.get("created_at"),
+            })
+
+            # 2 & 3. Linked sources via edges (both directions)
+            edges = self.neighbors(sid, limit=50)
+            for edge in edges:
+                other_id = edge["target_id"] if edge["source_id"] == sid else edge["source_id"]
+                direction = "→" if edge["source_id"] == sid else "←"
+                if other_id in seen_source_ids:
+                    continue
+
+                # Resolve the other end — it could be a source, thought, or derivation
+                other_source = None
+                other_type = edge["target_type"] if edge["source_id"] == sid else edge["source_type"]
+
+                if other_type == "source":
+                    other_source = self.get_source(other_id)
+                else:
+                    # Edge points to a thought/derivation — look up its parent source
+                    row = self.conn.execute(
+                        "SELECT source_id FROM thoughts WHERE id = ? "
+                        "UNION SELECT source_id FROM derivations WHERE id = ?",
+                        (other_id, other_id),
+                    ).fetchone()
+                    if row:
+                        parent_sid = row[0]
+                        if parent_sid not in seen_source_ids:
+                            other_source = self.get_source(parent_sid)
+                            other_id = parent_sid
+
+                if other_source and other_id not in seen_source_ids:
+                    if project and other_source.get("project") != project:
+                        continue
+                    seen_source_ids.add(other_id)
+                    edge_meta = edge.get("metadata", "{}")
+                    if isinstance(edge_meta, str):
+                        try:
+                            edge_meta = json.loads(edge_meta)
+                        except (json.JSONDecodeError, TypeError):
+                            edge_meta = {}
+                    turn = edge_meta.get("turn") or edge_meta.get("turn_number")
+                    relation = edge.get("relation", "linked")
+                    results.append({
+                        "id": other_id,
+                        "content": f"{direction} {relation}: {other_source.get('title') or other_id}",
+                        "turn_number": turn,
+                        "source_id": other_id,
+                        "source_title": other_source.get("title") or other_id,
+                        "platform": other_source.get("platform"),
+                        "project": other_source.get("project"),
+                        "result_type": "edge",
+                        "rank": -500,
+                        "relation": relation,
+                        "direction": direction,
+                        "source_type": other_source.get("type"),
+                    })
+
+        # 4. FTS fallback — content that mentions this ID string
+        remaining = limit - len(results)
+        if remaining > 0:
+            try:
+                fts_query = _sanitize_fts_query(query)
+                for table, content_table, rtype in [
+                    ("thoughts_fts", "thoughts", "thought"),
+                    ("derivations_fts", "derivations", "derivation"),
+                ]:
+                    if project:
+                        rows = self.conn.execute(
+                            f"""SELECT t.id, t.content, t.turn_number, t.source_id,
+                                       s.title as source_title, s.platform, s.project,
+                                       '{rtype}' as result_type, rank
+                                FROM {table} fts
+                                JOIN {content_table} t ON t.rowid = fts.rowid
+                                JOIN sources s ON s.id = t.source_id
+                                WHERE {table} MATCH ? AND s.project = ?
+                                ORDER BY rank LIMIT ?""",
+                            (fts_query, project, remaining),
+                        ).fetchall()
+                    else:
+                        rows = self.conn.execute(
+                            f"""SELECT t.id, t.content, t.turn_number, t.source_id,
+                                       s.title as source_title, s.platform, s.project,
+                                       '{rtype}' as result_type, rank
+                                FROM {table} fts
+                                JOIN {content_table} t ON t.rowid = fts.rowid
+                                JOIN sources s ON s.id = t.source_id
+                                WHERE {table} MATCH ?
+                                ORDER BY rank LIMIT ?""",
+                            (fts_query, remaining),
+                        ).fetchall()
+                    for r in rows:
+                        rd = dict(r)
+                        if rd["source_id"] not in seen_source_ids:
+                            results.append(rd)
+            except Exception:
+                pass  # FTS may not match hex strings — that's fine
+
         return results[:limit]
 
     def search_entities(self, query: str, limit: int = 20) -> list[dict]:
