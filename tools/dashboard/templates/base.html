@@ -374,7 +374,7 @@
       }
     }
     /* Prevent horizontal scrolling on mobile */
-    html, body { overflow-x: hidden; }
+    html, body { overflow-x: hidden; overscroll-behavior: none; }
     main#content { overflow-x: hidden; }
     .markdown-body pre { max-width: 100%; overflow-x: auto; overflow-wrap: break-word; }
     .markdown-body code { overflow-wrap: break-word; }
@@ -387,6 +387,11 @@
         font-size: 16px !important;
       }
     }
+    @media (pointer: coarse) {
+      .sv-input-row textarea:focus {
+        border-color: #374151; /* gray-700 — subtle instead of indigo-500 */
+      }
+    }
     /* Session viewer layout — four fixed zones */
     .session-viewer {
       position: fixed;
@@ -397,8 +402,10 @@
       padding-bottom: 0;
       display: flex;
       flex-direction: column;
-      background: #111827;
+      background: #1f2937;
       z-index: 15;
+      overflow: hidden;
+      overscroll-behavior: none;
     }
     /* On desktop, inset the viewer to sit within the content area (after sidebar + header) */
     @media (min-width: 768px) {
@@ -449,6 +456,9 @@
       gap: 0.5rem;
       padding: 6px 0.5rem;
     }
+    .sv-header { touch-action: none; }
+    .sv-input { touch-action: none; }
+    .sv-entries { overscroll-behavior: none; }
     .sv-input-safe {
       height: env(safe-area-inset-bottom, 0px);
       /* empty spacer — gray bg inherited from .sv-input, no content enters safe area */

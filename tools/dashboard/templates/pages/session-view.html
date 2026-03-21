@@ -168,7 +168,7 @@
                            bg-transparent hover:bg-gray-700 text-gray-400 hover:text-gray-200
                            rounded-lg disabled:opacity-50 disabled:cursor-not-allowed
                            transition-colors duration-150"
-                    style="width:40px; height:40px;">
+                    style="width:36px; height:36px;">
               <template x-if="!uploading">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
               </template>
@@ -189,10 +189,10 @@
                       autocorrect="off"
                       autocapitalize="sentences"
                       enterkeyhint="send"
-                      class="flex-1 bg-gray-700 text-gray-100 px-3 py-2 rounded-lg text-base leading-normal
+                      class="flex-1 bg-gray-700 text-gray-100 rounded-lg text-base leading-normal
                              resize-none focus:outline-none border-2 border-transparent focus:border-indigo-500
                              font-sans transition-colors duration-150"
-                      style="min-height: 40px; max-height: 160px; overflow-y: hidden;"></textarea>
+                      style="min-height: 36px; max-height: 160px; overflow-y: hidden; padding: 6px 12px;"></textarea>
 
             <!-- Send button (SVG arrow + label) -->
             <button @click="sendMessage()"
@@ -201,7 +201,7 @@
                            disabled:opacity-30 disabled:cursor-default
                            whitespace-nowrap flex items-center justify-center gap-1.5
                            transition-colors duration-150"
-                    style="height:40px;">
+                    style="height:36px;">
               <template x-if="!sending">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
               </template>
