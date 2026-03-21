@@ -131,7 +131,7 @@
              @drop.prevent="$el.classList.remove('drop-highlight'); addFiles($event.dataTransfer.files)">
 
           <!-- Attachment preview strip -->
-          <div x-show="attachments.length > 0" class="flex" style="gap:6px; padding:2px 2px 4px; overflow:visible;">
+          <div x-show="attachments.length > 0" class="flex" style="gap:6px; padding:6px 0.5rem 0; overflow:visible;">
             <template x-for="att in attachments" :key="att.id">
               <div class="thumb-wrap">
                 <template x-if="att.isImage && att.dataUrl">
@@ -211,6 +211,7 @@
               <span x-text="sending ? 'Sending' : 'Send'"></span>
             </button>
           </div>
+          <div class="sv-input-safe"></div>
         </div>
       </template>
 
@@ -280,6 +281,7 @@
             </div>
           </template>
 
+          <div class="sv-input-safe"></div>
         </div>
       </template>
 
