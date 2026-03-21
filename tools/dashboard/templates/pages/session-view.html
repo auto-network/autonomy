@@ -42,6 +42,7 @@
                  'live-entry-assistant': entry.type === 'assistant_text',
                  'live-entry-tool': entry.type === 'tool_use' || entry.type === 'tool_result',
                  'live-entry-thinking': entry.type === 'thinking',
+                 'live-entry-system': entry.type === 'system',
                }">
 
             <!-- User message -->
@@ -101,6 +102,15 @@
                 </summary>
                 <div class="text-xs text-gray-500 mt-1 italic" x-text="entry.content || ''"></div>
               </details>
+            </template>
+
+            <!-- System / harness message (compact, gray) -->
+            <template x-if="entry.type === 'system'">
+              <div class="flex items-center gap-2 py-0.5 text-xs text-gray-500 italic">
+                <span class="opacity-60">&#9670;</span>
+                <span x-text="entry.content || ''"></span>
+                <span class="live-entry-time ml-auto" x-text="formatTime(entry.timestamp)"></span>
+              </div>
             </template>
 
           </div>
