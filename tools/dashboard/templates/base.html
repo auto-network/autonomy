@@ -386,16 +386,78 @@
         font-size: 16px !important;
       }
     }
-    /* Session viewer: fill available height, account for header */
-    .session-viewer-container {
-      height: calc(100dvh - 8rem);
+    /* Session viewer layout — four fixed zones */
+    .session-viewer {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      flex-direction: column;
+      background: #111827;
+      z-index: 15;
     }
-    @media screen and (max-width: 768px) {
-      /* On mobile: tighter layout for session viewer — cancel main#content padding */
-      .session-viewer-container {
-        height: calc(100dvh - 5rem);
-        margin: -0.75rem -1.5rem 0;
+    /* On desktop, inset the viewer to sit within the content area (after sidebar + header) */
+    @media (min-width: 768px) {
+      .session-viewer {
+        left: 14rem; /* w-56 = 14rem sidebar */
+        top: 0;
       }
+    }
+    /* Inner ready container fills the viewer as a flex column */
+    .sv-ready {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+    }
+    /* Zone 2: Session header */
+    .sv-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      padding: 0.5rem 0.75rem;
+      padding-top: calc(0.5rem + env(safe-area-inset-top, 0px));
+      background: #1f2937;
+      border-bottom: 1px solid #374151;
+      flex-shrink: 0;
+      z-index: 10;
+    }
+    @media (min-width: 768px) {
+      .sv-header {
+        padding-top: 0.5rem; /* no safe area needed on desktop */
+      }
+    }
+    /* Zone 3: Scrollable entries */
+    .sv-entries {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 0.75rem;
+      min-height: 0;
+    }
+    .sv-entries > .live-entry + .live-entry { margin-top: 0.75rem; }
+    /* Zone 4: Input bar */
+    .sv-input {
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 6px 0.5rem;
+      padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+      background: #1f2937;
+      border-top: 1px solid #374151;
+    }
+    .sv-input .sv-input-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 0.5rem;
+    }
+    /* Hide main#content overflow when session viewer is active */
+    main#content:has(.session-viewer) {
+      overflow: hidden;
+      padding: 0 !important;
     }
   </style>
 </head>
