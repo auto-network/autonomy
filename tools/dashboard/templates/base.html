@@ -350,6 +350,36 @@
     }
     .thumb-x:hover { background: #dc2626; border-color: #dc2626; color: #fff; }
     .drop-highlight { border-color: #6366f1 !important; background: rgba(99,102,241,0.08) !important; }
+    /* PWA safe area insets — prevents content from rendering behind status bar / home indicator */
+    @supports (padding-top: env(safe-area-inset-top)) {
+      #nav-toggle {
+        top: calc(0.75rem + env(safe-area-inset-top));
+        left: calc(0.75rem + env(safe-area-inset-left));
+      }
+      #sidebar {
+        padding-top: calc(1rem + env(safe-area-inset-top));
+        padding-bottom: env(safe-area-inset-bottom);
+        padding-left: env(safe-area-inset-left);
+      }
+      header {
+        padding-top: calc(0.75rem + env(safe-area-inset-top));
+      }
+      main#content, #terminal-page {
+        padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));
+        padding-right: calc(1.5rem + env(safe-area-inset-right));
+      }
+      #live-panel {
+        padding-bottom: env(safe-area-inset-bottom);
+      }
+    }
+    /* Prevent horizontal scrolling on mobile */
+    html, body { overflow-x: hidden; }
+    main#content { overflow-x: hidden; }
+    .markdown-body pre { max-width: 100%; overflow-x: auto; overflow-wrap: break-word; }
+    .markdown-body code { overflow-wrap: break-word; }
+    /* Session viewer entry text wrapping */
+    .live-entry { overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
+    .live-entry .markdown-body { overflow-wrap: anywhere; word-break: break-word; }
   </style>
 </head>
 <body class="bg-gray-900 text-gray-100 h-screen flex">
