@@ -48,7 +48,7 @@
       loadedMB: '0',
       totalMB: '0',
       autoScroll: true,
-      _pollTimer: null,
+      _storeWatcher: null,
 
       // Tool ID tracking (for matching tool_result to tool_use)
       _toolMap: {},
@@ -70,11 +70,6 @@
 
       // Session type (host or container)
       sessionType: '',
-
-      // SSE dedup sequence number
-      _lastSeq: 0,
-      _initialLoadDone: false,
-      _pendingSSE: [],
 
       // Link terminal state
       linkState: 'idle',   // 'idle' | 'picking' | 'handshaking' | 'confirmed' | 'failed'
@@ -467,7 +462,7 @@
           const deadline = Date.now() + 10000;
           while (Date.now() < deadline) {
             await new Promise(r => setTimeout(r, 1500));
-            await this._poll();
+            this.entries = window.getSessionStore(this.sessionId).entries;
             const found = this.entries.slice(-5).some(
               e => e.type === 'user' && (e.content || '').includes(this.HANDSHAKE_STRING)
             );
@@ -482,6 +477,7 @@
                 }),
               });
               this._tmuxSession = this.selectedTmux;
+              window.getSessionStore(this.sessionId).tmuxSession = this.selectedTmux;
               this.linkState = 'confirmed';
               return;
             }
@@ -501,60 +497,44 @@
         this.linkCandidates = [];
       },
 
-      async _poll() {
-        try {
-          const data = await window.fetchWithProgress(
-            `${this._tailUrl}?after=${this.offset}`,
-            (received, total) => {
-              this.loadProgress = Math.round(received / total * 100);
-              this.loadedMB = (received / 1048576).toFixed(1);
-              this.totalMB = (total / 1048576).toFixed(1);
+      async _fetchBacklog(store) {
+        var self = this;
+        var data = await window.fetchWithProgress(
+          this._tailUrl + '?after=0',
+          function(received, total) {
+            self.loadProgress = Math.round(received / total * 100);
+            self.loadedMB = (received / 1048576).toFixed(1);
+            self.totalMB = (total / 1048576).toFixed(1);
+          }
+        );
+
+        store.offset = data.offset || 0;
+        store.isLive = !!data.is_live;
+        store.sessionType = data.type || '';
+        store.tmuxSession = data.tmux_session || '';
+        if (data.seq !== undefined) store.seq = data.seq;
+
+        if (data.entries && data.entries.length > 0) {
+          for (var i = 0; i < data.entries.length; i++) {
+            var entry = data.entries[i];
+            if (entry.type === 'tool_use' && entry.tool_id) {
+              store.toolMap[entry.tool_id] = { tool_name: entry.tool_name || '?' };
             }
-          );
-
-          this.isLive = data.is_live;
-          if (data.offset !== undefined) this.offset = data.offset;
-          if (data.seq !== undefined) this._lastSeq = data.seq;
-
-          // Set session type from first response
-          if (data.type && !this.sessionType) this.sessionType = data.type;
-
-          // Auto-detect tmux session from per-file meta (handles page reload after linking)
-          if (data.tmux_session && !this._tmuxSession) this._tmuxSession = data.tmux_session;
-
-          if (data.entries && data.entries.length > 0) {
-            this._ingestEntries(data.entries);
+            if (entry.type === 'tool_result' && entry.tool_id) {
+              store.resultMap[entry.tool_id] = entry;
+            }
           }
-
-          if (this.state === 'loading') this.state = 'ready';
-        } catch (e) {
-          if (this.state === 'loading') {
-            this.errorMsg = 'Failed to connect to session';
-            this.state = 'error';
-          }
+          store.entries = data.entries;
         }
-      },
 
-      /** Track tool IDs, pair results, append entries, auto-scroll. Shared by _poll and SSE. */
-      _ingestEntries(entries) {
-        for (const entry of entries) {
-          if (entry.type === 'tool_use' && entry.tool_id) {
-            this._toolMap[entry.tool_id] = {
-              tool_name: entry.tool_name || '?',
-            };
-          }
-          if (entry.type === 'tool_result' && entry.tool_id) {
-            this._resultMap[entry.tool_id] = entry;
-          }
-        }
-        this.entries = [...this.entries, ...entries];
-
-        if (this.autoScroll) {
-          this.$nextTick(() => {
-            const el = this.$refs.entriesContainer;
-            if (el) el.scrollTop = el.scrollHeight;
-          });
-        }
+        // Sync to component
+        this.entries = store.entries;
+        this.offset = store.offset;
+        this.isLive = store.isLive;
+        this.sessionType = store.sessionType;
+        if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
+        this._toolMap = store.toolMap;
+        this._resultMap = store.resultMap;
       },
 
       async init() {
@@ -575,46 +555,81 @@
         const params = new URLSearchParams(window.location.search);
         this._tmuxSession = params.get('tmux') || '';
 
-        // Subscribe to SSE BEFORE fetching so we don't miss anything
-        this._lastSeq = 0;
-        this._initialLoadDone = false;
-        this._pendingSSE = [];
-        var sseTopic = 'session:' + this.sessionId;
-        this._sseHandler = (data) => {
-          if (!this._initialLoadDone) {
-            this._pendingSSE.push(data);
+        var store = window.getSessionStore(this.sessionId);
+
+        if (store.loaded) {
+          // Instant render from cache — zero network
+          this.entries = store.entries;
+          this.offset = store.offset;
+          this.isLive = store.isLive;
+          this.sessionType = store.sessionType;
+          if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
+          this._toolMap = store.toolMap;
+          this._resultMap = store.resultMap;
+          this.state = 'ready';
+
+          // Auto-scroll to bottom
+          this.$nextTick(() => {
+            var el = this.$refs.entriesContainer;
+            if (el) el.scrollTop = el.scrollHeight;
+          });
+        } else {
+          // First visit — subscribe SSE before fetch to not miss events
+          store._loading = true;
+          window.ensureSessionSSE(this.sessionId);
+
+          try {
+            await this._fetchBacklog(store);
+          } catch (e) {
+            if (this.state === 'loading') {
+              this.errorMsg = 'Failed to connect to session';
+              this.state = 'error';
+            }
+            store._loading = false;
             return;
           }
-          if (data.seq !== undefined && data.seq <= this._lastSeq) return;
-          if (data.seq !== undefined) this._lastSeq = data.seq;
-          if (data.entries && data.entries.length > 0) {
-            this._ingestEntries(data.entries);
-          }
-          if (data.is_live !== undefined) {
-            this.isLive = data.is_live;
-          }
-        };
-        window.registerHandler(sseTopic, this._sseHandler);
 
-        // Fetch full backlog
-        await this._poll();
-
-        // If no entries came back and state is still loading, set ready (empty session)
-        if (this.state === 'loading') this.state = 'ready';
-
-        // Process any SSE events that arrived during fetch
-        this._initialLoadDone = true;
-        for (const pending of this._pendingSSE) {
-          if (pending.seq !== undefined && pending.seq <= this._lastSeq) continue;
-          if (pending.seq !== undefined) this._lastSeq = pending.seq;
-          if (pending.entries && pending.entries.length > 0) {
-            this._ingestEntries(pending.entries);
+          // Flush pending SSE events that arrived during fetch
+          var pending = store._pendingSSE;
+          store._pendingSSE = [];
+          store._loading = false;
+          store.loaded = true;
+          for (var i = 0; i < pending.length; i++) {
+            window.appendSessionEntries(store, pending[i]);
           }
-          if (pending.is_live !== undefined) {
-            this.isLive = pending.is_live;
-          }
+
+          // Sync any SSE additions to component
+          this.entries = store.entries;
+          this._toolMap = store.toolMap;
+          this._resultMap = store.resultMap;
+
+          if (this.state === 'loading') this.state = 'ready';
         }
-        this._pendingSSE = [];
+
+        // Ensure SSE subscription (idempotent — for already-loaded live sessions)
+        window.ensureSessionSSE(this.sessionId);
+
+        // Store watcher — bridges shared store into Alpine reactivity (200ms check)
+        this._storeWatcher = setInterval(() => {
+          var s = window.getSessionStore(this.sessionId);
+          var changed = false;
+          if (s.entries.length !== this.entries.length) {
+            this.entries = s.entries;
+            this._toolMap = s.toolMap;
+            this._resultMap = s.resultMap;
+            changed = true;
+          }
+          if (s.isLive !== this.isLive) {
+            this.isLive = s.isLive;
+            changed = true;
+          }
+          if (changed && this.autoScroll) {
+            this.$nextTick(() => {
+              var el = this.$refs.entriesContainer;
+              if (el) el.scrollTop = el.scrollHeight;
+            });
+          }
+        }, 200);
 
         // Clipboard paste support — attach pasted files
         this.$nextTick(() => {
@@ -637,13 +652,11 @@
       },
 
       destroy() {
-        if (this._sseHandler) {
-          window.unregisterHandler('session:' + this.sessionId, this._sseHandler);
-          this._sseHandler = null;
-        }
-        if (this._pollTimer) {
-          clearInterval(this._pollTimer);
-          this._pollTimer = null;
+        // Do NOT unregister SSE — store keeps accumulating outside component lifecycle
+        // Do NOT clear store — it persists across navigations
+        if (this._storeWatcher) {
+          clearInterval(this._storeWatcher);
+          this._storeWatcher = null;
         }
       },
     }));
