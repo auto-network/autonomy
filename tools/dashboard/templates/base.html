@@ -365,9 +365,9 @@
         padding-top: calc(0.75rem + env(safe-area-inset-top));
       }
       main#content, #terminal-page {
-        padding-bottom: env(safe-area-inset-bottom);
         padding-right: calc(1.5rem + env(safe-area-inset-right));
       }
+      .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0); }
       #live-panel {
         padding-bottom: env(safe-area-inset-bottom);
       }
