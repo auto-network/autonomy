@@ -399,6 +399,71 @@ class GraphDB:
         ).fetchone()
         return dict(row) if row else None
 
+    def resolve_source_strict(self, value: str) -> dict | list[dict] | None:
+        """Strict source resolution: exact → prefix → session_uuid → file_path.
+
+        Returns:
+            dict — single match (success)
+            list[dict] — multiple matches (caller should error with candidates)
+            None — no match
+        """
+        # 1. Exact source ID match
+        row = self.conn.execute(
+            "SELECT * FROM sources WHERE id = ?", (value,)
+        ).fetchone()
+        if row:
+            return dict(row)
+
+        # 2. Prefix match on source ID
+        rows = self.conn.execute(
+            "SELECT * FROM sources WHERE id LIKE ?", (f"{value}%",)
+        ).fetchall()
+        if len(rows) == 1:
+            return dict(rows[0])
+        if len(rows) > 1:
+            return [dict(r) for r in rows]
+
+        # 3. Match by session_uuid in metadata (the JSONL filename stem)
+        rows = self.conn.execute(
+            "SELECT * FROM sources WHERE json_extract(metadata, '$.session_uuid') LIKE ?",
+            (f"{value}%",),
+        ).fetchall()
+        if len(rows) == 1:
+            return dict(rows[0])
+        if len(rows) > 1:
+            return [dict(r) for r in rows]
+
+        # 4. Match by session_id in metadata (legacy, same as session_uuid)
+        rows = self.conn.execute(
+            "SELECT * FROM sources WHERE json_extract(metadata, '$.session_id') LIKE ?",
+            (f"{value}%",),
+        ).fetchall()
+        if len(rows) == 1:
+            return dict(rows[0])
+        if len(rows) > 1:
+            return [dict(r) for r in rows]
+
+        # 5. Match by file_path containing the value (JSONL UUID in path)
+        rows = self.conn.execute(
+            "SELECT * FROM sources WHERE file_path LIKE ?",
+            (f"%/{value}%.jsonl",),
+        ).fetchall()
+        if len(rows) == 1:
+            return dict(rows[0])
+        if len(rows) > 1:
+            return [dict(r) for r in rows]
+
+        return None
+
+    def get_source_by_tmux(self, tmux_name: str) -> dict | None:
+        """Find the most recent source with the given tmux_session in metadata."""
+        row = self.conn.execute(
+            "SELECT * FROM sources WHERE json_extract(metadata, '$.tmux_session') = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (tmux_name,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def get_source_content(self, source_id: str) -> list[dict]:
         """Get all thoughts and derivations for a source, ordered by turn number."""
         rows = self.conn.execute(
