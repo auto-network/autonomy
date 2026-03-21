@@ -1440,7 +1440,7 @@ def cmd_wait(args):
 
         # Query dispatch_runs for a completed row
         try:
-            conn = sqlite3.connect(str(dispatch_db))
+            conn = sqlite3.connect(f"file:{dispatch_db}?immutable=1", uri=True)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """SELECT * FROM dispatch_runs
@@ -1461,7 +1461,7 @@ def cmd_wait(args):
 
             if status == "DONE":
                 # Success report
-                commit = run.get("commit_hash", "")[:7] or "none"
+                commit = (run.get("commit_hash") or "")[:7] or "none"
                 added = run.get("lines_added") or 0
                 removed = run.get("lines_removed") or 0
                 files = run.get("files_changed") or 0
@@ -1509,7 +1509,7 @@ def cmd_wait(args):
 
         # Not completed yet — check current state for status messages
         try:
-            conn = sqlite3.connect(str(dispatch_db))
+            conn = sqlite3.connect(f"file:{dispatch_db}?immutable=1", uri=True)
             conn.row_factory = sqlite3.Row
             running_row = conn.execute(
                 """SELECT * FROM dispatch_runs
