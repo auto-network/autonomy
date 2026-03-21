@@ -3099,14 +3099,30 @@ async def api_events(request):
     async def event_generator():
         try:
             while True:
-                topic, data = await queue.get()
-                yield {"event": topic, "data": json.dumps(data)}
+                topic, data, seq = await queue.get()
+                yield {"id": str(seq), "event": topic, "data": json.dumps(data)}
         except asyncio.CancelledError:
             pass
         finally:
             event_bus.unsubscribe(queue)
 
     return EventSourceResponse(event_generator())
+
+
+async def api_events_replay(request):
+    """Return missed events from the ring buffer for gap replay.
+
+    GET /api/events/replay?from={seq}&to={seq}
+    Returns {events: [...], complete: bool}.
+    If complete=false, the buffer doesn't cover the range —
+    caller should fall back to full re-fetch from disk.
+    """
+    from_seq = int(request.query_params.get("from", "0"))
+    to_seq = int(request.query_params.get("to", "0"))
+    if from_seq <= 0 or to_seq <= 0 or from_seq > to_seq:
+        return JSONResponse({"error": "Invalid range"}, status_code=400)
+    events, complete = event_bus.replay(from_seq, to_seq)
+    return JSONResponse({"events": events, "complete": complete})
 
 
 # ── Background watchers ───────────────────────────────────────
@@ -3319,6 +3335,7 @@ routes = [
 
     # Events (SSE)
     Route("/api/events", api_events),
+    Route("/api/events/replay", api_events_replay),
 
     # API
     Route("/api/beads/ready", api_beads_ready),
