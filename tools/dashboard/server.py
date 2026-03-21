@@ -47,6 +47,7 @@ from agents.experiments_db import (
     dismiss_experiment,
 )
 from tools.dashboard.event_bus import event_bus
+from tools.dashboard.session_monitor import session_monitor
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -1261,6 +1262,13 @@ async def api_terminal_kill(request):
     if _tmux_session_exists(name):
         subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
         _active_terminals.pop(name, None)
+        # Deregister from session monitor (liveness checker would catch it too,
+        # but immediate deregister gives faster UI feedback)
+        # Find session by tmux name
+        for s in session_monitor.get_all():
+            if s.tmux_name == name:
+                await session_monitor.deregister(s.session_id)
+                break
         # Ingest the completed session into the graph (fire-and-forget)
         if name.startswith("chatwith-"):
             asyncio.create_task(asyncio.to_thread(
@@ -1369,7 +1377,7 @@ async def api_chatwith_spawn(request):
             session_type="chatwith",
             name=session_name,
             prompt=None,
-            metadata={"context_id": context_id, "page_type": page_type},
+            metadata={"context_id": context_id, "page_type": page_type, "tmux_session": session_name},
             detach=False,
         )
         if not docker_cmd:
@@ -1402,6 +1410,23 @@ async def api_chatwith_spawn(request):
         subprocess.run(
             ["tmux", "send-keys", "-t", session_name, "", "Enter"],
             capture_output=True,
+        )
+
+    # Register with session monitor (new or existing)
+    if not already_exists:
+        # Chatwith runs in a container — JSONL appears in data/agent-runs/
+        agent_runs = _REPO_ROOT / "data" / "agent-runs"
+        run_dirs = sorted(
+            agent_runs.glob(f"{session_name}-*"),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        ) if agent_runs.exists() else []
+        sess_dir = run_dirs[0] / "sessions" if run_dirs else agent_runs
+        await session_monitor.register(
+            session_id=session_name,
+            tmux_name=session_name,
+            session_type="chatwith",
+            project=context_id,
+            jsonl_path=sess_dir,
         )
 
     ws_url = f"/ws/terminal?attach={session_name}"
@@ -2437,6 +2462,13 @@ async def _watch_for_host_session_jsonl(
                 logger.info("JSONL watcher found new session  uuid=%s  tmux=%s", new_jsonl.stem, tmux_name)
                 from tools.dashboard.dao.sessions import _write_host_session_meta
                 _write_host_session_meta(new_jsonl, tmux_name)
+                await session_monitor.register(
+                    session_id=new_jsonl.stem,
+                    tmux_name=tmux_name,
+                    session_type="terminal",
+                    project=projects_dir.name,
+                    jsonl_path=new_jsonl,
+                )
                 return
         logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
 
@@ -2582,6 +2614,20 @@ async def ws_terminal(websocket: WebSocket):
             )
         elif is_container_cmd:
             logger.info("ws_terminal: starting container session  tmux=%s", tmux_name)
+            # Register with monitor — JSONL path is a directory (resolved by tailer)
+            agent_runs = _REPO_ROOT / "data" / "agent-runs"
+            # Container sessions write to data/agent-runs/{tmux_name}-*/sessions/
+            # We pass the agent-runs dir; the tailer resolves the actual JSONL.
+            # Look for matching run dir (created by launch_session)
+            run_dirs = sorted(agent_runs.glob(f"{tmux_name}-*"), key=lambda p: p.stat().st_mtime, reverse=True) if agent_runs.exists() else []
+            sess_dir = run_dirs[0] / "sessions" if run_dirs else agent_runs
+            await session_monitor.register(
+                session_id=tmux_name,
+                tmux_name=tmux_name,
+                session_type="terminal",
+                project="container",
+                jsonl_path=sess_dir,
+            )
 
     # Track it — only set cmd/env on initial creation, not re-attach
     if tmux_name not in _active_terminals:
@@ -2973,8 +3019,8 @@ async def page_sessions_fragment(request):
     return templates.TemplateResponse(request, "pages/sessions.html")
 
 async def api_dao_active_sessions(request):
-    threshold = int(request.query_params.get("threshold", "600"))
-    sessions = await asyncio.to_thread(dao_sessions.get_active_sessions, threshold)
+    # Read directly from session monitor — zero filesystem access
+    sessions = session_monitor.get_all_as_dicts()
     return JSONResponse(sessions)
 
 async def api_dao_recent_sessions(request):
@@ -3157,47 +3203,8 @@ async def _collect_dispatch_data() -> dict:
 
 
 def _count_active_sessions() -> int:
-    """Count active Claude Code sessions using tmux liveness check.
-
-    Scans two locations:
-    1. data/agent-runs/*/sessions/.session_meta.json  (container sessions)
-    2. ~/.claude/projects/**/*.meta.json               (host sessions)
-
-    A session is active only if its meta file has a tmux_session field
-    pointing to a currently-running tmux session.
-    """
-    count = 0
-    seen_tmux: set[str] = set()
-
-    # 1. Container sessions
-    agent_runs = _REPO_ROOT / "data" / "agent-runs"
-    if agent_runs.exists():
-        for run_dir in agent_runs.iterdir():
-            meta_path = run_dir / "sessions" / ".session_meta.json"
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text())
-                    tmux_name = meta.get("tmux_session")
-                    if tmux_name and tmux_name not in seen_tmux and _tmux_session_exists(tmux_name):
-                        seen_tmux.add(tmux_name)
-                        count += 1
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-    # 2. Host sessions with live tmux links
-    home_projects = Path.home() / ".claude" / "projects"
-    if home_projects.exists():
-        for meta_path in home_projects.rglob("*.meta.json"):
-            try:
-                data = json.loads(meta_path.read_text())
-                tmux_name = data.get("tmux_session")
-                if tmux_name and tmux_name not in seen_tmux and _tmux_session_exists(tmux_name):
-                    seen_tmux.add(tmux_name)
-                    count += 1
-            except (json.JSONDecodeError, OSError):
-                pass
-
-    return count
+    """Count active Claude Code sessions from the session monitor."""
+    return session_monitor.count()
 
 
 def _count_terminals() -> int:
@@ -3373,6 +3380,9 @@ routes = [
 async def _on_startup():
     from agents.dispatch_db import init_db
     init_db()  # ensure schema exists (idempotent — all CREATE IF NOT EXISTS)
+    # Recover active sessions from filesystem, then start background tasks
+    await session_monitor.recover()
+    await session_monitor.start(event_bus=event_bus)
     asyncio.create_task(_dispatch_watcher())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
