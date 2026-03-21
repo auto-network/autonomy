@@ -2431,7 +2431,6 @@ async def api_upload(request):
 
 # Track active terminal sessions
 _active_terminals: dict[str, dict] = {}
-_term_counter = 0
 
 # Per-project locks to serialise host session JSONL watchers
 _host_launch_locks: dict[str, asyncio.Lock] = {}
@@ -2532,12 +2531,12 @@ async def ws_terminal(websocket: WebSocket):
       attach  — existing tmux session name to attach to
       id      — terminal session ID (auto-generated if not provided)
     """
-    global _term_counter
     await websocket.accept()
 
     params = websocket.query_params
     attach = params.get("attach")
     term_id = params.get("id")
+    logger.info("ws_terminal: connect  attach=%s  cmd=%s  id=%s", attach, params.get("cmd"), term_id)
 
     if attach:
         # Attach to existing tmux session
@@ -2558,9 +2557,13 @@ async def ws_terminal(websocket: WebSocket):
     else:
         # Create a new tmux session
         cmd_str = params.get("cmd", "/bin/bash")
-        _term_counter += 1
         if not term_id:
-            term_id = f"auto-t{_term_counter}"
+            # Find first unused auto-t{N} name
+            existing = set(_list_dashboard_tmux())
+            n = 1
+            while f"auto-t{n}" in existing:
+                n += 1
+            term_id = f"auto-t{n}"
         tmux_name = term_id
 
         # Resolve special container commands
@@ -2596,7 +2599,14 @@ async def ws_terminal(websocket: WebSocket):
         if start_dir:
             tmux_cmd += ["-c", start_dir]
         tmux_cmd.append(cmd_str)
-        subprocess.run(tmux_cmd, env={**os.environ, "TERM": "xterm-256color"})
+        result = subprocess.run(tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True)
+        if result.returncode != 0:
+            logger.error("ws_terminal: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
+                         tmux_name, result.returncode, result.stderr.decode().strip())
+            await websocket.send_text(f"\r\n\x1b[31mFailed to create session '{tmux_name}'\x1b[0m\r\n")
+            await websocket.close()
+            return
+        logger.info("ws_terminal: created tmux session  tmux=%s  cmd=%s", tmux_name, "container" if is_container_cmd else "host")
         # Enable OSC 52 clipboard passthrough in this session
         subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"],
                         capture_output=True)
@@ -2630,7 +2640,7 @@ async def ws_terminal(websocket: WebSocket):
                 session_id=tmux_name,
                 tmux_name=tmux_name,
                 session_type="terminal",
-                project="container",
+                project=sess_dir.name,
                 jsonl_path=sess_dir,
             )
 
