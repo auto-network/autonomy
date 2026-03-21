@@ -12,7 +12,7 @@
 
   <!-- Main viewer -->
   <template x-if="state === 'ready'">
-    <div class="flex flex-col h-[calc(100dvh-8rem)]">
+    <div class="flex flex-col session-viewer-container">
 
       <!-- Sticky header: session info + stats -->
       <div class="flex items-center gap-3 px-2 py-2 bg-gray-800 rounded-t-lg border-b border-gray-700 flex-shrink-0 flex-wrap">
@@ -181,7 +181,7 @@
                       autocorrect="off"
                       autocapitalize="sentences"
                       enterkeyhint="send"
-                      class="flex-1 bg-gray-700 text-gray-100 px-3 py-2 rounded-lg text-sm leading-normal
+                      class="flex-1 bg-gray-700 text-gray-100 px-3 py-2 rounded-lg text-base leading-normal
                              resize-none focus:outline-none border-2 border-transparent focus:border-indigo-500
                              font-sans transition-colors duration-150"
                       style="min-height: 40px; max-height: 160px; overflow-y: hidden;"></textarea>

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <!-- PWA -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -380,6 +380,27 @@
     /* Session viewer entry text wrapping */
     .live-entry { overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
     .live-entry .markdown-body { overflow-wrap: anywhere; word-break: break-word; }
+    /* iOS: prevent auto-zoom on textarea focus (requires >= 16px) */
+    @media screen and (max-width: 768px) {
+      textarea, input[type="text"], input[type="search"], select {
+        font-size: 16px !important;
+      }
+    }
+    /* Session viewer: fill available height, account for header */
+    .session-viewer-container {
+      height: calc(100dvh - 8rem);
+    }
+    @media screen and (max-width: 768px) {
+      /* On mobile: tighter layout for session viewer — cancel main#content padding */
+      .session-viewer-container {
+        height: calc(100dvh - 5rem);
+        margin: -0.75rem -1.5rem -1.5rem;
+      }
+      /* When session viewer is present, remove double safe-area from main */
+      main#content:has(.session-viewer-container) {
+        padding-bottom: 0 !important;
+      }
+    }
   </style>
 </head>
 <body class="bg-gray-900 text-gray-100 h-screen flex">
