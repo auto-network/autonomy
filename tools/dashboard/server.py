@@ -3039,13 +3039,6 @@ async def api_dao_recent_sessions(request):
     sessions = await asyncio.to_thread(dao_sessions.get_recent_sessions, limit)
     return JSONResponse(sessions)
 
-async def page_search(request):
-    return HTMLResponse(_load_template("base.html"))
-
-async def page_search_fragment(request):
-    """Return the Search page as an HTML fragment for SPA injection."""
-    return templates.TemplateResponse(request, "pages/search.html")
-
 async def page_source(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -3326,8 +3319,6 @@ routes = [
     Route("/pages/bead", page_bead_fragment),
     Route("/pages/timeline", page_timeline_fragment),
     Route("/pages/trace", page_trace_fragment),
-    Route("/search", page_search),
-    Route("/pages/search", page_search_fragment),
     Route("/source/{id}", page_source),
     Route("/pages/source", page_source_fragment),
     Route("/bead/{id}", page_bead),
