@@ -3,7 +3,7 @@
 All four launch paths (dispatch, librarian, chatwith, terminal) go through
 launch_session(), which handles:
 - Credential resolution (one implementation)
-- Default volume mounts: repo (ro), graph.db (rw), .beads (rw), per-run sessions dir
+- Default volume mounts: repo (ro), graph.db (ro), .beads (rw), per-run sessions dir
 - Session directory creation
 - Writing .session_meta.json with type + metadata + timestamp
 - Building and executing the docker run command
@@ -191,7 +191,7 @@ def launch_session(
     # The table is ordered; callers can override any entry by matching container path.
     default_mounts: dict[str, str] = {
         str(REPO_ROOT): "/workspace/repo:ro",
-        str(REPO_ROOT / "data" / "graph.db"): "/home/agent/graph.db",
+        str(REPO_ROOT / "data" / "graph.db"): "/home/agent/graph.db:ro",
         str(REPO_ROOT / ".beads"): "/data/.beads",
         str(run_dir): "/workspace/output",
         str(sessions_dir): "/home/agent/.claude/projects",
@@ -216,6 +216,7 @@ def launch_session(
         "-e", f"BD_ACTOR={session_type}:{name}",
         "-e", "BD_READONLY=0",
         "-e", "GRAPH_DB=/home/agent/graph.db",
+        "-e", "GRAPH_API=http://localhost:8080",
         *auth_args,
     ]
 
