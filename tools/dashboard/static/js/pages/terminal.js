@@ -115,7 +115,7 @@
       },
 
       async kill(id) {
-        await fetch(`/api/terminal/${id}/kill`);
+        await fetch(`/api/terminal/${id}/kill`, { method: 'POST' });
         if (activeTerminalId === id) {
           this.setActiveId(null);
           destroyTerminal();
