@@ -150,3 +150,7 @@ class EventBus:
 
 # Module-level singleton — imported by server.py
 event_bus = EventBus()
+
+# Server epoch — set once at import time, changes on process restart.
+# Clients compare this to detect restarts and reset stale seq counters.
+_SERVER_EPOCH = int(time.time())
