@@ -3676,7 +3676,7 @@ routes = [
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
     Route("/api/dao/bead/{id}", api_dao_bead),
     Route("/api/terminals", api_terminals),
-    Route("/api/terminal/{id}/kill", api_terminal_kill),
+    Route("/api/terminal/{id}/kill", api_terminal_kill, methods=["POST"]),
     Route("/api/terminal/{id}/rename", api_terminal_rename, methods=["POST"]),
     Route("/api/primer/{id}", api_primer),
     Route("/api/chatwith/primer/{page_type}", api_chatwith_primer),

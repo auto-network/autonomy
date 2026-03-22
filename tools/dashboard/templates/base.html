@@ -12,6 +12,7 @@
   <title>Autonomy Dashboard</title>
   <link rel="stylesheet" href="/static/tailwind.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/session-chips.css?v=__STATIC_VERSION__">
+  <link rel="stylesheet" href="/static/css/action-sheet.css?v=__STATIC_VERSION__">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
@@ -483,41 +484,6 @@
       overflow: hidden;
       padding: 0 !important;
     }
-    /* Action sheet — iOS-style slide-up tray */
-    .action-sheet-overlay {
-        position: fixed; inset: 0; background: rgba(0,0,0,0.5);
-        z-index: 100; opacity: 0; transition: opacity 0.2s;
-        pointer-events: none;
-    }
-    .action-sheet-overlay.active {
-        opacity: 1; pointer-events: auto;
-    }
-    .action-sheet {
-        position: fixed; bottom: 0; left: 0; right: 0;
-        z-index: 101;
-        transform: translateY(100%);
-        transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
-        padding: 0 8px env(safe-area-inset-bottom, 8px);
-    }
-    .action-sheet.active {
-        transform: translateY(0);
-    }
-    .action-sheet-group {
-        background: #1f2937; border-radius: 14px;
-        overflow: hidden; margin-bottom: 8px;
-    }
-    .action-sheet-title {
-        padding: 12px 16px 4px;
-        text-align: center; font-size: 13px; color: #9ca3af;
-    }
-    .action-sheet-btn {
-        display: block; width: 100%; padding: 16px;
-        text-align: center; font-size: 17px;
-        border: none; background: none; cursor: pointer;
-        border-top: 1px solid #374151;
-    }
-    .action-sheet-btn.destructive { color: #ef4444; }
-    .action-sheet-btn.cancel { color: #60a5fa; font-weight: 600; }
   </style>
 </head>
 <body class="bg-gray-900 text-gray-100 h-dvh flex">
@@ -775,6 +741,22 @@
     </div>
   </div>
 
+  <!-- Global action sheet (available on all pages) -->
+  <div class="action-sheet-overlay" :class="$store.actionSheet.open && 'active'"
+       @click="window.actionSheet.dismiss()"></div>
+  <div class="action-sheet" :class="$store.actionSheet.open && 'active'">
+      <div class="action-sheet-group">
+          <div class="action-sheet-title" x-text="$store.actionSheet.title"></div>
+          <template x-for="(a, i) in $store.actionSheet.actions" :key="i">
+              <button class="action-sheet-btn" :class="a.style === 'destructive' && 'destructive'"
+                      @click="window.actionSheet.trigger(i)" x-text="a.label"></button>
+          </template>
+      </div>
+      <div class="action-sheet-group">
+          <button class="action-sheet-btn cancel" @click="window.actionSheet.dismiss()">Cancel</button>
+      </div>
+  </div>
+
   <script src="/static/js/lib/fetch-progress.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/events.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-store.js?v=__STATIC_VERSION__"></script>
@@ -788,6 +770,7 @@
   <script src="/static/js/pages/trace.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/pages/source.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/pages/terminal.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/components/action-sheet.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/live-panel-viewer.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/chatwith-panel.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/test-harness.js?v=__STATIC_VERSION__"></script>

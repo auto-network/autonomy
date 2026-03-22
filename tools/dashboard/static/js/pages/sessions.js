@@ -52,7 +52,6 @@
       _creating: false,
       _longPressTimer: null,
       _longPressFired: false,
-      actionSheet: { open: false, session: null, title: '' },
 
       init() {
         // Ensure global SSE handlers are registered
@@ -161,7 +160,7 @@
       },
 
       navigate(s) {
-        if (this._longPressFired || this.actionSheet.open) return;
+        if (this._longPressFired || window.actionSheet.isOpen()) return;
         var path = '/session/' + encodeURIComponent(s.project) + '/' + s.session_id
           + (s.tmux_session ? '?tmux=' + encodeURIComponent(s.tmux_session) : '');
         navigateTo(path);
@@ -186,21 +185,19 @@
 
       showCloseConfirm(s) {
         var label = s.label || s.tmux_session || s.session_id.slice(0, 12);
-        this.actionSheet = { open: true, session: s, title: label };
-      },
-
-      async confirmClose() {
-        var s = this.actionSheet.session;
-        this.closeActionSheet();
-        if (s && s.tmux_session) {
-          await fetch('/api/terminal/' + encodeURIComponent(s.tmux_session) + '/kill', { method: 'POST' });
-        }
-      },
-
-      closeActionSheet() {
-        this.actionSheet = { open: false, session: null, title: '' };
-        // Reset after a tick so the click event from the closing tap doesn't navigate
-        setTimeout(() => { this._longPressFired = false; }, 300);
+        var tmux = s.tmux_session;
+        window.actionSheet.show({
+          title: label,
+          actions: [{
+            label: 'Close Session',
+            style: 'destructive',
+            handler: async function () {
+              if (tmux) {
+                await fetch('/api/terminal/' + encodeURIComponent(tmux) + '/kill', { method: 'POST' });
+              }
+            },
+          }],
+        });
       },
 
       destroy() {
