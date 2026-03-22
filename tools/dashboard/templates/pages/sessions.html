@@ -37,6 +37,7 @@
              @touchmove="cancelLongPress()"
              @contextmenu.prevent
              class="block p-3 bg-gray-800 rounded-lg border border-green-700 hover:bg-gray-750 cursor-pointer select-none"
+             data-testid="session-card"
              :data-session-id="s.session_id">
           <div class="flex items-center gap-3 mb-1">
             <span class="w-2 h-2 rounded-full" :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
@@ -68,6 +69,7 @@
              @touchmove="cancelLongPress()"
              @contextmenu.prevent
              class="block p-3 bg-gray-800 rounded-lg border border-blue-800 hover:bg-gray-750 cursor-pointer select-none"
+             data-testid="session-card"
              :data-session-id="s.session_id">
           <div class="flex items-center gap-3 mb-1">
             <span class="w-2 h-2 rounded-full" :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
@@ -110,14 +112,14 @@
   </template>
 
   <!-- Action sheet for long press -->
-  <div class="action-sheet-overlay" :class="actionSheet.open && 'active'" @click="closeActionSheet()"></div>
-  <div class="action-sheet" :class="actionSheet.open && 'active'">
+  <div class="action-sheet-overlay" data-testid="action-sheet-overlay" :class="actionSheet.open && 'active'" @click="closeActionSheet()"></div>
+  <div class="action-sheet" data-testid="action-sheet" :class="actionSheet.open && 'active'">
       <div class="action-sheet-group">
           <div class="action-sheet-title" x-text="actionSheet.title"></div>
-          <button class="action-sheet-btn destructive" @click="confirmClose()">Close Session</button>
+          <button class="action-sheet-btn destructive" data-testid="action-close-session" @click="confirmClose()">Close Session</button>
       </div>
       <div class="action-sheet-group">
-          <button class="action-sheet-btn cancel" @click="closeActionSheet()">Cancel</button>
+          <button class="action-sheet-btn cancel" data-testid="action-cancel" @click="closeActionSheet()">Cancel</button>
       </div>
   </div>
 
