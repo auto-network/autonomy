@@ -1408,12 +1408,6 @@ async def api_chatwith_spawn(request):
             ["tmux", "set-option", "-t", session_name, "mouse", "on"],
             capture_output=True,
         )
-        # Set DASHBOARD_SESSION so processes inside can identify their session
-        subprocess.run(
-            ["tmux", "set-environment", "-t", session_name, "DASHBOARD_SESSION", session_name],
-            capture_output=True, timeout=5,
-        )
-
         # Wait for Claude to initialize and display its prompt
         await asyncio.sleep(4)
 
@@ -2695,6 +2689,8 @@ async def ws_terminal(websocket: WebSocket):
         tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40"]
         if start_dir:
             tmux_cmd += ["-c", start_dir]
+        if not is_container_cmd:
+            cmd_str = f"DASHBOARD_SESSION={tmux_name} {cmd_str}"
         tmux_cmd.append(cmd_str)
         result = subprocess.run(tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True)
         if result.returncode != 0:
@@ -2715,10 +2711,6 @@ async def ws_terminal(websocket: WebSocket):
         # Paste is handled at the xterm.js layer using the browser clipboard API.
         subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
                         capture_output=True)
-        # Set DASHBOARD_SESSION so processes inside can identify their session
-        subprocess.run(["tmux", "set-environment", "-t", tmux_name, "DASHBOARD_SESSION", tmux_name],
-                        capture_output=True, timeout=5)
-
         # For host Claude sessions, register with jsonl_path=None, then watch for JSONL
         if not is_container_cmd and "claude" in cmd_str.lower():
             logger.info("ws_terminal: starting host Claude session  tmux=%s", tmux_name)
