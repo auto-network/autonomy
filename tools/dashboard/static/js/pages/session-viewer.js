@@ -62,6 +62,13 @@
       // Expand view mode: index → 'output' | 'input'
       _expandView: {},
 
+      // Grouped display layer
+      displayEntries: [],
+      // Group accordion: dIdx → expanded subIdx (or null)
+      _groupExpanded: {},
+      // Group item view mode: 'dIdx-subIdx' → 'output' | 'input'
+      _groupExpandView: {},
+
       // Input
       inputText: '',
       sending: false,
@@ -103,7 +110,7 @@
       },
 
       borderClass(entry) {
-        if (entry.type === 'tool_use') return TOOL_BORDERS[entry.tool_name] || 'sc-border-default';
+        if (entry.type === 'tool_use' || entry.type === 'tool_group') return TOOL_BORDERS[entry.tool_name] || 'sc-border-default';
         if (entry.type === 'user') return 'sc-border-user';
         if (entry.type === 'assistant_text') return 'sc-border-assistant';
         if (entry.type === 'thinking') return 'sc-border-thinking';
@@ -265,8 +272,8 @@
       /** Returns true if a role-transition gap should precede this entry. */
       hasGap(idx) {
         if (idx === 0) return false;
-        const prev = this.entries[idx - 1];
-        const curr = this.entries[idx];
+        const prev = this.displayEntries[idx - 1];
+        const curr = this.displayEntries[idx];
         if (!prev || !curr) return false;
         // Skip hidden entries (tool_result) for gap calculation
         // Gap when transitioning from user to non-user, or non-user to user
@@ -288,7 +295,123 @@
         return 'color: #22c55e';
       },
 
+      // ── Group card helpers ──────────────────────────────────────
+
+      /** Aggregate metadata badges for a tool group. */
+      groupMeta(group) {
+        const badges = [];
+        switch (group.tool_name) {
+          case 'Bash': {
+            let total = 0, has = false;
+            for (const item of group.items) {
+              const dur = this._duration(item, this._resultMap[item.tool_id]);
+              if (dur != null) { total += dur; has = true; }
+            }
+            if (has) badges.push({ text: this.fmtDuration(total), cls: 'sc-meta-gray' });
+            break;
+          }
+          case 'Read': {
+            let total = 0, has = false;
+            for (const item of group.items) {
+              const r = this._resultMap[item.tool_id];
+              if (r && r.content) { total += this._countLines(r.content); has = true; }
+            }
+            if (has) badges.push({ text: '+' + total, cls: 'sc-meta-green' });
+            break;
+          }
+          case 'Edit': {
+            let added = 0, removed = 0;
+            for (const item of group.items) {
+              const inp = item.input || {};
+              if (inp.new_string) added += this._countLines(inp.new_string);
+              if (inp.old_string) removed += this._countLines(inp.old_string);
+            }
+            if (added) badges.push({ text: '+' + added, cls: 'sc-meta-green' });
+            if (removed) badges.push({ text: '\u2212' + removed, cls: 'sc-meta-red' });
+            break;
+          }
+          // Grep, Glob: no badge
+        }
+        return badges;
+      },
+
+      bashStatus(item) {
+        const r = this._resultMap[item.tool_id];
+        if (!r) return '';
+        return r.is_error ? '\u2717' : '\u2713';
+      },
+
+      bashStatusColor(item) {
+        const r = this._resultMap[item.tool_id];
+        if (!r) return '';
+        return r.is_error ? 'color: #ef4444' : 'color: #22c55e';
+      },
+
+      toggleGroupItem(dIdx, subIdx) {
+        const cur = this._groupExpanded[dIdx];
+        this._groupExpanded[dIdx] = (cur === subIdx) ? null : subIdx;
+        this._groupExpanded = { ...this._groupExpanded };
+      },
+
+      isGroupItemExpanded(dIdx, subIdx) {
+        return this._groupExpanded[dIdx] === subIdx;
+      },
+
+      groupItemViewMode(dIdx, subIdx) {
+        return this._groupExpandView[dIdx + '-' + subIdx] || 'output';
+      },
+
+      toggleGroupItemView(dIdx, subIdx) {
+        const key = dIdx + '-' + subIdx;
+        this._groupExpandView[key] = (this._groupExpandView[key] || 'output') === 'output' ? 'input' : 'output';
+        this._groupExpandView = { ...this._groupExpandView };
+      },
+
+      groupItemExpandContent(item, dIdx, subIdx) {
+        const mode = this._groupExpandView[dIdx + '-' + subIdx] || 'output';
+        if (mode === 'input') return this._inputSummary(item);
+        const result = this._resultMap[item.tool_id];
+        if (result && result.content) return result.content;
+        return this._inputSummary(item);
+      },
+
       // ── Internal helpers ───────────────────────────────────────
+
+      _GROUPABLE: new Set(['Bash', 'Read', 'Edit', 'Grep', 'Glob']),
+
+      _buildDisplayEntries() {
+        const out = [];
+        const entries = this.entries;
+        let i = 0;
+        while (i < entries.length) {
+          const e = entries[i];
+          if (e.type === 'tool_use' && this._GROUPABLE.has(e.tool_name)) {
+            let j = i + 1;
+            while (j < entries.length &&
+                   entries[j].type === 'tool_use' &&
+                   entries[j].tool_name === e.tool_name) {
+              j++;
+            }
+            if (j - i >= 2) {
+              out.push({
+                type: 'tool_group',
+                tool_name: e.tool_name,
+                items: entries.slice(i, j),
+                timestamp: e.timestamp,
+              });
+              i = j;
+              continue;
+            }
+          }
+          out.push(e);
+          i++;
+        }
+        return out;
+      },
+
+      _rebuildDisplay() {
+        this.displayEntries = this._buildDisplayEntries();
+      },
 
       _smartPath(path) {
         if (!path || typeof path !== 'string') return '';
@@ -467,6 +590,7 @@
             await new Promise(r => setTimeout(r, 1500));
             var ss = window.getSessionStore(this.sessionId);
             this.entries = ss.entries;
+            this._rebuildDisplay();
             const found = this.entries.slice(-5).some(
               e => e.type === 'user' && (e.content || '').includes(this.HANDSHAKE_STRING)
             );
@@ -542,6 +666,7 @@
         if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
         this._toolMap = store.toolMap;
         this._resultMap = store.resultMap;
+        this._rebuildDisplay();
       },
 
       async init() {
@@ -574,6 +699,7 @@
           if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
           this._toolMap = store.toolMap;
           this._resultMap = store.resultMap;
+          this._rebuildDisplay();
           this.state = 'ready';
 
           // Auto-scroll to bottom
@@ -594,6 +720,7 @@
               store._loading = false;
               store.loaded = true;
               this.entries = [];
+              this._rebuildDisplay();
               this.isLive = true;
               this.sessionType = store.sessionType || 'terminal';
               this.state = 'ready';
@@ -621,6 +748,7 @@
           this.entries = store.entries;
           this._toolMap = store.toolMap;
           this._resultMap = store.resultMap;
+          this._rebuildDisplay();
           this.contextTokens = store.contextTokens || 0;
 
           if (this.state === 'loading') this.state = 'ready';
@@ -649,6 +777,7 @@
             self.entries = s.entries;
             self._toolMap = s.toolMap;
             self._resultMap = s.resultMap;
+            self._rebuildDisplay();
             if (self.autoScroll) {
               self.$nextTick(function() {
                 var el = self.$refs.entriesContainer;

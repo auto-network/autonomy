@@ -228,6 +228,37 @@
   margin-top: 14px;
 }
 
+/* ── Grouped tool call items ───────────────────────────────── */
+.sc-group-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  margin-top: 1px;
+  cursor: pointer;
+  border-radius: 3px;
+  -webkit-tap-highlight-color: transparent;
+}
+.sc-group-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.sc-group-item-text {
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #9ca3af;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.sc-group-status {
+  flex-shrink: 0;
+  font-size: 0.6875rem;
+  width: 14px;
+  text-align: center;
+}
+
 /* ── Markdown in assistant entries ──────────────────────────── */
 .sc-entry-assistant .markdown-body {
   overflow-wrap: anywhere;
