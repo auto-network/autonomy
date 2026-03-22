@@ -196,43 +196,8 @@ async function renderTraceFragment() {
   }
 }
 
-async function loadSessionLog(runName) {
-  const container = document.getElementById('session-log-container');
-  const loadBtn = document.getElementById('session-log-load');
-  loadBtn.textContent = 'Loading...';
-  loadBtn.disabled = true;
 
-  try {
-    const data = await api(`/api/dispatch/tail/${runName}?after=0`);
-    container.innerHTML = '';
 
-    if (!data.entries || data.entries.length === 0) {
-      container.innerHTML = '<div class="text-sm text-gray-500">No session entries found.</div>';
-      return;
-    }
-
-    // Entry count summary
-    const summary = document.createElement('div');
-    summary.className = 'text-xs text-gray-500 mb-3';
-    summary.textContent = `${data.entries.length} entries`;
-    container.appendChild(summary);
-
-    // Scrollable entries container
-    const entriesEl = document.createElement('div');
-    entriesEl.className = 'bg-gray-800 rounded-lg p-4 max-h-[80vh] overflow-y-auto';
-    container.appendChild(entriesEl);
-
-    _renderSessionEntries(data.entries, entriesEl);
-  } catch (err) {
-    container.innerHTML = `<div class="text-sm text-red-400">Failed to load session log: ${escapeHtml(err.message)}</div>`;
-  }
-}
-
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
-}
 
 async function renderSessionsFragment() {
   pageTitle.textContent = 'Sessions';
@@ -723,127 +688,54 @@ async function renderTerminal(cmd, attach) {
 }
 
 // ── Live Session Panel ───────────────────────────────────────
+// Panel shell (show/hide/collapse) is imperative; body is Alpine-managed
+// via the livePanelViewer component (live-panel-viewer.js).
 
-let _livePanelInterval = null;
-let _livePanelRunDir = null;
-let _livePanelOffset = 0;
-let _livePanelAutoScroll = true;
-
-function showLivePanel(runDir) {
+function _showPanel(runDir, isLive) {
   const panel = document.getElementById('live-panel');
-  const entries = document.getElementById('live-panel-entries');
   const beadLabel = document.getElementById('live-panel-bead');
   const statusEl = document.getElementById('live-panel-status');
   const pulseEl = document.getElementById('live-pulse');
   const badgeEl = document.getElementById('live-panel-badge');
-
-  // Reset state
-  _livePanelRunDir = runDir;
-  _livePanelOffset = 0;
-  _livePanelAutoScroll = true;
-  entries.innerHTML = '';
-  document.getElementById('live-resume-btn').style.display = 'none';
 
   // Extract bead ID from run dir name (format: <bead>-YYYYMMDD-HHMMSS)
   const parts = runDir.split('-');
   const beadId = parts.length >= 3 ? parts.slice(0, -2).join('-') : runDir;
   beadLabel.textContent = beadId;
-  statusEl.textContent = 'connecting...';
 
-  // Live appearance
-  badgeEl.textContent = 'Live';
-  badgeEl.className = 'badge badge-open';
-  pulseEl.style.animation = '';
-  pulseEl.style.background = '#22c55e';
-
-  // Show panel and add padding to main content
-  panel.style.display = 'flex';
-  panel.classList.remove('collapsed');
-  document.getElementById('content').style.paddingBottom = '20rem';
-
-  // Set up scroll detection
-  const body = document.getElementById('live-panel-body');
-  body.onscroll = () => {
-    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 50;
-    _livePanelAutoScroll = atBottom;
-    document.getElementById('live-resume-btn').style.display = atBottom ? 'none' : 'block';
-  };
-
-  // Start polling
-  if (_livePanelInterval) clearInterval(_livePanelInterval);
-  _livePollTail(); // immediate first poll
-  _livePanelInterval = setInterval(_livePollTail, 1500);
-}
-
-/**
- * Open the bottom-docked session panel for a completed dispatch.
- * Same panel as showLivePanel but loads all entries at once (no polling)
- * and shows a gray "Complete" badge instead of green "Live".
- */
-async function showCompletedPanel(runDir) {
-  const panel = document.getElementById('live-panel');
-  const entries = document.getElementById('live-panel-entries');
-  const beadLabel = document.getElementById('live-panel-bead');
-  const statusEl = document.getElementById('live-panel-status');
-  const pulseEl = document.getElementById('live-pulse');
-  const badgeEl = document.getElementById('live-panel-badge');
-
-  // Stop any existing polling
-  if (_livePanelInterval) {
-    clearInterval(_livePanelInterval);
-    _livePanelInterval = null;
+  if (isLive) {
+    badgeEl.textContent = 'Live';
+    badgeEl.className = 'badge badge-open';
+    pulseEl.style.animation = '';
+    pulseEl.style.background = '#22c55e';
+    statusEl.textContent = 'connecting...';
+    statusEl.className = 'text-xs text-gray-500 ml-auto';
+  } else {
+    badgeEl.textContent = 'Complete';
+    badgeEl.className = 'badge badge-closed';
+    pulseEl.style.background = '#6b7280';
+    pulseEl.style.animation = 'none';
+    statusEl.textContent = 'loading...';
+    statusEl.className = 'text-xs text-gray-500 ml-auto';
   }
-
-  // Reset state
-  _livePanelRunDir = runDir;
-  _livePanelOffset = 0;
-  _livePanelAutoScroll = true;
-  entries.innerHTML = '';
-  document.getElementById('live-resume-btn').style.display = 'none';
-
-  // Extract bead ID
-  const parts = runDir.split('-');
-  const beadId = parts.length >= 3 ? parts.slice(0, -2).join('-') : runDir;
-  beadLabel.textContent = beadId;
-
-  // Completed appearance — gray badge, no pulse animation
-  badgeEl.textContent = 'Complete';
-  badgeEl.className = 'badge badge-closed';
-  pulseEl.style.background = '#6b7280';
-  pulseEl.style.animation = 'none';
-  statusEl.textContent = 'loading...';
-  statusEl.className = 'text-xs text-gray-500 ml-auto';
 
   // Show panel
   panel.style.display = 'flex';
   panel.classList.remove('collapsed');
   document.getElementById('content').style.paddingBottom = '20rem';
 
-  // Scroll detection
-  const body = document.getElementById('live-panel-body');
-  body.onscroll = () => {
-    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 50;
-    _livePanelAutoScroll = atBottom;
-    document.getElementById('live-resume-btn').style.display = atBottom ? 'none' : 'block';
-  };
-
-  // Load all entries at once — no polling
-  try {
-    const data = await api(`/api/dispatch/tail/${runDir}?after=0`);
-    if (data.entries && data.entries.length > 0) {
-      _liveAppendEntries(data.entries);
-      statusEl.textContent = `${data.entries.length} entries`;
-    } else {
-      entries.innerHTML = '<div class="text-sm text-gray-500 p-2">No session entries found.</div>';
-      statusEl.textContent = 'empty';
-    }
-    if (data.offset !== undefined) {
-      _livePanelOffset = data.offset;
-    }
-  } catch (err) {
-    statusEl.textContent = 'error';
-    statusEl.className = 'text-xs text-red-400 ml-auto';
+  // Delegate to Alpine component
+  if (window._livePanelLoad) {
+    window._livePanelLoad(runDir, isLive);
   }
+}
+
+function showLivePanel(runDir) {
+  _showPanel(runDir, true);
+}
+
+async function showCompletedPanel(runDir) {
+  _showPanel(runDir, false);
 }
 
 function hideLivePanel() {
@@ -851,172 +743,12 @@ function hideLivePanel() {
   panel.style.display = 'none';
   panel.classList.add('collapsed');
   document.getElementById('content').style.paddingBottom = '';
-  if (_livePanelInterval) {
-    clearInterval(_livePanelInterval);
-    _livePanelInterval = null;
-  }
-  _livePanelRunDir = null;
+  if (window._livePanelReset) window._livePanelReset();
 }
 
 function toggleLivePanel() {
   const panel = document.getElementById('live-panel');
   panel.classList.toggle('collapsed');
-}
-
-function liveResumeScroll() {
-  _livePanelAutoScroll = true;
-  document.getElementById('live-resume-btn').style.display = 'none';
-  const body = document.getElementById('live-panel-body');
-  body.scrollTop = body.scrollHeight;
-}
-
-async function _livePollTail() {
-  if (!_livePanelRunDir) return;
-
-  try {
-    const data = await api(`/api/dispatch/tail/${_livePanelRunDir}?after=${_livePanelOffset}`);
-    const statusEl = document.getElementById('live-panel-status');
-    const pulseEl = document.getElementById('live-pulse');
-
-    const badgeEl = document.getElementById('live-panel-badge');
-    if (data.is_live) {
-      statusEl.textContent = 'streaming';
-      statusEl.className = 'text-xs text-green-400 ml-auto';
-      pulseEl.style.background = '#22c55e';
-      badgeEl.textContent = 'Live';
-      badgeEl.className = 'badge badge-open';
-    } else {
-      statusEl.textContent = 'completed';
-      statusEl.className = 'text-xs text-gray-500 ml-auto';
-      pulseEl.style.background = '#6b7280';
-      pulseEl.style.animation = 'none';
-      badgeEl.textContent = 'Complete';
-      badgeEl.className = 'badge badge-closed';
-      // Stop polling if not live and we've already loaded data
-      if (_livePanelOffset > 0 && !data.entries.length) {
-        clearInterval(_livePanelInterval);
-        _livePanelInterval = null;
-      }
-    }
-
-    if (data.offset !== undefined) {
-      _livePanelOffset = data.offset;
-    }
-
-    if (data.entries && data.entries.length > 0) {
-      _liveAppendEntries(data.entries);
-    }
-  } catch (err) {
-    const statusEl = document.getElementById('live-panel-status');
-    statusEl.textContent = 'error';
-    statusEl.className = 'text-xs text-red-400 ml-auto';
-  }
-}
-
-/**
- * Render parsed session entries into a container element.
- * Shared by the live panel and the trace view session log.
- */
-// Map tool_id -> {tool_name} for linking results to calls
-const _toolIdMap = {};
-
-function _renderSessionEntries(entries, container) {
-  for (const entry of entries) {
-    const el = document.createElement('div');
-    el.className = 'live-entry';
-
-    const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '';
-
-    if (entry.type === 'user') {
-      el.className += ' live-entry-user';
-      el.innerHTML = `
-        <div class="flex items-center gap-2 mb-1">
-          <span class="text-xs text-blue-400 font-semibold">USER</span>
-          <span class="live-entry-time">${timeStr}</span>
-        </div>`;
-      const textEl = document.createElement('div');
-      textEl.className = 'text-sm text-gray-300';
-      textEl.textContent = entry.content;
-      el.appendChild(textEl);
-
-    } else if (entry.type === 'assistant_text') {
-      el.className += ' live-entry-assistant';
-      el.innerHTML = `
-        <div class="flex items-center gap-2 mb-1">
-          <span class="text-xs text-indigo-400 font-semibold">ASSISTANT</span>
-          <span class="live-entry-time">${timeStr}</span>
-        </div>`;
-      const mdEl = renderMd(entry.content);
-      mdEl.className += ' text-sm';
-      el.appendChild(mdEl);
-
-    } else if (entry.type === 'tool_use') {
-      el.className += ' live-entry-tool';
-      // Track tool_id for matching results
-      if (entry.tool_id) {
-        _toolIdMap[entry.tool_id] = {
-          tool_name: entry.tool_name,
-        };
-      }
-      const details = document.createElement('details');
-      details.className = 'text-sm';
-      const inputStr = entry.input ? JSON.stringify(entry.input, null, 2) : '';
-      details.innerHTML = `
-        <summary class="live-tool-toggle text-purple-400 text-xs font-mono cursor-pointer select-none">
-          <strong>${escapeHtml(entry.tool_name)}</strong>
-          <span class="live-entry-time ml-2">${timeStr}</span>
-        </summary>
-        <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-32 overflow-y-auto bg-gray-800 rounded p-2">${escapeHtml(inputStr)}</pre>`;
-      el.appendChild(details);
-
-    } else if (entry.type === 'tool_result') {
-      el.className += ' live-entry-tool';
-      const details = document.createElement('details');
-      details.className = 'text-sm';
-      const preview = (entry.content || '').slice(0, 80).replace(/\n/g, ' ');
-      // Show which tool this result belongs to
-      const caller = entry.tool_id ? _toolIdMap[entry.tool_id] : null;
-      const resultLabel = caller
-        ? `<span class="text-gray-400">${escapeHtml(caller.tool_name)}</span> result`
-        : 'result';
-      details.innerHTML = `
-        <summary class="live-tool-toggle text-gray-500 text-xs font-mono cursor-pointer select-none">
-          ${resultLabel} <span class="text-gray-600">${escapeHtml(preview)}${entry.content.length > 80 ? '...' : ''}</span>
-          <span class="live-entry-time ml-2">${timeStr}</span>
-        </summary>
-        <pre class="text-xs text-gray-400 mt-1 overflow-x-auto max-h-48 overflow-y-auto bg-gray-800 rounded p-2">${escapeHtml(entry.content)}</pre>`;
-      el.appendChild(details);
-
-    } else if (entry.type === 'thinking') {
-      el.className += ' live-entry-thinking';
-      const details = document.createElement('details');
-      details.className = 'text-sm';
-      details.innerHTML = `
-        <summary class="live-tool-toggle text-gray-600 text-xs">
-          thinking...
-          <span class="live-entry-time ml-2">${timeStr}</span>
-        </summary>
-        <div class="text-xs text-gray-500 mt-1 italic">${escapeHtml(entry.content)}</div>`;
-      el.appendChild(details);
-
-    } else {
-      continue;
-    }
-
-    container.appendChild(el);
-  }
-}
-
-function _liveAppendEntries(entries) {
-  const container = document.getElementById('live-panel-entries');
-  const body = document.getElementById('live-panel-body');
-
-  _renderSessionEntries(entries, container);
-
-  // Auto-scroll
-  if (_livePanelAutoScroll) {
-    body.scrollTop = body.scrollHeight;
-  }
 }
 
 /**
