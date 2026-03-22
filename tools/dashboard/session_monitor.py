@@ -119,6 +119,8 @@ class _TailState:
     resolution_dir: Path | None = None
     # Broadcast sequence number (monotonically increasing per session)
     broadcast_seq: int = 0
+    # Last queued message content — for deduping against the subsequent user entry
+    last_enqueue_content: str | None = None
 
 
 class SessionMonitor:
@@ -266,6 +268,23 @@ class SessionMonitor:
                         self._tail_one, row, ts
                     )
                     if new_entries:
+                        # Dedup queued messages: if an enqueue entry is followed
+                        # by a user entry with the same content, drop the duplicate.
+                        # Uses a one-slot lookahead on _TailState — no accumulation.
+                        deduped = []
+                        for entry in new_entries:
+                            if entry.get("queued"):
+                                ts.last_enqueue_content = entry.get("content", "").strip()
+                                deduped.append(entry)
+                            elif (entry.get("type") == "user"
+                                  and ts.last_enqueue_content
+                                  and entry.get("content", "").strip() == ts.last_enqueue_content):
+                                ts.last_enqueue_content = None  # consumed — skip this duplicate
+                            else:
+                                ts.last_enqueue_content = None
+                                deduped.append(entry)
+                        new_entries = deduped
+
                         self._enrich_agent_entries(row, ts, new_entries)
                     if new_entries and self._event_bus:
                         ts.broadcast_seq += 1
