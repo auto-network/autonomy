@@ -31,9 +31,13 @@
     </template>
     <div class="space-y-2">
       <template x-for="s in interactive" :key="s.session_id">
-        <a :href="'/session/' + encodeURIComponent(s.project) + '/' + s.session_id + (s.tmux_session ? '?tmux=' + encodeURIComponent(s.tmux_session) : '')"
-           class="block p-3 bg-gray-800 rounded-lg border border-green-700 no-underline hover:bg-gray-750"
-           :data-session-id="s.session_id">
+        <div @click="navigate(s)"
+             @touchstart="startLongPress(s, $event)"
+             @touchend="cancelLongPress()"
+             @touchmove="cancelLongPress()"
+             @contextmenu.prevent
+             class="block p-3 bg-gray-800 rounded-lg border border-green-700 hover:bg-gray-750 cursor-pointer select-none"
+             :data-session-id="s.session_id">
           <div class="flex items-center gap-3 mb-1">
             <span class="w-2 h-2 rounded-full" :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
             <span class="font-medium text-sm text-gray-200 flex-1 truncate" x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></span>
@@ -45,7 +49,7 @@
               <span class="text-xs text-gray-600 whitespace-nowrap" x-text="s._lastActiveStr"></span>
             </div>
           </template>
-        </a>
+        </div>
       </template>
     </div>
   </section>
@@ -58,9 +62,13 @@
     </template>
     <div class="space-y-2">
       <template x-for="s in agents" :key="s.session_id">
-        <a :href="'/session/' + encodeURIComponent(s.project) + '/' + s.session_id"
-           class="block p-3 bg-gray-800 rounded-lg border border-blue-800 no-underline hover:bg-gray-750"
-           :data-session-id="s.session_id">
+        <div @click="navigate(s)"
+             @touchstart="startLongPress(s, $event)"
+             @touchend="cancelLongPress()"
+             @touchmove="cancelLongPress()"
+             @contextmenu.prevent
+             class="block p-3 bg-gray-800 rounded-lg border border-blue-800 hover:bg-gray-750 cursor-pointer select-none"
+             :data-session-id="s.session_id">
           <div class="flex items-center gap-3 mb-1">
             <span class="w-2 h-2 rounded-full" :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
             <span class="font-medium text-sm text-gray-200 flex-1 truncate" x-text="s.label || (s.bead_id ? s.bead_id : s.tmux_session) || s.session_id.slice(0, 12)"></span>
@@ -72,7 +80,7 @@
               <span class="text-xs text-gray-600 whitespace-nowrap" x-text="s._lastActiveStr"></span>
             </div>
           </template>
-        </a>
+        </div>
       </template>
     </div>
   </section>
