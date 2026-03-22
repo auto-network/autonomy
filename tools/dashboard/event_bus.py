@@ -64,9 +64,10 @@ class EventBus:
         q: asyncio.Queue = asyncio.Queue()
         self._subscribers.append(q)
         # Replay cached state for all known topics.
+        # seq=0 signals "cached state, not a live event" — prevents the client's
+        # gap detector from seeing non-contiguous seqs and firing a false alarm.
         for topic, serialised in self._last.items():
-            seq = self._last_seq.get(topic, 0)
-            q.put_nowait((topic, json.loads(serialised), seq))
+            q.put_nowait((topic, json.loads(serialised), 0))
         return q
 
     def unsubscribe(self, queue: asyncio.Queue) -> None:
