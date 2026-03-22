@@ -7,32 +7,39 @@
 
 (function () {
 
-  function _formatAge(secs) {
-    if (secs < 60) return secs + 's ago';
-    if (secs < 3600) return Math.round(secs / 60) + 'm ago';
-    if (secs < 86400) return Math.floor(secs / 3600) + 'h ' + Math.round((secs % 3600) / 60) + 'm ago';
-    return Math.floor(secs / 86400) + 'd ' + Math.round((secs % 86400) / 3600) + 'h ago';
+  function _formatTimestamp(epoch) {
+    if (!epoch) return '';
+    var d = new Date(epoch * 1000);
+    var now = new Date();
+    var isToday = d.getFullYear() === now.getFullYear() &&
+                  d.getMonth() === now.getMonth() &&
+                  d.getDate() === now.getDate();
+    if (isToday) {
+      var h = d.getHours();
+      var m = d.getMinutes();
+      var ampm = h >= 12 ? 'PM' : 'AM';
+      h = h % 12 || 12;
+      return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ampm;
+    }
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return months[d.getMonth()] + ' ' + d.getDate();
   }
 
-  function _formatSize(bytes) {
-    return (bytes / 1024 / 1024).toFixed(1) + ' MB';
-  }
-
-  function _formatProject(project) {
-    // Strip /home/<user>/workspace/ path prefix (encoded as dashes)
-    const cleaned = project
-      .replace(/^-home-[^-]+-workspace-/, '')
-      .replace(/^-home-[^-]+-/, '')
-      .replace(/^-+/, '');
-    return cleaned || 'home';
+  function _formatRecency(epoch) {
+    if (!epoch) return '';
+    var secs = Math.round(Date.now() / 1000 - epoch);
+    if (secs < 0) secs = 0;
+    if (secs < 60) return secs + 's';
+    if (secs < 3600) return Math.round(secs / 60) + 'm';
+    if (secs < 86400) return Math.floor(secs / 3600) + 'h';
+    return Math.floor(secs / 86400) + 'd';
   }
 
   function _mapActive(s) {
     return {
       ...s,
-      _ageStr: _formatAge(s.age_seconds),
-      _sizeStr: _formatSize(s.size_bytes),
-      _project: _formatProject(s.project),
+      _createdStr: _formatTimestamp(s.created_at),
+      _lastActiveStr: _formatRecency(s.last_activity),
     };
   }
 
@@ -89,24 +96,24 @@
           if (!s.isLive) continue;
           var lastEntry = s.entries.length > 0 ? s.entries[s.entries.length - 1] : null;
           var sizeVal = s.sizeMB ? parseFloat(s.sizeMB) : 0;
-          var ageSeconds = Math.round(now - (s.startedAt || now));
           var hasData = s.entries.length > 0 || (s.sizeMB && sizeVal > 0);
-          var isNew = ageSeconds < 30;
           all.push({
             session_id: id,
             project: s.project || '',
             label: s.label || '',
-            size_bytes: sizeVal * 1048576,
-            age_seconds: ageSeconds,
-            active: hasData && s.lastActivity > 0 && (now - s.lastActivity) < 60,
+            is_live: s.isLive,
+            created_at: s.startedAt || 0,
+            last_activity: s.lastActivity || 0,
             latest: lastEntry ? (lastEntry.content || '').slice(0, 150) : '',
             type: s.sessionType || 'terminal',
             tmux_session: s.tmuxSession || '',
-            _starting: isNew && !hasData,
+            bead_id: s.beadId || '',
             _hasData: !!hasData,
           });
         }
         if (all.length > 0 || !this.loading) {
+          // Sort by creation time descending — stable across navigations
+          all.sort(function(a, b) { return (b.created_at || 0) - (a.created_at || 0); });
           var mapped = all.map(_mapActive);
           var interactiveTypes = ['terminal', 'chatwith', 'host', 'container'];
           this.interactive = mapped.filter(s =>

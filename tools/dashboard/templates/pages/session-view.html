@@ -27,32 +27,30 @@
 
       <!-- ZONE 2: Session header — flex child, always visible at top -->
       <div class="sv-header">
-        <!-- Inline-editable label (live sessions only) -->
-        <template x-if="_tmuxSession">
-          <span class="text-xs font-mono text-gray-300 cursor-pointer hover:text-white border-b border-transparent hover:border-gray-500 min-w-[60px]"
-                :contenteditable="isLive"
+        <!-- Inline-editable label (live sessions) or static label -->
+        <template x-if="_tmuxSession && isLive">
+          <span class="text-sm font-medium text-gray-200 cursor-pointer hover:text-white border-b border-transparent hover:border-gray-500 min-w-[60px]"
+                contenteditable="true"
                 @blur="saveLabel($event)"
                 @keydown.enter.prevent="$event.target.blur()"
                 @keydown.escape.prevent="$event.target.textContent = _label || _tmuxSession; $event.target.blur()"
                 x-text="_label || _tmuxSession"
-                :title="isLive ? 'Click to edit label' : _tmuxSession"></span>
+                title="Click to edit label"></span>
+        </template>
+        <template x-if="_tmuxSession && !isLive">
+          <span class="text-sm font-medium text-gray-200" x-text="_label || _tmuxSession"></span>
         </template>
         <template x-if="!_tmuxSession">
-          <span class="text-xs font-mono text-gray-500" x-text="sessionId.slice(0, 12)"></span>
+          <span class="text-sm font-medium text-gray-400" x-text="sessionId.slice(0, 12)"></span>
         </template>
-        <span class="text-xs text-indigo-400" x-text="'[' + projectLabel + ']'"></span>
-        <template x-if="isLive">
-          <span class="flex items-center gap-1">
-            <span class="live-pulse"></span>
-            <span class="badge badge-open text-xs">Live</span>
-          </span>
-        </template>
-        <template x-if="!isLive">
-          <span class="badge badge-closed text-xs">Complete</span>
-        </template>
-        <span class="text-xs text-gray-500" x-show="contextTokens > 0"
-              x-text="Math.round(contextTokens / 1000) + 'k ctx'"></span>
-        <span class="text-xs text-gray-500 ml-auto" x-show="!isLive" x-text="entries.length + ' total'"></span>
+        <span class="flex items-center gap-1.5 ml-auto">
+          <template x-if="!isLive">
+            <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
+          </template>
+          <span class="text-xs text-gray-500" x-show="contextTokens > 0"
+                x-text="Math.round(contextTokens / 1000) + 'k'"></span>
+          <span class="w-2 h-2 rounded-full" :class="isLive ? 'bg-green-400' : 'bg-gray-500'"></span>
+        </span>
       </div>
 
       <!-- ZONE 3: Scrollable entries — fills all remaining space -->
