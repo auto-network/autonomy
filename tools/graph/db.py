@@ -626,6 +626,14 @@ class GraphDB:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_latest_turn(self, source_id: str) -> int | None:
+        """Return the highest turn_number for a source, or None if no turns."""
+        row = self.conn.execute(
+            "SELECT MAX(turn_number) as max_turn FROM thoughts WHERE source_id = ?",
+            (source_id,),
+        ).fetchone()
+        return row["max_turn"] if row and row["max_turn"] is not None else None
+
     def get_source_content(self, source_id: str) -> list[dict]:
         """Get all thoughts and derivations for a source, ordered by turn number."""
         rows = self.conn.execute(
