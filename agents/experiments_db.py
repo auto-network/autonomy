@@ -6,12 +6,13 @@ via the dashboard gallery. Results are polled back by the agent.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = REPO_ROOT / "data" / "experiments.db"
+DB_PATH = Path(os.environ.get("EXPERIMENTS_DB", str(REPO_ROOT / "data" / "experiments.db")))
 
 CREATE_EXPERIMENTS = """\
 CREATE TABLE IF NOT EXISTS experiments (

@@ -6,11 +6,12 @@ sole writer; this module never modifies the database.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-DB_PATH = _REPO_ROOT / "data" / "dispatch.db"
+DB_PATH = Path(os.environ.get("DISPATCH_DB", str(_REPO_ROOT / "data" / "dispatch.db")))
 
 
 def _get_conn() -> sqlite3.Connection:
