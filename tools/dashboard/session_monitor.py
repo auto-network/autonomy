@@ -267,10 +267,12 @@ class SessionMonitor:
                         ts.broadcast_seq += 1
                         # Re-read to get updated values
                         updated = get_session(tmux_name)
+                        # session_id MUST be the JSONL UUID — the client store is keyed by it
+                        session_uuid = row.get("session_uuid") or tmux_name
                         await self._event_bus.broadcast(
                             "session:messages",
                             {
-                                "session_id": tmux_name,
+                                "session_id": session_uuid,
                                 "entries": new_entries,
                                 "is_live": bool(updated["is_live"]) if updated else True,
                                 "seq": ts.broadcast_seq,
