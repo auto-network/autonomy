@@ -131,6 +131,18 @@ window.ensureSessionMessages = function() {
       }
     }
   });
+
+  // Handle label_update events — update stored session's label field
+  window.registerHandler('label_update', function(data) {
+    if (!data || !data.session_id) return;
+    var sessions = Alpine.store('sessions');
+    for (var id in sessions) {
+      var s = sessions[id];
+      if (s.tmuxSession === data.session_id || id === data.session_id) {
+        s.label = data.label || '';
+      }
+    }
+  });
 };
 
 // Register SSE handlers on startup — session store is always alive
