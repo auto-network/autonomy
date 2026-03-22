@@ -2099,23 +2099,23 @@ async def api_session_tail(request):
         # Session file not resolved — check if it's a newly created session
         # registered in the monitor but with no JSONL yet
         monitor_state = session_monitor.get_one(session_id)
-        if monitor_state and monitor_state.is_live:
+        if monitor_state and monitor_state.get("is_live"):
             return JSONResponse({
                 "entries": [], "offset": 0, "is_live": True,
-                "type": monitor_state.session_type,
-                "tmux_session": monitor_state.tmux_name,
-                "seq": monitor_state._broadcast_seq,
+                "type": monitor_state.get("type", ""),
+                "tmux_session": monitor_state.get("tmux_name", ""),
+                "seq": 0,
             })
         return JSONResponse({"error": "Invalid project or session_id"}, status_code=400)
     if not session_file.exists():
         # JSONL doesn't exist yet — check monitor for starting sessions
         monitor_state = session_monitor.get_one(session_id)
-        if monitor_state and monitor_state.is_live:
+        if monitor_state and monitor_state.get("is_live"):
             return JSONResponse({
                 "entries": [], "offset": 0, "is_live": True,
-                "type": monitor_state.session_type,
-                "tmux_session": monitor_state.tmux_name,
-                "seq": monitor_state._broadcast_seq,
+                "type": monitor_state.get("type", ""),
+                "tmux_session": monitor_state.get("tmux_name", ""),
+                "seq": 0,
             })
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
@@ -2160,7 +2160,7 @@ async def api_session_tail(request):
 
     # Look up current broadcast seq from monitor
     monitor_state = session_monitor.get_one(session_id)
-    seq = monitor_state._broadcast_seq if monitor_state else 0
+    seq = 0  # broadcast_seq is now on ephemeral _TailState, not in DB row
 
     base_resp = {"entries": [], "offset": file_size, "is_live": is_live,
                  "type": session_type, "seq": seq}
