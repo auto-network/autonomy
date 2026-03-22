@@ -217,7 +217,6 @@ def launch_session(
         "-e", "BD_READONLY=0",
         "-e", "GRAPH_DB=/home/agent/graph.db",
         "-e", "GRAPH_API=https://localhost:8080",
-        "-e", f"DASHBOARD_SESSION={name}",
         *auth_args,
     ]
 
