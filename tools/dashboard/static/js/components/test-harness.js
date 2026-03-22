@@ -9,10 +9,7 @@
     page: function () { return location.pathname; },
 
     actionSheetOpen: function () {
-      var el = document.querySelector('[x-data*="sessionsPage"]');
-      if (!el || !el._x_dataStack) return false;
-      var data = Alpine.$data(el);
-      return data?.actionSheet?.open ?? false;
+      return window.actionSheet ? window.actionSheet.isOpen() : false;
     },
 
     sessions: function () {
@@ -76,11 +73,7 @@
     },
 
     dismissActionSheet: function () {
-      var el = document.querySelector('[x-data*="sessionsPage"]');
-      if (!el || !el._x_dataStack) return false;
-      var page = Alpine.$data(el);
-      if (page && page.closeActionSheet) { page.closeActionSheet(); return true; }
-      return false;
+      return window.actionSheet.dismiss();
     },
 
     // Wait utilities
