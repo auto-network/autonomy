@@ -1419,7 +1419,7 @@ async def api_chatwith_spawn(request):
             capture_output=True,
         )
         subprocess.run(
-            ["tmux", "paste-buffer", "-b", "cw_primer", "-t", session_name],
+            ["tmux", "paste-buffer", "-p", "-b", "cw_primer", "-t", session_name],
             capture_output=True,
         )
         await asyncio.sleep(0.3)
