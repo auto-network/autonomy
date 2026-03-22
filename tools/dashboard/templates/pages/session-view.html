@@ -26,10 +26,11 @@
     <div class="sv-ready">
 
       <!-- ZONE 2: Session header — flex child, always visible at top -->
-      <div class="sv-header">
+      <div class="sv-header" data-testid="session-header">
         <!-- Inline-editable label (live sessions) or static label -->
         <template x-if="_tmuxSession && isLive">
           <span class="text-sm font-medium text-gray-200 cursor-pointer hover:text-white border-b border-transparent hover:border-gray-500 min-w-[60px]"
+                data-testid="session-label-edit"
                 contenteditable="true"
                 @blur="saveLabel($event)"
                 @keydown.enter.prevent="$event.target.blur()"
