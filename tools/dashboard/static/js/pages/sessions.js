@@ -9,7 +9,9 @@
 
   function _formatAge(secs) {
     if (secs < 60) return secs + 's ago';
-    return Math.round(secs / 60) + 'm ago';
+    if (secs < 3600) return Math.round(secs / 60) + 'm ago';
+    if (secs < 86400) return Math.floor(secs / 3600) + 'h ' + Math.round((secs % 3600) / 60) + 'm ago';
+    return Math.floor(secs / 86400) + 'd ' + Math.round((secs % 86400) / 3600) + 'h ago';
   }
 
   function _formatSize(bytes) {
