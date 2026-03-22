@@ -222,11 +222,12 @@ def api_sessions(args) -> None:
 
 def api_set_label(args) -> None:
     """Set session label via dashboard API."""
-    tmux_name = os.environ.get("DASHBOARD_SESSION")
-    if not tmux_name:
-        print("Error: $DASHBOARD_SESSION not set. Cannot identify current session.", file=sys.stderr)
-        print("This command must be run inside a dashboard-managed tmux session.", file=sys.stderr)
+    bd_actor = os.environ.get("BD_ACTOR")
+    if not bd_actor or ":" not in bd_actor:
+        print("Error: $BD_ACTOR not set. Cannot identify current session.", file=sys.stderr)
+        print("This command must be run inside a dashboard-managed session.", file=sys.stderr)
         sys.exit(1)
+    tmux_name = bd_actor.split(":", 1)[1]
     label = " ".join(args.text)
     result = _put(f"/api/session/{urllib.parse.quote(tmux_name)}/label", {"label": label})
     print(f"  \u2713 Label set: {label}")

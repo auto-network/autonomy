@@ -2690,7 +2690,7 @@ async def ws_terminal(websocket: WebSocket):
         if start_dir:
             tmux_cmd += ["-c", start_dir]
         if not is_container_cmd:
-            cmd_str = f"DASHBOARD_SESSION={tmux_name} {cmd_str}"
+            cmd_str = f"BD_ACTOR=terminal:{tmux_name} {cmd_str}"
         tmux_cmd.append(cmd_str)
         result = subprocess.run(tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True)
         if result.returncode != 0:
