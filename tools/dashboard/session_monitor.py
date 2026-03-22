@@ -41,7 +41,6 @@ from tools.dashboard.dao.dashboard_db import (
     insert_session,
     mark_dead,
     delete_session,
-    update_jsonl_link,
     update_tail_state,
     count_live,
 )
@@ -179,8 +178,9 @@ class SessionMonitor:
         self._tail_states[tmux_name] = ts
 
         logger.info(
-            "session_monitor: registered %s  type=%s  project=%s",
+            "session_monitor: registered %s  type=%s  project=%s  jsonl=%s",
             tmux_name, session_type, project,
+            "pending" if path_str is None else Path(path_str).name,
         )
         await self._broadcast_registry()
 
@@ -256,6 +256,10 @@ class SessionMonitor:
                     # Ensure we have ephemeral tail state
                     if tmux_name not in self._tail_states:
                         self._tail_states[tmux_name] = _TailState()
+                        logger.info(
+                            "session_monitor: tailer picked up %s  jsonl=%s  offset=%d",
+                            tmux_name, Path(row["jsonl_path"]).name, row.get("file_offset", 0),
+                        )
 
                     ts = self._tail_states[tmux_name]
                     _, new_entries = await asyncio.to_thread(
@@ -292,15 +296,13 @@ class SessionMonitor:
                     if resolved:
                         ts.needs_resolution = False
                         ts.resolution_dir = None
-                        update_jsonl_link(
+                        # Use link_and_enrich so container sessions also get graph_source_id
+                        from tools.dashboard.dao.dashboard_db import link_and_enrich
+                        link_and_enrich(
                             tmux_name,
                             session_uuid=resolved.stem,
                             jsonl_path=str(resolved),
                             project=resolved.parent.name,
-                        )
-                        logger.info(
-                            "session_monitor: resolved JSONL for tmux=%s → %s",
-                            tmux_name, resolved.stem,
                         )
 
             except Exception:
@@ -586,6 +588,7 @@ class SessionMonitor:
                     last_message=seed_msg,
                     is_live=True,
                 )
+                logger.info("session_monitor: seeded container %s  uuid=%s  project=%s", tmux_name, jsonl.stem[:12], jsonl.parent.name)
                 dashboard_tmux.discard(tmux_name)
                 seeded += 1
 
@@ -622,6 +625,7 @@ class SessionMonitor:
                     last_message=seed_msg,
                     is_live=True,
                 )
+                logger.info("session_monitor: seeded host %s  uuid=%s  project=%s", tmux_name, jsonl.stem[:12], jsonl.parent.name)
                 dashboard_tmux.discard(tmux_name)
                 seeded += 1
 
