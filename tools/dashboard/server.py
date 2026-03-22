@@ -2405,8 +2405,8 @@ async def api_session_confirm_link(request):
     if not session_file.exists():
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
-    # Update DB with the confirmed link
-    dashboard_db.update_jsonl_link(
+    # LINK + ENRICH: set session_uuid, jsonl_path, and graph_source_id
+    dashboard_db.link_and_enrich(
         tmux_session,
         session_uuid=session_id,
         jsonl_path=str(session_file),
@@ -2517,8 +2517,8 @@ async def _watch_for_host_session_jsonl(
             if new_files:
                 new_jsonl = min(new_files, key=lambda p: p.stat().st_mtime)
                 logger.info("JSONL watcher found new session  uuid=%s  tmux=%s", new_jsonl.stem, tmux_name)
-                # UPDATE the DB row with session_uuid and jsonl_path
-                dashboard_db.update_jsonl_link(
+                # LINK + ENRICH: set session_uuid, jsonl_path, and graph_source_id
+                dashboard_db.link_and_enrich(
                     tmux_name,
                     session_uuid=new_jsonl.stem,
                     jsonl_path=str(new_jsonl),
