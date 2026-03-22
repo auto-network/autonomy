@@ -2094,11 +2094,22 @@ async def api_session_tail(request):
     session_id = request.path_params["session_id"]
     after = int(request.query_params.get("after", "0"))
 
-    session_file = _session_file_path(project, session_id)
+    # First, try resolving via DB (session_id may be a tmux_name)
+    session_file = None
+    db_row = session_monitor.get_one(session_id)
+    if db_row and db_row.get("jsonl_path"):
+        candidate = Path(db_row["jsonl_path"])
+        if candidate.exists():
+            session_file = candidate
+
+    # Fallback: legacy path resolution by UUID
+    if session_file is None:
+        session_file = _session_file_path(project, session_id)
+
     if session_file is None:
         # Session file not resolved — check if it's a newly created session
         # registered in the monitor but with no JSONL yet
-        monitor_state = session_monitor.get_one(session_id)
+        monitor_state = db_row
         if monitor_state and monitor_state.get("is_live"):
             return JSONResponse({
                 "entries": [], "offset": 0, "is_live": True,
