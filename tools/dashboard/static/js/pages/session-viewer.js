@@ -78,6 +78,9 @@
       attachments: [],
       _nextAttachId: 0,
 
+      // User-settable label
+      _label: '',
+
       // Session type (host or container)
       sessionType: '',
 
@@ -90,6 +93,25 @@
 
       // API paths set from URL params
       _tailUrl: '',
+
+      // ── Label editing ──────────────────────────────────────────
+
+      saveLabel(event) {
+        if (!this._tmuxSession || !this.isLive) return;
+        var newLabel = (event.target.textContent || '').trim();
+        // If cleared to empty or same as tmux name, treat as "no label"
+        if (newLabel === this._tmuxSession) newLabel = '';
+        if (newLabel === this._label) return;
+        this._label = newLabel;
+        // Update the store so cards reflect it too
+        var store = Alpine.store('sessions')[this.sessionId];
+        if (store) store.label = newLabel;
+        fetch('/api/session/' + encodeURIComponent(this._tmuxSession) + '/label', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label: newLabel }),
+        });
+      },
 
       // ── Render helpers ─────────────────────────────────────────
 
@@ -663,6 +685,7 @@
         this.offset = store.offset;
         this.isLive = store.isLive;
         this.sessionType = store.sessionType;
+        this._label = store.label || '';
         if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
         this._toolMap = store.toolMap;
         this._resultMap = store.resultMap;
@@ -696,6 +719,7 @@
           this.isLive = store.isLive;
           this.sessionType = store.sessionType;
           this.contextTokens = store.contextTokens || 0;
+          this._label = store.label || '';
           if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
           this._toolMap = store.toolMap;
           this._resultMap = store.resultMap;
@@ -799,6 +823,13 @@
             return s ? s.contextTokens : 0;
           },
           function(val) { self.contextTokens = val; }
+        ));
+        this._storeCleanups.push(this.$watch(
+          function() {
+            var s = Alpine.store('sessions')[sid];
+            return s ? s.label : '';
+          },
+          function(val) { self._label = val || ''; }
         ));
 
         // Clipboard paste support — attach pasted files
