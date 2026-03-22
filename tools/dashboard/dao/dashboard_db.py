@@ -100,6 +100,38 @@ def update_jsonl_link(tmux_name: str, session_uuid: str, jsonl_path: str, projec
     conn.commit()
 
 
+def link_and_enrich(tmux_name: str, session_uuid: str, jsonl_path: str, project: str | None = None) -> None:
+    """LINK + ENRICH in one shot: set session_uuid, jsonl_path, and graph_source_id.
+
+    1. Updates dashboard.db with session_uuid and jsonl_path
+    2. Runs `graph ingest-session` to ingest the JSONL and get the graph source ID
+    3. Updates dashboard.db with graph_source_id
+
+    This is the ONLY function that should be called when a JSONL is discovered
+    (by the watcher or the Link Terminal handshake).
+    """
+    import subprocess
+
+    # LINK: write session_uuid and jsonl_path
+    update_jsonl_link(tmux_name, session_uuid, jsonl_path, project)
+    logger.info("dashboard_db: LINK  %s → uuid=%s  path=%s", tmux_name, session_uuid[:12], jsonl_path)
+
+    # ENRICH: ingest into graph and capture source ID
+    try:
+        result = subprocess.run(
+            ["graph", "ingest-session", jsonl_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        graph_source_id = result.stdout.strip()
+        if result.returncode == 0 and graph_source_id:
+            update_graph_source(tmux_name, graph_source_id)
+            logger.info("dashboard_db: ENRICH  %s → graph=%s", tmux_name, graph_source_id[:11])
+        else:
+            logger.warning("dashboard_db: ENRICH failed for %s: %s", tmux_name, result.stderr.strip())
+    except Exception:
+        logger.warning("dashboard_db: ENRICH error for %s", tmux_name, exc_info=True)
+
+
 def update_graph_source(tmux_name: str, graph_source_id: str) -> None:
     """ENRICH step: set graph_source_id after graph ingestion."""
     conn = get_conn()
