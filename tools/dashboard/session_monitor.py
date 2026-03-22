@@ -585,7 +585,9 @@ class SessionMonitor:
                 if not tmux_name or tmux_name not in dashboard_tmux:
                     continue
 
-                jsonl = meta_path.with_suffix(".jsonl")
+                # .meta.json is a double suffix; .with_suffix() only replaces
+                # the last one, producing .meta.jsonl instead of .jsonl.
+                jsonl = meta_path.parent / (meta_path.stem.removesuffix(".meta") + ".jsonl")
                 if not jsonl.exists():
                     continue
 
