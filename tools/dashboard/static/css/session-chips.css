@@ -60,6 +60,7 @@
   color: #e5e7eb;
   font-size: 0.875rem;
   line-height: 1.4;
+  white-space: pre-wrap;
 }
 
 .sc-entry-assistant .sc-asst-label {
