@@ -14,6 +14,7 @@ import re
 import ssl
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 GRAPH_API = os.environ.get("GRAPH_API")
@@ -42,6 +43,33 @@ def _post(endpoint: str, data: dict) -> dict:
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=30, context=_SSL_CTX)
+        result = json.loads(resp.read())
+        return result
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read())
+            error_msg = err_body.get("error", str(e))
+        except Exception:
+            error_msg = str(e)
+        print(f"API error: {error_msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _put(endpoint: str, data: dict) -> dict:
+    """PUT JSON to the dashboard API. Returns parsed JSON response."""
+    url = f"{GRAPH_API}{endpoint}"
+    body = json.dumps(data).encode()
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="PUT",
     )
     try:
         resp = urllib.request.urlopen(req, timeout=30, context=_SSL_CTX)
@@ -190,3 +218,15 @@ def api_sessions(args) -> None:
         data["force"] = True
 
     _print_output(_post("/api/graph/sessions", data))
+
+
+def api_set_label(args) -> None:
+    """Set session label via dashboard API."""
+    tmux_name = os.environ.get("DASHBOARD_SESSION")
+    if not tmux_name:
+        print("Error: $DASHBOARD_SESSION not set. Cannot identify current session.", file=sys.stderr)
+        print("This command must be run inside a dashboard-managed tmux session.", file=sys.stderr)
+        sys.exit(1)
+    label = " ".join(args.text)
+    result = _put(f"/api/session/{urllib.parse.quote(tmux_name)}/label", {"label": label})
+    print(f"  \u2713 Label set: {label}")
