@@ -32,13 +32,15 @@
     <div class="space-y-2">
       <template x-for="s in interactive" :key="s.session_id">
         <div @click="navigate(s)"
-             @touchstart="startLongPress(s, $event)"
-             @touchend="cancelLongPress()"
-             @touchmove="cancelLongPress()"
-             @contextmenu.prevent
-             class="block p-3 bg-gray-800 rounded-lg border border-green-700 hover:bg-gray-750 cursor-pointer select-none"
+             class="relative block p-3 bg-gray-800 rounded-lg border border-green-700 hover:bg-gray-750 cursor-pointer select-none"
              data-testid="session-card"
              :data-session-id="s.session_id">
+          <button @click.stop="showCloseConfirm(s)"
+                  data-testid="session-close-btn"
+                  class="absolute top-2 right-2 w-5 h-5 flex items-center justify-center
+                         rounded-full bg-gray-900 text-gray-500 hover:text-white hover:bg-red-600
+                         text-xs leading-none transition-colors"
+                  aria-label="Close session">✕</button>
           <div class="flex items-center gap-3 mb-1">
             <span class="w-2 h-2 rounded-full" :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
             <span class="font-medium text-sm text-gray-200 flex-1 truncate" x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></span>
@@ -64,13 +66,15 @@
     <div class="space-y-2">
       <template x-for="s in agents" :key="s.session_id">
         <div @click="navigate(s)"
-             @touchstart="startLongPress(s, $event)"
-             @touchend="cancelLongPress()"
-             @touchmove="cancelLongPress()"
-             @contextmenu.prevent
-             class="block p-3 bg-gray-800 rounded-lg border border-blue-800 hover:bg-gray-750 cursor-pointer select-none"
+             class="relative block p-3 bg-gray-800 rounded-lg border border-blue-800 hover:bg-gray-750 cursor-pointer select-none"
              data-testid="session-card"
              :data-session-id="s.session_id">
+          <button @click.stop="showCloseConfirm(s)"
+                  data-testid="session-close-btn"
+                  class="absolute top-2 right-2 w-5 h-5 flex items-center justify-center
+                         rounded-full bg-gray-900 text-gray-500 hover:text-white hover:bg-red-600
+                         text-xs leading-none transition-colors"
+                  aria-label="Close session">✕</button>
           <div class="flex items-center gap-3 mb-1">
             <span class="w-2 h-2 rounded-full" :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
             <span class="font-medium text-sm text-gray-200 flex-1 truncate" x-text="s.label || (s.bead_id ? s.bead_id : s.tmux_session) || s.session_id.slice(0, 12)"></span>
