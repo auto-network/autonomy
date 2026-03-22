@@ -130,3 +130,6 @@ window.ensureSessionMessages = function() {
     }
   });
 };
+
+// Register SSE handlers on startup — session store is always alive
+setTimeout(ensureSessionMessages, 0);
