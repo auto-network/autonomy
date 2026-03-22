@@ -625,6 +625,25 @@ class SessionMonitor:
                 dashboard_tmux.discard(tmux_name)
                 seeded += 1
 
+        # ENRICH: resolve graph_source_id for all seeded sessions via graph ingest-session
+        enriched = 0
+        for row in get_live_sessions():
+            if row.get("session_uuid") and not row.get("graph_source_id") and row.get("jsonl_path"):
+                try:
+                    result = subprocess.run(
+                        ["graph", "ingest-session", row["jsonl_path"]],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    graph_id = result.stdout.strip()
+                    if result.returncode == 0 and graph_id:
+                        from tools.dashboard.dao.dashboard_db import update_graph_source
+                        update_graph_source(row["tmux_name"], graph_id)
+                        enriched += 1
+                except Exception:
+                    pass
+        if enriched:
+            logger.info("session_monitor: enriched %d sessions with graph_source_id", enriched)
+
         logger.info("session_monitor: seeded %d sessions from filesystem", seeded)
 
 

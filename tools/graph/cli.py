@@ -579,6 +579,32 @@ def cmd_sessions(args):
     db.close()
 
 
+def cmd_ingest_session(args):
+    """Ingest a single JSONL session file and print its graph source ID.
+
+    Used by the dashboard to link a session to the graph at discovery time.
+    Idempotent: if the source already exists, returns the existing ID.
+    Prints only the source ID to stdout (for subprocess capture).
+    """
+    db = GraphDB(args.db)
+    file_path = Path(args.file).resolve()
+
+    if not file_path.exists():
+        print(f"error: file not found: {file_path}", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+
+    result = ingest_claude_code_session(db, file_path, project=args.project)
+    source_id = result.get("source_id")
+    db.close()
+
+    if source_id:
+        print(source_id)
+    else:
+        print(f"error: ingest returned no source_id: {result.get('reason', 'unknown')}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_docs_ingest(args):
     """Ingest documentation files."""
     db = GraphDB(args.db)
@@ -1693,6 +1719,12 @@ def main():
     p.add_argument("--project", help="Specific project path")
     p.add_argument("--force", action="store_true", help="Re-ingest existing sessions")
     p.set_defaults(func=cmd_sessions)
+
+    # ingest-session
+    p = sub.add_parser("ingest-session", help="Ingest a single JSONL session file and print its graph source ID")
+    p.add_argument("file", help="Path to JSONL session file")
+    p.add_argument("--project", help="Project name (auto-detected from path if omitted)")
+    p.set_defaults(func=cmd_ingest_session)
 
     # seed
     p = sub.add_parser("seed", help="Seed the knowledge hierarchy")
