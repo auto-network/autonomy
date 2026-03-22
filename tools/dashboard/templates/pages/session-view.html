@@ -56,98 +56,139 @@
           </div>
         </template>
 
-        <template x-for="(entry, idx) in entries" :key="idx">
+        <template x-for="(dEntry, dIdx) in displayEntries" :key="dIdx">
           <div>
 
-            <!-- Skip tool_result — consumed by paired tool_use -->
-            <template x-if="entry.type !== 'tool_result'">
+            <!-- ── Grouped tool calls (combined card) ────────── -->
+            <template x-if="dEntry.type === 'tool_group'">
+              <div class="sc-entry"
+                   :class="[borderClass(dEntry), hasGap(dIdx) ? 'sc-gap' : '']">
+                <div>
+                  <!-- Header: chip + count + aggregated meta + timestamp -->
+                  <div class="sc-line1">
+                    <span class="sc-chip" :class="chipClass(dEntry.tool_name)" x-text="dEntry.tool_name"></span>
+                    <span class="sc-meta sc-meta-gray" x-text="'\u00d7' + dEntry.items.length"></span>
+                    <template x-for="badge in groupMeta(dEntry)" :key="badge.text">
+                      <span class="sc-meta" :class="badge.cls" x-text="badge.text"></span>
+                    </template>
+                    <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+                  </div>
+                  <!-- Per-invocation lines -->
+                  <template x-for="(item, subIdx) in dEntry.items" :key="subIdx">
+                    <div>
+                      <div class="sc-group-item" @click="toggleGroupItem(dIdx, subIdx)">
+                        <template x-if="dEntry.tool_name === 'Bash'">
+                          <span class="sc-group-status" :style="bashStatusColor(item)" x-text="bashStatus(item)"></span>
+                        </template>
+                        <span class="sc-group-item-text" x-text="headline(item)"></span>
+                      </div>
+                      <!-- Expanded detail panel (accordion — one at a time) -->
+                      <template x-if="isGroupItemExpanded(dIdx, subIdx)">
+                        <div @click.stop>
+                          <div class="sc-detail-tabs" @click="toggleGroupItemView(dIdx, subIdx)">
+                            <span class="sc-detail-tab"
+                                  :class="groupItemViewMode(dIdx, subIdx) === 'output' ? 'sc-detail-tab-active' : ''">Output</span>
+                            <span class="sc-detail-tab"
+                                  :class="groupItemViewMode(dIdx, subIdx) === 'input' ? 'sc-detail-tab-active' : ''">Input</span>
+                          </div>
+                          <pre class="sc-detail" x-text="groupItemExpandContent(item, dIdx, subIdx)"></pre>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <!-- ── Regular entries (skip tool_result) ────────── -->
+            <template x-if="dEntry.type !== 'tool_result' && dEntry.type !== 'tool_group'">
               <div class="sc-entry"
                    :class="[
-                     borderClass(entry),
-                     hasGap(idx) ? 'sc-gap' : '',
-                     entry.type === 'user' ? 'sc-entry-user' : '',
-                     entry.type === 'assistant_text' ? 'sc-entry-assistant' : '',
-                     entry.type === 'thinking' ? 'sc-entry-thinking' : '',
-                     entry.type === 'system' ? 'sc-entry-system' : '',
+                     borderClass(dEntry),
+                     hasGap(dIdx) ? 'sc-gap' : '',
+                     dEntry.type === 'user' ? 'sc-entry-user' : '',
+                     dEntry.type === 'assistant_text' ? 'sc-entry-assistant' : '',
+                     dEntry.type === 'thinking' ? 'sc-entry-thinking' : '',
+                     dEntry.type === 'system' ? 'sc-entry-system' : '',
                    ]">
 
                 <!-- ── User message ────────────────────────────── -->
-                <template x-if="entry.type === 'user'">
+                <template x-if="dEntry.type === 'user'">
                   <div>
                     <div class="flex items-center gap-2 mb-1">
                       <span class="sc-user-label">USER</span>
-                      <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                      <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
                     </div>
-                    <div class="sc-user-content" x-text="entry.content || ''"></div>
+                    <div class="sc-user-content" x-text="dEntry.content || ''"></div>
                   </div>
                 </template>
 
                 <!-- ── Assistant text (markdown) ───────────────── -->
-                <template x-if="entry.type === 'assistant_text'">
+                <template x-if="dEntry.type === 'assistant_text'">
                   <div>
                     <div class="flex items-center gap-2 mb-1">
                       <span class="sc-asst-label">ASSISTANT</span>
-                      <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                      <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
                     </div>
-                    <div class="sc-asst-content" x-markdown="entry.content || ''"></div>
+                    <div class="sc-asst-content" x-markdown="dEntry.content || ''"></div>
                   </div>
                 </template>
 
                 <!-- ── Tool use: two-line chip card ────────────── -->
-                <template x-if="entry.type === 'tool_use'">
-                  <div class="sc-tool-card" @click="toggleExpand(idx)">
+                <template x-if="dEntry.type === 'tool_use'">
+                  <div class="sc-tool-card" @click="toggleExpand(dIdx)">
                     <!-- Line 1: chip + meta + timestamp -->
                     <div class="sc-line1">
-                      <span class="sc-chip" :class="chipClass(entry.tool_name)" x-text="entry.tool_name || '?'"></span>
-                      <template x-for="badge in metaDisplay(entry)" :key="badge.text">
+                      <span class="sc-chip" :class="chipClass(dEntry.tool_name)" x-text="dEntry.tool_name || '?'"></span>
+                      <template x-for="badge in metaDisplay(dEntry)" :key="badge.text">
                         <span class="sc-meta" :class="badge.cls" x-text="badge.text"></span>
                       </template>
-                      <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                      <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
                     </div>
                     <!-- Line 2: headline -->
                     <div class="sc-line2"
-                         :class="isExpanded(idx) ? 'sc-line2-expanded' : 'sc-line2-truncated'"
-                         x-text="headline(entry)"></div>
+                         :class="isExpanded(dIdx) ? 'sc-line2-expanded' : 'sc-line2-truncated'"
+                         x-text="headline(dEntry)"></div>
                     <!-- Detail panel (expanded) -->
-                    <template x-if="isExpanded(idx)">
+                    <template x-if="isExpanded(dIdx)">
                       <div @click.stop>
-                        <div class="sc-detail-tabs" @click="toggleView(idx)">
+                        <div class="sc-detail-tabs" @click="toggleView(dIdx)">
                           <span class="sc-detail-tab"
-                                :class="expandViewMode(idx) === 'output' ? 'sc-detail-tab-active' : ''"
+                                :class="expandViewMode(dIdx) === 'output' ? 'sc-detail-tab-active' : ''"
                                 >Output</span>
                           <span class="sc-detail-tab"
-                                :class="expandViewMode(idx) === 'input' ? 'sc-detail-tab-active' : ''"
+                                :class="expandViewMode(dIdx) === 'input' ? 'sc-detail-tab-active' : ''"
                                 >Input</span>
                         </div>
-                        <pre class="sc-detail" x-text="expandContent(entry, idx)"></pre>
+                        <pre class="sc-detail" x-text="expandContent(dEntry, dIdx)"></pre>
                       </div>
                     </template>
                   </div>
                 </template>
 
                 <!-- ── Thinking (collapsed by default) ─────────── -->
-                <template x-if="entry.type === 'thinking'">
-                  <div class="sc-tool-card" @click="toggleExpand(idx)">
+                <template x-if="dEntry.type === 'thinking'">
+                  <div class="sc-tool-card" @click="toggleExpand(dIdx)">
                     <div class="sc-line1">
                       <span class="sc-think-label">thinking...</span>
-                      <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                      <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
                     </div>
-                    <template x-if="isExpanded(idx)">
-                      <div class="sc-detail" style="font-style: italic;" x-text="entry.content || ''"></div>
+                    <template x-if="isExpanded(dIdx)">
+                      <div class="sc-detail" style="font-style: italic;" x-text="dEntry.content || ''"></div>
                     </template>
                   </div>
                 </template>
 
                 <!-- ── System / harness message ────────────────── -->
-                <template x-if="entry.type === 'system'">
-                  <div class="sc-tool-card" @click="toggleExpand(idx)">
+                <template x-if="dEntry.type === 'system'">
+                  <div class="sc-tool-card" @click="toggleExpand(dIdx)">
                     <div class="flex items-center gap-2">
-                      <span class="sc-sys-icon" :style="sysIconColor(entry)" x-text="sysIcon(entry)"></span>
-                      <span class="sc-sys-label" x-text="entry.content || ''"></span>
-                      <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                      <span class="sc-sys-icon" :style="sysIconColor(dEntry)" x-text="sysIcon(dEntry)"></span>
+                      <span class="sc-sys-label" x-text="dEntry.content || ''"></span>
+                      <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
                     </div>
-                    <template x-if="isExpanded(idx)">
-                      <div class="sc-detail" x-text="entry.content || ''"></div>
+                    <template x-if="isExpanded(dIdx)">
+                      <div class="sc-detail" x-text="dEntry.content || ''"></div>
                     </template>
                   </div>
                 </template>
