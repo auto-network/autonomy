@@ -50,6 +50,8 @@
       recent: [],
       loading: true,
       _creating: false,
+      _longPressTimer: null,
+      _longPressTarget: null,
 
       init() {
         // Ensure global SSE handlers are registered
@@ -157,7 +159,42 @@
         }
       },
 
+      navigate(s) {
+        if (!this._longPressTimer && this._longPressTarget) {
+          // Long press just fired, skip the click
+          this._longPressTarget = null;
+          return;
+        }
+        this._longPressTarget = null;
+        var path = '/session/' + encodeURIComponent(s.project) + '/' + s.session_id
+          + (s.tmux_session ? '?tmux=' + encodeURIComponent(s.tmux_session) : '');
+        navigateTo(path);
+      },
+
+      startLongPress(s, event) {
+        this._longPressTarget = s;
+        this._longPressTimer = setTimeout(() => {
+          this._longPressTimer = null;
+          this.showCloseConfirm(s);
+        }, 500);
+      },
+
+      cancelLongPress() {
+        if (this._longPressTimer) {
+          clearTimeout(this._longPressTimer);
+          this._longPressTimer = null;
+        }
+      },
+
+      async showCloseConfirm(s) {
+        var label = s.label || s.tmux_session || s.session_id.slice(0, 12);
+        if (confirm('Close session "' + label + '"?')) {
+          await fetch('/api/terminal/' + encodeURIComponent(s.tmux_session) + '/kill', { method: 'POST' });
+        }
+      },
+
       destroy() {
+        this.cancelLongPress();
         if (this._storeWatcher) clearInterval(this._storeWatcher);
         if (this._recentTimer) clearInterval(this._recentTimer);
         if (this._onCreateTerminal) window.removeEventListener('create-terminal', this._onCreateTerminal);
