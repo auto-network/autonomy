@@ -46,6 +46,16 @@
       <!-- ZONE 3: Scrollable entries — fills all remaining space -->
       <div class="sv-entries" x-ref="entriesContainer" @scroll="onScroll()">
 
+        <!-- Empty state for new sessions with no entries yet -->
+        <template x-if="entries.length === 0">
+          <div style="display: flex; align-items: center; justify-content: center; height: 100%;">
+            <div class="text-center text-gray-500">
+              <div class="text-sm">Session started</div>
+              <div class="text-xs mt-1 text-gray-600">Send a message to begin</div>
+            </div>
+          </div>
+        </template>
+
         <template x-for="(entry, idx) in entries" :key="idx">
           <div>
 

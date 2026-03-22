@@ -274,7 +274,8 @@ class SessionMonitor:
             if resolved:
                 state.jsonl_path = resolved
                 state._path_is_dir = False
-                state.session_id = resolved.stem
+                # Keep session_id as tmux_name — changing it breaks SSE
+                # routing since the client store is keyed by the original ID
                 state.project = resolved.parent.name
                 logger.info(
                     "session_monitor: resolved JSONL for tmux=%s → %s  project=%s",

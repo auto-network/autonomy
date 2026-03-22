@@ -2056,8 +2056,27 @@ async def api_session_tail(request):
 
     session_file = _session_file_path(project, session_id)
     if session_file is None:
+        # Session file not resolved — check if it's a newly created session
+        # registered in the monitor but with no JSONL yet
+        monitor_state = session_monitor.get_one(session_id)
+        if monitor_state and monitor_state.is_live:
+            return JSONResponse({
+                "entries": [], "offset": 0, "is_live": True,
+                "type": monitor_state.session_type,
+                "tmux_session": monitor_state.tmux_name,
+                "seq": monitor_state._broadcast_seq,
+            })
         return JSONResponse({"error": "Invalid project or session_id"}, status_code=400)
     if not session_file.exists():
+        # JSONL doesn't exist yet — check monitor for starting sessions
+        monitor_state = session_monitor.get_one(session_id)
+        if monitor_state and monitor_state.is_live:
+            return JSONResponse({
+                "entries": [], "offset": 0, "is_live": True,
+                "type": monitor_state.session_type,
+                "tmux_session": monitor_state.tmux_name,
+                "seq": monitor_state._broadcast_seq,
+            })
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
     file_size = session_file.stat().st_size
@@ -2462,13 +2481,23 @@ async def _watch_for_host_session_jsonl(
                 logger.info("JSONL watcher found new session  uuid=%s  tmux=%s", new_jsonl.stem, tmux_name)
                 from tools.dashboard.dao.sessions import _write_host_session_meta
                 _write_host_session_meta(new_jsonl, tmux_name)
-                await session_monitor.register(
-                    session_id=new_jsonl.stem,
-                    tmux_name=tmux_name,
-                    session_type="terminal",
-                    project=projects_dir.name,
-                    jsonl_path=new_jsonl,
-                )
+                # Update existing monitor entry (registered at creation time)
+                # instead of re-registering with a new session_id
+                state = session_monitor.get_one(tmux_name)
+                if state:
+                    state.jsonl_path = new_jsonl
+                    state._path_is_dir = False
+                    state.project = projects_dir.name
+                    logger.info("JSONL watcher updated monitor entry  tmux=%s  jsonl=%s", tmux_name, new_jsonl.stem)
+                else:
+                    # Fallback: register fresh if initial entry was lost
+                    await session_monitor.register(
+                        session_id=new_jsonl.stem,
+                        tmux_name=tmux_name,
+                        session_type="terminal",
+                        project=projects_dir.name,
+                        jsonl_path=new_jsonl,
+                    )
                 return
         logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
 
@@ -2615,11 +2644,19 @@ async def ws_terminal(websocket: WebSocket):
         subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
                         capture_output=True)
 
-        # For host Claude sessions, watch for the JSONL file and write .meta.json
+        # For host Claude sessions, register immediately then watch for JSONL
         if not is_container_cmd and "claude" in cmd_str.lower():
             logger.info("ws_terminal: starting host Claude session  tmux=%s", tmux_name)
             project_folder = str(_REPO_ROOT).replace("/", "-")
             projects_dir = Path.home() / ".claude" / "projects" / project_folder
+            # Register immediately so session appears in dashboard before JSONL exists
+            await session_monitor.register(
+                session_id=tmux_name,
+                tmux_name=tmux_name,
+                session_type="terminal",
+                project=project_folder,
+                jsonl_path=projects_dir,
+            )
             asyncio.create_task(
                 _watch_for_host_session_jsonl(projects_dir, tmux_name)
             )
