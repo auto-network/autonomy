@@ -210,12 +210,13 @@ class SessionMonitor:
         sessions = get_live_sessions()
         return [
             {
-                "session_id": s["tmux_name"],
+                "session_id": s["session_uuid"] or s["tmux_name"],
                 "project": s["project"],
                 "type": s["type"],
                 "tmux_session": s["tmux_name"],
                 "is_live": bool(s["is_live"]),
                 "started_at": s["created_at"],
+                "graph_source_id": s.get("graph_source_id"),
             }
             for s in sessions
         ]
