@@ -1610,8 +1610,17 @@ def _parse_jsonl_entry(line: str) -> dict | None:
     timestamp = raw.get("timestamp", "")
     is_sidechain = raw.get("isSidechain", False)
 
+    # Queued user messages: sent while agent was working, logged as queue-operation
+    # instead of user. Render enqueue entries with content as user messages.
+    if entry_type == "queue-operation":
+        op = raw.get("operation")
+        content = raw.get("content", "")
+        if op == "enqueue" and content and not content.startswith("<task-notification"):
+            return {"type": "user", "content": content, "timestamp": timestamp, "queued": True}
+        return None
+
     # Skip non-content entries
-    if entry_type in ("queue-operation", "progress", "system"):
+    if entry_type in ("progress", "system"):
         return None
     if is_sidechain:
         return None
