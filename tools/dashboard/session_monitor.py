@@ -242,6 +242,9 @@ class SessionMonitor:
         self._tailer_task = asyncio.create_task(self._tailer_loop())
         self._liveness_task = asyncio.create_task(self._liveness_loop())
         logger.info("session_monitor: background tasks started")
+        # Broadcast registry for any sessions registered during recover()
+        if self._sessions:
+            await self._broadcast_registry()
 
     async def _broadcast_registry(self) -> None:
         """Push session registry to SSE subscribers."""
