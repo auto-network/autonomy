@@ -267,24 +267,6 @@ async function renderSessionViewFragment() {
   }
 }
 
-async function renderSearchFragment() {
-  const params = new URLSearchParams(window.location.search);
-  const q = params.get('q');
-  pageTitle.textContent = q ? `Search: ${q}${params.get('project') ? ' [' + params.get('project') + ']' : ''}` : 'Search';
-  let html;
-  if (_fragmentCache.has('/pages/search')) {
-    html = _fragmentCache.get('/pages/search');
-  } else {
-    const res = await fetch('/pages/search');
-    html = await res.text();
-    _fragmentCache.set('/pages/search', html);
-  }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
-}
-
 async function renderSourceFragment() {
   const path = window.location.pathname;
   const id = path.split('/source/')[1] || '';
@@ -1769,7 +1751,7 @@ function route() {
   });
 
   // Update global search placeholder based on page
-  globalSearch.placeholder = (path === '/' || path === '/beads') ? 'Search beads...' : 'Search graph...';
+  globalSearch.placeholder = (path === '/' || path === '/beads') ? 'Search beads...' : 'Search...';
 
   if (path === '/' || path === '/beads') {
     renderBeadsFragment();
@@ -1785,8 +1767,6 @@ function route() {
     renderSessionsFragment();
   } else if (path.match(/^\/session\/[^/]+\/.+$/)) {
     renderSessionViewFragment();
-  } else if (path === '/search') {
-    renderSearchFragment();
   } else if (path.startsWith('/source/')) {
     renderSourceFragment();
   } else if (isTerminalPage) {
@@ -1809,8 +1789,6 @@ globalSearch.addEventListener('keydown', (e) => {
       const path = window.location.pathname;
       if (path === '/' || path === '/beads') {
         // On beads page: Alpine component reacts to input events — no extra action needed
-      } else {
-        navigateTo(`/search?q=${encodeURIComponent(q)}`);
       }
     }
   }
