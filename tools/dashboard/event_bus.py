@@ -111,12 +111,8 @@ class EventBus:
         return len(self._subscribers)
 
     def _trim_buffer(self) -> None:
-        """Evict oldest entries by age and memory pressure."""
-        cutoff = time.monotonic() - self._BUFFER_MAX_AGE
-        while self._buffer and (
-            self._buffer[0].timestamp < cutoff
-            or self._buffer_bytes > self._BUFFER_MAX_BYTES
-        ):
+        """Evict oldest entries when memory budget is exceeded."""
+        while self._buffer and self._buffer_bytes > self._BUFFER_MAX_BYTES:
             evicted = self._buffer.popleft()
             self._buffer_bytes -= evicted.size
 
