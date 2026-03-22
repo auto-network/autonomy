@@ -8,13 +8,14 @@ then updates it on completion via insert_run() (upsert).
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = REPO_ROOT / "data" / "dispatch.db"
+DB_PATH = Path(os.environ.get("DISPATCH_DB", str(REPO_ROOT / "data" / "dispatch.db")))
 
 CREATE_TABLE = """\
 CREATE TABLE IF NOT EXISTS dispatch_runs (
