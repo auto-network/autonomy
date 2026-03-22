@@ -85,15 +85,17 @@ _KNOWN_PAUSE_LABELS = ["dashboard"]
 
 # ── CLI Subprocess Helper ─────────────────────────────────────
 
-async def run_cli(cmd: list[str], timeout: int = 30) -> tuple[str, str, int]:
+async def run_cli(cmd: list[str], timeout: int = 30, stdin_data: str | None = None) -> tuple[str, str, int]:
     """Run a CLI command async and return (stdout, stderr, returncode)."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
+        stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        input_bytes = stdin_data.encode() if stdin_data is not None else None
+        stdout, stderr = await asyncio.wait_for(proc.communicate(input=input_bytes), timeout=timeout)
         return stdout.decode(), stderr.decode(), proc.returncode
     except asyncio.TimeoutError:
         proc.kill()
@@ -3373,6 +3375,220 @@ async def _dispatch_watcher():
         await asyncio.sleep(_DISPATCH_WATCHER_INTERVAL)
 
 
+# ── Graph Write API (single-writer proxy) ─────────────────────
+# Containers mount graph.db read-only and POST writes here.
+# The server shells out to the graph CLI on the host, serialising all writes.
+
+_GRAPH_SOURCE_ID_RE = re.compile(r'^[0-9a-f-]+$', re.IGNORECASE)
+_GRAPH_TAGS_RE = re.compile(r'^[a-zA-Z0-9_,:-]+$')
+_GRAPH_MAX_CONTENT = 100_000  # 100KB
+
+
+def _graph_validate_content(body: dict, field: str = "content") -> str | None:
+    """Validate and return content field, or return error string."""
+    content = body.get(field, "")
+    if not content:
+        return f"{field} required"
+    if len(content) > _GRAPH_MAX_CONTENT:
+        return f"{field} exceeds 100KB limit ({len(content)} bytes)"
+    return None
+
+
+def _graph_validate_source_id(value: str) -> str | None:
+    """Return error string if source_id is malformed."""
+    if not value or not _GRAPH_SOURCE_ID_RE.match(value):
+        return f"malformed source_id: {value!r}"
+    return None
+
+
+async def api_graph_note(request):
+    """Create a note via graph CLI."""
+    body = await request.json()
+    err = _graph_validate_content(body)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    content = body["content"]
+
+    cmd = ["graph", "note", "-c", "-"]
+    if body.get("tags"):
+        tags = body["tags"]
+        if not _GRAPH_TAGS_RE.match(tags):
+            return JSONResponse({"error": f"invalid tags: {tags!r}"}, status_code=400)
+        cmd += ["--tags", tags]
+    if body.get("project"):
+        cmd += ["-p", body["project"]]
+    if body.get("author"):
+        cmd += ["--author", body["author"]]
+
+    stdout, stderr, rc = await run_cli(cmd, timeout=30, stdin_data=content)
+
+    if rc != 0:
+        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    return JSONResponse({"ok": True, "output": stdout})
+
+
+async def api_graph_note_update(request):
+    """Update a note via graph CLI."""
+    body = await request.json()
+
+    source_id = body.get("source_id", "")
+    err = _graph_validate_source_id(source_id)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    err = _graph_validate_content(body)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    content = body["content"]
+
+    cmd = ["graph", "note", "update", source_id, "-c", "-"]
+    for cid in body.get("integrate_ids", []):
+        cmd += ["--integrate", cid]
+
+    stdout, stderr, rc = await run_cli(cmd, timeout=30, stdin_data=content)
+
+    if rc != 0:
+        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    return JSONResponse({"ok": True, "output": stdout})
+
+
+async def api_graph_comment(request):
+    """Add a comment to a note via graph CLI."""
+    body = await request.json()
+
+    source_id = body.get("source_id", "")
+    err = _graph_validate_source_id(source_id)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    err = _graph_validate_content(body)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    content = body["content"]
+
+    cmd = ["graph", "comment", source_id, "-c", "-"]
+    if body.get("actor"):
+        cmd += ["--actor", body["actor"]]
+
+    stdout, stderr, rc = await run_cli(cmd, timeout=30, stdin_data=content)
+
+    if rc != 0:
+        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    return JSONResponse({"ok": True, "output": stdout})
+
+
+async def api_graph_comment_integrate(request):
+    """Mark a comment as integrated via graph CLI."""
+    body = await request.json()
+
+    comment_id = body.get("comment_id", "")
+    err = _graph_validate_source_id(comment_id)
+    if err:
+        return JSONResponse({"error": f"malformed comment_id: {comment_id!r}"}, status_code=400)
+
+    stdout, stderr, rc = await run_cli(
+        ["graph", "comment", "integrate", comment_id], timeout=15
+    )
+
+    if rc != 0:
+        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    return JSONResponse({"ok": True, "output": stdout})
+
+
+async def api_graph_bead(request):
+    """Create a bead with provenance via graph CLI."""
+    body = await request.json()
+
+    title = body.get("title", "")
+    if not title:
+        return JSONResponse({"error": "title required"}, status_code=400)
+    if len(title) > 200:
+        return JSONResponse({"error": "title too long (max 200 chars)"}, status_code=400)
+
+    priority = body.get("priority", 1)
+    if not isinstance(priority, int) or priority < 0 or priority > 3:
+        return JSONResponse({"error": "priority must be integer 0-3"}, status_code=400)
+
+    cmd = ["graph", "bead", title, "-p", str(priority)]
+
+    desc = body.get("description", "")
+    stdin_data = None
+    if desc:
+        if len(desc) > _GRAPH_MAX_CONTENT:
+            return JSONResponse({"error": "description exceeds 100KB"}, status_code=400)
+        cmd += ["-d", "-"]
+        stdin_data = desc
+
+    if body.get("type"):
+        cmd += ["-t", body["type"]]
+    if body.get("source"):
+        source_id = body["source"]
+        err = _graph_validate_source_id(source_id)
+        if err:
+            return JSONResponse({"error": err}, status_code=400)
+        cmd += ["--source", source_id]
+    if body.get("turns"):
+        cmd += ["--turns", body["turns"]]
+    if body.get("note"):
+        cmd += ["--note", body["note"]]
+
+    stdout, stderr, rc = await run_cli(cmd, timeout=60, stdin_data=stdin_data)
+
+    if rc != 0:
+        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    return JSONResponse({"ok": True, "output": stdout})
+
+
+async def api_graph_link(request):
+    """Create a provenance edge via graph CLI."""
+    body = await request.json()
+
+    bead_id = body.get("bead_id", "")
+    if not bead_id:
+        return JSONResponse({"error": "bead_id required"}, status_code=400)
+
+    source_id = body.get("source_id", "")
+    err = _graph_validate_source_id(source_id)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    relationship = body.get("relationship", "informed_by")
+
+    cmd = ["graph", "link", bead_id, source_id, "-r", relationship]
+    if body.get("turn"):
+        cmd += ["-t", body["turn"]]
+    if body.get("note"):
+        cmd += ["--note", body["note"]]
+
+    stdout, stderr, rc = await run_cli(cmd, timeout=30)
+
+    if rc != 0:
+        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    return JSONResponse({"ok": True, "output": stdout})
+
+
+async def api_graph_sessions(request):
+    """Ingest sessions via graph CLI."""
+    body = await request.json()
+
+    cmd = ["graph", "sessions"]
+    if body.get("all"):
+        cmd += ["--all"]
+    if body.get("project"):
+        cmd += ["--project", body["project"]]
+    if body.get("force"):
+        cmd += ["--force"]
+
+    stdout, stderr, rc = await run_cli(cmd, timeout=120)
+
+    if rc != 0:
+        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    return JSONResponse({"ok": True, "output": stdout})
+
+
 # ── App ───────────────────────────────────────────────────────
 
 routes = [
@@ -3456,6 +3672,15 @@ routes = [
     Route("/api/timeline", api_timeline),
     Route("/api/timeline/stats", api_timeline_stats),
     Route("/api/version", api_version),
+
+    # Graph write API (single-writer proxy for containers)
+    Route("/api/graph/note", api_graph_note, methods=["POST"]),
+    Route("/api/graph/note/update", api_graph_note_update, methods=["POST"]),
+    Route("/api/graph/comment", api_graph_comment, methods=["POST"]),
+    Route("/api/graph/comment/integrate", api_graph_comment_integrate, methods=["POST"]),
+    Route("/api/graph/bead", api_graph_bead, methods=["POST"]),
+    Route("/api/graph/link", api_graph_link, methods=["POST"]),
+    Route("/api/graph/sessions", api_graph_sessions, methods=["POST"]),
 
     # Experiments
     Route("/api/experiments", api_experiments_create, methods=["POST"]),
