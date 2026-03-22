@@ -63,6 +63,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph dispatch runs --primer` | Rich per-run output: title, commit, diff, scores, merge state | `graph dispatch runs --primer --completed` |
 | `graph primer <bead-id>` | Dynamic context primer for a bead (description + pitfalls + provenance) | `graph primer auto-n9qa` |
 | `graph ui-exp "title" <dir>` | Create UI experiment from HTML files + live-watch for changes | `graph ui-exp "Input redesign" /tmp/cards/` |
+| `graph set-label "text"` | Set a working title for the current session | `graph set-label "Passkey auth design"` |
 
 ### Beads (`bd`)
 | Command | What | Example |
@@ -136,3 +137,4 @@ graph attention --search "keyword"            # find when user discussed somethi
 - Work tracking via `bd` (Beads) — all tasks are beads
 - Research before building — mine the graph for context before creating beads
 - Scoped agent access via `GRAPH_SCOPE` env var and `graph-<project>` wrappers
+- Set your session label when starting a new topic: `graph set-label "topic description"`
