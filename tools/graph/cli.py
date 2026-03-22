@@ -912,6 +912,23 @@ def cmd_note_router(args):
         cmd_note(args)
 
 
+def _check_single_line_content(content: str, force: bool) -> None:
+    """Reject unformatted single-line content over 120 chars unless --force is used."""
+    if '\n' not in content and len(content) > 120 and not force:
+        print("\u2717 Note content is %d chars on a single line \u2014 this will be unreadable." % len(content), file=sys.stderr)
+        print("  Write formatted markdown to a temp file, then pipe it:", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("    cat > /tmp/note.md << 'EOF'", file=sys.stderr)
+        print("    # Title", file=sys.stderr)
+        print("    ", file=sys.stderr)
+        print("    Your content with proper structure...", file=sys.stderr)
+        print("    EOF", file=sys.stderr)
+        print("    graph note -c - --tags tag1,tag2 < /tmp/note.md", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  To force save anyway: graph note --force \"...\"", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_note(args):
     """Drop a searchable trail marker into the graph."""
     if getattr(args, 'content_stdin', None) == "-":
@@ -921,6 +938,7 @@ def cmd_note(args):
     else:
         print("Error: note text required", file=sys.stderr)
         sys.exit(1)
+    _check_single_line_content(text, getattr(args, 'force', False))
     db = GraphDB(args.db)
     tags = args.tags.split(",") if args.tags else []
 
@@ -1044,6 +1062,7 @@ def cmd_note_update(args):
     if not new_content:
         print("Error: no content provided", file=sys.stderr)
         sys.exit(1)
+    _check_single_line_content(new_content, getattr(args, 'force', False))
 
     result = _resolve_source(db, args.source, first=True)
     if result is None:
@@ -1712,6 +1731,7 @@ def main():
     p_note.add_argument("--project", "-p", help="Project to tag with")
     p_note.add_argument("--tags", "-t", help="Comma-separated tags")
     p_note.add_argument("--author", help="Who wrote this (default: user)")
+    p_note.add_argument("--force", action="store_true", help="Bypass single-line length check")
     p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
     p_note.set_defaults(func=cmd_note_router)
 
