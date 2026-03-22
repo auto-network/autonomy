@@ -2435,6 +2435,22 @@ async def api_session_confirm_link(request):
     return JSONResponse({"ok": True})
 
 
+async def api_session_label(request):
+    """Set or clear the user-facing label for a session.
+
+    PUT /api/session/{tmux_name}/label
+    Body: {"label": "Dashboard auth design"}
+    Returns: {"ok": true}
+    """
+    tmux_name = request.path_params["tmux_name"]
+    body = await request.json()
+    label = body.get("label", "").strip()
+    dashboard_db.update_label(tmux_name, label)
+    # Broadcast via SSE so all clients update
+    await event_bus.broadcast("session:registry", session_monitor.get_registry())
+    return JSONResponse({"ok": True})
+
+
 async def api_upload(request):
     """Upload a file to the workspace.
 
@@ -3673,6 +3689,7 @@ routes = [
     Route("/api/terminal/unclaimed", api_terminal_unclaimed),
     Route("/api/session/send-handshake", api_session_send_handshake, methods=["POST"]),
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
+    Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
     Route("/api/session/send", api_session_send, methods=["POST"]),
     Route("/api/session/{project}/{session_id}/tail", api_session_tail),
     Route("/api/session/{project}/{session_id}/send", api_session_send, methods=["POST"]),
