@@ -95,6 +95,7 @@
           all.push({
             session_id: id,
             project: s.project || '',
+            label: s.label || '',
             size_bytes: sizeVal * 1048576,
             age_seconds: ageSeconds,
             active: hasData && s.lastActivity > 0 && (now - s.lastActivity) < 60,
@@ -139,6 +140,7 @@
               store.project = s.project || '';
               store.sessionType = s.type || '';
               store.tmuxSession = s.tmux_session || '';
+              store.label = s.label || '';
               store.isLive = s.is_live !== false;
               store.startedAt = s.started_at || 0;
             }

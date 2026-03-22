@@ -219,6 +219,7 @@ class SessionMonitor:
                 "is_live": bool(s["is_live"]),
                 "started_at": s["created_at"],
                 "graph_source_id": s.get("graph_source_id"),
+                "label": s.get("label", ""),
             }
             for s in sessions
         ]
