@@ -512,6 +512,9 @@
           }
         );
 
+        // Handle error responses from server
+        if (data.error) throw new Error(data.error);
+
         store.offset = data.offset || 0;
         store.isLive = !!data.is_live;
         store.sessionType = data.type || '';
@@ -586,12 +589,23 @@
           try {
             await this._fetchBacklog(store);
           } catch (e) {
-            if (this.state === 'loading') {
-              this.errorMsg = 'Failed to connect to session';
-              this.state = 'error';
+            // New session with no JSONL yet — show empty ready state
+            if (this._tmuxSession) {
+              store._loading = false;
+              store.loaded = true;
+              this.entries = [];
+              this.isLive = true;
+              this.sessionType = store.sessionType || 'terminal';
+              this.state = 'ready';
+              // Continue to set up watchers below
+            } else {
+              if (this.state === 'loading') {
+                this.errorMsg = 'Failed to connect to session';
+                this.state = 'error';
+              }
+              store._loading = false;
+              return;
             }
-            store._loading = false;
-            return;
           }
 
           // Flush pending SSE events that arrived during fetch
