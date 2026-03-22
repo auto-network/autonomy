@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_IMAGE = "autonomy-agent"
+DEFAULT_IMAGE = "autonomy-agent:dashboard"
 
 
 # ── Credential Resolution ─────────────────────────────────────────────────────
