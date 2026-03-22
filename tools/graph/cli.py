@@ -1223,7 +1223,7 @@ def cmd_comment_integrate(args):
 
 def cmd_note_update(args):
     """Update a note with versioned history."""
-    _require_read("bf3a848c", "Agents must read the Note Revision Protocol before updating notes.\n  See: graph://bf3a848c-8b5")
+    _require_read("843a8137", "Agents must read the Note Revision Protocol before updating notes.\n  See: graph://843a8137-3c7")
     db = GraphDB(args.db)
 
     # Resolve content

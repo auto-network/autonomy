@@ -100,7 +100,7 @@ graph note update <src_id> -c - --integrate <cid1> --integrate <cid2> < /tmp/rev
 ### Bead polishing protocol
 Read the full protocol before polishing any bead:
 `graph://f6c6c43e-24a`  (resolves to: `graph read f6c6c43e-24a`)
-Note revision protocol: `graph://bf3a848c-8b5`
+Note revision protocol: `graph://843a8137-3c7`
 
 ### Before working on a bead — get the full primer
 ```bash
