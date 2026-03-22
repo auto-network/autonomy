@@ -1720,6 +1720,8 @@ async function checkPendingExperiments() {
 // ── Router ───────────────────────────────────────────────────
 
 function navigateTo(path) {
+  if (path === window.location.pathname + window.location.search) return;
+  history.replaceState({ scrollY: window.scrollY }, '');
   history.pushState({}, '', path);
   route();
 }
@@ -1803,7 +1805,12 @@ document.addEventListener('click', (e) => {
   }
 });
 
-window.addEventListener('popstate', route);
+window.addEventListener('popstate', (e) => {
+  route();
+  if (e.state && e.state.scrollY !== undefined) {
+    requestAnimationFrame(() => window.scrollTo(0, e.state.scrollY));
+  }
+});
 
 // ── Init ─────────────────────────────────────────────────────
 
