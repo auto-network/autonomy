@@ -1844,8 +1844,14 @@ async def api_dispatch_tail(request):
     file_size = session_file.stat().st_size
     is_live = (import_time() - session_file.stat().st_mtime) < 120
 
+    session_id = session_file.stem
+    project = session_file.parent.name
+
     if after >= file_size:
-        return JSONResponse({"entries": [], "offset": file_size, "is_live": is_live})
+        return JSONResponse({
+            "entries": [], "offset": file_size, "is_live": is_live,
+            "session_id": session_id, "project": project,
+        })
 
     entries = []
     with open(session_file, "rb") as f:
@@ -1871,6 +1877,8 @@ async def api_dispatch_tail(request):
         "entries": entries,
         "offset": new_offset,
         "is_live": is_live,
+        "session_id": session_id,
+        "project": project,
     })
 
 

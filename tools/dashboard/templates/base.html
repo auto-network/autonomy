@@ -123,20 +123,14 @@
       min-height: 2.5rem; flex-shrink: 0;
     }
     #live-panel-body {
-      overflow-y: auto; max-height: 50vh; padding: 0.75rem 1rem;
-      scroll-behavior: smooth;
+      max-height: 50vh; padding: 0;
     }
     #live-panel.collapsed #live-panel-body { display: none; }
-    .live-entry { margin-bottom: 0.75rem; }
-    .live-entry-user { border-left: 3px solid #3b82f6; padding-left: 0.75rem; }
-    .live-entry-assistant { border-left: 3px solid #6366f1; padding-left: 0.75rem; }
-    .live-entry-tool { border-left: 3px solid #8b5cf6; padding-left: 0.75rem; }
-    .live-entry-thinking { border-left: 3px solid #374151; padding-left: 0.75rem; opacity: 0.6; }
-    .live-entry-system { border-left: 3px solid #4b5563; padding-left: 0.75rem; opacity: 0.5; margin-bottom: 0.25rem; }
-    .live-entry-time { font-size: 0.625rem; color: #6b7280; }
-    .live-tool-toggle { cursor: pointer; user-select: none; }
-    .live-tool-toggle::before { content: '▶ '; font-size: 0.625rem; }
-    .live-tool-toggle[open]::before { content: '▼ '; }
+    .lp-viewer { display: flex; flex-direction: column; max-height: 50vh; }
+    .lp-entries {
+      overflow-y: auto; padding: 0.75rem 1rem;
+      scroll-behavior: smooth; flex: 1;
+    }
     .live-resume-btn {
       position: sticky; bottom: 0.5rem; align-self: center;
       padding: 0.25rem 1rem; background: #4f46e5; color: white;
@@ -615,9 +609,134 @@
       <span class="text-xs text-gray-500 ml-auto" id="live-panel-status"></span>
       <button onclick="event.stopPropagation(); hideLivePanel();" class="text-gray-500 hover:text-gray-300 text-sm px-1">✕</button>
     </div>
-    <div id="live-panel-body">
-      <div id="live-panel-entries"></div>
-      <button id="live-resume-btn" class="live-resume-btn" onclick="liveResumeScroll()">↓ Resume auto-scroll</button>
+    <div id="live-panel-body" x-data="livePanelViewer()">
+
+      <!-- Loading -->
+      <template x-if="state === 'loading'">
+        <div class="text-gray-500 text-sm p-2">Loading session...</div>
+      </template>
+
+      <!-- Error -->
+      <template x-if="state === 'error'">
+        <div class="text-red-400 text-sm p-2" x-text="errorMsg"></div>
+      </template>
+
+      <!-- Empty idle state -->
+      <template x-if="state === 'idle'">
+        <div class="text-gray-600 text-sm p-2">No session loaded</div>
+      </template>
+
+      <!-- Session entries -->
+      <template x-if="state === 'ready'">
+        <div class="lp-viewer">
+          <div class="lp-entries" x-ref="panelEntries" @scroll="onScroll()">
+
+            <template x-if="entries.length === 0">
+              <div class="text-sm text-gray-500 p-2">No session entries yet.</div>
+            </template>
+
+            <template x-for="(entry, idx) in entries" :key="idx">
+              <div>
+                <template x-if="entry.type !== 'tool_result'">
+                  <div class="sc-entry"
+                       :class="[
+                         borderClass(entry),
+                         hasGap(idx) ? 'sc-gap' : '',
+                         entry.type === 'user' ? 'sc-entry-user' : '',
+                         entry.type === 'assistant_text' ? 'sc-entry-assistant' : '',
+                         entry.type === 'thinking' ? 'sc-entry-thinking' : '',
+                         entry.type === 'system' ? 'sc-entry-system' : '',
+                       ]">
+
+                    <!-- User message -->
+                    <template x-if="entry.type === 'user'">
+                      <div>
+                        <div class="flex items-center gap-2 mb-1">
+                          <span class="sc-user-label">USER</span>
+                          <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                        </div>
+                        <div class="sc-user-content" x-text="entry.content || ''"></div>
+                      </div>
+                    </template>
+
+                    <!-- Assistant text (markdown) -->
+                    <template x-if="entry.type === 'assistant_text'">
+                      <div>
+                        <div class="flex items-center gap-2 mb-1">
+                          <span class="sc-asst-label">ASSISTANT</span>
+                          <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                        </div>
+                        <div class="sc-asst-content" x-markdown="entry.content || ''"></div>
+                      </div>
+                    </template>
+
+                    <!-- Tool use: two-line chip card -->
+                    <template x-if="entry.type === 'tool_use'">
+                      <div class="sc-tool-card" @click="toggleExpand(idx)">
+                        <div class="sc-line1">
+                          <span class="sc-chip" :class="chipClass(entry.tool_name)" x-text="entry.tool_name || '?'"></span>
+                          <template x-for="badge in metaDisplay(entry)" :key="badge.text">
+                            <span class="sc-meta" :class="badge.cls" x-text="badge.text"></span>
+                          </template>
+                          <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                        </div>
+                        <div class="sc-line2"
+                             :class="isExpanded(idx) ? 'sc-line2-expanded' : 'sc-line2-truncated'"
+                             x-text="headline(entry)"></div>
+                        <template x-if="isExpanded(idx)">
+                          <div @click.stop>
+                            <div class="sc-detail-tabs" @click="toggleView(idx)">
+                              <span class="sc-detail-tab" :class="expandViewMode(idx) === 'output' ? 'sc-detail-tab-active' : ''">Output</span>
+                              <span class="sc-detail-tab" :class="expandViewMode(idx) === 'input' ? 'sc-detail-tab-active' : ''">Input</span>
+                            </div>
+                            <pre class="sc-detail" x-text="expandContent(entry, idx)"></pre>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- Thinking -->
+                    <template x-if="entry.type === 'thinking'">
+                      <div class="sc-tool-card" @click="toggleExpand(idx)">
+                        <div class="sc-line1">
+                          <span class="sc-think-label">thinking...</span>
+                          <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                        </div>
+                        <template x-if="isExpanded(idx)">
+                          <div class="sc-detail" style="font-style: italic;" x-text="entry.content || ''"></div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- System message -->
+                    <template x-if="entry.type === 'system'">
+                      <div class="sc-tool-card" @click="toggleExpand(idx)">
+                        <div class="flex items-center gap-2">
+                          <span class="sc-sys-icon" :style="sysIconColor(entry)" x-text="sysIcon(entry)"></span>
+                          <span class="sc-sys-label" x-text="entry.content || ''"></span>
+                          <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                        </div>
+                        <template x-if="isExpanded(idx)">
+                          <div class="sc-detail" x-text="entry.content || ''"></div>
+                        </template>
+                      </div>
+                    </template>
+
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- Resume auto-scroll -->
+            <button x-show="!autoScroll && entries.length > 0"
+                    @click="resumeScroll()"
+                    class="live-resume-btn" style="display:block;">
+              ↓ Resume auto-scroll
+            </button>
+          </div>
+        </div>
+      </template>
+
     </div>
   </div>
 
@@ -634,6 +753,7 @@
   <script src="/static/js/pages/trace.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/pages/source.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/pages/terminal.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/components/live-panel-viewer.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/chatwith-panel.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/pages/experiment.js?v=__STATIC_VERSION__"></script>
 </body>
