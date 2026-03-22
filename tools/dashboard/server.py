@@ -51,7 +51,7 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
-from tools.dashboard.event_bus import event_bus
+from tools.dashboard.event_bus import event_bus, _SERVER_EPOCH
 from tools.dashboard.session_monitor import session_monitor
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
@@ -3100,7 +3100,7 @@ async def api_events(request):
         try:
             while True:
                 topic, data, seq = await queue.get()
-                yield {"id": str(seq), "event": topic, "data": json.dumps(data)}
+                yield {"id": f"{seq}:{_SERVER_EPOCH}", "event": topic, "data": json.dumps(data)}
         except asyncio.CancelledError:
             pass
         finally:

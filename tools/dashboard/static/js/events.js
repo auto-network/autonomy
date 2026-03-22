@@ -5,7 +5,9 @@
 //
 // Gap detection: tracks global seq from SSE id: field. On reconnect, if seq
 // jumps, fetches missed events from /api/events/replay and dispatches in order.
-// If the buffer can't cover the gap, fires 'sse-gap-unrecoverable' CustomEvent.
+// Epoch detection: SSE id encodes seq:epoch. On epoch change (server restart),
+// resets seq counters and shows an interruption banner. Same banner shown for
+// unrecoverable replay gaps.
 //
 // Globals exposed:
 //   window._sseCache         — last data received per topic, keyed by topic name
@@ -19,6 +21,7 @@
   var _topicListening = new Set(); // topics with an ES listener already attached
   var _es = null;             // the single global EventSource
   var _lastSeq = 0;
+  var _serverEpoch = null;   // int timestamp from server, set from first event
   var _replaying = false;
   var _heldEvents = [];
 
@@ -33,6 +36,30 @@
     }
   }
 
+  function _onInterruption(reason) {
+    // Reset global seq — accept events from the new server
+    _lastSeq = 0;
+
+    // Reset all session store seqs — prevent dedup from dropping new events
+    if (window.Alpine) {
+      try {
+        var sessions = Alpine.store('sessions');
+        if (sessions) {
+          for (var id in sessions) {
+            if (sessions.hasOwnProperty(id)) sessions[id].seq = 0;
+          }
+        }
+      } catch (e) { /* store not initialised yet */ }
+    }
+
+    // Show banner via Alpine store
+    if (window.Alpine) {
+      try {
+        Alpine.store('app').sseInterrupted = reason || 'Connection interrupted';
+      } catch (e) { /* store not initialised yet */ }
+    }
+  }
+
   // Attach a named-event listener for `topic` to the global EventSource.
   // No-op if the EventSource isn't open yet (called again from _connect).
   function _addTopicListener(topic) {
@@ -40,8 +67,17 @@
     _topicListening.add(topic);
     _es.addEventListener(topic, function(e) {
       try {
-        var seq = parseInt(e.lastEventId, 10) || 0;
+        var parts = e.lastEventId.split(':');
+        var seq = parseInt(parts[0], 10) || 0;
+        var epoch = parseInt(parts[1], 10) || 0;
         var data = JSON.parse(e.data);
+
+        // Epoch change detection — server restarted
+        if (epoch > 0 && _serverEpoch !== null && epoch !== _serverEpoch) {
+          console.warn('[EventBus] server restarted, epoch ' + _serverEpoch + ' → ' + epoch);
+          _onInterruption('Server restarted');
+        }
+        if (epoch > 0) _serverEpoch = epoch;
 
         // During replay, hold all incoming events
         if (_replaying) {
@@ -81,12 +117,10 @@
           _dispatch(ev.topic, ev.data);
         }
       } else {
-        // Buffer doesn't cover the gap — notify consumers to re-fetch
-        console.warn('[EventBus] replay incomplete, triggering store re-fetch');
+        // Buffer doesn't cover the gap — reset seqs and show banner
+        console.warn('[EventBus] replay incomplete, events may have been missed');
         _lastSeq = toSeq;
-        window.dispatchEvent(new CustomEvent('sse-gap-unrecoverable', {
-          detail: { fromSeq: fromSeq, toSeq: toSeq }
-        }));
+        _onInterruption('Some updates may have been missed');
       }
 
       // Dispatch held events in order
@@ -100,9 +134,7 @@
       }
     } catch (err) {
       console.warn('[EventBus] replay fetch failed', err);
-      window.dispatchEvent(new CustomEvent('sse-gap-unrecoverable', {
-        detail: { fromSeq: fromSeq, toSeq: toSeq }
-      }));
+      _onInterruption('Some updates may have been missed');
     } finally {
       _heldEvents = [];
       _replaying = false;
@@ -175,6 +207,11 @@
   window.connectEvents = connectEvents;
   window.registerHandler = registerHandler;
   window.unregisterHandler = unregisterHandler;
+
+  // Register Alpine store for SSE interruption banner
+  document.addEventListener('alpine:init', function() {
+    Alpine.store('app', { sseInterrupted: false });
+  });
 
   // Defer connection to next microtask so synchronous handler registrations
   // in app.js (loaded immediately after this script) are in place.

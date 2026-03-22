@@ -536,6 +536,24 @@
       <div id="header-actions" class="flex items-center gap-2 ml-auto"></div>
     </header>
 
+    <!-- SSE interruption banner — shown on server restart or unrecoverable gap -->
+    <div x-data x-show="$store.app.sseInterrupted"
+         x-cloak
+         class="bg-amber-700 text-white text-sm px-4 py-2 flex items-center justify-between flex-shrink-0"
+         style="display:none;">
+      <span x-text="$store.app.sseInterrupted"></span>
+      <div class="flex gap-2 ml-4">
+        <button @click="$store.app.sseInterrupted = false"
+                class="px-3 py-1 bg-amber-600 hover:bg-amber-500 rounded text-xs font-medium">
+          Continue
+        </button>
+        <button @click="window.location.reload()"
+                class="px-3 py-1 bg-amber-800 hover:bg-amber-900 rounded text-xs font-medium">
+          Reload
+        </button>
+      </div>
+    </div>
+
     <!-- Content -->
     <main class="flex-1 overflow-auto pt-6 px-6" id="content">
       <div class="text-gray-400">Loading...</div>
