@@ -202,32 +202,23 @@ def _resolve_source(db, source_arg, first=False):
 def _resolve_current_source(db):
     """Find the graph source for the session we're running inside.
 
-    Detection order:
-    1. Ask tmux for our session name, look up by tmux_session in metadata
-    2. (future: other detection methods)
+    Uses BD_ACTOR env var (e.g. 'terminal:auto-0322-153000') to get tmux name,
+    then looks up graph_source_id via dashboard.db API.
 
     Returns source dict or None.
     """
-    try:
-        r = subprocess.run(
-            ["tmux", "display-message", "-p", "#{session_name}"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if r.returncode != 0:
-            return None
-        tmux_name = r.stdout.strip()
-        if not tmux_name:
-            return None
-        return db.get_source_by_tmux(tmux_name)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    bd_actor = os.environ.get("BD_ACTOR")
+    if not bd_actor or ":" not in bd_actor:
         return None
+    tmux_name = bd_actor.split(":", 1)[1]
+    return db.get_source_by_tmux(tmux_name)
 
 
 def _auto_provenance(db):
     """Auto-detect current session source and latest turn.
 
     Returns (source_dict, turn_number) or (None, None).
-    Uses tmux session name -> graph source lookup -> max turn query.
+    Uses BD_ACTOR env var -> graph source lookup -> max turn query.
     Runs graph sessions --all first to ensure current session is ingested.
     """
     subprocess.run(["graph", "sessions", "--all"], capture_output=True, timeout=30)
@@ -599,11 +590,12 @@ def cmd_set_label(args):
     import urllib.parse
     import urllib.request
 
-    tmux_name = os.environ.get("DASHBOARD_SESSION")
-    if not tmux_name:
-        print("Error: $DASHBOARD_SESSION not set. Cannot identify current session.", file=sys.stderr)
-        print("This command must be run inside a dashboard-managed tmux session.", file=sys.stderr)
+    bd_actor = os.environ.get("BD_ACTOR")
+    if not bd_actor or ":" not in bd_actor:
+        print("Error: $BD_ACTOR not set. Cannot identify current session.", file=sys.stderr)
+        print("This command must be run inside a dashboard-managed session.", file=sys.stderr)
         sys.exit(1)
+    tmux_name = bd_actor.split(":", 1)[1]
 
     if is_api_mode():
         api_set_label(args)
