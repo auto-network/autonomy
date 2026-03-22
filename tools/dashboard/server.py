@@ -53,6 +53,7 @@ logging.basicConfig(
 
 from tools.dashboard.event_bus import event_bus, _SERVER_EPOCH
 from tools.dashboard.session_monitor import count_tool_uses, session_monitor
+from tools.dashboard.dao import dashboard_db
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -1251,36 +1252,40 @@ async def api_active_sessions(request):
 
 
 async def api_terminals(request):
-    """List active terminal sessions (tmux-backed)."""
-    live = _list_dashboard_tmux()
-    # Clean up tracking for dead sessions
-    dead = [k for k in _active_terminals if k not in live]
-    for k in dead:
-        del _active_terminals[k]
-    # Detect and cache type for any untracked sessions (e.g. after server restart)
-    for name in live:
-        if name not in _active_terminals:
+    """List active terminal sessions (tmux-backed, DB-sourced)."""
+    live_tmux = set(_list_dashboard_tmux())
+    db_sessions = dashboard_db.get_live_sessions()
+    result = []
+    for row in db_sessions:
+        name = row["tmux_name"]
+        alive = name in live_tmux
+        if not alive:
+            # Mark dead in DB if tmux is gone
+            dashboard_db.mark_dead(name)
+            continue
+        result.append({
+            "id": name,
+            "alive": True,
+            "cmd": "",
+            "env": "container" if row["type"] == "container" else "host",
+            "started": row["created_at"],
+        })
+    # Also include live tmux sessions not in DB yet (e.g. pre-existing)
+    db_names = {r["tmux_name"] for r in db_sessions}
+    for name in live_tmux:
+        if name not in db_names:
             info = _detect_terminal_type(name)
             info["started"] = asyncio.get_event_loop().time()
-            _active_terminals[name] = info
-    return JSONResponse([
-        {"id": name, "alive": True, **_active_terminals[name]}
-        for name in live
-    ])
+            result.append({"id": name, "alive": True, **info})
+    return JSONResponse(result)
 
 async def api_terminal_kill(request):
     """Kill a terminal session. If it's a Chat With session, ingest it into the graph."""
     name = request.path_params["id"]
     if _tmux_session_exists(name):
         subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
-        _active_terminals.pop(name, None)
-        # Deregister from session monitor (liveness checker would catch it too,
-        # but immediate deregister gives faster UI feedback)
-        # Find session by tmux name
-        for s in session_monitor.get_all():
-            if s.tmux_name == name:
-                await session_monitor.deregister(s.session_id)
-                break
+        # Deregister from session monitor (marks dead in DB)
+        await session_monitor.deregister(name)
         # Ingest the completed session into the graph (fire-and-forget)
         if name.startswith("chatwith-"):
             asyncio.create_task(asyncio.to_thread(
@@ -1298,8 +1303,8 @@ async def api_terminal_rename(request):
     name = request.path_params["id"]
     body = await request.json()
     new_name = body.get("name", "").strip()
-    if name in _active_terminals:
-        _active_terminals[name]["name"] = new_name if new_name else None
+    if dashboard_db.session_exists(name):
+        # Display name is UI-only — stored in DB as last_message prefix if needed
         return JSONResponse({"ok": True, "id": name, "name": new_name})
     return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -1424,7 +1429,7 @@ async def api_chatwith_spawn(request):
             capture_output=True,
         )
 
-    # Register with session monitor (new or existing)
+    # Register with session monitor (INSERT into DB)
     if not already_exists:
         # Chatwith runs in a container — JSONL appears in data/agent-runs/
         agent_runs = _REPO_ROOT / "data" / "agent-runs"
@@ -1434,7 +1439,6 @@ async def api_chatwith_spawn(request):
         ) if agent_runs.exists() else []
         sess_dir = run_dirs[0] / "sessions" if run_dirs else agent_runs
         await session_monitor.register(
-            session_id=session_name,
             tmux_name=session_name,
             session_type="chatwith",
             project=context_id,
@@ -1474,7 +1478,8 @@ async def api_chatwith_sessions(request):
     )
     if result.returncode != 0:
         return JSONResponse({"sessions": []})
-    sessions = [s for s in result.stdout.strip().split("\n") if s.startswith("chatwith-")]
+    sessions = [s for s in result.stdout.strip().split("\n")
+                 if s.startswith("chatwith-") or s.startswith("chat-")]
     return JSONResponse({"sessions": sessions})
 
 
@@ -2274,43 +2279,28 @@ async def api_session_send(request):
 
 
 async def api_terminal_unclaimed(request):
-    """Return unclaimed host tmux sessions for orphaned session recovery.
+    """Return unclaimed host tmux sessions — those with no jsonl_path yet.
 
     GET /api/terminal/unclaimed
-    Returns list of host tmux sessions from _active_terminals that aren't already
-    claimed by a .meta.json in ~/.claude/projects/.
+    Returns live host sessions from dashboard.db that don't yet have a JSONL link.
     """
-    claimed = set()
-    home_projects = Path.home() / ".claude" / "projects"
-    if home_projects.exists():
-        for meta in home_projects.rglob("*.meta.json"):
-            try:
-                data = json.loads(meta.read_text())
-                if data.get("tmux_session"):
-                    claimed.add(data["tmux_session"])
-            except (json.JSONDecodeError, OSError):
-                pass
-
+    sessions = dashboard_db.get_live_sessions()
+    now = time.time()
     result = []
-    for name, info in _active_terminals.items():
-        if info.get("env") != "host":
+    for row in sessions:
+        if row["type"] != "host":
             continue
-        if name in claimed:
-            continue
-        try:
-            alive = subprocess.run(
-                ["tmux", "has-session", "-t", name],
-                capture_output=True,
-            ).returncode == 0
-        except OSError:
-            alive = False
+        if row.get("jsonl_path"):
+            continue  # already linked
+        # Verify still alive
+        alive = _tmux_session_exists(row["tmux_name"])
         if not alive:
             continue
-        elapsed = int(asyncio.get_event_loop().time() - info.get("started", 0))
+        elapsed = int(now - row["created_at"])
         result.append({
-            "tmux_session": name,
+            "tmux_session": row["tmux_name"],
             "elapsed_seconds": elapsed,
-            "cmd": info.get("cmd", ""),
+            "cmd": "",
         })
     return JSONResponse(result)
 
@@ -2404,8 +2394,13 @@ async def api_session_confirm_link(request):
     if not session_file.exists():
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
-    from tools.dashboard.dao.sessions import _write_host_session_meta
-    _write_host_session_meta(session_file, tmux_session)
+    # Update DB with the confirmed link
+    dashboard_db.update_jsonl_link(
+        tmux_session,
+        session_uuid=session_id,
+        jsonl_path=str(session_file),
+        project=project,
+    )
 
     return JSONResponse({"ok": True})
 
@@ -2479,9 +2474,6 @@ async def api_upload(request):
 
 # ── WebSocket Terminal ─────────────────────────────────────────
 
-# Track active terminal sessions
-_active_terminals: dict[str, dict] = {}
-
 # Per-project locks to serialise host session JSONL watchers
 _host_launch_locks: dict[str, asyncio.Lock] = {}
 
@@ -2497,8 +2489,8 @@ async def _watch_for_host_session_jsonl(
 ) -> None:
     """Watch for a new JSONL to appear after a host Claude session starts.
 
-    Polls every 500ms for up to `timeout` seconds. Writes .meta.json alongside
-    the new file so get_active_sessions() can find the tmux association.
+    Polls every 500ms for up to `timeout` seconds. Updates dashboard.db with
+    the discovered JSONL path — the ONLY code that sets jsonl_path for host sessions.
     """
     lock = _get_host_launch_lock(projects_dir.name)
     async with lock:
@@ -2514,25 +2506,13 @@ async def _watch_for_host_session_jsonl(
             if new_files:
                 new_jsonl = min(new_files, key=lambda p: p.stat().st_mtime)
                 logger.info("JSONL watcher found new session  uuid=%s  tmux=%s", new_jsonl.stem, tmux_name)
-                from tools.dashboard.dao.sessions import _write_host_session_meta
-                _write_host_session_meta(new_jsonl, tmux_name)
-                # Update existing monitor entry (registered at creation time)
-                # instead of re-registering with a new session_id
-                state = session_monitor.get_one(tmux_name)
-                if state:
-                    state.jsonl_path = new_jsonl
-                    state._path_is_dir = False
-                    state.project = projects_dir.name
-                    logger.info("JSONL watcher updated monitor entry  tmux=%s  jsonl=%s", tmux_name, new_jsonl.stem)
-                else:
-                    # Fallback: register fresh if initial entry was lost
-                    await session_monitor.register(
-                        session_id=new_jsonl.stem,
-                        tmux_name=tmux_name,
-                        session_type="terminal",
-                        project=projects_dir.name,
-                        jsonl_path=new_jsonl,
-                    )
+                # UPDATE the DB row with session_uuid and jsonl_path
+                dashboard_db.update_jsonl_link(
+                    tmux_name,
+                    session_uuid=new_jsonl.stem,
+                    jsonl_path=str(new_jsonl),
+                    project=projects_dir.name,
+                )
                 return
         logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
 
@@ -2542,13 +2522,17 @@ def _tmux_session_exists(name: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+_DASHBOARD_PREFIXES = ("auto-", "host-", "chat-", "chatwith-")
+
+
 def _list_dashboard_tmux() -> list[str]:
-    """List all tmux sessions created by the dashboard (prefixed 'auto-')."""
+    """List all tmux sessions created by the dashboard."""
     result = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
                             capture_output=True, text=True)
     if result.returncode != 0:
         return []
-    return [s for s in result.stdout.strip().split("\n") if s.startswith("auto-")]
+    return [s for s in result.stdout.strip().split("\n")
+            if any(s.startswith(p) for p in _DASHBOARD_PREFIXES)]
 
 
 def _detect_terminal_type(tmux_name: str) -> dict:
@@ -2618,12 +2602,14 @@ async def ws_terminal(websocket: WebSocket):
         # Create a new tmux session
         cmd_str = params.get("cmd", "/bin/bash")
         if not term_id:
-            # Find first unused auto-t{N} name
-            existing = set(_list_dashboard_tmux())
-            n = 1
-            while f"auto-t{n}" in existing:
-                n += 1
-            term_id = f"auto-t{n}"
+            # Unique, type-prefixed naming — no reuse ever
+            is_container_cmd_hint = "autonomy-agent" in cmd_str
+            prefix = "auto" if is_container_cmd_hint else "host"
+            term_id = f"{prefix}-{time.strftime('%m%d-%H%M%S')}"
+            # Handle sub-second collisions
+            if dashboard_db.session_exists(term_id):
+                import random
+                term_id = f"{prefix}-{time.strftime('%m%d-%H%M%S')}-{random.randint(10,99)}"
         tmux_name = term_id
 
         # Resolve special container commands
@@ -2679,18 +2665,17 @@ async def ws_terminal(websocket: WebSocket):
         subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
                         capture_output=True)
 
-        # For host Claude sessions, register immediately then watch for JSONL
+        # For host Claude sessions, register with jsonl_path=None, then watch for JSONL
         if not is_container_cmd and "claude" in cmd_str.lower():
             logger.info("ws_terminal: starting host Claude session  tmux=%s", tmux_name)
             project_folder = str(_REPO_ROOT).replace("/", "-")
             projects_dir = Path.home() / ".claude" / "projects" / project_folder
-            # Register immediately so session appears in dashboard before JSONL exists
+            # INSERT into DB with no jsonl_path — watcher will UPDATE it
             await session_monitor.register(
-                session_id=tmux_name,
                 tmux_name=tmux_name,
-                session_type="terminal",
+                session_type="host",
                 project=project_folder,
-                jsonl_path=projects_dir,
+                # jsonl_path deliberately None — watcher is the ONLY code that sets it
             )
             asyncio.create_task(
                 _watch_for_host_session_jsonl(projects_dir, tmux_name)
@@ -2699,34 +2684,27 @@ async def ws_terminal(websocket: WebSocket):
             logger.info("ws_terminal: starting container session  tmux=%s", tmux_name)
             # Register with monitor — JSONL path is a directory (resolved by tailer)
             agent_runs = _REPO_ROOT / "data" / "agent-runs"
-            # Container sessions write to data/agent-runs/{tmux_name}-*/sessions/
-            # We pass the agent-runs dir; the tailer resolves the actual JSONL.
-            # Look for matching run dir (created by launch_session)
             run_dirs = sorted(agent_runs.glob(f"{tmux_name}-*"), key=lambda p: p.stat().st_mtime, reverse=True) if agent_runs.exists() else []
             sess_dir = run_dirs[0] / "sessions" if run_dirs else agent_runs
             await session_monitor.register(
-                session_id=tmux_name,
                 tmux_name=tmux_name,
-                session_type="terminal",
+                session_type="container",
                 project=sess_dir.name,
-                jsonl_path=sess_dir,
+                jsonl_path=sess_dir,  # directory — monitor will resolve to actual JSONL
             )
 
-    # Track it — only set cmd/env on initial creation, not re-attach
-    if tmux_name not in _active_terminals:
-        if attach:
-            # Reconnecting to a session we lost track of (server restart)
-            info = _detect_terminal_type(tmux_name)
-            info["started"] = asyncio.get_event_loop().time()
-            _active_terminals[tmux_name] = info
-        else:
-            orig_cmd = params.get("cmd", "/bin/bash")
-            is_container = "autonomy-agent" in orig_cmd
-            _active_terminals[tmux_name] = {
-                "cmd": orig_cmd,
-                "env": "container" if is_container else "host",
-                "started": asyncio.get_event_loop().time(),
-            }
+    # Ensure session is in DB (attach to existing sessions not yet tracked)
+    if attach and not dashboard_db.session_exists(tmux_name):
+        info = _detect_terminal_type(tmux_name)
+        stype = "container" if info["env"] == "container" else "host"
+        try:
+            await session_monitor.register(
+                tmux_name=tmux_name,
+                session_type=stype,
+                project="unknown",
+            )
+        except Exception:
+            pass  # already exists
 
     # Now attach to the tmux session via a PTY
     master_fd, slave_fd = pty.openpty()
@@ -3698,9 +3676,10 @@ routes = [
 
 async def _on_startup():
     from agents.dispatch_db import init_db
-    init_db()  # ensure schema exists (idempotent — all CREATE IF NOT EXISTS)
-    # Recover active sessions from filesystem, then start background tasks
-    await session_monitor.recover()
+    init_db()  # ensure dispatch schema exists
+    dashboard_db.init_db()  # ensure dashboard.db schema exists
+    # Seed from filesystem on first run (one-time), then start background tasks
+    await session_monitor.seed_from_filesystem()
     await session_monitor.start(event_bus=event_bus, entry_parser=_parse_jsonl_entry)
     asyncio.create_task(_dispatch_watcher())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
