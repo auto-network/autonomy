@@ -208,9 +208,10 @@
   window.registerHandler = registerHandler;
   window.unregisterHandler = unregisterHandler;
 
-  // Register Alpine store for SSE interruption banner
+  // Register Alpine stores
   document.addEventListener('alpine:init', function() {
     Alpine.store('app', { sseInterrupted: false });
+    Alpine.store('pinned', { beads: [] });
   });
 
   // Defer connection to next microtask so synchronous handler registrations

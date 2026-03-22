@@ -121,6 +121,10 @@ def _runs() -> list[dict]:
 
 # ── beads DAO interface ──────────────────────────────────────────────
 
+def get_beads_by_label(label: str) -> list[dict]:
+    return [b for b in _beads() if label in (b.get("labels") or [])]
+
+
 def get_open_beads(limit: int = 200) -> list[dict]:
     return [b for b in _beads() if b["status"] != "closed"][:limit]
 
