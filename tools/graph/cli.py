@@ -54,6 +54,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve
+from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions
 
 
 def cmd_ingest(args):
@@ -540,6 +541,9 @@ def cmd_seed(args):
 
 def cmd_sessions(args):
     """Ingest Claude Code sessions."""
+    if is_api_mode():
+        api_sessions(args)
+        return
     db = GraphDB(args.db)
 
     if args.all:
@@ -687,6 +691,9 @@ def cmd_playbooks(args):
 
 def cmd_bead(args):
     """Create a bead with provenance — links to the source conversation turns that inspired it."""
+    if is_api_mode():
+        api_bead(args)
+        return
     import subprocess
     db = GraphDB(args.db)
     from .models import Edge
@@ -773,6 +780,9 @@ def cmd_bead(args):
 
 def cmd_link(args):
     """Create a provenance edge between a bead and session turns."""
+    if is_api_mode():
+        api_link(args)
+        return
     db = GraphDB(args.db)
     from .models import Edge
 
@@ -907,9 +917,15 @@ def cmd_note_router(args):
             sys.exit(1)
         args.source = args.text[1]
         args.text = args.text[2:]
-        cmd_note_update(args)
+        if is_api_mode():
+            api_note_update(args)
+        else:
+            cmd_note_update(args)
     else:
-        cmd_note(args)
+        if is_api_mode():
+            api_note(args)
+        else:
+            cmd_note(args)
 
 
 def _check_single_line_content(content: str, force: bool) -> None:
@@ -982,12 +998,18 @@ def cmd_comment_router(args):
             print("Error: usage: graph comment integrate <comment_id>", file=sys.stderr)
             sys.exit(1)
         args.comment_id = positionals[1]
-        cmd_comment_integrate(args)
+        if is_api_mode():
+            api_comment_integrate(args)
+        else:
+            cmd_comment_integrate(args)
     else:
         # add mode: first arg is source, rest is text
         args.source = positionals[0] if positionals else None
         args.text = positionals[1:] if len(positionals) > 1 else []
-        cmd_comment_add(args)
+        if is_api_mode():
+            api_comment_add(args)
+        else:
+            cmd_comment_add(args)
 
 
 def cmd_comment_add(args):

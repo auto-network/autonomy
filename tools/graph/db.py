@@ -57,12 +57,19 @@ def _sanitize_fts_query(query: str, or_mode: bool = False) -> str:
 class GraphDB:
     def __init__(self, db_path: Path | str = DEFAULT_DB):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self._init_schema()
+        self.read_only = False
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(str(self.db_path))
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA journal_mode = WAL")
+            self.conn.execute("PRAGMA foreign_keys = ON")
+            self._init_schema()
+        except (sqlite3.OperationalError, OSError):
+            # Read-only mount — open in immutable mode for read commands
+            self.conn = sqlite3.connect(f"file:{self.db_path}?immutable=1", uri=True)
+            self.conn.row_factory = sqlite3.Row
+            self.read_only = True
 
     def _init_schema(self):
         schema = SCHEMA_PATH.read_text()
