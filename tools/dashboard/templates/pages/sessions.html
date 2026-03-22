@@ -32,24 +32,18 @@
     <div class="space-y-2">
       <template x-for="s in interactive" :key="s.session_id">
         <a :href="'/session/' + encodeURIComponent(s.project) + '/' + s.session_id + (s.tmux_session ? '?tmux=' + encodeURIComponent(s.tmux_session) : '')"
-           class="block p-4 bg-gray-800 rounded-lg border border-green-700 no-underline hover:bg-gray-750"
+           class="block p-3 bg-gray-800 rounded-lg border border-green-700 no-underline hover:bg-gray-750"
            :data-session-id="s.session_id">
-          <div class="flex items-center gap-3 mb-2">
-            <span class="w-2 h-2 rounded-full" :class="s._starting ? 'bg-yellow-400 animate-pulse' : (s.active ? 'bg-green-400' : 'bg-yellow-400')"></span>
-            <span class="font-mono text-sm text-gray-400" x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></span>
-            <span class="text-xs text-indigo-400" x-text="'[' + s._project + ']'"></span>
-            <template x-if="s._hasData">
-              <span class="text-xs text-gray-500" x-text="s._sizeStr"></span>
-            </template>
-            <template x-if="s._starting">
-              <span class="text-xs text-yellow-400 ml-auto">Starting...</span>
-            </template>
-            <template x-if="!s._starting">
-              <span class="text-xs text-gray-500 ml-auto" x-text="s._ageStr"></span>
-            </template>
+          <div class="flex items-center gap-3 mb-1">
+            <span class="w-2 h-2 rounded-full" :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
+            <span class="font-medium text-sm text-gray-200 flex-1 truncate" x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></span>
+            <span class="text-xs text-gray-500" x-text="s._createdStr"></span>
           </div>
           <template x-if="s._hasData">
-            <div class="text-sm text-gray-300 truncate" x-text="s.latest || '...'"></div>
+            <div class="flex items-center gap-2 pl-5">
+              <span class="flex-1 text-sm text-gray-400 truncate" x-text="s.latest || '...'"></span>
+              <span class="text-xs text-gray-600 whitespace-nowrap" x-text="s._lastActiveStr"></span>
+            </div>
           </template>
         </a>
       </template>
@@ -65,20 +59,18 @@
     <div class="space-y-2">
       <template x-for="s in agents" :key="s.session_id">
         <a :href="'/session/' + encodeURIComponent(s.project) + '/' + s.session_id"
-           class="block p-4 bg-gray-800 rounded-lg border border-blue-800 no-underline hover:bg-gray-750"
+           class="block p-3 bg-gray-800 rounded-lg border border-blue-800 no-underline hover:bg-gray-750"
            :data-session-id="s.session_id">
-          <div class="flex items-center gap-3 mb-2">
-            <span class="w-2 h-2 rounded-full" :class="s.active ? 'bg-blue-400' : 'bg-gray-500'"></span>
-            <span class="font-mono text-sm text-gray-400" x-text="s.label || (s.bead_id ? (s.bead_id + ' · ' + s.type) : (s.type + ' · ' + s.session_id.slice(0, 8)))"></span>
-            <span class="text-xs text-indigo-400" x-text="'[' + s._project + ']'"></span>
-            <span class="text-xs text-gray-500" x-text="s.type"></span>
-            <template x-if="s._hasData">
-              <span class="text-xs text-gray-500" x-text="s._sizeStr"></span>
-            </template>
-            <span class="text-xs text-gray-500 ml-auto" x-text="s._ageStr"></span>
+          <div class="flex items-center gap-3 mb-1">
+            <span class="w-2 h-2 rounded-full" :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
+            <span class="font-medium text-sm text-gray-200 flex-1 truncate" x-text="s.label || (s.bead_id ? s.bead_id : s.tmux_session) || s.session_id.slice(0, 12)"></span>
+            <span class="text-xs text-gray-500" x-text="s._createdStr"></span>
           </div>
           <template x-if="s._hasData">
-            <div class="text-sm text-gray-300 truncate" x-text="s.latest || '...'"></div>
+            <div class="flex items-center gap-2 pl-5">
+              <span class="flex-1 text-sm text-gray-400 truncate" x-text="s.latest || '...'"></span>
+              <span class="text-xs text-gray-600 whitespace-nowrap" x-text="s._lastActiveStr"></span>
+            </div>
           </template>
         </a>
       </template>
