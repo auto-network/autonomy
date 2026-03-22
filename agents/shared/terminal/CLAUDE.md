@@ -68,7 +68,7 @@ See `agents/shared/dashboard/agent-browser-primer.md` for dashboard-specific pat
 
 ## Bead Polishing Protocol
 When formulating or refining beads, read the protocol directly:
-`graph://c6473a19-52d`  (resolves to: `graph read c6473a19-52d`)
+`graph://f6c6c43e-24a`  (resolves to: `graph read f6c6c43e-24a`)
 
 ## Working Style
 - In design discussions, your role is to formulate and polish beads — not to dispatch or implement while the design is ongoing. The user will signal when work is ready to dispatch.
