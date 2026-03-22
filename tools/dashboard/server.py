@@ -1599,6 +1599,10 @@ def _classify_system_message(text: str) -> dict | None:
     return None
 
 
+# Track recently queued message content to dedup against subsequent user entries
+_recent_enqueue_content: set[str] = set()
+
+
 def _parse_jsonl_entry(line: str) -> dict | None:
     """Parse a single JSONL line into a display entry."""
     try:
@@ -1612,10 +1616,12 @@ def _parse_jsonl_entry(line: str) -> dict | None:
 
     # Queued user messages: sent while agent was working, logged as queue-operation
     # instead of user. Render enqueue entries with content as user messages.
+    # Track content so we can dedup if the same text also appears as a user entry.
     if entry_type == "queue-operation":
         op = raw.get("operation")
         content = raw.get("content", "")
         if op == "enqueue" and content and not content.startswith("<task-notification"):
+            _recent_enqueue_content.add(content.strip())
             return {"type": "user", "content": content, "timestamp": timestamp, "queued": True}
         return None
 
@@ -1673,12 +1679,17 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                     "timestamp": timestamp,
                 })
             else:
-                entries.append({
-                    "type": "user",
-                    "role": "user",
-                    "content": text[:2000],
-                    "timestamp": timestamp,
-                })
+                # Dedup: if this text was already emitted as a queued message
+                # (queue-operation/enqueue), skip the duplicate user entry
+                if text.strip() in _recent_enqueue_content:
+                    _recent_enqueue_content.discard(text.strip())
+                else:
+                    entries.append({
+                        "type": "user",
+                        "role": "user",
+                        "content": text[:2000],
+                        "timestamp": timestamp,
+                    })
 
         entries.extend(tool_results)
 
