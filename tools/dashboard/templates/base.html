@@ -393,6 +393,29 @@
         border-color: #374151; /* gray-700 — subtle instead of indigo-500 */
       }
     }
+    /* SSE interruption banner — fixed above session viewer */
+    .sse-banner {
+      position: fixed;
+      z-index: 20;
+      top: calc(env(safe-area-inset-top, 0px) + 3rem);
+      left: 0;
+      right: 0;
+    }
+    @media (min-width: 768px) {
+      .sse-banner {
+        top: 0;
+        left: 14rem;
+      }
+    }
+    /* Shift session viewer down when banner is visible */
+    body.sse-banner-visible .session-viewer {
+      top: calc(env(safe-area-inset-top, 0px) + 3rem + 2.5rem);
+    }
+    @media (min-width: 768px) {
+      body.sse-banner-visible .session-viewer {
+        top: 2.5rem;
+      }
+    }
     /* Session viewer layout — four fixed zones */
     .session-viewer {
       position: fixed;
@@ -538,8 +561,9 @@
 
     <!-- SSE interruption banner — shown on server restart or unrecoverable gap -->
     <div x-data x-show="$store.app.sseInterrupted"
+         x-effect="document.body.classList.toggle('sse-banner-visible', !!$store.app.sseInterrupted)"
          x-cloak
-         class="bg-amber-700 text-white text-sm px-4 py-2 flex items-center justify-between flex-shrink-0"
+         class="sse-banner bg-amber-700 text-white text-sm px-4 py-2 flex items-center justify-between flex-shrink-0"
          style="display:none;">
       <span x-text="$store.app.sseInterrupted"></span>
       <div class="flex gap-2 ml-4">
