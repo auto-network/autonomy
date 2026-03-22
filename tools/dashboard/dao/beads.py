@@ -257,6 +257,24 @@ def get_bead(bead_id: str) -> dict | None:
     return bead
 
 
+def get_beads_by_label(label: str) -> list[dict]:
+    """Return beads that have a specific label. Used for pinned beads strip."""
+    conn = _get_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT {_BEAD_COLS}
+            FROM issues i
+            JOIN labels la ON la.issue_id = i.id AND la.label = %s
+            LEFT JOIN labels l ON l.issue_id = i.id
+            GROUP BY i.id
+            ORDER BY i.priority ASC, i.updated_at DESC
+            """,
+            (label,),
+        )
+        return [_coerce(r) for r in _rows(cur)]
+
+
 def get_open_beads(limit: int = 200) -> list[dict]:
     """Return the working set — all beads that are not closed.
 
