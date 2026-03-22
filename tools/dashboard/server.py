@@ -2406,6 +2406,7 @@ async def api_session_confirm_link(request):
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
     # LINK + ENRICH: set session_uuid, jsonl_path, and graph_source_id
+    logger.info("confirm-link: %s → uuid=%s  project=%s", tmux_session, session_id[:12], project)
     dashboard_db.link_and_enrich(
         tmux_session,
         session_uuid=session_id,
