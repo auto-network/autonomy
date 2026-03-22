@@ -38,7 +38,7 @@
             <span class="w-2 h-2 rounded-full" :class="s._starting ? 'bg-yellow-400 animate-pulse' : (s.active ? 'bg-green-400' : 'bg-yellow-400')"></span>
             <span class="font-mono text-sm text-gray-400" x-text="s.tmux_session || s.session_id.slice(0, 12)"></span>
             <span class="text-xs text-indigo-400" x-text="'[' + s._project + ']'"></span>
-            <template x-if="!s._starting">
+            <template x-if="s._hasData">
               <span class="text-xs text-gray-500" x-text="s._sizeStr"></span>
             </template>
             <template x-if="s._starting">
@@ -48,7 +48,9 @@
               <span class="text-xs text-gray-500 ml-auto" x-text="s._ageStr"></span>
             </template>
           </div>
-          <div class="text-sm text-gray-300 truncate" x-text="s._starting ? '' : (s.latest || '...')"></div>
+          <template x-if="s._hasData">
+            <div class="text-sm text-gray-300 truncate" x-text="s.latest || '...'"></div>
+          </template>
         </a>
       </template>
     </div>
@@ -70,10 +72,14 @@
             <span class="font-mono text-sm text-gray-400" x-text="s.bead_id ? (s.bead_id + ' · ' + s.type) : (s.type + ' · ' + s.session_id.slice(0, 8))"></span>
             <span class="text-xs text-indigo-400" x-text="'[' + s._project + ']'"></span>
             <span class="text-xs text-gray-500" x-text="s.type"></span>
-            <span class="text-xs text-gray-500" x-text="s._sizeStr"></span>
+            <template x-if="s._hasData">
+              <span class="text-xs text-gray-500" x-text="s._sizeStr"></span>
+            </template>
             <span class="text-xs text-gray-500 ml-auto" x-text="s._ageStr"></span>
           </div>
-          <div class="text-sm text-gray-300 truncate" x-text="s.latest || '...'"></div>
+          <template x-if="s._hasData">
+            <div class="text-sm text-gray-300 truncate" x-text="s.latest || '...'"></div>
+          </template>
         </a>
       </template>
     </div>

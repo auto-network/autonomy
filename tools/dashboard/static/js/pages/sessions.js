@@ -87,16 +87,20 @@
           if (!s.isLive) continue;
           var lastEntry = s.entries.length > 0 ? s.entries[s.entries.length - 1] : null;
           var sizeVal = s.sizeMB ? parseFloat(s.sizeMB) : 0;
+          var ageSeconds = Math.round(now - (s.startedAt || now));
+          var hasData = s.entries.length > 0 || (s.sizeMB && sizeVal > 0);
+          var isNew = ageSeconds < 30;
           all.push({
             session_id: id,
             project: s.project || '',
             size_bytes: sizeVal * 1048576,
-            age_seconds: Math.round(now - (s.startedAt || now)),
-            active: s.lastActivity > 0 && (now - s.lastActivity) < 60,
+            age_seconds: ageSeconds,
+            active: hasData && s.lastActivity > 0 && (now - s.lastActivity) < 60,
             latest: lastEntry ? (lastEntry.content || '').slice(0, 150) : '',
             type: s.sessionType || 'terminal',
             tmux_session: s.tmuxSession || '',
-            _starting: s.entries.length === 0 && sizeVal === 0,
+            _starting: isNew && !hasData,
+            _hasData: !!hasData,
           });
         }
         if (all.length > 0 || !this.loading) {
