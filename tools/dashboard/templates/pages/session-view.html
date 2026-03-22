@@ -38,6 +38,8 @@
         <template x-if="!isLive">
           <span class="badge badge-closed text-xs">Complete</span>
         </template>
+        <span class="text-xs text-gray-500" x-show="contextTokens > 0"
+              x-text="Math.round(contextTokens / 1000) + 'k ctx'"></span>
         <span class="text-xs text-gray-500 ml-auto" x-show="!isLive" x-text="entries.length + ' total'"></span>
       </div>
 

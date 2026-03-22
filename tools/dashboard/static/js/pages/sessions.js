@@ -2,8 +2,8 @@
 // Registered via alpine:init so it's available when the fragment is injected and
 // Alpine.initTree() is called by the SPA router.
 //
-// Subscribes to SSE 'sessions' topic for active sessions (pushed by session monitor).
-// Fetches recent sessions from DAO endpoint on init + periodic refresh.
+// Reads active sessions from Alpine.store('sessions') (fed by session:registry
+// and session:messages SSE topics). Fetches recent sessions from DAO endpoint.
 
 (function () {
 
@@ -42,9 +42,42 @@
       loading: true,
 
       init() {
-        // Subscribe to SSE 'sessions' topic for active session data
-        this._sseHandler = (data) => {
-          const mapped = (Array.isArray(data) ? data : []).map(_mapActive);
+        // Ensure global SSE handlers are registered
+        window.ensureSessionMessages();
+
+        // Build session list from store (poll every 500ms)
+        this._updateFromStore();
+        this._storeWatcher = setInterval(() => this._updateFromStore(), 500);
+
+        // Fetch recent sessions (from graph.db, not monitor)
+        this._fetchRecent();
+        this._recentTimer = setInterval(() => this._fetchRecent(), 30000);
+
+        // Seed stores from HTTP if SSE hasn't delivered registry yet
+        this._fetchActiveFallback();
+      },
+
+      _updateFromStore() {
+        var allSessions = Alpine.store('sessions');
+        var now = Date.now() / 1000;
+        var all = [];
+        for (var id in allSessions) {
+          var s = allSessions[id];
+          if (!s.isLive) continue;
+          var lastEntry = s.entries.length > 0 ? s.entries[s.entries.length - 1] : null;
+          all.push({
+            session_id: id,
+            project: s.project || '',
+            size_bytes: s.sizeMB ? parseFloat(s.sizeMB) * 1048576 : 0,
+            age_seconds: Math.round(now - (s.startedAt || now)),
+            active: s.lastActivity > 0 && (now - s.lastActivity) < 60,
+            latest: lastEntry ? (lastEntry.content || '').slice(0, 150) : '',
+            type: s.sessionType || 'terminal',
+            tmux_session: s.tmuxSession || '',
+          });
+        }
+        if (all.length > 0 || !this.loading) {
+          var mapped = all.map(_mapActive);
           this.interactive = mapped.filter(s =>
             s.tmux_session && (s.type === 'terminal' || s.type === 'chatwith')
           );
@@ -54,17 +87,6 @@
             !s.session_id.startsWith('agent-') && s.project !== 'subagents'
           );
           this.loading = false;
-        };
-        window.registerHandler('sessions', this._sseHandler);
-
-        // Fetch recent sessions (from graph.db, not monitor)
-        this._fetchRecent();
-        this._recentTimer = setInterval(() => this._fetchRecent(), 30000);
-
-        // If SSE hasn't delivered data yet, do one initial fetch for active sessions
-        // as a fallback (e.g., first page load before monitor broadcasts)
-        if (!window._sseCache || !window._sseCache.sessions) {
-          this._fetchActiveFallback();
         }
       },
 
@@ -80,8 +102,16 @@
       async _fetchActiveFallback() {
         try {
           const data = await fetch('/api/dao/active_sessions').then(r => r.json());
-          if (data && (!this.interactive.length && !this.agents.length)) {
-            this._sseHandler(data);
+          if (Array.isArray(data)) {
+            for (var i = 0; i < data.length; i++) {
+              var s = data[i];
+              var store = window.getSessionStore(s.session_id);
+              store.project = s.project || '';
+              store.sessionType = s.type || '';
+              store.tmuxSession = s.tmux_session || '';
+              store.isLive = s.is_live !== false;
+              store.startedAt = s.started_at || 0;
+            }
           }
         } catch (e) {
           console.warn('[sessionsPage] fallback fetch error', e);
@@ -89,9 +119,7 @@
       },
 
       destroy() {
-        if (this._sseHandler) {
-          window.unregisterHandler('sessions', this._sseHandler);
-        }
+        if (this._storeWatcher) clearInterval(this._storeWatcher);
         if (this._recentTimer) clearInterval(this._recentTimer);
       },
     }));

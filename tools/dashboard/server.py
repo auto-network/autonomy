@@ -3031,7 +3031,7 @@ async def page_sessions_fragment(request):
 
 async def api_dao_active_sessions(request):
     # Read directly from session monitor — zero filesystem access
-    sessions = session_monitor.get_all_as_dicts()
+    sessions = session_monitor.get_registry()
     return JSONResponse(sessions)
 
 async def api_dao_recent_sessions(request):

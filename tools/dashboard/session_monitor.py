@@ -17,7 +17,7 @@ Usage::
     )
 
     # Read from monitor (zero filesystem access)
-    all_sessions = session_monitor.get_all_as_dicts()
+    all_sessions = session_monitor.get_registry()
     count = session_monitor.count()
 
     # Start background tasks (called from _on_startup)
@@ -56,6 +56,7 @@ class SessionState:
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     size_bytes: int = 0
+    context_tokens: int = 0
 
     # Internal: True if jsonl_path is a directory (needs resolution)
     _path_is_dir: bool = False
@@ -156,7 +157,7 @@ class SessionMonitor:
             "session_monitor: registered %s  tmux=%s  type=%s  project=%s",
             session_id, tmux_name, session_type, project,
         )
-        await self._broadcast()
+        await self._broadcast_registry()
 
     async def deregister(self, session_id: str) -> None:
         """Remove a session from the monitor."""
@@ -167,7 +168,7 @@ class SessionMonitor:
                 "session_monitor: deregistered %s  tmux=%s",
                 session_id, removed.tmux_name,
             )
-            await self._broadcast()
+            await self._broadcast_registry()
 
     # ── Queries ───────────────────────────────────────────────────
 
@@ -182,29 +183,20 @@ class SessionMonitor:
         """Count live sessions."""
         return sum(1 for s in self._sessions.values() if s.is_live)
 
-    def get_all_as_dicts(self) -> list[dict]:
-        """Return all sessions in the API response shape."""
-        now = time.time()
-        result = []
+    def get_registry(self) -> list[dict]:
+        """Return registry of active sessions (lightweight roster)."""
+        registry = []
         for s in self._sessions.values():
-            if not s.is_live:
-                continue
-            entry: dict[str, Any] = {
-                "session_id": s.session_id,
-                "project": s.project,
-                "size_bytes": s.size_bytes,
-                "age_seconds": round(now - s.started_at),
-                "active": (now - s.last_activity) < 60,
-                "latest": s.last_message,
-                "type": s.session_type,
-            }
-            if s.tmux_name:
-                entry["tmux_session"] = s.tmux_name
-            if s.bead_id:
-                entry["bead_id"] = s.bead_id
-            result.append(entry)
-        result.sort(key=lambda e: e["age_seconds"])
-        return result
+            if s.is_live:
+                registry.append({
+                    "session_id": s.session_id,
+                    "project": s.project,
+                    "type": s.session_type,
+                    "tmux_session": s.tmux_name,
+                    "is_live": s.is_live,
+                    "started_at": s.started_at,
+                })
+        return registry
 
     # ── Background tasks ──────────────────────────────────────────
 
@@ -228,12 +220,11 @@ class SessionMonitor:
         self._liveness_task = asyncio.create_task(self._liveness_loop())
         logger.info("session_monitor: background tasks started")
 
-    async def _broadcast(self) -> None:
-        """Push current session list to SSE subscribers."""
+    async def _broadcast_registry(self) -> None:
+        """Push session registry to SSE subscribers."""
         if self._event_bus is None:
             return
-        payload = self.get_all_as_dicts()
-        await self._event_bus.broadcast("sessions", payload)
+        await self._event_bus.broadcast("session:registry", self.get_registry())
 
     # ── JSONL Tailer ──────────────────────────────────────────────
 
@@ -241,14 +232,11 @@ class SessionMonitor:
         """Check all registered sessions for new JSONL content every 1s."""
         while True:
             try:
-                summary_changed = False
                 sessions = list(self._sessions.values())
                 for state in sessions:
                     if not state.is_live:
                         continue
-                    did_change, new_entries = await asyncio.to_thread(self._tail_one, state)
-                    if did_change:
-                        summary_changed = True
+                    _, new_entries = await asyncio.to_thread(self._tail_one, state)
                     if new_entries:
                         if self._entry_enricher:
                             try:
@@ -258,12 +246,17 @@ class SessionMonitor:
                     if new_entries and self._event_bus:
                         state._broadcast_seq += 1
                         await self._event_bus.broadcast(
-                            f"session:{state.session_id}",
-                            {"entries": new_entries, "is_live": state.is_live, "seq": state._broadcast_seq},
+                            "session:messages",
+                            {
+                                "session_id": state.session_id,
+                                "entries": new_entries,
+                                "is_live": state.is_live,
+                                "seq": state._broadcast_seq,
+                                "context_tokens": state.context_tokens,
+                                "size_bytes": state.size_bytes,
+                            },
                             dedup=False,
                         )
-                if summary_changed:
-                    await self._broadcast()
             except Exception:
                 logger.exception("session_monitor: tailer error")
             await asyncio.sleep(1)
@@ -344,6 +337,16 @@ class SessionMonitor:
             if text:
                 state.last_message = text
 
+            # Extract context_tokens from assistant usage
+            if entry.get("type") == "assistant":
+                usage = entry.get("message", {}).get("usage", {})
+                if usage:
+                    ctx = (usage.get("input_tokens", 0)
+                           + usage.get("cache_creation_input_tokens", 0)
+                           + usage.get("cache_read_input_tokens", 0))
+                    if ctx > 0:
+                        state.context_tokens = ctx
+
             # Parse full entry for SSE broadcast
             if self._entry_parser:
                 try:
@@ -417,7 +420,7 @@ class SessionMonitor:
                     changed = True
 
                 if changed:
-                    await self._broadcast()
+                    await self._broadcast_registry()
 
             except Exception:
                 logger.exception("session_monitor: liveness error")
