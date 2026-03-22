@@ -69,7 +69,7 @@
       showMoreContext() {
         this.contextWindow += 5;
         const url = `/source/${this.id}?turn=${this.targetTurn}&window=${this.contextWindow}`;
-        history.pushState({}, '', url);
+        history.replaceState({}, '', url);
         this._updateVisibleEntries();
       },
 
