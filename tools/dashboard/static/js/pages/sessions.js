@@ -107,11 +107,12 @@
         }
         if (all.length > 0 || !this.loading) {
           var mapped = all.map(_mapActive);
+          var interactiveTypes = ['terminal', 'chatwith', 'host', 'container'];
           this.interactive = mapped.filter(s =>
-            s.tmux_session && (s.type === 'terminal' || s.type === 'chatwith')
+            s.tmux_session && interactiveTypes.indexOf(s.type) !== -1
           );
           this.agents = mapped.filter(s =>
-            !s.tmux_session || (s.type !== 'terminal' && s.type !== 'chatwith')
+            !s.tmux_session || interactiveTypes.indexOf(s.type) === -1
           ).filter(s =>
             !s.session_id.startsWith('agent-') && s.project !== 'subagents'
           );
