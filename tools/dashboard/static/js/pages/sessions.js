@@ -51,7 +51,7 @@
       loading: true,
       _creating: false,
       _longPressTimer: null,
-      _longPressTarget: null,
+      _longPressFired: false,
 
       init() {
         // Ensure global SSE handlers are registered
@@ -160,21 +160,20 @@
       },
 
       navigate(s) {
-        if (!this._longPressTimer && this._longPressTarget) {
-          // Long press just fired, skip the click
-          this._longPressTarget = null;
+        if (this._longPressFired) {
+          this._longPressFired = false;
           return;
         }
-        this._longPressTarget = null;
         var path = '/session/' + encodeURIComponent(s.project) + '/' + s.session_id
           + (s.tmux_session ? '?tmux=' + encodeURIComponent(s.tmux_session) : '');
         navigateTo(path);
       },
 
       startLongPress(s, event) {
-        this._longPressTarget = s;
+        this._longPressFired = false;
         this._longPressTimer = setTimeout(() => {
           this._longPressTimer = null;
+          this._longPressFired = true;
           this.showCloseConfirm(s);
         }, 500);
       },
@@ -184,6 +183,7 @@
           clearTimeout(this._longPressTimer);
           this._longPressTimer = null;
         }
+        this._longPressFired = false;
       },
 
       async showCloseConfirm(s) {
