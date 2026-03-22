@@ -1,6 +1,6 @@
 """API client for routing graph write commands through the dashboard server.
 
-When GRAPH_API env var is set (e.g. GRAPH_API=http://localhost:8080),
+When GRAPH_API env var is set (e.g. GRAPH_API=https://localhost:8080),
 write commands POST to the dashboard server instead of opening the DB directly.
 This enables the single-writer architecture: containers mount graph.db read-only
 and all writes go through the host dashboard server.
@@ -11,11 +11,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import sys
 import urllib.error
 import urllib.request
 
 GRAPH_API = os.environ.get("GRAPH_API")
+
+# Accept self-signed certs — dashboard uses Tailscale TLS
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 # Validation patterns
 _SOURCE_ID_RE = re.compile(r'^[0-9a-f-]+$', re.IGNORECASE)
@@ -38,7 +44,7 @@ def _post(endpoint: str, data: dict) -> dict:
         method="POST",
     )
     try:
-        resp = urllib.request.urlopen(req, timeout=30)
+        resp = urllib.request.urlopen(req, timeout=30, context=_SSL_CTX)
         result = json.loads(resp.read())
         return result
     except urllib.error.HTTPError as e:
