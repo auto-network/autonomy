@@ -40,6 +40,7 @@
       agents: [],
       recent: [],
       loading: true,
+      _creating: false,
 
       init() {
         // Ensure global SSE handlers are registered
@@ -55,6 +56,26 @@
 
         // Seed stores from HTTP if SSE hasn't delivered registry yet
         this._fetchActiveFallback();
+
+        // Handle new terminal creation from the + button dropdown
+        this._onCreateTerminal = (e) => {
+          var cmd = e.detail.cmd;
+          this._creating = true;
+          var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+          var wsUrl = proto + '//' + location.host + '/ws/terminal?cmd=' + encodeURIComponent(cmd);
+          var ws = new WebSocket(wsUrl);
+          var self = this;
+          ws.onopen = function () {
+            // Terminal created — close after 2s to let monitor register
+            setTimeout(function () {
+              ws.close();
+              self._creating = false;
+            }, 2000);
+          };
+          ws.onerror = function () { self._creating = false; };
+          ws.onclose = function () { self._creating = false; };
+        };
+        window.addEventListener('create-terminal', this._onCreateTerminal);
       },
 
       _updateFromStore() {
@@ -121,6 +142,7 @@
       destroy() {
         if (this._storeWatcher) clearInterval(this._storeWatcher);
         if (this._recentTimer) clearInterval(this._recentTimer);
+        if (this._onCreateTerminal) window.removeEventListener('create-terminal', this._onCreateTerminal);
       },
     }));
   });
