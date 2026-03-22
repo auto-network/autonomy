@@ -3122,7 +3122,8 @@ async def api_events_replay(request):
     if from_seq <= 0 or to_seq <= 0 or from_seq > to_seq:
         return JSONResponse({"error": "Invalid range"}, status_code=400)
     events, complete = event_bus.replay(from_seq, to_seq)
-    return JSONResponse({"events": events, "complete": complete})
+    status_code = 200 if complete else 206
+    return JSONResponse({"events": events, "complete": complete}, status_code=status_code)
 
 
 # ── Background watchers ───────────────────────────────────────
