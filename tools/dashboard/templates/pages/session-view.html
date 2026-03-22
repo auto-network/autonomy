@@ -27,7 +27,19 @@
 
       <!-- ZONE 2: Session header — flex child, always visible at top -->
       <div class="sv-header">
-        <span class="text-xs font-mono text-gray-500" x-text="sessionId.slice(0, 12)"></span>
+        <!-- Inline-editable label (live sessions only) -->
+        <template x-if="_tmuxSession">
+          <span class="text-xs font-mono text-gray-300 cursor-pointer hover:text-white border-b border-transparent hover:border-gray-500 min-w-[60px]"
+                :contenteditable="isLive"
+                @blur="saveLabel($event)"
+                @keydown.enter.prevent="$event.target.blur()"
+                @keydown.escape.prevent="$event.target.textContent = _label || _tmuxSession; $event.target.blur()"
+                x-text="_label || _tmuxSession"
+                :title="isLive ? 'Click to edit label' : _tmuxSession"></span>
+        </template>
+        <template x-if="!_tmuxSession">
+          <span class="text-xs font-mono text-gray-500" x-text="sessionId.slice(0, 12)"></span>
+        </template>
         <span class="text-xs text-indigo-400" x-text="'[' + projectLabel + ']'"></span>
         <template x-if="isLive">
           <span class="flex items-center gap-1">

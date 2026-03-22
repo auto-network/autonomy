@@ -31,6 +31,7 @@ window.getSessionStore = function(sessionId) {
       sessionType: '',
       tmuxSession: '',
       project: '',
+      label: '',
       startedAt: 0,
       contextTokens: 0,
       sizeMB: '0',
@@ -118,6 +119,7 @@ window.ensureSessionMessages = function() {
       store.project = s.project || '';
       store.sessionType = s.type || '';
       store.tmuxSession = s.tmux_session || '';
+      store.label = s.label || '';
       store.isLive = s.is_live;
       store.startedAt = s.started_at || 0;
     }
