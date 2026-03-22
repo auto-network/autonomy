@@ -779,7 +779,7 @@ def cmd_bead(args):
 
 
 def cmd_link(args):
-    """Create a provenance edge between a bead and session turns."""
+    """Create an edge between two graph nodes (bead, source, or note)."""
     if is_api_mode():
         api_link(args)
         return
@@ -795,12 +795,27 @@ def cmd_link(args):
         elif len(parts) == 1:
             turn_range = {"from": int(parts[0]), "to": int(parts[0])}
 
-    # Strict source resolution
+    # Resolve the first argument (from-node)
+    from_source, from_err = _resolve_source_for_link(db, args.bead)
+    if from_source:
+        resolved_from_id = from_source["id"]
+        resolved_from_type = from_source.get("type", "source")
+    elif args.bead.startswith("auto-"):
+        # Bead ID — use as-is
+        resolved_from_id = args.bead
+        resolved_from_type = "bead"
+    else:
+        print(f"Cannot resolve '{args.bead}' as a source or bead ID. "
+              f"Use 'graph search' to find the right ID.", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+
+    # Strict source resolution for the second argument (target)
     source, err = _resolve_source_for_link(db, args.source)
     if err:
         print(err, file=sys.stderr)
         db.close()
-        return
+        sys.exit(1)
 
     metadata = {}
     if turn_range:
@@ -809,8 +824,8 @@ def cmd_link(args):
         metadata["note"] = args.note
 
     db.insert_edge(Edge(
-        source_id=args.bead,
-        source_type="bead",
+        source_id=resolved_from_id,
+        source_type=resolved_from_type,
         target_id=source["id"],
         target_type="source",
         relation=args.relation,
@@ -819,7 +834,8 @@ def cmd_link(args):
     db.commit()
 
     turns_str = f" turns {args.turns}" if args.turns else ""
-    print(f"  ✓ {args.bead} —[{args.relation}]→ {source['id'][:12]}{turns_str}")
+    from_label = resolved_from_id if resolved_from_type == "bead" else resolved_from_id[:12]
+    print(f"  ✓ {from_label} —[{args.relation}]→ {source['id'][:12]}{turns_str}")
     db.close()
 
 
@@ -1730,8 +1746,8 @@ def main():
     p.set_defaults(func=cmd_bead)
 
     # link
-    p = sub.add_parser("link", help="Create provenance edge between bead and session turns")
-    p.add_argument("bead", help="Bead ID (e.g. auto-ov3)")
+    p = sub.add_parser("link", help="Create edge between two graph nodes (bead, source, or note)")
+    p.add_argument("bead", help="Source node: bead ID (auto-xxx), source/note ID, or prefix")
     p.add_argument("source", help="Source ID or prefix")
     p.add_argument("--relation", "-r", default="informed_by",
                    help="Relation type: informed_by, implemented_by, conceived_at, discussed_at (default: informed_by)")
