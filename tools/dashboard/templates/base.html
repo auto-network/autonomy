@@ -562,7 +562,7 @@
     <div x-data x-show="$store.app.sseInterrupted"
          x-effect="document.body.classList.toggle('sse-banner-visible', !!$store.app.sseInterrupted)"
          x-cloak
-         class="sse-banner bg-amber-700 text-white text-sm px-4 py-2 flex items-center justify-between flex-shrink-0"
+         class="sse-banner bg-amber-700 text-white text-sm px-4 py-2 flex items-center justify-between flex-shrink-0 min-h-[44px]"
          style="display:none;">
       <span x-text="$store.app.sseInterrupted"></span>
       <div class="flex gap-2 ml-4">
