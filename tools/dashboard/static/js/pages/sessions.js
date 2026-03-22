@@ -50,9 +50,6 @@
       recent: [],
       loading: true,
       _creating: false,
-      _longPressTimer: null,
-      _longPressFired: false,
-
       init() {
         // Ensure global SSE handlers are registered
         window.ensureSessionMessages();
@@ -160,27 +157,10 @@
       },
 
       navigate(s) {
-        if (this._longPressFired || window.actionSheet.isOpen()) return;
+        if (window.actionSheet.isOpen()) return;
         var path = '/session/' + encodeURIComponent(s.project) + '/' + s.session_id
           + (s.tmux_session ? '?tmux=' + encodeURIComponent(s.tmux_session) : '');
         navigateTo(path);
-      },
-
-      startLongPress(s, event) {
-        this._longPressFired = false;
-        this._longPressTimer = setTimeout(() => {
-          this._longPressTimer = null;
-          this._longPressFired = true;
-          this.showCloseConfirm(s);
-        }, 500);
-      },
-
-      cancelLongPress() {
-        if (this._longPressTimer) {
-          clearTimeout(this._longPressTimer);
-          this._longPressTimer = null;
-        }
-        // Do NOT reset _longPressFired here — it stays true while the action sheet is open
       },
 
       showCloseConfirm(s) {
@@ -201,7 +181,6 @@
       },
 
       destroy() {
-        this.cancelLongPress();
         if (this._storeWatcher) clearInterval(this._storeWatcher);
         if (this._recentTimer) clearInterval(this._recentTimer);
         if (this._onCreateTerminal) window.removeEventListener('create-terminal', this._onCreateTerminal);
