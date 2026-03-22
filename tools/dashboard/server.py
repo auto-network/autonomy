@@ -52,7 +52,7 @@ logging.basicConfig(
 )
 
 from tools.dashboard.event_bus import event_bus, _SERVER_EPOCH
-from tools.dashboard.session_monitor import session_monitor
+from tools.dashboard.session_monitor import count_tool_uses, session_monitor
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -1544,7 +1544,7 @@ async def api_chatwith_tail(request):
             else:
                 entries.append(parsed)
 
-    _enrich_entries(entries)
+    _enrich_entries(entries, session_dir=jsonl_path.parent / jsonl_path.stem)
     return JSONResponse({
         "entries": entries, "offset": new_offset, "is_live": is_live,
         "tmux_session": session_name,
@@ -1732,26 +1732,59 @@ def _parse_jsonl_entry(line: str) -> dict | None:
     return None
 
 
-def _enrich_entries(entries: list[dict]) -> None:
+def _enrich_entries(entries: list[dict], session_dir: Path | None = None) -> None:
     """Post-process parsed entries: pair tool_results with tool_uses.
 
-    Enriches Agent tool_results with subagent tool call counts when the
-    subagent JSONL file can be discovered.  Mutates entries in place.
+    Enriches Agent tool_results with subagent tool call counts by reading
+    the actual subagent JSONL files.  Mutates entries in place.
+
+    Args:
+        entries: Parsed JSONL entries (tool_use and tool_result dicts).
+        session_dir: Path to the session directory (parent of the JSONL file).
+            When provided, subagent files are discovered at
+            ``session_dir/{session_id}/subagents/*.meta.json``.
     """
-    tool_names: dict[str, str] = {}  # tool_id → tool_name
+    if session_dir is None:
+        return
+
+    agent_descriptions: dict[str, str] = {}  # tool_id -> description
+    claimed: set[str] = set()
+
     for entry in entries:
-        if entry.get("type") == "tool_use" and entry.get("tool_id"):
-            tool_names[entry["tool_id"]] = entry.get("tool_name", "")
+        if entry.get("type") == "tool_use" and entry.get("tool_name") == "Agent":
+            tool_id = entry.get("tool_id", "")
+            desc = entry.get("input", {}).get("description", "")
+            if tool_id and desc:
+                agent_descriptions[tool_id] = desc
+
         elif entry.get("type") == "tool_result" and entry.get("tool_id"):
-            name = tool_names.get(entry["tool_id"], "")
-            if name == "Agent" and "tool_calls" not in entry:
-                # Best-effort: count tool_use lines in the result content
-                # (subagent JSONL is not accessible from here — approximate
-                # from the text summary the Agent tool returns)
-                content = entry.get("content", "")
-                count = content.count('"type": "tool_use"') + content.count('"type":"tool_use"')
-                if count > 0:
-                    entry["tool_calls"] = count
+            tool_id = entry["tool_id"]
+            if tool_id not in agent_descriptions:
+                continue
+            target_desc = agent_descriptions[tool_id]
+
+            # Find the subagents directory — try multiple session ID patterns
+            # Container: session_dir/{uuid}/subagents/
+            # The session_dir is the parent of the JSONL file
+            subagents_dir = session_dir / "subagents"
+            if not subagents_dir.is_dir():
+                continue
+
+            for meta_path in sorted(subagents_dir.glob("*.meta.json")):
+                if str(meta_path) in claimed:
+                    continue
+                try:
+                    meta = json.loads(meta_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if meta.get("description") == target_desc:
+                    claimed.add(str(meta_path))
+                    jsonl_path = meta_path.with_suffix("").with_suffix(".jsonl")
+                    if jsonl_path.exists():
+                        count = count_tool_uses(jsonl_path)
+                        if count > 0:
+                            entry["tool_calls"] = count
+                    break
 
 
 def _find_session_files(run_name: str) -> list[Path]:
@@ -1816,7 +1849,7 @@ async def api_dispatch_tail(request):
             else:
                 entries.append(parsed)
 
-    _enrich_entries(entries)
+    _enrich_entries(entries, session_dir=session_file.parent / session_file.stem)
     return JSONResponse({
         "entries": entries,
         "offset": new_offset,
@@ -2147,7 +2180,7 @@ async def api_session_tail(request):
             else:
                 entries.append(parsed)
 
-    _enrich_entries(entries)
+    _enrich_entries(entries, session_dir=session_file.parent / session_file.stem)
     resp = {"entries": entries, "offset": new_offset, "is_live": is_live,
             "type": session_type, "seq": seq}
     if tmux_name:
@@ -3443,7 +3476,7 @@ async def _on_startup():
     init_db()  # ensure schema exists (idempotent — all CREATE IF NOT EXISTS)
     # Recover active sessions from filesystem, then start background tasks
     await session_monitor.recover()
-    await session_monitor.start(event_bus=event_bus, entry_parser=_parse_jsonl_entry, entry_enricher=_enrich_entries)
+    await session_monitor.start(event_bus=event_bus, entry_parser=_parse_jsonl_entry)
     asyncio.create_task(_dispatch_watcher())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher

@@ -58,6 +58,10 @@ class SessionState:
     size_bytes: int = 0
     context_tokens: int = 0
 
+    # Agent subagent tracking for tool_calls enrichment
+    agent_descriptions: dict = field(default_factory=dict)   # tool_id -> description
+    claimed_subagents: set = field(default_factory=set)       # claimed meta.json paths
+
     # Internal: True if jsonl_path is a directory (needs resolution)
     _path_is_dir: bool = False
     # Cooldown timestamp: when is_live turned False
@@ -104,6 +108,25 @@ def _read_latest_msg_from_tail(jsonl: Path) -> str:
         except json.JSONDecodeError:
             continue
     return ""
+
+
+def count_tool_uses(jsonl_path: Path) -> int:
+    """Count tool_use blocks in a subagent JSONL file."""
+    count = 0
+    try:
+        with open(jsonl_path) as f:
+            for line in f:
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if raw.get("type") == "assistant":
+                    for block in raw.get("message", {}).get("content", []):
+                        if block.get("type") == "tool_use":
+                            count += 1
+    except OSError:
+        pass
+    return count
 
 
 class SessionMonitor:
@@ -238,11 +261,7 @@ class SessionMonitor:
                         continue
                     _, new_entries = await asyncio.to_thread(self._tail_one, state)
                     if new_entries:
-                        if self._entry_enricher:
-                            try:
-                                self._entry_enricher(new_entries)
-                            except Exception:
-                                pass
+                        self._enrich_agent_entries(state, new_entries)
                     if new_entries and self._event_bus:
                         state._broadcast_seq += 1
                         await self._event_bus.broadcast(
@@ -260,6 +279,46 @@ class SessionMonitor:
             except Exception:
                 logger.exception("session_monitor: tailer error")
             await asyncio.sleep(1)
+
+    @staticmethod
+    def _enrich_agent_entries(state: SessionState, entries: list) -> None:
+        """Enrich Agent tool_results with tool_calls counts from subagent JSONL.
+
+        Uses state.agent_descriptions and state.claimed_subagents to track
+        Agent tool_use/tool_result pairs across incremental SSE batches.
+        """
+        for entry in entries:
+            if entry.get("type") == "tool_use" and entry.get("tool_name") == "Agent":
+                tool_id = entry.get("tool_id", "")
+                desc = entry.get("input", {}).get("description", "")
+                if tool_id and desc:
+                    state.agent_descriptions[tool_id] = desc
+
+            elif entry.get("type") == "tool_result" and entry.get("tool_id"):
+                tool_id = entry["tool_id"]
+                if tool_id not in state.agent_descriptions:
+                    continue
+                if state.jsonl_path is None:
+                    continue
+                target_desc = state.agent_descriptions[tool_id]
+                subagents_dir = state.jsonl_path.parent / state.jsonl_path.stem / "subagents"
+                if not subagents_dir.is_dir():
+                    continue
+                for meta_path in sorted(subagents_dir.glob("*.meta.json")):
+                    if str(meta_path) in state.claimed_subagents:
+                        continue
+                    try:
+                        meta = json.loads(meta_path.read_text())
+                    except (json.JSONDecodeError, OSError):
+                        continue
+                    if meta.get("description") == target_desc:
+                        state.claimed_subagents.add(str(meta_path))
+                        jsonl_path = meta_path.with_suffix("").with_suffix(".jsonl")
+                        if jsonl_path.exists():
+                            count = count_tool_uses(jsonl_path)
+                            if count > 0:
+                                entry["tool_calls"] = count
+                        break
 
     def _tail_one(self, state: SessionState) -> tuple[bool, list]:
         """Incremental read of one session's JSONL.
