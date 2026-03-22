@@ -543,11 +543,11 @@
                             transition-transform duration-200 ease-in-out">
     <h1 class="text-lg font-bold text-indigo-400 mb-4">Autonomy</h1>
     <div class="space-y-1 mb-6">
-      <a href="/beads" class="nav-link" data-page="beads" onclick="closeSidebar()">Beads <span id="badge-beads" class="nav-badge nav-badge-indigo"></span></a>
-      <a href="/dispatch" class="nav-link" data-page="dispatch" onclick="closeSidebar()">Dispatch <span class="dispatch-badges" id="badge-dispatch"></span></a>
-      <a href="/sessions" class="nav-link" data-page="sessions" onclick="closeSidebar()">Sessions <span id="badge-sessions" class="nav-badge nav-badge-green"></span></a>
-      <a href="/timeline" class="nav-link" data-page="timeline" onclick="closeSidebar()">Timeline <span id="badge-timeline" class="nav-badge nav-badge-green"></span></a>
-      <a href="/terminal" class="nav-link" data-page="terminal" onclick="closeSidebar()">Terminal <span id="badge-terminal" class="nav-badge nav-badge-gray"></span></a>
+      <a href="/beads" class="nav-link" data-page="beads" onclick="closeSidebar()">Beads <span id="badge-beads" data-testid="badge-beads" class="nav-badge nav-badge-indigo"></span></a>
+      <a href="/dispatch" class="nav-link" data-page="dispatch" onclick="closeSidebar()">Dispatch <span class="dispatch-badges" id="badge-dispatch" data-testid="badge-dispatch"></span></a>
+      <a href="/sessions" class="nav-link" data-page="sessions" onclick="closeSidebar()">Sessions <span id="badge-sessions" data-testid="badge-sessions" class="nav-badge nav-badge-green"></span></a>
+      <a href="/timeline" class="nav-link" data-page="timeline" onclick="closeSidebar()">Timeline <span id="badge-timeline" data-testid="badge-timeline" class="nav-badge nav-badge-green"></span></a>
+      <a href="/terminal" class="nav-link" data-page="terminal" onclick="closeSidebar()">Terminal <span id="badge-terminal" data-testid="badge-terminal" class="nav-badge nav-badge-gray"></span></a>
     </div>
     <div class="mt-auto">
       <div id="sidebar-experiments" class="mb-2 space-y-1"></div>
@@ -790,6 +790,7 @@
   <script src="/static/js/pages/terminal.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/live-panel-viewer.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/chatwith-panel.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/components/test-harness.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/pages/experiment.js?v=__STATIC_VERSION__"></script>
 </body>
 </html>
