@@ -54,6 +54,9 @@
       _toolMap: {},
       // tool_id → tool_result entry (for pairing — chip metadata)
       _resultMap: {},
+      // Context window tokens (from usage)
+      contextTokens: 0,
+
       // Expand/collapse state: index → boolean
       _expanded: {},
       // Expand view mode: index → 'output' | 'input'
@@ -564,6 +567,7 @@
           this.offset = store.offset;
           this.isLive = store.isLive;
           this.sessionType = store.sessionType;
+          this.contextTokens = store.contextTokens || 0;
           if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
           this._toolMap = store.toolMap;
           this._resultMap = store.resultMap;
@@ -577,7 +581,7 @@
         } else {
           // First visit — subscribe SSE before fetch to not miss events
           store._loading = true;
-          window.ensureSessionSSE(this.sessionId);
+          window.ensureSessionMessages();
 
           try {
             await this._fetchBacklog(store);
@@ -603,6 +607,7 @@
           this.entries = store.entries;
           this._toolMap = store.toolMap;
           this._resultMap = store.resultMap;
+          this.contextTokens = store.contextTokens || 0;
 
           if (this.state === 'loading') this.state = 'ready';
 
@@ -614,7 +619,7 @@
         }
 
         // Ensure SSE subscription (idempotent — for already-loaded live sessions)
-        window.ensureSessionSSE(this.sessionId);
+        window.ensureSessionMessages();
 
         // Reactive sync — Alpine.store mutations trigger $watch automatically
         var self = this;
@@ -644,6 +649,13 @@
             return s ? s.isLive : true;
           },
           function(val) { self.isLive = val; }
+        ));
+        this._storeCleanups.push(this.$watch(
+          function() {
+            var s = Alpine.store('sessions')[sid];
+            return s ? s.contextTokens : 0;
+          },
+          function(val) { self.contextTokens = val; }
         ));
 
         // Clipboard paste support — attach pasted files

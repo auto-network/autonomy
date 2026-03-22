@@ -3,12 +3,16 @@
  *
  * Fed by three paths:
  *   1. fetchWithProgress (first visit)
- *   2. SSE session:{id} push (live updates)
+ *   2. SSE session:messages push (live updates)
  *   3. EventBus gap replay (reconnect recovery)
  *
  * All three paths use seq-checked append — no duplicates, no gaps.
  * Store persists across SPA navigations; lost only on full page reload.
  * Mutations through the Alpine proxy trigger automatic re-renders.
+ *
+ * Two SSE topics:
+ *   - session:registry — roster of active sessions (register/deregister only)
+ *   - session:messages — entry stream with session_id routing
  *
  * Depends on: events.js (registerHandler, unregisterHandler), Alpine.js
  */
@@ -26,10 +30,14 @@ window.getSessionStore = function(sessionId) {
       isLive: true,
       sessionType: '',
       tmuxSession: '',
+      project: '',
+      startedAt: 0,
+      contextTokens: 0,
+      sizeMB: '0',
+      lastActivity: 0,
       toolMap: {},       // tool_id -> { tool_name }
       resultMap: {},     // tool_id -> tool_result entry
       loaded: false,
-      _sseRegistered: false,
       _loading: false,   // true during initial fetch — buffers SSE
       _pendingSSE: [],
     };
@@ -66,29 +74,59 @@ window.appendSessionEntries = function(store, data) {
 };
 
 /**
- * Register SSE handler for a session (idempotent — only registers once).
- * Handler lives outside component lifecycle — survives SPA navigation.
- * Buffers events during initial fetch (_loading flag).
+ * Register global SSE handlers for session:messages and session:registry.
+ * Idempotent — only registers once. Call from any page that needs session data.
  */
-window.ensureSessionSSE = function(sessionId) {
-  var store = window.getSessionStore(sessionId);
-  if (store._sseRegistered || !store.isLive) return;
-  store._sseRegistered = true;
+var _messagesRegistered = false;
+window.ensureSessionMessages = function() {
+  if (_messagesRegistered) return;
+  _messagesRegistered = true;
 
-  var topic = 'session:' + sessionId;
-  var handler = function(data) {
-    // Buffer during initial fetch to avoid race condition
+  window.registerHandler('session:messages', function(data) {
+    var id = data.session_id;
+    if (!id) return;
+
+    // Only process sessions we have stores for
+    var sessions = Alpine.store('sessions');
+    var store = sessions[id];
+    if (!store) return;
+
+    // Buffer during initial fetch
     if (store._loading) {
       store._pendingSSE.push(data);
       return;
     }
+
     window.appendSessionEntries(store, data);
 
-    // Session died — freeze store, unregister handler
+    // Update metadata
+    if (data.context_tokens !== undefined) store.contextTokens = data.context_tokens;
+    if (data.size_bytes !== undefined) store.sizeMB = (data.size_bytes / 1048576).toFixed(1);
+    store.lastActivity = Date.now() / 1000;
+
     if (data.is_live === false) {
-      window.unregisterHandler(topic, handler);
-      store._sseRegistered = false;
+      store.isLive = false;
     }
-  };
-  window.registerHandler(topic, handler);
+  });
+
+  window.registerHandler('session:registry', function(registrySessions) {
+    var activeIds = {};
+    for (var i = 0; i < registrySessions.length; i++) {
+      var s = registrySessions[i];
+      activeIds[s.session_id] = true;
+      var store = window.getSessionStore(s.session_id);
+      store.project = s.project || '';
+      store.sessionType = s.type || '';
+      store.tmuxSession = s.tmux_session || '';
+      store.isLive = s.is_live;
+      store.startedAt = s.started_at || 0;
+    }
+    // Mark removed sessions as dead
+    var allSessions = Alpine.store('sessions');
+    for (var id in allSessions) {
+      if (!activeIds[id] && allSessions[id].isLive) {
+        allSessions[id].isLive = false;
+      }
+    }
+  });
 };
