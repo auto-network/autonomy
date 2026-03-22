@@ -48,7 +48,7 @@
       loadedMB: '0',
       totalMB: '0',
       autoScroll: true,
-      _storeWatcher: null,
+      _storeCleanups: [],
 
       // Tool ID tracking (for matching tool_result to tool_use)
       _toolMap: {},
@@ -462,7 +462,8 @@
           const deadline = Date.now() + 10000;
           while (Date.now() < deadline) {
             await new Promise(r => setTimeout(r, 1500));
-            this.entries = window.getSessionStore(this.sessionId).entries;
+            var ss = window.getSessionStore(this.sessionId);
+            this.entries = ss.entries;
             const found = this.entries.slice(-5).some(
               e => e.type === 'user' && (e.content || '').includes(this.HANDSHAKE_STRING)
             );
@@ -477,7 +478,7 @@
                 }),
               });
               this._tmuxSession = this.selectedTmux;
-              window.getSessionStore(this.sessionId).tmuxSession = this.selectedTmux;
+              ss.tmuxSession = this.selectedTmux;
               this.linkState = 'confirmed';
               return;
             }
@@ -615,27 +616,35 @@
         // Ensure SSE subscription (idempotent — for already-loaded live sessions)
         window.ensureSessionSSE(this.sessionId);
 
-        // Store watcher — bridges shared store into Alpine reactivity (200ms check)
-        this._storeWatcher = setInterval(() => {
-          var s = window.getSessionStore(this.sessionId);
-          var changed = false;
-          if (s.entries.length !== this.entries.length) {
-            this.entries = s.entries;
-            this._toolMap = s.toolMap;
-            this._resultMap = s.resultMap;
-            changed = true;
+        // Reactive sync — Alpine.store mutations trigger $watch automatically
+        var self = this;
+        var sid = this.sessionId;
+        this._storeCleanups.push(this.$watch(
+          function() {
+            var s = Alpine.store('sessions')[sid];
+            return s ? s.entries.length : 0;
+          },
+          function(newLen) {
+            var s = Alpine.store('sessions')[sid];
+            if (!s) return;
+            self.entries = s.entries;
+            self._toolMap = s.toolMap;
+            self._resultMap = s.resultMap;
+            if (self.autoScroll) {
+              self.$nextTick(function() {
+                var el = self.$refs.entriesContainer;
+                if (el) el.scrollTop = el.scrollHeight;
+              });
+            }
           }
-          if (s.isLive !== this.isLive) {
-            this.isLive = s.isLive;
-            changed = true;
-          }
-          if (changed && this.autoScroll) {
-            this.$nextTick(() => {
-              var el = this.$refs.entriesContainer;
-              if (el) el.scrollTop = el.scrollHeight;
-            });
-          }
-        }, 200);
+        ));
+        this._storeCleanups.push(this.$watch(
+          function() {
+            var s = Alpine.store('sessions')[sid];
+            return s ? s.isLive : true;
+          },
+          function(val) { self.isLive = val; }
+        ));
 
         // Clipboard paste support — attach pasted files
         this.$nextTick(() => {
@@ -660,10 +669,10 @@
       destroy() {
         // Do NOT unregister SSE — store keeps accumulating outside component lifecycle
         // Do NOT clear store — it persists across navigations
-        if (this._storeWatcher) {
-          clearInterval(this._storeWatcher);
-          this._storeWatcher = null;
+        for (var i = 0; i < this._storeCleanups.length; i++) {
+          if (typeof this._storeCleanups[i] === 'function') this._storeCleanups[i]();
         }
+        this._storeCleanups = [];
       },
     }));
   });
