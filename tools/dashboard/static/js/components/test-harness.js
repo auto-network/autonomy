@@ -61,14 +61,10 @@
       return false;
     },
 
-    longPressSession: function (tmuxName) {
-      var el = document.querySelector('[x-data*="sessionsPage"]');
-      if (!el || !el._x_dataStack) return false;
-      var page = Alpine.$data(el);
-      if (!page) return false;
-      var s = (page.interactive || []).find(function (s) { return s.tmux_session === tmuxName; })
-           || (page.agents || []).find(function (s) { return s.tmux_session === tmuxName; });
-      if (s && page.showCloseConfirm) { page.showCloseConfirm(s); return true; }
+    closeSession: function (tmuxName) {
+      var card = document.querySelector('[data-session-id="' + tmuxName + '"]');
+      var btn = card ? card.querySelector('[data-testid="session-close-btn"]') : null;
+      if (btn) { btn.click(); return true; }
       return false;
     },
 
