@@ -1,22 +1,20 @@
-"""Session Monitor — event-driven session tracking with incremental tailing.
+"""Session Monitor — DB-backed session tracking with incremental tailing.
 
-Replaces filesystem scanning with a single in-memory registry of active sessions.
-Sessions are registered explicitly at creation time and maintained by background tasks.
+All session state lives in dashboard.db (tmux_sessions table).
+No in-memory dicts, no recovery heuristics, no meta file scanning.
 
 Usage::
 
     from tools.dashboard.session_monitor import session_monitor
 
-    # Register a session (at creation time)
-    session_monitor.register(
-        session_id="abc123",
-        tmux_name="auto-t1",
-        session_type="terminal",
+    # Register a session (at creation time — INSERTs into DB)
+    await session_monitor.register(
+        tmux_name="host-0322-111522",
+        session_type="host",
         project="my-project",
-        jsonl_path=Path("/path/to/session.jsonl"),
     )
 
-    # Read from monitor (zero filesystem access)
+    # Read from monitor (reads DB)
     all_sessions = session_monitor.get_registry()
     count = session_monitor.count()
 
@@ -35,39 +33,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tools.dashboard.dao.dashboard_db import (
+    get_conn,
+    get_live_sessions,
+    get_session,
+    get_tailable_sessions,
+    insert_session,
+    mark_dead,
+    delete_session,
+    update_jsonl_link,
+    update_tail_state,
+    count_live,
+)
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SessionState:
-    session_id: str           # JSONL filename stem (UUID) or tmux name
-    tmux_name: str            # tmux session name (auto-tN, chatwith-X)
-    session_type: str         # terminal, chatwith, dispatch, librarian, host
-    project: str              # project folder name
-    jsonl_path: Path | None   # absolute path to JSONL file, or directory to resolve
-
-    bead_id: str | None = None
-
-    # Maintained by monitor
-    last_message: str = ""
-    entry_count: int = 0
-    file_offset: int = 0
-    is_live: bool = True
-    started_at: float = field(default_factory=time.time)
-    last_activity: float = field(default_factory=time.time)
-    size_bytes: int = 0
-    context_tokens: int = 0
-
-    # Agent subagent tracking for tool_calls enrichment
-    agent_descriptions: dict = field(default_factory=dict)   # tool_id -> description
-    claimed_subagents: set = field(default_factory=set)       # claimed meta.json paths
-
-    # Internal: True if jsonl_path is a directory (needs resolution)
-    _path_is_dir: bool = False
-    # Cooldown timestamp: when is_live turned False
-    _dead_since: float = 0.0
-    # Broadcast sequence number (monotonically increasing per session)
-    _broadcast_seq: int = 0
 
 
 def _extract_message_text(entry: dict) -> str:
@@ -91,7 +70,7 @@ def _extract_message_text(entry: dict) -> str:
 
 
 def _read_latest_msg_from_tail(jsonl: Path) -> str:
-    """Seed initial last_message by reading tail of JSONL (recovery only)."""
+    """Seed initial last_message by reading tail of JSONL (seeding only)."""
     try:
         size = jsonl.stat().st_size
         with open(jsonl, "rb") as f:
@@ -129,110 +108,122 @@ def count_tool_uses(jsonl_path: Path) -> int:
     return count
 
 
+@dataclass
+class _TailState:
+    """Ephemeral per-session state for the tailer (not persisted in DB)."""
+    # Agent subagent tracking for tool_calls enrichment
+    agent_descriptions: dict = field(default_factory=dict)   # tool_id -> description
+    claimed_subagents: set = field(default_factory=set)       # claimed meta.json paths
+    # Track if path needs directory resolution (container sessions)
+    needs_resolution: bool = False
+    # Resolution directory (for container sessions where jsonl_path is a dir)
+    resolution_dir: Path | None = None
+    # Broadcast sequence number (monotonically increasing per session)
+    broadcast_seq: int = 0
+
+
 class SessionMonitor:
-    """In-memory registry of active sessions with background maintenance."""
+    """DB-backed session registry with background tailing and liveness checking."""
 
     def __init__(self) -> None:
-        self._sessions: dict[str, SessionState] = {}
-        self._lock = asyncio.Lock()
+        self._tail_states: dict[str, _TailState] = {}
         self._tailer_task: asyncio.Task | None = None
         self._liveness_task: asyncio.Task | None = None
-        self._event_bus = None  # set in start()
-        self._entry_parser = None  # set in start()
-        self._entry_enricher = None  # set in start()
+        self._event_bus = None
+        self._entry_parser = None
+        self._entry_enricher = None
         self._started = False
 
     # ── Registration ──────────────────────────────────────────────
 
     async def register(
         self,
-        session_id: str,
         tmux_name: str,
         session_type: str,
         project: str,
+        *,
         jsonl_path: Path | None = None,
         bead_id: str | None = None,
         seed_message: str = "",
+        session_uuid: str | None = None,
     ) -> None:
-        """Register a new session into the monitor."""
+        """Register a new session — INSERT into dashboard.db."""
         path_is_dir = False
-        if jsonl_path is not None and jsonl_path.is_dir():
-            path_is_dir = True
+        path_str: str | None = None
+        if jsonl_path is not None:
+            if jsonl_path.is_dir():
+                path_is_dir = True
+                # Don't store directory as jsonl_path — store None, resolve later
+                path_str = None
+            else:
+                path_str = str(jsonl_path)
 
-        state = SessionState(
-            session_id=session_id,
-            tmux_name=tmux_name,
-            session_type=session_type,
-            project=project,
-            jsonl_path=jsonl_path,
-            bead_id=bead_id,
-            last_message=seed_message,
-            _path_is_dir=path_is_dir,
-        )
-        async with self._lock:
-            # Dedup: if another session has this tmux_name, remove it
-            for existing_id, existing in list(self._sessions.items()):
-                if existing.tmux_name == tmux_name and existing_id != session_id:
-                    del self._sessions[existing_id]
-                    logger.info("session_monitor: dedup removed %s (same tmux=%s)", existing_id, tmux_name)
-            self._sessions[session_id] = state
+        try:
+            insert_session(
+                tmux_name=tmux_name,
+                session_type=session_type,
+                project=project,
+                bead_id=bead_id,
+                jsonl_path=path_str,
+                session_uuid=session_uuid,
+            )
+        except Exception:
+            logger.warning("session_monitor: INSERT failed for tmux=%s (may already exist)", tmux_name)
+            return
+
+        if seed_message:
+            update_tail_state(tmux_name, last_message=seed_message)
+
+        # Set up ephemeral tail state
+        ts = _TailState(needs_resolution=path_is_dir, resolution_dir=jsonl_path if path_is_dir else None)
+        self._tail_states[tmux_name] = ts
+
         logger.info(
-            "session_monitor: registered %s  tmux=%s  type=%s  project=%s",
-            session_id, tmux_name, session_type, project,
+            "session_monitor: registered %s  type=%s  project=%s",
+            tmux_name, session_type, project,
         )
         await self._broadcast_registry()
 
-    async def deregister(self, session_id: str) -> None:
-        """Remove a session from the monitor."""
-        async with self._lock:
-            removed = self._sessions.pop(session_id, None)
-        if removed:
-            logger.info(
-                "session_monitor: deregistered %s  tmux=%s",
-                session_id, removed.tmux_name,
-            )
-            await self._broadcast_registry()
+    async def deregister(self, tmux_name: str) -> None:
+        """Mark a session as dead and remove from tail states."""
+        mark_dead(tmux_name)
+        self._tail_states.pop(tmux_name, None)
+        logger.info("session_monitor: deregistered %s", tmux_name)
+        await self._broadcast_registry()
 
     # ── Queries ───────────────────────────────────────────────────
 
-    def get_all(self) -> list[SessionState]:
-        """Return all registered sessions."""
-        return list(self._sessions.values())
+    def get_all(self) -> list[dict]:
+        """Return all live sessions from DB."""
+        return get_live_sessions()
 
-    def get_one(self, session_id: str) -> SessionState | None:
-        return self._sessions.get(session_id)
+    def get_one(self, tmux_name: str) -> dict | None:
+        """Return a single session by tmux_name."""
+        return get_session(tmux_name)
 
     def count(self) -> int:
         """Count live sessions."""
-        return sum(1 for s in self._sessions.values() if s.is_live)
+        return count_live()
 
     def get_registry(self) -> list[dict]:
-        """Return registry of active sessions (lightweight roster)."""
-        registry = []
-        for s in self._sessions.values():
-            if s.is_live:
-                registry.append({
-                    "session_id": s.session_id,
-                    "project": s.project,
-                    "type": s.session_type,
-                    "tmux_session": s.tmux_name,
-                    "is_live": s.is_live,
-                    "started_at": s.started_at,
-                })
-        return registry
+        """Return registry of active sessions (lightweight roster for SSE)."""
+        sessions = get_live_sessions()
+        return [
+            {
+                "session_id": s["tmux_name"],
+                "project": s["project"],
+                "type": s["type"],
+                "tmux_session": s["tmux_name"],
+                "is_live": bool(s["is_live"]),
+                "started_at": s["created_at"],
+            }
+            for s in sessions
+        ]
 
     # ── Background tasks ──────────────────────────────────────────
 
     async def start(self, event_bus=None, entry_parser=None, entry_enricher=None) -> None:
-        """Start background tailer and liveness tasks.
-
-        Args:
-            event_bus: EventBus for SSE broadcasting.
-            entry_parser: Callable (str -> dict | list | None) that parses a
-                raw JSONL line into display entries for per-session SSE push.
-            entry_enricher: Optional callable (list[dict] -> None) that enriches
-                parsed entries in place (e.g. Agent tool_calls count).
-        """
+        """Start background tailer and liveness tasks."""
         if self._started:
             return
         self._started = True
@@ -242,8 +233,8 @@ class SessionMonitor:
         self._tailer_task = asyncio.create_task(self._tailer_loop())
         self._liveness_task = asyncio.create_task(self._liveness_loop())
         logger.info("session_monitor: background tasks started")
-        # Broadcast registry for any sessions registered during recover()
-        if self._sessions:
+        # Broadcast registry for any sessions that exist in DB
+        if count_live() > 0:
             await self._broadcast_registry()
 
     async def _broadcast_registry(self) -> None:
@@ -255,136 +246,147 @@ class SessionMonitor:
     # ── JSONL Tailer ──────────────────────────────────────────────
 
     async def _tailer_loop(self) -> None:
-        """Check all registered sessions for new JSONL content every 1s."""
+        """Check all live sessions for new JSONL content every 1s."""
         while True:
             try:
-                sessions = list(self._sessions.values())
-                for state in sessions:
-                    if not state.is_live:
-                        continue
-                    _, new_entries = await asyncio.to_thread(self._tail_one, state)
+                sessions = get_tailable_sessions()
+                for row in sessions:
+                    tmux_name = row["tmux_name"]
+                    # Ensure we have ephemeral tail state
+                    if tmux_name not in self._tail_states:
+                        self._tail_states[tmux_name] = _TailState()
+
+                    ts = self._tail_states[tmux_name]
+                    _, new_entries = await asyncio.to_thread(
+                        self._tail_one, row, ts
+                    )
                     if new_entries:
-                        self._enrich_agent_entries(state, new_entries)
+                        self._enrich_agent_entries(row, ts, new_entries)
                     if new_entries and self._event_bus:
-                        state._broadcast_seq += 1
+                        ts.broadcast_seq += 1
+                        # Re-read to get updated values
+                        updated = get_session(tmux_name)
                         await self._event_bus.broadcast(
                             "session:messages",
                             {
-                                "session_id": state.session_id,
+                                "session_id": tmux_name,
                                 "entries": new_entries,
-                                "is_live": state.is_live,
-                                "seq": state._broadcast_seq,
-                                "context_tokens": state.context_tokens,
-                                "size_bytes": state.size_bytes,
+                                "is_live": bool(updated["is_live"]) if updated else True,
+                                "seq": ts.broadcast_seq,
+                                "context_tokens": updated["context_tokens"] if updated else 0,
+                                "size_bytes": Path(row["jsonl_path"]).stat().st_size if row.get("jsonl_path") else 0,
                             },
                             dedup=False,
                         )
+
+                # Also try to resolve sessions that need directory resolution
+                unresolved = [
+                    (name, ts) for name, ts in self._tail_states.items()
+                    if ts.needs_resolution and ts.resolution_dir is not None
+                ]
+                for tmux_name, ts in unresolved:
+                    resolved = await asyncio.to_thread(self._resolve_jsonl_in_dir, ts.resolution_dir)
+                    if resolved:
+                        ts.needs_resolution = False
+                        ts.resolution_dir = None
+                        update_jsonl_link(
+                            tmux_name,
+                            session_uuid=resolved.stem,
+                            jsonl_path=str(resolved),
+                            project=resolved.parent.name,
+                        )
+                        logger.info(
+                            "session_monitor: resolved JSONL for tmux=%s → %s",
+                            tmux_name, resolved.stem,
+                        )
+
             except Exception:
                 logger.exception("session_monitor: tailer error")
             await asyncio.sleep(1)
 
     @staticmethod
-    def _enrich_agent_entries(state: SessionState, entries: list) -> None:
-        """Enrich Agent tool_results with tool_calls counts from subagent JSONL.
+    def _enrich_agent_entries(row: dict, ts: _TailState, entries: list) -> None:
+        """Enrich Agent tool_results with tool_calls counts from subagent JSONL."""
+        jsonl_path_str = row.get("jsonl_path")
+        if not jsonl_path_str:
+            return
+        jsonl_path = Path(jsonl_path_str)
 
-        Uses state.agent_descriptions and state.claimed_subagents to track
-        Agent tool_use/tool_result pairs across incremental SSE batches.
-        """
         for entry in entries:
             if entry.get("type") == "tool_use" and entry.get("tool_name") == "Agent":
                 tool_id = entry.get("tool_id", "")
                 desc = entry.get("input", {}).get("description", "")
                 if tool_id and desc:
-                    state.agent_descriptions[tool_id] = desc
+                    ts.agent_descriptions[tool_id] = desc
 
             elif entry.get("type") == "tool_result" and entry.get("tool_id"):
                 tool_id = entry["tool_id"]
-                if tool_id not in state.agent_descriptions:
+                if tool_id not in ts.agent_descriptions:
                     continue
-                if state.jsonl_path is None:
-                    continue
-                target_desc = state.agent_descriptions[tool_id]
-                subagents_dir = state.jsonl_path.parent / state.jsonl_path.stem / "subagents"
+                target_desc = ts.agent_descriptions[tool_id]
+                subagents_dir = jsonl_path.parent / jsonl_path.stem / "subagents"
                 if not subagents_dir.is_dir():
                     continue
                 for meta_path in sorted(subagents_dir.glob("*.meta.json")):
-                    if str(meta_path) in state.claimed_subagents:
+                    if str(meta_path) in ts.claimed_subagents:
                         continue
                     try:
                         meta = json.loads(meta_path.read_text())
                     except (json.JSONDecodeError, OSError):
                         continue
                     if meta.get("description") == target_desc:
-                        state.claimed_subagents.add(str(meta_path))
-                        jsonl_path = meta_path.with_suffix("").with_suffix(".jsonl")
-                        if jsonl_path.exists():
-                            count = count_tool_uses(jsonl_path)
+                        ts.claimed_subagents.add(str(meta_path))
+                        jsonl_sub = meta_path.with_suffix("").with_suffix(".jsonl")
+                        if jsonl_sub.exists():
+                            count = count_tool_uses(jsonl_sub)
                             if count > 0:
                                 entry["tool_calls"] = count
                         break
 
-    def _tail_one(self, state: SessionState) -> tuple[bool, list]:
-        """Incremental read of one session's JSONL.
+    def _tail_one(self, row: dict, ts: _TailState) -> tuple[bool, list]:
+        """Incremental read of one session's JSONL. Updates DB with new state."""
+        jsonl_path_str = row.get("jsonl_path")
+        if not jsonl_path_str:
+            return False, []
 
-        Returns (changed, parsed_entries) where *changed* indicates summary
-        state was updated and *parsed_entries* is a list of display-ready
-        dicts to broadcast via SSE.
-        """
-        # Resolve directory path to actual JSONL file
-        if state._path_is_dir and state.jsonl_path is not None:
-            resolved = self._resolve_jsonl_in_dir(state.jsonl_path)
-            if resolved:
-                state.jsonl_path = resolved
-                state._path_is_dir = False
-                # Keep session_id as tmux_name — changing it breaks SSE
-                # routing since the client store is keyed by the original ID
-                state.project = resolved.parent.name
-                logger.info(
-                    "session_monitor: resolved JSONL for tmux=%s → %s  project=%s",
-                    state.tmux_name, resolved.stem, state.project,
-                )
-            else:
-                return False, []
-
-        if state.jsonl_path is None or not state.jsonl_path.exists():
+        jsonl_path = Path(jsonl_path_str)
+        if not jsonl_path.exists():
             return False, []
 
         try:
-            st = state.jsonl_path.stat()
+            st = jsonl_path.stat()
         except OSError:
             return False, []
 
+        file_offset = row.get("file_offset", 0)
+        last_activity = row.get("last_activity", 0) or 0
+
         # No growth since last check
-        if st.st_size <= state.file_offset and st.st_mtime <= state.last_activity:
+        if st.st_size <= file_offset and st.st_mtime <= last_activity:
             return False, []
 
-        changed = False
-
-        # Update size
-        if st.st_size != state.size_bytes:
-            state.size_bytes = st.st_size
-            changed = True
-
-        if st.st_size <= state.file_offset:
-            return changed, []
+        if st.st_size <= file_offset:
+            return False, []
 
         # Read new data from offset
         try:
-            with open(state.jsonl_path, "rb") as fh:
-                fh.seek(state.file_offset)
+            with open(jsonl_path, "rb") as fh:
+                fh.seek(file_offset)
                 data = fh.read()
         except OSError:
-            return changed, []
+            return False, []
 
         # Only process complete lines
         last_nl = data.rfind(b"\n")
         if last_nl == -1:
-            return changed, []
+            return False, []
 
         complete = data[:last_nl + 1]
-        new_offset = state.file_offset + last_nl + 1
+        new_offset = file_offset + last_nl + 1
         new_entry_count = 0
         parsed_entries: list = []
+        last_message = row.get("last_message", "")
+        context_tokens = row.get("context_tokens", 0)
 
         for raw_line in complete.splitlines():
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -398,7 +400,7 @@ class SessionMonitor:
             new_entry_count += 1
             text = _extract_message_text(entry)
             if text:
-                state.last_message = text
+                last_message = text
 
             # Extract context_tokens from assistant usage
             if entry.get("type") == "assistant":
@@ -408,7 +410,7 @@ class SessionMonitor:
                            + usage.get("cache_creation_input_tokens", 0)
                            + usage.get("cache_read_input_tokens", 0))
                     if ctx > 0:
-                        state.context_tokens = ctx
+                        context_tokens = ctx
 
             # Parse full entry for SSE broadcast
             if self._entry_parser:
@@ -421,23 +423,28 @@ class SessionMonitor:
                 elif parsed is not None:
                     parsed_entries.append(parsed)
 
+        tmux_name = row["tmux_name"]
         if new_entry_count > 0:
-            state.entry_count += new_entry_count
-            state.last_activity = st.st_mtime
-            changed = True
+            update_tail_state(
+                tmux_name,
+                file_offset=new_offset,
+                last_activity=st.st_mtime,
+                last_message=last_message,
+                entry_count=(row.get("entry_count", 0) + new_entry_count),
+                context_tokens=context_tokens,
+            )
+            return True, parsed_entries
 
-        state.file_offset = new_offset
-        return changed, parsed_entries
+        # Update offset even if no entries parsed (whitespace lines)
+        update_tail_state(tmux_name, file_offset=new_offset)
+        return False, parsed_entries
 
     @staticmethod
     def _resolve_jsonl_in_dir(directory: Path) -> Path | None:
         """Find the JSONL file inside a session directory (container sessions)."""
         try:
-            # Container sessions: data/agent-runs/{name}-*/sessions/{project}/*.jsonl
-            # The directory might be the sessions/ dir or a project subdir
             jsonls = list(directory.rglob("*.jsonl"))
             if jsonls:
-                # Return the most recently modified
                 return max(jsonls, key=lambda p: p.stat().st_mtime)
         except OSError:
             pass
@@ -451,36 +458,35 @@ class SessionMonitor:
         """Check tmux liveness for all sessions every 10s."""
         while True:
             try:
-                sessions = list(self._sessions.values())
+                sessions = get_live_sessions()
                 changed = False
-
-                # Collect dead sessions past cooldown for deregistration
-                to_deregister: list[str] = []
                 now = time.time()
 
-                for state in sessions:
-                    if not state.is_live:
-                        # Check cooldown
-                        if state._dead_since and (now - state._dead_since) > self._COOLDOWN_SECONDS:
-                            to_deregister.append(state.session_id)
-                        continue
-
-                    alive = await asyncio.to_thread(self._check_tmux, state.tmux_name)
+                for row in sessions:
+                    tmux_name = row["tmux_name"]
+                    alive = await asyncio.to_thread(self._check_tmux, tmux_name)
                     if not alive:
-                        state.is_live = False
-                        state._dead_since = now
+                        mark_dead(tmux_name)
+                        self._tail_states.pop(tmux_name, None)
                         changed = True
                         logger.info(
-                            "session_monitor: tmux dead  %s (tmux=%s)",
-                            state.session_id, state.tmux_name,
+                            "session_monitor: tmux dead  %s (type=%s)",
+                            tmux_name, row["type"],
                         )
 
-                # Deregister expired dead sessions
-                for sid in to_deregister:
-                    async with self._lock:
-                        self._sessions.pop(sid, None)
-                    logger.info("session_monitor: deregistered expired %s", sid)
-                    changed = True
+                # Clean up old dead sessions from tail states
+                # (Dead sessions with _COOLDOWN expired get deleted from DB)
+                conn = get_conn()
+                expired = conn.execute(
+                    "SELECT tmux_name FROM tmux_sessions"
+                    " WHERE is_live=0 AND last_activity IS NOT NULL"
+                    "   AND (? - COALESCE(last_activity, created_at)) > ?",
+                    (now, self._COOLDOWN_SECONDS),
+                ).fetchall()
+                for exp_row in expired:
+                    # Don't actually delete from DB — keep for history
+                    # Just ensure tail states are cleaned up
+                    self._tail_states.pop(exp_row["tmux_name"], None)
 
                 if changed:
                     await self._broadcast_registry()
@@ -500,16 +506,23 @@ class SessionMonitor:
         except (FileNotFoundError, OSError):
             return False
 
-    # ── Recovery ──────────────────────────────────────────────────
+    # ── Seed (replaces recover) ────────────────────────────────────
 
-    async def recover(self) -> None:
-        """Recover sessions from filesystem on startup.
+    async def seed_from_filesystem(self) -> None:
+        """One-time seed: read existing live tmux sessions from filesystem.
 
-        Called once from _on_startup(). This is the ONLY time we scan filesystems.
+        Called on first startup when dashboard.db has no live sessions.
+        Reads .meta.json and .session_meta.json files ONE FINAL TIME.
+        After this, those files are never consulted again.
         """
-        recovered = 0
+        # Check if we already have live sessions — skip seeding
+        if count_live() > 0:
+            logger.info("session_monitor: DB has live sessions, skipping seed")
+            return
 
-        # 1. Get live tmux sessions
+        seeded = 0
+
+        # Get live tmux sessions
         try:
             result = subprocess.run(
                 ["tmux", "list-sessions", "-F", "#{session_name}"],
@@ -519,13 +532,18 @@ class SessionMonitor:
         except (FileNotFoundError, OSError):
             live_tmux = set()
 
-        # Filter to dashboard sessions (auto-* and chatwith-*)
+        # Filter to dashboard sessions
         dashboard_tmux = {
             name for name in live_tmux
-            if name.startswith("auto-") or name.startswith("chatwith-")
+            if (name.startswith("auto-") or name.startswith("chatwith-")
+                or name.startswith("host-") or name.startswith("chat-"))
         }
 
-        # 2. Container sessions: data/agent-runs/*/sessions/
+        if not dashboard_tmux:
+            logger.info("session_monitor: no dashboard tmux sessions to seed")
+            return
+
+        # Container sessions: data/agent-runs/*/sessions/
         repo_root = Path(__file__).resolve().parent.parent.parent
         agent_runs = repo_root / "data" / "agent-runs"
         if agent_runs.exists():
@@ -543,7 +561,6 @@ class SessionMonitor:
                     continue
 
                 sess_dir = run_dir / "sessions"
-                # Find the JSONL
                 jsonls = list(sess_dir.rglob("*.jsonl"))
                 if not jsonls:
                     continue
@@ -552,27 +569,24 @@ class SessionMonitor:
                 seed_msg = _read_latest_msg_from_tail(jsonl)
                 st = jsonl.stat()
 
-                await self.register(
-                    session_id=jsonl.stem,
+                stype = meta.get("type", "container")
+                from tools.dashboard.dao.dashboard_db import upsert_session
+                upsert_session(
                     tmux_name=tmux_name,
-                    session_type=meta.get("type", "terminal"),
+                    session_type=stype,
                     project=jsonl.parent.name,
-                    jsonl_path=jsonl,
                     bead_id=meta.get("bead_id"),
-                    seed_message=seed_msg,
+                    jsonl_path=str(jsonl),
+                    session_uuid=jsonl.stem,
+                    created_at=st.st_mtime - 60,
+                    file_offset=st.st_size,
+                    last_message=seed_msg,
+                    is_live=True,
                 )
-                # Seed offset to current file size so we don't re-read everything
-                state = self._sessions.get(jsonl.stem)
-                if state:
-                    state.file_offset = st.st_size
-                    state.size_bytes = st.st_size
-                    state.last_activity = st.st_mtime
-                    state.started_at = st.st_mtime - 60  # approximate
-
                 dashboard_tmux.discard(tmux_name)
-                recovered += 1
+                seeded += 1
 
-        # 3. Host sessions: ~/.claude/projects/**/*.meta.json
+        # Host sessions: ~/.claude/projects/**/*.meta.json
         home_projects = Path.home() / ".claude" / "projects"
         if home_projects.exists():
             for meta_path in home_projects.rglob("*.meta.json"):
@@ -585,8 +599,6 @@ class SessionMonitor:
                 if not tmux_name or tmux_name not in dashboard_tmux:
                     continue
 
-                # .meta.json is a double suffix; .with_suffix() only replaces
-                # the last one, producing .meta.jsonl instead of .jsonl.
                 jsonl = meta_path.parent / (meta_path.stem.removesuffix(".meta") + ".jsonl")
                 if not jsonl.exists():
                     continue
@@ -594,26 +606,23 @@ class SessionMonitor:
                 seed_msg = _read_latest_msg_from_tail(jsonl)
                 st = jsonl.stat()
 
-                stype = "chatwith" if tmux_name.startswith("chatwith-") else "terminal"
-                await self.register(
-                    session_id=jsonl.stem,
+                stype = "chatwith" if tmux_name.startswith("chatwith-") or tmux_name.startswith("chat-") else "host"
+                from tools.dashboard.dao.dashboard_db import upsert_session
+                upsert_session(
                     tmux_name=tmux_name,
                     session_type=stype,
                     project=jsonl.parent.name,
-                    jsonl_path=jsonl,
-                    seed_message=seed_msg,
+                    jsonl_path=str(jsonl),
+                    session_uuid=jsonl.stem,
+                    created_at=st.st_mtime - 60,
+                    file_offset=st.st_size,
+                    last_message=seed_msg,
+                    is_live=True,
                 )
-                state = self._sessions.get(jsonl.stem)
-                if state:
-                    state.file_offset = st.st_size
-                    state.size_bytes = st.st_size
-                    state.last_activity = st.st_mtime
-                    state.started_at = st.st_mtime - 60
-
                 dashboard_tmux.discard(tmux_name)
-                recovered += 1
+                seeded += 1
 
-        logger.info("session_monitor: recovered %d sessions", recovered)
+        logger.info("session_monitor: seeded %d sessions from filesystem", seeded)
 
 
 # Module-level singleton
