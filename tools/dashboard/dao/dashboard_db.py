@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     last_activity   REAL,
     last_message    TEXT DEFAULT '',
     entry_count     INTEGER DEFAULT 0,
-    context_tokens  INTEGER DEFAULT 0
+    context_tokens  INTEGER DEFAULT 0,
+    label           TEXT DEFAULT ''
 );
 """
 
@@ -50,6 +51,12 @@ def init_db(db_path: Path | None = None) -> None:
     _conn.execute("PRAGMA busy_timeout=5000")
     _conn.executescript(_SCHEMA)
     _conn.commit()
+    # Migrate: add label column if missing (for existing databases)
+    try:
+        _conn.execute("SELECT label FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN label TEXT DEFAULT ''")
+        _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
 
@@ -177,6 +184,13 @@ def update_tail_state(
     conn.commit()
 
 
+def update_label(tmux_name: str, label: str) -> None:
+    """Set or clear the user-facing label for a session."""
+    conn = get_conn()
+    conn.execute("UPDATE tmux_sessions SET label=? WHERE tmux_name=?", (label, tmux_name))
+    conn.commit()
+
+
 def mark_dead(tmux_name: str) -> None:
     """CLOSE step: mark session as no longer live."""
     conn = get_conn()
@@ -259,17 +273,19 @@ def upsert_session(
     file_offset: int = 0,
     last_message: str = "",
     is_live: bool = True,
+    label: str = "",
 ) -> None:
     """INSERT OR REPLACE — used for seeding on first run."""
     conn = get_conn()
     conn.execute(
         "INSERT OR REPLACE INTO tmux_sessions"
         " (tmux_name, type, project, bead_id, jsonl_path, session_uuid,"
-        "  created_at, is_live, file_offset, last_message)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  created_at, is_live, file_offset, last_message, label)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             tmux_name, session_type, project, bead_id, jsonl_path, session_uuid,
             created_at or time.time(), 1 if is_live else 0, file_offset, last_message,
+            label,
         ),
     )
     conn.commit()
