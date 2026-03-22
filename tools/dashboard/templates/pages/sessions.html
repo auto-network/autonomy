@@ -109,4 +109,16 @@
     <div class="text-gray-400">No sessions found</div>
   </template>
 
+  <!-- Action sheet for long press -->
+  <div class="action-sheet-overlay" :class="actionSheet.open && 'active'" @click="closeActionSheet()"></div>
+  <div class="action-sheet" :class="actionSheet.open && 'active'">
+      <div class="action-sheet-group">
+          <div class="action-sheet-title" x-text="actionSheet.title"></div>
+          <button class="action-sheet-btn destructive" @click="confirmClose()">Close Session</button>
+      </div>
+      <div class="action-sheet-group">
+          <button class="action-sheet-btn cancel" @click="closeActionSheet()">Cancel</button>
+      </div>
+  </div>
+
 </div>

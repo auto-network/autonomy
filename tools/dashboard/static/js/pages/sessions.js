@@ -52,6 +52,7 @@
       _creating: false,
       _longPressTimer: null,
       _longPressFired: false,
+      actionSheet: { open: false, session: null, title: '' },
 
       init() {
         // Ensure global SSE handlers are registered
@@ -160,10 +161,7 @@
       },
 
       navigate(s) {
-        if (this._longPressFired) {
-          this._longPressFired = false;
-          return;
-        }
+        if (this._longPressFired || this.actionSheet.open) return;
         var path = '/session/' + encodeURIComponent(s.project) + '/' + s.session_id
           + (s.tmux_session ? '?tmux=' + encodeURIComponent(s.tmux_session) : '');
         navigateTo(path);
@@ -183,14 +181,26 @@
           clearTimeout(this._longPressTimer);
           this._longPressTimer = null;
         }
-        this._longPressFired = false;
+        // Do NOT reset _longPressFired here — it stays true while the action sheet is open
       },
 
-      async showCloseConfirm(s) {
+      showCloseConfirm(s) {
         var label = s.label || s.tmux_session || s.session_id.slice(0, 12);
-        if (confirm('Close session "' + label + '"?')) {
+        this.actionSheet = { open: true, session: s, title: label };
+      },
+
+      async confirmClose() {
+        var s = this.actionSheet.session;
+        this.closeActionSheet();
+        if (s && s.tmux_session) {
           await fetch('/api/terminal/' + encodeURIComponent(s.tmux_session) + '/kill', { method: 'POST' });
         }
+      },
+
+      closeActionSheet() {
+        this.actionSheet = { open: false, session: null, title: '' };
+        // Reset after a tick so the click event from the closing tap doesn't navigate
+        setTimeout(() => { this._longPressFired = false; }, 300);
       },
 
       destroy() {
