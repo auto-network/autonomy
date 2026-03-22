@@ -174,6 +174,11 @@ async def api_bead_approve(request):
         return JSONResponse({"error": stderr.strip(), "ok": False}, status_code=400)
     return JSONResponse({"ok": True, "bead_id": bead_id})
 
+async def api_pinned_beads(request):
+    """Return beads with the 'pinned' label."""
+    beads = await asyncio.to_thread(dao_beads.get_beads_by_label, "pinned")
+    return JSONResponse(beads)
+
 # ── Dispatch pause state helpers ──────────────────────────────
 
 def _read_dispatch_state() -> dict:
@@ -3132,7 +3137,7 @@ _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
 
 _WATCHER_HELPERS = [
     "collect_dispatch_data", "get_bead_counts", "count_active_sessions",
-    "count_terminals", "count_today_done", "get_dispatcher_state",
+    "count_terminals", "count_today_done", "get_dispatcher_state", "get_pinned_beads",
 ]
 _watcher_errors: dict[str, str] = {}  # helper_name -> last error string
 
@@ -3262,6 +3267,7 @@ async def _dispatch_watcher():
                 asyncio.to_thread(_count_terminals),
                 asyncio.to_thread(_count_today_done),
                 asyncio.to_thread(_get_dispatcher_state),
+                asyncio.to_thread(dao_beads.get_beads_by_label, "pinned"),
                 return_exceptions=True,
             )
 
@@ -3284,6 +3290,7 @@ async def _dispatch_watcher():
             terminal_count = results[3] if not isinstance(results[3], BaseException) else 0
             today_done = results[4] if not isinstance(results[4], BaseException) else 0
             dispatcher_state = results[5] if not isinstance(results[5], BaseException) else {"paused": False, "reason": None}
+            pinned_beads = results[6] if not isinstance(results[6], BaseException) else []
 
             nav_data = {
                 "open_beads": counts.get("open_count", 0),
@@ -3293,6 +3300,7 @@ async def _dispatch_watcher():
                 "active_sessions": active_sessions,
                 "terminal_count": terminal_count,
                 "today_done": today_done,
+                "pinned": pinned_beads,
             }
             await event_bus.broadcast("dispatch", dispatch_data)
             await event_bus.broadcast("nav", nav_data)
@@ -3345,6 +3353,7 @@ routes = [
     Route("/api/bead/{id}", api_bead_show),
     Route("/api/bead/{id}/tree", api_bead_tree),
     Route("/api/bead/{id}/approve", api_bead_approve, methods=["POST"]),
+    Route("/api/pinned", api_pinned_beads),
     Route("/api/dispatch/pause", api_dispatch_pause_get),
     Route("/api/dispatch/pause", api_dispatch_pause_post, methods=["POST"]),
     Route("/api/dispatch/resume", api_dispatch_resume, methods=["POST"]),
