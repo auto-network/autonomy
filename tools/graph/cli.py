@@ -223,6 +223,21 @@ def _resolve_current_source(db):
         return None
 
 
+def _auto_provenance(db):
+    """Auto-detect current session source and latest turn.
+
+    Returns (source_dict, turn_number) or (None, None).
+    Uses tmux session name -> graph source lookup -> max turn query.
+    Runs graph sessions --all first to ensure current session is ingested.
+    """
+    subprocess.run(["graph", "sessions", "--all"], capture_output=True, timeout=30)
+    source = _resolve_current_source(db)
+    if not source:
+        return None, None
+    turn = db.get_latest_turn(source["id"])
+    return source, turn
+
+
 def _resolve_source_for_link(db, source_arg):
     """Strict source resolution for bead/link commands.
 
@@ -761,6 +776,16 @@ def cmd_playbooks(args):
 def cmd_bead(args):
     """Create a bead with provenance — links to the source conversation turns that inspired it."""
     if is_api_mode():
+        # Auto-detect source + turn before API dispatch
+        if not args.source and not args.turns:
+            db = GraphDB(args.db)
+            source, turn = _auto_provenance(db)
+            db.close()
+            if source and turn:
+                args.source = source["id"]
+                args.turns = str(turn)
+                title = (source.get("title") or "?")[:60]
+                print(f'  Auto-provenance: {source["id"][:12]} turn {turn} "{title}"')
         api_bead(args)
         return
     import subprocess
@@ -819,6 +844,13 @@ def cmd_bead(args):
         else:
             print("  Warning: --turns given but no --source and could not auto-detect current session",
                   file=sys.stderr)
+    else:
+        # No --source, no --turns: auto-detect both
+        source, turn = _auto_provenance(db)
+        if source and turn:
+            args.turns = str(turn)
+            title = (source.get("title") or "?")[:60]
+            print(f'  Auto-provenance: {source["id"][:12]} turn {turn} "{title}"')
 
     if source and args.turns:
         turn_range = {}
@@ -843,6 +875,16 @@ def cmd_bead(args):
         db.commit()
         turns_str = f" turns {args.turns}" if args.turns else ""
         print(f"  ✓ linked: {bead_id} —[conceived_at]→ {source['id'][:12]}{turns_str}")
+        # Echo linked turn content for verification
+        turn_num = turn_range.get("from") if turn_range else None
+        if turn_num is not None:
+            content = db.conn.execute(
+                "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = ? LIMIT 1",
+                (source["id"], turn_num),
+            ).fetchone()
+            if content:
+                snippet = content["content"][:120].replace("\n", " ")
+                print(f'  → "{snippet}..."')
 
     db.close()
 
@@ -850,10 +892,23 @@ def cmd_bead(args):
 def cmd_link(args):
     """Create an edge between two graph nodes (bead, source, or note)."""
     if is_api_mode():
+        # Auto-detect turn before API dispatch
+        if not args.turns:
+            db = GraphDB(args.db)
+            source, turn = _auto_provenance(db)
+            db.close()
+            if turn:
+                args.turns = str(turn)
         api_link(args)
         return
     db = GraphDB(args.db)
     from .models import Edge
+
+    # Auto-detect turn if not provided
+    if not args.turns:
+        source, turn = _auto_provenance(db)
+        if turn:
+            args.turns = str(turn)
 
     # Parse turn range
     turn_range = None
@@ -905,6 +960,17 @@ def cmd_link(args):
     turns_str = f" turns {args.turns}" if args.turns else ""
     from_label = resolved_from_id if resolved_from_type == "bead" else resolved_from_id[:12]
     print(f"  ✓ {from_label} —[{args.relation}]→ {source['id'][:12]}{turns_str}")
+    # Echo linked turn content for verification
+    if turn_range:
+        turn_num = turn_range.get("from")
+        if turn_num is not None:
+            content = db.conn.execute(
+                "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = ? LIMIT 1",
+                (source["id"], turn_num),
+            ).fetchone()
+            if content:
+                snippet = content["content"][:120].replace("\n", " ")
+                print(f'  → "{snippet}..."')
     db.close()
 
 
