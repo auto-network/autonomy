@@ -48,11 +48,11 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph projects` | Show all projects with source counts | |
 | `graph attention` | Show human input chronologically | `graph attention --last 10` |
 | `graph note "text"` | Drop a searchable trail marker | `graph note "pitfall: X breaks Y" --tags pitfall` |
-| `graph comment <src_id> "text"` | Add a comment to a note | `graph comment c6473a19 "fix step 3 wording"` |
+| `graph comment <src_id> "text"` | Add a comment to a note | `graph comment f6c6c43e "fix step 3 wording"` |
 | `graph comment integrate <id>` | Mark comment as rolled into note body | `graph comment integrate df5f1546` |
-| `graph note update <src_id>` | Update a note (versioned, non-destructive) | `graph note update c6473a19 -c - --integrate df5f < new.txt` |
-| `graph read <src_id>@N` | Read a specific version of a note | `graph read c6473a19@1` |
-| `graph read <src_id>@` | List all versions with timestamps | `graph read c6473a19@` |
+| `graph note update <src_id>` | Update a note (versioned, non-destructive) | `graph note update f6c6c43e -c - --integrate df5f < new.txt` |
+| `graph read <src_id>@N` | Read a specific version of a note | `graph read f6c6c43e@1` |
+| `graph read <src_id>@` | List all versions with timestamps | `graph read f6c6c43e@` |
 | `graph link <bead> <src>` | Create provenance edge | `graph link auto-5kj 8cdc1d85 -r conceived_at -t 286` |
 | `graph bead "title"` | Create bead with provenance link | `graph bead "Fix X" --source 8cdc1d85 --turns 286` |
 | `graph agent-runs` | Discover and ingest subagent traces | `graph agent-runs --list` |
@@ -98,7 +98,7 @@ graph note update <src_id> -c - --integrate <cid1> --integrate <cid2> < /tmp/rev
 
 ### Bead polishing protocol
 Read the full protocol before polishing any bead:
-`graph://c6473a19-52d`  (resolves to: `graph read c6473a19-52d`)
+`graph://f6c6c43e-24a`  (resolves to: `graph read f6c6c43e-24a`)
 Note revision protocol: `graph://bf3a848c-8b5`
 
 ### Before working on a bead — get the full primer
