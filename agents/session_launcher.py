@@ -216,7 +216,7 @@ def launch_session(
         "-e", f"BD_ACTOR={session_type}:{name}",
         "-e", "BD_READONLY=0",
         "-e", "GRAPH_DB=/home/agent/graph.db",
-        "-e", "GRAPH_API=http://localhost:8080",
+        "-e", "GRAPH_API=https://localhost:8080",
         *auth_args,
     ]
 
