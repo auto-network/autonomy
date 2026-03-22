@@ -54,7 +54,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve
-from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions
+from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label
 
 
 def cmd_ingest(args):
@@ -577,6 +577,49 @@ def cmd_sessions(args):
 
     print(f"\nTotal: {len(ingested)} new, {len(updated)} updated, {len(skipped)} skipped")
     db.close()
+
+
+def cmd_set_label(args):
+    """Set the label for the current session."""
+    import urllib.parse
+    import urllib.request
+
+    tmux_name = os.environ.get("DASHBOARD_SESSION")
+    if not tmux_name:
+        print("Error: $DASHBOARD_SESSION not set. Cannot identify current session.", file=sys.stderr)
+        print("This command must be run inside a dashboard-managed tmux session.", file=sys.stderr)
+        sys.exit(1)
+
+    if is_api_mode():
+        api_set_label(args)
+        return
+
+    label = " ".join(args.text)
+    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    url = f"{api_base}/api/session/{urllib.parse.quote(tmux_name)}/label"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"label": label}).encode(),
+        method="PUT",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10, context=ctx)
+        if resp.status == 200:
+            print(f"  \u2713 Label set: {label}")
+        else:
+            print(f"  \u2717 Failed: HTTP {resp.status}", file=sys.stderr)
+            sys.exit(1)
+    except urllib.error.HTTPError as e:
+        print(f"  \u2717 Failed: HTTP {e.code}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"  \u2717 Cannot reach dashboard: {e.reason}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_ingest_session(args):
@@ -1712,6 +1755,11 @@ def main():
     p.add_argument("--depth", type=int, default=10, help="Max depth")
     p.add_argument("--verbose", "-v", action="store_true", help="Show descriptions")
     p.set_defaults(func=cmd_tree)
+
+    # set-label
+    p = sub.add_parser("set-label", help="Set a working title for the current session")
+    p.add_argument("text", nargs="+", help="Label text")
+    p.set_defaults(func=cmd_set_label)
 
     # sessions
     p = sub.add_parser("sessions", help="Ingest Claude Code sessions")
