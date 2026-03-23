@@ -50,6 +50,9 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph attention` | Show human input chronologically | `graph attention --last 10` |
 | `graph note "text"` | Drop a searchable trail marker | `graph note "pitfall: X breaks Y" --tags pitfall` |
 | `graph note "text" --attach <file>` | Create note with file attachment | `graph note "Bug {1}" --attach /tmp/shot.png` |
+| `graph attach <file>` | Store file as graph attachment | `graph attach /tmp/screenshot.png --source 7bf1d812 --turn 5` |
+| `graph attachment <id>` | Show attachment metadata | `graph attachment 7c0c8c82` |
+| `graph attachments [source_id]` | List attachments | `graph attachments 45869b69` |
 | `graph comment <src_id> "text"` | Add a comment to a note | `graph comment f6c6c43e "fix step 3 wording"` |
 | `graph comment integrate <id>` | Mark comment as rolled into note body | `graph comment integrate df5f1546` |
 | `graph note update <src_id>` | Update a note (versioned, non-destructive) | `graph note update f6c6c43e -c - --integrate df5f < new.txt` |
