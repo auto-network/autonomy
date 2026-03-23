@@ -1,0 +1,48 @@
+/* Session Cards — type color coding, stats chips, wrapper pattern */
+
+/* Border-radius wrapper (never combine border-left + border-radius on same element) */
+.session-card-wrap { border-radius: 10px; overflow: clip; }
+.session-card {
+  border-left: 4px solid;
+  padding: 10px 12px;
+  background: #1f2937;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.session-card:hover { background: #1e293b; }
+.session-card-host { border-left-color: #3b82f6; }
+.session-card-container { border-left-color: #64748b; }
+
+/* Compact stats chip: "774 · 169K" */
+.session-stat-chip {
+  display: inline-flex;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #1e293b;
+  color: #9ca3af;
+  white-space: nowrap;
+}
+.session-stat-warn { background: #78350f; color: #fde68a; }
+
+/* HOST badge */
+.session-badge-host {
+  display: inline-flex;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.625rem;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #1e3a5f;
+  color: #93c5fd;
+  letter-spacing: 0.05em;
+}
+
+/* Recency color classes */
+.recency-green { color: #22c55e; }
+.recency-amber { color: #f59e0b; }
+.recency-red   { color: #ef4444; }
+.recency-gray  { color: #6b7280; }

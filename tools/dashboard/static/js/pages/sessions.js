@@ -35,18 +35,36 @@
     return Math.floor(secs / 86400) + 'd';
   }
 
+  function _formatCtx(tokens) {
+    if (!tokens) return '';
+    if (tokens >= 1000000) return (tokens / 1000000).toFixed(0) + 'M';
+    if (tokens >= 1000) return Math.round(tokens / 1000) + 'K';
+    return String(tokens);
+  }
+
+  function _recencyColor(epoch) {
+    if (!epoch) return 'recency-gray';
+    var secs = Math.round(Date.now() / 1000 - epoch);
+    if (secs < 120) return 'recency-green';
+    if (secs < 600) return 'recency-amber';
+    return 'recency-red';
+  }
+
   function _mapActive(s) {
     return {
       ...s,
       _createdStr: _formatTimestamp(s.created_at),
       _lastActiveStr: _formatRecency(s.last_activity),
+      _turnsStr: s.entry_count ? String(s.entry_count) : '',
+      _ctxStr: _formatCtx(s.context_tokens),
+      _ctxWarn: s.context_tokens > 700000,
+      _recencyColor: _recencyColor(s.last_activity),
     };
   }
 
   document.addEventListener('alpine:init', () => {
     Alpine.data('sessionsPage', () => ({
       interactive: [],
-      agents: [],
       recent: [],
       loading: true,
       _creating: false,
@@ -107,6 +125,8 @@
             type: s.sessionType || 'terminal',
             tmux_session: s.tmuxSession || '',
             bead_id: s.beadId || '',
+            entry_count: s.entryCount || s.entries.length,
+            context_tokens: s.contextTokens || 0,
             _hasData: !!hasData,
           });
         }
@@ -117,11 +137,6 @@
           var interactiveTypes = ['terminal', 'chatwith', 'host', 'container'];
           this.interactive = mapped.filter(s =>
             s.tmux_session && interactiveTypes.indexOf(s.type) !== -1
-          );
-          this.agents = mapped.filter(s =>
-            !s.tmux_session || interactiveTypes.indexOf(s.type) === -1
-          ).filter(s =>
-            !s.session_id.startsWith('agent-') && s.project !== 'subagents'
           );
           this.loading = false;
         }
