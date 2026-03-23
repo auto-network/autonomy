@@ -31,61 +31,47 @@
     </template>
     <div class="space-y-2">
       <template x-for="s in interactive" :key="s.session_id">
-        <div @click="navigate(s)"
-             class="relative block p-3 bg-gray-800 rounded-lg border border-green-700 hover:bg-gray-750 cursor-pointer select-none"
-             data-testid="session-card"
-             :data-session-id="s.session_id">
-          <button @click.stop="showCloseConfirm(s)"
-                  data-testid="session-close-btn"
-                  class="absolute top-2 right-2 w-5 h-5 flex items-center justify-center
-                         rounded-full bg-gray-900 text-gray-500 hover:text-white hover:bg-red-600
-                         text-xs leading-none transition-colors"
-                  aria-label="Close session">✕</button>
-          <div class="flex items-center gap-3 mb-1">
-            <span class="w-2 h-2 rounded-full" :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
-            <span class="font-medium text-sm text-gray-200 flex-1 truncate" x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></span>
-            <span class="text-xs text-gray-500" x-text="s._createdStr"></span>
-          </div>
-          <template x-if="s._hasData">
-            <div class="flex items-center gap-2 pl-5">
-              <span class="flex-1 text-sm text-gray-400 truncate" x-text="s.latest || '...'"></span>
-              <span class="text-xs text-gray-600 whitespace-nowrap" x-text="s._lastActiveStr"></span>
+        <div class="session-card-wrap">
+          <div class="session-card"
+               :class="s.type === 'host' ? 'session-card-host' : 'session-card-container'"
+               @click="navigate(s)" data-testid="session-card"
+               :data-session-id="s.session_id">
+            <!-- Row 1: live dot + label + close button -->
+            <div class="flex items-center gap-2 min-h-[22px]">
+              <span class="w-2 h-2 rounded-full flex-shrink-0"
+                    :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
+              <span class="font-medium text-sm text-gray-200 flex-1 truncate"
+                    x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></span>
+              <button @click.stop="showCloseConfirm(s)" data-testid="session-close-btn"
+                      class="w-5 h-5 flex items-center justify-center rounded-full
+                             bg-gray-900 text-gray-500 hover:text-white hover:bg-red-600
+                             text-xs leading-none transition-colors"
+                      aria-label="Close session">✕</button>
             </div>
-          </template>
-        </div>
-      </template>
-    </div>
-  </section>
-
-  <!-- Running Agents (dispatch, librarian) -->
-  <section aria-label="Running Agents" class="mb-8">
-    <h2 class="text-lg font-semibold mb-3 text-blue-400">⚙ Running Agents</h2>
-    <template x-if="agents.length === 0">
-      <div class="text-gray-500 text-sm">No running agents</div>
-    </template>
-    <div class="space-y-2">
-      <template x-for="s in agents" :key="s.session_id">
-        <div @click="navigate(s)"
-             class="relative block p-3 bg-gray-800 rounded-lg border border-blue-800 hover:bg-gray-750 cursor-pointer select-none"
-             data-testid="session-card"
-             :data-session-id="s.session_id">
-          <button @click.stop="showCloseConfirm(s)"
-                  data-testid="session-close-btn"
-                  class="absolute top-2 right-2 w-5 h-5 flex items-center justify-center
-                         rounded-full bg-gray-900 text-gray-500 hover:text-white hover:bg-red-600
-                         text-xs leading-none transition-colors"
-                  aria-label="Close session">✕</button>
-          <div class="flex items-center gap-3 mb-1">
-            <span class="w-2 h-2 rounded-full" :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
-            <span class="font-medium text-sm text-gray-200 flex-1 truncate" x-text="s.label || (s.bead_id ? s.bead_id : s.tmux_session) || s.session_id.slice(0, 12)"></span>
-            <span class="text-xs text-gray-500" x-text="s._createdStr"></span>
-          </div>
-          <template x-if="s._hasData">
-            <div class="flex items-center gap-2 pl-5">
-              <span class="flex-1 text-sm text-gray-400 truncate" x-text="s.latest || '...'"></span>
-              <span class="text-xs text-gray-600 whitespace-nowrap" x-text="s._lastActiveStr"></span>
+            <!-- Row 2: tmux ID · stats chip (+ HOST badge if host) -->
+            <div class="flex items-center gap-2 pl-4 mt-0.5">
+              <span class="text-xs font-mono text-gray-500"
+                    x-text="s.tmux_session"></span>
+              <template x-if="s._turnsStr">
+                <span class="session-stat-chip"
+                      :class="s._ctxWarn ? 'session-stat-warn' : ''"
+                      x-text="s._turnsStr + ' · ' + s._ctxStr"></span>
+              </template>
+              <template x-if="s.type === 'host'">
+                <span class="session-badge-host">HOST</span>
+              </template>
             </div>
-          </template>
+            <!-- Row 3: last message ... recency (inline) -->
+            <template x-if="s._hasData">
+              <div class="flex items-center gap-2 pl-4 mt-0.5">
+                <span class="flex-1 text-sm text-gray-400 truncate"
+                      x-text="s.latest || '...'"></span>
+                <span class="text-xs whitespace-nowrap"
+                      :class="s._recencyColor"
+                      x-text="s._lastActiveStr"></span>
+              </div>
+            </template>
+          </div>
         </div>
       </template>
     </div>
@@ -111,9 +97,8 @@
     </div>
   </section>
 
-  <template x-if="interactive.length === 0 && agents.length === 0 && recent.length === 0 && !loading">
+  <template x-if="interactive.length === 0 && recent.length === 0 && !loading">
     <div class="text-gray-400">No sessions found</div>
   </template>
-
 
 </div>

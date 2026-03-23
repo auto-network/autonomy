@@ -220,6 +220,8 @@ class SessionMonitor:
                 "started_at": s["created_at"],
                 "graph_source_id": s.get("graph_source_id"),
                 "label": s.get("label", ""),
+                "entry_count": s.get("entry_count", 0),
+                "context_tokens": s.get("context_tokens", 0),
             }
             for s in sessions
         ]
