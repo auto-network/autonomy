@@ -178,7 +178,7 @@
         <!-- Rich message feed + input bar -->
         <div x-show="!chatWithCollapsed"
              x-data="chatWithPanel()" x-ref="chatWithPanelInner"
-             x-init="$nextTick(() => { $el._cwPanel = $data; if (window._experimentPage) window._experimentPage.chatWithPanelRef = $data; })"
+             x-init="$nextTick(() => { $el._cwPanel = $data; if (window._experimentPage) { window._experimentPage.chatWithPanelRef = $data; var _s = Alpine.store('chatWith')[window._experimentPage.expId]; if (_s && !$data._sessionId) $data.configure(_s); } })"
              class="flex flex-col" style="height:400px;">
           {% include 'partials/chatwith-panel.html' %}
         </div>
