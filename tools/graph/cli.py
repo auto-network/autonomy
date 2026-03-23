@@ -360,6 +360,7 @@ def cmd_read(args):
                 "project": source.get("project"),
                 "platform": source.get("platform"),
                 "created_at": source.get("created_at"),
+                "file_path": source.get("file_path") or None,
                 "metadata": source.get("metadata"),
             },
             "entries": entry_list,
@@ -374,6 +375,8 @@ def cmd_read(args):
     print(f"Source: {source['id'][:12]}  {source['type']}{proj}")
     print(f"Title:  {source.get('title', '?')}")
     print(f"Date:   {source.get('created_at', '?')[:10]}")
+    if source.get("file_path"):
+        print(f"File:   {source['file_path']}")
     # Show author for notes when it's not the default "user"
     if source.get("type") == "note":
         meta = source.get("metadata") or {}
@@ -430,6 +433,9 @@ def cmd_sources(args):
         proj = f" [{s['project']}]" if s.get('project') else ""
         date = (s.get("created_at") or "")[:10]
         print(f"  {s['id'][:12]}  {s['type']:10s}  {date}  {s.get('title', '?')[:55]}{proj}")
+        if args.verbose:
+            fp = s.get("file_path")
+            print(f"                {fp if fp else '(no file)'}")
 
     db.close()
 
@@ -1780,6 +1786,7 @@ def main():
     p = sub.add_parser("sources", help="List sources")
     p.add_argument("--project", "-p", help="Filter by project")
     p.add_argument("--type", "-t", help="Filter by type (session, status, git-log, etc.)")
+    p.add_argument("--verbose", "-v", action="store_true", help="Show file paths under each source")
     p.add_argument("--limit", type=int, default=20, help="Max results")
     p.set_defaults(func=cmd_sources)
 
