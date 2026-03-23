@@ -28,6 +28,12 @@ document.addEventListener('alpine:init', () => {
       queueMicrotask(() => {
         el.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
       });
+      // Resolve graph:// image sources to attachment API
+      el.querySelectorAll('img[src^="graph://"]').forEach(img => {
+        const id = img.getAttribute('src').slice('graph://'.length);
+        img.setAttribute('src', '/api/attachment/' + id);
+        img.classList.add('attachment-img');
+      });
       // Post-process links
       el.querySelectorAll('a').forEach(a => {
         const href = a.getAttribute('href') || '';
