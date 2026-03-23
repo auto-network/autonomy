@@ -2461,6 +2461,15 @@ async def api_session_label(request):
     body = await request.json()
     label = body.get("label", "").strip()
     dashboard_db.update_label(tmux_name, label)
+    # Also update graph source title if the session has been ingested
+    session_row = dashboard_db.get_session(tmux_name)
+    if session_row and session_row.get("graph_source_id"):
+        from tools.graph.db import GraphDB
+        gdb = GraphDB()
+        try:
+            gdb.update_source_title(session_row["graph_source_id"], label)
+        finally:
+            gdb.close()
     # Broadcast via SSE so all clients update
     await event_bus.broadcast("session:registry", session_monitor.get_registry())
     return JSONResponse({"ok": True})
