@@ -201,7 +201,7 @@
                       <span class="tl-lib-dot" :class="'tl-lib-dot-' + (item.type || 'skip')">●</span>
                       <span x-text="item.description || ''"></span>
                       <template x-if="item.source_id">
-                        <a class="tl-lib-link" :href="'/source/' + item.source_id" @click.stop x-text="item.source_id.slice(0,8)"></a>
+                        <a class="tl-lib-link" :href="'/graph/' + item.source_id" @click.stop x-text="item.source_id.slice(0,8)"></a>
                       </template>
                       <template x-if="item.bead_id">
                         <a class="tl-lib-link" :href="'/bead/' + item.bead_id" @click.stop x-text="item.bead_id"></a>
@@ -220,7 +220,7 @@
                       <span class="tl-lib-dot" :class="'tl-lib-dot-' + (item.type || 'skip')">●</span>
                       <span x-text="item.description || ''"></span>
                       <template x-if="item.source_id">
-                        <a class="tl-lib-link" :href="'/source/' + item.source_id" @click.stop x-text="item.source_id.slice(0,8)"></a>
+                        <a class="tl-lib-link" :href="'/graph/' + item.source_id" @click.stop x-text="item.source_id.slice(0,8)"></a>
                       </template>
                       <template x-if="item.bead_id">
                         <a class="tl-lib-link" :href="'/bead/' + item.bead_id" @click.stop x-text="item.bead_id"></a>
@@ -249,7 +249,7 @@
                   <span class="tl-lib-dot" :class="'tl-lib-dot-' + (item.type || 'skip')">●</span>
                   <span x-text="item.description || ''"></span>
                   <template x-if="item.source_id">
-                    <a class="tl-lib-link" :href="'/source/' + item.source_id" @click.stop x-text="item.source_id.slice(0,8)"></a>
+                    <a class="tl-lib-link" :href="'/graph/' + item.source_id" @click.stop x-text="item.source_id.slice(0,8)"></a>
                   </template>
                   <template x-if="item.bead_id">
                     <a class="tl-lib-link" :href="'/bead/' + item.bead_id" @click.stop x-text="item.bead_id"></a>
