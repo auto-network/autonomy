@@ -48,6 +48,20 @@
       // Store watchers (for cleanup)
       _storeCleanups: [],
 
+      _scrollToBottom() {
+        // Double-RAF after $nextTick: ensures Alpine has processed the x-for
+        // template AND the browser has laid out all entries before we measure
+        // scrollHeight. Critical for initial loads with 1000+ entries.
+        this.$nextTick(() => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              var el = this.$refs.cwEntriesContainer;
+              if (el) el.scrollTop = el.scrollHeight;
+            });
+          });
+        });
+      },
+
       configure(opts) {
         this._sessionId = opts.sessionId || '';
         this._project = opts.project || '';
@@ -93,11 +107,7 @@
           if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
           this.entryCount = this.entries.length;
           this.state = 'ready';
-
-          this.$nextTick(() => {
-            var el = this.$refs.cwEntriesContainer;
-            if (el) el.scrollTop = el.scrollHeight;
-          });
+          this._scrollToBottom();
         } else {
           // First visit — fetch backfill
           store._loading = true;
@@ -144,11 +154,7 @@
               if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
               this.entryCount = this.entries.length;
               this.state = 'ready';
-
-              this.$nextTick(() => {
-                var el = this.$refs.cwEntriesContainer;
-                if (el) el.scrollTop = el.scrollHeight;
-              });
+              this._scrollToBottom();
             }
           } catch (e) {
             // Session may not be ready yet — show empty but live
