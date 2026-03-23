@@ -98,7 +98,7 @@
                 </div>
               </template>
               <div class="text-xs text-gray-500">
-                Source: <a :href="'/source/' + prov.source_id"
+                Source: <a :href="'/graph/' + prov.source_id"
                            class="text-indigo-400 hover:underline font-mono text-xs"
                            x-text="prov.source_id.slice(0, 12)"></a>
               </div>
@@ -116,7 +116,7 @@
               <div class="p-2 bg-gray-800 rounded border border-gray-700">
                 <div class="text-sm text-gray-300 mb-1" x-text="note.content_preview || ''"></div>
                 <div class="flex items-center gap-2 flex-wrap">
-                  <a :href="'/source/' + note.source_id"
+                  <a :href="'/graph/' + note.source_id"
                      class="text-indigo-400 hover:underline font-mono text-xs"
                      x-text="note.source_id.slice(0, 12)"></a>
                   <template x-for="tag in (note.tags || [])" :key="tag">
@@ -138,7 +138,7 @@
               <div class="p-2 bg-yellow-900/20 rounded border border-yellow-800/30">
                 <div class="text-sm text-gray-300 mb-1" x-text="pit.content_preview || ''"></div>
                 <div class="flex items-center gap-2 flex-wrap">
-                  <a :href="'/source/' + pit.source_id"
+                  <a :href="'/graph/' + pit.source_id"
                      class="text-indigo-400 hover:underline font-mono text-xs"
                      x-text="pit.source_id.slice(0, 12)"></a>
                   <template x-for="tag in (pit.tags || [])" :key="tag">

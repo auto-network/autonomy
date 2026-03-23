@@ -234,7 +234,7 @@ async function renderSessionViewFragment() {
 
 async function renderSourceFragment() {
   const path = window.location.pathname;
-  const id = path.split('/source/')[1] || '';
+  const id = path.split('/graph/')[1] || path.split('/source/')[1] || '';
   pageTitle.textContent = `Source: ${id.slice(0, 12)}`;
   let html;
   if (_fragmentCache.has('/pages/source')) {
@@ -1501,7 +1501,7 @@ function route() {
     renderSessionsFragment();
   } else if (path.match(/^\/session\/[^/]+\/.+$/)) {
     renderSessionViewFragment();
-  } else if (path.startsWith('/source/')) {
+  } else if (path.startsWith('/graph/') || path.startsWith('/source/')) {
     renderSourceFragment();
   } else if (isTerminalPage) {
     const sessionId = path.startsWith('/terminal/') ? path.split('/terminal/')[1] : null;

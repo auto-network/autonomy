@@ -3236,6 +3236,13 @@ async def api_dao_recent_sessions(request):
 async def page_source(request):
     return HTMLResponse(_load_template("base.html"))
 
+async def page_source_redirect(request):
+    """301 redirect /source/{id} → /graph/{id}, preserving query params."""
+    id = request.path_params["id"]
+    qs = str(request.query_params)
+    target = f"/graph/{id}" + (f"?{qs}" if qs else "")
+    return RedirectResponse(target, status_code=301)
+
 async def page_source_fragment(request):
     """Return the Source/Context page as an HTML fragment for SPA injection.
 
@@ -3915,6 +3922,38 @@ async def api_attachment_serve(request):
     )
 
 
+async def api_graph_resolve(request):
+    """Universal graph entity resolver — sources, attachments, partial ID prefix."""
+    from tools.graph.db import GraphDB
+
+    id = request.path_params["id"]
+    if not _GRAPH_SOURCE_ID_RE.match(id):
+        return JSONResponse({"error": f"malformed id: {id!r}"}, status_code=400)
+    db = GraphDB()
+    try:
+        source = db.get_source(id)
+        if source:
+            return JSONResponse(await run_cli_json(
+                ["graph", "read", source["id"], "--json", "--max-chars", "50000", "--first"]
+            ))
+        att = db.get_attachment(id)
+        if att:
+            return JSONResponse({
+                "type": "attachment",
+                "id": att["id"],
+                "filename": att["filename"],
+                "mime_type": att["mime_type"],
+                "size_bytes": att["size_bytes"],
+                "source_id": att["source_id"],
+                "turn": att.get("turn"),
+                "created_at": att["created_at"],
+                "url": f"/api/attachment/{att['id'][:12]}",
+            })
+    finally:
+        db.close()
+    return JSONResponse({"error": "not found"}, status_code=404)
+
+
 # ── App ───────────────────────────────────────────────────────
 
 routes = [
@@ -3931,7 +3970,8 @@ routes = [
     Route("/pages/bead", page_bead_fragment),
     Route("/pages/timeline", page_timeline_fragment),
     Route("/pages/trace", page_trace_fragment),
-    Route("/source/{id}", page_source),
+    Route("/graph/{id}", page_source),
+    Route("/source/{id}", page_source_redirect),
     Route("/pages/source", page_source_fragment),
     Route("/bead/{id}", page_bead),
     Route("/timeline", page_timeline),
@@ -3968,6 +4008,7 @@ routes = [
     Route("/dispatch/trace/{run}", page_dispatch),
     Route("/api/search", api_search),
     Route("/api/sources", api_sources),
+    Route("/api/graph/{id}", api_graph_resolve),
     Route("/api/source/{id}", api_source_read),
     Route("/api/source/{id}/attachments", api_source_attachments),
     Route("/api/context/{id}/{turn}", api_context),
