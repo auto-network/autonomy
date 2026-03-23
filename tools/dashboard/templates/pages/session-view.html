@@ -210,14 +210,20 @@
                   <div>
                     <div class="flex items-center gap-2 mb-1">
                       <span class="sc-ct-label">CROSSTALK</span>
-                      <a class="sc-ct-sender"
-                         :href="'/sessions/' + dEntry.sender"
-                         x-text="dEntry.sender_label || dEntry.sender"></a>
+                      <template x-if="dEntry.source_id">
+                        <a class="sc-ct-sender"
+                           :href="'/source/' + dEntry.source_id"
+                           x-text="dEntry.sender_label || dEntry.sender"></a>
+                      </template>
+                      <template x-if="!dEntry.source_id">
+                        <span class="sc-ct-sender"
+                              x-text="dEntry.sender_label || dEntry.sender"></span>
+                      </template>
                       <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
                     </div>
                     <div class="sc-ct-content" x-text="dEntry.content || ''"></div>
                     <div class="sc-ct-provenance" x-show="dEntry.source_id">
-                      <a :href="'/graph/source/' + dEntry.source_id">
+                      <a :href="'/source/' + dEntry.source_id + '?turn=' + dEntry.turn">
                         <span x-text="'turn ' + dEntry.turn"></span>
                       </a>
                     </div>

@@ -1357,7 +1357,7 @@ async def api_crosstalk_send(request):
 
     # Resolve sender metadata from dashboard_db
     sender_row = dashboard_db.get_session(sender)
-    sender_label = (sender_row or {}).get("label", "") or ""
+    sender_label = (sender_row or {}).get("label", "") or sender
     sender_source_id = (sender_row or {}).get("graph_source_id", "") or ""
     sender_entry_count = (sender_row or {}).get("entry_count", 0) or 0
 
