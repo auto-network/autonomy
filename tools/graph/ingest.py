@@ -573,6 +573,7 @@ def ingest_claude_code_session(
     abs_path = str(file_path.resolve())
     # Normalize container paths to host paths to prevent duplicates
     abs_path = abs_path.replace("/home/agent/", "/home/jeremy/")
+    abs_path = abs_path.replace("/workspace/repo/", "/home/jeremy/workspace/autonomy/")
 
     if project is None:
         project = _extract_project_name(file_path)
