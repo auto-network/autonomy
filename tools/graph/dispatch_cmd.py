@@ -301,6 +301,62 @@ def _print_primer(runs: list, args):
         print(", ".join(parts))
 
 
+def cmd_dispatch_watch(args):
+    """Block until the next dispatch run completes (DONE or FAILED)."""
+    import time
+    base = _get_dashboard_url()
+    ctx = _make_ssl_ctx()
+    timeout = getattr(args, "timeout", 600) or 600
+    poll_interval = 3.0
+    deadline = time.time() + timeout
+
+    # Snapshot current completed run IDs so we can detect new completions
+    try:
+        data = _api_call(base, "/api/dispatch/runs", ctx)
+    except Exception as e:
+        print(f"Cannot reach dashboard: {e}", file=sys.stderr)
+        return
+
+    runs = data if isinstance(data, list) else data.get("runs", data.get("active", []))
+    seen_completed = set()
+    for r in runs:
+        if r.get("completed_at") or r.get("status") in ("DONE", "FAILED", "done", "failed"):
+            seen_completed.add(r.get("bead_id") or r.get("id"))
+
+    running_ids = set()
+    for r in runs:
+        if not r.get("completed_at") and r.get("status") not in ("DONE", "FAILED", "done", "failed"):
+            running_ids.add(r.get("bead_id") or r.get("id"))
+
+    if not running_ids:
+        print("No running dispatch — nothing to watch")
+        return
+
+    print(f"Watching {len(running_ids)} running dispatch(es): {', '.join(running_ids)}")
+
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        try:
+            data = _api_call(base, "/api/dispatch/runs", ctx)
+        except Exception:
+            continue
+        runs = data if isinstance(data, list) else data.get("runs", data.get("active", []))
+        for r in runs:
+            rid = r.get("bead_id") or r.get("id")
+            is_done = r.get("completed_at") or r.get("status") in ("DONE", "FAILED", "done", "failed")
+            if is_done and rid not in seen_completed:
+                status = r.get("status", "DONE")
+                exit_code = r.get("exit_code", "?")
+                duration = r.get("duration_secs") or r.get("duration", "?")
+                print(f"\n✓ Dispatch completed: {rid}")
+                print(f"  Status: {status}  Exit: {exit_code}  Duration: {duration}s")
+                if r.get("commit_sha"):
+                    print(f"  Commit: {r['commit_sha'][:12]}")
+                return
+
+    print(f"Timeout after {timeout}s — dispatch still running", file=sys.stderr)
+
+
 def cmd_dispatch_approve(args):
     """Set readiness=approved on one or more beads, releasing them for dispatch."""
     import subprocess
