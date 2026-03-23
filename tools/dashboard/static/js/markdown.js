@@ -20,19 +20,15 @@ const SECURE_CONFIG = {
 document.addEventListener('alpine:init', () => {
   Alpine.directive('markdown', (el, { expression }, { effect, evaluate }) => {
     effect(() => {
-      const text = evaluate(expression);
-      const html = DOMPurify.sanitize(marked.parse(text || ''), SECURE_CONFIG);
+      let text = evaluate(expression) || '';
+      // Rewrite graph:// image refs BEFORE DOMPurify (which strips unknown protocols)
+      text = text.replace(/!\[([^\]]*)\]\(graph:\/\/([^)]+)\)/g, '![$1](/api/attachment/$2)');
+      const html = DOMPurify.sanitize(marked.parse(text), SECURE_CONFIG);
       el.classList.add('markdown-body');
       el.innerHTML = html;
       // $nextTick not available in directive context — use queueMicrotask
       queueMicrotask(() => {
         el.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
-      });
-      // Resolve graph:// image sources to attachment API
-      el.querySelectorAll('img[src^="graph://"]').forEach(img => {
-        const id = img.getAttribute('src').slice('graph://'.length);
-        img.setAttribute('src', '/api/attachment/' + id);
-        img.classList.add('attachment-img');
       });
       // Post-process links
       el.querySelectorAll('a').forEach(a => {
