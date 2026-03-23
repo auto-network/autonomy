@@ -203,7 +203,7 @@ def _resolve_current_source(db):
     """Find the graph source for the session we're running inside.
 
     Uses BD_ACTOR env var (e.g. 'terminal:auto-0322-153000') to get tmux name,
-    then looks up graph_source_id via dashboard.db API.
+    then asks the dashboard API for graph_source_id (canonical source of truth).
 
     Returns source dict or None.
     """
@@ -211,7 +211,30 @@ def _resolve_current_source(db):
     if not bd_actor or ":" not in bd_actor:
         return None
     tmux_name = bd_actor.split(":", 1)[1]
-    return db.get_source_by_tmux(tmux_name)
+
+    # Ask the dashboard API (canonical source of truth)
+    api_base = os.environ.get("GRAPH_API")
+    if not api_base:
+        return None
+    import ssl
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    url = f"{api_base}/api/session/{urllib.parse.quote(tmux_name)}"
+    try:
+        resp = urllib.request.urlopen(url, timeout=5, context=ctx)
+        data = json.loads(resp.read())
+        graph_source_id = data.get("graph_source_id")
+        if not graph_source_id:
+            print(f"warning: session {tmux_name} has no graph_source_id yet", file=sys.stderr)
+            return None
+        return db.get_source(graph_source_id)
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
+        print(f"warning: auto-provenance failed for {tmux_name}: {e}", file=sys.stderr)
+        return None
 
 
 def _auto_provenance(db):

@@ -617,14 +617,6 @@ class GraphDB:
 
         return None
 
-    def get_source_by_tmux(self, tmux_name: str) -> dict | None:
-        """Find the most recent source with the given tmux_session in metadata."""
-        row = self.conn.execute(
-            "SELECT * FROM sources WHERE json_extract(metadata, '$.tmux_session') = ? "
-            "ORDER BY created_at DESC LIMIT 1",
-            (tmux_name,),
-        ).fetchone()
-        return dict(row) if row else None
 
     def get_latest_turn(self, source_id: str) -> int | None:
         """Return the highest turn_number for a source, or None if no turns."""

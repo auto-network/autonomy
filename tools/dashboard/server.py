@@ -2434,6 +2434,22 @@ async def api_session_confirm_link(request):
     return JSONResponse({"ok": True})
 
 
+async def api_session_get(request):
+    """GET /api/session/{tmux_name} — return session details."""
+    tmux_name = request.path_params["tmux_name"]
+    session = dashboard_db.get_session(tmux_name)
+    if not session:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({
+        "session_id": session["tmux_name"],
+        "session_uuid": session.get("session_uuid"),
+        "graph_source_id": session.get("graph_source_id"),
+        "type": session.get("type"),
+        "project": session.get("project"),
+        "is_live": bool(session.get("is_live")),
+    })
+
+
 async def api_session_label(request):
     """Set or clear the user-facing label for a session.
 
@@ -3689,6 +3705,7 @@ routes = [
     Route("/api/terminal/unclaimed", api_terminal_unclaimed),
     Route("/api/session/send-handshake", api_session_send_handshake, methods=["POST"]),
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
+    Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
     Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
     Route("/api/session/send", api_session_send, methods=["POST"]),
     Route("/api/session/{project}/{session_id}/tail", api_session_tail),
