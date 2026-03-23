@@ -1160,6 +1160,67 @@ def cmd_collab_tag(args):
         print(f"  Already tagged: {source['id'][:12]} \"{title}\"")
 
 
+def _parse_duration(s: str) -> float:
+    """Parse a duration string like '1h', '30m', '2d', '1w' to seconds."""
+    import re
+    m = re.match(r'^(\d+)\s*([smhdw])$', s.strip())
+    if not m:
+        raise ValueError(f"Invalid duration: {s!r}. Use e.g. 1h, 30m, 2d, 1w")
+    val, unit = int(m.group(1)), m.group(2)
+    multipliers = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800}
+    return val * multipliers[unit]
+
+
+def cmd_notes(args):
+    """List notes, optionally filtered by recency."""
+    db = GraphDB(args.db)
+    try:
+        since_iso = None
+        if args.since:
+            try:
+                secs = _parse_duration(args.since)
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+            from datetime import datetime, timezone, timedelta
+            since_dt = datetime.now(timezone.utc) - timedelta(seconds=secs)
+            since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
+
+        sources = db.list_sources(
+            source_type="note",
+            project=args.project,
+            since=since_iso,
+            tags=tags,
+            limit=args.limit,
+        )
+        if not sources:
+            print("No notes found")
+            return
+
+        for s in sources:
+            sid = s["id"][:11]
+            date = (s.get("created_at") or "")[:10]
+            title = (s.get("title") or "")[:60]
+            project = s.get("project") or ""
+            tags_str = ""
+            meta = s.get("metadata")
+            if meta and isinstance(meta, str):
+                import json
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            if isinstance(meta, dict) and meta.get("tags"):
+                tags_str = ",".join(meta["tags"])
+            print(f"  {sid}  {date}  [{project}]  {title}")
+            if tags_str:
+                print(f"           tags: {tags_str}")
+    finally:
+        db.close()
+
+
 def cmd_note_router(args):
     """Route 'graph note ...' to create or update."""
     if args.text and args.text[0] == "update":
@@ -2180,6 +2241,14 @@ def main():
     p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
     p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement. For images use markdown syntax: ![alt]({1}). Unplaced attachments appear as downloads")
     p_note.set_defaults(func=cmd_note_router)
+
+    # notes (list notes with optional recency filter)
+    p_notes = sub.add_parser("notes", help="List notes")
+    p_notes.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d, 1w")
+    p_notes.add_argument("--project", help="Filter by project")
+    p_notes.add_argument("--tags", help="Filter by tag (comma-separated)")
+    p_notes.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    p_notes.set_defaults(func=cmd_notes)
 
     # comment (handles both add and integrate)
     p_comment = sub.add_parser("comment", help="Add or manage comments on notes")
