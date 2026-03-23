@@ -3424,6 +3424,14 @@ _GRAPH_TAGS_RE = re.compile(r'^[a-zA-Z0-9_,:-]+$')
 _GRAPH_MAX_CONTENT = 100_000  # 100KB
 
 
+def _safe_unlink(path: str) -> None:
+    """Remove a temp file, ignoring errors."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def _graph_validate_content(body: dict, field: str = "content") -> str | None:
     """Validate and return content field, or return error string."""
     content = body.get(field, "")
@@ -3442,56 +3450,160 @@ def _graph_validate_source_id(value: str) -> str | None:
 
 
 async def api_graph_note(request):
-    """Create a note via graph CLI."""
-    body = await request.json()
-    err = _graph_validate_content(body)
-    if err:
-        return JSONResponse({"error": err}, status_code=400)
+    """Create a note via graph CLI. Accepts JSON or multipart (when attachments present)."""
+    import tempfile
 
-    content = body["content"]
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        content = str(form.get("content", ""))
+        if not content:
+            return JSONResponse({"error": "content required"}, status_code=400)
+        if len(content) > _GRAPH_MAX_CONTENT:
+            return JSONResponse({"error": f"content exceeds 100KB limit"}, status_code=400)
 
-    cmd = ["graph", "note", "-c", "-"]
-    if body.get("tags"):
-        tags = body["tags"]
-        if not _GRAPH_TAGS_RE.match(tags):
-            return JSONResponse({"error": f"invalid tags: {tags!r}"}, status_code=400)
-        cmd += ["--tags", tags]
-    if body.get("project"):
-        cmd += ["-p", body["project"]]
-    if body.get("author"):
-        cmd += ["--author", body["author"]]
+        cmd = ["graph", "note", "-c", "-"]
+        tags = form.get("tags")
+        if tags:
+            if not _GRAPH_TAGS_RE.match(str(tags)):
+                return JSONResponse({"error": f"invalid tags: {tags!r}"}, status_code=400)
+            cmd += ["--tags", str(tags)]
+        if form.get("project"):
+            cmd += ["-p", str(form["project"])]
+        if form.get("author"):
+            cmd += ["--author", str(form["author"])]
 
-    stdout, stderr, rc = await run_cli(cmd, timeout=30, stdin_data=content)
+        # Write uploaded files to temp locations and add --attach flags
+        tmp_paths = []
+        for key, upload in form.multi_items():
+            if key != "attachments":
+                continue
+            file_contents = await upload.read()
+            if not file_contents:
+                continue
+            if len(file_contents) > 50 * 1024 * 1024:
+                for p in tmp_paths:
+                    _safe_unlink(p)
+                return JSONResponse({"error": "attachment too large (max 50MB)"}, status_code=400)
+            suffix = ""
+            if upload.filename and "." in upload.filename:
+                suffix = "." + upload.filename.rsplit(".", 1)[1]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(file_contents)
+                tmp_paths.append(tmp.name)
+            cmd += ["--attach", tmp_paths[-1]]
 
-    if rc != 0:
-        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-    return JSONResponse({"ok": True, "output": stdout})
+        stdout, stderr, rc = await run_cli(cmd, timeout=60, stdin_data=content)
+
+        for p in tmp_paths:
+            _safe_unlink(p)
+
+        if rc != 0:
+            return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+        return JSONResponse({"ok": True, "output": stdout})
+    else:
+        body = await request.json()
+        err = _graph_validate_content(body)
+        if err:
+            return JSONResponse({"error": err}, status_code=400)
+
+        content = body["content"]
+
+        cmd = ["graph", "note", "-c", "-"]
+        if body.get("tags"):
+            tags = body["tags"]
+            if not _GRAPH_TAGS_RE.match(tags):
+                return JSONResponse({"error": f"invalid tags: {tags!r}"}, status_code=400)
+            cmd += ["--tags", tags]
+        if body.get("project"):
+            cmd += ["-p", body["project"]]
+        if body.get("author"):
+            cmd += ["--author", body["author"]]
+
+        stdout, stderr, rc = await run_cli(cmd, timeout=30, stdin_data=content)
+
+        if rc != 0:
+            return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+        return JSONResponse({"ok": True, "output": stdout})
 
 
 async def api_graph_note_update(request):
-    """Update a note via graph CLI."""
-    body = await request.json()
+    """Update a note via graph CLI. Accepts JSON or multipart (when attachments present)."""
+    import tempfile
 
-    source_id = body.get("source_id", "")
-    err = _graph_validate_source_id(source_id)
-    if err:
-        return JSONResponse({"error": err}, status_code=400)
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        source_id = str(form.get("source_id", ""))
+        err = _graph_validate_source_id(source_id)
+        if err:
+            return JSONResponse({"error": err}, status_code=400)
+        content = str(form.get("content", ""))
+        if not content:
+            return JSONResponse({"error": "content required"}, status_code=400)
+        if len(content) > _GRAPH_MAX_CONTENT:
+            return JSONResponse({"error": "content exceeds 100KB limit"}, status_code=400)
 
-    err = _graph_validate_content(body)
-    if err:
-        return JSONResponse({"error": err}, status_code=400)
+        cmd = ["graph", "note", "update", source_id, "-c", "-"]
+        integrate_raw = form.get("integrate_ids")
+        if integrate_raw:
+            try:
+                ids = json.loads(str(integrate_raw))
+            except (json.JSONDecodeError, TypeError):
+                ids = []
+            for cid in ids:
+                cmd += ["--integrate", str(cid)]
 
-    content = body["content"]
+        tmp_paths = []
+        for key, upload in form.multi_items():
+            if key != "attachments":
+                continue
+            file_contents = await upload.read()
+            if not file_contents:
+                continue
+            if len(file_contents) > 50 * 1024 * 1024:
+                for p in tmp_paths:
+                    _safe_unlink(p)
+                return JSONResponse({"error": "attachment too large (max 50MB)"}, status_code=400)
+            suffix = ""
+            if upload.filename and "." in upload.filename:
+                suffix = "." + upload.filename.rsplit(".", 1)[1]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(file_contents)
+                tmp_paths.append(tmp.name)
+            cmd += ["--attach", tmp_paths[-1]]
 
-    cmd = ["graph", "note", "update", source_id, "-c", "-"]
-    for cid in body.get("integrate_ids", []):
-        cmd += ["--integrate", cid]
+        stdout, stderr, rc = await run_cli(cmd, timeout=60, stdin_data=content)
 
-    stdout, stderr, rc = await run_cli(cmd, timeout=30, stdin_data=content)
+        for p in tmp_paths:
+            _safe_unlink(p)
 
-    if rc != 0:
-        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-    return JSONResponse({"ok": True, "output": stdout})
+        if rc != 0:
+            return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+        return JSONResponse({"ok": True, "output": stdout})
+    else:
+        body = await request.json()
+
+        source_id = body.get("source_id", "")
+        err = _graph_validate_source_id(source_id)
+        if err:
+            return JSONResponse({"error": err}, status_code=400)
+
+        err = _graph_validate_content(body)
+        if err:
+            return JSONResponse({"error": err}, status_code=400)
+
+        content = body["content"]
+
+        cmd = ["graph", "note", "update", source_id, "-c", "-"]
+        for cid in body.get("integrate_ids", []):
+            cmd += ["--integrate", cid]
+
+        stdout, stderr, rc = await run_cli(cmd, timeout=30, stdin_data=content)
+
+        if rc != 0:
+            return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+        return JSONResponse({"ok": True, "output": stdout})
 
 
 async def api_graph_comment(request):
@@ -3682,6 +3794,21 @@ async def api_graph_attach(request):
 
 # ── Attachment serving ────────────────────────────────────────
 
+async def api_source_attachments(request):
+    """List attachments linked to a source."""
+    from tools.graph.db import GraphDB
+
+    source_id = request.path_params["id"]
+    if not _GRAPH_SOURCE_ID_RE.match(source_id):
+        return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
+    db = GraphDB()
+    try:
+        atts = db.list_attachments(source_id=source_id)
+    finally:
+        db.close()
+    return JSONResponse({"attachments": atts})
+
+
 async def api_attachment_serve(request):
     """Serve an attachment file by ID with correct Content-Type."""
     from tools.graph.db import GraphDB
@@ -3760,6 +3887,7 @@ routes = [
     Route("/api/search", api_search),
     Route("/api/sources", api_sources),
     Route("/api/source/{id}", api_source_read),
+    Route("/api/source/{id}/attachments", api_source_attachments),
     Route("/api/context/{id}/{turn}", api_context),
     Route("/api/projects", api_projects),
     Route("/api/stats", api_stats),

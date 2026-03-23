@@ -1142,6 +1142,21 @@ def cmd_note(args):
     )
     db.insert_source(source)
 
+    # Handle --attach: store files and substitute placeholders
+    attach_paths = getattr(args, "attach", None) or []
+    if attach_paths:
+        att_ids = []
+        for fp in attach_paths:
+            att = _store_attachment(db, fp, source_id=source.id)
+            if att is None:
+                db.close()
+                sys.exit(1)
+            att_ids.append(att.id)
+            print(f"  ✓ Attached {att.filename} ({att.id[:12]})")
+        # Substitute positional placeholders {1}, {2}, ...
+        for i, att_id in enumerate(att_ids, 1):
+            text = text.replace('{' + str(i) + '}', f'graph://{att_id[:12]}')
+
     t = Thought(
         source_id=source.id,
         content=text,
@@ -1271,6 +1286,20 @@ def cmd_note_update(args):
         sys.exit(1)
 
     source_id = source["id"]
+
+    # Handle --attach: store files and substitute placeholders
+    attach_paths = getattr(args, "attach", None) or []
+    if attach_paths:
+        att_ids = []
+        for fp in attach_paths:
+            att = _store_attachment(db, fp, source_id=source_id)
+            if att is None:
+                db.close()
+                sys.exit(1)
+            att_ids.append(att.id)
+            print(f"  ✓ Attached {att.filename} ({att.id[:12]})")
+        for i, att_id in enumerate(att_ids, 1):
+            new_content = new_content.replace('{' + str(i) + '}', f'graph://{att_id[:12]}')
 
     # Get current thought (turn 1)
     thoughts = db.get_thoughts_by_source(source_id)
@@ -1771,58 +1800,45 @@ def cmd_wait(args):
         time.sleep(poll_interval)
 
 
-def cmd_attach(args):
-    """Attach a file to the graph with hash-based dedup."""
+def _store_attachment(db, file_path_str, source_id=None, turn_number=None):
+    """Hash, dedup, store a file and insert an attachment record.
+
+    Returns the Attachment object (new or existing).
+    Shared by cmd_attach() and cmd_note() --attach handling.
+    """
     import hashlib
     import mimetypes
     import shutil
-
-    if is_api_mode():
-        api_attach(args)
-        return
-
-    db = GraphDB(args.db)
     from .models import Attachment
 
-    file_path = Path(args.file_path)
+    file_path = Path(file_path_str)
     if not file_path.is_file():
         print(f"Error: {file_path} not found or not a file", file=sys.stderr)
-        db.close()
-        sys.exit(1)
+        return None
 
-    # Read file and compute SHA256
     file_data = file_path.read_bytes()
     file_hash = hashlib.sha256(file_data).hexdigest()
     size_bytes = len(file_data)
     filename = file_path.name
 
-    # Check for existing attachment with same hash (dedup)
     existing = db.get_attachment_by_hash(file_hash)
     if existing:
-        print(f"  ✓ Already attached as {existing['id'][:12]} — {filename} ({size_bytes} bytes, dedup)")
-        db.close()
-        return
+        # Update source_id if provided and not already set
+        if source_id and not existing.get("source_id"):
+            db.conn.execute("UPDATE attachments SET source_id = ? WHERE id = ?", (source_id, existing["id"]))
+            db.conn.commit()
+        return Attachment(
+            id=existing["id"], hash=file_hash, filename=filename,
+            mime_type=existing.get("mime_type"), size_bytes=size_bytes,
+            file_path=existing["file_path"], source_id=source_id or existing.get("source_id"),
+        )
 
-    # Detect mime type
     mime_type, _ = mimetypes.guess_type(filename)
-
-    # Determine storage path: data/attachments/{hash[:2]}/{hash}.{ext}
     ext = file_path.suffix or ""
-    store_dir = Path(args.db).parent / "attachments" / file_hash[:2]
+    store_dir = db.db_path.parent / "attachments" / file_hash[:2]
     store_path = store_dir / f"{file_hash}{ext}"
-
     store_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(str(file_path), str(store_path))
-
-    # Resolve provenance
-    source_id = getattr(args, "source", None)
-    turn_number = getattr(args, "turn", None)
-
-    if not source_id and not turn_number:
-        auto_src, auto_turn = _auto_provenance(db)
-        if auto_src:
-            source_id = auto_src["id"]
-            turn_number = auto_turn
 
     att = Attachment(
         hash=file_hash,
@@ -1834,9 +1850,35 @@ def cmd_attach(args):
         turn_number=int(turn_number) if turn_number else None,
     )
     db.insert_attachment(att)
+    return att
+
+
+def cmd_attach(args):
+    """Attach a file to the graph with hash-based dedup."""
+    if is_api_mode():
+        api_attach(args)
+        return
+
+    db = GraphDB(args.db)
+
+    # Resolve provenance
+    source_id = getattr(args, "source", None)
+    turn_number = getattr(args, "turn", None)
+
+    if not source_id and not turn_number:
+        auto_src, auto_turn = _auto_provenance(db)
+        if auto_src:
+            source_id = auto_src["id"]
+            turn_number = auto_turn
+
+    att = _store_attachment(db, args.file_path, source_id=source_id,
+                            turn_number=turn_number)
+    if att is None:
+        db.close()
+        sys.exit(1)
 
     src_label = f" src:{source_id[:12]}" if source_id else ""
-    print(f"  ✓ Attached {filename} ({att.id[:12]}{src_label}) — {size_bytes} bytes, {mime_type or 'unknown'}")
+    print(f"  ✓ Attached {att.filename} ({att.id[:12]}{src_label}) — {att.size_bytes} bytes, {att.mime_type or 'unknown'}")
     db.close()
 
 
@@ -2053,6 +2095,7 @@ def main():
     p_note.add_argument("--author", help="Who wrote this (default: user)")
     p_note.add_argument("--force", action="store_true", help="Bypass single-line length check")
     p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
+    p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement; unplaced attachments appear as downloads")
     p_note.set_defaults(func=cmd_note_router)
 
     # comment (handles both add and integrate)

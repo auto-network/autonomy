@@ -52,6 +52,25 @@
         </div>
       </template>
 
+      <!-- Non-referenced attachments (download list) -->
+      <template x-if="isNote && unrefAttachments.length > 0">
+        <div class="mt-4 p-3 bg-gray-800/50 rounded border border-gray-700">
+          <div class="text-xs font-semibold text-gray-500 mb-2">Attachments</div>
+          <template x-for="att in unrefAttachments" :key="att.id">
+            <a :href="'/api/attachment/' + att.id"
+               :download="att.filename"
+               class="flex items-center gap-2 text-sm text-indigo-400 hover:text-indigo-300 py-1">
+              <span class="text-gray-500">&#128206;</span>
+              <span x-text="att.filename"></span>
+              <span class="text-xs text-gray-500"
+                    x-text="att.size_bytes > 1024*1024
+                      ? (att.size_bytes / 1024 / 1024).toFixed(1) + 'MB'
+                      : (att.size_bytes / 1024).toFixed(0) + 'KB'"></span>
+            </a>
+          </template>
+        </div>
+      </template>
+
       <!-- Chat layout (session / conversation / agent-run) -->
       <template x-if="isChat">
         <div class="space-y-4">
