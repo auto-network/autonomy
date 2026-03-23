@@ -56,7 +56,7 @@ document.addEventListener('alpine:init', () => {
       const textNodes = [];
       while (walker.nextNode()) textNodes.push(walker.currentNode);
       for (const node of textNodes) {
-        if (node.parentElement && (node.parentElement.tagName === 'A' || node.parentElement.tagName === 'PRE' || node.parentElement.tagName === 'CODE')) continue;
+        if (node.parentElement && (node.parentElement.tagName === 'A' || node.parentElement.tagName === 'PRE' || node.parentElement.closest('pre'))) continue;
         if (!COMBINED_RE.test(node.textContent)) continue;
         COMBINED_RE.lastIndex = 0;
         const frag = document.createDocumentFragment();

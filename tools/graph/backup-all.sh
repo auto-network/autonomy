@@ -38,6 +38,7 @@ backup_sqlite "graph.db"       "${ROOT}/data/graph.db"
 backup_sqlite "dispatch.db"    "${ROOT}/data/dispatch.db"
 backup_sqlite "experiments.db" "${ROOT}/data/experiments.db"
 backup_sqlite "dashboard.db"   "${ROOT}/data/dashboard.db"
+backup_sqlite "auth.db"        "${ROOT}/data/auth.db"
 
 # ── Beads (dolt — mysqldump via docker against running sql-server) ─
 DOLT_PORT=3306
