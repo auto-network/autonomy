@@ -2068,6 +2068,57 @@ def cmd_attachments(args):
     db.close()
 
 
+def _parse_duration(s: str) -> float:
+    """Parse a human duration string (e.g. '1h', '30m', '2d') to seconds."""
+    import re
+    m = re.fullmatch(r"(\d+)\s*([smhd])", s.strip())
+    if not m:
+        raise argparse.ArgumentTypeError(f"Invalid duration: {s!r} (use e.g. 1h, 30m, 2d)")
+    val, unit = int(m.group(1)), m.group(2)
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    return val * mult[unit]
+
+
+def cmd_crosstalk(args):
+    """Display recent CrossTalk messages."""
+    from datetime import datetime
+
+    auth_db_path = Path(__file__).resolve().parents[1] / "data" / "auth.db"
+    if not auth_db_path.exists():
+        print("auth.db not found", file=sys.stderr)
+        return
+
+    from tools.dashboard.dao import auth_db
+    if auth_db._conn is None:
+        auth_db.init_db(auth_db_path)
+
+    since_epoch = None
+    if args.since:
+        secs = _parse_duration(args.since)
+        since_epoch = time.time() - secs
+
+    messages = auth_db.get_messages(
+        limit=args.limit,
+        since=since_epoch,
+        session=args.session,
+    )
+
+    if not messages:
+        print("No CrossTalk messages found")
+        return
+
+    for msg in reversed(messages):
+        ts = datetime.fromtimestamp(msg["timestamp"]).strftime("%H:%M:%S")
+        sender = msg["sender_label"] or msg["sender_session"]
+        target = msg["target_session"]
+        text = (msg["message"] or "")[:120].replace("\n", " ")
+        delivered = "✓" if msg["delivered"] else "·"
+        print(f"  {ts} {delivered} {sender} → {target}")
+        print(f"         {text}")
+        if len(msg["message"] or "") > 120:
+            print(f"         ... ({len(msg['message'])} chars)")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="autonomy-graph",
@@ -2349,6 +2400,13 @@ def main():
     p_collab_tag = collab_sub.add_parser("tag", help="Add collab tag to an existing note")
     p_collab_tag.add_argument("source_id", help="Source ID or prefix")
     p_collab_tag.set_defaults(func=cmd_collab_tag)
+
+    # crosstalk
+    p = sub.add_parser("crosstalk", help="View CrossTalk message log")
+    p.add_argument("--session", help="Filter by sender or target session")
+    p.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d")
+    p.add_argument("--limit", type=int, default=30, help="Max messages (default: 30)")
+    p.set_defaults(func=cmd_crosstalk)
 
     args = parser.parse_args()
 
