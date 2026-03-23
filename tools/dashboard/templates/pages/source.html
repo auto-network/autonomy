@@ -24,8 +24,17 @@
             <span class="text-xs text-indigo-400" x-text="'[' + src.project + ']'"></span>
           </template>
           <span class="text-xs text-gray-500" x-text="date"></span>
-          <span class="text-xs text-gray-600 font-mono ml-auto"
-                x-text="(src.id || '').slice(0, 12)"></span>
+          <button class="text-xs text-gray-600 font-mono ml-auto hover:text-gray-400 active:text-emerald-400 transition-colors duration-150 cursor-pointer bg-transparent border-none p-0"
+                @click="
+                  navigator.clipboard.writeText('graph://' + (src.id || '').slice(0, 12));
+                  $el.textContent = 'copied!';
+                  $el.classList.add('text-emerald-400');
+                  setTimeout(() => {
+                    $el.textContent = (src.id || '').slice(0, 12);
+                    $el.classList.remove('text-emerald-400');
+                  }, 1000);
+                "
+                x-text="(src.id || '').slice(0, 12)"></button>
         </div>
         <h1 class="font-bold"
             :class="isContext ? 'text-lg' : 'text-xl'"
