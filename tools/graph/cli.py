@@ -2106,7 +2106,7 @@ def main():
     p_note.add_argument("--author", help="Who wrote this (default: user)")
     p_note.add_argument("--force", action="store_true", help="Bypass single-line length check")
     p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
-    p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement; unplaced attachments appear as downloads")
+    p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement. For images use markdown syntax: ![alt]({1}). Unplaced attachments appear as downloads")
     p_note.set_defaults(func=cmd_note_router)
 
     # comment (handles both add and integrate)

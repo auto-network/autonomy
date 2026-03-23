@@ -49,7 +49,8 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph projects` | Show all projects with source counts | |
 | `graph attention` | Show human input chronologically | `graph attention --last 10` |
 | `graph note "text"` | Drop a searchable trail marker | `graph note "pitfall: X breaks Y" --tags pitfall` |
-| `graph note "text" --attach <file>` | Create note with file attachment | `graph note "Bug {1}" --attach /tmp/shot.png` |
+| `graph note "text" --attach <file>` | Create note with file attachment | `graph note "Screenshot: ![desc]({1})" --attach /tmp/shot.png` |
+| `graph note -c - --attach ...` | Multi-attachment note (use `![alt]({1})`, `![alt]({2})`) | `graph note -c - --attach img1.png --attach img2.png < note.txt` |
 | `graph attach <file>` | Store file as graph attachment | `graph attach /tmp/screenshot.png --source 7bf1d812 --turn 5` |
 | `graph attachment <id>` | Show attachment metadata | `graph attachment 7c0c8c82` |
 | `graph attachments [source_id]` | List attachments | `graph attachments 45869b69` |
