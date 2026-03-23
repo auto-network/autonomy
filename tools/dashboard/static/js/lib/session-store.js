@@ -35,6 +35,7 @@ window.getSessionStore = function(sessionId) {
       startedAt: 0,
       entryCount: 0,
       contextTokens: 0,
+      topics: [],
       sizeMB: '0',
       lastActivity: 0,
       toolMap: {},       // tool_id -> { tool_name }
@@ -123,6 +124,7 @@ window.ensureSessionMessages = function() {
       store.label = s.label || '';
       store.entryCount = s.entry_count || 0;
       if (s.context_tokens) store.contextTokens = s.context_tokens;
+      if (s.topics) store.topics = s.topics;
       store.isLive = s.is_live;
       store.startedAt = s.started_at || 0;
     }

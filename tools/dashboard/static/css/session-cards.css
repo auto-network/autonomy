@@ -46,3 +46,13 @@
 .recency-amber { color: #f59e0b; }
 .recency-red   { color: #ef4444; }
 .recency-gray  { color: #6b7280; }
+
+/* Sub-topic status lines */
+.session-topic {
+  font-size: 0.75rem;
+  color: #9ca3af;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

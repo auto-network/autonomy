@@ -48,6 +48,14 @@
                              text-xs leading-none transition-colors"
                       aria-label="Close session">✕</button>
             </div>
+            <!-- Sub-topics (between title and tmux row) -->
+            <template x-if="s.topics && s.topics.length > 0">
+              <div class="pl-4 mt-0.5">
+                <template x-for="topic in s.topics" :key="topic">
+                  <div class="session-topic" x-text="topic"></div>
+                </template>
+              </div>
+            </template>
             <!-- Row 2: tmux ID · stats chip (+ HOST badge if host) -->
             <div class="flex items-center gap-2 pl-4 mt-0.5">
               <span class="text-xs font-mono text-gray-500"

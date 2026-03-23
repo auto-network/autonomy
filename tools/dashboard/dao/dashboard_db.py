@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     last_message    TEXT DEFAULT '',
     entry_count     INTEGER DEFAULT 0,
     context_tokens  INTEGER DEFAULT 0,
-    label           TEXT DEFAULT ''
+    label           TEXT DEFAULT '',
+    topics          TEXT DEFAULT '[]'
 );
 """
 
@@ -56,6 +57,12 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("SELECT label FROM tmux_sessions LIMIT 0")
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN label TEXT DEFAULT ''")
+        _conn.commit()
+    # Migrate: add topics column if missing (for existing databases)
+    try:
+        _conn.execute("SELECT topics FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN topics TEXT DEFAULT '[]'")
         _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
@@ -188,6 +195,15 @@ def update_label(tmux_name: str, label: str) -> None:
     """Set or clear the user-facing label for a session."""
     conn = get_conn()
     conn.execute("UPDATE tmux_sessions SET label=? WHERE tmux_name=?", (label, tmux_name))
+    conn.commit()
+
+
+def update_topics(tmux_name: str, topics: list[str]) -> None:
+    """Set the sub-topic status lines for a session (1-4 items, max 80 chars each)."""
+    import json
+    conn = get_conn()
+    conn.execute("UPDATE tmux_sessions SET topics=? WHERE tmux_name=?",
+                 (json.dumps(topics), tmux_name))
     conn.commit()
 
 
