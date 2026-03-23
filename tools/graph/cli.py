@@ -450,7 +450,10 @@ def cmd_read(args):
 def cmd_sources(args):
     """List sources with optional filters."""
     db = GraphDB(args.db)
-    sources = db.list_sources(project=args.project, source_type=args.type, limit=args.limit)
+    sources = db.list_sources(
+        project=args.project, source_type=args.type, limit=args.limit,
+        since=args.since, until=getattr(args, 'until', None), author=args.author,
+    )
 
     if not sources:
         print("No sources found.")
@@ -1972,6 +1975,9 @@ def main():
     p.add_argument("--type", "-t", help="Filter by type (session, status, git-log, etc.)")
     p.add_argument("--verbose", "-v", action="store_true", help="Show file paths under each source")
     p.add_argument("--limit", type=int, default=20, help="Max results")
+    p.add_argument("--since", help="Filter to sources created on or after this timestamp (ISO 8601)")
+    p.add_argument("--until", help="Filter to sources created on or before this timestamp (ISO 8601)")
+    p.add_argument("--author", help="Filter by metadata author (e.g. terminal:auto-t3, user)")
     p.set_defaults(func=cmd_sources)
 
     # context
