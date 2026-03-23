@@ -116,3 +116,30 @@ def insert_message(
     )
     conn.commit()
     return cur.lastrowid
+
+
+def get_messages(
+    limit: int = 50,
+    since: float | None = None,
+    session: str | None = None,
+) -> list[dict]:
+    """Query recent crosstalk messages.
+
+    Args:
+        limit: Max messages to return.
+        since: Unix epoch — only messages after this time.
+        session: Filter to messages sent by or to this session.
+    """
+    conn = get_conn()
+    query = "SELECT * FROM crosstalk_messages WHERE 1=1"
+    params: list = []
+    if since is not None:
+        query += " AND timestamp >= ?"
+        params.append(since)
+    if session:
+        query += " AND (sender_session = ? OR target_session = ?)"
+        params.extend([session, session])
+    query += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
