@@ -1587,80 +1587,6 @@ async def api_chatwith_sessions(request):
     return JSONResponse({"sessions": sessions})
 
 
-def _find_chatwith_jsonl(session_name: str) -> Path | None:
-    """Find the JSONL log file for a Chat With container session.
-
-    Scans data/agent-runs/{session_name}-*/sessions/ for the most recent JSONL.
-    Returns None if no JSONL is found.
-    """
-    agent_runs = _REPO_ROOT / "data" / "agent-runs"
-    if not agent_runs.exists():
-        return None
-    best = None
-    best_mtime = 0
-    for run_dir in sorted(agent_runs.glob(f"{session_name}-*"), reverse=True):
-        sessions_dir = run_dir / "sessions"
-        if not sessions_dir.exists():
-            continue
-        for jsonl in sessions_dir.rglob("*.jsonl"):
-            mtime = jsonl.stat().st_mtime
-            if mtime > best_mtime:
-                best = jsonl
-                best_mtime = mtime
-    return best
-
-
-async def api_chatwith_tail(request):
-    """Tail JSONL entries for a Chat With session by tmux session name.
-
-    GET /api/chatwith/{name}/tail?after=N
-    Returns same format as api_session_tail: {entries, offset, is_live, tmux_session}.
-    Finds the JSONL by scanning data/agent-runs/{name}-*/sessions/.
-    """
-    session_name = request.path_params["name"]
-    after = int(request.query_params.get("after", "0"))
-
-    jsonl_path = await asyncio.to_thread(_find_chatwith_jsonl, session_name)
-    if jsonl_path is None:
-        # Session may not have written JSONL yet — return empty but indicate live
-        is_live = _tmux_session_exists(session_name)
-        return JSONResponse({
-            "entries": [], "offset": 0, "is_live": is_live,
-            "tmux_session": session_name,
-        })
-
-    file_size = jsonl_path.stat().st_size
-    is_live = _tmux_session_exists(session_name)
-
-    base_resp = {"entries": [], "offset": file_size, "is_live": is_live,
-                 "tmux_session": session_name}
-    if after >= file_size:
-        return JSONResponse(base_resp)
-
-    entries = []
-    with open(jsonl_path, "rb") as f:
-        f.seek(after)
-        data = f.read()
-        new_offset = after + len(data)
-        text = data.decode("utf-8", errors="replace")
-        for line in text.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            parsed = _parse_jsonl_entry(line)
-            if parsed is None:
-                continue
-            if isinstance(parsed, list):
-                entries.extend(parsed)
-            else:
-                entries.append(parsed)
-
-    _enrich_entries(entries, session_dir=jsonl_path.parent / jsonl_path.stem)
-    return JSONResponse({
-        "entries": entries, "offset": new_offset, "is_live": is_live,
-        "tmux_session": session_name,
-    })
-
 
 # ── Live Session Tailing ──────────────────────────────────────
 
@@ -4060,7 +3986,6 @@ routes = [
     Route("/api/chatwith/spawn", api_chatwith_spawn, methods=["POST"]),
     Route("/api/chatwith/check", api_chatwith_check),
     Route("/api/chatwith/sessions", api_chatwith_sessions),
-    Route("/api/chatwith/{name}/tail", api_chatwith_tail),
     Route("/api/dispatch/tail/{run}", api_dispatch_tail),
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
     Route("/api/terminal/unclaimed", api_terminal_unclaimed),
