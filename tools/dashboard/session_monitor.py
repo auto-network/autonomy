@@ -222,6 +222,7 @@ class SessionMonitor:
                 "label": s.get("label", ""),
                 "entry_count": s.get("entry_count", 0),
                 "context_tokens": s.get("context_tokens", 0),
+                "topics": json.loads(s.get("topics") or "[]"),
             }
             for s in sessions
         ]

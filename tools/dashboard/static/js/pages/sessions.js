@@ -127,6 +127,7 @@
             bead_id: s.beadId || '',
             entry_count: s.entryCount || s.entries.length,
             context_tokens: s.contextTokens || 0,
+            topics: s.topics || [],
             _hasData: !!hasData,
           });
         }
