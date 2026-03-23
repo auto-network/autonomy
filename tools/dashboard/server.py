@@ -3954,6 +3954,66 @@ async def api_graph_resolve(request):
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
+async def api_graph_collab_list(request):
+    """List collab-tagged notes ranked by activity."""
+    from tools.graph.db import GraphDB
+    limit = int(request.query_params.get("limit", "50"))
+    db = GraphDB()
+    try:
+        sources = db.list_collab_sources(limit=limit)
+    finally:
+        db.close()
+    if not sources:
+        return JSONResponse({"ok": True, "output": "No collab notes found. Tag notes with: graph note --tags collab"})
+    lines = []
+    lines.append(f"{'ID':14s} {'Title':50s} {'Comments':>8s} {'Reads':>6s} {'Age'}")
+    lines.append(f"{'─' * 14} {'─' * 50} {'─' * 8} {'─' * 6} {'─' * 10}")
+    from datetime import datetime, timezone
+    for s in sources:
+        sid = s["id"][:12]
+        title = (s.get("title") or "?")[:50]
+        comments = str(s.get("comment_count", 0))
+        reads = str(s.get("read_count", 0))
+        try:
+            dt = datetime.fromisoformat(s.get("created_at", "").replace("Z", "+00:00"))
+            delta = datetime.now(timezone.utc) - dt
+            days = delta.days
+            if days > 0:
+                age = f"{days}d ago"
+            else:
+                hours = delta.seconds // 3600
+                age = f"{hours}h ago" if hours > 0 else "just now"
+        except Exception:
+            age = s.get("created_at", "")[:10]
+        lines.append(f"{sid:14s} {title:50s} {comments:>8s} {reads:>6s} {age}")
+    lines.append(f"\n  {len(sources)} collab notes")
+    return JSONResponse({"ok": True, "output": "\n".join(lines)})
+
+
+async def api_graph_collab_tag(request):
+    """Add the 'collab' tag to an existing source."""
+    from tools.graph.db import GraphDB
+    source_id = request.path_params["source_id"]
+    if not _GRAPH_SOURCE_ID_RE.match(source_id):
+        return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
+    db = GraphDB()
+    try:
+        source = db.get_source(source_id)
+        if not source:
+            return JSONResponse({"error": f"no source found matching '{source_id}'"}, status_code=404)
+        if isinstance(source, list):
+            return JSONResponse({"error": f"multiple sources match '{source_id}' — use a longer prefix"}, status_code=400)
+        added = db.add_source_tag(source["id"], "collab")
+    finally:
+        db.close()
+    title = (source.get("title") or "?")[:60]
+    if added:
+        msg = f"  \u2713 Tagged {source['id'][:12]} \"{title}\" as collab"
+    else:
+        msg = f"  Already tagged: {source['id'][:12]} \"{title}\""
+    return JSONResponse({"ok": True, "output": msg})
+
+
 # ── App ───────────────────────────────────────────────────────
 
 routes = [
@@ -4051,6 +4111,8 @@ routes = [
     Route("/api/graph/link", api_graph_link, methods=["POST"]),
     Route("/api/graph/sessions", api_graph_sessions, methods=["POST"]),
     Route("/api/graph/attach", api_graph_attach, methods=["POST"]),
+    Route("/api/graph/collab", api_graph_collab_list, methods=["GET"]),
+    Route("/api/graph/collab/tag/{source_id}", api_graph_collab_tag, methods=["PUT"]),
 
     # CrossTalk
     Route("/api/crosstalk/send", api_crosstalk_send, methods=["POST"]),

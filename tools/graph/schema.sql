@@ -234,3 +234,14 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 CREATE INDEX IF NOT EXISTS idx_attachments_hash ON attachments(hash);
 CREATE INDEX IF NOT EXISTS idx_attachments_source ON attachments(source_id);
+
+-- ============================================================
+-- NOTE READS — read tracking for collaborative notes
+-- ============================================================
+CREATE TABLE IF NOT EXISTS note_reads (
+    source_id TEXT NOT NULL,
+    actor     TEXT NOT NULL,
+    ts        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (source_id, actor, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_note_reads_source ON note_reads(source_id);
