@@ -3629,6 +3629,57 @@ async def api_graph_sessions(request):
     return JSONResponse({"ok": True, "output": stdout})
 
 
+async def api_graph_attach(request):
+    """Attach a file to the graph via multipart form upload."""
+    import tempfile
+    form = await request.form()
+    upload = form.get("file")
+    if not upload:
+        return JSONResponse({"error": "file field required"}, status_code=400)
+
+    # Write uploaded file to a temp location
+    contents = await upload.read()
+    if not contents:
+        return JSONResponse({"error": "empty file"}, status_code=400)
+    if len(contents) > 50 * 1024 * 1024:  # 50MB limit
+        return JSONResponse({"error": "file too large (max 50MB)"}, status_code=400)
+
+    suffix = ""
+    if upload.filename and "." in upload.filename:
+        suffix = "." + upload.filename.rsplit(".", 1)[1]
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(contents)
+        tmp_path = tmp.name
+
+    cmd = ["graph", "attach", tmp_path]
+
+    source_id = form.get("source_id")
+    if source_id:
+        if not _GRAPH_SOURCE_ID_RE.match(str(source_id)):
+            import os
+            os.unlink(tmp_path)
+            return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
+        cmd += ["--source", str(source_id)]
+
+    turn = form.get("turn")
+    if turn is not None:
+        cmd += ["--turn", str(turn)]
+
+    stdout, stderr, rc = await run_cli(cmd, timeout=60)
+
+    # Clean up temp file
+    import os
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+
+    if rc != 0:
+        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    return JSONResponse({"ok": True, "output": stdout})
+
+
 # ── App ───────────────────────────────────────────────────────
 
 routes = [
@@ -3723,6 +3774,7 @@ routes = [
     Route("/api/graph/bead", api_graph_bead, methods=["POST"]),
     Route("/api/graph/link", api_graph_link, methods=["POST"]),
     Route("/api/graph/sessions", api_graph_sessions, methods=["POST"]),
+    Route("/api/graph/attach", api_graph_attach, methods=["POST"]),
 
     # Experiments
     Route("/api/experiments", api_experiments_create, methods=["POST"]),

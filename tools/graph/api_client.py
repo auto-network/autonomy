@@ -220,6 +220,80 @@ def api_sessions(args) -> None:
     _print_output(_post("/api/graph/sessions", data))
 
 
+def api_attach(args) -> None:
+    """Attach a file via API (multipart form upload)."""
+    import mimetypes
+    from pathlib import Path
+
+    file_path = Path(args.file_path)
+    if not file_path.is_file():
+        print(f"Error: {file_path} not found or not a file", file=sys.stderr)
+        sys.exit(1)
+
+    file_data = file_path.read_bytes()
+    filename = file_path.name
+    mime_type, _ = mimetypes.guess_type(filename)
+    content_type = mime_type or "application/octet-stream"
+
+    # Build multipart/form-data body
+    boundary = "----GraphAttachBoundary"
+    parts = []
+
+    # File part
+    parts.append(f"--{boundary}\r\n"
+                 f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                 f"Content-Type: {content_type}\r\n\r\n")
+    parts.append(None)  # placeholder for binary data
+    parts.append(f"\r\n")
+
+    # Source ID part
+    source_id = getattr(args, "source", None)
+    if source_id:
+        parts.append(f"--{boundary}\r\n"
+                     f'Content-Disposition: form-data; name="source_id"\r\n\r\n'
+                     f"{source_id}\r\n")
+
+    # Turn part
+    turn = getattr(args, "turn", None)
+    if turn is not None:
+        parts.append(f"--{boundary}\r\n"
+                     f'Content-Disposition: form-data; name="turn"\r\n\r\n'
+                     f"{turn}\r\n")
+
+    parts.append(f"--{boundary}--\r\n")
+
+    # Assemble body bytes
+    body = b""
+    for part in parts:
+        if part is None:
+            body += file_data
+        else:
+            body += part.encode()
+
+    url = f"{GRAPH_API}/api/graph/attach"
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=60, context=_SSL_CTX)
+        result = json.loads(resp.read())
+        _print_output(result)
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read())
+            error_msg = err_body.get("error", str(e))
+        except Exception:
+            error_msg = str(e)
+        print(f"API error: {error_msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
 def api_set_label(args) -> None:
     """Set session label via dashboard API."""
     bd_actor = os.environ.get("BD_ACTOR")

@@ -95,6 +95,20 @@ class Edge:
 
 
 @dataclass
+class Attachment:
+    id: str = field(default_factory=new_id)
+    hash: str = ""
+    filename: str = ""
+    mime_type: str | None = None
+    size_bytes: int = 0
+    file_path: str = ""
+    source_id: str | None = None
+    turn_number: int | None = None
+    metadata: dict = field(default_factory=dict)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass
 class Node:
     """Hierarchical knowledge tree node."""
     id: str = field(default_factory=new_id)
