@@ -654,7 +654,8 @@ class GraphDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def list_sources(self, project: str | None = None, source_type: str | None = None, limit: int = 20) -> list[dict]:
+    def list_sources(self, project: str | None = None, source_type: str | None = None, limit: int = 20,
+                     since: str | None = None, until: str | None = None, author: str | None = None) -> list[dict]:
         """List sources with optional filters."""
         query = "SELECT * FROM sources WHERE 1=1"
         params = []
@@ -664,6 +665,15 @@ class GraphDB:
         if source_type:
             query += " AND type = ?"
             params.append(source_type)
+        if since:
+            query += " AND created_at >= ?"
+            params.append(since)
+        if until:
+            query += " AND created_at <= ?"
+            params.append(until)
+        if author:
+            query += " AND json_extract(metadata, '$.author') = ?"
+            params.append(author)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(query, params).fetchall()
