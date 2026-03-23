@@ -30,7 +30,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
@@ -3680,6 +3680,32 @@ async def api_graph_attach(request):
     return JSONResponse({"ok": True, "output": stdout})
 
 
+# ── Attachment serving ────────────────────────────────────────
+
+async def api_attachment_serve(request):
+    """Serve an attachment file by ID with correct Content-Type."""
+    from tools.graph.db import GraphDB
+
+    attachment_id = request.path_params["attachment_id"]
+    db = GraphDB()
+    try:
+        att = db.get_attachment(attachment_id)
+    finally:
+        db.close()
+    if not att:
+        return JSONResponse({"error": "attachment not found"}, status_code=404)
+    file_path = Path(att["file_path"])
+    if not file_path.is_absolute():
+        file_path = _REPO_ROOT / file_path
+    if not file_path.exists():
+        return JSONResponse({"error": "file missing"}, status_code=404)
+    return FileResponse(
+        file_path,
+        media_type=att.get("mime_type") or "application/octet-stream",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 # ── App ───────────────────────────────────────────────────────
 
 routes = [
@@ -3775,6 +3801,9 @@ routes = [
     Route("/api/graph/link", api_graph_link, methods=["POST"]),
     Route("/api/graph/sessions", api_graph_sessions, methods=["POST"]),
     Route("/api/graph/attach", api_graph_attach, methods=["POST"]),
+
+    # Attachment serving
+    Route("/api/attachment/{attachment_id}", api_attachment_serve),
 
     # Experiments
     Route("/api/experiments", api_experiments_create, methods=["POST"]),
