@@ -229,6 +229,77 @@ class GraphDB:
         )
         return e
 
+    # ── Collab / Tags ─────────────────────────────────────────
+
+    def add_source_tag(self, source_id: str, tag: str) -> bool:
+        """Append a tag to the source's metadata.tags array. Returns True if added, False if already present."""
+        row = self.conn.execute("SELECT metadata FROM sources WHERE id = ?", (source_id,)).fetchone()
+        if not row:
+            return False
+        meta = json.loads(row["metadata"]) if row["metadata"] else {}
+        tags = meta.get("tags", [])
+        if tag in tags:
+            return False
+        tags.append(tag)
+        meta["tags"] = tags
+        self.update_source_metadata(source_id, meta)
+        return True
+
+    def _ensure_note_reads_table(self):
+        """Auto-migration: create note_reads table if missing. No-op on read-only DBs."""
+        if self.read_only:
+            return
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS note_reads (
+                source_id TEXT NOT NULL,
+                actor     TEXT NOT NULL,
+                ts        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                PRIMARY KEY (source_id, actor, ts)
+            )
+        """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_note_reads_source ON note_reads(source_id)")
+
+    def record_read(self, source_id: str, actor: str):
+        """Record a read event for a collab note."""
+        self._ensure_note_reads_table()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO note_reads (source_id, actor) VALUES (?, ?)",
+            (source_id, actor),
+        )
+        self.conn.commit()
+
+    def _has_table(self, name: str) -> bool:
+        """Check if a table exists in the database."""
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        return row is not None
+
+    def list_collab_sources(self, limit: int = 50) -> list[dict]:
+        """List sources tagged 'collab', ranked by activity (comments*3 + reads*1)."""
+        self._ensure_note_reads_table()
+        has_reads = self._has_table("note_reads")
+        if has_reads:
+            reads_join = "LEFT JOIN (SELECT source_id, COUNT(*) AS cnt FROM note_reads GROUP BY source_id) r ON r.source_id = s.id"
+            reads_col = "COALESCE(r.cnt, 0)"
+        else:
+            reads_join = ""
+            reads_col = "0"
+        query = f"""
+            SELECT s.*,
+                   COALESCE(c.cnt, 0) AS comment_count,
+                   {reads_col} AS read_count
+            FROM sources s
+            LEFT JOIN (SELECT source_id, COUNT(*) AS cnt FROM note_comments GROUP BY source_id) c
+                ON c.source_id = s.id
+            {reads_join}
+            WHERE json_extract(s.metadata, '$.tags') LIKE '%"collab"%'
+            ORDER BY ({reads_col} * 1 + COALESCE(c.cnt, 0) * 3) DESC, s.created_at DESC
+            LIMIT ?
+        """
+        rows = self.conn.execute(query, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Nodes (hierarchy) ────────────────────────────────────
 
     def insert_node(self, n: Node) -> Node:
@@ -655,7 +726,8 @@ class GraphDB:
         return [dict(r) for r in rows]
 
     def list_sources(self, project: str | None = None, source_type: str | None = None, limit: int = 20,
-                     since: str | None = None, until: str | None = None, author: str | None = None) -> list[dict]:
+                     since: str | None = None, until: str | None = None, author: str | None = None,
+                     tags: list[str] | None = None) -> list[dict]:
         """List sources with optional filters."""
         query = "SELECT * FROM sources WHERE 1=1"
         params = []
@@ -674,6 +746,10 @@ class GraphDB:
         if author:
             query += " AND json_extract(metadata, '$.author') = ?"
             params.append(author)
+        if tags:
+            for tag in tags:
+                query += " AND json_extract(metadata, '$.tags') LIKE ?"
+                params.append(f'%"{tag}"%')
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(query, params).fetchall()

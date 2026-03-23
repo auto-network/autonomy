@@ -54,7 +54,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve
-from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach
+from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag
 
 
 def cmd_ingest(args):
@@ -315,6 +315,13 @@ def cmd_read(args):
         return
     source = result
     _mark_read(source["id"])
+
+    # Track reads for collab-tagged notes
+    meta = json.loads(source.get("metadata", "{}")) if isinstance(source.get("metadata"), str) else source.get("metadata", {})
+    if "collab" in meta.get("tags", []):
+        actor = os.environ.get("BD_ACTOR", "user")
+        if not db.read_only:
+            db.record_read(source["id"], actor)
 
     # Handle version requests for notes
     if version_req is not None:
@@ -1086,6 +1093,71 @@ def cmd_attention(args):
 
     print(f"\n  {len(messages)} messages")
     db.close()
+
+
+def _age_str(created_at: str) -> str:
+    """Format a created_at timestamp as a human-friendly age string."""
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        delta = datetime.now(timezone.utc) - dt
+        days = delta.days
+        if days > 0:
+            return f"{days}d ago"
+        hours = delta.seconds // 3600
+        if hours > 0:
+            return f"{hours}h ago"
+        return "just now"
+    except Exception:
+        return created_at[:10]
+
+
+def cmd_collab_list(args):
+    """List collaborative reference notes ranked by activity."""
+    if is_api_mode():
+        api_collab_list(args)
+        return
+    db = GraphDB(args.db)
+    sources = db.list_collab_sources(limit=args.limit)
+    db.close()
+    if not sources:
+        print("No collab notes found. Tag notes with: graph note --tags collab")
+        return
+    # Header
+    print(f"{'ID':14s} {'Title':50s} {'Comments':>8s} {'Reads':>6s} {'Age'}")
+    print(f"{'─' * 14} {'─' * 50} {'─' * 8} {'─' * 6} {'─' * 10}")
+    for s in sources:
+        sid = s["id"][:12]
+        title = (s.get("title") or "?")[:50]
+        comments = str(s.get("comment_count", 0))
+        reads = str(s.get("read_count", 0))
+        age = _age_str(s.get("created_at", ""))
+        print(f"{sid:14s} {title:50s} {comments:>8s} {reads:>6s} {age}")
+    print(f"\n  {len(sources)} collab notes")
+
+
+def cmd_collab_tag(args):
+    """Add the 'collab' tag to an existing note."""
+    if is_api_mode():
+        api_collab_tag(args)
+        return
+    db = GraphDB(args.db)
+    source = db.get_source(args.source_id)
+    if not source:
+        print(f"No source found matching '{args.source_id}'", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+    if isinstance(source, list):
+        print(f"Multiple sources match '{args.source_id}' — use a longer prefix", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+    added = db.add_source_tag(source["id"], "collab")
+    db.close()
+    title = (source.get("title") or "?")[:60]
+    if added:
+        print(f"  \u2713 Tagged {source['id'][:12]} \"{title}\" as collab")
+    else:
+        print(f"  Already tagged: {source['id'][:12]} \"{title}\"")
 
 
 def cmd_note_router(args):
@@ -2195,6 +2267,15 @@ def main():
     p.add_argument("source_id", nargs="?", help="Filter by source ID")
     p.add_argument("--limit", type=int, default=50, help="Max results (default 50)")
     p.set_defaults(func=cmd_attachments)
+
+    # collab
+    p_collab = sub.add_parser("collab", help="Discover collaborative reference notes")
+    p_collab.add_argument("--limit", type=int, default=50)
+    p_collab.set_defaults(func=cmd_collab_list)
+    collab_sub = p_collab.add_subparsers(dest="collab_subcmd")
+    p_collab_tag = collab_sub.add_parser("tag", help="Add collab tag to an existing note")
+    p_collab_tag.add_argument("source_id", help="Source ID or prefix")
+    p_collab_tag.set_defaults(func=cmd_collab_tag)
 
     args = parser.parse_args()
 

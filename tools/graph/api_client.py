@@ -88,6 +88,27 @@ def _put(endpoint: str, data: dict) -> dict:
         sys.exit(1)
 
 
+def _get(endpoint: str) -> dict:
+    """GET from the dashboard API. Returns parsed JSON response."""
+    url = f"{GRAPH_API}{endpoint}"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        resp = urllib.request.urlopen(req, timeout=30, context=_SSL_CTX)
+        result = json.loads(resp.read())
+        return result
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read())
+            error_msg = err_body.get("error", str(e))
+        except Exception:
+            error_msg = str(e)
+        print(f"API error: {error_msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _print_output(result: dict) -> None:
     """Print the output field from an API response, mimicking direct CLI output."""
     output = result.get("output", "")
@@ -379,3 +400,19 @@ def api_set_label(args) -> None:
     label = " ".join(args.text)
     result = _put(f"/api/session/{urllib.parse.quote(tmux_name)}/label", {"label": label})
     print(f"  \u2713 Label set: {label}")
+
+
+def api_collab_list(args) -> None:
+    """List collab notes via dashboard API."""
+    result = _get(f"/api/graph/collab?limit={args.limit}")
+    _print_output(result)
+
+
+def api_collab_tag(args) -> None:
+    """Add collab tag via dashboard API."""
+    source_id = args.source_id
+    if not _SOURCE_ID_RE.match(source_id):
+        print(f"Error: malformed source_id: {source_id!r}", file=sys.stderr)
+        sys.exit(1)
+    result = _put(f"/api/graph/collab/tag/{source_id}", {})
+    _print_output(result)
