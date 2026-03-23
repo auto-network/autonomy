@@ -1394,6 +1394,8 @@ async def api_crosstalk_send(request):
         "delivered": True,
         "from": sender,
         "label": sender_label,
+        "source_id": sender_source_id or None,
+        "turn": sender_entry_count or None,
         "target": target,
     })
 
