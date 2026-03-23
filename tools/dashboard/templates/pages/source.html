@@ -29,6 +29,7 @@
         </div>
         <h1 class="font-bold"
             :class="isContext ? 'text-lg' : 'text-xl'"
+            x-show="!isNote"
             x-text="src.title || 'Untitled'"></h1>
 
         <!-- Context mode sub-header -->
@@ -44,10 +45,27 @@
         </template>
       </section>
 
+      <!-- Note metadata bar -->
+      <template x-if="isNote && noteMeta">
+        <div class="flex items-center gap-3 mt-2 mb-4 text-sm flex-wrap">
+          <span class="font-mono text-gray-400" x-text="src.id.slice(0, 12) + '@v' + noteVersionCount"></span>
+          <span class="text-gray-500" x-text="src.created_at.slice(0, 16)"></span>
+          <template x-if="noteMeta.author">
+            <span class="text-gray-400" x-text="noteMeta.author"></span>
+          </template>
+          <template x-if="noteProvenanceId">
+            <a :href="'/' + (noteProvenanceType === 'bead' ? 'bead' : 'source') + '/' + noteProvenanceId"
+               class="text-indigo-400 hover:underline text-xs">provenance →</a>
+          </template>
+          <template x-for="tag in (noteMeta.tags || [])" :key="tag">
+            <span class="px-1.5 py-0.5 bg-gray-700 text-gray-400 text-xs rounded" x-text="tag"></span>
+          </template>
+        </div>
+      </template>
+
       <!-- Note layout -->
       <template x-if="isNote">
-        <div class="p-4 bg-gray-800 rounded-lg border-l-4 border-yellow-600"
-             :data-source-id="src.id">
+        <div :data-source-id="src.id">
           <div x-markdown="noteContent"></div>
         </div>
       </template>
@@ -69,6 +87,22 @@
             </a>
           </template>
         </div>
+      </template>
+
+      <!-- Note comments -->
+      <template x-if="isNote && noteComments.length > 0">
+        <section aria-label="Comments" class="mt-8">
+          <h3 class="text-sm font-semibold text-gray-400 mb-3"
+              x-text="'Comments (' + noteComments.length + ')'"></h3>
+          <div class="space-y-3">
+            <template x-for="c in noteComments" :key="c._key">
+              <div class="pl-4 border-l-2 border-indigo-700/50">
+                <div class="text-xs text-gray-500 mb-1" x-text="c.actor + ' · ' + c.created_at.slice(0, 16)"></div>
+                <div class="text-sm text-gray-300" x-markdown="c.content"></div>
+              </div>
+            </template>
+          </div>
+        </section>
       </template>
 
       <!-- Chat layout (session / conversation / agent-run) -->

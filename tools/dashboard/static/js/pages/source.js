@@ -38,6 +38,11 @@
       visibleEntries: [],
       edges: [],
       noteContent: '',
+      noteMeta: null,
+      noteComments: [],
+      noteVersionCount: 1,
+      noteProvenanceId: null,
+      noteProvenanceType: null,
       attachments: [],
       unrefAttachments: [],
 
@@ -149,6 +154,20 @@
           this.isDoc = !this.isNote && !this.isChat;
           this.date = (this.src.created_at || '').slice(0, 10);
           this.noteContent = this.isNote ? (this.allEntries[0]?.content || '') : '';
+
+          if (this.isNote) {
+            const raw = this.src.metadata;
+            this.noteMeta = typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {});
+            this.noteComments = (data.comments || []).map((c, i) => ({ ...c, _key: `comment-${i}` }));
+            this.noteVersionCount = data.version_count || 1;
+            // Find provenance link from edges (either direction)
+            const provEdge = this.edges.find(e => e.relation === 'conceived_at');
+            if (provEdge) {
+              const isSource = provEdge.source_id === this.src.id;
+              this.noteProvenanceId = isSource ? provEdge.target_id : provEdge.source_id;
+              this.noteProvenanceType = isSource ? provEdge.target_type : provEdge.source_type;
+            }
+          }
 
           // Fetch attachments for notes
           if (this.isNote) {
