@@ -95,6 +95,41 @@ def _print_output(result: dict) -> None:
         print(output, end="" if output.endswith("\n") else "\n")
 
 
+def _post_multipart(endpoint: str, fields: dict, files: list[tuple[str, str, bytes, str]]) -> dict:
+    """POST multipart/form-data. files: list of (field_name, filename, data, content_type)."""
+    boundary = "----GraphMultipartBoundary"
+    body = b""
+    for key, value in fields.items():
+        body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode()
+    for field_name, filename, data, content_type in files:
+        body += (f"--{boundary}\r\n"
+                 f"Content-Disposition: form-data; name=\"{field_name}\"; filename=\"{filename}\"\r\n"
+                 f"Content-Type: {content_type}\r\n\r\n").encode()
+        body += data + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+
+    url = f"{GRAPH_API}{endpoint}"
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=60, context=_SSL_CTX)
+        return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read())
+            error_msg = err_body.get("error", str(e))
+        except Exception:
+            error_msg = str(e)
+        print(f"API error: {error_msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
 def api_note(args) -> None:
     """Create a note via API."""
     if getattr(args, 'content_stdin', None) == "-":
@@ -105,18 +140,41 @@ def api_note(args) -> None:
         print("Error: note text required", file=sys.stderr)
         sys.exit(1)
 
-    data = {"content": text}
-    if args.tags:
-        data["tags"] = args.tags
-    if args.project:
-        data["project"] = args.project
-    if args.author:
-        data["author"] = args.author
-    scope = os.environ.get("GRAPH_SCOPE")
-    if scope and not args.project:
-        data["project"] = scope
-
-    _print_output(_post("/api/graph/note", data))
+    attach_paths = getattr(args, "attach", None) or []
+    if attach_paths:
+        import mimetypes
+        from pathlib import Path
+        fields = {"content": text}
+        if args.tags:
+            fields["tags"] = args.tags
+        if args.project:
+            fields["project"] = args.project
+        if args.author:
+            fields["author"] = args.author
+        scope = os.environ.get("GRAPH_SCOPE")
+        if scope and not args.project:
+            fields["project"] = scope
+        files = []
+        for fp in attach_paths:
+            p = Path(fp)
+            if not p.is_file():
+                print(f"Error: {fp} not found or not a file", file=sys.stderr)
+                sys.exit(1)
+            mime, _ = mimetypes.guess_type(p.name)
+            files.append(("attachments", p.name, p.read_bytes(), mime or "application/octet-stream"))
+        _print_output(_post_multipart("/api/graph/note", fields, files))
+    else:
+        data = {"content": text}
+        if args.tags:
+            data["tags"] = args.tags
+        if args.project:
+            data["project"] = args.project
+        if args.author:
+            data["author"] = args.author
+        scope = os.environ.get("GRAPH_SCOPE")
+        if scope and not args.project:
+            data["project"] = scope
+        _print_output(_post("/api/graph/note", data))
 
 
 def api_note_update(args) -> None:
@@ -130,14 +188,30 @@ def api_note_update(args) -> None:
         print("Error: no content provided", file=sys.stderr)
         sys.exit(1)
 
-    data = {
-        "source_id": args.source,
-        "content": new_content,
-    }
-    if args.integrate_ids:
-        data["integrate_ids"] = args.integrate_ids
-
-    _print_output(_post("/api/graph/note/update", data))
+    attach_paths = getattr(args, "attach", None) or []
+    if attach_paths:
+        import mimetypes
+        from pathlib import Path
+        fields = {"source_id": args.source, "content": new_content}
+        if args.integrate_ids:
+            fields["integrate_ids"] = json.dumps(args.integrate_ids)
+        files = []
+        for fp in attach_paths:
+            p = Path(fp)
+            if not p.is_file():
+                print(f"Error: {fp} not found or not a file", file=sys.stderr)
+                sys.exit(1)
+            mime, _ = mimetypes.guess_type(p.name)
+            files.append(("attachments", p.name, p.read_bytes(), mime or "application/octet-stream"))
+        _print_output(_post_multipart("/api/graph/note/update", fields, files))
+    else:
+        data = {
+            "source_id": args.source,
+            "content": new_content,
+        }
+        if args.integrate_ids:
+            data["integrate_ids"] = args.integrate_ids
+        _print_output(_post("/api/graph/note/update", data))
 
 
 def api_comment_add(args) -> None:

@@ -38,6 +38,8 @@
       visibleEntries: [],
       edges: [],
       noteContent: '',
+      attachments: [],
+      unrefAttachments: [],
 
       // Context mode
       isContext: false,
@@ -147,6 +149,21 @@
           this.isDoc = !this.isNote && !this.isChat;
           this.date = (this.src.created_at || '').slice(0, 10);
           this.noteContent = this.isNote ? (this.allEntries[0]?.content || '') : '';
+
+          // Fetch attachments for notes
+          if (this.isNote) {
+            try {
+              const attRes = await fetch(`/api/source/${this.id}/attachments`);
+              const attData = await attRes.json();
+              this.attachments = attData.attachments || [];
+              this.unrefAttachments = this.attachments.filter(
+                a => !this.noteContent.includes('graph://' + a.id.slice(0, 12))
+                     && !this.noteContent.includes('graph://' + a.id)
+              );
+            } catch (_) {
+              // Non-critical — just skip attachment list
+            }
+          }
 
           this._updateVisibleEntries();
           this.state = 'ready';

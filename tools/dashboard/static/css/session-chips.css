@@ -264,3 +264,11 @@
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+/* ── Inline attachment images ─────────────────────────────── */
+.attachment-img {
+  max-width: 100%;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  margin: 0.5rem 0;
+}
