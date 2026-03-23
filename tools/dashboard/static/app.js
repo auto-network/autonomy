@@ -1531,7 +1531,7 @@ globalSearch.addEventListener('keydown', (e) => {
 // Client-side nav (no full page reload)
 document.addEventListener('click', (e) => {
   const link = e.target.closest('a[href]');
-  if (link && link.origin === window.location.origin) {
+  if (link && link.origin === window.location.origin && !link.pathname.startsWith('/api/') && !link.hasAttribute('download')) {
     e.preventDefault();
     navigateTo(link.pathname + link.search);
   }
