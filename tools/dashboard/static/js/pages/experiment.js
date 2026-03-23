@@ -14,6 +14,10 @@
   }
 
   document.addEventListener('alpine:init', () => {
+    // In-memory store for Chat With session selection, keyed by experiment ID.
+    // Survives SPA navigation (Alpine stores persist), lost only on full page reload.
+    if (!Alpine.store('chatWith')) Alpine.store('chatWith', {});
+
     Alpine.data('experimentPage', () => ({
       // State machine
       state: 'loading',   // 'loading' | 'ready' | 'error'
@@ -233,24 +237,16 @@
 
       // ── Chat With ─────────────────────────────────────────────────────
 
-      get _storageKey() { return 'chatwith-session-' + this.expId; },
-
       _saveSession(sessionId, tmuxSession, project) {
-        try {
-          localStorage.setItem(this._storageKey, JSON.stringify({
-            sessionId: sessionId,
-            tmuxSession: tmuxSession,
-            project: project,
-          }));
-        } catch (e) { /* localStorage may be unavailable */ }
+        Alpine.store('chatWith')[this.expId] = {
+          sessionId: sessionId,
+          tmuxSession: tmuxSession,
+          project: project,
+        };
       },
 
       _loadSession() {
-        try {
-          const raw = localStorage.getItem(this._storageKey);
-          if (raw) return JSON.parse(raw);
-        } catch (e) { /* ignore */ }
-        return null;
+        return Alpine.store('chatWith')[this.expId] || null;
       },
 
       toggleChatWithPanel() {
@@ -355,7 +351,7 @@
         this.chatWithBtnText = 'Chat With';
         this.chatWithBtnDisabled = false;
         this.setChatWithStatus('', 'text-xs text-gray-500 ml-2');
-        try { localStorage.removeItem(this._storageKey); } catch (e) { /* ignore */ }
+        delete Alpine.store('chatWith')[this.expId];
       },
 
       reconnectChatWith() {
@@ -471,7 +467,7 @@ ${_safeHtml}
             initDisplayCapture(this.expId).catch(() => {});
           } else {
             // Session no longer exists — clear saved state
-            try { localStorage.removeItem(this._storageKey); } catch (e) { /* ignore */ }
+            delete Alpine.store('chatWith')[this.expId];
           }
         } catch (e) { /* best-effort */ }
       },
