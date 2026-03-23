@@ -45,6 +45,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph read <src_id>` | Read full source content | `graph read dc4c73ee --max-chars 2000` |
 | `graph context <src_id> <turn>` | Show turns around a search hit | `graph context 8cdc1d85 286 --window 3` |
 | `graph sources` | List sources | `graph sources --project jira --type docs` |
+| `graph sources --verbose` | List sources with file paths | `graph sources -v --limit 5` |
 | `graph projects` | Show all projects with source counts | |
 | `graph attention` | Show human input chronologically | `graph attention --last 10` |
 | `graph note "text"` | Drop a searchable trail marker | `graph note "pitfall: X breaks Y" --tags pitfall` |
