@@ -1,12 +1,12 @@
 {# Chat With panel — rich message feed + multimodal input bar.
-   Replaces xterm.js terminal for Chat With sessions on experiment pages.
+   Uses session store + SSE for live updates (no polling).
    Include inside a parent x-data scope that initializes chatWithPanel(). #}
 
 <!-- Scrollable entries -->
 <div class="flex-1 overflow-y-auto px-2 py-3 space-y-3" x-ref="cwEntriesContainer"
      @scroll="onScroll()">
 
-  <!-- Waiting state — shown while JSONL hasn't delivered entries yet -->
+  <!-- Waiting state — shown while session data hasn't arrived yet -->
   <template x-if="state === 'waiting' && entries.length === 0">
     <div class="text-gray-500 text-xs text-center py-4">Connecting to session...</div>
   </template>
