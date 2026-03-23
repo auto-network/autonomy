@@ -1665,6 +1665,36 @@ async def api_chatwith_tail(request):
 # ── Live Session Tailing ──────────────────────────────────────
 
 
+_CROSSTALK_RE = re.compile(
+    r'<crosstalk\s+from="([^"]+)"\s+label="([^"]*)"\s+source="([^"]*)"\s+turn="([^"]*)"\s+timestamp="([^"]+)">\n(.*)\n</crosstalk>',
+    re.DOTALL,
+)
+
+
+def _classify_crosstalk(text: str) -> dict | None:
+    """Detect CrossTalk peer messages in user entries.
+
+    Returns a dict with sender info and message body, or None if the text
+    is not a valid crosstalk envelope.  Body must be plain text (no angle
+    brackets) to avoid injection.
+    """
+    stripped = text.strip()
+    m = _CROSSTALK_RE.fullmatch(stripped)
+    if not m:
+        return None
+    body = m.group(6)
+    if '<' in body or '>' in body:
+        return None  # not valid crosstalk — body must be plain text
+    return {
+        "from": m.group(1),
+        "label": m.group(2),
+        "source": m.group(3),
+        "turn": m.group(4),
+        "timestamp": m.group(5),
+        "message": body,
+    }
+
+
 def _classify_system_message(text: str) -> dict | None:
     """Detect harness-injected system messages in user entries.
 
@@ -1767,9 +1797,21 @@ def _parse_jsonl_entry(line: str) -> dict | None:
         entries = []
 
         if text:
+            # Detect CrossTalk peer messages before system message check
+            ct = _classify_crosstalk(text)
+            if ct:
+                entries.append({
+                    "type": "crosstalk",
+                    "role": "crosstalk",
+                    "content": ct["message"],
+                    "sender": ct["from"],
+                    "sender_label": ct["label"],
+                    "source_id": ct["source"],
+                    "turn": ct["turn"],
+                    "timestamp": timestamp,
+                })
             # Detect harness-injected system messages masquerading as user entries
-            sys_info = _classify_system_message(text)
-            if sys_info:
+            elif (sys_info := _classify_system_message(text)):
                 entries.append({
                     "type": "system",
                     "role": "system",

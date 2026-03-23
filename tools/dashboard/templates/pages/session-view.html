@@ -121,6 +121,7 @@
                      dEntry.type === 'assistant_text' ? 'sc-entry-assistant' : '',
                      dEntry.type === 'thinking' ? 'sc-entry-thinking' : '',
                      dEntry.type === 'system' ? 'sc-entry-system' : '',
+                     dEntry.type === 'crosstalk' ? 'sc-entry-crosstalk' : '',
                    ]">
 
                 <!-- ── User message ────────────────────────────── -->
@@ -201,6 +202,25 @@
                     <template x-if="isExpanded(dIdx)">
                       <div class="sc-detail" x-text="dEntry.content || ''"></div>
                     </template>
+                  </div>
+                </template>
+
+                <!-- ── CrossTalk peer message ──────────────────── -->
+                <template x-if="dEntry.type === 'crosstalk'">
+                  <div>
+                    <div class="flex items-center gap-2 mb-1">
+                      <span class="sc-ct-label">CROSSTALK</span>
+                      <a class="sc-ct-sender"
+                         :href="'/sessions/' + dEntry.sender"
+                         x-text="dEntry.sender_label || dEntry.sender"></a>
+                      <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+                    </div>
+                    <div class="sc-ct-content" x-text="dEntry.content || ''"></div>
+                    <div class="sc-ct-provenance" x-show="dEntry.source_id">
+                      <a :href="'/graph/source/' + dEntry.source_id">
+                        <span x-text="'turn ' + dEntry.turn"></span>
+                      </a>
+                    </div>
                   </div>
                 </template>
 

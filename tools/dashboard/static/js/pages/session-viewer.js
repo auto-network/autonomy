@@ -137,6 +137,7 @@
         if (entry.type === 'assistant_text') return 'sc-border-assistant';
         if (entry.type === 'thinking') return 'sc-border-thinking';
         if (entry.type === 'system') return 'sc-border-system';
+        if (entry.type === 'crosstalk') return 'sc-border-crosstalk';
         return 'sc-border-default';
       },
 
