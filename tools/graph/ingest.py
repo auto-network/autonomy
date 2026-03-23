@@ -697,8 +697,19 @@ def ingest_claude_code_session(
         if len(first_user["content"]) > 80:
             title += "…"
 
-    # Merge .session_meta.json fields if present alongside this JSONL
+    # Check dashboard DB for a user-set label (overrides first-message title)
     session_meta = _load_session_meta(file_path)
+    container_name = session_meta.get("container_name", "")
+    if container_name:
+        try:
+            from tools.dashboard.dao.dashboard_db import get_session
+            db_row = get_session(container_name)
+            if db_row and db_row.get("label"):
+                title = db_row["label"]
+        except Exception:
+            pass  # dashboard DB not available (e.g. offline ingest)
+
+    # Merge .session_meta.json fields if present alongside this JSONL
 
     source_meta = {
         "session_id": meta["session_id"],

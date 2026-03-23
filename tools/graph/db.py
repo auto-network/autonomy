@@ -96,6 +96,13 @@ class GraphDB:
         self.conn.commit()
         return src
 
+    def update_source_title(self, source_id: str, title: str):
+        """Update the title of a source. Last write wins."""
+        self.conn.execute(
+            "UPDATE sources SET title = ? WHERE id = ?", (title, source_id)
+        )
+        self.conn.commit()
+
     def update_source_metadata(self, source_id: str, metadata: dict):
         self.conn.execute(
             "UPDATE sources SET metadata = ?, ingested_at = ? WHERE id = ?",
