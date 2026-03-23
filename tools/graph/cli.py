@@ -389,6 +389,11 @@ def cmd_read(args):
             "entries": entry_list,
             "edges": edge_list,
         }
+        if source.get("type") == "note":
+            comments = db.get_comments(source["id"])
+            output["comments"] = [dict(c) for c in comments]
+            versions = db.list_note_versions(source["id"])
+            output["version_count"] = len(versions) + 1 if versions else 1
         print(_json.dumps(output, default=str))
         db.close()
         return
