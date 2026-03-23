@@ -490,7 +490,17 @@ def cmd_context(args):
         return
 
     entries = db.get_source_content(source["id"])
-    target_turn = args.turn
+
+    # Resolve "last" keyword to max turn number
+    if args.turn == "last":
+        target_turn = db.get_latest_turn(source["id"])
+        if target_turn is None:
+            print("No turns found for this source", file=sys.stderr)
+            db.close()
+            return
+    else:
+        target_turn = int(args.turn)
+
     window = args.window
 
     # Filter to turns within the window
@@ -2212,7 +2222,7 @@ def main():
     # context
     p = sub.add_parser("context", help="Show turns around a search hit")
     p.add_argument("source", help="Source ID or prefix")
-    p.add_argument("turn", type=int, help="Turn number to center on")
+    p.add_argument("turn", type=str, help="Turn number to center on (or 'last')")
     p.add_argument("--window", type=int, default=3, help="Turns before/after (default 3)")
     p.add_argument("--max-chars", type=int, default=0, help="Max chars per turn (0=unlimited)")
     p.set_defaults(func=cmd_context)
