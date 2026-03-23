@@ -10,8 +10,84 @@
     <div class="text-red-400" x-text="errorMsg"></div>
   </template>
 
-  <!-- Content -->
-  <template x-if="state === 'ready'">
+  <!-- Attachment view -->
+  <template x-if="state === 'ready' && isAttachment">
+    <div>
+      <section aria-label="Attachment Header" class="mb-6">
+        <div class="flex items-center gap-3 mb-2">
+          <span class="px-2 py-0.5 rounded text-xs font-semibold bg-cyan-700">attachment</span>
+          <span class="text-xs text-gray-500" x-text="(attData.created_at || '').slice(0, 10)"></span>
+          <button class="text-xs text-gray-600 font-mono ml-auto hover:text-gray-400 active:text-emerald-400 transition-colors duration-150 cursor-pointer bg-transparent border-none p-0"
+                @click="
+                  navigator.clipboard.writeText('graph://' + (attData.id || '').slice(0, 12));
+                  $el.textContent = 'copied!';
+                  $el.classList.add('text-emerald-400');
+                  setTimeout(() => {
+                    $el.textContent = (attData.id || '').slice(0, 12);
+                    $el.classList.remove('text-emerald-400');
+                  }, 1000);
+                "
+                x-text="(attData.id || '').slice(0, 12)"></button>
+        </div>
+        <h1 class="text-xl font-bold" x-text="attData.filename || 'Untitled'"></h1>
+      </section>
+
+      <!-- Image preview (if image type) -->
+      <template x-if="attData.mime_type && attData.mime_type.startsWith('image/')">
+        <div class="mb-4">
+          <img :src="attData.url" :alt="attData.filename" class="max-w-full rounded border border-gray-700">
+        </div>
+      </template>
+
+      <!-- Metadata -->
+      <div class="p-4 bg-gray-800 rounded-lg border border-gray-700 space-y-2 text-sm">
+        <div class="flex gap-2">
+          <span class="text-gray-500 w-20">Filename</span>
+          <span class="text-gray-300" x-text="attData.filename"></span>
+        </div>
+        <div class="flex gap-2">
+          <span class="text-gray-500 w-20">MIME type</span>
+          <span class="text-gray-300" x-text="attData.mime_type"></span>
+        </div>
+        <div class="flex gap-2">
+          <span class="text-gray-500 w-20">Size</span>
+          <span class="text-gray-300"
+                x-text="attData.size_bytes > 1024*1024
+                  ? (attData.size_bytes / 1024 / 1024).toFixed(1) + ' MB'
+                  : (attData.size_bytes / 1024).toFixed(1) + ' KB'"></span>
+        </div>
+        <div class="flex gap-2">
+          <span class="text-gray-500 w-20">Created</span>
+          <span class="text-gray-300" x-text="(attData.created_at || '').slice(0, 16)"></span>
+        </div>
+        <template x-if="attData.turn">
+          <div class="flex gap-2">
+            <span class="text-gray-500 w-20">Turn</span>
+            <span class="text-gray-300" x-text="'t' + attData.turn"></span>
+          </div>
+        </template>
+        <template x-if="attData.source_id">
+          <div class="flex gap-2">
+            <span class="text-gray-500 w-20">Source</span>
+            <a :href="'/graph/' + attData.source_id"
+               class="text-indigo-400 hover:underline"
+               x-text="attData.source_id.slice(0, 12) + ' →'"></a>
+          </div>
+        </template>
+      </div>
+
+      <!-- Download link -->
+      <div class="mt-4">
+        <a :href="attData.url" :download="attData.filename"
+           class="inline-block px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">
+          Download
+        </a>
+      </div>
+    </div>
+  </template>
+
+  <!-- Source content -->
+  <template x-if="state === 'ready' && !isAttachment">
     <div>
 
       <!-- Header -->
@@ -48,7 +124,7 @@
             <span x-text="(targetTurn - contextWindow) + '–' + (targetTurn + contextWindow)"></span>
             of
             <span x-text="allEntries.length"></span>
-            <a :href="'/source/' + id"
+            <a :href="'/graph/' + id"
                class="text-indigo-400 ml-2 hover:underline">View full source →</a>
           </div>
         </template>
@@ -63,7 +139,7 @@
             <span class="text-gray-400" x-text="noteMeta.author"></span>
           </template>
           <template x-if="noteProvenanceId">
-            <a :href="'/' + (noteProvenanceType === 'bead' ? 'bead' : 'source') + '/' + noteProvenanceId"
+            <a :href="'/' + (noteProvenanceType === 'bead' ? 'bead' : 'graph') + '/' + noteProvenanceId"
                class="text-indigo-400 hover:underline text-xs">provenance →</a>
           </template>
           <template x-for="tag in (noteMeta.tags || [])" :key="tag">
@@ -152,7 +228,7 @@
         <div class="flex gap-4 mt-4 justify-center">
           <button @click="showMoreContext()"
                   class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Show more context</button>
-          <a :href="'/source/' + id"
+          <a :href="'/graph/' + id"
              class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600 inline-block">Full source</a>
         </div>
       </template>

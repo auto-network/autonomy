@@ -3,8 +3,8 @@
 // Alpine.initTree() is called by the SPA router.
 //
 // Handles both:
-//   /source/{id}          — full source view
-//   /source/{id}?turn=N   — context view (windowed around turn N)
+//   /graph/{id}           — full source/attachment view
+//   /graph/{id}?turn=N    — context view (windowed around turn N)
 //
 // The template at /pages/source uses x-if to show the right layout based on
 // isNote / isChat / isDoc flags, and isContext for context-specific UI.
@@ -75,7 +75,7 @@
 
       showMoreContext() {
         this.contextWindow += 5;
-        const url = `/source/${this.id}?turn=${this.targetTurn}&window=${this.contextWindow}`;
+        const url = `/graph/${this.id}?turn=${this.targetTurn}&window=${this.contextWindow}`;
         history.replaceState({}, '', url);
         this._updateVisibleEntries();
       },
@@ -109,13 +109,17 @@
       edgeHref(edge) {
         const other = this.edgeTarget(edge);
         const otherType = this.edgeTargetType(edge);
-        return `/${otherType === 'source' ? 'source' : 'bead'}/${other}`;
+        return `/${otherType === 'source' ? 'graph' : 'bead'}/${other}`;
       },
+
+      // Attachment fields (when type === 'attachment')
+      isAttachment: false,
+      attData: null,
 
       async init() {
         const path = window.location.pathname;
-        const m = path.match(/^\/source\/(.+)$/);
-        this.id = m ? m[1] : '';
+        const m = path.match(/^\/(graph|source)\/(.+)$/);
+        this.id = m ? m[2] : '';
         if (!this.id) {
           this.errorMsg = 'No source ID in URL';
           this.state = 'error';
@@ -131,12 +135,22 @@
         }
 
         try {
-          const res = await fetch(`/api/source/${this.id}`);
+          const res = await fetch(`/api/graph/${this.id}`);
           const data = await res.json();
 
           if (data && data.error) {
             this.errorMsg = data.error;
             this.state = 'error';
+            return;
+          }
+
+          // Attachment response
+          if (data.type === 'attachment') {
+            this.isAttachment = true;
+            this.attData = data;
+            this.state = 'ready';
+            const titleEl = document.getElementById('page-title');
+            if (titleEl) titleEl.textContent = `Attachment: ${data.filename}`;
             return;
           }
 

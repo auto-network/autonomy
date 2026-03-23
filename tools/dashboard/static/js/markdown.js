@@ -47,8 +47,8 @@ document.addEventListener('alpine:init', () => {
       // Each rule: regex source contributes one capture group; group index maps to href/text
       const LINK_RULES = [
         { group: 1, href: id => '/bead/' + id,   display: (full, id) => id },    // auto-xxxx
-        { group: 2, href: id => '/source/' + id,  display: (full, id) => full },  // graph://xxxxx
-        { group: 3, href: id => '/source/' + id,  display: (full, id) => id },    // 9e1a2361-405
+        { group: 2, href: id => '/graph/' + id,  display: (full, id) => full },  // graph://xxxxx
+        { group: 3, href: id => '/graph/' + id,  display: (full, id) => id },    // 9e1a2361-405
       ];
       //                       group 1: bead              group 2: graph:// URI               group 3: source ID
       const COMBINED_RE = /\b(auto-[a-z0-9]{2,8})\b|graph:\/\/([0-9a-f]{8}[-0-9a-f]*)|\b([0-9a-f]{8}-[0-9a-f]{3})\b/g;

@@ -99,7 +99,7 @@
     </template>
     <div class="space-y-2">
       <template x-for="s in recent" :key="s.id">
-        <a :href="'/source/' + s.id"
+        <a :href="'/graph/' + s.id"
            class="flex items-center gap-3 p-3 bg-gray-800 rounded-lg hover:bg-gray-750 border border-gray-700 no-underline"
            :data-session-id="s.id">
           <span class="font-mono text-xs text-gray-500" x-text="s.id.slice(0, 12)"></span>
