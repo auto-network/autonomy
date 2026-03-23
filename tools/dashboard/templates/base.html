@@ -511,6 +511,8 @@
         background: white !important;
         color: black !important;
         display: block !important;
+        height: auto !important;
+        overflow: visible !important;
       }
 
       /* Hide entire header bar */
@@ -526,6 +528,12 @@
         overflow: visible !important;
         padding: 0 !important;
       }
+
+      /* Break out of flex/viewport height containment */
+      .overflow-hidden { overflow: visible !important; }
+      .overflow-auto { overflow: visible !important; }
+      .h-dvh, [class*='h-dvh'] { height: auto !important; }
+      .flex-1 { height: auto !important; flex: none !important; }
 
       #content {
         padding: 0.5rem !important;
