@@ -742,6 +742,7 @@
   </div>
 
   <!-- Global action sheet (available on all pages) -->
+  <div x-data>
   <div class="action-sheet-overlay" :class="$store.actionSheet.open && 'active'"
        @click="window.actionSheet.dismiss()"></div>
   <div class="action-sheet" :class="$store.actionSheet.open && 'active'">
@@ -755,6 +756,7 @@
       <div class="action-sheet-group">
           <button class="action-sheet-btn cancel" @click="window.actionSheet.dismiss()">Cancel</button>
       </div>
+  </div>
   </div>
 
   <script src="/static/js/lib/fetch-progress.js?v=__STATIC_VERSION__"></script>
