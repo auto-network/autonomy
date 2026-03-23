@@ -49,6 +49,7 @@
 .sc-border-assistant { border-left-color: #6366f1; }
 .sc-border-thinking  { border-left-color: #374151; }
 .sc-border-system    { border-left-color: #4b5563; }
+.sc-border-crosstalk { border-left-color: #10b981; }
 
 /* ── Role-specific entry styling ────────────────────────────── */
 .sc-entry-user .sc-user-label {
@@ -62,6 +63,31 @@
   line-height: 1.4;
   white-space: pre-wrap;
 }
+
+.sc-entry-crosstalk .sc-ct-label {
+  color: #10b981;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.sc-entry-crosstalk .sc-ct-sender {
+  color: #6ee7b7;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.sc-entry-crosstalk .sc-ct-sender:hover { text-decoration: underline; }
+.sc-entry-crosstalk .sc-ct-content {
+  color: #e5e7eb;
+  white-space: pre-wrap;
+}
+.sc-entry-crosstalk .sc-ct-provenance {
+  color: #6b7280;
+  font-size: 0.65rem;
+  margin-top: 0.25rem;
+}
+.sc-entry-crosstalk .sc-ct-provenance a { color: #9ca3af; }
+.sc-entry-crosstalk .sc-ct-provenance a:hover { color: #d1d5db; }
 
 .sc-entry-assistant .sc-asst-label {
   color: #6366f1;
