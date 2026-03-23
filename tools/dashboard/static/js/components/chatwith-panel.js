@@ -1,27 +1,25 @@
 // Chat With panel — reusable Alpine component for rich session messaging.
 //
-// Replaces xterm.js terminal with the session viewer's rich HTML message feed,
-// multimodal input bar (auto-expanding textarea, file attachment, two-send
-// image injection), and JSONL polling.
+// Uses the shared session store (session-store.js) and SSE for live updates.
+// No polling — all updates come through SSE session:messages topic.
 //
 // Usage in template:
-//   <div x-data="chatWithPanel()" x-init="configure({tailUrl, tmuxSession})">
+//   <div x-data="chatWithPanel()" x-init="configure({sessionId, project, tmuxSession})">
 //
 // The component expects configure() to be called with:
-//   tailUrl:      API endpoint for JSONL polling (e.g. /api/chatwith/{name}/tail)
+//   sessionId:    session ID (tmux name) for session store + SSE routing
+//   project:      project identifier for the tail API endpoint
 //   tmuxSession:  tmux session name for sending messages
 
 (function () {
 
   document.addEventListener('alpine:init', () => {
     Alpine.data('chatWithPanel', () => ({
-      // Entries and polling
+      // Entries (synced from session store)
       entries: [],
-      offset: 0,
       isLive: false,
       entryCount: 0,
       autoScroll: true,
-      _pollTimer: null,
 
       // Tool ID tracking (for matching tool_result to tool_use)
       _toolMap: {},
@@ -36,7 +34,8 @@
       _nextAttachId: 0,
 
       // Configuration (set via configure())
-      _tailUrl: '',
+      _sessionId: '',
+      _project: '',
       _tmuxSession: '',
 
       // Screenshot injection indicator
@@ -46,12 +45,18 @@
       // State
       state: 'waiting',  // 'waiting' | 'ready'
 
+      // Store watchers (for cleanup)
+      _storeCleanups: [],
+
       configure(opts) {
-        this._tailUrl = opts.tailUrl || '';
+        this._sessionId = opts.sessionId || '';
+        this._project = opts.project || '';
         this._tmuxSession = opts.tmuxSession || '';
-        if (this._tailUrl) {
-          this._startPolling();
+
+        if (this._sessionId) {
+          this._connectToStore();
         }
+
         // Clipboard paste support — attach pasted files
         this.$nextTick(() => {
           const ta = this.$refs.cwMessageInput;
@@ -72,11 +77,126 @@
         });
       },
 
-      destroy() {
-        if (this._pollTimer) {
-          clearInterval(this._pollTimer);
-          this._pollTimer = null;
+      async _connectToStore() {
+        var sessionId = this._sessionId;
+        var project = this._project;
+        var store = window.getSessionStore(sessionId);
+
+        // Ensure SSE subscription (idempotent)
+        window.ensureSessionMessages();
+
+        if (store.loaded) {
+          // Already loaded — instant render from cache
+          this.entries = store.entries;
+          this.isLive = store.isLive;
+          this._toolMap = store.toolMap;
+          if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
+          this.entryCount = this.entries.length;
+          this.state = 'ready';
+
+          this.$nextTick(() => {
+            var el = this.$refs.cwEntriesContainer;
+            if (el) el.scrollTop = el.scrollHeight;
+          });
+        } else {
+          // First visit — fetch backfill
+          store._loading = true;
+          var tailUrl = '/api/session/' + encodeURIComponent(project) + '/' + encodeURIComponent(sessionId) + '/tail';
+
+          try {
+            var data = await fetch(tailUrl + '?after=0').then(r => r.json());
+
+            if (data.error) {
+              // Session may not have written JSONL yet — show empty state
+              store._loading = false;
+              store.loaded = true;
+              this.entries = [];
+              this.isLive = true;
+              this.state = 'ready';
+            } else {
+              store.offset = data.offset || 0;
+              store.isLive = !!data.is_live;
+              store.tmuxSession = data.tmux_session || '';
+              if (data.seq !== undefined) store.seq = data.seq;
+
+              if (data.entries && data.entries.length > 0) {
+                for (var i = 0; i < data.entries.length; i++) {
+                  var entry = data.entries[i];
+                  if (entry.type === 'tool_use' && entry.tool_id) {
+                    store.toolMap[entry.tool_id] = { tool_name: entry.tool_name || '?' };
+                  }
+                }
+                store.entries = data.entries;
+              }
+
+              // Flush pending SSE events that arrived during fetch
+              var pending = store._pendingSSE;
+              store._pendingSSE = [];
+              store._loading = false;
+              store.loaded = true;
+              for (var j = 0; j < pending.length; j++) {
+                window.appendSessionEntries(store, pending[j]);
+              }
+
+              this.entries = store.entries;
+              this.isLive = store.isLive;
+              this._toolMap = store.toolMap;
+              if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
+              this.entryCount = this.entries.length;
+              this.state = 'ready';
+
+              this.$nextTick(() => {
+                var el = this.$refs.cwEntriesContainer;
+                if (el) el.scrollTop = el.scrollHeight;
+              });
+            }
+          } catch (e) {
+            // Session may not be ready yet — show empty but live
+            store._loading = false;
+            store.loaded = true;
+            this.entries = [];
+            this.isLive = true;
+            this.state = 'ready';
+          }
         }
+
+        // Reactive sync — watch store for new entries from SSE
+        var self = this;
+        this._storeCleanups.push(this.$watch(
+          function() {
+            var s = Alpine.store('sessions')[sessionId];
+            return s ? s.entries.length : 0;
+          },
+          function(newLen) {
+            var s = Alpine.store('sessions')[sessionId];
+            if (!s) return;
+            self.entries = s.entries;
+            self._toolMap = s.toolMap;
+            self.entryCount = s.entries.length;
+            if (self.state === 'waiting') self.state = 'ready';
+            if (self.autoScroll) {
+              self.$nextTick(function() {
+                var el = self.$refs.cwEntriesContainer;
+                if (el) el.scrollTop = el.scrollHeight;
+              });
+            }
+          }
+        ));
+
+        this._storeCleanups.push(this.$watch(
+          function() {
+            var s = Alpine.store('sessions')[sessionId];
+            return s ? s.isLive : true;
+          },
+          function(val) { self.isLive = val; }
+        ));
+      },
+
+      destroy() {
+        for (var i = 0; i < this._storeCleanups.length; i++) {
+          if (typeof this._storeCleanups[i] === 'function') this._storeCleanups[i]();
+        }
+        this._storeCleanups = [];
         if (this._screenshotTimer) {
           clearTimeout(this._screenshotTimer);
           this._screenshotTimer = null;
@@ -208,56 +328,6 @@
           this.screenshotInjected = false;
           this._screenshotTimer = null;
         }, 3000);
-      },
-
-      async _poll() {
-        if (!this._tailUrl) return;
-        try {
-          const res = await fetch(`${this._tailUrl}?after=${this.offset}`);
-          const data = await res.json();
-
-          this.isLive = data.is_live;
-          if (data.offset !== undefined) this.offset = data.offset;
-          if (data.tmux_session && !this._tmuxSession) {
-            this._tmuxSession = data.tmux_session;
-          }
-
-          if (data.entries && data.entries.length > 0) {
-            for (const entry of data.entries) {
-              if (entry.type === 'tool_use' && entry.tool_id) {
-                this._toolMap[entry.tool_id] = {
-                  tool_name: entry.tool_name || '?',
-                };
-              }
-            }
-            this.entries = [...this.entries, ...data.entries];
-            this.entryCount = this.entries.length;
-
-            if (this.autoScroll) {
-              this.$nextTick(() => {
-                const el = this.$refs.cwEntriesContainer;
-                if (el) el.scrollTop = el.scrollHeight;
-              });
-            }
-          }
-
-          if (this.state === 'waiting') this.state = 'ready';
-
-          // Stop polling if session is complete and no new entries
-          if (!data.is_live && this.offset > 0 && (!data.entries || data.entries.length === 0)) {
-            clearInterval(this._pollTimer);
-            this._pollTimer = null;
-          }
-        } catch (e) {
-          // Silently retry on next poll — session may not be ready yet
-        }
-      },
-
-      _startPolling() {
-        // Immediate first poll
-        this._poll();
-        // Then poll every 1.5s
-        this._pollTimer = setInterval(() => this._poll(), 1500);
       },
     }));
   });

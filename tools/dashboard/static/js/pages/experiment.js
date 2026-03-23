@@ -2,8 +2,8 @@
 // Manages experiment comparison UI: series navigation, variant cards,
 // selection/ranking, Chat With panel toggle, screenshot status.
 //
-// The Chat With panel uses the rich chatWithPanel component (JSONL polling,
-// multimodal input bar, markdown rendering) instead of xterm.js terminal.
+// The Chat With panel uses a session picker to select any live session,
+// or spawn a new one. Session data is delivered via SSE (no polling).
 // Screenshot capture triggers two-send image injection via the server.
 
 (function () {
@@ -45,8 +45,11 @@
       chatWithStatusClass: 'text-xs text-gray-500 ml-2',
       chatWithBtnText: 'Chat With',
       chatWithBtnDisabled: false,
-      chatWithKillVisible: false,
       chatWithPanelRef: null,  // reference to the chatWithPanel Alpine component
+
+      // Session picker
+      pickerVisible: false,
+      pickerSessions: [],
 
       // Screenshot
       screenshotStatus: '',
@@ -62,10 +65,6 @@
 
       destroy() {
         if (window._experimentPage === this) window._experimentPage = null;
-        // Note: don't call _clearHeaderActions() here — Alpine's MutationObserver
-        // fires destroy() asynchronously, which races with the new component's
-        // init() that injects header buttons. The router clears header-actions
-        // synchronously before dispatching, so cleanup is already handled.
         if (window._expSeriesCleanup) {
           window._expSeriesCleanup();
           window._expSeriesCleanup = null;
@@ -93,7 +92,7 @@
           // Post-render: inject iframe content once Alpine has rendered the skeleton.
           this.$nextTick(() => this._injectIframes());
 
-          // Auto-reconnect Chat With if a session already exists
+          // Auto-reconnect Chat With if a session was previously selected
           this._checkChatWith();
 
           // SSE subscription for new series iterations
@@ -234,28 +233,86 @@
 
       // ── Chat With ─────────────────────────────────────────────────────
 
-      get sessionCtx() { return (this.exp && this.exp.series_id) || this.expId; },
+      get _storageKey() { return 'chatwith-session-' + this.expId; },
 
-      get sessionName() { return `chatwith-${this.sessionCtx}`; },
+      _saveSession(sessionId, tmuxSession, project) {
+        try {
+          localStorage.setItem(this._storageKey, JSON.stringify({
+            sessionId: sessionId,
+            tmuxSession: tmuxSession,
+            project: project,
+          }));
+        } catch (e) { /* localStorage may be unavailable */ }
+      },
+
+      _loadSession() {
+        try {
+          const raw = localStorage.getItem(this._storageKey);
+          if (raw) return JSON.parse(raw);
+        } catch (e) { /* ignore */ }
+        return null;
+      },
 
       toggleChatWithPanel() {
         this.chatWithCollapsed = !this.chatWithCollapsed;
       },
 
-      _configureChatWithPanel(sessionName) {
+      _configureChatWithPanel(sessionId, project, tmuxSession) {
         // Configure the chatWithPanel inner component once it's rendered.
-        // Uses $nextTick to wait for Alpine to render the panel DOM.
         this.$nextTick(() => {
           if (this.chatWithPanelRef) {
             this.chatWithPanelRef.configure({
-              tailUrl: `/api/chatwith/${encodeURIComponent(sessionName)}/tail`,
-              tmuxSession: sessionName,
+              sessionId: sessionId,
+              project: project,
+              tmuxSession: tmuxSession,
             });
           }
         });
       },
 
-      async spawnChatWith() {
+      // ── Session picker ──────────────────────────────────────────────
+
+      openSessionPicker() {
+        // Build list of live interactive sessions from the store
+        var allSessions = Alpine.store('sessions');
+        var sessions = [];
+        var interactiveTypes = ['terminal', 'chatwith', 'host', 'container'];
+        for (var id in allSessions) {
+          var s = allSessions[id];
+          if (!s.isLive) continue;
+          if (!s.tmuxSession) continue;
+          if (interactiveTypes.indexOf(s.sessionType || 'terminal') === -1) continue;
+          var lastEntry = s.entries.length > 0 ? s.entries[s.entries.length - 1] : null;
+          sessions.push({
+            sessionId: id,
+            tmuxSession: s.tmuxSession,
+            project: s.project || '',
+            label: s.label || '',
+            type: s.sessionType || 'terminal',
+            preview: lastEntry ? (lastEntry.content || '').slice(0, 100) : '',
+          });
+        }
+        // Sort by label presence, then alphabetically
+        sessions.sort(function(a, b) {
+          if (a.label && !b.label) return -1;
+          if (!a.label && b.label) return 1;
+          return (a.tmuxSession || '').localeCompare(b.tmuxSession || '');
+        });
+        this.pickerSessions = sessions;
+        this.pickerVisible = true;
+      },
+
+      selectSession(session) {
+        this.pickerVisible = false;
+        this._saveSession(session.sessionId, session.tmuxSession, session.project);
+        this.chatWithVisible = true;
+        this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
+        this._configureChatWithPanel(session.sessionId, session.project, session.tmuxSession);
+        initDisplayCapture(this.expId).catch(() => {});
+      },
+
+      async spawnNewSession() {
+        this.pickerVisible = false;
         this.chatWithBtnText = 'Spawning...';
         this.chatWithBtnDisabled = true;
         this.setChatWithStatus('spawning...', 'text-xs text-yellow-400 ml-2');
@@ -270,51 +327,55 @@
           if (result.error) {
             this.chatWithBtnText = 'Chat With';
             this.chatWithBtnDisabled = false;
-            this.setChatWithStatus(`Error: ${result.error}`, 'text-xs text-red-400 ml-2');
+            this.setChatWithStatus('Error: ' + result.error, 'text-xs text-red-400 ml-2');
             return;
           }
+          var sessionName = result.session_name;
+          // The spawn endpoint registers with project=context_id, session_id=session_name
+          this._saveSession(sessionName, sessionName, this.expId);
           this.chatWithBtnText = 'Chat With';
           this.chatWithBtnDisabled = false;
-          this.chatWithKillVisible = true;
           this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
-          this._configureChatWithPanel(result.session_name);
+          this._configureChatWithPanel(sessionName, this.expId, sessionName);
           initDisplayCapture(this.expId).catch(() => {});
         } catch (e) {
           this.chatWithBtnText = 'Chat With';
           this.chatWithBtnDisabled = false;
           this.setChatWithStatus('spawn failed', 'text-xs text-red-400 ml-2');
-          console.error('[experimentPage] spawnChatWith error', e);
+          console.error('[experimentPage] spawnNewSession error', e);
         }
       },
 
-      async killChatWith() {
-        const name = this.sessionName;
+      disconnectChatWith() {
+        // Disconnect from the session (does NOT kill it — session continues independently)
         if (this.chatWithPanelRef) {
           this.chatWithPanelRef.destroy();
         }
         this.chatWithVisible = false;
-        this.chatWithKillVisible = false;
         this.chatWithBtnText = 'Chat With';
         this.chatWithBtnDisabled = false;
-        try {
-          await fetch(`/api/terminal/${name}/kill`);
-        } catch (e) {
-          console.warn('[experimentPage] killChatWith error', e);
-        }
+        this.setChatWithStatus('', 'text-xs text-gray-500 ml-2');
+        try { localStorage.removeItem(this._storageKey); } catch (e) { /* ignore */ }
       },
 
       reconnectChatWith() {
-        this.chatWithVisible = true;
-        this.chatWithKillVisible = true;
-        this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
-        this._configureChatWithPanel(this.sessionName);
+        var saved = this._loadSession();
+        if (saved) {
+          this.chatWithVisible = true;
+          this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
+          this._configureChatWithPanel(saved.sessionId, saved.project, saved.tmuxSession);
+        } else {
+          this.openSessionPicker();
+        }
       },
 
       // ── Screenshot ────────────────────────────────────────────────────
       // Now triggers two-send image injection via server when tmux session exists.
 
       async captureScreenshot() {
-        await manualCaptureScreenshot(this.expId, this.sessionName);
+        var saved = this._loadSession();
+        var tmux = saved ? saved.tmuxSession : '';
+        await manualCaptureScreenshot(this.expId, tmux);
       },
 
       // ── Imperative → Alpine bridge ────────────────────────────────────
@@ -328,7 +389,6 @@
         this.chatWithVisible = true;
       },
 
-      setKillVisible(v) { this.chatWithKillVisible = v; },
       setScreenshotStatus(msg) { this.screenshotStatus = msg; },
 
       // ── Iframe injection ──────────────────────────────────────────────
@@ -386,20 +446,34 @@ ${_safeHtml}
       // ── Auto-reconnect Chat With ──────────────────────────────────────
 
       async _checkChatWith() {
+        var saved = this._loadSession();
+        if (!saved) return;
+
+        // Check if the saved session is still live in the store
+        var store = Alpine.store('sessions')[saved.sessionId];
+        if (store && store.isLive) {
+          this.chatWithVisible = true;
+          this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
+          this._configureChatWithPanel(saved.sessionId, saved.project, saved.tmuxSession);
+          initDisplayCapture(this.expId).catch(() => {});
+          return;
+        }
+
+        // Fallback: check via the chatwith/check API (session may not be in store yet)
         try {
-          const sessionName = this.sessionName;
           const check = await fetch(
-            `/api/chatwith/check?session=${encodeURIComponent(sessionName)}`
+            '/api/chatwith/check?session=' + encodeURIComponent(saved.tmuxSession)
           ).then(r => r.json());
           if (check && check.exists) {
-            this.chatWithBtnText = 'Chat With';
             this.chatWithVisible = true;
-            this.chatWithKillVisible = true;
             this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
-            this._configureChatWithPanel(sessionName);
+            this._configureChatWithPanel(saved.sessionId, saved.project, saved.tmuxSession);
             initDisplayCapture(this.expId).catch(() => {});
+          } else {
+            // Session no longer exists — clear saved state
+            try { localStorage.removeItem(this._storageKey); } catch (e) { /* ignore */ }
           }
-        } catch (e) { /* best-effort — session check is non-critical */ }
+        } catch (e) { /* best-effort */ }
       },
 
       // ── SSE series subscription ───────────────────────────────────────
@@ -441,7 +515,7 @@ ${_safeHtml}
         const cwBtn = document.getElementById('ha-chatwith-btn');
         cwBtn.onclick = () => {
           if (this.chatWithVisible) this.reconnectChatWith();
-          else this.spawnChatWith();
+          else this.openSessionPicker();
         };
 
         // Sync reactive state to injected DOM via $watch
