@@ -6,6 +6,7 @@ Every view the dashboard shows, an agent can also produce via CLI.
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -53,7 +54,7 @@ logging.basicConfig(
 
 from tools.dashboard.event_bus import event_bus, _SERVER_EPOCH
 from tools.dashboard.session_monitor import count_tool_uses, session_monitor
-from tools.dashboard.dao import dashboard_db
+from tools.dashboard.dao import auth_db, dashboard_db
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -1286,6 +1287,8 @@ async def api_terminal_kill(request):
         subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
         # Deregister from session monitor (marks dead in DB)
         await session_monitor.deregister(name)
+        # Revoke CrossTalk tokens for this session
+        await asyncio.to_thread(auth_db.revoke_token, name)
         # Ingest the completed session into the graph (fire-and-forget)
         if name.startswith("chatwith-"):
             asyncio.create_task(asyncio.to_thread(
@@ -1307,6 +1310,106 @@ async def api_terminal_rename(request):
         # Display name is UI-only — stored in DB as last_message prefix if needed
         return JSONResponse({"ok": True, "id": name, "name": new_name})
     return JSONResponse({"error": "not found"}, status_code=404)
+
+
+# ── CrossTalk API ────────────────────────────────────────────────────────────
+
+def _crosstalk_auth(request) -> tuple[str | None, JSONResponse | None]:
+    """Extract and verify a CrossTalk bearer token.
+
+    Returns (sender_tmux_name, None) on success, or (None, error_response) on failure.
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        return None, JSONResponse({"error": "missing or invalid Authorization header"}, status_code=401)
+    raw_token = auth[7:]
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    sender = auth_db.resolve_token(token_hash)
+    if sender is None:
+        return None, JSONResponse({"error": "invalid or revoked token"}, status_code=401)
+    return sender, None
+
+
+async def api_crosstalk_send(request):
+    """POST /api/crosstalk/send — deliver a plain-text message to a peer session."""
+    sender, err = _crosstalk_auth(request)
+    if err:
+        return err
+
+    # Parse body
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    target = body.get("target", "")
+    message = body.get("message", "")
+
+    # Validate message: plain text only, no angle brackets, max 4000 chars
+    if not message or len(message) > 4000:
+        return JSONResponse({"error": "message must be 1-4000 characters"}, status_code=400)
+    if "<" in message or ">" in message:
+        return JSONResponse({"error": "message must not contain < or > characters"}, status_code=400)
+
+    # Validate target exists
+    if not target or not _tmux_session_exists(target):
+        return JSONResponse({"error": f"target session not found: {target}"}, status_code=404)
+
+    # Resolve sender metadata from dashboard_db
+    sender_row = dashboard_db.get_session(sender)
+    sender_label = (sender_row or {}).get("label", "") or ""
+    sender_source_id = (sender_row or {}).get("graph_source_id", "") or ""
+    sender_entry_count = (sender_row or {}).get("entry_count", 0) or 0
+
+    # Build envelope
+    iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    envelope = (
+        f'<crosstalk from="{sender}"\n'
+        f'           label="{sender_label}"\n'
+        f'           source="{sender_source_id}" turn="{sender_entry_count}"\n'
+        f'           timestamp="{iso_now}">\n'
+        f'{message}\n'
+        f'</crosstalk>'
+    )
+
+    # Inject via tmux paste-buffer (same pattern as api_chatwith_spawn)
+    import secrets as _secrets
+    path = f"/tmp/crosstalk_{_secrets.token_hex(4)}.txt"
+    Path(path).write_text(envelope, encoding="utf-8")
+    subprocess.run(["tmux", "load-buffer", "-b", "ct_msg", path], capture_output=True)
+    subprocess.run(["tmux", "paste-buffer", "-p", "-b", "ct_msg", "-t", target], capture_output=True)
+    await asyncio.sleep(0.3)
+    subprocess.run(["tmux", "send-keys", "-t", target, "", "Enter"], capture_output=True)
+    Path(path).unlink(missing_ok=True)
+
+    # Store in crosstalk_messages
+    await asyncio.to_thread(
+        auth_db.insert_message,
+        sender, sender_label, target,
+        sender_source_id or None, sender_entry_count or None,
+        message, time.time(),
+    )
+
+    return JSONResponse({
+        "delivered": True,
+        "from": sender,
+        "label": sender_label,
+        "target": target,
+    })
+
+
+async def api_crosstalk_peers(request):
+    """GET /api/crosstalk/peers — list live sessions excluding the caller."""
+    sender, err = _crosstalk_auth(request)
+    if err:
+        return err
+
+    conn = dashboard_db.get_conn()
+    rows = conn.execute(
+        "SELECT tmux_name, type, label, created_at FROM tmux_sessions WHERE is_live=1 AND tmux_name != ?",
+        (sender,),
+    ).fetchall()
+    return JSONResponse({"peers": [dict(r) for r in rows]})
 
 
 async def api_primer(request):
@@ -3939,6 +4042,10 @@ routes = [
     Route("/api/graph/sessions", api_graph_sessions, methods=["POST"]),
     Route("/api/graph/attach", api_graph_attach, methods=["POST"]),
 
+    # CrossTalk
+    Route("/api/crosstalk/send", api_crosstalk_send, methods=["POST"]),
+    Route("/api/crosstalk/peers", api_crosstalk_peers, methods=["GET"]),
+
     # Attachment serving
     Route("/api/attachment/{attachment_id}", api_attachment_serve),
 
@@ -3960,6 +4067,7 @@ async def _on_startup():
     from agents.dispatch_db import init_db
     init_db()  # ensure dispatch schema exists
     dashboard_db.init_db()  # ensure dashboard.db schema exists
+    auth_db.init_db()  # ensure auth.db schema exists
     # Seed from filesystem on first run (one-time), then start background tasks
     await session_monitor.seed_from_filesystem()
     await session_monitor.start(event_bus=event_bus, entry_parser=_parse_jsonl_entry)

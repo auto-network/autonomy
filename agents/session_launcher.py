@@ -15,8 +15,10 @@ or None on failure.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -208,6 +210,12 @@ def launch_session(
                     del default_mounts[dk]
             default_mounts[str(host_path)] = container_spec
 
+    # ── CrossTalk token ──────────────────────────────────────────
+    from tools.dashboard.dao import auth_db
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    auth_db.insert_token(token_hash, name)
+
     # ── Assemble docker command ────────────────────────────────
     cmd: list[str] = [
         "docker", "run",
@@ -217,6 +225,7 @@ def launch_session(
         "-e", "BD_READONLY=0",
         "-e", "GRAPH_DB=/home/agent/graph.db",
         "-e", "GRAPH_API=https://localhost:8080",
+        "-e", f"CROSSTALK_TOKEN={raw_token}",
         *auth_args,
     ]
 
