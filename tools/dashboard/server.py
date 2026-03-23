@@ -4068,6 +4068,8 @@ routes = [
     Route("/dispatch/trace/{run}", page_dispatch),
     Route("/api/search", api_search),
     Route("/api/sources", api_sources),
+    Route("/api/graph/collab", api_graph_collab_list, methods=["GET"]),
+    Route("/api/graph/collab/tag/{source_id}", api_graph_collab_tag, methods=["PUT"]),
     Route("/api/graph/{id}", api_graph_resolve),
     Route("/api/source/{id}", api_source_read),
     Route("/api/source/{id}/attachments", api_source_attachments),
@@ -4111,8 +4113,6 @@ routes = [
     Route("/api/graph/link", api_graph_link, methods=["POST"]),
     Route("/api/graph/sessions", api_graph_sessions, methods=["POST"]),
     Route("/api/graph/attach", api_graph_attach, methods=["POST"]),
-    Route("/api/graph/collab", api_graph_collab_list, methods=["GET"]),
-    Route("/api/graph/collab/tag/{source_id}", api_graph_collab_tag, methods=["PUT"]),
 
     # CrossTalk
     Route("/api/crosstalk/send", api_crosstalk_send, methods=["POST"]),
