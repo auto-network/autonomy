@@ -589,8 +589,53 @@ def cmd_seed(args):
     db.close()
 
 
+def _print_session_status():
+    """Print compact status table of live sessions from dashboard.db."""
+    import sqlite3
+    import time as _time
+
+    db_path = Path(__file__).parents[2] / "data" / "dashboard.db"
+    if not db_path.exists():
+        print("dashboard.db not found", file=sys.stderr)
+        return
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM tmux_sessions WHERE is_live=1 ORDER BY last_activity DESC"
+    ).fetchall()
+    conn.close()
+    if not rows:
+        print("No live sessions")
+        return
+
+    now = _time.time()
+    print(f"{'TMUX':<28} {'LABEL':<24} {'IDLE':>6} {'TURNS':>6} {'CTX':>6} {'LAST MESSAGE'}")
+    print("\u2500" * 100)
+    for r in rows:
+        tmux = (r["tmux_name"] or "")[:27]
+        label = (r["label"] or "")[:23]
+        last_act = r["last_activity"] or r["created_at"]
+        idle_s = int(now - last_act) if last_act else 0
+        if idle_s < 60:
+            idle = f"{idle_s}s"
+        elif idle_s < 3600:
+            idle = f"{idle_s // 60}m"
+        elif idle_s < 86400:
+            idle = f"{idle_s // 3600}h"
+        else:
+            idle = f"{idle_s // 86400}d"
+        turns = str(r["entry_count"] or 0)
+        ctx = r["context_tokens"] or 0
+        ctx_str = f"{ctx // 1000}K" if ctx >= 1000 else str(ctx)
+        msg = (r["last_message"] or "")[:40].replace("\n", " ")
+        print(f"{tmux:<28} {label:<24} {idle:>6} {turns:>6} {ctx_str:>6} {msg}")
+
+
 def cmd_sessions(args):
     """Ingest Claude Code sessions."""
+    if args.status:
+        _print_session_status()
+        return
     if is_api_mode():
         api_sessions(args)
         return
@@ -2154,6 +2199,7 @@ def main():
     p.add_argument("--all", action="store_true", help="Ingest all projects, not just current")
     p.add_argument("--project", help="Specific project path")
     p.add_argument("--force", action="store_true", help="Re-ingest existing sessions")
+    p.add_argument("--status", action="store_true", help="Show live session status table from dashboard.db")
     p.set_defaults(func=cmd_sessions)
 
     # ingest-session
