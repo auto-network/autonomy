@@ -2548,6 +2548,40 @@ async def api_session_label(request):
     return JSONResponse({"ok": True})
 
 
+async def api_session_topics(request):
+    """Set sub-topic status lines for a session card.
+
+    PUT /api/session/{tmux_name}/topics
+    Body: {"topics": ["Researching auth flow", "Reading server.py"]}
+    Returns: {"ok": true}
+
+    Rules: 1-4 strings, max 80 chars each, plain text only.
+    """
+    tmux_name = request.path_params["tmux_name"]
+    body = await request.json()
+    topics_raw = body.get("topics", [])
+
+    # Validate
+    if not isinstance(topics_raw, list):
+        return JSONResponse({"error": "topics must be an array"}, status_code=400)
+    if len(topics_raw) > 4:
+        return JSONResponse({"error": "max 4 topics"}, status_code=400)
+
+    # Sanitize: plain text, strip, truncate to 80 chars
+    topics = []
+    for t in topics_raw:
+        if not isinstance(t, str):
+            continue
+        clean = t.strip().replace('<', '').replace('>', '')[:80]
+        if clean:
+            topics.append(clean)
+
+    dashboard_db.update_topics(tmux_name, topics)
+    # Broadcast via SSE so all clients update
+    await event_bus.broadcast("session:registry", session_monitor.get_registry())
+    return JSONResponse({"ok": True})
+
+
 async def api_upload(request):
     """Upload a file to the workspace.
 
@@ -4096,6 +4130,7 @@ routes = [
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
     Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
+    Route("/api/session/{tmux_name}/topics", api_session_topics, methods=["PUT"]),
     Route("/api/session/send", api_session_send, methods=["POST"]),
     Route("/api/session/{project}/{session_id}/tail", api_session_tail),
     Route("/api/session/{project}/{session_id}/send", api_session_send, methods=["POST"]),
