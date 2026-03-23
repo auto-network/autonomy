@@ -54,7 +54,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve
-from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label
+from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach
 
 
 def cmd_ingest(args):
@@ -1771,6 +1771,120 @@ def cmd_wait(args):
         time.sleep(poll_interval)
 
 
+def cmd_attach(args):
+    """Attach a file to the graph with hash-based dedup."""
+    import hashlib
+    import mimetypes
+    import shutil
+
+    if is_api_mode():
+        api_attach(args)
+        return
+
+    db = GraphDB(args.db)
+    from .models import Attachment
+
+    file_path = Path(args.file_path)
+    if not file_path.is_file():
+        print(f"Error: {file_path} not found or not a file", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+
+    # Read file and compute SHA256
+    file_data = file_path.read_bytes()
+    file_hash = hashlib.sha256(file_data).hexdigest()
+    size_bytes = len(file_data)
+    filename = file_path.name
+
+    # Check for existing attachment with same hash (dedup)
+    existing = db.get_attachment_by_hash(file_hash)
+    if existing:
+        print(f"  ✓ Already attached as {existing['id'][:12]} — {filename} ({size_bytes} bytes, dedup)")
+        db.close()
+        return
+
+    # Detect mime type
+    mime_type, _ = mimetypes.guess_type(filename)
+
+    # Determine storage path: data/attachments/{hash[:2]}/{hash}.{ext}
+    ext = file_path.suffix or ""
+    store_dir = Path(args.db).parent / "attachments" / file_hash[:2]
+    store_path = store_dir / f"{file_hash}{ext}"
+
+    store_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(file_path), str(store_path))
+
+    # Resolve provenance
+    source_id = getattr(args, "source", None)
+    turn_number = getattr(args, "turn", None)
+
+    if not source_id and not turn_number:
+        auto_src, auto_turn = _auto_provenance(db)
+        if auto_src:
+            source_id = auto_src["id"]
+            turn_number = auto_turn
+
+    att = Attachment(
+        hash=file_hash,
+        filename=filename,
+        mime_type=mime_type,
+        size_bytes=size_bytes,
+        file_path=str(store_path),
+        source_id=source_id,
+        turn_number=int(turn_number) if turn_number else None,
+    )
+    db.insert_attachment(att)
+
+    src_label = f" src:{source_id[:12]}" if source_id else ""
+    print(f"  ✓ Attached {filename} ({att.id[:12]}{src_label}) — {size_bytes} bytes, {mime_type or 'unknown'}")
+    db.close()
+
+
+def cmd_attachment(args):
+    """Show metadata for a single attachment."""
+    db = GraphDB(args.db)
+    att = db.get_attachment(args.id)
+    if not att:
+        print(f"No attachment found matching '{args.id}'", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+
+    print(f"  id:          {att['id']}")
+    print(f"  filename:    {att['filename']}")
+    print(f"  mime_type:   {att['mime_type'] or 'unknown'}")
+    print(f"  size_bytes:  {att['size_bytes']}")
+    print(f"  hash:        {att['hash']}")
+    print(f"  file_path:   {att['file_path']}")
+    print(f"  source_id:   {att['source_id'] or '—'}")
+    print(f"  turn:        {att['turn_number'] if att['turn_number'] is not None else '—'}")
+    print(f"  created_at:  {att['created_at']}")
+    meta = att.get("metadata", "{}")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+    if meta:
+        print(f"  metadata:    {json.dumps(meta)}")
+    db.close()
+
+
+def cmd_attachments(args):
+    """List attachments, optionally filtered by source."""
+    db = GraphDB(args.db)
+    source_id = getattr(args, "source_id", None)
+    atts = db.list_attachments(source_id=source_id, limit=getattr(args, "limit", 50))
+    if not atts:
+        print("  No attachments found.")
+        db.close()
+        return
+
+    for att in atts:
+        mime = att.get("mime_type") or "unknown"
+        print(f"  {att['id'][:12]}  {mime:20s}  {att['size_bytes']:>8}  {att['filename']}")
+    db.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="autonomy-graph",
@@ -2009,6 +2123,24 @@ def main():
     p_approve = dispatch_sub.add_parser("approve", help="Approve bead(s) for dispatch")
     p_approve.add_argument("bead_ids", nargs="+", help="One or more bead IDs")
     p_approve.set_defaults(func=cmd_dispatch_approve)
+
+    # attach
+    p = sub.add_parser("attach", help="Attach a file to the graph with hash-based dedup")
+    p.add_argument("file_path", help="Path to file to attach")
+    p.add_argument("--source", help="Source ID to link as provenance")
+    p.add_argument("--turn", type=int, help="Turn number in source conversation")
+    p.set_defaults(func=cmd_attach)
+
+    # attachment (show single)
+    p = sub.add_parser("attachment", help="Show metadata for an attachment")
+    p.add_argument("id", help="Attachment ID or prefix")
+    p.set_defaults(func=cmd_attachment)
+
+    # attachments (list)
+    p = sub.add_parser("attachments", help="List attachments")
+    p.add_argument("source_id", nargs="?", help="Filter by source ID")
+    p.add_argument("--limit", type=int, default=50, help="Max results (default 50)")
+    p.set_defaults(func=cmd_attachments)
 
     args = parser.parse_args()
 

@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .models import Source, Thought, Derivation, Entity, Claim, Edge, Node, new_id
+from .models import Source, Thought, Derivation, Entity, Claim, Edge, Node, Attachment, new_id
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 DEFAULT_DB = Path(__file__).parents[2] / "data" / "graph.db"
@@ -731,6 +731,43 @@ class GraphDB:
             "UPDATE thoughts SET content = ? WHERE id = ?",
             (content, thought_id),
         )
+
+    # ── Attachments ─────────────────────────────────────────
+
+    def insert_attachment(self, att: Attachment) -> Attachment:
+        self.conn.execute(
+            """INSERT INTO attachments (id, hash, filename, mime_type, size_bytes, file_path,
+                                        source_id, turn_number, metadata, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (att.id, att.hash, att.filename, att.mime_type, att.size_bytes, att.file_path,
+             att.source_id, att.turn_number, json.dumps(att.metadata), att.created_at),
+        )
+        self.conn.commit()
+        return att
+
+    def get_attachment(self, att_id: str) -> dict | None:
+        """Look up attachment by ID or prefix."""
+        row = self.conn.execute("SELECT * FROM attachments WHERE id = ?", (att_id,)).fetchone()
+        if row:
+            return dict(row)
+        row = self.conn.execute("SELECT * FROM attachments WHERE id LIKE ? LIMIT 1", (f"{att_id}%",)).fetchone()
+        return dict(row) if row else None
+
+    def get_attachment_by_hash(self, hash: str) -> dict | None:
+        row = self.conn.execute("SELECT * FROM attachments WHERE hash = ?", (hash,)).fetchone()
+        return dict(row) if row else None
+
+    def list_attachments(self, source_id: str | None = None, limit: int = 50) -> list[dict]:
+        if source_id:
+            rows = self.conn.execute(
+                "SELECT * FROM attachments WHERE source_id LIKE ? ORDER BY created_at DESC LIMIT ?",
+                (f"{source_id}%", limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM attachments ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def commit(self):
         self.conn.commit()

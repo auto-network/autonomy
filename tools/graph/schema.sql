@@ -216,3 +216,21 @@ CREATE TABLE IF NOT EXISTS note_versions (
     UNIQUE(source_id, version)
 );
 CREATE INDEX IF NOT EXISTS idx_note_versions_source ON note_versions(source_id);
+
+-- ============================================================
+-- ATTACHMENTS — binary files with hash dedup and provenance
+-- ============================================================
+CREATE TABLE IF NOT EXISTS attachments (
+    id          TEXT PRIMARY KEY,
+    hash        TEXT NOT NULL,          -- SHA256 of file content
+    filename    TEXT NOT NULL,          -- original filename
+    mime_type   TEXT,                   -- e.g. image/png, application/json
+    size_bytes  INTEGER NOT NULL,
+    file_path   TEXT NOT NULL UNIQUE,   -- path in data/attachments/{hash[:2]}/{hash}.{ext}
+    source_id   TEXT,                   -- linked graph source (session/note)
+    turn_number INTEGER,               -- conversation turn
+    metadata    TEXT DEFAULT '{}',      -- JSON: width, height, description, tags
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_hash ON attachments(hash);
+CREATE INDEX IF NOT EXISTS idx_attachments_source ON attachments(source_id);
