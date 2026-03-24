@@ -58,6 +58,7 @@ def init_db() -> None:
         for stmt in [
             "ALTER TABLE experiments ADD COLUMN series_id TEXT",
             "ALTER TABLE experiments ADD COLUMN series_seq INTEGER",
+            "ALTER TABLE experiments ADD COLUMN alpine INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 conn.execute(stmt)
@@ -79,6 +80,7 @@ def create_experiment(
     fixture: str | None = None,
     variants: list[dict],
     series_id: str | None = None,
+    alpine: bool = False,
 ) -> str:
     """Create an experiment with variants. Returns the experiment UUID.
 
@@ -99,9 +101,9 @@ def create_experiment(
             series_id = exp_id
             series_seq = 1
         conn.execute(
-            "INSERT INTO experiments (id, title, description, fixture, series_id, series_seq)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (exp_id, title, description, fixture, series_id, series_seq),
+            "INSERT INTO experiments (id, title, description, fixture, series_id, series_seq, alpine)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (exp_id, title, description, fixture, series_id, series_seq, int(alpine)),
         )
         for v in variants:
             conn.execute(
