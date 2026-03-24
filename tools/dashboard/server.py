@@ -4505,6 +4505,40 @@ async def api_graph_thread(request):
     return JSONResponse({"ok": True, "output": msg, "id": thread_id})
 
 
+async def api_graph_thread_action(request):
+    """Thread actions (park/done/active/assign/attach) via API proxy."""
+    from tools.graph.db import GraphDB
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    action = body.get("action", "")
+    thread_id = body.get("thread_id", "")
+    target = body.get("target")
+
+    if action not in ("park", "done", "active", "assign", "attach"):
+        return JSONResponse({"error": f"unknown action: {action}"}, status_code=400)
+
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        if action in ("park", "done", "active"):
+            db.update_thread_status(thread_id, "parked" if action == "park" else action)
+            thread = db.get_thread(thread_id)
+            title = thread["title"] if thread else thread_id
+            return JSONResponse({"ok": True, "output": f"  \u2713 {action.capitalize()}: {thread_id} \"{title}\"\n"})
+        elif action in ("assign", "attach"):
+            if not target:
+                return JSONResponse({"error": "assign requires target thread_id"}, status_code=400)
+            db.assign_capture_to_thread(thread_id, target)
+            return JSONResponse({"ok": True, "output": f"  \u2713 Assigned {thread_id} \u2192 thread {target}\n"})
+    finally:
+        db.close()
+
+
 async def api_graph_thoughts(request):
     """List thought captures via API proxy."""
     from tools.graph.db import GraphDB
@@ -4653,6 +4687,7 @@ routes = [
     Route("/api/graph/threads", api_graph_threads, methods=["GET"]),
     Route("/api/graph/thought", api_graph_thought, methods=["POST"]),
     Route("/api/graph/thread", api_graph_thread, methods=["POST"]),
+    Route("/api/graph/thread/action", api_graph_thread_action, methods=["POST"]),
     Route("/api/graph/{id}", api_graph_resolve),
     Route("/api/source/{id}", api_source_read),
     Route("/api/source/{id}/attachments", api_source_attachments),

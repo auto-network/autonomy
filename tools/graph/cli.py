@@ -54,7 +54,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag
-from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads
+from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action
 
 
 def cmd_ingest(args):
@@ -1386,6 +1386,9 @@ def cmd_threads(args):
 
 def cmd_thread_action(args, action: str, thread_id: str, target: str | None = None):
     """Thread actions: park, done, active, assign."""
+    if is_api_mode():
+        api_thread_action(args, action, thread_id, target)
+        return
     db = GraphDB(args.db)
     if action in ("park", "done", "active"):
         db.update_thread_status(thread_id, "parked" if action == "park" else action)
@@ -1439,6 +1442,13 @@ def cmd_notes(args):
         )
         if not sources:
             print("No notes found")
+            return
+
+        if getattr(args, "short", False):
+            for s in sources:
+                sid = s["id"][:12]
+                title = (s.get("title") or "")[:60].replace("\n", " ")
+                print(f"  {sid}  {title}")
             return
 
         for s in sources:
@@ -2543,6 +2553,7 @@ def main():
     p_notes.add_argument("--project", help="Filter by project")
     p_notes.add_argument("--tags", help="Filter by tag (comma-separated)")
     p_notes.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    p_notes.add_argument("--short", action="store_true", help="One-line compact output")
     p_notes.set_defaults(func=cmd_notes)
 
     # comment (handles both add and integrate)

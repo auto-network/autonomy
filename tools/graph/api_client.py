@@ -475,6 +475,14 @@ def api_threads(args) -> None:
     _print_output(_get(f"/api/graph/threads?{'&'.join(params)}"))
 
 
+def api_thread_action(args, action: str, thread_id: str, target: str | None = None) -> None:
+    """Thread actions via API proxy."""
+    data = {"action": action, "thread_id": thread_id}
+    if target:
+        data["target"] = target
+    _print_output(_post("/api/graph/thread/action", data))
+
+
 def api_thread(args) -> None:
     """Create a thread via dashboard API."""
     parts = args.thread_args or []
