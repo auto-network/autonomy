@@ -2762,6 +2762,77 @@ async def api_session_dispatch_nag(request):
     return JSONResponse({"ok": True})
 
 
+async def api_session_create(request):
+    """Create a new container session and block until ready.
+
+    POST /api/session/create
+    Body: {"type": "container"} (optional)
+    Returns: {"tmux_name": str, "label": str, "type": str}
+    Blocks up to 30s for session to become live.
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    session_type = body.get("type", "container")
+    if session_type not in ("container",):
+        return JSONResponse({"error": "Only container sessions supported"}, status_code=400)
+
+    # Generate unique tmux name
+    tmux_name = f"auto-{time.strftime('%m%d-%H%M%S')}"
+    if dashboard_db.session_exists(tmux_name):
+        import random
+        tmux_name = f"auto-{time.strftime('%m%d-%H%M%S')}-{random.randint(10, 99)}"
+
+    # Build docker command via launch_session
+    docker_cmd = launch_session(
+        session_type="terminal",
+        name=tmux_name,
+        prompt=None,
+        detach=False,
+        image="autonomy-agent:dashboard",
+        metadata={"tmux_session": tmux_name},
+        global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
+    )
+    if not docker_cmd:
+        return JSONResponse({"error": "Failed to resolve credentials"}, status_code=500)
+
+    # Create detached tmux session running the container
+    tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40", docker_cmd]
+    result = subprocess.run(tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True)
+    if result.returncode != 0:
+        logger.error("api_session_create: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
+                     tmux_name, result.returncode, result.stderr.decode().strip())
+        return JSONResponse({"error": f"tmux creation failed: {result.stderr.decode().strip()}"}, status_code=500)
+
+    # Enable OSC 52 + mouse + passthrough
+    subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"], capture_output=True)
+    subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"], capture_output=True)
+    subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"], capture_output=True)
+
+    # Poll dashboard.db until session is live with jsonl_path
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        row = dashboard_db.get_session(tmux_name)
+        if row and row.get("is_live") and row.get("jsonl_path"):
+            return JSONResponse({
+                "tmux_name": tmux_name,
+                "label": row.get("label", ""),
+                "type": "container",
+            })
+        await asyncio.sleep(1)
+
+    # Timeout — session created but not yet tracked
+    return JSONResponse({
+        "tmux_name": tmux_name,
+        "label": "",
+        "type": "container",
+        "warning": "Session created but not yet tracked by session monitor. It may appear shortly.",
+    }, status_code=202)
+
+
 async def api_upload(request):
     """Upload a file to the workspace.
 
@@ -4684,6 +4755,7 @@ routes = [
     Route("/api/dispatch/tail/{run}", api_dispatch_tail),
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
     Route("/api/terminal/unclaimed", api_terminal_unclaimed),
+    Route("/api/session/create", api_session_create, methods=["POST"]),
     Route("/api/session/send-handshake", api_session_send_handshake, methods=["POST"]),
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
