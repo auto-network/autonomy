@@ -4387,39 +4387,34 @@ async def api_graph_streams(request):
 
 
 async def api_graph_collab_list(request):
-    """List collab-tagged notes ranked by activity."""
+    """List collab-tagged notes as structured JSON."""
     from tools.graph.db import GraphDB
-    limit = int(request.query_params.get("limit", "50"))
-    db = GraphDB()
+    import json as _json
+    limit = int(request.query_params.get("limit", "20"))
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
     try:
         sources = db.list_collab_sources(limit=limit)
     finally:
         db.close()
-    if not sources:
-        return JSONResponse({"ok": True, "output": "No collab notes found. Tag notes with: graph note --tags collab"})
-    lines = []
-    lines.append(f"{'ID':14s} {'Title':50s} {'Comments':>8s} {'Reads':>6s} {'Age'}")
-    lines.append(f"{'─' * 14} {'─' * 50} {'─' * 8} {'─' * 6} {'─' * 10}")
-    from datetime import datetime, timezone
+
+    items = []
     for s in sources:
-        sid = s["id"][:12]
-        title = (s.get("title") or "?")[:50]
-        comments = str(s.get("comment_count", 0))
-        reads = str(s.get("read_count", 0))
-        try:
-            dt = datetime.fromisoformat(s.get("created_at", "").replace("Z", "+00:00"))
-            delta = datetime.now(timezone.utc) - dt
-            days = delta.days
-            if days > 0:
-                age = f"{days}d ago"
-            else:
-                hours = delta.seconds // 3600
-                age = f"{hours}h ago" if hours > 0 else "just now"
-        except Exception:
-            age = s.get("created_at", "")[:10]
-        lines.append(f"{sid:14s} {title:50s} {comments:>8s} {reads:>6s} {age}")
-    lines.append(f"\n  {len(sources)} collab notes")
-    return JSONResponse({"ok": True, "output": "\n".join(lines)})
+        meta = _json.loads(s["metadata"]) if isinstance(s.get("metadata"), str) else (s.get("metadata") or {})
+        items.append({
+            "id": s["id"],
+            "title": s.get("title", ""),
+            "created_at": meta.get("created_at", s.get("created_at", "")),
+            "author": meta.get("author", ""),
+            "project": s.get("project", ""),
+            "tags": meta.get("tags", []),
+            "comment_count": s.get("comment_count", 0),
+            "version": meta.get("version", 1),
+        })
+    return JSONResponse({"notes": items})
 
 
 async def api_graph_collab_tag(request):
@@ -4561,38 +4556,46 @@ async def api_graph_thread_action(request):
 
 
 async def api_graph_thoughts(request):
-    """List thought captures via API proxy."""
+    """List thought captures as structured JSON."""
     from tools.graph.db import GraphDB
-    limit = int(request.query_params.get("limit", "20"))
+    limit = int(request.query_params.get("limit", "50"))
     thread_id = request.query_params.get("thread")
-    since = request.query_params.get("since")
+    since_param = request.query_params.get("since")
+    since_iso = None
+    if since_param:
+        since_iso = _parse_range(since_param)
     db_args = {}
     p = _graph_db_path()
     if p:
         db_args["db_path"] = p
     db = GraphDB(**db_args)
     try:
-        captures = db.list_captures(thread_id=thread_id, since=since, limit=limit)
+        captures = db.list_captures(thread_id=thread_id, since=since_iso, limit=limit)
+    except Exception:
+        captures = []  # captures table may not exist in older DBs
     finally:
         db.close()
-    lines = []
+
+    items = []
     for c in captures:
-        cid = c["id"][:11]
-        date = (c.get("created_at") or "")[:10]
-        status = c.get("status", "?")[:8]
-        text = (c["content"] or "")[:60].replace("\n", " ")
-        lines.append(f"  {cid}  {date}  [{status}]  {text}")
-    if not lines:
-        lines.append("No captures found")
-    return JSONResponse({"ok": True, "output": "\n".join(lines) + "\n"})
+        items.append({
+            "id": c["id"],
+            "content": c.get("content", ""),
+            "status": c.get("status", "captured"),
+            "thread_id": c.get("thread_id"),
+            "source_id": c.get("source_id"),
+            "turn_number": c.get("turn_number"),
+            "created_at": c.get("created_at", ""),
+        })
+    return JSONResponse({"thoughts": items})
 
 
 async def api_graph_threads(request):
-    """List threads via API proxy."""
+    """List threads as structured JSON."""
     from tools.graph.db import GraphDB
     limit = int(request.query_params.get("limit", "20"))
     status = request.query_params.get("status", "active")
-    show_all = request.query_params.get("all") == "1"
+    show_all = request.query_params.get("all")
     db_args = {}
     p = _graph_db_path()
     if p:
@@ -4600,15 +4603,23 @@ async def api_graph_threads(request):
     db = GraphDB(**db_args)
     try:
         threads = db.list_threads(status=None if show_all else status, limit=limit)
+    except Exception:
+        threads = []  # threads table may not exist in older DBs
     finally:
         db.close()
-    if not threads:
-        return JSONResponse({"ok": True, "output": "No threads found\n"})
-    lines = [f"{'ID':<12} {'P':>1} {'STATUS':<8} {'CAPS':>4}  TITLE",
-             f"{'─'*12} {'─'} {'─'*8} {'─'*4}  {'─'*40}"]
+
+    items = []
     for t in threads:
-        lines.append(f"{t['id'][:11]:<12} {t.get('priority',1):>1} {t.get('status','?')[:8]:<8} {t.get('capture_count',0):>4}  {(t.get('title') or '')[:40]}")
-    return JSONResponse({"ok": True, "output": "\n".join(lines) + "\n"})
+        items.append({
+            "id": t["id"],
+            "title": t.get("title", ""),
+            "status": t.get("status", "active"),
+            "priority": t.get("priority", 1),
+            "capture_count": t.get("capture_count", 0),
+            "created_at": t.get("created_at", ""),
+            "updated_at": t.get("updated_at", ""),
+        })
+    return JSONResponse({"threads": items})
 
 
 async def api_graph_collab_tag_describe(request):
