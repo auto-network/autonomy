@@ -289,7 +289,19 @@ class SessionMonitor:
             if row.get("jsonl_path"):
                 continue  # already resolved
             if row.get("type") == "host":
-                continue  # host sessions use watcher, not directory resolution
+                # Host resolution: scan Claude projects dirs for .meta.json matching tmux_name
+                jsonl = self._resolve_host_jsonl(tmux_name)
+                if jsonl:
+                    from tools.dashboard.dao.dashboard_db import link_and_enrich
+                    link_and_enrich(
+                        tmux_name,
+                        session_uuid=jsonl.stem,
+                        jsonl_path=str(jsonl),
+                        project=jsonl.parent.name,
+                    )
+                    recovered += 1
+                    logger.info("session_monitor: recovered host %s → %s", tmux_name, jsonl.name)
+                continue
             if tmux_name in self._tail_states:
                 continue  # already has a tail state
             # Derive resolution_dir from agent-runs/{tmux_name}-*/sessions/
@@ -307,7 +319,27 @@ class SessionMonitor:
                     recovered += 1
                     logger.info("session_monitor: RECOVERED unresolved %s → %s", tmux_name, sess_dir)
         if recovered:
-            logger.info("session_monitor: recovered %d unresolved container sessions on startup", recovered)
+            logger.info("session_monitor: recovered %d unresolved sessions on startup", recovered)
+
+    def _resolve_host_jsonl(self, tmux_name: str) -> Path | None:
+        """Find JSONL for a host session by scanning .meta.json files."""
+        claude_projects = Path.home() / ".claude" / "projects"
+        if not claude_projects.exists():
+            return None
+        for meta_path in sorted(
+            claude_projects.rglob("*.meta.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ):
+            try:
+                data = json.loads(meta_path.read_text())
+                if data.get("tmux_session") == tmux_name:
+                    jsonl = meta_path.parent / (meta_path.stem.removesuffix(".meta") + ".jsonl")
+                    if jsonl.exists():
+                        return jsonl
+            except (json.JSONDecodeError, OSError):
+                continue
+        return None
 
     async def _broadcast_registry(self) -> None:
         """Push session registry to SSE subscribers."""
