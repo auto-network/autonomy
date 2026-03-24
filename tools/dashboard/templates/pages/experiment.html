@@ -87,19 +87,25 @@
             </template>
             <template x-for="sess in chatSessions" :key="sess.id">
               <button @click="_connectSession(sess.id)"
-                      style="width:100%;text-align:left;padding:10px 12px;margin-bottom:4px;background:transparent;border:none;border-radius:6px;cursor:pointer;transition:background 0.15s"
+                      style="width:100%;text-align:left;padding:8px 12px;margin-bottom:4px;background:transparent;border:none;border-radius:6px;cursor:pointer;transition:background 0.15s"
                       @mouseenter="$el.style.background='#263244'" @mouseleave="$el.style.background='transparent'">
-                <div style="display:flex;align-items:center;gap:8px">
-                  <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;flex-shrink:0;box-shadow:0 0 4px rgba(34,197,94,0.4)"></span>
-                  <span style="font-size:13px;font-weight:600;color:#e2e8f0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-                        x-text="sess.label || sess.id"></span>
-                  <span x-show="sess.label" style="font-size:11px;color:#475569;flex-shrink:0"
-                        x-text="sess.id"></span>
-                  <span style="font-size:10px;color:#475569;flex-shrink:0;margin-left:auto"
-                        x-text="sess.env === 'host' ? 'host' : 'container'"></span>
+                <!-- Row 1: dot + role + tmux ID -->
+                <div style="display:flex;align-items:center;gap:5px;font-size:10px;margin-bottom:2px">
+                  <span style="display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0"
+                        :style="sess.isLive ? 'background:#22c55e;box-shadow:0 0 4px rgba(34,197,94,0.4)' : 'background:#374151'"></span>
+                  <template x-if="sess.role">
+                    <span style="padding:1px 7px;border-radius:4px;font-size:11px;font-weight:600;white-space:nowrap"
+                          :style="sess.isHost ? 'background:#1e3a5f;color:#93c5fd' : 'background:#2a3444;color:#cbd5e1'"
+                          x-text="sess.role"></span>
+                  </template>
+                  <span style="font-family:ui-monospace,monospace;color:#3d4f63;margin-left:auto" x-text="sess.id"></span>
                 </div>
+                <!-- Row 2: label -->
+                <div style="font-size:14px;font-weight:600;color:#f1f5f9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                     x-text="sess.label || sess.id"></div>
+                <!-- Row 3: preview -->
                 <div x-show="sess.preview"
-                     style="font-size:11px;color:#475569;margin-top:2px;padding-left:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                     style="font-size:11px;color:#56657a;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                      x-text="sess.preview"></div>
               </button>
             </template>
@@ -108,6 +114,10 @@
               <span style="font-size:11px;color:#475569" x-text="chatSessions.length + ' sessions'"></span>
               <button @click="_loadChatSessions()" style="font-size:11px;color:#818cf8;background:transparent;border:none;cursor:pointer">Refresh</button>
             </div>
+            <button @click="$dispatch('create-terminal', {cmd: 'autonomy-agent-claude'}); _loadChatSessions()"
+                    style="width:100%;padding:10px 12px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#94a3b8;font-size:13px;cursor:pointer;margin-top:4px;text-align:center">
+              + New Session
+            </button>
           </div>
         </template>
 
