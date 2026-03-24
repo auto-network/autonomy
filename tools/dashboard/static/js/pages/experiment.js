@@ -209,10 +209,24 @@
               .filter(function (t) { return !t.id.startsWith('chatwith-') && !t.id.startsWith('chat-'); })
               .map(function (t) {
                 var dash = dashMap[t.id] || {};
+                var role = '';
+                var label = dash.label || '';
+                var lowerLabel = label.toLowerCase();
+                if (lowerLabel.indexOf('coordinator') !== -1) role = 'Coordinator';
+                else if (lowerLabel.indexOf('reviewer') !== -1 || lowerLabel.indexOf('review') !== -1) role = 'Reviewer';
+                else if (lowerLabel.indexOf('builder') !== -1 || lowerLabel.indexOf('build') !== -1) role = 'Builder';
+                else if (lowerLabel.indexOf('designer') !== -1 || lowerLabel.indexOf('design') !== -1) role = 'Designer';
+                var isHost = (dash.type || t.env || '') === 'host';
+                if (!role && isHost) role = 'Host';
                 return {
                   id: t.id,
-                  label: dash.label || '',
-                  env: t.env || 'container',
+                  label: label,
+                  role: role,
+                  isHost: isHost,
+                  type: dash.type || t.env || 'container',
+                  entryCount: dash.entry_count || 0,
+                  contextTokens: dash.context_tokens || 0,
+                  isLive: dash.is_live !== false,
                   preview: (dash.last_message || '').slice(0, 80),
                 };
               })
