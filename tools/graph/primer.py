@@ -155,6 +155,17 @@ def collect_primer_data(
 
             result["provenance"].append(prov_entry)
 
+    # Collect provenance source IDs for dedup
+    provenance_source_ids = {p["source_id"] for p in result["provenance"]}
+
+    # Extract bead labels once for tag boosting
+    bead_labels = set(bead.get("labels", [])) if bead else set()
+
+    def _tag_score(note):
+        meta = json.loads(note["metadata"]) if note["metadata"] else {}
+        note_tags = set(meta.get("tags", []))
+        return len(bead_labels & note_tags)
+
     # ── 3. Related notes ─────────────────────────────────────
     if bead and bead.get("title"):
         title_words = [w for w in bead["title"].split() if len(w) > 3]
@@ -169,7 +180,7 @@ def collect_primer_data(
                        WHERE s.type = 'note'
                        AND s.metadata NOT LIKE '%pitfall%'
                        AND thoughts_fts MATCH ?
-                       ORDER BY s.created_at DESC LIMIT 5""",
+                       ORDER BY fts.rank LIMIT 5""",
                     (fts_q,),
                 ).fetchall()
             except Exception:
@@ -185,13 +196,19 @@ def collect_primer_data(
                            WHERE s.type = 'note'
                            AND s.metadata NOT LIKE '%pitfall%'
                            AND thoughts_fts MATCH ?
-                           ORDER BY s.created_at DESC LIMIT 5""",
+                           ORDER BY fts.rank LIMIT 5""",
                         (fts_q,),
                     ).fetchall()
                 except Exception:
                     notes = []
 
+            # Boost notes with tag overlap
+            if bead_labels and notes:
+                notes = sorted(notes, key=_tag_score, reverse=True)
+
             for note in (notes or []):
+                if note["id"] in provenance_source_ids:
+                    continue
                 meta = json.loads(note["metadata"]) if note["metadata"] else {}
                 result["related_notes"].append({
                     "source_id": note["id"],
@@ -212,11 +229,14 @@ def collect_primer_data(
                        WHERE s.type = 'note'
                        AND s.metadata LIKE '%pitfall%'
                        AND thoughts_fts MATCH ?
-                       ORDER BY s.created_at DESC LIMIT 10""",
+                       ORDER BY fts.rank LIMIT 5""",
                     (pit_q,),
                 ).fetchall()
             except Exception:
                 pitfalls = []
+
+            if bead_labels and pitfalls:
+                pitfalls = sorted(pitfalls, key=_tag_score, reverse=True)
 
             for p in (pitfalls or []):
                 meta = json.loads(p["metadata"]) if p["metadata"] else {}
