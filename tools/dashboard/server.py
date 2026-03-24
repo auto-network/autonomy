@@ -3267,6 +3267,14 @@ async def api_dao_recent_sessions(request):
     sessions = await asyncio.to_thread(dao_sessions.get_recent_sessions, limit)
     return JSONResponse(sessions)
 
+async def page_stream(request):
+    """Serve the stream page (full HTML shell for direct navigation)."""
+    return HTMLResponse(_load_template("base.html"))
+
+async def page_stream_fragment(request):
+    """Return the stream page as an HTML fragment for SPA injection."""
+    return templates.TemplateResponse(request, "pages/stream.html")
+
 async def page_source(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -3988,6 +3996,79 @@ async def api_graph_resolve(request):
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
+def _graph_db_path() -> str | None:
+    """Resolve graph DB path: GRAPH_DB env var, then default."""
+    import os
+    return os.environ.get("GRAPH_DB") or None
+
+
+async def api_graph_stream(request):
+    """List notes matching a tag as a chronological feed."""
+    from tools.graph.db import GraphDB
+
+    tag = request.path_params["tag"]
+    limit = int(request.query_params.get("limit", "50"))
+    offset = int(request.query_params.get("offset", "0"))
+
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        sources = db.list_sources(source_type="note", tags=[tag], limit=limit)
+    finally:
+        db.close()
+
+    items = []
+    for s in sources:
+        meta = json.loads(s["metadata"]) if isinstance(s.get("metadata"), str) else (s.get("metadata") or {})
+        items.append({
+            "id": s["id"],
+            "title": s.get("title", ""),
+            "created_at": s.get("created_at", ""),
+            "author": meta.get("author", ""),
+            "tags": meta.get("tags", []),
+            "preview": (s.get("title") or "")[:200],
+        })
+
+    # Apply offset (list_sources doesn't support offset natively)
+    items = items[offset:]
+
+    return JSONResponse({"tag": tag, "count": len(items), "items": items})
+
+
+async def api_graph_streams(request):
+    """List active tag streams with note counts."""
+    from tools.graph.db import GraphDB
+
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        rows = db.conn.execute(
+            """SELECT metadata FROM sources
+               WHERE type = 'note' AND json_extract(metadata, '$.tags') IS NOT NULL"""
+        ).fetchall()
+    finally:
+        db.close()
+
+    tag_counts: dict[str, int] = {}
+    for r in rows:
+        try:
+            meta = json.loads(r["metadata"]) if isinstance(r["metadata"], str) else (r["metadata"] or {})
+            for t in meta.get("tags", []):
+                if isinstance(t, str):
+                    tag_counts[t] = tag_counts.get(t, 0) + 1
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    streams = sorted(tag_counts.items(), key=lambda x: -x[1])[:50]
+    return JSONResponse({"streams": [{"tag": t, "count": c} for t, c in streams]})
+
+
 async def api_graph_collab_list(request):
     """List collab-tagged notes ranked by activity."""
     from tools.graph.db import GraphDB
@@ -4064,6 +4145,8 @@ routes = [
     Route("/pages/bead", page_bead_fragment),
     Route("/pages/timeline", page_timeline_fragment),
     Route("/pages/trace", page_trace_fragment),
+    Route("/stream/{tag}", page_stream),
+    Route("/pages/stream", page_stream_fragment),
     Route("/graph/{id}", page_source),
     Route("/source/{id}", page_source_redirect),
     Route("/pages/source", page_source_fragment),
@@ -4102,6 +4185,8 @@ routes = [
     Route("/dispatch/trace/{run}", page_dispatch),
     Route("/api/search", api_search),
     Route("/api/sources", api_sources),
+    Route("/api/graph/streams", api_graph_streams, methods=["GET"]),
+    Route("/api/graph/stream/{tag}", api_graph_stream, methods=["GET"]),
     Route("/api/graph/collab", api_graph_collab_list, methods=["GET"]),
     Route("/api/graph/collab/tag/{source_id}", api_graph_collab_tag, methods=["PUT"]),
     Route("/api/graph/{id}", api_graph_resolve),
