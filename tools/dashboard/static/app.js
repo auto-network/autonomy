@@ -1655,6 +1655,9 @@ connectEvents(['nav', 'dispatch'], {
     const terminalEl = document.getElementById('badge-terminal');
     if (terminalEl) terminalEl.textContent = data.terminal_count || '';
 
+    const streamsEl = document.getElementById('badge-streams');
+    if (streamsEl) streamsEl.textContent = data.stream_count || '';
+
     // Update pinned beads strip
     if (data.pinned && window.Alpine) {
       Alpine.store('pinned').beads = data.pinned;
