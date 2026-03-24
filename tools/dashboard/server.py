@@ -64,6 +64,28 @@ else:
     from tools.dashboard.dao import dispatch as dao_dispatch
     from tools.dashboard.dao import sessions as dao_sessions
 
+import secrets as _secrets
+import tempfile as _tempfile
+
+
+def _tmux_inject(target: str, text: str) -> None:
+    """Inject text into a tmux pane via paste-buffer with a unique buffer name."""
+    buf = f"inject_{_secrets.token_hex(4)}"
+    tmp_path = None
+    try:
+        with _tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(text)
+            tmp_path = f.name
+        subprocess.run(["tmux", "load-buffer", "-b", buf, tmp_path], capture_output=True)
+        subprocess.run(["tmux", "paste-buffer", "-p", "-b", buf, "-t", target], capture_output=True)
+        subprocess.run(["tmux", "delete-buffer", "-b", buf], capture_output=True)
+    finally:
+        if tmp_path:
+            os.unlink(tmp_path)
+
+
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
@@ -1372,15 +1394,10 @@ async def api_crosstalk_send(request):
         f'</crosstalk>'
     )
 
-    # Inject via tmux paste-buffer (same pattern as api_chatwith_spawn)
-    import secrets as _secrets
-    path = f"/tmp/crosstalk_{_secrets.token_hex(4)}.txt"
-    Path(path).write_text(envelope, encoding="utf-8")
-    subprocess.run(["tmux", "load-buffer", "-b", "ct_msg", path], capture_output=True)
-    subprocess.run(["tmux", "paste-buffer", "-p", "-b", "ct_msg", "-t", target], capture_output=True)
+    # Inject via tmux paste-buffer (unique buffer per operation)
+    _tmux_inject(target, envelope)
     await asyncio.sleep(0.3)
     subprocess.run(["tmux", "send-keys", "-t", target, "", "Enter"], capture_output=True)
-    Path(path).unlink(missing_ok=True)
 
     # Store in crosstalk_messages
     await asyncio.to_thread(
@@ -1516,17 +1533,8 @@ async def api_chatwith_spawn(request):
         # Wait for Claude to initialize and display its prompt
         await asyncio.sleep(4)
 
-        # Write primer to a temp file and inject via tmux paste-buffer
-        primer_path = f"/tmp/chatwith_primer_{context_id}.txt"
-        Path(primer_path).write_text(primer_text, encoding="utf-8")
-        subprocess.run(
-            ["tmux", "load-buffer", "-b", "cw_primer", primer_path],
-            capture_output=True,
-        )
-        subprocess.run(
-            ["tmux", "paste-buffer", "-p", "-b", "cw_primer", "-t", session_name],
-            capture_output=True,
-        )
+        # Inject primer via tmux paste-buffer (unique buffer per operation)
+        _tmux_inject(session_name, primer_text)
         await asyncio.sleep(0.3)
         subprocess.run(
             ["tmux", "send-keys", "-t", session_name, "", "Enter"],
@@ -2323,9 +2331,6 @@ async def api_session_send(request):
     Returns 404 if the tmux session does not exist.
     Returns 503 if tmux is not available in this environment.
     """
-    import tempfile
-    import os
-
     body = await request.json()
     message = (body.get("message") or "")
     tmux_session = (body.get("tmux_session") or "").strip()
@@ -2353,42 +2358,20 @@ async def api_session_send(request):
             status_code=404,
         )
 
-    # Write message to a temp file and inject via paste-buffer (same pattern as
-    # chatwith primer injection, server.py lines 1074-1089).
-    buf_name = "api_send"
-    tmp_path = None
+    # Inject via paste-buffer (unique buffer per operation)
     logger.warning("[session-send] tmux=%r message=%r", tmux_session, message)
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(message)
-            tmp_path = f.name
-        logger.warning("[session-send] tmp_path=%r contents=%r", tmp_path, message)
-        r1 = subprocess.run(
-            ["tmux", "load-buffer", "-b", buf_name, tmp_path],
-            capture_output=True,
-        )
-        logger.warning("[session-send] load-buffer rc=%d stderr=%r", r1.returncode, r1.stderr)
-        r2 = subprocess.run(
-            ["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", tmux_session],
-            capture_output=True,
-        )
-        logger.warning("[session-send] paste-buffer rc=%d stderr=%r", r2.returncode, r2.stderr)
+        _tmux_inject(tmux_session, message)
         await asyncio.sleep(0.2)
-        r3 = subprocess.run(
+        subprocess.run(
             ["tmux", "send-keys", "-t", tmux_session, "\r"],
             capture_output=True,
         )
-        logger.warning("[session-send] send-keys rc=%d stderr=%r", r3.returncode, r3.stderr)
     except FileNotFoundError:
         return JSONResponse(
             {"error": "tmux is not available in this environment"},
             status_code=503,
         )
-    finally:
-        if tmp_path:
-            os.unlink(tmp_path)
 
     return JSONResponse({"ok": True, "tmux_session": tmux_session})
 
@@ -2427,9 +2410,6 @@ async def api_session_send_handshake(request):
     Body: {"tmux_session": "auto-t6"}
     Returns: {"ok": true, "handshake": "<the string sent>"}
     """
-    import tempfile
-    import os
-
     body = await request.json()
     tmux_session = (body.get("tmux_session") or "").strip()
     if not tmux_session:
@@ -2450,24 +2430,10 @@ async def api_session_send_handshake(request):
             status_code=404,
         )
 
-    # Inject via paste-buffer (same pattern as api_session_send)
-    buf_name = "api_send"
-    tmp_path = None
+    # Inject via paste-buffer (unique buffer per operation)
     logger.warning("[send-handshake] tmux=%r", tmux_session)
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(handshake)
-            tmp_path = f.name
-        subprocess.run(
-            ["tmux", "load-buffer", "-b", buf_name, tmp_path],
-            capture_output=True,
-        )
-        subprocess.run(
-            ["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", tmux_session],
-            capture_output=True,
-        )
+        _tmux_inject(tmux_session, handshake)
         await asyncio.sleep(0.2)
         subprocess.run(
             ["tmux", "send-keys", "-t", tmux_session, "\r"],
@@ -2478,9 +2444,6 @@ async def api_session_send_handshake(request):
             {"error": "tmux is not available in this environment"},
             status_code=503,
         )
-    finally:
-        if tmp_path:
-            os.unlink(tmp_path)
 
     return JSONResponse({"ok": True, "handshake": handshake})
 
@@ -3193,24 +3156,8 @@ def _tmux_send_message(tmux_session: str, message: str) -> bool:
 
     Returns True on success, False on failure.
     """
-    import tempfile as _tempfile
-
-    buf_name = "screenshot_send"
-    tmp_path = None
     try:
-        with _tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(message)
-            tmp_path = f.name
-        subprocess.run(
-            ["tmux", "load-buffer", "-b", buf_name, tmp_path],
-            capture_output=True,
-        )
-        subprocess.run(
-            ["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", tmux_session],
-            capture_output=True,
-        )
+        _tmux_inject(tmux_session, message)
         import time
         time.sleep(0.15)
         subprocess.run(
@@ -3220,9 +3167,6 @@ def _tmux_send_message(tmux_session: str, message: str) -> bool:
         return True
     except FileNotFoundError:
         return False
-    finally:
-        if tmp_path:
-            os.unlink(tmp_path)
 
 
 async def api_experiments_screenshot(request):
