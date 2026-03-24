@@ -1475,7 +1475,7 @@ async def api_chatwith_primer(request):
 
     GET /api/chatwith/primer/{page_type}?context={id}
 
-    Returns {primer_text: str, session_name: str}.
+    Returns {primer_text: str}.
     Returns 400 for unknown page_type or missing context param.
     Returns 404 if the context resource is not found.
     """
@@ -1502,93 +1502,6 @@ async def api_chatwith_primer(request):
             )
         # Resource not found (experiment missing, etc.)
         return JSONResponse({"error": msg}, status_code=404)
-
-
-async def api_chatwith_spawn(request):
-    """Spawn a Chat With Claude session for a given page context.
-
-    POST /api/chatwith/spawn
-    Body: {page_type: str, context_id: str}
-
-    Creates a tmux session named "chatwith-{context_id}" running Claude,
-    injects the primer, and returns {session_name, ws_url, new}.
-    If the session already exists, returns it without re-creating.
-    """
-    from tools.dashboard.chatwith_primers import get_primer, VALID_PAGE_TYPES
-
-    body = await request.json()
-    page_type = (body.get("page_type") or "").strip()
-    context_id = (body.get("context_id") or "").strip()
-
-    if not page_type or not context_id:
-        return JSONResponse({"error": "Missing page_type or context_id"}, status_code=400)
-
-    try:
-        primer_result = await asyncio.to_thread(get_primer, page_type, context_id)
-    except ValueError as exc:
-        msg = str(exc)
-        if "Unknown page type" in msg:
-            return JSONResponse({"error": msg, "valid_types": VALID_PAGE_TYPES}, status_code=400)
-        return JSONResponse({"error": msg}, status_code=404)
-
-    session_name = primer_result["session_name"]
-    primer_text = primer_result["primer_text"]
-
-    already_exists = _tmux_session_exists(session_name)
-    if not already_exists:
-        # Launch Claude in a container (read-only repo, isolated from host)
-        # launch_session returns a shell-safe docker run -it --rm command string.
-        docker_cmd = launch_session(
-            session_type="chatwith",
-            name=session_name,
-            prompt=None,
-            metadata={"context_id": context_id, "page_type": page_type, "tmux_session": session_name},
-            detach=False,
-        )
-        if not docker_cmd:
-            return JSONResponse({"error": "Failed to resolve credentials for container"}, status_code=500)
-        subprocess.run(
-            ["tmux", "new-session", "-d", "-s", session_name,
-             "-x", "220", "-y", "50", docker_cmd],
-            env={**os.environ, "TERM": "xterm-256color"},
-        )
-        subprocess.run(
-            ["tmux", "set-option", "-t", session_name, "mouse", "on"],
-            capture_output=True,
-        )
-        # Wait for Claude to initialize and display its prompt
-        await asyncio.sleep(4)
-
-        # Inject primer via tmux paste-buffer (unique buffer per operation)
-        _tmux_inject(session_name, primer_text)
-        await asyncio.sleep(0.3)
-        subprocess.run(
-            ["tmux", "send-keys", "-t", session_name, "\r"],
-            capture_output=True,
-        )
-
-    # Register with session monitor (INSERT into DB)
-    if not already_exists:
-        # Chatwith runs in a container — JSONL appears in data/agent-runs/
-        agent_runs = _REPO_ROOT / "data" / "agent-runs"
-        run_dirs = sorted(
-            agent_runs.glob(f"{session_name}-*"),
-            key=lambda p: p.stat().st_mtime, reverse=True,
-        ) if agent_runs.exists() else []
-        sess_dir = run_dirs[0] / "sessions" if run_dirs else agent_runs
-        await session_monitor.register(
-            tmux_name=session_name,
-            session_type="chatwith",
-            project=context_id,
-            jsonl_path=sess_dir,
-        )
-
-    ws_url = f"/ws/terminal?attach={session_name}"
-    return JSONResponse({
-        "session_name": session_name,
-        "ws_url": ws_url,
-        "new": not already_exists,
-    })
 
 
 async def api_chatwith_check(request):
@@ -4740,7 +4653,6 @@ routes = [
     Route("/api/terminal/{id}/rename", api_terminal_rename, methods=["POST"]),
     Route("/api/primer/{id}", api_primer),
     Route("/api/chatwith/primer/{page_type}", api_chatwith_primer),
-    Route("/api/chatwith/spawn", api_chatwith_spawn, methods=["POST"]),
     Route("/api/chatwith/check", api_chatwith_check),
     Route("/api/chatwith/sessions", api_chatwith_sessions),
     Route("/api/dispatch/tail/{run}", api_dispatch_tail),
