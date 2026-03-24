@@ -121,7 +121,7 @@
           if (!s.isLive) continue;
           var lastEntry = s.entries.length > 0 ? s.entries[s.entries.length - 1] : null;
           var sizeVal = s.sizeMB ? parseFloat(s.sizeMB) : 0;
-          var hasData = s.entries.length > 0 || (s.sizeMB && sizeVal > 0);
+          var hasData = s.entries.length > 0 || (s.sizeMB && sizeVal > 0) || s.entryCount > 0 || s.lastActivity > 0;
           all.push({
             session_id: id,
             project: s.project || '',
@@ -129,7 +129,7 @@
             is_live: s.isLive,
             created_at: s.startedAt || 0,
             last_activity: s.lastActivity || 0,
-            latest: lastEntry ? (lastEntry.content || '').slice(0, 150) : '',
+            latest: lastEntry ? (lastEntry.content || '').slice(0, 150) : (s.lastMessage || ''),
             type: s.sessionType || 'terminal',
             tmux_session: s.tmuxSession || '',
             bead_id: s.beadId || '',
@@ -176,6 +176,10 @@
               store.label = s.label || '';
               store.isLive = s.is_live !== false;
               store.startedAt = s.started_at || 0;
+              if (s.last_activity) store.lastActivity = s.last_activity;
+              if (s.entry_count) store.entryCount = s.entry_count;
+              if (s.context_tokens) store.contextTokens = s.context_tokens;
+              if (s.last_message !== undefined) store.lastMessage = s.last_message;
             }
           }
         } catch (e) {
