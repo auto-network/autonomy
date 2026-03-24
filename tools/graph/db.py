@@ -750,6 +750,15 @@ class GraphDB:
         ).fetchone()
         return row["max_turn"] if row and row["max_turn"] is not None else None
 
+    def get_recent_turns(self, source_id: str, limit: int = 50) -> list[dict]:
+        """Return the most recent N turns for a source, newest first."""
+        rows = self.conn.execute(
+            """SELECT turn_number, content FROM thoughts
+               WHERE source_id = ? ORDER BY turn_number DESC LIMIT ?""",
+            (source_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_source_content(self, source_id: str) -> list[dict]:
         """Get all thoughts and derivations for a source, ordered by turn number."""
         rows = self.conn.execute(
