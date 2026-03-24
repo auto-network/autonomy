@@ -261,6 +261,8 @@ class GraphDB:
 
     def record_read(self, source_id: str, actor: str):
         """Record a read event for a collab note."""
+        if self.read_only:
+            return
         self._ensure_note_reads_table()
         self.conn.execute(
             "INSERT OR IGNORE INTO note_reads (source_id, actor) VALUES (?, ?)",
