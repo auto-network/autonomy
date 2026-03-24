@@ -1,19 +1,58 @@
-/* Session Cards — type color coding, stats chips, wrapper pattern */
+/* Session Cards — v11 design system */
 
 /* Border-radius wrapper (never combine border-left + border-radius on same element) */
 .session-card-wrap { border-radius: 10px; overflow: clip; }
 .session-card {
   border-left: 4px solid;
-  padding: 10px 12px;
-  background: #1f2937;
+  padding: 8px 10px 8px 0;
+  background: #1a2332;
   cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
+  display: flex;
+  gap: 0;
 }
-.session-card:hover { background: #1e293b; }
+.session-card:hover { background: #1e2d3d; }
 .session-card-host { border-left-color: #3b82f6; }
 .session-card-container { border-left-color: #64748b; }
+
+/* Left indicator column: live dot + nag bell stacked */
+.sc-indicator {
+  width: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 4px;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.sc-dot { width: 8px; height: 8px; border-radius: 50%; }
+.sc-dot-live { background: #22c55e; }
+.sc-dot-dead { background: #475569; }
+.sc-nag { font-size: 9px; line-height: 1; opacity: 0.85; }
+
+/* Content column */
+.sc-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+
+/* Stats row */
+.sc-stats { display: flex; align-items: center; gap: 6px; min-height: 20px; }
+
+/* Role badge */
+.sc-role {
+  display: inline-flex;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+.sc-role-co { background: #312e81; color: #a5b4fc; }
+.sc-role-rv { background: #14532d; color: #86efac; }
+.sc-role-bl { background: #3b0764; color: #d8b4fe; }
+.sc-role-ds { background: #164e63; color: #67e8f9; }
+.sc-role-host { background: #172554; color: #60a5fa; }
 
 /* Compact stats chip: "774 · 169K" */
 .session-stat-chip {
@@ -28,18 +67,77 @@
 }
 .session-stat-warn { background: #78350f; color: #fde68a; }
 
-/* HOST badge */
-.session-badge-host {
-  display: inline-flex;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 0.625rem;
-  font-weight: 700;
+/* Tmux ID (right-aligned, dim) */
+.sc-tmux {
+  font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  background: #1e3a5f;
-  color: #93c5fd;
-  letter-spacing: 0.05em;
+  color: #3d4f63;
+  margin-left: auto;
+  white-space: nowrap;
 }
+
+/* Recency (inline in stats row) */
+.sc-recency { font-size: 11px; white-space: nowrap; }
+
+/* Actions button */
+.sc-actions {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: transparent;
+  color: #475569;
+  font-size: 11px;
+  line-height: 1;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+}
+.sc-actions:hover { color: #e2e8f0; background: #334155; }
+
+/* Title row — single-line truncation by default, 2-line in expanded */
+.sc-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f1f5f9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Topics (dot-separated, single line, truncated) */
+.sc-topics {
+  font-size: 11px;
+  color: #a7b7c8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Last message */
+.sc-message {
+  font-size: 11px;
+  color: #56657a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Footer tray (expanded only) */
+.sc-footer {
+  border-top: 1px solid #1e293b;
+  padding-top: 4px;
+  margin-top: 2px;
+  display: flex;
+  gap: 12px;
+  font-size: 10px;
+}
+.sc-footer-item { display: flex; flex-direction: column; gap: 1px; }
+.sc-footer-label { color: #334155; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; }
+.sc-footer-value { color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 /* Recency color classes */
 .recency-green { color: #22c55e; }
@@ -47,19 +145,49 @@
 .recency-red   { color: #ef4444; }
 .recency-gray  { color: #6b7280; }
 
-/* Nag indicator (non-interactive — just a visual badge) */
-.session-nag-indicator {
-  font-size: 0.625rem;
-  flex-shrink: 0;
-  opacity: 0.85;
+/* --- Zoom levels --- */
+/* Compact: stats + title only */
+body.zoom-compact .sc-topics { display: none; }
+body.zoom-compact .sc-message { display: none; }
+body.zoom-compact .sc-footer { display: none; }
+
+/* Normal (default): stats + title + topics + message */
+body.zoom-normal .sc-footer { display: none; }
+
+/* Expanded: everything + 2-line title */
+body.zoom-expanded .sc-title {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
-/* Sub-topic status lines */
-.session-topic {
-  font-size: 0.75rem;
-  color: #9ca3af;
-  line-height: 1.3;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* Card gap adjustments per zoom */
+body.zoom-compact .sc-card-list { gap: 4px; }
+body.zoom-normal .sc-card-list { gap: 6px; }
+body.zoom-expanded .sc-card-list { gap: 8px; }
+
+/* --- Zoom controls bar --- */
+.sc-zoom-bar {
+  display: inline-flex;
+  gap: 2px;
+  background: #1e293b;
+  border-radius: 6px;
+  padding: 2px;
 }
+.sc-zoom-btn {
+  width: 26px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #64748b;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.sc-zoom-btn:hover { color: #94a3b8; }
+.sc-zoom-btn.active { background: #334155; color: #e2e8f0; }

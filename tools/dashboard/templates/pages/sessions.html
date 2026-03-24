@@ -30,6 +30,14 @@
   <section aria-label="Active Sessions" class="mb-8">
     <div class="flex items-center justify-between mb-3">
       <h2 class="text-lg font-semibold text-green-400">● Active Sessions</h2>
+      <div class="sc-zoom-bar" x-data>
+        <button class="sc-zoom-btn" :class="$store.sessionZoom === 'compact' && 'active'"
+                @click="setZoom('compact')" title="Compact">⊟</button>
+        <button class="sc-zoom-btn" :class="$store.sessionZoom === 'normal' && 'active'"
+                @click="setZoom('normal')" title="Normal">⊞</button>
+        <button class="sc-zoom-btn" :class="$store.sessionZoom === 'expanded' && 'active'"
+                @click="setZoom('expanded')" title="Expanded">⊡</button>
+      </div>
       <div x-data="{ open: false }" class="relative">
         <button @click="open = !open"
                 :disabled="_creating"
@@ -55,59 +63,67 @@
     <template x-if="interactive.length === 0">
       <div class="text-gray-500 text-sm">No active sessions</div>
     </template>
-    <div class="space-y-2">
+    <div class="sc-card-list" style="display:flex;flex-direction:column;gap:6px">
       <template x-for="s in interactive" :key="s.session_id">
         <div class="session-card-wrap">
           <div class="session-card"
                :class="s.type === 'host' ? 'session-card-host' : 'session-card-container'"
                @click="navigate(s)" data-testid="session-card"
                :data-session-id="s.session_id">
-            <!-- Row 1: live dot + nag indicator + label + actions button -->
-            <div class="flex items-center gap-2 min-h-[22px]">
-              <span class="w-2 h-2 rounded-full flex-shrink-0"
-                    :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
+            <!-- Left indicator column -->
+            <div class="sc-indicator">
+              <span class="sc-dot" :class="s.is_live ? 'sc-dot-live' : 'sc-dot-dead'"></span>
               <template x-if="s.nag_enabled">
-                <span class="session-nag-indicator" title="Nag active">🔔</span>
+                <span class="sc-nag" title="Nag active">🔔</span>
               </template>
-              <span class="font-medium text-sm text-gray-200 flex-1 truncate"
-                    x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></span>
-              <button @click.stop="showSessionActions(s)" data-testid="session-actions-btn"
-                      class="w-5 h-5 flex items-center justify-center rounded-full
-                             bg-gray-900 text-gray-500 hover:text-white hover:bg-gray-600
-                             text-xs leading-none transition-colors"
-                      aria-label="Session actions">⋮</button>
             </div>
-            <!-- Sub-topics (between title and tmux row) -->
-            <template x-if="s.topics && s.topics.length > 0">
-              <div class="pl-4 mt-0.5">
-                <template x-for="topic in s.topics" :key="topic">
-                  <div class="session-topic" x-text="topic"></div>
+            <!-- Content column -->
+            <div class="sc-body">
+              <!-- Row 1: stats row -->
+              <div class="sc-stats">
+                <template x-if="s._roleBadge">
+                  <span class="sc-role" :class="s._roleCls" x-text="s._roleBadge"></span>
                 </template>
+                <template x-if="s._turnsStr">
+                  <span class="session-stat-chip"
+                        :class="s._ctxWarn ? 'session-stat-warn' : ''"
+                        x-text="s._turnsStr + ' · ' + s._ctxStr"></span>
+                </template>
+                <span class="sc-tmux" x-text="s.tmux_session"></span>
+                <span class="sc-recency" :class="s._recencyColor" x-text="s._lastActiveStr"></span>
+                <button @click.stop="showSessionActions(s)" class="sc-actions"
+                        data-testid="session-actions-btn" aria-label="Session actions">⋮</button>
               </div>
-            </template>
-            <!-- Row 2: tmux ID · stats chip (+ HOST badge if host) -->
-            <div class="flex items-center gap-2 pl-4 mt-0.5">
-              <span class="text-xs font-mono text-gray-500"
-                    x-text="s.tmux_session"></span>
-              <template x-if="s._turnsStr">
-                <span class="session-stat-chip"
-                      :class="s._ctxWarn ? 'session-stat-warn' : ''"
-                      x-text="s._turnsStr + ' · ' + s._ctxStr"></span>
+              <!-- Row 2: title -->
+              <div class="sc-title" x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></div>
+              <!-- Row 3: topics (dot-separated) -->
+              <template x-if="s.topics && s.topics.length > 0">
+                <div class="sc-topics" x-text="s.topics.join(' · ')"></div>
               </template>
-              <template x-if="s.type === 'host'">
-                <span class="session-badge-host">HOST</span>
+              <!-- Row 4: last message -->
+              <template x-if="s._hasData">
+                <div class="sc-message" x-text="s.latest || '...'"></div>
               </template>
+              <!-- Footer (expanded only) -->
+              <div class="sc-footer">
+                <div class="sc-footer-item">
+                  <span class="sc-footer-label">turns</span>
+                  <span class="sc-footer-value" x-text="s._turnsStr || '—'"></span>
+                </div>
+                <div class="sc-footer-item">
+                  <span class="sc-footer-label">ctx</span>
+                  <span class="sc-footer-value" x-text="s._ctxStr || '—'"></span>
+                </div>
+                <div class="sc-footer-item">
+                  <span class="sc-footer-label">idle</span>
+                  <span class="sc-footer-value" x-text="s._lastActiveStr || '—'"></span>
+                </div>
+                <div class="sc-footer-item">
+                  <span class="sc-footer-label">tmux</span>
+                  <span class="sc-footer-value" x-text="s.tmux_session"></span>
+                </div>
+              </div>
             </div>
-            <!-- Row 3: last message ... recency (inline) -->
-            <template x-if="s._hasData">
-              <div class="flex items-center gap-2 pl-4 mt-0.5">
-                <span class="flex-1 text-sm text-gray-400 truncate"
-                      x-text="s.latest || '...'"></span>
-                <span class="text-xs whitespace-nowrap"
-                      :class="s._recencyColor"
-                      x-text="s._lastActiveStr"></span>
-              </div>
-            </template>
           </div>
         </div>
       </template>
