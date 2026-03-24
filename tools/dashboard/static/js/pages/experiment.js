@@ -1,555 +1,295 @@
-// Experiment page Alpine component.
-// Manages experiment comparison UI: series navigation, variant cards,
-// selection/ranking, Chat With panel toggle, screenshot status.
-//
-// The Chat With panel uses a session picker to select any live session,
-// or spawn a new one. Session data is delivered via SSE (no polling).
-// Screenshot capture triggers two-send image injection via the server.
+// Experiment page Alpine component — Chrome v2.
+// Full-bleed surface, control strip, persistent input bar, two-state chat toggle.
+// Removed: variant selection, ranking, prev/next navigation, multi-iframe injection.
+// Kept: experiment fetch, single iframe injection, capture, Chat With integration, SSE series subscription.
 
 (function () {
 
   function _expIdFromPath() {
-    const m = window.location.pathname.match(/^\/experiments\/(.+)$/);
+    var m = window.location.pathname.match(/^\/experiments\/(.+)$/);
     return m ? m[1] : '';
   }
 
-  document.addEventListener('alpine:init', () => {
+  document.addEventListener('alpine:init', function () {
     // In-memory store for Chat With session selection, keyed by series_id (or expId for standalone).
-    // Survives SPA navigation (Alpine stores persist), lost only on full page reload.
     if (!Alpine.store('chatWith')) Alpine.store('chatWith', {});
 
-    Alpine.data('experimentPage', () => ({
-      // State machine
-      state: 'loading',   // 'loading' | 'ready' | 'error'
+    Alpine.data('experimentPage', function () {
+      return {
+        // State machine
+        state: 'loading',   // 'loading' | 'ready' | 'error'
 
-      // Experiment data
-      expId: '',
-      exp: null,
-      variants: [],
-      isCompleted: false,
+        // Experiment data
+        expId: '',
+        exp: null,
+        iterCount: 0,
 
-      // Series navigation
-      seriesIdx: 0,
-      seriesTotal: 1,
-      prevId: null,
-      nextId: null,
+        // Chat toggle
+        chatOpen: false,
+        chatMessages: [],
+        inputText: '',
+        inputFocused: false,
+        isLive: false,
 
-      // Selection state — plain object (not Map) for Alpine reactivity
-      // { variantId: rank }
-      selectedVariants: {},
+        // Chat With session
+        _tmuxSession: null,
 
-      // Submit state
-      submitBtnText: 'Submit Rankings',
-      submitting: false,
+        // Session picker
+        pickerVisible: false,
+        pickerSessions: [],
 
-      // Chat With panel
-      chatWithVisible: false,
-      chatWithCollapsed: false,
-      chatWithStatus: '',
-      chatWithStatusClass: 'text-xs text-gray-500 ml-2',
-      chatWithBtnText: 'Chat With',
-      chatWithBtnDisabled: false,
-      chatWithPanelRef: null,  // reference to the chatWithPanel Alpine component
+        // ── Lifecycle ─────────────────────────────────────────────────────
 
-      // Session picker
-      pickerVisible: false,
-      pickerSessions: [],
+        init: function () {
+          window._experimentPage = this;
+          this.expId = _expIdFromPath();
+          this._load();
+        },
 
-      // Screenshot
-      screenshotStatus: '',
-
-      // ── Lifecycle ─────────────────────────────────────────────────────
-
-      init() {
-        window._experimentPage = this;
-        this.expId = _expIdFromPath();
-        this._injectHeaderActions();
-        this._load();
-      },
-
-      destroy() {
-        if (window._experimentPage === this) window._experimentPage = null;
-        if (window._expSeriesCleanup) {
-          window._expSeriesCleanup();
-          window._expSeriesCleanup = null;
-        }
-        if (this.chatWithPanelRef) {
-          this.chatWithPanelRef.destroy();
-          this.chatWithPanelRef = null;
-        }
-        this.chatWithVisible = false;
-      },
-
-      // ── Data loading ──────────────────────────────────────────────────
-
-      async _load() {
-        this.state = 'loading';
-        try {
-          const data = await fetch(`/api/experiments/${this.expId}/full`).then(r => r.json());
-          if (data.error) {
-            this.state = 'error';
-            return;
+        destroy: function () {
+          if (window._experimentPage === this) window._experimentPage = null;
+          if (window._expSeriesCleanup) {
+            window._expSeriesCleanup();
+            window._expSeriesCleanup = null;
           }
-          this._mapData(data);
-          this.state = 'ready';
+          this._tmuxSession = null;
+          this.isLive = false;
+        },
 
-          // Post-render: inject iframe content once Alpine has rendered the skeleton.
-          this.$nextTick(() => this._injectIframes());
+        // ── Data loading ──────────────────────────────────────────────────
 
-          // Auto-reconnect Chat With if a session was previously selected
-          this._checkChatWith();
-
-          // SSE subscription for new series iterations
-          this._subscribeToSeries();
-
-          // If display stream is already active (from a previous Chat With), auto-capture
-          if (!this.isCompleted && window._displayStream) {
-            setTimeout(() => captureTabScreenshot(this.expId), 1500);
-          }
-        } catch (e) {
-          console.error('[experimentPage] load error', e);
-          this.state = 'error';
-        }
-      },
-
-      _mapData(data) {
-        this.exp = data;
-        const variants = data.variants || [];
-        this.isCompleted = data.status === 'completed';
-
-        // Series navigation
-        const siblingIds = data.sibling_ids || [this.expId];
-        const idx = siblingIds.indexOf(this.expId);
-        this.seriesIdx = idx >= 0 ? idx : 0;
-        this.seriesTotal = siblingIds.length;
-        this.prevId = this.seriesIdx > 0 ? siblingIds[this.seriesIdx - 1] : null;
-        this.nextId = this.seriesIdx < this.seriesTotal - 1 ? siblingIds[this.seriesIdx + 1] : null;
-
-        // Pre-compute rank options once (not inside x-for template expressions)
-        const rankOptions = variants.map((_, i) => i + 1);
-
-        // Selection state from completed results
-        const sel = {};
-        if (this.isCompleted) {
-          variants.forEach(v => {
-            if (v.selected && v.rank != null) sel[v.id] = v.rank;
-          });
-        }
-        this.selectedVariants = sel;
-
-        this.variants = variants.map(v => ({
-          ...v,
-          _rankOptions: rankOptions,
-        }));
-      },
-
-      // ── Series navigation ─────────────────────────────────────────────
-
-      get isInSeries() { return this.seriesTotal > 1; },
-
-      // ── Selection ─────────────────────────────────────────────────────
-
-      get selectedCount() { return Object.keys(this.selectedVariants).length; },
-
-      isVariantSelected(vid) { return vid in this.selectedVariants; },
-
-      variantRank(vid) { return this.selectedVariants[vid] || 1; },
-
-      showRankFor(vid) {
-        return this.selectedCount >= 2 && this.isVariantSelected(vid);
-      },
-
-      toggleVariant(vid) {
-        if (this.isCompleted) return;
-        const sel = { ...this.selectedVariants };
-        if (vid in sel) {
-          delete sel[vid];
-        } else {
-          sel[vid] = Object.keys(sel).length + 1;
-        }
-        this.selectedVariants = sel;
-      },
-
-      setRank(vid, rank) {
-        if (!this.isVariantSelected(vid)) return;
-        this.selectedVariants = { ...this.selectedVariants, [vid]: parseInt(rank) };
-      },
-
-      get selectionHint() {
-        const count = this.selectedCount;
-        if (count === 0) return 'Select variants to rank them';
-        if (count === 1) return '1 selected \u2014 select more to rank, or submit as winner';
-        return `${count} selected \u2014 set ranks and submit`;
-      },
-
-      get canSubmit() { return this.selectedCount > 0 && !this.submitting; },
-
-      // ── Submit ────────────────────────────────────────────────────────
-
-      async submit() {
-        if (!this.canSubmit) return;
-        this.submitting = true;
-        this.submitBtnText = 'Submitting...';
-
-        const selections = Object.entries(this.selectedVariants).map(([id, rank]) => ({ id, rank }));
-        if (selections.length === 1) selections[0].rank = 1;
-
-        try {
-          const res = await fetch(`/api/experiments/${this.expId}/submit`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ selections }),
-          });
-          const data = await res.json();
-          if (data.ok) {
-            this.submitBtnText = 'Submitted';
-            const indicator = document.querySelector(`[data-exp-id="${this.expId}"]`);
-            if (indicator) indicator.remove();
-            setTimeout(() => this._reload(), 500);
-          } else {
-            this.submitting = false;
-            this.submitBtnText = 'Submit Rankings';
-            alert('Failed to submit: ' + (data.error || 'unknown error'));
-          }
-        } catch (e) {
-          this.submitting = false;
-          this.submitBtnText = 'Submit Rankings';
-        }
-      },
-
-      _reload() {
-        if (window._expSeriesCleanup) {
-          window._expSeriesCleanup();
-          window._expSeriesCleanup = null;
-        }
-        if (this.chatWithPanelRef) {
-          this.chatWithPanelRef.destroy();
-          this.chatWithPanelRef = null;
-        }
-        this.chatWithVisible = false;
-        this.chatWithBtnText = 'Chat With';
-        this.chatWithBtnDisabled = false;
-        this.selectedVariants = {};
-        this.submitting = false;
-        this.submitBtnText = 'Submit Rankings';
-        this._load();
-      },
-
-      // ── Chat With ─────────────────────────────────────────────────────
-
-      _chatWithKey() {
-        return (this.exp && this.exp.series_id) || this.expId;
-      },
-
-      _saveSession(sessionId, tmuxSession, project) {
-        Alpine.store('chatWith')[this._chatWithKey()] = {
-          sessionId: sessionId,
-          tmuxSession: tmuxSession,
-          project: project,
-        };
-      },
-
-      _loadSession() {
-        return Alpine.store('chatWith')[this._chatWithKey()] || null;
-      },
-
-      toggleChatWithPanel() {
-        this.chatWithCollapsed = !this.chatWithCollapsed;
-      },
-
-      _configureChatWithPanel(sessionId, project, tmuxSession) {
-        // Double $nextTick: first tick lets Alpine process x-show visibility
-        // change, second tick lets the inner chatWithPanel component initialize.
-        this.$nextTick(() => {
-          this.$nextTick(() => {
-            if (this.chatWithPanelRef) {
-              this.chatWithPanelRef.configure({
-                sessionId: sessionId,
-                project: project,
-                tmuxSession: tmuxSession,
-              });
+        _load: async function () {
+          this.state = 'loading';
+          try {
+            var resp = await fetch('/api/experiments/' + this.expId + '/full');
+            var data = await resp.json();
+            if (data.error) {
+              this.state = 'error';
+              return;
             }
-          });
-        });
-      },
+            this.exp = data;
+            this.iterCount = (data.sibling_ids || []).length || 1;
+            this.state = 'ready';
 
-      // ── Session picker ──────────────────────────────────────────────
+            // Post-render: inject iframe content
+            this.$nextTick(function () { this._injectIframe(data); }.bind(this));
 
-      openSessionPicker() {
-        // Build list of live interactive sessions from the store
-        var allSessions = Alpine.store('sessions');
-        var sessions = [];
-        var interactiveTypes = ['terminal', 'chatwith', 'host', 'container'];
-        for (var id in allSessions) {
-          var s = allSessions[id];
-          if (!s.isLive) continue;
-          if (!s.tmuxSession) continue;
-          if (interactiveTypes.indexOf(s.sessionType || 'terminal') === -1) continue;
-          var lastEntry = s.entries.length > 0 ? s.entries[s.entries.length - 1] : null;
-          sessions.push({
-            sessionId: id,
-            tmuxSession: s.tmuxSession,
-            project: s.project || '',
-            label: s.label || '',
-            type: s.sessionType || 'terminal',
-            preview: lastEntry ? (lastEntry.content || '').slice(0, 100) : '',
-          });
-        }
-        // Sort by label presence, then alphabetically
-        sessions.sort(function(a, b) {
-          if (a.label && !b.label) return -1;
-          if (!a.label && b.label) return 1;
-          return (a.tmuxSession || '').localeCompare(b.tmuxSession || '');
-        });
-        this.pickerSessions = sessions;
-        this.pickerVisible = true;
-      },
+            // Auto-reconnect Chat With if session was previously selected
+            this._checkChatWith();
 
-      selectSession(session) {
-        this.pickerVisible = false;
-        this._saveSession(session.sessionId, session.tmuxSession, session.project);
-        this.chatWithVisible = true;
-        this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
-        this._configureChatWithPanel(session.sessionId, session.project, session.tmuxSession);
-        initDisplayCapture(this.expId).catch(() => {});
-      },
-
-      async spawnNewSession() {
-        this.pickerVisible = false;
-        this.chatWithBtnText = 'Spawning...';
-        this.chatWithBtnDisabled = true;
-        this.setChatWithStatus('spawning...', 'text-xs text-yellow-400 ml-2');
-        this.chatWithVisible = true;
-        try {
-          const res = await fetch('/api/chatwith/spawn', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ page_type: 'experiment', context_id: this.expId }),
-          });
-          const result = await res.json();
-          if (result.error) {
-            this.chatWithBtnText = 'Chat With';
-            this.chatWithBtnDisabled = false;
-            this.setChatWithStatus('Error: ' + result.error, 'text-xs text-red-400 ml-2');
-            return;
+            // SSE subscription for new series iterations
+            this._subscribeToSeries();
+          } catch (e) {
+            console.error('[experimentPage] load error', e);
+            this.state = 'error';
           }
-          var sessionName = result.session_name;
-          // The spawn endpoint registers with project=context_id, session_id=session_name
-          this._saveSession(sessionName, sessionName, this.expId);
-          this.chatWithBtnText = 'Chat With';
-          this.chatWithBtnDisabled = false;
-          this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
-          this._configureChatWithPanel(sessionName, this.expId, sessionName);
-          initDisplayCapture(this.expId).catch(() => {});
-        } catch (e) {
-          this.chatWithBtnText = 'Chat With';
-          this.chatWithBtnDisabled = false;
-          this.setChatWithStatus('spawn failed', 'text-xs text-red-400 ml-2');
-          console.error('[experimentPage] spawnNewSession error', e);
-        }
-      },
+        },
 
-      disconnectChatWith() {
-        // Disconnect from the session (does NOT kill it — session continues independently)
-        if (this.chatWithPanelRef) {
-          this.chatWithPanelRef.destroy();
-        }
-        this.chatWithVisible = false;
-        this.chatWithBtnText = 'Chat With';
-        this.chatWithBtnDisabled = false;
-        this.setChatWithStatus('', 'text-xs text-gray-500 ml-2');
-        delete Alpine.store('chatWith')[this._chatWithKey()];
-      },
+        // ── Iframe injection (single iframe, latest variant) ──────────────
 
-      reconnectChatWith() {
-        var saved = this._loadSession();
-        if (saved) {
-          this.chatWithVisible = true;
-          this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
-          this._configureChatWithPanel(saved.sessionId, saved.project, saved.tmuxSession);
-        } else {
-          this.openSessionPicker();
-        }
-      },
+        _injectIframe: function (data) {
+          var variants = data.variants || [];
+          var v = variants.length > 0 ? variants[variants.length - 1] : null;
+          if (!v) return;
 
-      // ── Screenshot ────────────────────────────────────────────────────
-      // Now triggers two-send image injection via server when tmux session exists.
-
-      async captureScreenshot() {
-        var saved = this._loadSession();
-        var tmux = saved ? saved.tmuxSession : '';
-        await manualCaptureScreenshot(this.expId, tmux);
-      },
-
-      // ── Imperative → Alpine bridge ────────────────────────────────────
-
-      setChatWithStatus(text, cls) {
-        this.chatWithStatus = text;
-        this.chatWithStatusClass = cls || 'text-xs text-gray-500 ml-2';
-      },
-
-      showChatWithPanel() {
-        this.chatWithVisible = true;
-      },
-
-      setScreenshotStatus(msg) { this.screenshotStatus = msg; },
-
-      // ── Iframe injection ──────────────────────────────────────────────
-      // Called after Alpine renders the variant skeleton so DOM elements exist.
-
-      _injectIframes() {
-        const expId = this.expId;
-        const exp = this.exp;
-        const variants = this.variants;
-        if (!variants.length) return;
-
-        const isAlpine = !!exp.alpine;
-        const _parentCSS = document.querySelector('style')?.textContent || '';
-        let _loadCount = 0;
-
-        variants.forEach(v => {
-          const iframe = document.querySelector(`iframe[data-variant="${v.id}"]`);
+          var iframe = document.getElementById('exp-iframe');
           if (!iframe) return;
-          const doc = iframe.contentDocument || iframe.contentWindow.document;
+          var doc = iframe.contentDocument || iframe.contentWindow.document;
+
+          var parentCSS = (document.querySelector('style') || {}).textContent || '';
+          var isAlpine = !!(data.alpine);
 
           // For Alpine experiments: don't wrap scripts in load listener —
           // Alpine needs to run its init before DOM is parsed.
-          const html = isAlpine ? (v.html || '') : (v.html || '').replace(
+          var safeHtml = isAlpine ? (v.html || '') : (v.html || '').replace(
             /<script(?![^>]*\bsrc\b)([^>]*)>([\s\S]*?)<\/script>/gi,
-            (_, attrs, body) => `<script${attrs}>window.addEventListener("load",function(){${body}});<\/script>`
+            function (_, attrs, body) {
+              return '<script' + attrs + '>window.addEventListener("load",function(){' + body + '});<\/script>';
+            }
           );
 
-          const alpineHead = isAlpine ? `
-      <link rel="stylesheet" href="/static/css/session-cards.css">
-      <script>window.FIXTURE = ${exp.fixture || '{}'};<\/script>
-      <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>`
-            : `<script>window.FIXTURE = ${exp.fixture || '{}'};<\/script>`;
+          var alpineHead = isAlpine
+            ? '<link rel="stylesheet" href="/static/css/session-cards.css">' +
+              '<script>window.FIXTURE = ' + (data.fixture || '{}') + ';<\/script>' +
+              '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>'
+            : '<script>window.FIXTURE = ' + (data.fixture || '{}') + ';<\/script>';
 
           doc.open();
-          doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="stylesheet" href="/static/tailwind.css">
-<style>${_parentCSS}</style>
-<style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;}</style>
-${alpineHead}
-</head><body>${html}</body></html>`);
+          doc.write('<!DOCTYPE html><html><head><meta charset="utf-8">' +
+            '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+            '<link rel="stylesheet" href="/static/tailwind.css">' +
+            '<style>' + parentCSS + '</style>' +
+            '<style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;}</style>' +
+            alpineHead +
+            '</head><body>' + safeHtml + '</body></html>');
           doc.close();
 
-          const resizeIframe = () => {
+          // Auto-capture after render
+          var expId = this.expId;
+          setTimeout(function () { captureTabScreenshot(expId); }, 1500);
+        },
+
+        // ── Chat ──────────────────────────────────────────────────────────
+
+        sendMessage: async function () {
+          var text = (this.inputText || '').trim();
+          if (!text) return;
+          this.chatMessages.push({ id: Date.now(), role: 'user', text: text });
+          this.inputText = '';
+
+          // Auto-open chat if not already open
+          if (!this.chatOpen) this.chatOpen = true;
+
+          // Send to Chat With session via API
+          if (this._tmuxSession) {
             try {
-              const h = iframe.contentDocument.documentElement.scrollHeight;
-              iframe.style.height = Math.max(200, Math.min(h, 800)) + 'px';
-            } catch (e) {}
+              await fetch('/api/session/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tmux_session: this._tmuxSession, message: text }),
+              });
+            } catch (e) {
+              console.error('[experimentPage] sendMessage error', e);
+            }
+          }
+
+          // Auto-scroll chat
+          this.$nextTick(function () {
+            var el = document.getElementById('chat-messages');
+            if (el) el.scrollTop = el.scrollHeight;
+          });
+        },
+
+        // ── Screenshot ────────────────────────────────────────────────────
+
+        captureScreenshot: async function () {
+          await manualCaptureScreenshot(this.expId, this._tmuxSession || '');
+        },
+
+        // ── Chat With session management ──────────────────────────────────
+
+        _chatWithKey: function () {
+          return (this.exp && this.exp.series_id) || this.expId;
+        },
+
+        _saveSession: function (tmuxSession) {
+          Alpine.store('chatWith')[this._chatWithKey()] = { tmuxSession: tmuxSession };
+        },
+
+        _loadSession: function () {
+          return Alpine.store('chatWith')[this._chatWithKey()] || null;
+        },
+
+        _connectSession: function (tmuxSession) {
+          this._tmuxSession = tmuxSession;
+          this.isLive = true;
+          this._saveSession(tmuxSession);
+          initDisplayCapture(this.expId).catch(function () {});
+        },
+
+        // ── Session picker ──────────────────────────────────────────────
+
+        openSessionPicker: function () {
+          var allSessions = Alpine.store('sessions');
+          var sessions = [];
+          var interactiveTypes = ['terminal', 'chatwith', 'host', 'container'];
+          for (var id in allSessions) {
+            var s = allSessions[id];
+            if (!s.isLive) continue;
+            if (!s.tmuxSession) continue;
+            if (interactiveTypes.indexOf(s.sessionType || 'terminal') === -1) continue;
+            var lastEntry = s.entries.length > 0 ? s.entries[s.entries.length - 1] : null;
+            sessions.push({
+              sessionId: id,
+              tmuxSession: s.tmuxSession,
+              project: s.project || '',
+              label: s.label || '',
+              type: s.sessionType || 'terminal',
+              preview: lastEntry ? (lastEntry.content || '').slice(0, 100) : '',
+            });
+          }
+          sessions.sort(function (a, b) {
+            if (a.label && !b.label) return -1;
+            if (!a.label && b.label) return 1;
+            return (a.tmuxSession || '').localeCompare(b.tmuxSession || '');
+          });
+          this.pickerSessions = sessions;
+          this.pickerVisible = true;
+        },
+
+        selectSession: function (session) {
+          this.pickerVisible = false;
+          this._connectSession(session.tmuxSession);
+        },
+
+        spawnNewSession: async function () {
+          this.pickerVisible = false;
+          try {
+            var res = await fetch('/api/chatwith/spawn', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ page_type: 'experiment', context_id: this.expId }),
+            });
+            var result = await res.json();
+            if (result.error) {
+              console.error('[experimentPage] spawn error', result.error);
+              return;
+            }
+            this._connectSession(result.session_name);
+          } catch (e) {
+            console.error('[experimentPage] spawnNewSession error', e);
+          }
+        },
+
+        // ── Auto-reconnect Chat With ──────────────────────────────────────
+
+        _checkChatWith: async function () {
+          var saved = this._loadSession();
+          if (!saved || !saved.tmuxSession) return;
+
+          // Check if the saved session is still live in the store
+          var allSessions = Alpine.store('sessions');
+          for (var id in allSessions) {
+            var s = allSessions[id];
+            if (s.tmuxSession === saved.tmuxSession && s.isLive) {
+              this._connectSession(saved.tmuxSession);
+              return;
+            }
+          }
+
+          // Fallback: check via the chatwith/check API
+          try {
+            var check = await fetch(
+              '/api/chatwith/check?session=' + encodeURIComponent(saved.tmuxSession)
+            ).then(function (r) { return r.json(); });
+            if (check && check.exists) {
+              this._connectSession(saved.tmuxSession);
+            } else {
+              delete Alpine.store('chatWith')[this._chatWithKey()];
+            }
+          } catch (e) { /* best-effort */ }
+        },
+
+        // ── SSE series subscription ───────────────────────────────────────
+
+        _subscribeToSeries: function () {
+          var seriesId = this.exp && this.exp.series_id;
+          if (!seriesId) return;
+          var self = this;
+          var seriesTopic = 'experiments:' + seriesId;
+          var handler = function (data) {
+            var currentId = window.location.pathname.split('/experiments/')[1];
+            if (!currentId || data.experiment_id === currentId) return;
+            if (!window.location.pathname.startsWith('/experiments/')) return;
+            // New iteration: update counter and navigate
+            self.iterCount = (data.sibling_ids || []).length || self.iterCount + 1;
+            navigateTo('/experiments/' + data.experiment_id);
           };
-          iframe.addEventListener('load', resizeIframe);
-          // doc.write/close doesn't fire 'load' reliably — use timeouts too
-          setTimeout(resizeIframe, 200);
-          setTimeout(resizeIframe, 600);
-          _loadCount++;
-          if (_loadCount >= variants.length) {
-            // All iframes injected — auto-capture after short delay for render
-            setTimeout(() => captureTabScreenshot(expId), 1500);
-          }
-        });
-      },
+          registerHandler(seriesTopic, handler);
+          window._expSeriesCleanup = function () { unregisterHandler(seriesTopic, handler); };
+        },
 
-      // ── Auto-reconnect Chat With ──────────────────────────────────────
-
-      async _checkChatWith() {
-        var saved = this._loadSession();
-        if (!saved) return;
-
-        // Check if the saved session is still live in the store
-        var store = Alpine.store('sessions')[saved.sessionId];
-        if (store && store.isLive) {
-          this.chatWithVisible = true;
-          this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
-          this._configureChatWithPanel(saved.sessionId, saved.project, saved.tmuxSession);
-          initDisplayCapture(this.expId).catch(() => {});
-          return;
-        }
-
-        // Fallback: check via the chatwith/check API (session may not be in store yet)
-        try {
-          const check = await fetch(
-            '/api/chatwith/check?session=' + encodeURIComponent(saved.tmuxSession)
-          ).then(r => r.json());
-          if (check && check.exists) {
-            this.chatWithVisible = true;
-            this.setChatWithStatus('connected', 'text-xs text-green-400 ml-2');
-            this._configureChatWithPanel(saved.sessionId, saved.project, saved.tmuxSession);
-            initDisplayCapture(this.expId).catch(() => {});
-          } else {
-            // Session no longer exists — clear saved state
-            delete Alpine.store('chatWith')[this._chatWithKey()];
-          }
-        } catch (e) { /* best-effort */ }
-      },
-
-      // ── SSE series subscription ───────────────────────────────────────
-
-      _subscribeToSeries() {
-        const seriesId = this.exp && this.exp.series_id;
-        if (!seriesId) return;
-        const seriesTopic = `experiments:${seriesId}`;
-        const handler = (data) => {
-          const currentId = window.location.pathname.split('/experiments/')[1];
-          if (!currentId || data.experiment_id === currentId) return;
-          if (!window.location.pathname.startsWith('/experiments/')) return;
-          navigateTo(`/experiments/${data.experiment_id}`);
-        };
-        registerHandler(seriesTopic, handler);
-        window._expSeriesCleanup = () => unregisterHandler(seriesTopic, handler);
-      },
-
-      // ── Header-actions injection ───────────────────────────────────
-
-      _injectHeaderActions() {
-        const ha = document.getElementById('header-actions');
-        if (!ha) return;
-        ha.innerHTML = `
-          <span id="ha-screenshot-status" class="text-xs text-gray-400"></span>
-          <button id="ha-capture-btn"
-                  aria-label="Capture screenshot"
-                  class="text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
-            Capture
-          </button>
-          <button id="ha-chatwith-btn"
-                  aria-label="Open Chat With Claude panel"
-                  class="px-3 py-1 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white disabled:opacity-50">
-          </button>
-        `;
-
-        // Wire click handlers via the component instance
-        document.getElementById('ha-capture-btn').onclick = () => this.captureScreenshot();
-        const cwBtn = document.getElementById('ha-chatwith-btn');
-        cwBtn.onclick = () => {
-          if (this.chatWithVisible) this.reconnectChatWith();
-          else this.openSessionPicker();
-        };
-
-        // Sync reactive state to injected DOM via $watch
-        cwBtn.textContent = this.chatWithBtnText;
-        cwBtn.disabled = this.chatWithBtnDisabled;
-        this.$watch('screenshotStatus', (val) => {
-          const el = document.getElementById('ha-screenshot-status');
-          if (el) el.textContent = val;
-        });
-        this.$watch('chatWithBtnText', (val) => {
-          const el = document.getElementById('ha-chatwith-btn');
-          if (el) el.textContent = val;
-        });
-        this.$watch('chatWithBtnDisabled', (val) => {
-          const el = document.getElementById('ha-chatwith-btn');
-          if (el) el.disabled = val;
-        });
-      },
-
-      _clearHeaderActions() {
-        const ha = document.getElementById('header-actions');
-        if (ha) ha.innerHTML = '';
-      },
-
-    }));
+      };
+    });
   });
 })();
