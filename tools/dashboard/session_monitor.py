@@ -273,9 +273,41 @@ class SessionMonitor:
         self._tailer_task = asyncio.create_task(self._tailer_loop())
         self._liveness_task = asyncio.create_task(self._liveness_loop())
         logger.info("session_monitor: background tasks started")
+        # Re-scan unresolved container sessions from prior server lifetime
+        self._recover_unresolved_sessions()
         # Broadcast registry for any sessions that exist in DB
         if count_live() > 0:
             await self._broadcast_registry()
+
+    def _recover_unresolved_sessions(self) -> None:
+        """On startup, recreate TailState for container sessions with NULL jsonl_path."""
+        sessions = get_live_sessions()
+        agent_runs = Path(__file__).resolve().parents[2] / "data" / "agent-runs"
+        recovered = 0
+        for row in sessions:
+            tmux_name = row["tmux_name"]
+            if row.get("jsonl_path"):
+                continue  # already resolved
+            if row.get("type") == "host":
+                continue  # host sessions use watcher, not directory resolution
+            if tmux_name in self._tail_states:
+                continue  # already has a tail state
+            # Derive resolution_dir from agent-runs/{tmux_name}-*/sessions/
+            run_dirs = sorted(
+                agent_runs.glob(f"{tmux_name}-*"),
+                key=lambda p: p.stat().st_mtime, reverse=True,
+            ) if agent_runs.exists() else []
+            if run_dirs:
+                sess_dir = run_dirs[0] / "sessions"
+                if sess_dir.exists():
+                    self._tail_states[tmux_name] = _TailState(
+                        needs_resolution=True,
+                        resolution_dir=sess_dir,
+                    )
+                    recovered += 1
+                    logger.info("session_monitor: RECOVERED unresolved %s → %s", tmux_name, sess_dir)
+        if recovered:
+            logger.info("session_monitor: recovered %d unresolved container sessions on startup", recovered)
 
     async def _broadcast_registry(self) -> None:
         """Push session registry to SSE subscribers."""
