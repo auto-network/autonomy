@@ -227,34 +227,33 @@
 
         _loadChatSessions: async function () {
           try {
-            var terminals = await fetch('/api/terminals').then(function (r) { return r.json(); });
-            var dashSessions = [];
-            try { dashSessions = await fetch('/api/active').then(function (r) { return r.json(); }); } catch (_) {}
-            var dashMap = {};
-            dashSessions.forEach(function (s) { dashMap[s.tmux_session || s.session_id] = s; });
-
-            this.chatSessions = terminals
-              .filter(function (t) { return t.alive; })
-              .filter(function (t) { return !t.id.startsWith('chatwith-') && !t.id.startsWith('chat-'); })
-              .map(function (t) {
-                var dash = dashMap[t.id] || {};
-                var label = dash.label || '';
+            var data = await fetch('/api/dao/active_sessions').then(function (r) { return r.json(); });
+            if (!Array.isArray(data)) data = [];
+            this.chatSessions = data
+              .filter(function (s) {
+                var id = s.session_id || s.tmux_session || '';
+                return !id.startsWith('chatwith-') && !id.startsWith('chat-');
+              })
+              .map(function (s) {
+                var label = s.label || '';
                 var lower = label.toLowerCase();
-                var role = '';
-                if (lower.indexOf('coordinator') !== -1) role = 'Coordinator';
-                else if (lower.indexOf('reviewer') !== -1 || lower.indexOf('review') !== -1) role = 'Reviewer';
-                else if (lower.indexOf('builder') !== -1 || lower.indexOf('build') !== -1) role = 'Builder';
-                else if (lower.indexOf('designer') !== -1 || lower.indexOf('design') !== -1) role = 'Designer';
-                else if (lower.indexOf('validator') !== -1 || lower.indexOf('validat') !== -1) role = 'Reviewer';
-                var isHost = (dash.type || t.env || '') === 'host';
+                var role = s.role || '';
+                if (!role) {
+                  if (lower.indexOf('coordinator') !== -1) role = 'Coordinator';
+                  else if (lower.indexOf('reviewer') !== -1 || lower.indexOf('review') !== -1) role = 'Reviewer';
+                  else if (lower.indexOf('builder') !== -1 || lower.indexOf('build') !== -1) role = 'Builder';
+                  else if (lower.indexOf('designer') !== -1 || lower.indexOf('design') !== -1) role = 'Designer';
+                  else if (lower.indexOf('validator') !== -1 || lower.indexOf('validat') !== -1) role = 'Reviewer';
+                }
+                var isHost = s.type === 'host';
                 if (!role && isHost) role = 'Host';
                 return {
-                  id: t.id,
+                  id: s.session_id || s.tmux_session,
                   label: label,
                   role: role,
                   isHost: isHost,
-                  isLive: dash.is_live !== false,
-                  preview: (dash.last_message || '').slice(0, 80).replace(/</g, '').replace(/>/g, ''),
+                  isLive: s.is_live !== false,
+                  preview: (s.last_message || '').slice(0, 80).replace(/</g, '').replace(/>/g, ''),
                 };
               })
               .sort(function (a, b) {
@@ -272,11 +271,12 @@
           if (savedSession) {
             // Verify saved session is still alive
             try {
-              var resp = await fetch('/api/terminals');
-              var terminals = await resp.json();
+              var data = await fetch('/api/dao/active_sessions').then(function (r) { return r.json(); });
+              if (!Array.isArray(data)) data = [];
               var alive = false;
-              for (var i = 0; i < terminals.length; i++) {
-                if (terminals[i].id === savedSession && terminals[i].alive) {
+              for (var i = 0; i < data.length; i++) {
+                var id = data[i].session_id || data[i].tmux_session;
+                if (id === savedSession && data[i].is_live !== false) {
                   alive = true;
                   break;
                 }
