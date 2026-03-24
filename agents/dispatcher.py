@@ -1165,14 +1165,19 @@ def _send_dispatch_nag_crosstalk(targets: list[str], message: str) -> None:
 
     for tmux_name in targets:
         try:
+            buf = f"nag_{_secrets.token_hex(4)}"
             path = f"/tmp/dispatch_nag_{_secrets.token_hex(4)}.txt"
             Path(path).write_text(envelope, encoding="utf-8")
             subprocess.run(
-                ["tmux", "load-buffer", "-b", "dispatch_nag", path],
+                ["tmux", "load-buffer", "-b", buf, path],
                 capture_output=True, timeout=5,
             )
             subprocess.run(
-                ["tmux", "paste-buffer", "-p", "-b", "dispatch_nag", "-t", tmux_name],
+                ["tmux", "paste-buffer", "-p", "-b", buf, "-t", tmux_name],
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["tmux", "delete-buffer", "-b", buf],
                 capture_output=True, timeout=5,
             )
             time.sleep(0.3)
