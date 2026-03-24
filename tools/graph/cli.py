@@ -1264,18 +1264,27 @@ def cmd_thought(args):
             print("No content provided", file=sys.stderr)
             db.close()
             sys.exit(1)
+    # Resolve thread prefix to full UUID before insert (FK requires exact match)
+    resolved_thread = None
+    if hasattr(args, 'thread') and args.thread:
+        thread = db.get_thread(args.thread)
+        if not thread:
+            print(f"Thread not found: {args.thread}", file=sys.stderr)
+            db.close()
+            sys.exit(1)
+        resolved_thread = thread["id"]
     capture_id = new_id()
     db.insert_capture(
         capture_id, content,
         source_id=args.source if hasattr(args, 'source') and args.source else None,
         turn_number=args.turn if hasattr(args, 'turn') and args.turn else None,
-        thread_id=args.thread if hasattr(args, 'thread') and args.thread else None,
+        thread_id=resolved_thread,
         actor=os.environ.get("BD_ACTOR", "user"),
     )
     thread_info = ""
-    if hasattr(args, 'thread') and args.thread:
-        thread = db.get_thread(args.thread)
-        thread_info = f' \u2192 thread "{thread["title"]}"' if thread else f" \u2192 thread {args.thread}"
+    if resolved_thread:
+        thread = db.get_thread(resolved_thread)
+        thread_info = f' \u2192 thread "{thread["title"]}"' if thread else ""
     db.close()
     print(f"  \u2713 Captured: {capture_id[:11]}{thread_info}")
 
@@ -1305,7 +1314,7 @@ def cmd_thoughts(args):
         print(f"  {cid}  {date}  [{status}]  {text}")
 
 
-_THREAD_ACTIONS = {"park", "done", "active", "assign"}
+_THREAD_ACTIONS = {"park", "done", "active", "assign", "attach"}
 
 
 def cmd_thread_dispatch(args):
@@ -1373,7 +1382,7 @@ def cmd_thread_action(args, action: str, thread_id: str, target: str | None = No
         thread = db.get_thread(thread_id)
         title = thread["title"] if thread else thread_id
         print(f"  \u2713 {action.capitalize()}: {thread_id} \"{title}\"")
-    elif action == "assign":
+    elif action in ("assign", "attach"):
         if not target:
             print("assign requires a thread ID: graph thread assign CAPTURE_ID THREAD_ID", file=sys.stderr)
             db.close()

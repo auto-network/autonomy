@@ -4244,6 +4244,13 @@ async def api_graph_thought(request):
     if p:
         db_args["db_path"] = p
     db = GraphDB(**db_args)
+    # Resolve thread_id prefix to full UUID (FK requires exact match)
+    if thread_id:
+        thread = db.get_thread(thread_id)
+        if not thread:
+            db.close()
+            return JSONResponse({"error": f"thread not found: {thread_id}"}, status_code=404)
+        thread_id = thread["id"]
     try:
         db.insert_capture(
             capture_id, content,
