@@ -450,9 +450,9 @@ class SessionMonitor:
                             jsonl_path=str(newest),
                             project=sessions_dir.name,
                         )
-                        # Reset tail state for new file
-                        self._tail_states.pop(tmux_name, None)
-                        self._tail_states[tmux_name] = _TailState()
+                        # Reset tail state for new file, preserving resolution_dir
+                        old_resolution_dir = self._tail_states.pop(tmux_name, _TailState()).resolution_dir
+                        self._tail_states[tmux_name] = _TailState(resolution_dir=old_resolution_dir)
 
             except Exception:
                 logger.exception("session_monitor: tailer error")
