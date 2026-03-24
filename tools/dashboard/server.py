@@ -1410,7 +1410,7 @@ async def api_crosstalk_send(request):
     # Inject via tmux paste-buffer (unique buffer per operation)
     _tmux_inject(target, envelope)
     await asyncio.sleep(0.3)
-    subprocess.run(["tmux", "send-keys", "-t", target, "", "Enter"], capture_output=True)
+    subprocess.run(["tmux", "send-keys", "-t", target, "\r"], capture_output=True)
 
     # Store in crosstalk_messages
     await asyncio.to_thread(
@@ -1550,7 +1550,7 @@ async def api_chatwith_spawn(request):
         _tmux_inject(session_name, primer_text)
         await asyncio.sleep(0.3)
         subprocess.run(
-            ["tmux", "send-keys", "-t", session_name, "", "Enter"],
+            ["tmux", "send-keys", "-t", session_name, "\r"],
             capture_output=True,
         )
 
@@ -2533,7 +2533,7 @@ async def api_session_send(request):
     logger.warning("[session-send] tmux=%r message=%r", tmux_session, message)
     try:
         _tmux_inject(tmux_session, message)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         subprocess.run(
             ["tmux", "send-keys", "-t", tmux_session, "\r"],
             capture_output=True,
@@ -2605,7 +2605,7 @@ async def api_session_send_handshake(request):
     logger.warning("[send-handshake] tmux=%r", tmux_session)
     try:
         _tmux_inject(tmux_session, handshake)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         subprocess.run(
             ["tmux", "send-keys", "-t", tmux_session, "\r"],
             capture_output=True,
