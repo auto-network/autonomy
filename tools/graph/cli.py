@@ -239,18 +239,40 @@ def _resolve_current_source(db):
         return None
 
 
-def _auto_provenance(db):
-    """Auto-detect current session source and latest turn.
+_STOPWORDS = {"the", "a", "an", "is", "in", "on", "at", "to", "for", "of", "and", "or", "with", "from", "by", "not", "no"}
+
+
+def _auto_provenance(db, title: str = ""):
+    """Auto-detect current session source and best-matching turn.
 
     Returns (source_dict, turn_number) or (None, None).
-    Uses BD_ACTOR env var -> graph source lookup -> max turn query.
-    Runs graph sessions --all first to ensure current session is ingested.
+    When *title* is provided, searches recent turns for keyword overlap
+    and picks the turn with the highest match score (minimum 2 words).
+    Falls back to MAX(turn) when no title match is found.
     """
     subprocess.run(["graph", "sessions", "--all"], capture_output=True, timeout=30)
     source = _resolve_current_source(db)
     if not source:
         return None, None
+
+    if title:
+        title_words = set(title.lower().split()) - _STOPWORDS
+        if len(title_words) >= 2:
+            recent = db.get_recent_turns(source["id"], limit=50)
+            best_turn, best_score = None, 0
+            for t in recent:
+                content_words = set((t["content"] or "").lower().split())
+                score = len(title_words & content_words)
+                if score > best_score:
+                    best_score = score
+                    best_turn = t["turn_number"]
+            if best_score >= 2 and best_turn is not None:
+                return source, best_turn
+
+    # Fallback: latest turn (preserves existing behavior)
     turn = db.get_latest_turn(source["id"])
+    if title and turn:
+        print("  warning: auto-provenance low confidence (no title match in last 50 turns)", file=sys.stderr)
     return source, turn
 
 
@@ -877,7 +899,7 @@ def cmd_bead(args):
         # Auto-detect source + turn before API dispatch
         if not args.source and not args.turns:
             db = GraphDB(args.db)
-            source, turn = _auto_provenance(db)
+            source, turn = _auto_provenance(db, title=args.title)
             db.close()
             if source and turn:
                 args.source = source["id"]
@@ -944,7 +966,7 @@ def cmd_bead(args):
                   file=sys.stderr)
     else:
         # No --source, no --turns: auto-detect both
-        source, turn = _auto_provenance(db)
+        source, turn = _auto_provenance(db, title=args.title)
         if source and turn:
             args.turns = str(turn)
             title = (source.get("title") or "?")[:60]
@@ -1277,11 +1299,20 @@ def cmd_thought(args):
             db.close()
             sys.exit(1)
         resolved_thread = thread["id"]
+    # Auto-detect provenance if not explicitly provided
+    prov_source_id = args.source if hasattr(args, 'source') and args.source else None
+    prov_turn = args.turn if hasattr(args, 'turn') and args.turn else None
+    if not prov_source_id:
+        auto_src, auto_turn = _auto_provenance(db, title=content[:80])
+        if auto_src and auto_turn:
+            prov_source_id = auto_src["id"]
+            prov_turn = auto_turn
+
     capture_id = new_id()
     db.insert_capture(
         capture_id, content,
-        source_id=args.source if hasattr(args, 'source') and args.source else None,
-        turn_number=args.turn if hasattr(args, 'turn') and args.turn else None,
+        source_id=prov_source_id,
+        turn_number=prov_turn,
         thread_id=resolved_thread,
         actor=os.environ.get("BD_ACTOR", "user"),
     )
@@ -1564,9 +1595,23 @@ def cmd_note(args):
         eid = db.upsert_entity(name, etype)
         db.add_mention(eid, t.id, "thought")
 
+    # Auto-provenance: link note to the session turn that inspired it
+    from .models import Edge
+    auto_src, auto_turn = _auto_provenance(db, title=text[:80])
+    if auto_src and auto_turn:
+        db.insert_edge(Edge(
+            source_id=source.id,
+            source_type="source",
+            target_id=auto_src["id"],
+            target_type="source",
+            relation="conceived_at",
+            metadata={"turns": {"from": auto_turn, "to": auto_turn}},
+        ))
+
     db.commit()
     _lines = text.count("\n") + (1 if text else 0)
-    print(f"  ✓ Note saved (src:{source.id[:12]}) — {_lines} lines, {len(text)} chars")
+    prov_info = f" turn {auto_turn}" if auto_src and auto_turn else ""
+    print(f"  ✓ Note saved (src:{source.id[:12]}{prov_info}) — {_lines} lines, {len(text)} chars")
     db.close()
 
 
