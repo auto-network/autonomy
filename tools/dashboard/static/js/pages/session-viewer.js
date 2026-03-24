@@ -602,44 +602,46 @@
         if (!this.selectedTmux) return;
         this.linkState = 'handshaking';
         try {
-          await fetch('/api/session/send-handshake', {
+          const hsResp = await fetch('/api/session/send-handshake', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ tmux_session: this.selectedTmux }),
           });
-          // Poll JSONL for handshake string to appear (up to 10s)
-          const deadline = Date.now() + 10000;
+          const hsData = await hsResp.json();
+          const handshake = hsData.handshake || '';
+
+          // Poll confirm-link (filesystem scan) until it finds the handshake
+          const deadline = Date.now() + 15000;
           while (Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 1500));
-            var ss = window.getSessionStore(this.sessionId);
-            this.entries = ss.entries;
-            this._rebuildDisplay();
-            const found = this.entries.slice(-5).some(
-              e => e.type === 'user' && (e.content || '').includes(this.HANDSHAKE_STRING)
-            );
-            if (found) {
-              await fetch('/api/session/confirm-link', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  project: this.project,
-                  session_id: this.sessionId,
-                  tmux_session: this.selectedTmux,
-                }),
-              });
+            await new Promise(r => setTimeout(r, 2000));
+            const resp = await fetch('/api/session/confirm-link', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                tmux_session: this.selectedTmux,
+                handshake: handshake,
+              }),
+            });
+            if (resp.ok) {
+              const data = await resp.json();
               this._tmuxSession = this.selectedTmux;
+              var ss = window.getSessionStore(this.sessionId);
               ss.tmuxSession = this.selectedTmux;
               ss.linked = true;
               this._linked = true;
               this.linkState = 'confirmed';
+              // Update project if filesystem scan found a different one
+              if (data.project && data.project !== this.project) {
+                this.project = data.project;
+              }
               return;
             }
           }
           this.linkState = 'failed';
-          this.linkError = 'Handshake timed out \u2014 handshake message did not appear in session log';
+          this.linkError = 'Handshake timed out \u2014 file not found';
         } catch (e) {
           this.linkState = 'failed';
-          this.linkError = 'Error during handshake: ' + (e.message || e);
+          this.linkError = 'Error: ' + (e.message || e);
         }
       },
 
