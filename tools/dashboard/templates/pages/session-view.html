@@ -257,13 +257,28 @@
                       <span class="sc-meta text-gray-400" x-text="dEntry.bead_id || dEntry.source_id || ''"></span>
                       <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
                     </div>
-                    <div class="sc-line2 sc-line2-truncated" x-text="dEntry.content"></div>
-                    <!-- Lazy tile placeholder for note/comment/thought -->
-                    <template x-if="dEntry.source_id && !dEntry._enhanced">
-                      <div class="text-xs text-gray-600 mt-1"
-                           x-data="{ visible: false }"
-                           x-intersect:enter.margin.100px="if (!dEntry._enhanced) { setTimeout(() => { if ($el.getBoundingClientRect().top > 0) { dEntry._enhanced = true; } }, 1000) }">
+                    <!-- Line 2: content (enriched title after lazy load, raw CLI output initially) -->
+                    <div class="sc-line2 sc-line2-truncated" x-text="dEntry._enriched_title || dEntry.content"></div>
+
+                    <!-- Line 3: enriched preview (appears after lazy load) -->
+                    <template x-if="dEntry._enriched_preview">
+                      <div class="text-xs mt-1 truncate" style="color:#6b7280" x-text="dEntry._enriched_preview"></div>
+                    </template>
+
+                    <!-- Line 4: enriched tags (appears after lazy load) -->
+                    <template x-if="dEntry._enriched_tags && dEntry._enriched_tags.length > 0">
+                      <div class="flex gap-1 flex-wrap mt-1">
+                        <template x-for="t in dEntry._enriched_tags" :key="t">
+                          <a :href="'/stream/' + t" @click.prevent.stop="navigateTo('/stream/' + t)"
+                             style="display:inline-flex; padding:0 5px; border-radius:3px; font-size:9px; background:#1e293b; color:#94a3b8; text-decoration:none"
+                             x-text="t"></a>
+                        </template>
                       </div>
+                    </template>
+
+                    <!-- Lazy enhancement trigger -->
+                    <template x-if="dEntry.source_id && !dEntry._enhanced">
+                      <div x-intersect:enter.margin.100px="lazyEnhance(dEntry)" style="height:1px"></div>
                     </template>
                   </a>
                 </template>
