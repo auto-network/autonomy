@@ -30,32 +30,7 @@
   <section aria-label="Active Sessions" class="mb-8">
     <div class="flex items-center justify-between mb-3">
       <h2 class="text-lg font-semibold text-green-400">● Active Sessions</h2>
-      <div class="sc-zoom-bar" x-data>
-        <button class="sc-zoom-btn" :class="$store.sessionZoom === 'compact' && 'active'"
-                @click="setZoom('compact')" title="Compact">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <rect x="1" y="4" width="12" height="2.5" rx="1" fill="currentColor"/>
-            <rect x="1" y="8" width="8" height="2.5" rx="1" fill="currentColor"/>
-          </svg>
-        </button>
-        <button class="sc-zoom-btn" :class="$store.sessionZoom === 'normal' && 'active'"
-                @click="setZoom('normal')" title="Normal">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <rect x="1" y="1.5" width="12" height="2.5" rx="1" fill="currentColor"/>
-            <rect x="1" y="5.5" width="9" height="2.5" rx="1" fill="currentColor"/>
-            <rect x="1" y="9.5" width="11" height="2.5" rx="1" fill="currentColor"/>
-          </svg>
-        </button>
-        <button class="sc-zoom-btn" :class="$store.sessionZoom === 'expanded' && 'active'"
-                @click="setZoom('expanded')" title="Expanded" style="padding-top:1px">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <rect x="1" y="0.5" width="12" height="2" rx="1" fill="currentColor"/>
-            <rect x="1" y="3.5" width="9" height="2" rx="1" fill="currentColor"/>
-            <rect x="1" y="6.5" width="11" height="2" rx="1" fill="currentColor"/>
-            <rect x="1" y="9.5" width="7" height="2" rx="1" fill="currentColor"/>
-          </svg>
-        </button>
-      </div>
+      {% include 'partials/zoom-toggle.html' %}
       <div x-data="{ open: false }" class="relative">
         <button @click="open = !open"
                 :disabled="_creating"
