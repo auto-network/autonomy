@@ -774,6 +774,14 @@ _DASHBOARD_WATCH_PATHS = (
 
 _DISPATCH_STATE_PATH = REPO_ROOT / "data" / "dispatch.state"
 _START_DASHBOARD_SCRIPT = REPO_ROOT / "tools" / "dashboard" / "start-dashboard.sh"
+_START_DISPATCHER_SCRIPT = REPO_ROOT / "agents" / "start-dispatcher.sh"
+_DISPATCHER_WATCH_PATHS = (
+    "agents/dispatcher.py",
+    "agents/compose.py",
+    "agents/launch.sh",
+    "agents/session_launcher.py",
+    "agents/dispatch_db.py",
+)
 
 
 def _dashboard_files_changed(branch_base: str) -> bool:
@@ -794,6 +802,47 @@ def _dashboard_files_changed(branch_base: str) -> bool:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
     return False
+
+
+def _dispatcher_files_changed(branch_base: str) -> bool:
+    """Return True if the merged commit touched dispatcher or agent infrastructure files."""
+    if not branch_base:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{branch_base}..HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(REPO_ROOT),
+        )
+        changed = result.stdout.strip().splitlines()
+        for path in changed:
+            for watch in _DISPATCHER_WATCH_PATHS:
+                if path == watch or path.startswith(watch):
+                    return True
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return False
+
+
+def _maybe_restart_dispatcher(branch_base: str) -> None:
+    """Restart the dispatcher if merged commit touched dispatcher/agent files."""
+    if not _dispatcher_files_changed(branch_base):
+        return
+
+    print("  Dispatcher files changed — scheduling restart...", file=sys.stderr)
+
+    if not _START_DISPATCHER_SCRIPT.exists():
+        print("  WARN: start-dispatcher.sh not found, skipping restart", file=sys.stderr)
+        return
+
+    try:
+        subprocess.run(
+            [str(_START_DISPATCHER_SCRIPT), "--restart"],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(REPO_ROOT),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  WARN: dispatcher restart failed: {e}", file=sys.stderr)
 
 
 def _maybe_restart_dashboard(branch_base: str) -> None:
@@ -1005,6 +1054,9 @@ def process_decision(dispatch_result: DispatchResult) -> str:
                           file=sys.stderr)
                     run_bd(["update", bead_id, "--append-notes",
                             f"smoke test errored (non-blocking): {smoke_err}"])
+
+            # ── Auto-restart dispatcher if agent infra files changed ──────────
+            _maybe_restart_dispatcher(dispatch_result.branch_base)
         else:
             print(f"  Merge: FAILED — {merge_err}")
             run_bd(["update", bead_id, "--append-notes",
