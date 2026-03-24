@@ -8,7 +8,12 @@
       tag: '',
       items: [],
       loaded: false,
-      zoom: 'normal',
+      zoom: localStorage.getItem('streamZoom') || 'normal',
+
+      setZoom(level) {
+        this.zoom = level;
+        localStorage.setItem('streamZoom', level);
+      },
 
       init() {
         this.tag = decodeURIComponent(window.location.pathname.split('/stream/')[1] || '');

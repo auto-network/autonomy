@@ -5,11 +5,8 @@
     <span class="text-2xl font-bold text-emerald-400">#</span>
     <h1 class="text-xl font-bold" x-text="tag"></h1>
     <span class="text-sm text-gray-500" x-text="items.length + ' notes'"></span>
-    <!-- Zoom controls -->
-    <div class="ml-auto flex gap-1">
-      <button @click="zoom = 'compact'" :class="zoom === 'compact' ? 'text-white' : 'text-gray-600'" class="text-xs px-1">&minus;</button>
-      <button @click="zoom = 'normal'" :class="zoom === 'normal' ? 'text-white' : 'text-gray-600'" class="text-xs px-1">&#9675;</button>
-      <button @click="zoom = 'expanded'" :class="zoom === 'expanded' ? 'text-white' : 'text-gray-600'" class="text-xs px-1">+</button>
+    <div class="ml-auto">
+      {% include 'partials/zoom-toggle.html' %}
     </div>
   </div>
 
