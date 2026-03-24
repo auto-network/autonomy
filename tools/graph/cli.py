@@ -1482,6 +1482,23 @@ def cmd_notes(args):
                 print(f"  {sid}  {title}")
             return
 
+        if getattr(args, "headline", False):
+            for s in sources:
+                sid = s["id"][:8]
+                ts = (s.get("created_at") or "")[11:16]  # HH:MM
+                meta = s.get("metadata")
+                if meta and isinstance(meta, str):
+                    import json
+                    try: meta = json.loads(meta)
+                    except Exception: meta = {}
+                tags_list = meta.get("tags", []) if isinstance(meta, dict) else []
+                tags_str = ",".join(tags_list)[:30] if tags_list else ""
+                author = (meta.get("author", "") if isinstance(meta, dict) else "")
+                author = author.split(":")[-1][:15] if author else ""
+                title = (s.get("title") or "").replace("\n", " ").lstrip("# ")[:50]
+                print(f"  {sid}  {ts}  [{tags_str:<30}]  {title:<50}  {author}")
+            return
+
         for s in sources:
             sid = s["id"][:11]
             date = (s.get("created_at") or "")[:10]
@@ -2603,6 +2620,7 @@ def main():
     p_notes.add_argument("--tags", help="Filter by tag (comma-separated)")
     p_notes.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     p_notes.add_argument("--short", action="store_true", help="One-line compact output")
+    p_notes.add_argument("--headline", action="store_true", help="Digest table: id, time, tags, title, author")
     p_notes.set_defaults(func=cmd_notes)
 
     # comment (handles both add and integrate)
