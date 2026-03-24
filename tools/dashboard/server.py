@@ -1668,7 +1668,6 @@ def _parse_graph_note_cmd(command: str, timestamp: str) -> dict | None:
         "semantic_type": "note-created",
         "role": "assistant",
         "content": "Created graph note",
-        "needs_result": True,
         "timestamp": timestamp,
     }
 
@@ -1727,6 +1726,53 @@ def _parse_bd_setstate_cmd(command: str, timestamp: str) -> dict | None:
         "content": f"Set {m.group(2)} on {m.group(1)}",
         "timestamp": timestamp,
     }
+
+
+def _upconvert_graph_result(content: str, timestamp: str) -> dict | None:
+    """Upconvert graph CLI tool_result output to semantic tiles.
+
+    Detects note creation, thought capture, and comment addition confirmations
+    in tool_result text and returns a semantic_bash entry with extracted IDs.
+    """
+    if not isinstance(content, str):
+        return None
+    # Note saved (src:abc123-456)
+    if "Note saved (src:" in content:
+        m = re.search(r"src:([a-f0-9-]+)", content)
+        if m:
+            return {
+                "type": "semantic_bash",
+                "semantic_type": "note-created",
+                "role": "tool",
+                "source_id": m.group(1),
+                "content": content.strip()[:100],
+                "timestamp": timestamp,
+            }
+    # Captured: abc123-456 (thought)
+    if "\u2713 Captured:" in content:
+        m = re.search(r"Captured:\s*([a-f0-9-]+)", content)
+        if m:
+            return {
+                "type": "semantic_bash",
+                "semantic_type": "thought-captured",
+                "role": "tool",
+                "source_id": m.group(1),
+                "content": content.strip()[:100],
+                "timestamp": timestamp,
+            }
+    # Comment added (id:abc123-456)
+    if "Comment added" in content:
+        m = re.search(r"id:([a-f0-9-]+)", content)
+        if m:
+            return {
+                "type": "semantic_bash",
+                "semantic_type": "comment-added",
+                "role": "tool",
+                "source_id": m.group(1),
+                "content": content.strip()[:100],
+                "timestamp": timestamp,
+            }
+    return None
 
 
 def _classify_system_message(text: str) -> dict | None:
@@ -1831,6 +1877,11 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                             b.get("text", "") for b in result_content
                             if isinstance(b, dict) and b.get("type") == "text"
                         )
+                    # Upconvert graph note/thought/comment results to semantic tiles
+                    sem = _upconvert_graph_result(result_content, timestamp)
+                    if sem:
+                        tool_results.append(sem)
+                        continue
                     if len(result_content) > 2000:
                         result_content = result_content[:2000] + "\n... (truncated)"
                     tool_results.append({
@@ -1967,10 +2018,14 @@ def _parse_jsonl_entry(line: str) -> dict | None:
             for block in content_raw:
                 if isinstance(block, dict) and block.get("type") == "text":
                     result_content += block.get("text", "")
-        if len(result_content) > 2000:
-            result_content = result_content[:2000] + "\n... (truncated)"
         if not result_content:
             return None
+        # Upconvert graph note/thought/comment results to semantic tiles
+        sem = _upconvert_graph_result(result_content, timestamp)
+        if sem:
+            return sem
+        if len(result_content) > 2000:
+            result_content = result_content[:2000] + "\n... (truncated)"
         return {
             "type": "tool_result",
             "role": "tool",
