@@ -41,6 +41,7 @@ window.getSessionStore = function(sessionId) {
       nagMessage: '',
       sizeMB: '0',
       lastActivity: 0,
+      lastMessage: '',
       toolMap: {},       // tool_id -> { tool_name }
       resultMap: {},     // tool_id -> tool_result entry
       loaded: false,
@@ -133,6 +134,8 @@ window.ensureSessionMessages = function() {
       store.nagMessage = s.nag_message || '';
       store.isLive = s.is_live;
       store.startedAt = s.started_at || 0;
+      if (s.last_activity) store.lastActivity = s.last_activity;
+      if (s.last_message !== undefined) store.lastMessage = s.last_message;
     }
     // Mark removed sessions as dead
     var allSessions = Alpine.store('sessions');
