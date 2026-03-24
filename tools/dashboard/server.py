@@ -4195,6 +4195,23 @@ async def api_graph_resolve(request):
                 "created_at": att["created_at"],
                 "url": f"/api/attachment/{att['id'][:12]}",
             })
+        # Try comment
+        comment = db.conn.execute(
+            "SELECT * FROM note_comments WHERE id = ? OR id LIKE ?",
+            (id, f"{id}%")
+        ).fetchone()
+        if comment:
+            comment = dict(comment)
+            return JSONResponse({
+                "type": "comment",
+                "id": comment["id"],
+                "source_id": comment["source_id"],
+                "content": comment["content"],
+                "actor": comment.get("actor", "user"),
+                "created_at": comment.get("created_at", ""),
+                "integrated": bool(comment.get("integrated", 0)),
+                "redirect": f"/graph/{comment['source_id'][:12]}?highlight={comment['id'][:12]}",
+            })
     finally:
         db.close()
     return JSONResponse({"error": "not found"}, status_code=404)

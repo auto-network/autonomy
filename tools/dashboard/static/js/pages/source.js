@@ -45,6 +45,7 @@
       noteProvenanceType: null,
       attachments: [],
       unrefAttachments: [],
+      highlightId: '',
 
       // Context mode
       isContext: false,
@@ -205,6 +206,7 @@
           this.targetTurn = parseInt(turn, 10);
           this.contextWindow = parseInt(params.get('window') || '5', 10);
         }
+        this.highlightId = params.get('highlight') || '';
 
         try {
           const res = await fetch(`/api/graph/${this.id}`);
@@ -213,6 +215,12 @@
           if (data && data.error) {
             this.errorMsg = data.error;
             this.state = 'error';
+            return;
+          }
+
+          // Comment response — redirect to parent source with highlight
+          if (data.type === 'comment') {
+            navigateTo(data.redirect);
             return;
           }
 
@@ -289,6 +297,14 @@
           if (this.isContext) {
             this.$nextTick(() => {
               const el = document.getElementById(`turn-${this.targetTurn}`);
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            });
+          }
+
+          // Scroll to highlighted comment
+          if (this.highlightId) {
+            this.$nextTick(() => {
+              const el = document.querySelector('[data-comment-highlight]');
               if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
             });
           }
