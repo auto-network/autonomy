@@ -375,6 +375,48 @@ def cmd_dispatch_approve(args):
         sys.exit(1)
 
 
+def cmd_dispatch_reset(args):
+    """Reset the circuit breaker for a bead by inserting a synthetic DONE record."""
+    import subprocess
+
+    # Import dispatch_db — it lives in agents/ which may not be on sys.path
+    import importlib
+    import pathlib
+    agents_dir = str(pathlib.Path(__file__).resolve().parent.parent.parent / "agents")
+    if agents_dir not in sys.path:
+        sys.path.insert(0, agents_dir)
+    import dispatch_db
+
+    bead_id = args.bead_id
+
+    # Check current failure count
+    agent_fails, merge_fails = dispatch_db.get_consecutive_failures(bead_id)
+    if agent_fails == 0 and merge_fails == 0:
+        print(f"  {bead_id}: no consecutive failures — circuit breaker not tripped")
+        return
+
+    print(f"  {bead_id}: {agent_fails} agent failures, {merge_fails} merge failures")
+
+    # Insert synthetic DONE record
+    run_id = dispatch_db.reset_circuit_breaker(bead_id)
+    print(f"  ✓ Inserted synthetic DONE record: {run_id}")
+
+    # Verify reset
+    agent_fails_after, merge_fails_after = dispatch_db.get_consecutive_failures(bead_id)
+    print(f"  ✓ Failure count now: {agent_fails_after} agent, {merge_fails_after} merge")
+
+    # Reset readiness to ready and re-approve
+    result = subprocess.run(
+        ["bd", "set-state", bead_id, "readiness=approved"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        print(f"  ✓ {bead_id} re-approved for dispatch")
+    else:
+        print(f"  ✗ Failed to re-approve: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_dispatch_nag(args):
     """Enable or disable dispatch completion nag for the current session."""
     bd_actor = os.environ.get("BD_ACTOR")

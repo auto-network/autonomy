@@ -53,7 +53,7 @@ from .watch import watch_sessions
 from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
-from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag
+from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
 from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action
 
 
@@ -2682,6 +2682,10 @@ def main():
     p_dnag = dispatch_sub.add_parser("nag", help="Enable dispatch completion nag for current session")
     p_dnag.add_argument("--disable", action="store_true", help="Disable instead of enable")
     p_dnag.set_defaults(func=cmd_dispatch_nag)
+
+    p_reset = dispatch_sub.add_parser("reset", help="Reset circuit breaker for a bead")
+    p_reset.add_argument("bead_id", help="Bead ID to reset")
+    p_reset.set_defaults(func=cmd_dispatch_reset)
 
     # attach
     p = sub.add_parser("attach", help="Attach a file to the graph with hash-based dedup")

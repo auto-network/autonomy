@@ -599,3 +599,40 @@ def test_consecutive_failures_skips_running():
         branch="", branch_base="", image="", container_name="", output_dir="",
     )
     assert db.get_consecutive_failures("auto-rn") == (2, 0)
+
+
+# ── reset_circuit_breaker tests ────────────────────────────────
+
+
+def test_reset_circuit_breaker_clears_agent_failures():
+    """Synthetic DONE record resets consecutive agent failure count to 0."""
+    _use_temp_db()
+    _insert_run_simple("auto-cb", "DONE", 1000)
+    _insert_run_simple("auto-cb", "FAILED", 2000)
+    _insert_run_simple("auto-cb", "FAILED", 3000)
+    _insert_run_simple("auto-cb", "FAILED", 4000)
+    assert db.get_consecutive_failures("auto-cb") == (3, 0)
+
+    run_id = db.reset_circuit_breaker("auto-cb")
+    assert run_id.startswith("reset-auto-cb-")
+    assert db.get_consecutive_failures("auto-cb") == (0, 0)
+
+
+def test_reset_circuit_breaker_clears_merge_failures():
+    """Synthetic DONE record also resets merge failure count."""
+    _use_temp_db()
+    _insert_run_simple("auto-mf2", "MERGE_FAILED", 1000)
+    _insert_run_simple("auto-mf2", "MERGE_FAILED", 2000)
+    _insert_run_simple("auto-mf2", "MERGE_FAILED", 3000)
+    assert db.get_consecutive_failures("auto-mf2") == (0, 3)
+
+    db.reset_circuit_breaker("auto-mf2")
+    assert db.get_consecutive_failures("auto-mf2") == (0, 0)
+
+
+def test_reset_circuit_breaker_no_prior_runs():
+    """Reset on a bead with no runs still works (inserts a DONE record)."""
+    _use_temp_db()
+    run_id = db.reset_circuit_breaker("auto-new")
+    assert run_id.startswith("reset-auto-new-")
+    assert db.get_consecutive_failures("auto-new") == (0, 0)
