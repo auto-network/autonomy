@@ -316,12 +316,15 @@ def cmd_read(args):
     source = result
     _mark_read(source["id"])
 
-    # Track reads for collab-tagged notes
+    # Track reads for collab-tagged notes (silently skip on read-only DBs)
     meta = json.loads(source.get("metadata", "{}")) if isinstance(source.get("metadata"), str) else source.get("metadata", {})
     if "collab" in meta.get("tags", []):
         actor = os.environ.get("BD_ACTOR", "user")
-        if not db.read_only:
-            db.record_read(source["id"], actor)
+        try:
+            if not db.read_only:
+                db.record_read(source["id"], actor)
+        except sqlite3.OperationalError:
+            pass
 
     # Handle version requests for notes
     if version_req is not None:
