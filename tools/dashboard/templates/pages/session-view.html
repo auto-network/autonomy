@@ -236,10 +236,10 @@
 
                 <!-- ── Semantic Bash: typed command tiles ───────── -->
                 <template x-if="dEntry.type === 'semantic_bash'">
-                  <a :href="dEntry.source_id ? '/graph/' + dEntry.source_id : (dEntry.bead_id ? '/bead/' + dEntry.bead_id : null)"
+                  <a :href="dEntry.comment_id ? '/graph/' + dEntry.comment_id : (dEntry.source_id ? '/graph/' + dEntry.source_id : (dEntry.bead_id ? '/bead/' + dEntry.bead_id : null))"
                      class="sc-tool-card block"
-                     :class="(dEntry.source_id || dEntry.bead_id) ? 'cursor-pointer hover:bg-gray-800/80' : ''"
-                     @click.prevent="if (dEntry.source_id) navigateTo('/graph/' + dEntry.source_id); else if (dEntry.bead_id) navigateTo('/bead/' + dEntry.bead_id);">
+                     :class="(dEntry.comment_id || dEntry.source_id || dEntry.bead_id) ? 'cursor-pointer hover:bg-gray-800/80' : ''"
+                     @click.prevent="if (dEntry.comment_id) navigateTo('/graph/' + dEntry.comment_id); else if (dEntry.source_id) navigateTo('/graph/' + dEntry.source_id); else if (dEntry.bead_id) navigateTo('/bead/' + dEntry.bead_id);">
                     <div class="sc-line1">
                       <span class="sc-chip" :class="{
                         'bg-purple-900 text-purple-300': dEntry.semantic_type === 'note-created',
@@ -254,7 +254,7 @@
                         'dispatch-approved': 'Dispatch',
                         'state-changed': 'State',
                       }[dEntry.semantic_type] || dEntry.semantic_type"></span>
-                      <span class="sc-meta text-gray-400" x-text="dEntry.bead_id || dEntry.source_id || ''"></span>
+                      <span class="sc-meta text-gray-400" x-text="dEntry.bead_id || dEntry.comment_id || dEntry.source_id || ''"></span>
                       <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
                     </div>
                     <!-- Line 2: content (enriched title after lazy load, raw CLI output initially) -->

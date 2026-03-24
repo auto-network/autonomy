@@ -178,10 +178,10 @@
 
               <!-- ── Semantic Bash: typed command tiles ───────── -->
               <template x-if="entry.type === 'semantic_bash'">
-                <a :href="entry.source_id ? '/graph/' + entry.source_id : (entry.bead_id ? '/bead/' + entry.bead_id : null)"
+                <a :href="entry.comment_id ? '/graph/' + entry.comment_id : (entry.source_id ? '/graph/' + entry.source_id : (entry.bead_id ? '/bead/' + entry.bead_id : null))"
                    class="sc-tool-card block"
-                   :class="(entry.source_id || entry.bead_id) ? 'cursor-pointer hover:bg-gray-800/80' : ''"
-                   @click.prevent="if (entry.source_id) navigateTo('/graph/' + entry.source_id); else if (entry.bead_id) navigateTo('/bead/' + entry.bead_id);">
+                   :class="(entry.comment_id || entry.source_id || entry.bead_id) ? 'cursor-pointer hover:bg-gray-800/80' : ''"
+                   @click.prevent="if (entry.comment_id) navigateTo('/graph/' + entry.comment_id); else if (entry.source_id) navigateTo('/graph/' + entry.source_id); else if (entry.bead_id) navigateTo('/bead/' + entry.bead_id);">
                   <div class="sc-line1">
                     <span class="sc-chip" :class="{
                       'bg-purple-900 text-purple-300': entry.semantic_type === 'note-created',
@@ -196,7 +196,7 @@
                       'dispatch-approved': 'Dispatch',
                       'state-changed': 'State',
                     }[entry.semantic_type] || entry.semantic_type"></span>
-                    <span class="sc-meta text-gray-400" x-text="entry.bead_id || entry.source_id || ''"></span>
+                    <span class="sc-meta text-gray-400" x-text="entry.bead_id || entry.comment_id || entry.source_id || ''"></span>
                     <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
                   </div>
                   <!-- Line 2: content (enriched title after lazy load, raw CLI output initially) -->
