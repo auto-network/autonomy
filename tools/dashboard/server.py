@@ -483,6 +483,68 @@ def _enrich_dispatch_runs(runs: list[dict]) -> None:
     for run in regular_runs:
         run["librarian_review"] = reviews.get(run["_run_id"])
 
+    # ── Experience report summary ────────────────────────────
+    for run in runs:
+        output_dir = run.get("_output_dir")
+        if output_dir:
+            exp_path = Path(output_dir) / "experience_report.md"
+            try:
+                if exp_path.exists():
+                    lines = exp_path.read_text().strip().split("\n")[:5]
+                    run["experience_summary"] = "\n".join(lines)
+            except OSError:
+                pass
+
+    # ── Validation + pitfall notes (batched graph query) ─────
+    try:
+        from tools.graph.db import GraphDB
+        gdb = GraphDB()
+
+        # Collect bead IDs from regular runs
+        bead_ids = {r["bead_id"] for r in regular_runs if r.get("bead_id")}
+
+        # Batch query: validation notes
+        if bead_ids:
+            val_notes = gdb.list_sources(source_type="note", tags=["validation"], limit=200)
+            val_by_bead: dict[str, dict] = {}
+            for n in val_notes:
+                title = n.get("title") or ""
+                for bid in bead_ids:
+                    if bid in title and bid not in val_by_bead:
+                        val_by_bead[bid] = {"source_id": n["id"][:12], "title": title[:80]}
+            for run in regular_runs:
+                bid = run.get("bead_id")
+                if bid and bid in val_by_bead:
+                    run["validation"] = val_by_bead[bid]
+
+        # Batch query: pitfall notes — single query covering all run time windows
+        earliest_start = min(
+            (r["_started_at"] for r in regular_runs if r.get("_started_at")),
+            default=None,
+        )
+        if earliest_start:
+            pitfall_notes = gdb.list_sources(
+                source_type="note", tags=["pitfall"], since=earliest_start, limit=500,
+            )
+            for run in regular_runs:
+                started = run.get("_started_at")
+                completed = run.get("_completed_at")
+                if not started or not completed:
+                    continue
+                matched = [
+                    p for p in pitfall_notes
+                    if started <= (p.get("created_at") or "") <= completed
+                ]
+                if matched:
+                    run["pitfalls"] = [
+                        {"id": p["id"][:12], "title": (p.get("title") or "")[:60]}
+                        for p in matched
+                    ]
+
+        gdb.close()
+    except Exception:
+        pass
+
 
 async def api_dispatch_runs(request):
     """List dispatch runs from SQLite (includes RUNNING rows)."""
@@ -551,6 +613,8 @@ async def api_dispatch_runs(request):
             "_run_id": row.get("id", ""),
             "_output_dir": row.get("output_dir") or "",
             "_librarian_type": row.get("librarian_type"),
+            "_started_at": row.get("started_at") or "",
+            "_completed_at": row.get("completed_at") or "",
         })
 
     await asyncio.to_thread(_enrich_dispatch_runs, runs)
@@ -559,6 +623,8 @@ async def api_dispatch_runs(request):
         run.pop("_run_id", None)
         run.pop("_output_dir", None)
         run.pop("_librarian_type", None)
+        run.pop("_started_at", None)
+        run.pop("_completed_at", None)
 
     return JSONResponse(runs)
 
