@@ -301,13 +301,20 @@
             });
           }
 
-          // Scroll to highlighted comment
-          if (this.highlightId) {
-            this.$nextTick(() => {
-              const el = document.querySelector('[data-comment-highlight]');
-              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            });
-          }
+          // Scroll to highlighted comment (from ?highlight= or #comment-)
+          this.$nextTick(() => {
+            var hash = window.location.hash;
+            var highlight = new URLSearchParams(window.location.search).get('highlight');
+            var target = hash ? hash.slice(1) : (highlight ? 'comment-' + highlight : null);
+            if (target) {
+              var el = document.getElementById(target);
+              if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                el.classList.add('ring-2', 'ring-indigo-500', 'bg-indigo-900/20', 'rounded');
+                setTimeout(() => el.classList.remove('ring-2', 'ring-indigo-500', 'bg-indigo-900/20'), 5000);
+              }
+            }
+          });
         } catch (e) {
           this.errorMsg = e.message || 'Failed to load source';
           this.state = 'error';
