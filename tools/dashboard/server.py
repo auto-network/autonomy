@@ -3703,6 +3703,7 @@ async def api_graph_note(request):
 
         if rc != 0:
             return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+        _checkpoint_graph()
         return JSONResponse({"ok": True, "output": stdout})
     else:
         body = await request.json()
@@ -3727,6 +3728,7 @@ async def api_graph_note(request):
 
         if rc != 0:
             return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+        _checkpoint_graph()
         return JSONResponse({"ok": True, "output": stdout})
 
 
@@ -3783,6 +3785,7 @@ async def api_graph_note_update(request):
 
         if rc != 0:
             return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+        _checkpoint_graph()
         return JSONResponse({"ok": True, "output": stdout})
     else:
         body = await request.json()
@@ -3806,6 +3809,7 @@ async def api_graph_note_update(request):
 
         if rc != 0:
             return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+        _checkpoint_graph()
         return JSONResponse({"ok": True, "output": stdout})
 
 
@@ -3832,6 +3836,7 @@ async def api_graph_comment(request):
 
     if rc != 0:
         return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    _checkpoint_graph()
     return JSONResponse({"ok": True, "output": stdout})
 
 
@@ -3992,6 +3997,7 @@ async def api_graph_attach(request):
 
     if rc != 0:
         return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    _checkpoint_graph()
     return JSONResponse({"ok": True, "output": stdout})
 
 
@@ -4072,6 +4078,21 @@ def _graph_db_path() -> str | None:
     """Resolve graph DB path: GRAPH_DB env var, then default."""
     import os
     return os.environ.get("GRAPH_DB") or None
+
+
+def _checkpoint_graph():
+    """Flush WAL to main DB so immutable=1 readers see current data."""
+    from tools.graph.db import GraphDB
+    try:
+        db_args = {}
+        p = _graph_db_path()
+        if p:
+            db_args["db_path"] = p
+        db = GraphDB(**db_args)
+        db.conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        db.close()
+    except Exception:
+        pass  # best-effort
 
 
 async def api_graph_stream(request):
@@ -4198,6 +4219,7 @@ async def api_graph_collab_tag(request):
         msg = f"  \u2713 Tagged {source['id'][:12]} \"{title}\" as collab"
     else:
         msg = f"  Already tagged: {source['id'][:12]} \"{title}\""
+    _checkpoint_graph()
     return JSONResponse({"ok": True, "output": msg})
 
 
@@ -4246,6 +4268,7 @@ async def api_graph_thought(request):
     finally:
         db.close()
     msg = f"  \u2713 Captured: {capture_id[:11]}"
+    _checkpoint_graph()
     return JSONResponse({"ok": True, "output": msg, "id": capture_id})
 
 
@@ -4275,6 +4298,7 @@ async def api_graph_thread(request):
     finally:
         db.close()
     msg = f"  \u2713 Thread: {thread_id[:11]} \"{title}\" [active, P{priority}]"
+    _checkpoint_graph()
     return JSONResponse({"ok": True, "output": msg, "id": thread_id})
 
 
@@ -4355,6 +4379,7 @@ async def api_graph_collab_tag_describe(request):
     finally:
         db.close()
     msg = f"  \u2713 Tag '{tag_name}': {description[:60]}"
+    _checkpoint_graph()
     return JSONResponse({"ok": True, "output": msg})
 
 
