@@ -40,6 +40,8 @@
       isRunning: false,
       approving: false,
       runDir: null,
+      dispatchRun: null,
+      experienceReport: null,
 
       formatTs(ts) {
         return _formatTs(ts);
@@ -138,8 +140,24 @@
             const beadRun = runsList.find(r => r.bead_id === this.id);
             if (beadRun) {
               this.runDir = beadRun.dir;
+              this.dispatchRun = beadRun;
               if (this.isRunning && window.showLivePanel) {
                 showLivePanel(beadRun.dir);
+              }
+              // Fetch experience report if available
+              if (beadRun.has_experience_report) {
+                try {
+                  const searchRes = await fetch('/api/search?q=' + encodeURIComponent(beadRun.dir) + '&limit=3');
+                  const hits = await searchRes.json();
+                  const expReport = hits.find(h => h.source_title && h.source_title.includes('Experience Report'));
+                  if (expReport) {
+                    this.experienceReport = {
+                      source_id: expReport.source_id,
+                      title: expReport.source_title,
+                      preview: (expReport.content || '').slice(0, 200),
+                    };
+                  }
+                } catch (_) {}
               }
             }
           } catch (_) {}

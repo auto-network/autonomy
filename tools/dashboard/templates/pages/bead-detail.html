@@ -61,6 +61,50 @@
         </section>
       </template>
 
+      <!-- Dispatch History -->
+      <template x-if="dispatchRun && dispatchRun.status === 'DONE'">
+        <section aria-label="Dispatch History" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Dispatch History</h2>
+          <div class="p-3 bg-gray-800 rounded border border-gray-700">
+            <div class="flex items-center gap-3 flex-wrap text-sm mb-2">
+              <span class="text-green-400 font-semibold" x-text="dispatchRun.status"></span>
+              <template x-if="dispatchRun.duration_secs">
+                <span class="text-gray-400" x-text="Math.floor(dispatchRun.duration_secs / 60) + 'm' + (dispatchRun.duration_secs % 60) + 's'"></span>
+              </template>
+              <template x-if="dispatchRun.commit_hash">
+                <span class="font-mono text-xs text-gray-500" x-text="dispatchRun.commit_hash.slice(0, 7)"></span>
+              </template>
+            </div>
+            <template x-if="dispatchRun.files_changed">
+              <div class="text-xs text-gray-500 mb-2"
+                   x-text="'+' + (dispatchRun.lines_added || 0) + ' -' + (dispatchRun.lines_removed || 0) + ' across ' + dispatchRun.files_changed + ' files'"></div>
+            </template>
+            <template x-if="dispatchRun.decision && dispatchRun.decision.scores">
+              <div class="flex gap-4 text-xs">
+                <template x-for="[k,v] in Object.entries(dispatchRun.decision.scores)" :key="k">
+                  <span class="text-gray-400"><span class="text-gray-500" x-text="k"></span> <span class="text-gray-200 font-semibold" x-text="v"></span></span>
+                </template>
+              </div>
+            </template>
+            <template x-if="dispatchRun.decision && dispatchRun.decision.reason">
+              <div class="text-sm text-gray-400 mt-2" x-text="dispatchRun.decision.reason"></div>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <!-- Experience Report -->
+      <template x-if="experienceReport">
+        <section aria-label="Experience Report" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Experience Report</h2>
+          <a :href="'/graph/' + experienceReport.source_id"
+             class="block p-3 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline">
+            <div class="text-sm text-gray-200 mb-1" x-text="experienceReport.title"></div>
+            <div class="text-xs text-gray-500" x-text="experienceReport.preview + '...'"></div>
+          </a>
+        </section>
+      </template>
+
       <!-- Acceptance Criteria -->
       <template x-if="bead.acceptance_criteria">
         <section aria-label="Acceptance Criteria" class="mb-6">
@@ -151,21 +195,26 @@
         </section>
       </template>
 
-      <!-- Similar Beads -->
+      <!-- Children -->
       <template x-if="primer && primer.related_beads && primer.related_beads.length > 0">
-        <section aria-label="Similar Beads" class="mb-6">
-          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Similar Beads</h2>
+        <section aria-label="Children" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Children</h2>
           <div class="space-y-1">
             <template x-for="rb in primer.related_beads" :key="rb.bead_id || rb.id">
               <a :href="'/bead/' + (rb.bead_id || rb.id)"
                  :data-bead-id="rb.bead_id || rb.id"
-                 class="flex items-center gap-2 p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline">
-                <span class="badge" :class="'badge-' + (rb.status || 'open')" x-text="rb.status || 'open'"></span>
-                <span class="ft-badge" :class="'badge-p' + rb.priority" x-text="'P' + rb.priority"></span>
-                <span class="font-mono text-xs text-gray-500" x-text="rb.bead_id || rb.id"></span>
-                <span class="text-sm text-gray-200 flex-1" x-text="rb.title"></span>
-                <template x-if="rb.similarity != null">
-                  <span class="text-xs text-gray-500" x-text="Math.round(rb.similarity * 100) + '% similar'"></span>
+                 class="block p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline">
+                <div class="flex items-center gap-2">
+                  <span class="badge" :class="'badge-' + (rb.status || 'open')" x-text="rb.status || 'open'"></span>
+                  <span class="ft-badge" :class="'badge-p' + rb.priority" x-text="'P' + rb.priority"></span>
+                  <span class="font-mono text-xs text-gray-500" x-text="rb.bead_id || rb.id"></span>
+                  <span class="text-sm text-gray-200 flex-1" x-text="rb.title"></span>
+                  <template x-if="rb.similarity != null">
+                    <span class="text-xs text-gray-500" x-text="Math.round(rb.similarity * 100) + '% similar'"></span>
+                  </template>
+                </div>
+                <template x-if="rb.description">
+                  <div class="text-xs text-gray-500 mt-1 truncate" x-text="rb.description.slice(0, 120)"></div>
                 </template>
               </a>
             </template>
