@@ -1661,17 +1661,6 @@ def _parse_crosstalk_send(command: str, timestamp: str) -> dict | None:
     }
 
 
-def _parse_graph_note_cmd(command: str, timestamp: str) -> dict | None:
-    """Detect graph note creation. Source ID comes from tool_result output."""
-    return {
-        "type": "semantic_bash",
-        "semantic_type": "note-created",
-        "role": "assistant",
-        "content": "Created graph note",
-        "timestamp": timestamp,
-    }
-
-
 def _parse_graph_comment_cmd(command: str, timestamp: str) -> dict | None:
     m = re.search(r'graph comment\s+(\S+)', command)
     if not m:
@@ -1682,19 +1671,6 @@ def _parse_graph_comment_cmd(command: str, timestamp: str) -> dict | None:
         "role": "assistant",
         "source_id": m.group(1),
         "content": "Added comment",
-        "timestamp": timestamp,
-    }
-
-
-def _parse_graph_thought_cmd(command: str, timestamp: str) -> dict | None:
-    m = re.search(r'graph thought\s+"([^"]+)"', command)
-    text = m.group(1) if m else "Captured thought"
-    return {
-        "type": "semantic_bash",
-        "semantic_type": "thought-captured",
-        "role": "assistant",
-        "content": text[:100],
-        "needs_result": True,
         "timestamp": timestamp,
     }
 
@@ -1957,24 +1933,10 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                         if ct_entry:
                             blocks.append(ct_entry)
                             continue
-                    # Semantic Bash: graph note creation
-                    if "graph note" in cmd and "graph note update" not in cmd:
-                        parsed = _parse_graph_note_cmd(cmd, timestamp)
-                        if parsed:
-                            parsed["_tool_id"] = block.get("id", "")
-                            blocks.append(parsed)
-                            continue
                     # Semantic Bash: graph comment
                     if "graph comment" in cmd and "integrate" not in cmd:
                         parsed = _parse_graph_comment_cmd(cmd, timestamp)
                         if parsed:
-                            blocks.append(parsed)
-                            continue
-                    # Semantic Bash: graph thought
-                    if "graph thought" in cmd:
-                        parsed = _parse_graph_thought_cmd(cmd, timestamp)
-                        if parsed:
-                            parsed["_tool_id"] = block.get("id", "")
                             blocks.append(parsed)
                             continue
                     # Semantic Bash: graph dispatch approve
@@ -2038,17 +2000,12 @@ def _parse_jsonl_entry(line: str) -> dict | None:
     return None
 
 
-_GRAPH_NOTE_ID_RE = re.compile(r"src:([0-9a-f]{8}-[0-9a-f]{3})")
-_GRAPH_CAPTURED_ID_RE = re.compile(r"Captured:\s*([0-9a-f]{8}-[0-9a-f]{2,3})")
-
 
 def _enrich_entries(entries: list[dict], session_dir: Path | None = None) -> None:
-    """Post-process parsed entries: pair tool_results with tool_uses.
+    """Post-process parsed entries: enrich Agent tool_results with subagent info.
 
-    Enriches semantic_bash entries that have needs_result=True with source_id
-    extracted from the matching tool_result.  Also enriches Agent tool_results
-    with subagent tool call counts by reading the actual subagent JSONL files.
-    Mutates entries in place.
+    Enriches Agent tool_results with subagent tool call counts by reading the
+    actual subagent JSONL files.  Mutates entries in place.
 
     Args:
         entries: Parsed JSONL entries (tool_use and tool_result dicts).
@@ -2056,26 +2013,6 @@ def _enrich_entries(entries: list[dict], session_dir: Path | None = None) -> Non
             When provided, subagent files are discovered at
             ``session_dir/{session_id}/subagents/*.meta.json``.
     """
-    # ── Pair semantic_bash entries (needs_result) with their tool_result ──
-    pending: dict[str, dict] = {}  # _tool_id -> semantic_bash entry
-    for entry in entries:
-        tid = entry.get("_tool_id", "")
-        if tid and entry.get("type") == "semantic_bash" and entry.get("needs_result"):
-            pending[tid] = entry
-        elif entry.get("type") == "tool_result" and entry.get("tool_id") in pending:
-            sem = pending.pop(entry["tool_id"])
-            content = entry.get("content", "")
-            if sem["semantic_type"] == "note-created":
-                m = _GRAPH_NOTE_ID_RE.search(content)
-                if m:
-                    sem["source_id"] = m.group(1)
-            elif sem["semantic_type"] == "thought-captured":
-                m = _GRAPH_CAPTURED_ID_RE.search(content)
-                if m:
-                    sem["source_id"] = m.group(1)
-            sem.pop("needs_result", None)
-            sem.pop("_tool_id", None)
-
     if session_dir is None:
         return
 
