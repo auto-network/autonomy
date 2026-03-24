@@ -66,8 +66,8 @@ class GraphDB:
             self.conn.execute("PRAGMA foreign_keys = ON")
             self._init_schema()
         except (sqlite3.OperationalError, OSError):
-            # Read-only mount — open in immutable mode for read commands
-            self.conn = sqlite3.connect(f"file:{self.db_path}?immutable=1", uri=True)
+            # Read-only mount — open in read-only mode (WAL-visible)
+            self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
             self.conn.row_factory = sqlite3.Row
             self.read_only = True
 
