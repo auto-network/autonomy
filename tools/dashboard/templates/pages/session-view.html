@@ -122,6 +122,7 @@
                      dEntry.type === 'thinking' ? 'sc-entry-thinking' : '',
                      dEntry.type === 'system' ? 'sc-entry-system' : '',
                      dEntry.type === 'crosstalk' ? 'sc-entry-crosstalk' : '',
+                     dEntry.type === 'crosstalk' && dEntry.direction === 'sent' ? 'sc-entry-crosstalk-sent' : '',
                    ]">
 
                 <!-- ── User message ────────────────────────────── -->
@@ -209,13 +210,16 @@
                 <template x-if="dEntry.type === 'crosstalk'">
                   <div>
                     <div class="flex items-center gap-2 mb-1">
-                      <span class="sc-ct-label">CROSSTALK</span>
-                      <template x-if="dEntry.source_id">
+                      <span class="sc-ct-label" x-text="dEntry.direction === 'sent' ? 'SENT' : 'CROSSTALK'"></span>
+                      <template x-if="dEntry.direction === 'sent'">
+                        <span class="sc-ct-sender" x-text="'→ ' + dEntry.target"></span>
+                      </template>
+                      <template x-if="dEntry.direction !== 'sent' && dEntry.source_id">
                         <a class="sc-ct-sender"
                            :href="'/graph/' + dEntry.source_id"
                            x-text="dEntry.sender_label || dEntry.sender"></a>
                       </template>
-                      <template x-if="!dEntry.source_id">
+                      <template x-if="dEntry.direction !== 'sent' && !dEntry.source_id">
                         <span class="sc-ct-sender"
                               x-text="dEntry.sender_label || dEntry.sender"></span>
                       </template>
