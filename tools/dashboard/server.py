@@ -3636,6 +3636,7 @@ _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
 _WATCHER_HELPERS = [
     "collect_dispatch_data", "get_bead_counts", "count_active_sessions",
     "count_terminals", "count_today_done", "get_dispatcher_state", "get_pinned_beads",
+    "count_streams",
 ]
 _watcher_errors: dict[str, str] = {}  # helper_name -> last error string
 
@@ -3750,6 +3751,24 @@ def _count_today_done() -> int:
         conn.close()
 
 
+def _count_streams() -> int:
+    """Count distinct tags across all notes (active stream count)."""
+    from tools.graph.db import GraphDB
+
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        row = db.conn.execute(
+            "SELECT COUNT(DISTINCT value) AS cnt FROM sources, json_each(json_extract(metadata, '$.tags')) WHERE type = 'note'"
+        ).fetchone()
+        return row["cnt"] if row else 0
+    finally:
+        db.close()
+
+
 async def _dispatch_watcher():
     """Background task: poll dispatch state and broadcast to SSE topics.
 
@@ -3766,6 +3785,7 @@ async def _dispatch_watcher():
                 asyncio.to_thread(_count_today_done),
                 asyncio.to_thread(_get_dispatcher_state),
                 asyncio.to_thread(dao_beads.get_beads_by_label, "pinned"),
+                asyncio.to_thread(_count_streams),
                 return_exceptions=True,
             )
 
@@ -3789,6 +3809,7 @@ async def _dispatch_watcher():
             today_done = results[4] if not isinstance(results[4], BaseException) else 0
             dispatcher_state = results[5] if not isinstance(results[5], BaseException) else {"paused": False, "reason": None}
             pinned_beads = results[6] if not isinstance(results[6], BaseException) else []
+            stream_count = results[7] if not isinstance(results[7], BaseException) else 0
 
             nav_data = {
                 "open_beads": counts.get("open_count", 0),
@@ -3799,6 +3820,7 @@ async def _dispatch_watcher():
                 "terminal_count": terminal_count,
                 "today_done": today_done,
                 "pinned": pinned_beads,
+                "stream_count": stream_count,
             }
             await event_bus.broadcast("dispatch", dispatch_data)
             await event_bus.broadcast("nav", nav_data)
