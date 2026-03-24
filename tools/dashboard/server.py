@@ -3520,6 +3520,14 @@ async def api_dao_recent_sessions(request):
     sessions = await asyncio.to_thread(dao_sessions.get_recent_sessions, limit)
     return JSONResponse(sessions)
 
+async def page_streams(request):
+    """Serve the streams landing page (full HTML shell for direct navigation)."""
+    return HTMLResponse(_load_template("base.html"))
+
+async def page_streams_fragment(request):
+    """Return the streams landing page as an HTML fragment for SPA injection."""
+    return templates.TemplateResponse(request, "pages/streams.html")
+
 async def page_stream(request):
     """Serve the stream page (full HTML shell for direct navigation)."""
     return HTMLResponse(_load_template("base.html"))
@@ -4313,7 +4321,7 @@ async def api_graph_stream(request):
 
 
 async def api_graph_streams(request):
-    """List active tag streams with note counts."""
+    """List active tag streams with note counts, descriptions, and last_active."""
     from tools.graph.db import GraphDB
 
     db_args = {}
@@ -4323,24 +4331,38 @@ async def api_graph_streams(request):
     db = GraphDB(**db_args)
     try:
         rows = db.conn.execute(
-            """SELECT metadata FROM sources
+            """SELECT metadata, created_at FROM sources
                WHERE type = 'note' AND json_extract(metadata, '$.tags') IS NOT NULL"""
         ).fetchall()
+        # Load tag descriptions (tags table from auto-dbdg)
+        tag_desc: dict[str, str] = {}
+        try:
+            for r2 in db.conn.execute("SELECT name, description FROM tags"):
+                tag_desc[r2["name"]] = r2["description"] or ""
+        except Exception:
+            pass  # tags table may not exist in older DBs
     finally:
         db.close()
 
     tag_counts: dict[str, int] = {}
+    tag_last: dict[str, str] = {}
     for r in rows:
         try:
             meta = json.loads(r["metadata"]) if isinstance(r["metadata"], str) else (r["metadata"] or {})
+            created = r["created_at"] or ""
             for t in meta.get("tags", []):
                 if isinstance(t, str):
                     tag_counts[t] = tag_counts.get(t, 0) + 1
+                    if created > tag_last.get(t, ""):
+                        tag_last[t] = created
         except (json.JSONDecodeError, TypeError):
             continue
 
     streams = sorted(tag_counts.items(), key=lambda x: -x[1])[:50]
-    return JSONResponse({"streams": [{"tag": t, "count": c} for t, c in streams]})
+    return JSONResponse({"streams": [
+        {"tag": t, "count": c, "description": tag_desc.get(t, ""), "last_active": tag_last.get(t, "")}
+        for t, c in streams
+    ]})
 
 
 async def api_graph_collab_list(request):
@@ -4580,6 +4602,8 @@ routes = [
     Route("/pages/bead", page_bead_fragment),
     Route("/pages/timeline", page_timeline_fragment),
     Route("/pages/trace", page_trace_fragment),
+    Route("/streams", page_streams),
+    Route("/pages/streams", page_streams_fragment),
     Route("/stream/{tag}", page_stream),
     Route("/pages/stream", page_stream_fragment),
     Route("/graph/{id}", page_source),

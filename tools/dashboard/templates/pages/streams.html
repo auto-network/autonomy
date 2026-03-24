@@ -1,0 +1,33 @@
+<div x-data="streamsPage" class="pb-safe">
+  <h1 class="text-lg font-semibold text-emerald-400 mb-4">Streams</h1>
+
+  <template x-if="!loaded">
+    <div class="text-gray-500 text-sm">Loading streams...</div>
+  </template>
+
+  <template x-if="loaded && streams.length > 0">
+    <div class="flex flex-col gap-1.5">
+      <template x-for="s in streams" :key="s.tag">
+        <a :href="'/stream/' + encodeURIComponent(s.tag)"
+           class="block rounded-lg overflow-clip">
+          <div class="flex items-center gap-3 px-3 py-2.5 bg-gray-800 border-l-4 border-emerald-600 hover:bg-gray-750 transition-colors">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-semibold text-emerald-400" x-text="'#' + s.tag"></span>
+                <span class="text-xs font-mono" style="color:#4b5e73" x-text="s.count + ' notes'"></span>
+                <span class="text-xs ml-auto" style="color:#475569" x-text="timeAgo(s.last_active)"></span>
+              </div>
+              <template x-if="s.description">
+                <div class="text-xs mt-0.5 truncate" style="color:#6b7280" x-text="s.description"></div>
+              </template>
+            </div>
+          </div>
+        </a>
+      </template>
+    </div>
+  </template>
+
+  <template x-if="loaded && streams.length === 0">
+    <div class="text-gray-500 text-sm">No streams found</div>
+  </template>
+</div>
