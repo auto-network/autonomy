@@ -116,6 +116,28 @@ def create_experiment(
         conn.close()
 
 
+def resolve_experiment_prefix(partial_id: str) -> tuple[str | None, list[str] | None]:
+    """Resolve a partial experiment UUID to a full UUID via prefix match.
+
+    Returns (full_id, None) on unique match, (None, [matches]) on ambiguous,
+    (None, None) on no match. Full UUIDs (>=36 chars) pass through unchanged.
+    """
+    if len(partial_id) >= 36:
+        return partial_id, None
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id FROM experiments WHERE id LIKE ?", (f"{partial_id}%",)
+        ).fetchall()
+        if len(rows) == 1:
+            return rows[0]["id"], None
+        if len(rows) > 1:
+            return None, [r["id"] for r in rows]
+        return None, None
+    finally:
+        conn.close()
+
+
 def get_experiment(exp_id: str) -> dict | None:
     """Get experiment with its variants, series info, and sibling_ids."""
     conn = _get_conn()

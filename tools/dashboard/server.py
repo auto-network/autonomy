@@ -45,7 +45,7 @@ from agents.dispatch_db import (
 from agents.session_launcher import launch_session
 from agents.experiments_db import (
     create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
-    dismiss_experiment,
+    dismiss_experiment, resolve_experiment_prefix,
 )
 logging.basicConfig(
     level=logging.INFO,
@@ -3321,6 +3321,18 @@ async def page_session_view_fragment(request):
 
 # ── Experiments API ────────────────────────────────────────────
 
+def _resolve_exp_id_or_error(raw_id: str):
+    """Resolve partial experiment UUID. Returns (full_id, None) or (None, JSONResponse)."""
+    full_id, matches = resolve_experiment_prefix(raw_id)
+    if full_id:
+        return full_id, None
+    if matches:
+        return None, JSONResponse(
+            {"error": "ambiguous prefix", "matches": matches}, status_code=400
+        )
+    return None, JSONResponse({"error": "not found"}, status_code=404)
+
+
 async def api_experiments_create(request):
     """Create a new experiment. Returns {id: uuid}."""
     body = await request.json()
@@ -3363,7 +3375,9 @@ async def api_experiments_create(request):
 
 async def api_experiments_poll(request):
     """Poll experiment status. 202 while pending, 200 with results when completed."""
-    exp_id = request.path_params["id"]
+    exp_id, err = _resolve_exp_id_or_error(request.path_params["id"])
+    if err:
+        return err
     exp = await asyncio.to_thread(get_experiment, exp_id)
     if not exp:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -3386,7 +3400,9 @@ async def api_experiments_poll(request):
 
 async def api_experiments_get(request):
     """Get full experiment data for gallery rendering."""
-    exp_id = request.path_params["id"]
+    exp_id, err = _resolve_exp_id_or_error(request.path_params["id"])
+    if err:
+        return err
     exp = await asyncio.to_thread(get_experiment, exp_id)
     if not exp:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -3395,7 +3411,9 @@ async def api_experiments_get(request):
 
 async def api_experiments_submit(request):
     """Submit ranking results."""
-    exp_id = request.path_params["id"]
+    exp_id, err = _resolve_exp_id_or_error(request.path_params["id"])
+    if err:
+        return err
     body = await request.json()
     selections = body.get("selections", [])
     ok = await asyncio.to_thread(submit_results, exp_id, selections)
@@ -3412,7 +3430,9 @@ async def api_experiments_pending(request):
 
 async def api_experiments_dismiss(request):
     """Dismiss an experiment and all pending siblings in its series."""
-    exp_id = request.path_params["id"]
+    exp_id, err = _resolve_exp_id_or_error(request.path_params["id"])
+    if err:
+        return err
     ok = await asyncio.to_thread(dismiss_experiment, exp_id)
     if not ok:
         return JSONResponse({"error": "experiment not found"}, status_code=404)
@@ -3449,7 +3469,9 @@ async def api_experiments_screenshot(request):
     2. Send bare image path as first message (triggers isMeta=True image injection)
     3. 200ms later, send follow-up text so agent knows to act on the image
     """
-    exp_id = request.path_params["id"]
+    exp_id, err = _resolve_exp_id_or_error(request.path_params["id"])
+    if err:
+        return err
     content_type = request.headers.get("content-type", "")
     if not content_type.startswith("image/"):
         return JSONResponse({"error": "content-type must be image/*"}, status_code=400)
