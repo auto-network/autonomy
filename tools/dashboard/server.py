@@ -3247,6 +3247,7 @@ async def api_experiments_create(request):
     fixture = body.get("fixture")  # JSON string or dict
     variants = body.get("variants", [])
     series_id = body.get("series_id")  # optional — links experiment into a series
+    alpine = bool(body.get("alpine"))  # inject Alpine.js runtime in iframe
 
     if not variants:
         return JSONResponse({"error": "At least one variant required"}, status_code=400)
@@ -3262,6 +3263,7 @@ async def api_experiments_create(request):
         fixture=fixture,
         variants=variants,
         series_id=series_id,
+        alpine=alpine,
     )
 
     # Broadcast to SSE so gallery pages auto-update without refresh

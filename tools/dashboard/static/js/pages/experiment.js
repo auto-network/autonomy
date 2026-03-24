@@ -403,6 +403,7 @@
         const variants = this.variants;
         if (!variants.length) return;
 
+        const isAlpine = !!exp.alpine;
         const _parentCSS = document.querySelector('style')?.textContent || '';
         let _loadCount = 0;
 
@@ -411,21 +412,27 @@
           if (!iframe) return;
           const doc = iframe.contentDocument || iframe.contentWindow.document;
 
-          // Wrap inline <script> bodies in a load listener so they execute after
-          // Tailwind CDN has loaded and set up its MutationObserver.
-          const _safeHtml = (v.html || '').replace(
+          // For Alpine experiments: don't wrap scripts in load listener —
+          // Alpine needs to run its init before DOM is parsed.
+          const html = isAlpine ? (v.html || '') : (v.html || '').replace(
             /<script(?![^>]*\bsrc\b)([^>]*)>([\s\S]*?)<\/script>/gi,
             (_, attrs, body) => `<script${attrs}>window.addEventListener("load",function(){${body}});<\/script>`
           );
+
+          const alpineHead = isAlpine ? `
+      <link rel="stylesheet" href="/static/css/session-cards.css">
+      <script>window.FIXTURE = ${exp.fixture || '{}'};<\/script>
+      <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>`
+            : `<script>window.FIXTURE = ${exp.fixture || '{}'};<\/script>`;
+
           doc.open();
           doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="/static/tailwind.css">
 <style>${_parentCSS}</style>
 <style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;}</style>
-</head><body>
-<script>window.FIXTURE = ${exp.fixture || '{}'};<\/script>
-${_safeHtml}
-</body></html>`);
+${alpineHead}
+</head><body>${html}</body></html>`);
           doc.close();
 
           const resizeIframe = () => {
