@@ -42,6 +42,7 @@ window.getSessionStore = function(sessionId) {
       sizeMB: '0',
       lastActivity: 0,
       lastMessage: '',
+      linked: false,
       toolMap: {},       // tool_id -> { tool_name }
       resultMap: {},     // tool_id -> tool_result entry
       loaded: false,
@@ -136,6 +137,7 @@ window.ensureSessionMessages = function() {
       store.startedAt = s.started_at || 0;
       if (s.last_activity) store.lastActivity = s.last_activity;
       if (s.last_message !== undefined) store.lastMessage = s.last_message;
+      store.linked = !!s.linked;
     }
     // Mark removed sessions as dead
     var allSessions = Alpine.store('sessions');

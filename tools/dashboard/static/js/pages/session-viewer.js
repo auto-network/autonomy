@@ -629,6 +629,8 @@
               });
               this._tmuxSession = this.selectedTmux;
               ss.tmuxSession = this.selectedTmux;
+              ss.linked = true;
+              this._linked = true;
               this.linkState = 'confirmed';
               return;
             }
@@ -712,6 +714,7 @@
         this._tmuxSession = params.get('tmux') || '';
 
         var store = window.getSessionStore(this.sessionId);
+        this._linked = store.linked || false;
 
         if (store.loaded) {
           // Instant render from cache — zero network
@@ -831,6 +834,13 @@
             return s ? s.label : '';
           },
           function(val) { self._label = val || ''; }
+        ));
+        this._storeCleanups.push(this.$watch(
+          function() {
+            var s = Alpine.store('sessions')[sid];
+            return s ? s.linked : false;
+          },
+          function(val) { self._linked = val; }
         ));
 
         // Clipboard paste support — attach pasted files
