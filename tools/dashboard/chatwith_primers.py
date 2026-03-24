@@ -11,7 +11,7 @@ Pattern mirrors tools/graph/primer.py:collect_primer_data():
 
 Usage:
     result = get_primer("experiment", "some-uuid")
-    # result = {"primer_text": "...", "session_name": "chatwith-..."}
+    # result = {"primer_text": "..."}
 """
 
 from __future__ import annotations
@@ -271,20 +271,12 @@ def _format_experiment_primer(data: dict) -> str:
 def build_experiment_primer(experiment_id: str) -> dict:
     """Build a Chat With primer for the experiment/design-studio page.
 
-    Returns {"primer_text": str, "session_name": str}.
+    Returns {"primer_text": str}.
     Raises ValueError if the experiment is not found.
-
-    Session name uses series_id when available so all iterations in a
-    series share one persistent Chat With session.
     """
     data = _collect_experiment_data(experiment_id)
     primer_text = _format_experiment_primer(data)
-    # One session per series — use series_id as the session key when available
-    session_context = data["series_id"] or experiment_id
-    return {
-        "primer_text": primer_text,
-        "session_name": f"chatwith-{session_context}",
-    }
+    return {"primer_text": primer_text}
 
 
 # ── Registry ─────────────────────────────────────────────────────
@@ -297,7 +289,7 @@ _BUILDERS = {
 def get_primer(page_type: str, context_id: str) -> dict:
     """Route to the correct primer builder for page_type.
 
-    Returns {"primer_text": str, "session_name": str}.
+    Returns {"primer_text": str}.
     Raises ValueError for unknown page_type or missing context.
     """
     builder = _BUILDERS.get(page_type)
