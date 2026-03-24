@@ -58,7 +58,28 @@
     return 'recency-red';
   }
 
+  // Derive role from explicit field or label patterns
+  function _deriveRole(s) {
+    if (s.role) return s.role;
+    var label = (s.label || '').toLowerCase();
+    if (label.indexOf('coordinator') !== -1) return 'coordinator';
+    if (label.indexOf('reviewer') !== -1 || label.indexOf('review') !== -1) return 'reviewer';
+    if (label.indexOf('builder') !== -1 || label.indexOf('build') !== -1) return 'builder';
+    if (label.indexOf('designer') !== -1 || label.indexOf('design') !== -1) return 'designer';
+    return '';
+  }
+
+  var _roleBadgeMap = {
+    coordinator: 'CO', reviewer: 'RV', builder: 'BL', designer: 'DS',
+  };
+  var _roleClsMap = {
+    coordinator: 'sc-role-co', reviewer: 'sc-role-rv',
+    builder: 'sc-role-bl', designer: 'sc-role-ds',
+  };
+
   function _mapActive(s) {
+    var role = _deriveRole(s);
+    var isHost = s.type === 'host';
     return {
       ...s,
       _createdStr: _formatTimestamp(s.created_at),
@@ -67,10 +88,28 @@
       _ctxStr: _formatCtx(s.context_tokens),
       _ctxWarn: s.context_tokens > 700000,
       _recencyColor: _recencyColor(s.last_activity),
+      _roleBadge: isHost ? 'HOST' : (_roleBadgeMap[role] || ''),
+      _roleCls: isHost ? 'sc-role-host' : (_roleClsMap[role] || ''),
     };
   }
 
+  // --- Zoom level persistence ---
+  var _savedZoom = localStorage.getItem('sessionZoom') || 'normal';
+  function _applyZoom(level) {
+    document.body.classList.remove('zoom-compact', 'zoom-normal', 'zoom-expanded');
+    document.body.classList.add('zoom-' + level);
+  }
+  _applyZoom(_savedZoom);
+
+  // Expose setZoom globally so template buttons can call it
+  window.setZoom = function(level) {
+    localStorage.setItem('sessionZoom', level);
+    _applyZoom(level);
+    Alpine.store('sessionZoom', level);
+  };
+
   document.addEventListener('alpine:init', () => {
+    Alpine.store('sessionZoom', _savedZoom);
     Alpine.data('sessionsPage', () => ({
       interactive: [],
       recent: [],
