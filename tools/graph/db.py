@@ -370,7 +370,7 @@ class GraphDB:
 
     # ── Search ───────────────────────────────────────────────
 
-    def search(self, query: str, limit: int = 20, project: str | None = None, or_mode: bool = False) -> list[dict]:
+    def search(self, query: str, limit: int = 20, project: str | None = None, or_mode: bool = False, tag: str | None = None) -> list[dict]:
         """Full-text search across thoughts and derivations. Optionally filter by project.
 
         If *query* looks like a hex source ID (6+ hex chars), resolves it
@@ -378,71 +378,77 @@ class GraphDB:
         before falling back to FTS for content mentions.
         """
         if _is_source_id(query):
-            return self._search_source_id(query.strip(), limit=limit, project=project)
+            return self._search_source_id(query.strip(), limit=limit, project=project, tag=tag)
 
         results = []
         fts_query = _sanitize_fts_query(query, or_mode=or_mode)
 
+        tag_clause = ""
+        tag_params: list[str] = []
+        if tag:
+            tag_clause = " AND json_extract(s.metadata, '$.tags') LIKE ?"
+            tag_params = [f'%"{tag}"%']
+
         if project:
             # Project-scoped search
             rows = self.conn.execute(
-                """SELECT t.id, t.content, t.turn_number, t.tags, t.source_id,
+                f"""SELECT t.id, t.content, t.turn_number, t.tags, t.source_id,
                           s.title as source_title, s.platform, s.project,
                           'thought' as result_type,
                           rank
                    FROM thoughts_fts fts
                    JOIN thoughts t ON t.rowid = fts.rowid
                    JOIN sources s ON s.id = t.source_id
-                   WHERE thoughts_fts MATCH ? AND s.project = ?
+                   WHERE thoughts_fts MATCH ? AND s.project = ?{tag_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, project, limit),
+                (fts_query, project, *tag_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
             rows = self.conn.execute(
-                """SELECT d.id, d.content, d.turn_number, d.thought_id, d.source_id,
+                f"""SELECT d.id, d.content, d.turn_number, d.thought_id, d.source_id,
                           s.title as source_title, s.platform, s.project,
                           'derivation' as result_type,
                           rank
                    FROM derivations_fts fts
                    JOIN derivations d ON d.rowid = fts.rowid
                    JOIN sources s ON s.id = d.source_id
-                   WHERE derivations_fts MATCH ? AND s.project = ?
+                   WHERE derivations_fts MATCH ? AND s.project = ?{tag_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, project, limit),
+                (fts_query, project, *tag_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
         else:
             # Global search
             rows = self.conn.execute(
-                """SELECT t.id, t.content, t.turn_number, t.tags, t.source_id,
+                f"""SELECT t.id, t.content, t.turn_number, t.tags, t.source_id,
                           s.title as source_title, s.platform, s.project,
                           'thought' as result_type,
                           rank
                    FROM thoughts_fts fts
                    JOIN thoughts t ON t.rowid = fts.rowid
                    JOIN sources s ON s.id = t.source_id
-                   WHERE thoughts_fts MATCH ?
+                   WHERE thoughts_fts MATCH ?{tag_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, limit),
+                (fts_query, *tag_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
             rows = self.conn.execute(
-                """SELECT d.id, d.content, d.turn_number, d.thought_id, d.source_id,
+                f"""SELECT d.id, d.content, d.turn_number, d.thought_id, d.source_id,
                           s.title as source_title, s.platform, s.project,
                           'derivation' as result_type,
                           rank
                    FROM derivations_fts fts
                    JOIN derivations d ON d.rowid = fts.rowid
                    JOIN sources s ON s.id = d.source_id
-                   WHERE derivations_fts MATCH ?
+                   WHERE derivations_fts MATCH ?{tag_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, limit),
+                (fts_query, *tag_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -450,7 +456,7 @@ class GraphDB:
         results.sort(key=lambda r: r.get("rank", 0))
         return results[:limit]
 
-    def _search_source_id(self, query: str, limit: int = 20, project: str | None = None) -> list[dict]:
+    def _search_source_id(self, query: str, limit: int = 20, project: str | None = None, tag: str | None = None) -> list[dict]:
         """Resolve a source-ID-shaped query directly.
 
         Returns:
@@ -467,6 +473,15 @@ class GraphDB:
         if source:
             if project and source.get("project") != project:
                 source = None  # skip if wrong project
+            if source and tag:
+                meta = source.get("metadata")
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except (json.JSONDecodeError, TypeError):
+                        meta = {}
+                if tag not in (meta.get("tags") or []):
+                    source = None
 
         if source:
             sid = source["id"]
@@ -521,6 +536,15 @@ class GraphDB:
                 if other_source and other_id not in seen_source_ids:
                     if project and other_source.get("project") != project:
                         continue
+                    if tag:
+                        ometa = other_source.get("metadata")
+                        if isinstance(ometa, str):
+                            try:
+                                ometa = json.loads(ometa)
+                            except (json.JSONDecodeError, TypeError):
+                                ometa = {}
+                        if tag not in (ometa.get("tags") or []):
+                            continue
                     seen_source_ids.add(other_id)
                     edge_meta = edge.get("metadata", "{}")
                     if isinstance(edge_meta, str):
@@ -550,6 +574,11 @@ class GraphDB:
         if remaining > 0:
             try:
                 fts_query = _sanitize_fts_query(query)
+                tag_clause = ""
+                tag_params: list[str] = []
+                if tag:
+                    tag_clause = " AND json_extract(s.metadata, '$.tags') LIKE ?"
+                    tag_params = [f'%"{tag}"%']
                 for table, content_table, rtype in [
                     ("thoughts_fts", "thoughts", "thought"),
                     ("derivations_fts", "derivations", "derivation"),
@@ -562,9 +591,9 @@ class GraphDB:
                                 FROM {table} fts
                                 JOIN {content_table} t ON t.rowid = fts.rowid
                                 JOIN sources s ON s.id = t.source_id
-                                WHERE {table} MATCH ? AND s.project = ?
+                                WHERE {table} MATCH ? AND s.project = ?{tag_clause}
                                 ORDER BY rank LIMIT ?""",
-                            (fts_query, project, remaining),
+                            (fts_query, project, *tag_params, remaining),
                         ).fetchall()
                     else:
                         rows = self.conn.execute(
@@ -574,9 +603,9 @@ class GraphDB:
                                 FROM {table} fts
                                 JOIN {content_table} t ON t.rowid = fts.rowid
                                 JOIN sources s ON s.id = t.source_id
-                                WHERE {table} MATCH ?
+                                WHERE {table} MATCH ?{tag_clause}
                                 ORDER BY rank LIMIT ?""",
-                            (fts_query, remaining),
+                            (fts_query, *tag_params, remaining),
                         ).fetchall()
                     for r in rows:
                         rd = dict(r)
