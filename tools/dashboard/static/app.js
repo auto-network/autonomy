@@ -1392,24 +1392,6 @@ async function dismissExperiment(expId, seriesKey, triggerEl) {
   if (el) el.remove();
 }
 
-async function dismissOrphanSession(sessionName, orphanKey, triggerEl) {
-  const confirmed = await new Promise(resolve => {
-    const confirm = document.createElement('span');
-    confirm.className = 'exp-dismiss-confirm';
-    confirm.innerHTML = 'Kill session? <button class="exp-dismiss-yes">Yes</button><button class="exp-dismiss-no">No</button>';
-    triggerEl.replaceWith(confirm);
-    confirm.querySelector('.exp-dismiss-yes').onclick = (e) => { e.stopPropagation(); resolve(true); };
-    confirm.querySelector('.exp-dismiss-no').onclick = (e) => { e.stopPropagation(); confirm.replaceWith(triggerEl); resolve(false); };
-  });
-  if (!confirmed) return;
-  try {
-    await fetch(`/api/terminal/${sessionName}/kill`);
-  } catch (e) {
-    console.warn('[dismiss] Failed to kill orphan Chat With session:', e);
-  }
-  const el = document.querySelector(`[data-exp-id="${orphanKey}"]`);
-  if (el) el.remove();
-}
 
 async function checkPendingExperiments() {
   const container = document.getElementById('sidebar-experiments');
@@ -1476,26 +1458,12 @@ async function checkPendingExperiments() {
       });
     }
 
-    // Orphaned Chat With sessions: active tmux sessions with no matching pending experiment
+    // Auto-kill orphaned chatwith/chat sessions — no parent experiment remains
     for (const sessionName of activeSessions) {
-      if (!sessionName.startsWith('chatwith-')) continue;
-      const orphanKey = `orphan-${sessionName}`;
-      keys.add(orphanKey);
-      if (container.querySelector(`[data-exp-id="${orphanKey}"]`)) continue;
-      const link = document.createElement('a');
-      link.className = 'sidebar-exp';
-      link.dataset.expId = orphanKey;
-      link.dataset.hasChatwith = 'true';
-      link.href = '#';
-      link.onclick = (e) => e.preventDefault();
-      link.innerHTML = `<span class="sidebar-exp-icon">\uD83D\uDCAC</span><span class="sidebar-exp-chat-dot"></span><span class="sidebar-exp-text">${_esc(sessionName)}</span>`;
-      const btn = document.createElement('button');
-      btn.className = 'sidebar-exp-dismiss';
-      btn.title = 'Kill session';
-      btn.textContent = '\u00d7';
-      btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); dismissOrphanSession(sessionName, orphanKey, btn); };
-      link.appendChild(btn);
-      container.appendChild(link);
+      if (!sessionName.startsWith('chatwith-') && !sessionName.startsWith('chat-')) continue;
+      try {
+        await fetch(`/api/terminal/${encodeURIComponent(sessionName)}/kill`, { method: 'POST' });
+      } catch (_) {}
     }
 
     // Remove indicators for series that are no longer pending (server is source of truth)
