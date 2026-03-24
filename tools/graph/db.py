@@ -260,15 +260,18 @@ class GraphDB:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_note_reads_source ON note_reads(source_id)")
 
     def record_read(self, source_id: str, actor: str):
-        """Record a read event for a collab note."""
+        """Record a read event for a collab note. Silently skips on read-only DBs."""
         if self.read_only:
             return
-        self._ensure_note_reads_table()
-        self.conn.execute(
-            "INSERT OR IGNORE INTO note_reads (source_id, actor) VALUES (?, ?)",
-            (source_id, actor),
-        )
-        self.conn.commit()
+        try:
+            self._ensure_note_reads_table()
+            self.conn.execute(
+                "INSERT OR IGNORE INTO note_reads (source_id, actor) VALUES (?, ?)",
+                (source_id, actor),
+            )
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
     def _has_table(self, name: str) -> bool:
         """Check if a table exists in the database."""
