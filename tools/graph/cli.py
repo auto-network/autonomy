@@ -2544,7 +2544,7 @@ def main():
     p_comment = sub.add_parser("comment", help="Add or manage comments on notes")
     p_comment.add_argument("args", nargs="*", help="<source_id> <text...> or 'integrate <comment_id>'")
     p_comment.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None, help="Read content from stdin")
-    p_comment.add_argument("--actor", default="user", help="Who is commenting")
+    p_comment.add_argument("--actor", default=os.environ.get("BD_ACTOR", "user"), help="Who is commenting")
     p_comment.set_defaults(func=cmd_comment_router)
 
     # agent-runs
