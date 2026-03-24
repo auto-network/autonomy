@@ -375,6 +375,39 @@ def cmd_dispatch_approve(args):
         sys.exit(1)
 
 
+def cmd_dispatch_nag(args):
+    """Enable or disable dispatch completion nag for the current session."""
+    bd_actor = os.environ.get("BD_ACTOR")
+    if not bd_actor or ":" not in bd_actor:
+        print("Error: $BD_ACTOR not set. Cannot identify current session.", file=sys.stderr)
+        print("This command must be run inside a dashboard-managed session.", file=sys.stderr)
+        sys.exit(1)
+    tmux_name = bd_actor.split(":", 1)[1]
+
+    enabled = not getattr(args, "disable", False)
+    base = _get_dashboard_url()
+    ctx = _make_ssl_ctx()
+    import urllib.parse
+    url = f"{base}/api/session/{urllib.parse.quote(tmux_name)}/dispatch-nag"
+    data = json.dumps({"enabled": enabled}).encode()
+    req = urllib.request.Request(url, data=data, method="PUT",
+                                headers={"Content-Type": "application/json"})
+    try:
+        resp = urllib.request.urlopen(req, context=ctx, timeout=10)
+        if resp.status == 200:
+            state = "enabled" if enabled else "disabled"
+            print(f"  \u2713 Dispatch nag {state} for {tmux_name}")
+        else:
+            print(f"  \u2717 Failed: HTTP {resp.status}", file=sys.stderr)
+            sys.exit(1)
+    except urllib.error.HTTPError as e:
+        print(f"  \u2717 Failed: HTTP {e.code}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"  \u2717 Dashboard not reachable: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_dispatch_status(args):
     """Print compact one-liner summary."""
     base = _get_dashboard_url()
