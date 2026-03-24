@@ -1629,6 +1629,38 @@ def _classify_crosstalk(text: str) -> dict | None:
     }
 
 
+_CROSSTALK_SEND_RE = re.compile(
+    r"""-d\s+['"]\s*(\{.*?\})\s*['"]""", re.DOTALL,
+)
+
+
+def _parse_crosstalk_send(command: str, timestamp: str) -> dict | None:
+    """Detect outbound CrossTalk send in a Bash command and return a crosstalk entry."""
+    m = _CROSSTALK_SEND_RE.search(command)
+    if not m:
+        return None
+    try:
+        payload = json.loads(m.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    target = payload.get("target", "")
+    message = payload.get("message", "")
+    if not target or not message:
+        return None
+    return {
+        "type": "crosstalk",
+        "role": "crosstalk",
+        "content": message,
+        "sender": "self",
+        "sender_label": "",
+        "source_id": "",
+        "turn": "",
+        "target": target,
+        "direction": "sent",
+        "timestamp": timestamp,
+    }
+
+
 def _classify_system_message(text: str) -> dict | None:
     """Detect harness-injected system messages in user entries.
 
@@ -1798,6 +1830,14 @@ def _parse_jsonl_entry(line: str) -> dict | None:
             elif btype == "tool_use":
                 tool_input = block.get("input", {})
                 tool_name = block.get("name", "?")
+                # Semantic Bash: detect outbound CrossTalk sends
+                if tool_name == "Bash":
+                    cmd = (tool_input.get("command") or "")
+                    if "crosstalk/send" in cmd:
+                        ct_entry = _parse_crosstalk_send(cmd, timestamp)
+                        if ct_entry:
+                            blocks.append(ct_entry)
+                            continue
                 blocks.append({
                     "type": "tool_use",
                     "role": "assistant",
