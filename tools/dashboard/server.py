@@ -2486,39 +2486,60 @@ async def api_session_send_handshake(request):
 
 
 async def api_session_confirm_link(request):
-    """Confirm a terminal link after handshake — writes .meta.json.
+    """Confirm a terminal link after handshake — scans filesystem for JSONL.
 
     POST /api/session/confirm-link
-    Body: {"project": "-workspace-repo", "session_id": "0b8992ca-...", "tmux_session": "auto-t6"}
-    Returns: {"ok": true}
+    Body: {"tmux_session": "auto-t6", "handshake": "[dashboard] confirming..."}
+    Returns: {"ok": true, "project": "...", "session_id": "..."}
+
+    Scans ~/.claude/projects/ for the newest JSONL files containing the
+    handshake text.  No SSE/store dependency — solves the chicken-and-egg
+    problem where entries are empty because jsonl_path is NULL.
     """
     body = await request.json()
-    project = (body.get("project") or "").strip()
-    session_id = (body.get("session_id") or "").strip()
     tmux_session = (body.get("tmux_session") or "").strip()
+    handshake_text = (body.get("handshake") or "").strip()
 
-    if not project or not session_id or not tmux_session:
-        return JSONResponse(
-            {"error": "project, session_id, and tmux_session are required"},
-            status_code=400,
-        )
+    if not tmux_session:
+        return JSONResponse({"error": "tmux_session required"}, status_code=400)
 
-    session_file = _session_file_path(project, session_id)
-    if session_file is None:
-        return JSONResponse({"error": "Invalid project or session_id"}, status_code=400)
-    if not session_file.exists():
-        return JSONResponse({"error": "Session not found"}, status_code=404)
+    # Scan all project directories for newest JSONL containing handshake
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return JSONResponse({"error": "no projects directory"}, status_code=404)
 
-    # LINK + ENRICH: set session_uuid, jsonl_path, and graph_source_id
-    logger.info("confirm-link: %s → uuid=%s  project=%s", tmux_session, session_id[:12], project)
-    dashboard_db.link_and_enrich(
-        tmux_session,
-        session_uuid=session_id,
-        jsonl_path=str(session_file),
-        project=project,
-    )
+    # Collect all JSONL files across all projects, sorted by mtime descending
+    all_jsonls = []
+    for project_dir in claude_projects.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for jf in project_dir.glob("*.jsonl"):
+            all_jsonls.append(jf)
 
-    return JSONResponse({"ok": True})
+    all_jsonls.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    # Check newest files first — read last 5 entries for handshake text
+    for jf in all_jsonls[:5]:  # only check 5 newest files
+        try:
+            lines = jf.read_text(encoding="utf-8", errors="replace").strip().split("\n")
+            tail = lines[-5:] if len(lines) > 5 else lines
+            for line in tail:
+                if handshake_text and handshake_text in line:
+                    # Found it — this is our file
+                    project = jf.parent.name
+                    session_id = jf.stem
+                    logger.info("confirm-link: FOUND handshake in %s/%s", project, session_id[:12])
+                    dashboard_db.link_and_enrich(
+                        tmux_session,
+                        session_uuid=session_id,
+                        jsonl_path=str(jf),
+                        project=project,
+                    )
+                    return JSONResponse({"ok": True, "project": project, "session_id": session_id})
+        except Exception:
+            continue
+
+    return JSONResponse({"error": "handshake not found in any recent JSONL"}, status_code=404)
 
 
 async def api_session_get(request):
