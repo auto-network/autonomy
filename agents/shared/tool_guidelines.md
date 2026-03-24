@@ -22,6 +22,11 @@ graph link <bead> <src> -r rel    # Create provenance edge
 graph attention --last N          # Show recent human input
 graph ui-exp "title" <dir>        # Create UI experiment from HTML files + live-watch for changes
 graph dispatch approve <bead-id>  # Approve bead(s) for dispatch (accepts multiple IDs)
+graph context <src_id> last       # Latest turns of a source
+graph notes --since 1h            # Recent notes (orientation)
+graph crosstalk --since 30m       # Recent CrossTalk messages
+graph thought "text" --tags x     # Capture idea discovered during work
+graph dispatch watch              # Block until next dispatch completes
 ```
 
 **Dispatch workflow:**
