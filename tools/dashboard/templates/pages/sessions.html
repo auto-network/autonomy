@@ -36,17 +36,20 @@
                :class="s.type === 'host' ? 'session-card-host' : 'session-card-container'"
                @click="navigate(s)" data-testid="session-card"
                :data-session-id="s.session_id">
-            <!-- Row 1: live dot + label + close button -->
+            <!-- Row 1: live dot + nag indicator + label + actions button -->
             <div class="flex items-center gap-2 min-h-[22px]">
               <span class="w-2 h-2 rounded-full flex-shrink-0"
                     :class="s.is_live ? 'bg-green-400' : 'bg-gray-500'"></span>
+              <template x-if="s.nag_enabled">
+                <span class="session-nag-indicator" title="Nag active">🔔</span>
+              </template>
               <span class="font-medium text-sm text-gray-200 flex-1 truncate"
                     x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></span>
-              <button @click.stop="showCloseConfirm(s)" data-testid="session-close-btn"
+              <button @click.stop="showSessionActions(s)" data-testid="session-actions-btn"
                       class="w-5 h-5 flex items-center justify-center rounded-full
-                             bg-gray-900 text-gray-500 hover:text-white hover:bg-red-600
+                             bg-gray-900 text-gray-500 hover:text-white hover:bg-gray-600
                              text-xs leading-none transition-colors"
-                      aria-label="Close session">✕</button>
+                      aria-label="Session actions">⋮</button>
             </div>
             <!-- Sub-topics (between title and tmux row) -->
             <template x-if="s.topics && s.topics.length > 0">

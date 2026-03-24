@@ -42,6 +42,7 @@ from tools.dashboard.dao.dashboard_db import (
     mark_dead,
     delete_session,
     update_tail_state,
+    update_nag_last_sent,
     count_live,
 )
 
@@ -105,6 +106,30 @@ def count_tool_uses(jsonl_path: Path) -> int:
     except OSError:
         pass
     return count
+
+
+def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
+    """Send a nag message to a session via CrossTalk envelope in tmux paste-buffer."""
+    import secrets as _secrets
+    iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    envelope = (
+        f'<crosstalk from="dashboard-nag"\n'
+        f'           label="Session Nag"\n'
+        f'           source="" turn="0"\n'
+        f'           timestamp="{iso_now}">\n'
+        f'{message}\n'
+        f'</crosstalk>'
+    )
+    try:
+        path = f"/tmp/nag_{_secrets.token_hex(4)}.txt"
+        Path(path).write_text(envelope, encoding="utf-8")
+        subprocess.run(["tmux", "load-buffer", "-b", "nag_msg", path], capture_output=True, timeout=5)
+        subprocess.run(["tmux", "paste-buffer", "-p", "-b", "nag_msg", "-t", tmux_name], capture_output=True, timeout=5)
+        time.sleep(0.3)
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name, "", "Enter"], capture_output=True, timeout=5)
+        Path(path).unlink(missing_ok=True)
+    except Exception:
+        pass  # best-effort — don't crash monitor
 
 
 @dataclass
@@ -223,6 +248,9 @@ class SessionMonitor:
                 "entry_count": s.get("entry_count", 0),
                 "context_tokens": s.get("context_tokens", 0),
                 "topics": json.loads(s.get("topics") or "[]"),
+                "nag_enabled": bool(s.get("nag_enabled")),
+                "nag_interval": s.get("nag_interval") or 15,
+                "nag_message": s.get("nag_message") or "",
             }
             for s in sessions
         ]
@@ -518,6 +546,27 @@ class SessionMonitor:
 
                 if changed:
                     await self._broadcast_registry()
+
+                # Nag check — send CrossTalk to idle sessions with nag enabled
+                for row in sessions:
+                    if not row.get("nag_enabled"):
+                        continue
+                    if not row.get("is_live"):
+                        continue
+                    tmux_name = row["tmux_name"]
+                    # Skip sessions whose tmux is dead (just marked above)
+                    alive = await asyncio.to_thread(self._check_tmux, tmux_name)
+                    if not alive:
+                        continue
+                    last_act = row.get("last_activity") or row["created_at"]
+                    nag_interval = (row.get("nag_interval") or 15) * 60
+                    nag_last_sent = row.get("nag_last_sent") or 0
+                    idle_secs = now - last_act
+
+                    if idle_secs >= nag_interval and (now - nag_last_sent) >= nag_interval:
+                        nag_msg = row.get("nag_message") or f"You've been idle for {int(idle_secs // 60)}m. Status update?"
+                        await asyncio.to_thread(_send_nag_crosstalk, tmux_name, nag_msg)
+                        update_nag_last_sent(tmux_name, now)
 
             except Exception:
                 logger.exception("session_monitor: liveness error")
