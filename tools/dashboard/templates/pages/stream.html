@@ -1,0 +1,43 @@
+<div x-data="streamPage" class="pb-safe">
+
+  <!-- Header -->
+  <div class="flex items-center gap-3 mb-4">
+    <span class="text-2xl font-bold text-emerald-400">#</span>
+    <h1 class="text-xl font-bold" x-text="tag"></h1>
+    <span class="text-sm text-gray-500" x-text="items.length + ' notes'"></span>
+  </div>
+
+  <!-- Loading -->
+  <template x-if="!loaded">
+    <div class="text-gray-500 text-sm">Loading stream...</div>
+  </template>
+
+  <!-- Feed -->
+  <template x-if="loaded && items.length > 0">
+    <div>
+      <template x-for="item in items" :key="item.id">
+        <a :href="'/graph/' + item.id.slice(0, 12)"
+           class="block mb-3 p-3 rounded-lg bg-gray-800/50 hover:bg-gray-800 border border-gray-700/50 transition-colors">
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-sm font-semibold text-gray-200" x-text="item.title || 'Untitled'"></span>
+          </div>
+          <div class="flex items-center gap-3 text-xs text-gray-500">
+            <span x-text="item.created_at ? item.created_at.slice(0, 10) : ''"></span>
+            <span x-show="item.author" x-text="item.author"></span>
+            <template x-for="t in item.tags.filter(t => t !== tag)" :key="t">
+              <a :href="'/stream/' + t"
+                 class="text-indigo-400 hover:underline"
+                 @click.stop
+                 x-text="'#' + t"></a>
+            </template>
+          </div>
+        </a>
+      </template>
+    </div>
+  </template>
+
+  <!-- Empty state -->
+  <template x-if="loaded && items.length === 0">
+    <div class="text-gray-500 text-sm">No notes tagged with #<span x-text="tag"></span></div>
+  </template>
+</div>

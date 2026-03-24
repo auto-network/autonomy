@@ -250,6 +250,26 @@ async function renderSourceFragment() {
   }
 }
 
+// ── Stream Page (Jinja2 fragment + Alpine) ───────────────────
+
+async function renderStreamFragment() {
+  const path = window.location.pathname;
+  const tag = decodeURIComponent(path.split('/stream/')[1] || '');
+  pageTitle.textContent = `#${tag}`;
+  let html;
+  if (_fragmentCache.has('/pages/stream')) {
+    html = _fragmentCache.get('/pages/stream');
+  } else {
+    const res = await fetch('/pages/stream');
+    html = await res.text();
+    _fragmentCache.set('/pages/stream', html);
+  }
+  content.innerHTML = html;
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
+}
+
 // ── Experiment Page (Jinja2 fragment + Alpine) ───────────────
 
 async function renderExperimentFragment() {
@@ -1501,6 +1521,8 @@ function route() {
     renderSessionsFragment();
   } else if (path.match(/^\/session\/[^/]+\/.+$/)) {
     renderSessionViewFragment();
+  } else if (path.startsWith('/stream/')) {
+    renderStreamFragment();
   } else if (path.startsWith('/graph/') || path.startsWith('/source/')) {
     renderSourceFragment();
   } else if (isTerminalPage) {
