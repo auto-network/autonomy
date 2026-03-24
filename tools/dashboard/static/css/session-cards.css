@@ -76,7 +76,7 @@
   display: flex; align-items: center; justify-content: flex-end;
   background: transparent; border: none;
   color: #475569; font-size: 14px; cursor: pointer;
-  margin-left: auto; flex-shrink: 0;
+  flex-shrink: 0; padding: 0;
   -webkit-tap-highlight-color: transparent;
 }
 .sc-actions:hover { color: #e2e8f0; }
@@ -148,6 +148,7 @@ body.zoom-expanded .sc-title {
 }
 body.zoom-expanded .sc-t3 { display: none !important; }
 body.zoom-expanded .sc-tmux { display: none; }
+body.zoom-expanded .sc-actions { margin-left: auto; }
 
 /* Card gap adjustments per zoom */
 body.zoom-compact .sc-card-list { gap: 4px; }
