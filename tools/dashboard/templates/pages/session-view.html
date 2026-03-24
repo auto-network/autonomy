@@ -234,6 +234,37 @@
                   </div>
                 </template>
 
+                <!-- ── Semantic Bash: typed command tiles ───────── -->
+                <template x-if="dEntry.type === 'semantic_bash'">
+                  <div class="sc-tool-card">
+                    <div class="sc-line1">
+                      <span class="sc-chip" :class="{
+                        'bg-purple-900 text-purple-300': dEntry.semantic_type === 'note-created',
+                        'bg-blue-900 text-blue-300': dEntry.semantic_type === 'comment-added',
+                        'bg-amber-900 text-amber-300': dEntry.semantic_type === 'thought-captured',
+                        'bg-green-900 text-green-300': dEntry.semantic_type === 'dispatch-approved',
+                        'bg-gray-700 text-gray-300': dEntry.semantic_type === 'state-changed',
+                      }" x-text="{
+                        'note-created': 'Note',
+                        'comment-added': 'Comment',
+                        'thought-captured': 'Thought',
+                        'dispatch-approved': 'Dispatch',
+                        'state-changed': 'State',
+                      }[dEntry.semantic_type] || dEntry.semantic_type"></span>
+                      <span class="sc-meta text-gray-400" x-text="dEntry.bead_id || dEntry.source_id || ''"></span>
+                      <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+                    </div>
+                    <div class="sc-line2 sc-line2-truncated" x-text="dEntry.content"></div>
+                    <!-- Lazy tile placeholder for note/comment/thought -->
+                    <template x-if="dEntry.source_id && !dEntry._enhanced">
+                      <div class="text-xs text-gray-600 mt-1"
+                           x-data="{ visible: false }"
+                           x-intersect:enter.margin.100px="if (!dEntry._enhanced) { setTimeout(() => { if ($el.getBoundingClientRect().top > 0) { dEntry._enhanced = true; } }, 1000) }">
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
               </div>
             </template>
 
