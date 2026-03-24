@@ -88,7 +88,11 @@
             <div class="sc-title" x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></div>
             <!-- Topics -->
             <template x-if="s.topics && s.topics.length > 0">
-              <div class="sc-topics" x-text="s.topics.join(' · ')"></div>
+              <div class="sc-topics">
+                <template x-for="(topic, idx) in s.topics" :key="idx">
+                  <span class="sc-topic-item" x-text="topic"></span>
+                </template>
+              </div>
             </template>
             <!-- Last message -->
             <template x-if="s._hasData">
