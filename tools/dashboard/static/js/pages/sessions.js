@@ -51,11 +51,11 @@
   }
 
   function _recencyColor(epoch) {
-    if (!epoch) return 'recency-gray';
+    if (!epoch) return 'gray';
     var secs = Math.round(Date.now() / 1000 - epoch);
-    if (secs < 120) return 'recency-green';
-    if (secs < 600) return 'recency-amber';
-    return 'recency-red';
+    if (secs < 120) return 'green';
+    if (secs < 600) return 'amber';
+    return 'red';
   }
 
   // Derive role from explicit field or label patterns
@@ -70,11 +70,12 @@
   }
 
   var _roleBadgeMap = {
-    coordinator: 'CO', reviewer: 'RV', builder: 'BL', designer: 'DS',
+    coordinator: 'Coordinator', reviewer: 'Reviewer',
+    builder: 'Builder', designer: 'Designer',
   };
   var _roleClsMap = {
-    coordinator: 'sc-role-co', reviewer: 'sc-role-rv',
-    builder: 'sc-role-bl', designer: 'sc-role-ds',
+    coordinator: 'sc-role', reviewer: 'sc-role',
+    builder: 'sc-role', designer: 'sc-role',
   };
 
   function _mapActive(s) {
@@ -88,8 +89,8 @@
       _ctxStr: _formatCtx(s.context_tokens),
       _ctxWarn: s.context_tokens > 700000,
       _recencyColor: _recencyColor(s.last_activity),
-      _roleBadge: isHost ? 'HOST' : (_roleBadgeMap[role] || ''),
-      _roleCls: isHost ? 'sc-role-host' : (_roleClsMap[role] || ''),
+      _roleBadge: isHost ? 'Host' : (_roleBadgeMap[role] || ''),
+      _roleCls: isHost ? 'sc-role sc-role-host' : (_roleClsMap[role] || ''),
     };
   }
 
