@@ -5,16 +5,8 @@
     <span class="text-sm text-gray-500" x-show="loaded" x-text="results.length + ' results'"></span>
   </div>
 
-  <!-- Zoom controls -->
-  <div class="flex items-center gap-2 mb-4">
-    <div class="inline-flex rounded-lg bg-gray-800 border border-gray-700 p-0.5">
-      <template x-for="z in ['compact','normal','expanded']" :key="z">
-        <button @click="zoom = z; localStorage.setItem('searchZoom', z)"
-                :class="zoom === z ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'"
-                class="px-2 py-0.5 text-xs font-medium rounded-md transition-colors"
-                x-text="z[0].toUpperCase()"></button>
-      </template>
-    </div>
+  <div class="mb-4">
+    {% include 'partials/zoom-toggle.html' %}
   </div>
 
   <!-- Loading -->

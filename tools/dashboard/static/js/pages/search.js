@@ -6,6 +6,11 @@
       loaded: false,
       zoom: localStorage.getItem('searchZoom') || 'normal',
 
+      setZoom(level) {
+        this.zoom = level;
+        localStorage.setItem('searchZoom', level);
+      },
+
       init() {
         var params = new URLSearchParams(window.location.search);
         this.query = params.get('q') || '';
