@@ -4298,20 +4298,23 @@ async def api_graph_stream(request):
         db_args["db_path"] = p
     db = GraphDB(**db_args)
     try:
-        sources = db.list_sources(source_type="note", tags=[tag], limit=limit)
+        sources = db.list_sources(tags=[tag], limit=limit)
     finally:
         db.close()
 
     items = []
     for s in sources:
         meta = json.loads(s["metadata"]) if isinstance(s.get("metadata"), str) else (s.get("metadata") or {})
+        raw_title = s.get("title") or ""
+        clean_title = raw_title.lstrip("# ").split("\n")[0][:80]
         items.append({
             "id": s["id"],
-            "title": s.get("title", ""),
+            "title": clean_title,
             "created_at": s.get("created_at", ""),
             "author": meta.get("author", ""),
             "tags": meta.get("tags", []),
-            "preview": (s.get("title") or "")[:200],
+            "source_type": s.get("type", "note"),
+            "preview": raw_title[:200],
         })
 
     # Apply offset (list_sources doesn't support offset natively)

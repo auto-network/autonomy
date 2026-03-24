@@ -5,39 +5,58 @@
     <span class="text-2xl font-bold text-emerald-400">#</span>
     <h1 class="text-xl font-bold" x-text="tag"></h1>
     <span class="text-sm text-gray-500" x-text="items.length + ' notes'"></span>
+    <!-- Zoom controls -->
+    <div class="ml-auto flex gap-1">
+      <button @click="zoom = 'compact'" :class="zoom === 'compact' ? 'text-white' : 'text-gray-600'" class="text-xs px-1">&minus;</button>
+      <button @click="zoom = 'normal'" :class="zoom === 'normal' ? 'text-white' : 'text-gray-600'" class="text-xs px-1">&#9675;</button>
+      <button @click="zoom = 'expanded'" :class="zoom === 'expanded' ? 'text-white' : 'text-gray-600'" class="text-xs px-1">+</button>
+    </div>
   </div>
 
-  <!-- Loading -->
   <template x-if="!loaded">
-    <div class="text-gray-500 text-sm">Loading stream...</div>
+    <div class="text-gray-500 text-sm">Loading...</div>
   </template>
 
-  <!-- Feed -->
   <template x-if="loaded && items.length > 0">
     <div>
       <template x-for="item in items" :key="item.id">
         <a :href="'/graph/' + item.id.slice(0, 12)"
-           class="block mb-3 p-3 rounded-lg bg-gray-800/50 hover:bg-gray-800 border border-gray-700/50 transition-colors">
-          <div class="flex items-center gap-2 mb-1">
-            <span class="text-sm font-semibold text-gray-200" x-text="item.title || 'Untitled'"></span>
+           @click.prevent="navigateTo('/graph/' + item.id.slice(0, 12))"
+           class="block mb-2 p-2 rounded transition-colors hover:bg-gray-800/60"
+           :class="item.source_type === 'thought' ? 'border-purple-500' : 'border-yellow-500'"
+           style="border-left-width: 3px; border-left-style: solid;">
+
+          <!-- Row 1: type + title + ID + recency (always visible) -->
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-semibold uppercase"
+                  :class="item.source_type === 'thought' ? 'text-purple-400' : 'text-yellow-500'"
+                  x-text="item.source_type === 'thought' ? 'thought' : 'note'"></span>
+            <span class="text-sm text-gray-200 flex-1 truncate" x-text="item.title || 'Untitled'"></span>
+            <span class="text-xs text-gray-600 font-mono flex-shrink-0" x-text="item.id.slice(0, 12)"></span>
+            <span class="text-xs flex-shrink-0" :class="recencyColor(item.created_at)" x-text="recencyText(item.created_at)"></span>
           </div>
-          <div class="flex items-center gap-3 text-xs text-gray-500">
-            <span x-text="item.created_at ? item.created_at.slice(0, 10) : ''"></span>
-            <span x-show="item.author" x-text="item.author"></span>
-            <template x-for="t in item.tags.filter(t => t !== tag)" :key="t">
-              <a :href="'/stream/' + t"
-                 class="text-indigo-400 hover:underline"
-                 @click.stop
-                 x-text="'#' + t"></a>
-            </template>
-          </div>
+
+          <!-- Row 2: preview (normal + expanded) -->
+          <template x-if="zoom !== 'compact'">
+            <div class="text-xs text-gray-500 mt-1 truncate" x-text="item.preview"></div>
+          </template>
+
+          <!-- Row 3: tags + author (expanded only) -->
+          <template x-if="zoom === 'expanded'">
+            <div class="flex items-center gap-2 mt-1 text-xs text-gray-600">
+              <span x-show="item.author" x-text="item.author"></span>
+              <template x-for="t in item.tags.filter(t => t !== tag)" :key="t">
+                <a :href="'/stream/' + t" @click.stop.prevent="navigateTo('/stream/' + t)"
+                   class="text-indigo-400 hover:underline" x-text="'#' + t"></a>
+              </template>
+            </div>
+          </template>
         </a>
       </template>
     </div>
   </template>
 
-  <!-- Empty state -->
   <template x-if="loaded && items.length === 0">
-    <div class="text-gray-500 text-sm">No notes tagged with #<span x-text="tag"></span></div>
+    <div class="text-gray-500 text-sm">No notes tagged #<span x-text="tag"></span></div>
   </template>
 </div>
