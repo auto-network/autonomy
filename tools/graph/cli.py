@@ -192,6 +192,8 @@ def _resolve_source(db, source_arg, first=False):
         if scope:
             sources = [s for s in sources if s.get("project") == scope]
         if not sources:
+            if db.is_immutable:
+                print("  (immutable mode — WAL data may not be visible)", file=sys.stderr)
             return None
         if len(sources) > 1 and not first:
             return sources  # Return list for disambiguation
@@ -303,6 +305,8 @@ def cmd_read(args):
     result = _resolve_source(db, source_arg, first=args.first)
     if result is None:
         print(f"No source found matching '{args.source}'")
+        if db.is_immutable:
+            print("  (immutable mode — recent writes may not be visible yet)", file=sys.stderr)
         db.close()
         return
     if isinstance(result, list):
