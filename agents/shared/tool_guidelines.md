@@ -157,27 +157,51 @@ is authoritative.
 
 ## Dashboard & Experiments
 
-The **live** dashboard runs on the host at `http://localhost:8080`. From inside the container
-(`--network=host`), you can query its APIs to read data. Note: this is the production
-dashboard — it does NOT reflect code changes you make in your worktree. Your edits
-to server.py, app.js, or templates won't be visible here until after your branch is
-merged and the dashboard restarts.
+The **live** dashboard runs on the host at `https://localhost:8080` (HTTPS, self-signed cert).
+From inside the container (`--network=host`), you can query its APIs to read data.
+Note: this is the production dashboard — it does NOT reflect code changes you make in your
+worktree. Your edits to server.py, app.js, or templates won't be visible here until after
+your branch is merged and the dashboard restarts.
 
-```
-# Fetch experiment variant HTML (for implementing a UI design)
-curl -s http://localhost:8080/api/experiments/{uuid}/full | python3 -c "
-import json,sys; d=json.load(sys.stdin)
-for v in d['variants']:
-    print('Variant:', v['id'])
-    print(v['html'])
+All curl commands MUST use `curl -sk` (silent + insecure for self-signed cert).
+
+### Design Studio experiments
+
+If your bead references a Design Studio experiment, you MUST fetch and use the experiment
+template. The experiment is the source of truth for the visual design. Do NOT write your
+own HTML/CSS — copy the experiment template and wire the DAO.
+
+If you cannot access the experiment template after trying the steps below, set your
+decision status to BLOCKED with reason "cannot access experiment template." Do NOT
+proceed without it.
+
+```bash
+# Step 1: List experiments to find the full UUID from a partial ID
+curl -sk https://localhost:8080/api/experiments/pending | python3 -c "
+import json,sys
+for e in json.load(sys.stdin):
+    print(e['id'], e.get('title',''))
 "
 
-# List pending experiments
-curl -s http://localhost:8080/api/experiments/pending
+# Step 2: Fetch the experiment HTML using the FULL UUID
+curl -sk https://localhost:8080/api/experiments/{FULL-UUID}/full | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+for v in d['variants']:
+    print(v['html'])
+"
+```
 
-# Fetch any dashboard API
-curl -s http://localhost:8080/api/beads/list
-curl -s http://localhost:8080/api/dispatch/runs
+NOTE: Experiment files referenced as /tmp/ paths in bead specs do NOT exist in your
+container. Always fetch via the API above.
+
+### Other dashboard APIs
+
+```bash
+curl -sk https://localhost:8080/api/beads/list
+curl -sk https://localhost:8080/api/dispatch/runs
+curl -sk https://localhost:8080/api/dao/active_sessions
+curl -sk https://localhost:8080/api/graph/thoughts
+curl -sk https://localhost:8080/api/graph/threads
 ```
 
 Use `localhost:8080`, not the Tailnet IP.
