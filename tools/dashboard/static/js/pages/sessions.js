@@ -116,6 +116,14 @@
       recent: [],
       loading: true,
       _creating: false,
+      zoom: localStorage.getItem('sessionZoom') || 'normal',
+
+      setZoom(level) {
+        this.zoom = level;
+        localStorage.setItem('sessionZoom', level);
+        document.body.classList.remove('zoom-compact', 'zoom-normal', 'zoom-expanded');
+        document.body.classList.add('zoom-' + level);
+      },
       init() {
         // Ensure global SSE handlers are registered
         window.ensureSessionMessages();
