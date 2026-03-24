@@ -58,6 +58,7 @@ class GraphDB:
     def __init__(self, db_path: Path | str = DEFAULT_DB):
         self.db_path = Path(db_path)
         self.read_only = False
+        self._immutable = False
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self.conn = sqlite3.connect(str(self.db_path))
@@ -73,6 +74,7 @@ class GraphDB:
             except (sqlite3.OperationalError, OSError):
                 self.conn = sqlite3.connect(f"file:{self.db_path}?immutable=1", uri=True)
                 self.conn.row_factory = sqlite3.Row
+                self._immutable = True
             self.read_only = True
 
     def _init_schema(self):
@@ -88,6 +90,11 @@ class GraphDB:
 
     def __exit__(self, *args):
         self.close()
+
+    @property
+    def is_immutable(self) -> bool:
+        """True if opened with immutable=1 (no WAL visibility)."""
+        return self.read_only and self._immutable
 
     # ── Sources ──────────────────────────────────────────────
 
