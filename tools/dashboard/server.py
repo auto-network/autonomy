@@ -153,6 +153,19 @@ async def api_bead_tree(request):
     bead_id = request.path_params["id"]
     return JSONResponse(await run_cli_json(["bd", "dep", "tree", bead_id, "--json"]))
 
+
+async def api_bead_deps(request):
+    """Return both blockers (down) and dependents (up) for a bead."""
+    bead_id = request.path_params["id"]
+    down, up = await asyncio.gather(
+        run_cli_json(["bd", "dep", "list", bead_id, "--json"]),
+        run_cli_json(["bd", "dep", "list", bead_id, "--direction=up", "--json"]),
+    )
+    blockers = down if isinstance(down, list) else []
+    dependents = up if isinstance(up, list) else []
+    return JSONResponse({"blockers": blockers, "dependents": dependents})
+
+
 async def api_beads_search(request):
     """Search beads by title and description. Falls back to issues.jsonl if bd unavailable."""
     q = request.query_params.get("q", "").strip().lower()
@@ -4645,6 +4658,7 @@ routes = [
     Route("/api/beads/search", api_beads_search),
     Route("/api/bead/{id}", api_bead_show),
     Route("/api/bead/{id}/tree", api_bead_tree),
+    Route("/api/bead/{id}/deps", api_bead_deps),
     Route("/api/bead/{id}/approve", api_bead_approve, methods=["POST"]),
     Route("/api/pinned", api_pinned_beads),
     Route("/api/dispatch/pause", api_dispatch_pause_get),
