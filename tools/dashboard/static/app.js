@@ -437,38 +437,6 @@ function connectChatWithTerminal(sessionName) {
   term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
 }
 
-async function spawnChatWith(expId) {
-  const btn = document.getElementById('chatwith-btn');
-  const statusEl = document.getElementById('chatwith-status');
-  if (btn) { btn.disabled = true; btn.textContent = 'Spawning...'; }
-  if (statusEl) { statusEl.textContent = 'spawning...'; statusEl.className = 'text-xs text-yellow-400 ml-2'; }
-
-  const panel = document.getElementById('chatwith-panel');
-  if (panel) panel.style.display = '';
-
-  try {
-    const res = await fetch('/api/chatwith/spawn', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({page_type: 'experiment', context_id: expId}),
-    });
-    const result = await res.json();
-    if (result.error) {
-      if (btn) { btn.disabled = false; btn.textContent = 'Chat With'; }
-      if (statusEl) { statusEl.textContent = `Error: ${result.error}`; statusEl.className = 'text-xs text-red-400 ml-2'; }
-      return;
-    }
-    if (btn) { btn.disabled = false; btn.textContent = 'Reconnect'; }
-    connectChatWithTerminal(result.session_name);
-    // Start display capture now that Chat With is active
-    initDisplayCapture(expId).catch(() => {});
-  } catch(e) {
-    if (btn) { btn.disabled = false; btn.textContent = 'Chat With'; }
-    if (statusEl) { statusEl.textContent = 'spawn failed'; statusEl.className = 'text-xs text-red-400 ml-2'; }
-    console.error('spawnChatWith error:', e);
-  }
-}
-
 function toggleChatWithPanel() {
   const body = document.getElementById('chatwith-body');
   const toggleBtn = document.getElementById('chatwith-toggle-btn');
@@ -1082,10 +1050,6 @@ async function renderExperiment(expId) {
       <button onclick="manualCaptureScreenshot('${_esc(expId)}')"
               class="text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
         Capture
-      </button>
-      <button id="chatwith-btn" onclick="spawnChatWith('${_esc(expId)}')"
-              class="px-3 py-1 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white">
-        Chat With
       </button>
     `;
   }
