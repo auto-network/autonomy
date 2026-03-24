@@ -3517,6 +3517,14 @@ async def page_streams_fragment(request):
     """Return the streams landing page as an HTML fragment for SPA injection."""
     return templates.TemplateResponse(request, "pages/streams.html")
 
+async def page_collab(request):
+    """Serve the collab hub page (full HTML shell for direct navigation)."""
+    return HTMLResponse(_load_template("base.html"))
+
+async def page_collab_fragment(request):
+    """Return the collab hub page as an HTML fragment for SPA injection."""
+    return templates.TemplateResponse(request, "pages/collab.html")
+
 async def page_stream(request):
     """Serve the stream page (full HTML shell for direct navigation)."""
     return HTMLResponse(_load_template("base.html"))
@@ -4683,6 +4691,8 @@ routes = [
     Route("/pages/search", page_search_fragment),
     Route("/streams", page_streams),
     Route("/pages/streams", page_streams_fragment),
+    Route("/collab", page_collab),
+    Route("/pages/collab", page_collab_fragment),
     Route("/stream/{tag}", page_stream),
     Route("/pages/stream", page_stream_fragment),
     Route("/graph/{id}", page_source),

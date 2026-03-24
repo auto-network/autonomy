@@ -286,6 +286,24 @@ async function renderStreamsFragment() {
   }
 }
 
+// ── Collab Hub Page (Jinja2 fragment + Alpine) ──────────────
+
+async function renderCollabFragment() {
+  pageTitle.textContent = 'Collab';
+  let html;
+  if (_fragmentCache.has('/pages/collab')) {
+    html = _fragmentCache.get('/pages/collab');
+  } else {
+    const res = await fetch('/pages/collab');
+    html = await res.text();
+    _fragmentCache.set('/pages/collab', html);
+  }
+  content.innerHTML = html;
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
+}
+
 // ── Stream Page (Jinja2 fragment + Alpine) ───────────────────
 
 async function renderStreamFragment() {
@@ -1506,6 +1524,8 @@ function route() {
     renderSessionsFragment();
   } else if (path.match(/^\/session\/[^/]+\/.+$/)) {
     renderSessionViewFragment();
+  } else if (path === '/collab') {
+    renderCollabFragment();
   } else if (path === '/streams') {
     renderStreamsFragment();
   } else if (path.startsWith('/stream/')) {
