@@ -74,6 +74,7 @@ class GraphDB:
     def _init_schema(self):
         schema = SCHEMA_PATH.read_text()
         self.conn.executescript(schema)
+        self._seed_tags()
 
     def close(self):
         self.conn.close()
@@ -866,6 +867,129 @@ class GraphDB:
                 "SELECT * FROM attachments ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Tags ──────────────────────────────────────────────────
+
+    def _seed_tags(self):
+        """Seed tags table from existing note metadata (idempotent)."""
+        rows = self.conn.execute(
+            "SELECT metadata FROM sources WHERE type='note' AND metadata LIKE '%tags%'"
+        ).fetchall()
+        for row in rows:
+            meta = json.loads(row["metadata"] or "{}")
+            for tag in meta.get("tags", []):
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,)
+                )
+        self.conn.commit()
+
+    def list_tags(self, limit: int = 100) -> list[dict]:
+        """List tags with note counts, sorted by usage."""
+        rows = self.conn.execute("""
+            SELECT t.name, t.description, t.updated_at,
+                   COUNT(s.id) as note_count
+            FROM tags t
+            LEFT JOIN sources s ON s.type = 'note'
+                AND json_extract(s.metadata, '$.tags') LIKE '%' || t.name || '%'
+            GROUP BY t.name
+            ORDER BY note_count DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_tag_description(self, name: str, description: str, actor: str = "user") -> bool:
+        """Set or update a tag's description. Creates the tag if it doesn't exist."""
+        self.conn.execute("""
+            INSERT INTO tags (name, description, created_by, updated_at)
+            VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            ON CONFLICT(name) DO UPDATE SET
+                description = excluded.description,
+                updated_at = excluded.updated_at
+        """, (name, description, actor))
+        self.conn.commit()
+        return True
+
+    # ── Captures ──────────────────────────────────────────────
+
+    def insert_capture(self, capture_id: str, content: str, *,
+                       source_id: str | None = None, turn_number: int | None = None,
+                       thread_id: str | None = None, actor: str = "user") -> None:
+        """Insert a thought capture."""
+        self.conn.execute(
+            "INSERT INTO captures (id, content, source_id, turn_number, thread_id, actor)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (capture_id, content, source_id, turn_number, thread_id, actor),
+        )
+        self.conn.commit()
+
+    def list_captures(self, thread_id: str | None = None, status: str | None = None,
+                      since: str | None = None, limit: int = 20) -> list[dict]:
+        """List captures, optionally filtered."""
+        query = "SELECT * FROM captures WHERE 1=1"
+        params: list = []
+        if thread_id:
+            query += " AND thread_id = ?"
+            params.append(thread_id)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        elif not thread_id:
+            # Default: show unthreaded captures (inbox)
+            query += " AND thread_id IS NULL"
+        if since:
+            query += " AND created_at >= ?"
+            params.append(since)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
+
+    def assign_capture_to_thread(self, capture_id: str, thread_id: str) -> None:
+        """Assign a capture to a thread."""
+        self.conn.execute(
+            "UPDATE captures SET thread_id = ?, status = 'threaded' WHERE id = ?",
+            (thread_id, capture_id),
+        )
+        self.conn.commit()
+
+    # ── Threads ───────────────────────────────────────────────
+
+    def insert_thread(self, thread_id: str, title: str, *, priority: int = 1,
+                      created_by: str | None = None) -> None:
+        """Create a new thread."""
+        self.conn.execute(
+            "INSERT INTO threads (id, title, priority, created_by) VALUES (?, ?, ?, ?)",
+            (thread_id, title, priority, created_by),
+        )
+        self.conn.commit()
+
+    def list_threads(self, status: str | None = "active", limit: int = 20) -> list[dict]:
+        """List threads with capture counts."""
+        query = """
+            SELECT t.*, COUNT(c.id) as capture_count
+            FROM threads t
+            LEFT JOIN captures c ON c.thread_id = t.id
+        """
+        params: list = []
+        if status:
+            query += " WHERE t.status = ?"
+            params.append(status)
+        query += " GROUP BY t.id ORDER BY t.priority, t.updated_at DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
+
+    def update_thread_status(self, thread_id: str, status: str) -> None:
+        """Update thread status (active/parked/done)."""
+        self.conn.execute(
+            "UPDATE threads SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+            (status, thread_id),
+        )
+        self.conn.commit()
+
+    def get_thread(self, thread_id: str) -> dict | None:
+        """Get a single thread by ID or prefix."""
+        row = self.conn.execute("SELECT * FROM threads WHERE id = ? OR id LIKE ?",
+                                (thread_id, thread_id + '%')).fetchone()
+        return dict(row) if row else None
 
     def commit(self):
         self.conn.commit()
