@@ -2635,6 +2635,20 @@ async def api_session_nag_delete(request):
     return JSONResponse({"ok": True})
 
 
+async def api_session_dispatch_nag(request):
+    """Enable or disable dispatch completion nag for a session.
+
+    PUT /api/session/{tmux_name}/dispatch-nag
+    Body: {"enabled": true}
+    """
+    tmux_name = request.path_params["tmux_name"]
+    body = await request.json()
+    enabled = bool(body.get("enabled", False))
+    dashboard_db.update_dispatch_nag(tmux_name, enabled)
+    await event_bus.broadcast("session:registry", session_monitor.get_registry())
+    return JSONResponse({"ok": True})
+
+
 async def api_upload(request):
     """Upload a file to the workspace.
 
@@ -4271,6 +4285,7 @@ routes = [
     Route("/api/session/{tmux_name}/topics", api_session_topics, methods=["PUT"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag, methods=["PUT"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag_delete, methods=["DELETE"]),
+    Route("/api/session/{tmux_name}/dispatch-nag", api_session_dispatch_nag, methods=["PUT"]),
     Route("/api/session/send", api_session_send, methods=["POST"]),
     Route("/api/session/{project}/{session_id}/tail", api_session_tail),
     Route("/api/session/{project}/{session_id}/send", api_session_send, methods=["POST"]),
