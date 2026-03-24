@@ -253,6 +253,7 @@ class SessionMonitor:
                 "nag_enabled": bool(s.get("nag_enabled")),
                 "nag_interval": s.get("nag_interval") or 15,
                 "nag_message": s.get("nag_message") or "",
+                "linked": bool(s.get("jsonl_path")),
             }
             for s in sessions
         ]

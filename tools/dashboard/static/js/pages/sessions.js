@@ -180,6 +180,7 @@
               if (s.entry_count) store.entryCount = s.entry_count;
               if (s.context_tokens) store.contextTokens = s.context_tokens;
               if (s.last_message !== undefined) store.lastMessage = s.last_message;
+              if (s.linked !== undefined) store.linked = !!s.linked;
             }
           }
         } catch (e) {
