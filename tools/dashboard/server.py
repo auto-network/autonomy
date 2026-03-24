@@ -1744,7 +1744,7 @@ def _upconvert_graph_result(content: str, timestamp: str) -> dict | None:
                 "type": "semantic_bash",
                 "semantic_type": "comment-added",
                 "role": "tool",
-                "source_id": m.group(1),
+                "comment_id": m.group(1),
                 "content": content.strip()[:100],
                 "timestamp": timestamp,
             }
