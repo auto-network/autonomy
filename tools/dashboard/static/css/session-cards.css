@@ -99,6 +99,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sc-topic-item + .sc-topic-item::before {
+  content: ' · ';
+  color: #384860;
+}
 
 /* Last message */
 .sc-message {
@@ -149,6 +153,22 @@ body.zoom-expanded .sc-title {
 body.zoom-expanded .sc-t3 { display: none !important; }
 body.zoom-expanded .sc-tmux { display: none; }
 body.zoom-expanded .sc-actions { margin-left: auto; }
+body.zoom-expanded .sc-topics {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+}
+body.zoom-expanded .sc-topic-item {
+  display: block;
+}
+body.zoom-expanded .sc-topic-item + .sc-topic-item::before {
+  content: none;
+}
+body.zoom-expanded .sc-topic-item::before {
+  content: '› ';
+  color: #475569;
+  font-weight: 700;
+}
 
 /* Card gap adjustments per zoom */
 body.zoom-compact .sc-card-list { gap: 4px; }
