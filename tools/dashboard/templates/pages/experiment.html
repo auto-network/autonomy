@@ -1,191 +1,130 @@
-<div x-data="experimentPage()" class="max-w-6xl mx-auto pb-safe">
+<div x-data="experimentPage()" style="display:flex;flex-direction:column;height:calc(100vh - 44px);height:calc(100dvh - 44px);margin:-24px -24px 0;overflow:hidden">
 
   <!-- Loading state -->
   <template x-if="state === 'loading'">
-    <div class="text-gray-400">Loading experiment...</div>
+    <div style="flex:1;display:flex;align-items:center;justify-content:center;color:#9ca3af">Loading experiment...</div>
   </template>
 
   <!-- Error state -->
   <template x-if="state === 'error'">
-    <div class="text-red-400">Experiment not found</div>
+    <div style="flex:1;display:flex;align-items:center;justify-content:center;color:#f87171">Experiment not found</div>
   </template>
 
-  <!-- Main content -->
+  <!-- Main content — control strip + surface/chat + input bar -->
   <template x-if="state === 'ready'">
-    <div>
+    <div style="display:flex;flex-direction:column;flex:1;min-height:0">
 
-      <!-- Title -->
-      <h2 class="text-xl font-bold text-indigo-400 mb-1" x-text="exp.title"></h2>
+      <!-- Control strip (40px) -->
+      <div style="height:40px;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:6px 10px;background:#1a2332;border-bottom:1px solid #1e293b;flex-shrink:0;z-index:10">
+        <button @click="document.getElementById('sidebar').classList.toggle('-translate-x-full')"
+                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent"
+                title="Toggle sidebar">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/>
+          </svg>
+        </button>
+        <span style="flex:1;min-width:0;font-size:12px;font-weight:500;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+              x-text="exp?.title || 'Experiment'"></span>
+        <span style="font-size:11px;font-family:ui-monospace,monospace;color:#475569;white-space:nowrap;flex-shrink:0">iter <span style="color:#94a3b8" x-text="iterCount"></span></span>
+        <button @click="chatOpen = !chatOpen"
+                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent;transition:all 0.15s"
+                :style="chatOpen ? 'background:#312e81;color:#a5b4fc' : 'color:#64748b'"
+                title="Toggle chat">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h12v8H5l-3 3V3z"/></svg>
+        </button>
+        <button @click="captureScreenshot()"
+                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent"
+                title="Capture screenshot">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="8" cy="8" r="2.5"/></svg>
+        </button>
+      </div>
 
-      <!-- Series navigation -->
-      <template x-if="isInSeries">
-        <section aria-label="Series navigation" class="flex items-center gap-3 mb-3 text-sm">
-          <template x-if="prevId">
-            <a :href="'/experiments/' + prevId"
-               class="text-indigo-400 hover:text-indigo-300">&larr; Prev</a>
-          </template>
-          <template x-if="!prevId">
-            <span class="text-gray-600">&larr; Prev</span>
-          </template>
-          <span class="text-gray-400" x-text="`Iteration ${seriesIdx + 1} of ${seriesTotal}`"></span>
-          <template x-if="nextId">
-            <a :href="'/experiments/' + nextId"
-               class="text-indigo-400 hover:text-indigo-300">Next &rarr;</a>
-          </template>
-          <template x-if="!nextId">
-            <span class="text-gray-600">Next &rarr;</span>
-          </template>
-        </section>
-      </template>
+      <!-- Experiment surface (State 1: visible when chat closed) -->
+      <div x-show="!chatOpen" style="flex:1;position:relative;overflow:hidden;min-height:0">
+        <iframe id="exp-iframe" style="width:100%;height:100%;border:none;background:#0f1623"></iframe>
+      </div>
 
-      <!-- Description -->
-      <template x-if="exp.description">
-        <p class="text-gray-400 text-sm mb-4" x-text="exp.description"></p>
-      </template>
-
-      <!-- Completion status -->
-      <template x-if="isCompleted">
-        <p class="text-green-400 text-sm mb-4 font-semibold">Results submitted</p>
-      </template>
-
-      <!-- Variant cards -->
-      <section aria-label="Experiment variants" id="exp-variants">
-        <template x-for="v in variants" :key="v.id">
-          <div class="exp-variant" role="group" :aria-label="'Variant ' + v.id">
-            <div class="exp-variant-header">
-              <span class="exp-variant-label" x-text="v.id"></span>
-              <div class="flex items-center gap-2">
-
-                <!-- Rank dropdown (shown when 2+ variants selected) -->
-                <span x-show="showRankFor(v.id)" class="flex items-center">
-                  <label class="text-xs text-gray-400 mr-1">Rank</label>
-                  <select class="exp-rank-select"
-                          :disabled="isCompleted"
-                          :value="variantRank(v.id)"
-                          @change="setRank(v.id, $event.target.value)">
-                    <template x-for="r in v._rankOptions" :key="r">
-                      <option :value="r"
-                              :selected="variantRank(v.id) === r"
-                              x-text="r"></option>
-                    </template>
-                  </select>
-                </span>
-
-                <!-- Select / deselect button -->
-                <button class="exp-select-btn"
-                        :class="{ 'selected': isVariantSelected(v.id) }"
-                        :aria-pressed="isVariantSelected(v.id)"
-                        :aria-label="'Select variant ' + v.id"
-                        :disabled="isCompleted"
-                        @click="toggleVariant(v.id)"
-                        title="Select this variant">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="3,8 7,12 13,4"/>
-                  </svg>
-                </button>
-              </div>
+      <!-- Chat overlay (State 2: visible when chat open) -->
+      <div x-show="chatOpen" x-transition.opacity.duration.200ms
+           style="flex:1;min-height:0">
+        <div style="display:flex;flex-direction:column;height:100%;background:#1a2332;overflow:hidden">
+          <div style="display:flex;align-items:center;padding:8px 12px;border-bottom:1px solid #1e293b;flex-shrink:0">
+            <span style="font-size:13px;font-weight:600;color:#a5b4fc;flex:1">Chat With Claude</span>
+            <span x-show="isLive" style="font-size:10px;color:#22c55e;margin-right:8px">&#9679; Live</span>
+            <button @click="chatOpen = false"
+                    style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;font-size:18px;cursor:pointer;border-radius:4px">&times;</button>
+          </div>
+          <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;min-height:0">
+            <template x-for="msg in chatMessages" :key="msg.id">
+              <div style="font-size:13px;line-height:1.4;padding:8px 10px;border-radius:8px;max-width:90%;word-wrap:break-word"
+                   :style="msg.role === 'user'
+                     ? 'background:#312e81;color:#e0e7ff;align-self:flex-end;border-bottom-right-radius:2px'
+                     : 'background:#1e293b;color:#cbd5e1;align-self:flex-start;border-bottom-left-radius:2px'"
+                   x-text="msg.text"></div>
+            </template>
+            <div x-show="chatMessages.length === 0" style="text-align:center;color:#475569;font-size:13px;padding:24px 0">
+              No messages yet. Type below to chat.
             </div>
-            <!-- iframe — Alpine renders the skeleton; _injectIframes() fills the content -->
-            <iframe class="exp-variant-iframe"
-                    :data-variant="v.id"
-                    style="min-height:300px;"></iframe>
-          </div>
-        </template>
-      </section>
-
-      <!-- Submit bar (not shown for completed experiments) -->
-      <template x-if="!isCompleted">
-        <div class="exp-submit-bar">
-          <span class="text-sm text-gray-400" x-text="selectionHint"></span>
-          <button class="exp-submit-btn"
-                  :disabled="!canSubmit"
-                  @click="submit()"
-                  x-text="submitBtnText">
-          </button>
-        </div>
-      </template>
-
-      <!-- Session picker overlay -->
-      <div x-show="pickerVisible"
-           x-transition
-           class="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-           @click.self="pickerVisible = false">
-        <div class="bg-gray-800 rounded-lg border border-gray-600 shadow-xl w-full max-w-md mx-4 max-h-[70vh] flex flex-col">
-          <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-            <span class="text-sm font-semibold text-indigo-400">Select Session</span>
-            <button @click="pickerVisible = false" class="text-gray-400 hover:text-white text-lg">&times;</button>
-          </div>
-          <div class="flex-1 overflow-y-auto px-2 py-2">
-            <template x-if="pickerSessions.length === 0">
-              <div class="text-gray-500 text-sm text-center py-6">No live sessions found</div>
-            </template>
-            <template x-for="sess in pickerSessions" :key="sess.sessionId">
-              <button @click="selectSession(sess)"
-                      class="w-full text-left px-3 py-2.5 rounded hover:bg-gray-700 transition-colors mb-1 group">
-                <div class="flex items-center gap-2">
-                  <span class="live-pulse flex-shrink-0"></span>
-                  <span class="text-sm text-gray-200 font-medium truncate"
-                        x-text="sess.label || sess.tmuxSession"></span>
-                  <span x-show="sess.label"
-                        class="text-xs text-gray-500 truncate"
-                        x-text="sess.tmuxSession"></span>
-                  <span class="ml-auto text-xs text-gray-600 flex-shrink-0" x-text="sess.type"></span>
-                </div>
-                <div x-show="sess.preview"
-                     class="text-xs text-gray-500 mt-0.5 truncate pl-4"
-                     x-text="sess.preview"></div>
-              </button>
-            </template>
-          </div>
-          <div class="px-3 py-2 border-t border-gray-700">
-            <button @click="spawnNewSession()"
-                    class="w-full px-3 py-2 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white text-center">
-              + New Session
-            </button>
           </div>
         </div>
       </div>
 
-      <!-- Chat With rich panel -->
-      <div x-show="chatWithVisible"
-           class="mt-6 border border-gray-700 rounded overflow-hidden">
-
-        <!-- Panel header — click anywhere on header to toggle -->
-        <div class="flex items-center px-3 py-2 bg-gray-800 border-b border-gray-700 cursor-pointer"
-             @click="toggleChatWithPanel()">
-          <span class="text-sm font-semibold text-indigo-400">Chat With Claude</span>
-          <span :class="chatWithStatusClass" x-text="chatWithStatus"></span>
-          <div class="ml-auto flex items-center gap-2" @click.stop>
-            <template x-if="chatWithPanelRef && chatWithPanelRef.isLive">
-              <span class="flex items-center gap-1">
-                <span class="live-pulse"></span>
-                <span class="text-xs text-green-400">Live</span>
-              </span>
-            </template>
-            <button @click="disconnectChatWith()"
-                    aria-label="Disconnect from session"
-                    class="text-xs text-gray-400 hover:text-gray-200 px-2 py-0.5 rounded border border-gray-600 hover:border-gray-400">
-              Disconnect
-            </button>
-            <button @click="toggleChatWithPanel()"
-                    aria-label="Toggle Chat With panel"
-                    class="text-xs text-gray-400 hover:text-white px-2"
-                    x-text="chatWithCollapsed ? '&#9658;' : '&#9662;'">
-            </button>
-          </div>
-        </div>
-
-        <!-- Rich message feed + input bar -->
-        <div x-show="!chatWithCollapsed"
-             x-data="chatWithPanel()" x-ref="chatWithPanelInner"
-             x-init="$nextTick(() => { $el._cwPanel = $data; if (window._experimentPage) { window._experimentPage.chatWithPanelRef = $data; var _s = Alpine.store('chatWith')[window._experimentPage.expId]; if (_s && !$data._sessionId) $data.configure(_s); } })"
-             class="flex flex-col" style="height:400px;">
-          {% include 'partials/chatwith-panel.html' %}
-        </div>
-
+      <!-- Persistent input bar (both states) -->
+      <div style="height:50px;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:8px 12px;background:#1a2332;border-top:1px solid #1e293b;flex-shrink:0">
+        <button style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;cursor:pointer;border-radius:6px;font-size:16px"
+                title="Voice input (future)">&#127897;</button>
+        <input x-model="inputText" @keydown.ctrl.enter="sendMessage()"
+               style="flex:1;background:#0f1623;border:1px solid #334155;border-radius:6px;padding:8px 10px;font-size:13px;color:#e5e7eb;outline:none;min-width:0"
+               :style="'border-color:' + (inputFocused ? '#4f46e5' : '#334155')"
+               @focus="inputFocused = true" @blur="inputFocused = false"
+               placeholder="Message...">
+        <button @click="sendMessage()"
+                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:#4f46e5;border:none;border-radius:6px;color:white;font-size:14px;cursor:pointer;flex-shrink:0"
+                title="Send message">&#8593;</button>
       </div>
 
     </div>
   </template>
+
+  <!-- Session picker overlay (reused from existing) -->
+  <div x-show="pickerVisible"
+       x-transition
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+       @click.self="pickerVisible = false">
+    <div class="bg-gray-800 rounded-lg border border-gray-600 shadow-xl w-full max-w-md mx-4 max-h-[70vh] flex flex-col">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+        <span class="text-sm font-semibold text-indigo-400">Select Session</span>
+        <button @click="pickerVisible = false" class="text-gray-400 hover:text-white text-lg">&times;</button>
+      </div>
+      <div class="flex-1 overflow-y-auto px-2 py-2">
+        <template x-if="pickerSessions.length === 0">
+          <div class="text-gray-500 text-sm text-center py-6">No live sessions found</div>
+        </template>
+        <template x-for="sess in pickerSessions" :key="sess.sessionId">
+          <button @click="selectSession(sess)"
+                  class="w-full text-left px-3 py-2.5 rounded hover:bg-gray-700 transition-colors mb-1 group">
+            <div class="flex items-center gap-2">
+              <span class="live-pulse flex-shrink-0"></span>
+              <span class="text-sm text-gray-200 font-medium truncate"
+                    x-text="sess.label || sess.tmuxSession"></span>
+              <span x-show="sess.label"
+                    class="text-xs text-gray-500 truncate"
+                    x-text="sess.tmuxSession"></span>
+              <span class="ml-auto text-xs text-gray-600 flex-shrink-0" x-text="sess.type"></span>
+            </div>
+            <div x-show="sess.preview"
+                 class="text-xs text-gray-500 mt-0.5 truncate pl-4"
+                 x-text="sess.preview"></div>
+          </button>
+        </template>
+      </div>
+      <div class="px-3 py-2 border-t border-gray-700">
+        <button @click="spawnNewSession()"
+                class="w-full px-3 py-2 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white text-center">
+          + New Session
+        </button>
+      </div>
+    </div>
+  </div>
 
 </div>
