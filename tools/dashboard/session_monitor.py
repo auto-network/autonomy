@@ -247,6 +247,8 @@ class SessionMonitor:
                 "label": s.get("label", ""),
                 "entry_count": s.get("entry_count", 0),
                 "context_tokens": s.get("context_tokens", 0),
+                "last_activity": s.get("last_activity") or s["created_at"],
+                "last_message": s.get("last_message", ""),
                 "topics": json.loads(s.get("topics") or "[]"),
                 "nag_enabled": bool(s.get("nag_enabled")),
                 "nag_interval": s.get("nag_interval") or 15,
