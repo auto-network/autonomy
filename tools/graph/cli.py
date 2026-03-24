@@ -1258,7 +1258,7 @@ def cmd_thought(args):
             print("No content provided", file=sys.stderr)
             db.close()
             sys.exit(1)
-    capture_id = new_id()[:8]
+    capture_id = new_id()
     db.insert_capture(
         capture_id, content,
         source_id=args.source if hasattr(args, 'source') and args.source else None,
@@ -1271,7 +1271,7 @@ def cmd_thought(args):
         thread = db.get_thread(args.thread)
         thread_info = f' \u2192 thread "{thread["title"]}"' if thread else f" \u2192 thread {args.thread}"
     db.close()
-    print(f"  \u2713 Captured: {capture_id}{thread_info}")
+    print(f"  \u2713 Captured: {capture_id[:11]}{thread_info}")
 
 
 def cmd_thoughts(args):
@@ -1326,14 +1326,14 @@ def cmd_thread_create(args, title: str):
     """Create a new thread."""
     from .models import new_id
     db = GraphDB(args.db)
-    thread_id = "thr-" + new_id()[:4]
+    thread_id = new_id()
     db.insert_thread(
         thread_id, title,
         priority=args.priority,
         created_by=os.environ.get("BD_ACTOR", "user"),
     )
     db.close()
-    print(f"  \u2713 Thread: {thread_id} \"{title}\" [active, P{args.priority}]")
+    print(f"  \u2713 Thread: {thread_id[:11]} \"{title}\" [active, P{args.priority}]")
 
 
 def cmd_threads(args):
