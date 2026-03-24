@@ -9,6 +9,7 @@ Database: data/dashboard.db
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -16,7 +17,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).parents[3] / "data" / "dashboard.db"
+_DB_PATH = Path(os.environ.get("DASHBOARD_DB", str(Path(__file__).parents[3] / "data" / "dashboard.db")))
 _conn: sqlite3.Connection | None = None
 
 _SCHEMA = """\
