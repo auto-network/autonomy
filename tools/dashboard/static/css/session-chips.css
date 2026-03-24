@@ -96,6 +96,10 @@
 .sc-entry-crosstalk .sc-ct-provenance a { color: #9ca3af; }
 .sc-entry-crosstalk .sc-ct-provenance a:hover { color: #d1d5db; }
 
+/* Sent CrossTalk — slightly brighter emerald tint */
+.sc-entry-crosstalk-sent { background: rgba(16, 185, 129, 0.07); }
+.sc-entry-crosstalk-sent .sc-ct-label { color: #6ee7b7; }
+
 .sc-entry-assistant .sc-asst-label {
   color: #6366f1;
   font-size: 0.6875rem;
