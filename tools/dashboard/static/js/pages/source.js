@@ -63,6 +63,78 @@
         return TYPE_BADGES[type] || 'bg-gray-700';
       },
 
+      // Display title: extract first # heading from content for notes, strip markdown prefix
+      get displayTitle() {
+        if (!this.isNote) return this.src?.title || 'Untitled';
+        // For notes, title field may contain raw markdown heading
+        const title = this.src?.title || '';
+        const match = title.match(/^#+\s+(.+)/);
+        if (match) return match[1];
+        // Fallback: try first line of content
+        if (!title && this.noteContent) {
+          const contentMatch = this.noteContent.match(/^#+\s+(.+)/m);
+          if (contentMatch) return contentMatch[1];
+        }
+        return title || 'Untitled';
+      },
+
+      // Border color by source type
+      get borderColor() {
+        const type = this.srcType;
+        if (type === 'note') return '#eab308';
+        if (type === 'session') return '#22c55e';
+        if (type === 'thought') return '#8b5cf6';
+        if (type === 'docs') return '#3b82f6';
+        return '#64748b';
+      },
+
+      // Tags from metadata
+      get tags() {
+        try {
+          const meta = typeof this.src?.metadata === 'string' ? JSON.parse(this.src.metadata) : (this.src?.metadata || {});
+          return meta.tags || [];
+        } catch { return []; }
+      },
+
+      // Author from metadata
+      get author() {
+        try {
+          const meta = typeof this.src?.metadata === 'string' ? JSON.parse(this.src.metadata) : (this.src?.metadata || {});
+          return meta.author || '';
+        } catch { return ''; }
+      },
+
+      // Note version
+      get noteVersion() {
+        if (!this.isNote) return null;
+        return this.noteVersionCount > 1 ? this.noteVersionCount : null;
+      },
+
+      // Comment count
+      get commentCount() { return this.noteComments?.length || 0; },
+
+      // Provenance link URL
+      get provenanceLink() {
+        if (!this.noteProvenanceId) return '';
+        return '/' + (this.noteProvenanceType === 'bead' ? 'bead' : 'graph') + '/' + this.noteProvenanceId;
+      },
+
+      // Has any secondary metadata to show in row 3
+      get authorOrMeta() { return !!(this.author || this.commentCount || this.provenanceLink); },
+
+      // Copy graph:// link to clipboard with visual feedback
+      copyGraphLink() {
+        navigator.clipboard.writeText('graph://' + (this.src.id || '').slice(0, 12));
+        const btn = this.$el;
+        const origText = (this.src.id || '').slice(0, 12);
+        btn.textContent = 'copied!';
+        btn.style.color = '#34d399';
+        setTimeout(() => {
+          btn.textContent = origText;
+          btn.style.color = '#3d4f63';
+        }, 1000);
+      },
+
       _updateVisibleEntries() {
         if (!this.isContext) {
           this.visibleEntries = this.allEntries;
@@ -168,6 +240,10 @@
           this.isDoc = !this.isNote && !this.isChat;
           this.date = (this.src.created_at || '').slice(0, 10);
           this.noteContent = this.isNote ? (this.allEntries[0]?.content || '') : '';
+          // Strip first heading from note body (it's shown in the header now)
+          if (this.isNote && this.noteContent) {
+            this.noteContent = this.noteContent.replace(/^#+\s+.+\n?/, '');
+          }
 
           if (this.isNote) {
             const raw = this.src.metadata;
