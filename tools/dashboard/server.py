@@ -1568,33 +1568,37 @@ def _classify_crosstalk(text: str) -> dict | None:
     }
 
 
-_CROSSTALK_SEND_RE = re.compile(
-    r"""-d\s+['"]\s*(\{.*?\})\s*['"]""", re.DOTALL,
-)
-
-
 def _parse_crosstalk_send(command: str, timestamp: str) -> dict | None:
-    """Detect outbound CrossTalk send in a Bash command and return a crosstalk entry."""
-    m = _CROSSTALK_SEND_RE.search(command)
-    if not m:
+    """Detect outbound CrossTalk send in a Bash command."""
+    if "crosstalk/send" not in command:
         return None
+    import shlex
     try:
-        payload = json.loads(m.group(1))
-    except (json.JSONDecodeError, ValueError):
-        return None
-    target = payload.get("target", "")
-    message = payload.get("message", "")
-    if not target or not message:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None  # malformed shell quoting
+    # Find the token after -d
+    payload = None
+    for i, tok in enumerate(tokens):
+        if tok == "-d" and i + 1 < len(tokens):
+            try:
+                parsed = json.loads(tokens[i + 1])
+                if isinstance(parsed, dict) and "target" in parsed and "message" in parsed:
+                    payload = parsed
+                    break
+            except (json.JSONDecodeError, ValueError):
+                continue
+    if not payload:
         return None
     return {
         "type": "crosstalk",
         "role": "crosstalk",
-        "content": message,
+        "content": payload.get("message", ""),
         "sender": "self",
         "sender_label": "",
         "source_id": "",
         "turn": "",
-        "target": target,
+        "target": payload.get("target", ""),
         "direction": "sent",
         "timestamp": timestamp,
     }
