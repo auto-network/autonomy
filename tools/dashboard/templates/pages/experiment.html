@@ -65,25 +65,36 @@
       <div x-show="chatOpen" x-transition.opacity.duration.200ms
            style="flex:1;min-height:0">
         <div style="display:flex;flex-direction:column;height:100%;background:#1a2332;overflow:hidden">
-          <div style="display:flex;align-items:center;padding:8px 12px;border-bottom:1px solid #1e293b;flex-shrink:0">
-            <span style="font-size:13px;font-weight:600;color:#a5b4fc;flex:1">Chat With Claude</span>
-            <span x-show="isLive" style="font-size:10px;color:#22c55e;margin-right:8px">&#9679; Live</span>
-            <button @click="chatOpen = false"
-                    style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;font-size:18px;cursor:pointer;border-radius:4px">&times;</button>
-          </div>
-          <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;min-height:0">
-            <!-- Not connected: show connect button -->
-            <template x-if="!_tmuxSession">
-              <div style="flex:1;display:flex;align-items:center;justify-content:center">
-                <button @click="_connectChat()"
-                        style="padding:8px 16px;background:#4f46e5;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">
-                  Start Chat With Claude
-                </button>
+
+          <!-- Not connected: session picker -->
+          <template x-if="!chatConnected">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px">
+              <span style="font-size:13px;color:#64748b">Connect to a session</span>
+              <button @click="_loadChatSessions()" style="font-size:11px;color:#818cf8;background:transparent;border:none;cursor:pointer">Refresh</button>
+              <template x-if="chatSessions.length === 0">
+                <span style="font-size:12px;color:#475569">No live sessions</span>
+              </template>
+              <div style="display:flex;flex-direction:column;gap:4px;width:100%;max-width:300px">
+                <template x-for="s in chatSessions" :key="s.id">
+                  <button @click="_connectSession(s.id)"
+                          style="text-align:left;padding:8px 12px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#e5e7eb;font-size:12px;cursor:pointer;transition:background 0.15s"
+                          x-text="s.id"></button>
+                </template>
               </div>
-            </template>
-            <!-- Connected: show messages -->
-            <template x-if="_tmuxSession">
-              <div style="display:flex;flex-direction:column;gap:8px;flex:1">
+            </div>
+          </template>
+
+          <!-- Connected: chat messages -->
+          <template x-if="chatConnected">
+            <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+              <div style="display:flex;align-items:center;padding:8px 12px;border-bottom:1px solid #1e293b;flex-shrink:0">
+                <span style="font-size:13px;font-weight:600;color:#a5b4fc;flex:1">Chat With Claude</span>
+                <span style="font-size:10px;color:#22c55e;margin-right:8px">&#9679; Live</span>
+                <button @click="disconnectSession()" style="font-size:10px;color:#64748b;background:transparent;border:none;cursor:pointer;margin-right:8px" title="Disconnect">Disconnect</button>
+                <button @click="chatOpen = false"
+                        style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;font-size:18px;cursor:pointer;border-radius:4px">&times;</button>
+              </div>
+              <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;min-height:0">
                 <template x-for="msg in chatMessages" :key="msg.id">
                   <div style="font-size:13px;line-height:1.4;padding:8px 10px;border-radius:8px;max-width:90%;word-wrap:break-word"
                        :style="msg.role === 'user'
@@ -95,8 +106,9 @@
                   No messages yet. Type below to chat.
                 </div>
               </div>
-            </template>
-          </div>
+            </div>
+          </template>
+
         </div>
       </div>
 
@@ -105,57 +117,19 @@
         <button style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;cursor:pointer;border-radius:6px;font-size:16px"
                 title="Voice input (future)">&#127897;</button>
         <input x-model="inputText" @keydown.ctrl.enter="sendMessage()"
+               :disabled="!chatConnected"
                style="flex:1;background:#0f1623;border:1px solid #334155;border-radius:6px;padding:8px 10px;font-size:13px;color:#e5e7eb;outline:none;min-width:0"
-               :style="'border-color:' + (inputFocused ? '#4f46e5' : '#334155')"
+               :style="'border-color:' + (inputFocused ? '#4f46e5' : '#334155') + ';opacity:' + (chatConnected ? '1' : '0.5')"
                @focus="inputFocused = true" @blur="inputFocused = false"
-               placeholder="Message...">
-        <button @click="sendMessage()"
-                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:#4f46e5;border:none;border-radius:6px;color:white;font-size:14px;cursor:pointer;flex-shrink:0"
+               :placeholder="chatConnected ? 'Message...' : 'Select a session first'">
+        <button @click="sendMessage()" :disabled="!chatConnected"
+                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;border:none;border-radius:6px;color:white;font-size:14px;flex-shrink:0"
+                :style="chatConnected ? 'background:#4f46e5;cursor:pointer' : 'background:#334155;cursor:not-allowed'"
                 title="Send message">&#8593;</button>
       </div>
 
     </div>
   </template>
 
-  <!-- Session picker overlay (reused from existing) -->
-  <div x-show="pickerVisible"
-       x-transition
-       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-       @click.self="pickerVisible = false">
-    <div class="bg-gray-800 rounded-lg border border-gray-600 shadow-xl w-full max-w-md mx-4 max-h-[70vh] flex flex-col">
-      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-        <span class="text-sm font-semibold text-indigo-400">Select Session</span>
-        <button @click="pickerVisible = false" class="text-gray-400 hover:text-white text-lg">&times;</button>
-      </div>
-      <div class="flex-1 overflow-y-auto px-2 py-2">
-        <template x-if="pickerSessions.length === 0">
-          <div class="text-gray-500 text-sm text-center py-6">No live sessions found</div>
-        </template>
-        <template x-for="sess in pickerSessions" :key="sess.sessionId">
-          <button @click="selectSession(sess)"
-                  class="w-full text-left px-3 py-2.5 rounded hover:bg-gray-700 transition-colors mb-1 group">
-            <div class="flex items-center gap-2">
-              <span class="live-pulse flex-shrink-0"></span>
-              <span class="text-sm text-gray-200 font-medium truncate"
-                    x-text="sess.label || sess.tmuxSession"></span>
-              <span x-show="sess.label"
-                    class="text-xs text-gray-500 truncate"
-                    x-text="sess.tmuxSession"></span>
-              <span class="ml-auto text-xs text-gray-600 flex-shrink-0" x-text="sess.type"></span>
-            </div>
-            <div x-show="sess.preview"
-                 class="text-xs text-gray-500 mt-0.5 truncate pl-4"
-                 x-text="sess.preview"></div>
-          </button>
-        </template>
-      </div>
-      <div class="px-3 py-2 border-t border-gray-700">
-        <button @click="spawnNewSession()"
-                class="w-full px-3 py-2 bg-indigo-700 hover:bg-indigo-600 rounded text-sm text-white text-center">
-          + New Session
-        </button>
-      </div>
-    </div>
-  </div>
 
 </div>
