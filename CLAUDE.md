@@ -16,7 +16,7 @@ tools/                — utility tools, each with its own TOOL.md
   dashboard/          — web UI: bead board, session monitor, graph explorer (planned)
   analytics/          — session log analysis, tool use metrics (planned)
 data/                 — extracted/collected data
-  graph.db            — knowledge graph database (92K+ thoughts, gitignored)
+  graph.db            — knowledge graph database (100K+ thoughts, gitignored)
   chatgpt/            — scraped ChatGPT conversations (.json, .md)
   claude/             — scraped Claude.ai conversations (.json, .md)
 .beads/               — Beads issue tracker (Dolt-backed, local state gitignored)
@@ -28,7 +28,7 @@ data/                 — extracted/collected data
 
 | Tool | Path | CLI | Description |
 |------|------|-----|-------------|
-| Graph | `tools/graph/` | `graph <cmd>` | Knowledge graph with FTS5 search, 4600+ sources, project scoping |
+| Graph | `tools/graph/` | `graph <cmd>` | Knowledge graph with FTS5 search, 6000+ sources, project scoping |
 | Scraper | `tools/scraper/` | HTTP REPL :8765 | Stealth browser + DOM extraction for ChatGPT/Claude.ai |
 | Dashboard | `tools/dashboard/` | (planned) | Web UI for beads, sessions, graph, monitoring |
 | Analytics | `tools/analytics/` | (planned) | Session log analysis, tool use metrics |
@@ -44,6 +44,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph search "query" --or` | Match ANY term instead of all | `graph search "auth login session" --or` |
 | `graph read <src_id>` | Read full source content | `graph read dc4c73ee --max-chars 2000` |
 | `graph context <src_id> <turn>` | Show turns around a search hit | `graph context 8cdc1d85 286 --window 3` |
+| `graph context <src_id> last` | Show latest turns of a source | `graph context 8cdc1d85 last --window 5` |
 | `graph sources` | List sources | `graph sources --project jira --type docs` |
 | `graph sources --verbose` | List sources with file paths | `graph sources -v --limit 5` |
 | `graph projects` | Show all projects with source counts | |
@@ -63,6 +64,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph bead "title"` | Create bead with provenance link | `graph bead "Fix X" --source 8cdc1d85 --turns 286` |
 | `graph agent-runs` | Discover and ingest subagent traces | `graph agent-runs --list` |
 | `graph sessions --all` | Ingest latest session data (107ms) | Run before searching for recent content |
+| `graph sessions --status` | Compact live session status table | `graph sessions --status` |
 | `graph wait <bead-id>` | Block until a dispatched bead completes | `graph wait auto-x7wr --timeout 900` |
 | `graph dispatch` | Show running/queued dispatch state | `graph dispatch runs --failed` |
 | `graph dispatch runs --completed` | Filter to completed (DONE) runs only | `graph dispatch runs --completed --limit 10` |
@@ -70,6 +72,15 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph primer <bead-id>` | Dynamic context primer for a bead (description + pitfalls + provenance) | `graph primer auto-n9qa` |
 | `graph ui-exp "title" <dir>` | Create UI experiment from HTML files + live-watch for changes | `graph ui-exp "Input redesign" /tmp/cards/` |
 | `graph set-label "text"` | Set a working title for the current session | `graph set-label "Passkey auth design"` |
+| `graph notes --since <dur>` | List notes by recency with duration filter | `graph notes --since 1h --tags pitfall` |
+| `graph crosstalk` | Query CrossTalk message log | `graph crosstalk --since 1h --session auto-0323-022132` |
+| `graph dispatch watch` | Block until next dispatch completes | `graph dispatch watch --timeout 300` |
+| `graph collab topics` | List tags with descriptions and note counts | `graph collab topics` |
+| `graph collab tag-describe <tag> "desc"` | Set or update a tag description | `graph collab tag-describe pitfall "Operational hazards..."` |
+| `graph thought "text"` | Capture a raw idea with optional provenance | `graph thought "auth needs passkeys" --tags auth` |
+| `graph thoughts` | List recent thoughts | `graph thoughts --since 1h` |
+| `graph thread "title"` | Create a thought thread | `graph thread "Passkey auth design" -p 1` |
+| `graph threads` | List active threads | `graph threads --all` |
 
 ### Beads (`bd`)
 | Command | What | Example |
@@ -125,6 +136,18 @@ graph read <src_id> --max-chars 3000          # read full sources
 ```bash
 graph attention --last 20                     # recent human input
 graph attention --search "keyword"            # find when user discussed something
+```
+
+### Session self-management
+```bash
+graph set-label "topic description"                      # set your session label
+curl -sk -X PUT https://localhost:8080/api/session/$TMUX/topics \
+  -H 'Content-Type: application/json' \
+  -d '{"topics":["Status line 1","Status line 2"]}'      # set 1-4 topic lines on card
+curl -sk -X PUT https://localhost:8080/api/session/$TMUX/nag \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"interval":10,"message":"Check in"}' # enable idle nag (1-120 min)
+curl -sk -X DELETE https://localhost:8080/api/session/$TMUX/nag  # disable nag
 ```
 
 ## Environment

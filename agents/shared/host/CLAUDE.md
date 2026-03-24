@@ -11,7 +11,7 @@ This is an open-ended interactive session. There is no bead, no task directive, 
 ## Capabilities
 
 ### graph — Knowledge Graph
-92K+ thoughts, 4600+ sources, full-text search. Primary tool for orienting around any topic.
+100K+ thoughts, 6000+ sources, full-text search. Primary tool for orienting around any topic.
 
 ```bash
 graph search "query"                  # FTS search (--or for ANY term)
@@ -27,6 +27,13 @@ graph dispatch approve <bead-id>      # approve bead(s) for dispatch (accepts mu
 graph dispatch status                 # compact one-liner
 graph dispatch runs                   # running/queued agent activity
 graph wait <bead-id>                 # block until bead completes (background it in your shell)
+graph context <src_id> last             # latest turns (no turn number needed)
+graph sessions --status                  # live session table from dashboard
+graph notes --since 1h                   # recent notes by time
+graph crosstalk --since 1h               # recent CrossTalk messages
+graph thought "text" --tags tag          # capture a raw idea
+graph thread "title"                     # create a thought thread
+graph collab topics                      # browse tag taxonomy with descriptions
 ```
 Run `graph --help` for full reference.
 
