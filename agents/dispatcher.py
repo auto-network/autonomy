@@ -1029,6 +1029,102 @@ def process_decision(dispatch_result: DispatchResult) -> str:
     return status
 
 
+# ── Dispatch completion nag ───────────────────────────────────────
+
+
+def _notify_dispatch_nag(
+    agent: RunningAgent,
+    effective_status: str,
+    result: DispatchResult,
+) -> None:
+    """Send CrossTalk dispatch-nag to all opted-in sessions. Best-effort."""
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from tools.dashboard.dao import dashboard_db
+        dashboard_db.init_db()
+        targets = dashboard_db.get_dispatch_nag_sessions()
+        if not targets:
+            return
+
+        # Derive notification fields
+        bead_id = agent.bead_id
+        status_label = "merged" if effective_status == "DONE" else "failed"
+        commit = result.commit_hash[:10] if result.commit_hash else "none"
+        duration = int(time.time() - agent.started_at)
+        dur_min, dur_sec = divmod(duration, 60)
+
+        # Get bead title via bd show (best-effort)
+        title = bead_id
+        try:
+            out = run_bd(["show", bead_id, "--json"])
+            if out:
+                info = json.loads(out)
+                title = info.get("title", bead_id)
+        except Exception:
+            pass
+
+        # Get lines changed from git diff (best-effort)
+        lines_changed = ""
+        if result.commit_hash:
+            try:
+                diff_stat = subprocess.run(
+                    ["git", "diff", "--shortstat", f"{result.commit_hash}~1", result.commit_hash],
+                    capture_output=True, text=True, timeout=5,
+                    cwd=str(REPO_ROOT),
+                )
+                if diff_stat.stdout.strip():
+                    lines_changed = diff_stat.stdout.strip()
+            except Exception:
+                pass
+
+        msg = (
+            f"Dispatch {status_label}: {bead_id} — {title}\n"
+            f"Status: {status_label} | Commit: {commit} | Duration: {dur_min}m{dur_sec}s"
+        )
+        if lines_changed:
+            msg += f"\n{lines_changed}"
+
+        _send_dispatch_nag_crosstalk(targets, msg)
+    except Exception as e:
+        print(f"  WARN: dispatch nag failed: {e}", file=sys.stderr)
+
+
+def _send_dispatch_nag_crosstalk(targets: list[str], message: str) -> None:
+    """Send a dispatch nag message to multiple sessions via tmux paste-buffer."""
+    import secrets as _secrets
+
+    iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    envelope = (
+        f'<crosstalk from="dispatcher"\n'
+        f'           label="Dispatch Notification"\n'
+        f'           source="" turn="0"\n'
+        f'           timestamp="{iso_now}">\n'
+        f'{message}\n'
+        f'</crosstalk>'
+    )
+
+    for tmux_name in targets:
+        try:
+            path = f"/tmp/dispatch_nag_{_secrets.token_hex(4)}.txt"
+            Path(path).write_text(envelope, encoding="utf-8")
+            subprocess.run(
+                ["tmux", "load-buffer", "-b", "dispatch_nag", path],
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["tmux", "paste-buffer", "-p", "-b", "dispatch_nag", "-t", tmux_name],
+                capture_output=True, timeout=5,
+            )
+            time.sleep(0.3)
+            subprocess.run(
+                ["tmux", "send-keys", "-t", tmux_name, "", "Enter"],
+                capture_output=True, timeout=5,
+            )
+            Path(path).unlink(missing_ok=True)
+        except Exception:
+            pass  # best-effort — don't crash dispatcher
+
+
 # ── Live stats collection ────────────────────────────────────────
 
 
@@ -1549,6 +1645,7 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
         try:
             result = collect_results(agent, exit_code)
             effective_status = process_decision(result)
+            _notify_dispatch_nag(agent, effective_status, result)
             # Track consecutive merge failures across beads for auto-pause
             _update_merge_failure_counter(effective_status, result)
             _record_run(agent, result, effective_status=effective_status)
@@ -1574,6 +1671,8 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             error_msg = f"Collection error: {type(e).__name__}: {e}"
             print(f"  ERROR collecting {agent.bead_id}: {error_msg}")
             release_bead(agent.bead_id, "FAILED", error_msg[:200])
+            _notify_dispatch_nag(agent, "FAILED", DispatchResult(
+                bead_id=agent.bead_id, exit_code=exit_code, error=error_msg))
             _record_run(agent, DispatchResult(
                 bead_id=agent.bead_id, exit_code=exit_code, error=error_msg),
                 effective_status="FAILED")
@@ -1590,17 +1689,21 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             if result.decision or result.commit_hash:
                 print(f"  Recovered results from timed-out {agent.bead_id}")
                 effective_status = process_decision(result)
+                _notify_dispatch_nag(agent, effective_status, result)
                 _record_run(agent, result, effective_status=effective_status)
             else:
                 print(f"  No results from timed-out {agent.bead_id}, marking FAILED")
                 release_bead(agent.bead_id, "FAILED",
                              f"Agent timeout ({MAX_AGENT_RUNTIME}s)")
+                _notify_dispatch_nag(agent, "FAILED", result)
                 _record_run(agent, result, effective_status="FAILED")
                 cleanup_worktree(agent.worktree_path)
         except Exception as e:
             error_msg = f"Timeout collection error: {type(e).__name__}: {e}"
             print(f"  ERROR collecting timed-out {agent.bead_id}: {error_msg}")
             release_bead(agent.bead_id, "FAILED", error_msg[:200])
+            _notify_dispatch_nag(agent, "FAILED", DispatchResult(
+                bead_id=agent.bead_id, exit_code=-1, error=error_msg))
             _record_run(agent, DispatchResult(
                 bead_id=agent.bead_id, exit_code=-1, error=error_msg),
                 effective_status="FAILED")
