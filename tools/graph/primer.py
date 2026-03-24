@@ -82,7 +82,29 @@ def collect_primer_data(
             "acceptance_criteria": bead.get("acceptance_criteria", ""),
             "design": bead.get("design", ""),
             "comments": bead.get("comments", []),
+            "notes": bead.get("notes", ""),
         }
+
+    # ── 1b. Merge retry context (from bead notes) ──────────
+    result["merge_retry"] = None
+    if bead and bead.get("notes", ""):
+        notes_text = bead["notes"]
+        marker = "MERGE_RETRY_CONTEXT"
+        idx = notes_text.rfind(marker)  # use last occurrence (most recent retry)
+        if idx >= 0:
+            block = notes_text[idx + len(marker):]
+            # Block ends at next note boundary or end of string
+            retry = {}
+            for line in block.splitlines():
+                line = line.strip()
+                if line.startswith("branch:"):
+                    retry["branch"] = line[len("branch:"):].strip()
+                elif line.startswith("commit:"):
+                    retry["commit"] = line[len("commit:"):].strip()
+                elif line.startswith("merge_error:"):
+                    retry["merge_error"] = line[len("merge_error:"):].strip()
+            if retry.get("branch") and retry.get("commit"):
+                result["merge_retry"] = retry
 
     # ── 2. Provenance — original conversation turns ──────────
     if include_provenance:
@@ -262,6 +284,26 @@ def format_for_agent(data: dict) -> str:
     if bead:
         sections.append(f"# Task: {bead['title']}")
         sections.append(f"**Bead:** {bead_id}  **Priority:** P{bead['priority']}  **Status:** {bead['status']}")
+        # ── Merge retry banner (before description) ──────────
+        merge_retry = data.get("merge_retry")
+        if merge_retry:
+            branch = merge_retry.get("branch", "?")
+            commit = merge_retry.get("commit", "?")
+            merge_error = merge_retry.get("merge_error", "(no details)")
+            sections.append(
+                f"\n## MERGE RETRY — Previous Work Available\n"
+                f"\nThis bead was previously completed but the merge to master failed due to conflicts.\n"
+                f"\n**Previous branch:** {branch}"
+                f"\n**Previous commit:** {commit}"
+                f"\n**Merge error:**\n```\n{merge_error}\n```\n"
+                f"\n### Recovery Strategy\n"
+                f"\n1. `git cherry-pick {commit}` — apply previous work onto current master"
+                f"\n2. Resolve any conflicts (usually trivial — adjacent edits, import lines)"
+                f"\n3. Verify the result compiles/works"
+                f"\n4. Commit and write decision.json as normal\n"
+                f"\nDo NOT re-implement from scratch. The previous work is complete and correct"
+                f" — it just needs conflict resolution."
+            )
         if bead["description"]:
             sections.append(f"\n## Description\n{bead['description']}")
         if bead["acceptance_criteria"]:
