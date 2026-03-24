@@ -980,8 +980,9 @@ class GraphDB:
             query += " AND thread_id = ?"
             params.append(thread_id)
         if status:
-            query += " AND status = ?"
-            params.append(status)
+            if status != "*":
+                query += " AND status = ?"
+                params.append(status)
         elif not thread_id:
             # Default: show unthreaded captures (inbox)
             query += " AND thread_id IS NULL"
