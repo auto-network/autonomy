@@ -245,7 +245,7 @@
       </div>
 
       <!-- ZONE 4: Input bar — flex child at bottom (shown when linked to tmux) -->
-      <template x-if="isLive && _tmuxSession">
+      <template x-if="isLive && _tmuxSession && (sessionType !== 'host' || _linked)">
         <div class="sv-input"
              @dragenter.prevent="$el.classList.add('drop-highlight')"
              @dragover.prevent="$el.classList.add('drop-highlight')"
@@ -337,7 +337,7 @@
       </template>
 
       <!-- ZONE 4 alt: Link Terminal — flex child at bottom -->
-      <template x-if="isLive && !_tmuxSession && sessionType === 'host'">
+      <template x-if="isLive && !_linked && sessionType === 'host'">
         <div class="sv-input">
 
           <!-- Idle: show Link Terminal button -->
