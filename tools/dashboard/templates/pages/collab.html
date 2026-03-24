@@ -1,0 +1,249 @@
+<style>
+  /* Tab strip */
+  .collab-tabs {
+    display: flex; gap: 2px; padding: 0 0 8px;
+    border-bottom: 1px solid #1e293b; margin-bottom: 8px;
+  }
+  .collab-tab {
+    padding: 6px 12px; border-radius: 6px 6px 0 0;
+    font-size: 13px; font-weight: 500; color: #64748b;
+    background: transparent; border: none; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: all 0.15s;
+  }
+  .collab-tab:hover { color: #94a3b8; }
+  .collab-tab.active { color: #e2e8f0; background: #1e293b; }
+  .collab-tab-count {
+    font-size: 10px; color: #475569; margin-left: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* Card list */
+  .collab-list { display: flex; flex-direction: column; gap: 4px; }
+
+  /* Note card */
+  .note-card {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 6px 10px; background: #1a2332;
+    border-left: 4px solid #ca8a04; border-radius: 0;
+    cursor: pointer; transition: background 0.1s;
+    text-decoration: none;
+  }
+  .note-card:hover { background: #1e2d3d; }
+  .note-card.type-thought { border-left-color: #a855f7; }
+  .note-card.type-pitfall { border-left-color: #ef4444; }
+  .note-card-wrap { border-radius: 8px; overflow: clip; }
+
+  .note-stats {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 10px; line-height: 1;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #4b5e73;
+  }
+  .note-type {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .note-type-note { color: #ca8a04; }
+  .note-type-thought { color: #a855f7; }
+  .note-type-pitfall { color: #ef4444; }
+  .note-date { color: #4b5e73; }
+  .note-author { color: #3d4f63; margin-left: auto; }
+  .note-title {
+    font-size: 14px; font-weight: 600; color: #f1f5f9;
+    line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .note-preview {
+    font-size: 11px; color: #56657a; line-height: 1.25;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .note-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 1px; }
+  .note-tag {
+    font-size: 10px; padding: 1px 6px; border-radius: 8px;
+    background: #1e293b; color: #94a3b8; text-decoration: none;
+    cursor: pointer;
+  }
+  .note-tag:hover { background: #334155; color: #e2e8f0; }
+
+  /* Thought card */
+  .thought-card {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 6px 10px; background: #1a2332;
+    border-left: 4px solid #a855f7;
+  }
+  .thought-card-wrap { border-radius: 8px; overflow: clip; }
+  .thought-content {
+    font-size: 13px; color: #cbd5e1; line-height: 1.4;
+  }
+  .thought-status {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    padding: 1px 6px; border-radius: 3px;
+  }
+  .thought-status-captured { background: #3b0764; color: #d8b4fe; }
+  .thought-status-actioned { background: #14532d; color: #86efac; }
+
+  /* Thread card */
+  .thread-card {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 6px 10px; background: #1a2332;
+    border-left: 4px solid #3b82f6;
+  }
+  .thread-card-wrap { border-radius: 8px; overflow: clip; }
+  .thread-captures {
+    font-size: 10px; color: #4b5e73;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* Topic card */
+  .topic-card {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 6px 10px; background: #1a2332;
+    border-left: 4px solid #14b8a6;
+    cursor: pointer; transition: background 0.1s;
+    text-decoration: none;
+  }
+  .topic-card:hover { background: #1e2d3d; }
+  .topic-card-wrap { border-radius: 8px; overflow: clip; }
+  .topic-name { font-size: 14px; font-weight: 600; color: #5eead4; }
+  .topic-desc {
+    font-size: 11px; color: #64748b; line-height: 1.3;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .topic-count {
+    font-size: 10px; color: #4b5e73;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* Thought input */
+  .thought-input-bar {
+    display: flex; gap: 6px; margin-bottom: 8px;
+  }
+  .thought-input {
+    flex: 1; background: #0f1623; border: 1px solid #334155;
+    border-radius: 6px; padding: 8px 10px; font-size: 13px;
+    color: #e5e7eb; outline: none;
+  }
+  .thought-input:focus { border-color: #a855f7; }
+  .thought-send {
+    padding: 8px 14px; border-radius: 6px;
+    background: #3b0764; color: #d8b4fe; border: none;
+    font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+  .thought-send:disabled { opacity: 0.4; cursor: default; }
+
+  /* Loading state */
+  .collab-loading {
+    color: #64748b; font-size: 13px; padding: 12px 0;
+  }
+</style>
+
+<div x-data="collabPage()" class="pb-safe" style="padding: 0 6px;">
+
+  <!-- Tab strip -->
+  <div class="collab-tabs">
+    <button class="collab-tab" :class="tab === 'recent' && 'active'" @click="setTab('recent')">
+      Recent<span class="collab-tab-count" x-text="recent.length"></span>
+    </button>
+    <button class="collab-tab" :class="tab === 'thoughts' && 'active'" @click="setTab('thoughts')">
+      Thoughts<span class="collab-tab-count" x-text="thoughts.length"></span>
+    </button>
+    <button class="collab-tab" :class="tab === 'threads' && 'active'" @click="setTab('threads')">
+      Threads<span class="collab-tab-count" x-text="threads.length"></span>
+    </button>
+    <button class="collab-tab" :class="tab === 'topics' && 'active'" @click="setTab('topics')">
+      Topics<span class="collab-tab-count" x-text="topics.length"></span>
+    </button>
+  </div>
+
+  <!-- Loading -->
+  <template x-if="loading">
+    <div class="collab-loading">Loading...</div>
+  </template>
+
+  <!-- RECENT TAB -->
+  <div x-show="tab === 'recent' && !loading" class="collab-list">
+    <template x-for="item in recent" :key="item.id">
+      <div class="note-card-wrap">
+        <a class="note-card" :class="borderClass(item)"
+           :href="'/graph/' + item.id.slice(0, 12)"
+           @click.prevent="navigateTo('/graph/' + item.id.slice(0, 12))">
+          <div class="note-stats">
+            <span class="note-type" :class="typeClass(item)" x-text="typeLabel(item)"></span>
+            <span class="note-date" x-text="formatDate(item.created_at)"></span>
+            <span class="note-author" x-text="formatAuthor(item.author)"></span>
+          </div>
+          <div class="note-title" x-text="item.title"></div>
+          <div class="note-preview" x-text="item.preview"></div>
+          <div class="note-tags">
+            <template x-for="tag in (item.tags || [])" :key="tag">
+              <span class="note-tag" x-text="tag"></span>
+            </template>
+          </div>
+        </a>
+      </div>
+    </template>
+  </div>
+
+  <!-- THOUGHTS TAB -->
+  <div x-show="tab === 'thoughts' && !loading">
+    <div class="thought-input-bar">
+      <input class="thought-input" placeholder="Capture a thought..."
+             x-model="thoughtInput" @keydown.enter="captureThought()">
+      <button class="thought-send" @click="captureThought()"
+              :disabled="!thoughtInput.trim()">Capture</button>
+    </div>
+    <div class="collab-list">
+      <template x-for="t in thoughts" :key="t.id">
+        <div class="thought-card-wrap">
+          <div class="thought-card">
+            <div class="note-stats">
+              <span class="thought-status" :class="'thought-status-' + (t.status || 'captured')" x-text="t.status || 'captured'"></span>
+              <span class="note-date" x-text="formatDate(t.created_at)"></span>
+              <template x-if="t.thread_id">
+                <span style="color:#3b82f6; font-size:10px;">threaded</span>
+              </template>
+            </div>
+            <div class="thought-content" x-text="t.content"></div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- THREADS TAB -->
+  <div x-show="tab === 'threads' && !loading" class="collab-list">
+    <template x-for="t in threads" :key="t.id">
+      <div class="thread-card-wrap">
+        <div class="thread-card">
+          <div class="note-stats">
+            <span style="color:#64748b; font-size:10px; font-weight:600;" x-text="'P' + t.priority"></span>
+            <span class="thought-status" :class="t.status === 'active' ? 'thought-status-captured' : 'thought-status-actioned'" x-text="t.status"></span>
+            <span class="thread-captures" x-text="t.capture_count + ' captures'"></span>
+            <span class="note-date" x-text="formatDate(t.created_at)"></span>
+          </div>
+          <div class="note-title" x-text="t.title"></div>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- TOPICS TAB -->
+  <div x-show="tab === 'topics' && !loading" class="collab-list">
+    <template x-for="t in topics" :key="t.tag">
+      <div class="topic-card-wrap">
+        <a class="topic-card" :href="'/stream/' + encodeURIComponent(t.tag)"
+           @click.prevent="navigateTo('/stream/' + encodeURIComponent(t.tag))">
+          <div class="note-stats">
+            <span class="topic-count" x-text="t.count + ' notes'"></span>
+            <span class="note-date" x-text="formatDate(t.last_active)"></span>
+          </div>
+          <div class="topic-name" x-text="'#' + t.tag"></div>
+          <template x-if="t.description">
+            <div class="topic-desc" x-text="t.description"></div>
+          </template>
+        </a>
+      </div>
+    </template>
+  </div>
+
+</div>
