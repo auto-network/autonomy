@@ -32,6 +32,7 @@ window.getSessionStore = function(sessionId) {
       tmuxSession: '',
       project: '',
       label: '',
+      role: '',
       startedAt: 0,
       entryCount: 0,
       contextTokens: 0,
@@ -135,6 +136,7 @@ window.ensureSessionMessages = function() {
       store.sessionType = s.type || '';
       store.tmuxSession = s.tmux_session || '';
       store.label = s.label || '';
+      store.role = s.role || '';
       store.entryCount = s.entry_count || 0;
       if (s.context_tokens) store.contextTokens = s.context_tokens;
       if (s.topics) store.topics = s.topics;

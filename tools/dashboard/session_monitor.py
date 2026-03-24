@@ -247,6 +247,7 @@ class SessionMonitor:
                 "started_at": s["created_at"],
                 "graph_source_id": s.get("graph_source_id"),
                 "label": s.get("label", ""),
+                "role": s.get("role", ""),
                 "entry_count": s.get("entry_count", 0),
                 "context_tokens": s.get("context_tokens", 0),
                 "last_activity": s.get("last_activity") or s["created_at"],
