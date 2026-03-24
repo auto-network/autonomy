@@ -14,7 +14,7 @@
   }
 
   document.addEventListener('alpine:init', () => {
-    // In-memory store for Chat With session selection, keyed by experiment ID.
+    // In-memory store for Chat With session selection, keyed by series_id (or expId for standalone).
     // Survives SPA navigation (Alpine stores persist), lost only on full page reload.
     if (!Alpine.store('chatWith')) Alpine.store('chatWith', {});
 
@@ -237,8 +237,12 @@
 
       // ── Chat With ─────────────────────────────────────────────────────
 
+      _chatWithKey() {
+        return (this.exp && this.exp.series_id) || this.expId;
+      },
+
       _saveSession(sessionId, tmuxSession, project) {
-        Alpine.store('chatWith')[this.expId] = {
+        Alpine.store('chatWith')[this._chatWithKey()] = {
           sessionId: sessionId,
           tmuxSession: tmuxSession,
           project: project,
@@ -246,7 +250,7 @@
       },
 
       _loadSession() {
-        return Alpine.store('chatWith')[this.expId] || null;
+        return Alpine.store('chatWith')[this._chatWithKey()] || null;
       },
 
       toggleChatWithPanel() {
@@ -351,7 +355,7 @@
         this.chatWithBtnText = 'Chat With';
         this.chatWithBtnDisabled = false;
         this.setChatWithStatus('', 'text-xs text-gray-500 ml-2');
-        delete Alpine.store('chatWith')[this.expId];
+        delete Alpine.store('chatWith')[this._chatWithKey()];
       },
 
       reconnectChatWith() {
@@ -467,7 +471,7 @@ ${_safeHtml}
             initDisplayCapture(this.expId).catch(() => {});
           } else {
             // Session no longer exists — clear saved state
-            delete Alpine.store('chatWith')[this.expId];
+            delete Alpine.store('chatWith')[this._chatWithKey()];
           }
         } catch (e) { /* best-effort */ }
       },
