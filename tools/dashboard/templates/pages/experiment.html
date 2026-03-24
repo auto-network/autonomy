@@ -1,4 +1,79 @@
-<style>@keyframes exp-spin { to { transform: rotate(360deg); } }</style>
+<style>
+@keyframes exp-spin { to { transform: rotate(360deg); } }
+
+/* Session picker — from Design Studio experiment 3b9d8d82 */
+.picker-list {
+  flex: 1; overflow-y: auto;
+  padding: 6px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.picker-card-wrap { border-radius: 8px; overflow: clip; }
+.picker-card {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px;
+  background: #0f1623;
+  border: none;
+  border-left: 4px solid #475569;
+  cursor: pointer;
+  transition: background 0.1s;
+  width: 100%; text-align: left;
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+.picker-card:hover { background: #162032; }
+.picker-card:active { background: #1e2d3d; }
+.picker-card-host { border-left-color: #3b82f6; }
+.picker-stats {
+  display: flex; align-items: center; gap: 3px;
+  line-height: 1;
+}
+.picker-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  flex-shrink: 0; vertical-align: 1px; margin-right: 1px;
+}
+.picker-dot-live { background: #22c55e; box-shadow: 0 0 4px rgba(34,197,94,0.4); }
+.picker-dot-dead { background: #374151; }
+.picker-role {
+  display: inline-flex; align-items: center;
+  padding: 1px 7px; border-radius: 4px;
+  font-size: 11px; font-weight: 600;
+  color: #cbd5e1; background: #2a3444;
+  white-space: nowrap; flex-shrink: 0;
+}
+.picker-role-host { background: #1e3a5f; color: #93c5fd; }
+.picker-tmux {
+  font-size: 10px; color: #3d4f63;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin-left: auto; white-space: nowrap;
+}
+.picker-label {
+  font-size: 14px; font-weight: 600; color: #f1f5f9;
+  line-height: 1.25;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.picker-preview {
+  font-size: 11px; color: #56657a; line-height: 1.25;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.picker-new {
+  margin: 4px 6px 6px;
+  padding: 10px 12px;
+  background: #4338ca;
+  border: none;
+  border-radius: 8px;
+  color: #e0e7ff;
+  font-size: 13px; font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.picker-new:hover { background: #4f46e5; }
+.picker-count {
+  font-size: 11px; color: #475569;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+</style>
 <div x-data="experimentPage()" style="display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden;padding-top:env(safe-area-inset-top, 0px)">
 
   <!-- Loading state -->
@@ -88,49 +163,45 @@
                   style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;font-size:18px;cursor:pointer;border-radius:4px">&times;</button>
         </div>
 
-        <!-- Picker (when not connected) -->
+        <!-- Picker (when not connected) — from Design Studio experiment 3b9d8d82 -->
         <template x-if="!chatConnected">
-          <div style="flex:1;overflow-y:auto;padding:8px">
-            <template x-if="chatSessions.length === 0">
-              <div style="text-align:center;padding:24px;color:#475569;font-size:13px">No live sessions found</div>
-            </template>
-            <template x-for="sess in chatSessions" :key="sess.id">
-              <div style="border-radius:8px;overflow:clip;margin-bottom:4px">
-                <button @click="_connectSession(sess.id)"
-                        style="display:flex;flex-direction:column;gap:2px;padding:8px 10px;width:100%;text-align:left;cursor:pointer;transition:background 0.1s;border:none;font-family:inherit;-webkit-tap-highlight-color:transparent"
-                        :style="'background:#0f1623;border-left:4px solid ' + (sess.isHost ? '#3b82f6' : '#475569')"
-                        @mouseenter="$el.style.background='#162032'" @mouseleave="$el.style.background='#0f1623'">
-                  <!-- Row 1: dot + role + tmux -->
-                  <div style="display:flex;align-items:center;gap:3px;line-height:1">
-                    <span style="display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0;vertical-align:1px;margin-right:1px"
-                          :style="sess.isLive ? 'background:#22c55e;box-shadow:0 0 4px rgba(34,197,94,0.4)' : 'background:#374151'"></span>
-                    <template x-if="sess.role">
-                      <span style="padding:1px 7px;border-radius:4px;font-size:11px;font-weight:600;white-space:nowrap"
-                            :style="sess.isHost ? 'background:#1e3a5f;color:#93c5fd' : 'background:#2a3444;color:#cbd5e1'"
-                            x-text="sess.role"></span>
-                    </template>
-                    <span style="font-size:10px;color:#3d4f63;font-family:ui-monospace,monospace;margin-left:auto;white-space:nowrap"
-                          x-text="sess.id"></span>
-                  </div>
-                  <!-- Row 2: label -->
-                  <div style="font-size:14px;font-weight:600;color:#f1f5f9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-                       x-text="sess.label || sess.id"></div>
-                  <!-- Row 3: preview -->
-                  <div x-show="sess.preview"
-                       style="font-size:11px;color:#56657a;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-                       x-text="sess.preview"></div>
-                </button>
-              </div>
-            </template>
-            <!-- Footer -->
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-top:1px solid #1e293b;margin-top:8px">
-              <span style="font-size:11px;color:#475569" x-text="chatSessions.length + ' sessions'"></span>
+          <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+            <!-- Count + refresh -->
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 10px 0">
+              <span class="picker-count" x-text="chatSessions.length + ' available'"></span>
               <button @click="_loadChatSessions()" style="font-size:11px;color:#818cf8;background:transparent;border:none;cursor:pointer">Refresh</button>
             </div>
+            <!-- Session list -->
+            <div class="picker-list">
+              <template x-if="chatSessions.length === 0">
+                <div style="text-align:center;padding:24px;color:#475569;font-size:13px">No live sessions found</div>
+              </template>
+              <template x-for="sess in chatSessions" :key="sess.id">
+                <div class="picker-card-wrap">
+                  <button class="picker-card"
+                          :class="{ 'picker-card-host': sess.isHost }"
+                          @click="_connectSession(sess.id)">
+                    <!-- Row 1: dot + role + tmux -->
+                    <div class="picker-stats">
+                      <span class="picker-dot" :class="sess.isLive ? 'picker-dot-live' : 'picker-dot-dead'"></span>
+                      <template x-if="sess.role">
+                        <span class="picker-role" :class="sess.isHost && 'picker-role-host'" x-text="sess.role"></span>
+                      </template>
+                      <span class="picker-tmux" x-text="sess.id"></span>
+                    </div>
+                    <!-- Row 2: label -->
+                    <div class="picker-label" x-text="sess.label || sess.id"></div>
+                    <!-- Row 3: preview -->
+                    <template x-if="sess.preview">
+                      <div class="picker-preview" x-text="sess.preview"></div>
+                    </template>
+                  </button>
+                </div>
+              </template>
+            </div>
+            <!-- + New Session -->
             <button @click="$dispatch('create-terminal', {cmd: 'autonomy-agent-claude'}); _loadChatSessions()"
-                    style="width:calc(100% - 24px);margin:4px 12px 6px;padding:10px 12px;background:#4338ca;border:none;border-radius:8px;color:#e0e7ff;font-size:13px;font-weight:600;cursor:pointer;text-align:center"
-                    onmouseenter="this.style.background='#4f46e5'"
-                    onmouseleave="this.style.background='#4338ca'">
+                    class="picker-new">
               + New Session
             </button>
           </div>
