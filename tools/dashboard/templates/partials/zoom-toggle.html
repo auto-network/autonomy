@@ -1,10 +1,9 @@
 <!-- Shared zoom toggle — 2/3/4 bar SVG icons for compact/normal/expanded.
-     Requires: setZoom(level) function in scope (component method or window global).
-     Active state: checks $store.sessionZoom first (sessions page), falls back to local zoom variable. -->
+     Requires: zoom data property + setZoom(level) method in consuming Alpine component. -->
 <div class="sc-zoom-bar">
   <button class="sc-zoom-btn"
-          :class="($store.sessionZoom || zoom) === 'compact' && 'active'"
-          @click="typeof setZoom === 'function' ? setZoom('compact') : (zoom = 'compact')"
+          :class="zoom === 'compact' && 'active'"
+          @click="setZoom('compact')"
           title="Compact">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
       <rect x="1" y="4" width="12" height="2.5" rx="1" fill="currentColor"/>
@@ -12,8 +11,8 @@
     </svg>
   </button>
   <button class="sc-zoom-btn"
-          :class="($store.sessionZoom || zoom) === 'normal' && 'active'"
-          @click="typeof setZoom === 'function' ? setZoom('normal') : (zoom = 'normal')"
+          :class="zoom === 'normal' && 'active'"
+          @click="setZoom('normal')"
           title="Normal">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
       <rect x="1" y="1.5" width="12" height="2.5" rx="1" fill="currentColor"/>
@@ -22,8 +21,8 @@
     </svg>
   </button>
   <button class="sc-zoom-btn"
-          :class="($store.sessionZoom || zoom) === 'expanded' && 'active'"
-          @click="typeof setZoom === 'function' ? setZoom('expanded') : (zoom = 'expanded')"
+          :class="zoom === 'expanded' && 'active'"
+          @click="setZoom('expanded')"
           title="Expanded"
           style="padding-top:1px">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
