@@ -42,6 +42,8 @@
       runDir: null,
       dispatchRun: null,
       experienceReport: null,
+      depBlockers: [],
+      depDependents: [],
 
       formatTs(ts) {
         return _formatTs(ts);
@@ -132,6 +134,14 @@
           }
 
           this.state = 'ready';
+
+          // Fetch dependency data (blockers + dependents)
+          try {
+            const depRes = await fetch(`/api/bead/${this.id}/deps`);
+            const depData = await depRes.json();
+            this.depBlockers = (depData.blockers || []).filter(d => d.dependency_type !== 'parent-child');
+            this.depDependents = (depData.dependents || []).filter(d => d.dependency_type !== 'parent-child');
+          } catch (_) {}
 
           // Fetch runDir for all dispatched beads (trace link for completed, live panel for running)
           try {
