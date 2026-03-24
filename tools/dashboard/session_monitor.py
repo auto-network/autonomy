@@ -415,7 +415,7 @@ class SessionMonitor:
                     resolved = await asyncio.to_thread(self._resolve_jsonl_in_dir, ts.resolution_dir)
                     if resolved:
                         ts.needs_resolution = False
-                        ts.resolution_dir = None
+                        # Keep resolution_dir for rollover detection
                         # Use link_and_enrich so container sessions also get graph_source_id
                         from tools.dashboard.dao.dashboard_db import link_and_enrich
                         link_and_enrich(
@@ -436,8 +436,8 @@ class SessionMonitor:
                     current_path = Path(row["jsonl_path"])
                     if not current_path.exists():
                         continue
-                    sessions_dir = current_path.parent
-                    jsonl_files = sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+                    sessions_dir = ts.resolution_dir or current_path.parent
+                    jsonl_files = sorted(sessions_dir.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime)
                     if len(jsonl_files) <= 1:
                         continue
                     newest = jsonl_files[-1]
