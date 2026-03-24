@@ -1661,6 +1661,73 @@ def _parse_crosstalk_send(command: str, timestamp: str) -> dict | None:
     }
 
 
+def _parse_graph_note_cmd(command: str, timestamp: str) -> dict | None:
+    """Detect graph note creation. Source ID comes from tool_result output."""
+    return {
+        "type": "semantic_bash",
+        "semantic_type": "note-created",
+        "role": "assistant",
+        "content": "Created graph note",
+        "needs_result": True,
+        "timestamp": timestamp,
+    }
+
+
+def _parse_graph_comment_cmd(command: str, timestamp: str) -> dict | None:
+    m = re.search(r'graph comment\s+(\S+)', command)
+    if not m:
+        return None
+    return {
+        "type": "semantic_bash",
+        "semantic_type": "comment-added",
+        "role": "assistant",
+        "source_id": m.group(1),
+        "content": "Added comment",
+        "timestamp": timestamp,
+    }
+
+
+def _parse_graph_thought_cmd(command: str, timestamp: str) -> dict | None:
+    m = re.search(r'graph thought\s+"([^"]+)"', command)
+    text = m.group(1) if m else "Captured thought"
+    return {
+        "type": "semantic_bash",
+        "semantic_type": "thought-captured",
+        "role": "assistant",
+        "content": text[:100],
+        "timestamp": timestamp,
+    }
+
+
+def _parse_dispatch_approve_cmd(command: str, timestamp: str) -> dict | None:
+    m = re.search(r'graph dispatch approve\s+(\S+)', command)
+    if not m:
+        return None
+    return {
+        "type": "semantic_bash",
+        "semantic_type": "dispatch-approved",
+        "role": "assistant",
+        "bead_id": m.group(1),
+        "content": f"Approved {m.group(1)} for dispatch",
+        "timestamp": timestamp,
+    }
+
+
+def _parse_bd_setstate_cmd(command: str, timestamp: str) -> dict | None:
+    m = re.search(r'bd set-state\s+(\S+)\s+(\S+=\S+)', command)
+    if not m:
+        return None
+    return {
+        "type": "semantic_bash",
+        "semantic_type": "state-changed",
+        "role": "assistant",
+        "bead_id": m.group(1),
+        "state": m.group(2),
+        "content": f"Set {m.group(2)} on {m.group(1)}",
+        "timestamp": timestamp,
+    }
+
+
 def _classify_system_message(text: str) -> dict | None:
     """Detect harness-injected system messages in user entries.
 
@@ -1837,6 +1904,36 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                         ct_entry = _parse_crosstalk_send(cmd, timestamp)
                         if ct_entry:
                             blocks.append(ct_entry)
+                            continue
+                    # Semantic Bash: graph note creation
+                    if "graph note" in cmd and "graph note update" not in cmd:
+                        parsed = _parse_graph_note_cmd(cmd, timestamp)
+                        if parsed:
+                            blocks.append(parsed)
+                            continue
+                    # Semantic Bash: graph comment
+                    if "graph comment" in cmd and "integrate" not in cmd:
+                        parsed = _parse_graph_comment_cmd(cmd, timestamp)
+                        if parsed:
+                            blocks.append(parsed)
+                            continue
+                    # Semantic Bash: graph thought
+                    if "graph thought" in cmd:
+                        parsed = _parse_graph_thought_cmd(cmd, timestamp)
+                        if parsed:
+                            blocks.append(parsed)
+                            continue
+                    # Semantic Bash: graph dispatch approve
+                    if "graph dispatch approve" in cmd:
+                        parsed = _parse_dispatch_approve_cmd(cmd, timestamp)
+                        if parsed:
+                            blocks.append(parsed)
+                            continue
+                    # Semantic Bash: bd set-state
+                    if "bd set-state" in cmd:
+                        parsed = _parse_bd_setstate_cmd(cmd, timestamp)
+                        if parsed:
+                            blocks.append(parsed)
                             continue
                 blocks.append({
                     "type": "tool_use",
