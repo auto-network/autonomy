@@ -416,3 +416,56 @@ def api_collab_tag(args) -> None:
         sys.exit(1)
     result = _put(f"/api/graph/collab/tag/{source_id}", {})
     _print_output(result)
+
+
+def api_collab_tag_describe(args) -> None:
+    """Set tag description via dashboard API."""
+    tag_name = args.tag_name
+    desc = args.description
+    if desc == "-":
+        desc = sys.stdin.read().strip()
+    data = {
+        "description": desc,
+        "actor": os.environ.get("BD_ACTOR", "user"),
+    }
+    result = _put(f"/api/graph/collab/tag-describe/{tag_name}", data)
+    _print_output(result)
+
+
+def api_thought(args) -> None:
+    """Create a thought capture via dashboard API."""
+    content = " ".join(args.text) if args.text else ""
+    if args.content_stdin == "-" or not content:
+        if args.content_stdin == "-":
+            content = sys.stdin.read().strip()
+        if not content:
+            print("No content provided", file=sys.stderr)
+            sys.exit(1)
+    data: dict = {
+        "content": content,
+        "actor": os.environ.get("BD_ACTOR", "user"),
+    }
+    if hasattr(args, "source") and args.source:
+        data["source_id"] = args.source
+    if hasattr(args, "turn") and args.turn:
+        data["turn_number"] = args.turn
+    if hasattr(args, "thread") and args.thread:
+        data["thread_id"] = args.thread
+    result = _post("/api/graph/thought", data)
+    _print_output(result)
+
+
+def api_thread(args) -> None:
+    """Create a thread via dashboard API."""
+    parts = args.thread_args or []
+    if not parts:
+        # list mode — read-only, no proxy needed
+        return
+    title = " ".join(parts)
+    data: dict = {
+        "title": title,
+        "priority": args.priority,
+        "actor": os.environ.get("BD_ACTOR", "user"),
+    }
+    result = _post("/api/graph/thread", data)
+    _print_output(result)

@@ -4182,6 +4182,105 @@ async def api_graph_collab_tag(request):
     return JSONResponse({"ok": True, "output": msg})
 
 
+async def api_graph_thought(request):
+    """Create a thought capture via API proxy."""
+    from tools.graph.db import GraphDB
+    from tools.graph.models import new_id
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    content = (body.get("content") or "").strip()
+    if not content:
+        return JSONResponse({"error": "content is required"}, status_code=400)
+    if len(content) > _GRAPH_MAX_CONTENT:
+        return JSONResponse({"error": f"content exceeds {_GRAPH_MAX_CONTENT} bytes"}, status_code=400)
+    thread_id = body.get("thread_id")
+    source_id = body.get("source_id")
+    turn_number = body.get("turn_number")
+    actor = body.get("actor", "user")
+    if source_id and not _GRAPH_SOURCE_ID_RE.match(source_id):
+        return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
+    if thread_id and not _GRAPH_SOURCE_ID_RE.match(thread_id):
+        return JSONResponse({"error": f"malformed thread_id: {thread_id!r}"}, status_code=400)
+    capture_id = new_id()
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        db.insert_capture(
+            capture_id, content,
+            source_id=source_id,
+            turn_number=int(turn_number) if turn_number else None,
+            thread_id=thread_id,
+            actor=actor,
+        )
+    finally:
+        db.close()
+    msg = f"  \u2713 Captured: {capture_id[:11]}"
+    return JSONResponse({"ok": True, "output": msg, "id": capture_id})
+
+
+async def api_graph_thread(request):
+    """Create a thread via API proxy."""
+    from tools.graph.db import GraphDB
+    from tools.graph.models import new_id
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    title = (body.get("title") or "").strip()
+    if not title:
+        return JSONResponse({"error": "title is required"}, status_code=400)
+    if len(title) > 500:
+        return JSONResponse({"error": "title too long (max 500)"}, status_code=400)
+    priority = int(body.get("priority", 1))
+    actor = body.get("actor", "user")
+    thread_id = new_id()
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        db.insert_thread(thread_id, title, priority=priority, created_by=actor)
+    finally:
+        db.close()
+    msg = f"  \u2713 Thread: {thread_id[:11]} \"{title}\" [active, P{priority}]"
+    return JSONResponse({"ok": True, "output": msg, "id": thread_id})
+
+
+async def api_graph_collab_tag_describe(request):
+    """Set or update a tag description via API proxy."""
+    from tools.graph.db import GraphDB
+    tag_name = request.path_params["name"]
+    if not _GRAPH_TAGS_RE.match(tag_name):
+        return JSONResponse({"error": f"malformed tag name: {tag_name!r}"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    description = (body.get("description") or "").strip()
+    if not description:
+        return JSONResponse({"error": "description is required"}, status_code=400)
+    if len(description) > _GRAPH_MAX_CONTENT:
+        return JSONResponse({"error": f"description exceeds {_GRAPH_MAX_CONTENT} bytes"}, status_code=400)
+    actor = body.get("actor", "user")
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        db.update_tag_description(tag_name, description, actor=actor)
+    finally:
+        db.close()
+    msg = f"  \u2713 Tag '{tag_name}': {description[:60]}"
+    return JSONResponse({"ok": True, "output": msg})
+
+
 # ── App ───────────────────────────────────────────────────────
 
 routes = [
@@ -4242,6 +4341,9 @@ routes = [
     Route("/api/graph/stream/{tag}", api_graph_stream, methods=["GET"]),
     Route("/api/graph/collab", api_graph_collab_list, methods=["GET"]),
     Route("/api/graph/collab/tag/{source_id}", api_graph_collab_tag, methods=["PUT"]),
+    Route("/api/graph/collab/tag-describe/{name}", api_graph_collab_tag_describe, methods=["PUT"]),
+    Route("/api/graph/thought", api_graph_thought, methods=["POST"]),
+    Route("/api/graph/thread", api_graph_thread, methods=["POST"]),
     Route("/api/graph/{id}", api_graph_resolve),
     Route("/api/source/{id}", api_source_read),
     Route("/api/source/{id}/attachments", api_source_attachments),
