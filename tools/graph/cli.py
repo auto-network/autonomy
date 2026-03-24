@@ -54,7 +54,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve, cmd_dispatch_watch
-from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag
+from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thread
 
 
 def cmd_ingest(args):
@@ -1237,6 +1237,9 @@ def cmd_collab_topics(args):
 
 def cmd_collab_tag_describe(args):
     """Set or update a tag's description."""
+    if is_api_mode():
+        api_collab_tag_describe(args)
+        return
     db = GraphDB(args.db)
     desc = args.description
     if desc == "-":
@@ -1248,6 +1251,9 @@ def cmd_collab_tag_describe(args):
 
 def cmd_thought(args):
     """Capture a raw thought/idea with optional provenance."""
+    if is_api_mode():
+        api_thought(args)
+        return
     from .models import new_id
     db = GraphDB(args.db)
     content = " ".join(args.text) if args.text else ""
@@ -1318,6 +1324,9 @@ def cmd_thread_dispatch(args):
         cmd_thread_action(args, action, parts[1], parts[2] if len(parts) > 2 else None)
     else:
         # Create mode: graph thread "Title"
+        if is_api_mode():
+            api_thread(args)
+            return
         title = " ".join(parts)
         cmd_thread_create(args, title)
 
