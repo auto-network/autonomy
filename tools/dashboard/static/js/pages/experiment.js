@@ -34,6 +34,9 @@
         // Chat With session
         _tmuxSession: null,
 
+        // Capture state: 'idle' | 'working' | 'success' | 'error'
+        captureState: 'idle',
+
         // Session picker
         pickerVisible: false,
         pickerSessions: [],
@@ -163,10 +166,38 @@
         // ── Screenshot ────────────────────────────────────────────────────
 
         captureScreenshot: async function () {
-          await manualCaptureScreenshot(this.expId, this._tmuxSession || '');
+          if (this.captureState === 'working') return; // prevent double-click
+          this.captureState = 'working';
+          var self = this;
+          try {
+            await manualCaptureScreenshot(this.expId, this._tmuxSession || '');
+            self.captureState = 'success';
+          } catch (e) {
+            self.captureState = 'error';
+          }
+          setTimeout(function () { self.captureState = 'idle'; }, 3000);
         },
 
         // ── Chat With session management ──────────────────────────────────
+
+        _connectChat: async function () {
+          if (this._tmuxSession) return; // already connected
+          try {
+            var resp = await fetch('/api/chatwith/spawn', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ page_type: 'experiment', context_id: this.expId }),
+            });
+            var data = await resp.json();
+            if (data.error) {
+              console.error('[experimentPage] chat connect error', data.error);
+              return;
+            }
+            this._connectSession(data.session_name);
+          } catch (e) {
+            console.error('[experimentPage] chat connect failed:', e);
+          }
+        },
 
         _chatWithKey: function () {
           return (this.exp && this.exp.series_id) || this.expId;
@@ -245,7 +276,11 @@
 
         _checkChatWith: async function () {
           var saved = this._loadSession();
-          if (!saved || !saved.tmuxSession) return;
+          if (!saved || !saved.tmuxSession) {
+            // No saved session — auto-spawn on first visit
+            this._connectChat();
+            return;
+          }
 
           // Check if the saved session is still live in the store
           var allSessions = Alpine.store('sessions');
@@ -266,6 +301,8 @@
               this._connectSession(saved.tmuxSession);
             } else {
               delete Alpine.store('chatWith')[this._chatWithKey()];
+              // Saved session is dead — auto-spawn a new one
+              this._connectChat();
             }
           } catch (e) { /* best-effort */ }
         },
