@@ -178,7 +178,10 @@
 
               <!-- ── Semantic Bash: typed command tiles ───────── -->
               <template x-if="entry.type === 'semantic_bash'">
-                <div class="sc-tool-card">
+                <a :href="entry.source_id ? '/graph/' + entry.source_id : (entry.bead_id ? '/bead/' + entry.bead_id : null)"
+                   class="sc-tool-card block"
+                   :class="(entry.source_id || entry.bead_id) ? 'cursor-pointer hover:bg-gray-800/80' : ''"
+                   @click.prevent="if (entry.source_id) navigateTo('/graph/' + entry.source_id); else if (entry.bead_id) navigateTo('/bead/' + entry.bead_id);">
                   <div class="sc-line1">
                     <span class="sc-chip" :class="{
                       'bg-purple-900 text-purple-300': entry.semantic_type === 'note-created',
@@ -197,7 +200,7 @@
                     <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
                   </div>
                   <div class="sc-line2 sc-line2-truncated" x-text="entry.content"></div>
-                </div>
+                </a>
               </template>
 
         </div>
