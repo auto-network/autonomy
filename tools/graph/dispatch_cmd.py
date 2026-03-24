@@ -279,6 +279,24 @@ def _print_primer(runs: list, args):
             else:
                 print(f"Review:  {lib_status}")
 
+        # Experience report summary
+        exp_summary = r.get("experience_summary")
+        if exp_summary:
+            first_line = exp_summary.split("\n")[0][:80]
+            print(f"Report:  {first_line}")
+
+        # Validation
+        val = r.get("validation")
+        if val and isinstance(val, dict):
+            print(f"Valid:   graph://{val['source_id']} — {val.get('title', '')[:60]}")
+
+        # Pitfalls
+        pitfalls = r.get("pitfalls", [])
+        if pitfalls:
+            print(f"Pitfall: {len(pitfalls)} note{'s' if len(pitfalls) != 1 else ''}")
+            for p in pitfalls[:3]:
+                print(f"         graph://{p['id']} {p['title']}")
+
         # Reason (for failures)
         if status in ("FAILED", "BLOCKED"):
             reason = decision.get("reason", "") if isinstance(decision, dict) else ""
