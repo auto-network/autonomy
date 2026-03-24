@@ -1108,7 +1108,12 @@ def _notify_dispatch_nag(
 
         # Derive notification fields
         bead_id = agent.bead_id
-        status_label = "merged" if effective_status == "DONE" else "failed"
+        if effective_status == "DONE":
+            status_label = "merged"
+        elif effective_status == "MERGE_FAILED":
+            status_label = "merge failed (auto-retrying)"
+        else:
+            status_label = "failed"
         commit = result.commit_hash[:10] if result.commit_hash else "none"
         duration = int(time.time() - agent.started_at)
         dur_min, dur_sec = divmod(duration, 60)
@@ -1139,8 +1144,10 @@ def _notify_dispatch_nag(
 
         msg = (
             f"Dispatch {status_label}: {bead_id} — {title}\n"
-            f"Status: {status_label} | Commit: {commit} | Duration: {dur_min}m{dur_sec}s"
+            f"Status: {effective_status.lower()} | Commit: {commit} | Duration: {dur_min}m{dur_sec}s"
         )
+        if effective_status == "MERGE_FAILED":
+            msg += f"\nRetry: merge conflict detected, will auto-retry with cherry-pick"
         if lines_changed:
             msg += f"\n{lines_changed}"
 
