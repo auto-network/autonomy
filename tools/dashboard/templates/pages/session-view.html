@@ -236,7 +236,10 @@
 
                 <!-- ── Semantic Bash: typed command tiles ───────── -->
                 <template x-if="dEntry.type === 'semantic_bash'">
-                  <div class="sc-tool-card">
+                  <a :href="dEntry.source_id ? '/graph/' + dEntry.source_id : (dEntry.bead_id ? '/bead/' + dEntry.bead_id : null)"
+                     class="sc-tool-card block"
+                     :class="(dEntry.source_id || dEntry.bead_id) ? 'cursor-pointer hover:bg-gray-800/80' : ''"
+                     @click.prevent="if (dEntry.source_id) navigateTo('/graph/' + dEntry.source_id); else if (dEntry.bead_id) navigateTo('/bead/' + dEntry.bead_id);">
                     <div class="sc-line1">
                       <span class="sc-chip" :class="{
                         'bg-purple-900 text-purple-300': dEntry.semantic_type === 'note-created',
@@ -262,7 +265,7 @@
                            x-intersect:enter.margin.100px="if (!dEntry._enhanced) { setTimeout(() => { if ($el.getBoundingClientRect().top > 0) { dEntry._enhanced = true; } }, 1000) }">
                       </div>
                     </template>
-                  </div>
+                  </a>
                 </template>
 
               </div>
