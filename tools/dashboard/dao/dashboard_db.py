@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     entry_count     INTEGER DEFAULT 0,
     context_tokens  INTEGER DEFAULT 0,
     label           TEXT DEFAULT '',
-    topics          TEXT DEFAULT '[]'
+    topics          TEXT DEFAULT '[]',
+    role            TEXT DEFAULT ''
 );
 """
 
@@ -79,6 +80,12 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("SELECT dispatch_nag FROM tmux_sessions LIMIT 0")
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN dispatch_nag INTEGER DEFAULT 0")
+        _conn.commit()
+    # Migrate: add role column if missing
+    try:
+        _conn.execute("SELECT role FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN role TEXT DEFAULT ''")
         _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
@@ -220,6 +227,16 @@ def update_topics(tmux_name: str, topics: list[str]) -> None:
     conn = get_conn()
     conn.execute("UPDATE tmux_sessions SET topics=? WHERE tmux_name=?",
                  (json.dumps(topics), tmux_name))
+    conn.commit()
+
+
+_ALLOWED_ROLES = {"coordinator", "reviewer", "builder", "designer", "validator", "researcher", ""}
+
+
+def update_role(tmux_name: str, role: str) -> None:
+    """Set or clear the explicit role for a session."""
+    conn = get_conn()
+    conn.execute("UPDATE tmux_sessions SET role=? WHERE tmux_name=?", (role, tmux_name))
     conn.commit()
 
 

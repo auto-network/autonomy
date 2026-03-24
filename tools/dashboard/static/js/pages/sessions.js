@@ -166,6 +166,7 @@
             session_id: id,
             project: s.project || '',
             label: s.label || '',
+            role: s.role || '',
             is_live: s.isLive,
             created_at: s.startedAt || 0,
             last_activity: s.lastActivity || 0,
@@ -214,6 +215,7 @@
               store.sessionType = s.type || '';
               store.tmuxSession = s.tmux_session || '';
               store.label = s.label || '';
+              if (s.role) store.role = s.role;
               store.isLive = s.is_live !== false;
               store.startedAt = s.started_at || 0;
               if (s.last_activity) store.lastActivity = s.last_activity;

@@ -2764,6 +2764,34 @@ async def api_session_topics(request):
     return JSONResponse({"ok": True})
 
 
+async def api_session_role(request):
+    """Set or clear the explicit role for a session.
+
+    PUT /api/session/{tmux_name}/role
+    Body: {"role": "coordinator"}
+    Returns: {"ok": true}
+
+    Allowed values: coordinator, reviewer, builder, designer, validator, researcher, "" (empty clears).
+    """
+    tmux_name = request.path_params["tmux_name"]
+    body = await request.json()
+    role = body.get("role", "")
+
+    if not isinstance(role, str):
+        return JSONResponse({"error": "role must be a string"}, status_code=400)
+
+    role = role.strip().lower()
+    if role not in dashboard_db._ALLOWED_ROLES:
+        return JSONResponse(
+            {"error": f"invalid role: must be one of {sorted(dashboard_db._ALLOWED_ROLES - {''})} or empty string"},
+            status_code=400,
+        )
+
+    dashboard_db.update_role(tmux_name, role)
+    await event_bus.broadcast("session:registry", session_monitor.get_registry())
+    return JSONResponse({"ok": True})
+
+
 async def api_session_nag(request):
     """Configure nag alerts for a session.
 
@@ -4711,6 +4739,7 @@ routes = [
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
     Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
     Route("/api/session/{tmux_name}/topics", api_session_topics, methods=["PUT"]),
+    Route("/api/session/{tmux_name}/role", api_session_role, methods=["PUT"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag, methods=["PUT"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag_delete, methods=["DELETE"]),
     Route("/api/session/{tmux_name}/dispatch-nag", api_session_dispatch_nag, methods=["PUT"]),
