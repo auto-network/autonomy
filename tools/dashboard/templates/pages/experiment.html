@@ -127,10 +127,10 @@
               <span style="font-size:11px;color:#475569" x-text="chatSessions.length + ' sessions'"></span>
               <button @click="_loadChatSessions()" style="font-size:11px;color:#818cf8;background:transparent;border:none;cursor:pointer">Refresh</button>
             </div>
-            <button @click="$dispatch('create-terminal', {cmd: 'autonomy-agent-claude'})"
-                    style="width:calc(100% - 24px);margin:4px 12px 6px;padding:10px 12px;background:#0f1623;border:1px dashed #334155;border-radius:8px;color:#64748b;font-size:13px;font-weight:500;cursor:pointer;text-align:center"
-                    onmouseenter="this.style.borderColor='#4f46e5';this.style.color='#a5b4fc';this.style.background='#1e1b4b'"
-                    onmouseleave="this.style.borderColor='#334155';this.style.color='#64748b';this.style.background='#0f1623'">
+            <button @click="$dispatch('create-terminal', {cmd: 'autonomy-agent-claude'}); _loadChatSessions()"
+                    style="width:calc(100% - 24px);margin:4px 12px 6px;padding:10px 12px;background:#4338ca;border:none;border-radius:8px;color:#e0e7ff;font-size:13px;font-weight:600;cursor:pointer;text-align:center"
+                    onmouseenter="this.style.background='#4f46e5'"
+                    onmouseleave="this.style.background='#4338ca'">
               + New Session
             </button>
           </div>
