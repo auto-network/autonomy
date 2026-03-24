@@ -4570,7 +4570,8 @@ async def api_graph_thoughts(request):
         db_args["db_path"] = p
     db = GraphDB(**db_args)
     try:
-        captures = db.list_captures(thread_id=thread_id, since=since_iso, limit=limit)
+        all_mode = not thread_id and not request.query_params.get("inbox")
+        captures = db.list_captures(thread_id=thread_id, status="*" if all_mode else None, since=since_iso, limit=limit)
     except Exception:
         captures = []  # captures table may not exist in older DBs
     finally:
