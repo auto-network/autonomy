@@ -250,6 +250,24 @@ async function renderSourceFragment() {
   }
 }
 
+// ── Search Results Page (Jinja2 fragment + Alpine) ───────────
+
+async function renderSearchFragment() {
+  pageTitle.textContent = 'Search';
+  let html;
+  if (_fragmentCache.has('/pages/search')) {
+    html = _fragmentCache.get('/pages/search');
+  } else {
+    const res = await fetch('/pages/search');
+    html = await res.text();
+    _fragmentCache.set('/pages/search', html);
+  }
+  content.innerHTML = html;
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
+}
+
 // ── Streams Landing Page (Jinja2 fragment + Alpine) ──────────
 
 async function renderStreamsFragment() {
@@ -1523,7 +1541,10 @@ function route() {
   });
 
   // Update global search placeholder based on page
-  globalSearch.placeholder = (path === '/' || path === '/beads') ? 'Search beads...' : 'Search...';
+  globalSearch.placeholder = (path === '/' || path === '/beads') ? 'Search beads...'
+    : path === '/sessions' ? 'Search sessions...'
+    : path === '/streams' ? 'Search streams...'
+    : 'Search graph...';
 
   if (path === '/' || path === '/beads') {
     renderBeadsFragment();
@@ -1550,6 +1571,8 @@ function route() {
     renderTerminal(null, sessionId);
   } else if (path.startsWith('/experiments/')) {
     renderExperimentFragment();
+  } else if (path === '/search') {
+    renderSearchFragment();
   } else {
     content.innerHTML = '<div class="text-gray-400">Page not found</div>';
   }
@@ -1561,11 +1584,12 @@ function route() {
 globalSearch.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     const q = globalSearch.value.trim();
-    if (q) {
-      const path = window.location.pathname;
-      if (path === '/' || path === '/beads') {
-        // On beads page: Alpine component reacts to input events — no extra action needed
-      }
+    if (!q) return;
+    const path = window.location.pathname;
+    if (path === '/' || path === '/beads') {
+      // On beads page: Alpine component reacts to input events — no extra action needed
+    } else {
+      navigateTo('/search?q=' + encodeURIComponent(q));
     }
   }
 });
