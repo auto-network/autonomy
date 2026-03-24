@@ -174,7 +174,10 @@
                class="text-indigo-400 hover:underline text-xs">provenance →</a>
           </template>
           <template x-for="tag in (noteMeta.tags || [])" :key="tag">
-            <span class="px-1.5 py-0.5 bg-gray-700 text-gray-400 text-xs rounded" x-text="tag"></span>
+            <a :href="'/stream/' + encodeURIComponent(tag)"
+               @click.prevent="navigateTo('/stream/' + encodeURIComponent(tag))"
+               class="px-1.5 py-0.5 bg-gray-700 text-gray-400 text-xs rounded hover:bg-gray-600 hover:text-gray-200 no-underline cursor-pointer"
+               x-text="tag"></a>
           </template>
         </div>
       </template>
