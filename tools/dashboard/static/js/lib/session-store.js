@@ -42,6 +42,7 @@ window.getSessionStore = function(sessionId) {
       sizeMB: '0',
       lastActivity: 0,
       lastMessage: '',
+      draftText: '',
       linked: false,
       toolMap: {},       // tool_id -> { tool_name }
       resultMap: {},     // tool_id -> tool_result entry

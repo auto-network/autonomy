@@ -572,6 +572,8 @@
           }
 
           this.inputText = '';
+          var s = window.getSessionStore(this.sessionId);
+          if (s) s.draftText = '';
           this.clearAttachments();
           // Dismiss mobile keyboard + reset textarea height
           if (this.$refs.messageInput) {
@@ -717,6 +719,7 @@
 
         var store = window.getSessionStore(this.sessionId);
         this._linked = store.linked || false;
+        this.inputText = store.draftText || '';
 
         if (store.loaded) {
           // Instant render from cache — zero network
@@ -844,6 +847,13 @@
           },
           function(val) { self._linked = val; }
         ));
+
+        // Persist draft text to store on every keystroke
+        var self = this;
+        this.$watch('inputText', function(val) {
+          var s = window.getSessionStore(self.sessionId);
+          if (s) s.draftText = val;
+        });
 
         // Clipboard paste support — attach pasted files
         this.$nextTick(() => {
