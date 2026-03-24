@@ -36,6 +36,9 @@ window.getSessionStore = function(sessionId) {
       entryCount: 0,
       contextTokens: 0,
       topics: [],
+      nagEnabled: false,
+      nagInterval: 15,
+      nagMessage: '',
       sizeMB: '0',
       lastActivity: 0,
       toolMap: {},       // tool_id -> { tool_name }
@@ -125,6 +128,9 @@ window.ensureSessionMessages = function() {
       store.entryCount = s.entry_count || 0;
       if (s.context_tokens) store.contextTokens = s.context_tokens;
       if (s.topics) store.topics = s.topics;
+      store.nagEnabled = !!s.nag_enabled;
+      store.nagInterval = s.nag_interval || 15;
+      store.nagMessage = s.nag_message || '';
       store.isLive = s.is_live;
       store.startedAt = s.started_at || 0;
     }

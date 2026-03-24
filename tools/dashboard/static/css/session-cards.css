@@ -47,6 +47,13 @@
 .recency-red   { color: #ef4444; }
 .recency-gray  { color: #6b7280; }
 
+/* Nag indicator (non-interactive — just a visual badge) */
+.session-nag-indicator {
+  font-size: 0.625rem;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
 /* Sub-topic status lines */
 .session-topic {
   font-size: 0.75rem;
