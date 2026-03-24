@@ -1009,6 +1009,14 @@ def process_decision(dispatch_result: DispatchResult) -> str:
             print(f"  Merge: FAILED — {merge_err}")
             run_bd(["update", bead_id, "--append-notes",
                     f"merge failed on {dispatch_result.branch}: {merge_err}"])
+            # Store retry context for smart merge retry
+            retry_note = (
+                f"MERGE_RETRY_CONTEXT\n"
+                f"branch: {dispatch_result.branch}\n"
+                f"commit: {dispatch_result.commit_hash}\n"
+                f"merge_error: {merge_err[:500]}"
+            )
+            run_bd(["update", bead_id, "--append-notes", retry_note])
             status = "MERGE_FAILED"
             reason = f"Merge conflict (will retry): {merge_err[:200]}"
 

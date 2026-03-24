@@ -130,6 +130,17 @@ When you complete your work, write a decision file to `/workspace/output/decisio
 - `code` — tests fail, won't compile, logic errors
 - `other` — anything else
 
+## Merge Retry
+
+If your primer includes a "MERGE RETRY" section, previous work exists on a branch. Do NOT re-implement from scratch.
+
+1. `git cherry-pick <commit>` to apply previous work
+2. Resolve conflicts if any
+3. Verify the result
+4. Commit normally
+
+If cherry-pick has irreconcilable conflicts, read the diff (`git show <commit>`) and manually apply the changes.
+
 ## Provenance as Primary Source
 
 The **Background — Original Discussions** section in your task prompt contains the conversation
