@@ -53,6 +53,47 @@
         </template>
       </section>
 
+      <!-- Dependencies -->
+      <template x-if="depBlockers.length > 0 || depDependents.length > 0">
+        <section aria-label="Dependencies" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Dependencies</h2>
+
+          <!-- Blockers (things this bead waits on) -->
+          <template x-if="depBlockers.length > 0">
+            <div class="mb-3">
+              <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Blocked by</div>
+              <template x-for="dep in depBlockers" :key="dep.id">
+                <a :href="'/bead/' + dep.id"
+                   class="flex items-center gap-2 p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline mb-1">
+                  <span class="w-2 h-2 rounded-full flex-shrink-0"
+                        :class="dep.status === 'closed' ? 'bg-green-500' : 'bg-amber-500'"></span>
+                  <span class="badge" :class="'badge-' + dep.status" x-text="dep.status"></span>
+                  <span class="font-mono text-xs text-gray-500" x-text="dep.id"></span>
+                  <span class="text-sm text-gray-200 flex-1 truncate" x-text="dep.title"></span>
+                </a>
+              </template>
+            </div>
+          </template>
+
+          <!-- Dependents (things that wait on this bead) -->
+          <template x-if="depDependents.length > 0">
+            <div>
+              <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Blocks</div>
+              <template x-for="dep in depDependents" :key="dep.id">
+                <a :href="'/bead/' + dep.id"
+                   class="flex items-center gap-2 p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline mb-1">
+                  <span class="w-2 h-2 rounded-full flex-shrink-0"
+                        :class="dep.status === 'closed' ? 'bg-green-500' : 'bg-amber-500'"></span>
+                  <span class="badge" :class="'badge-' + dep.status" x-text="dep.status"></span>
+                  <span class="font-mono text-xs text-gray-500" x-text="dep.id"></span>
+                  <span class="text-sm text-gray-200 flex-1 truncate" x-text="dep.title"></span>
+                </a>
+              </template>
+            </div>
+          </template>
+        </section>
+      </template>
+
       <!-- Description -->
       <template x-if="bead.description">
         <section aria-label="Description" class="mb-6">
