@@ -42,6 +42,14 @@
     return String(tokens);
   }
 
+  function _setNag(tmux, interval, message) {
+    fetch('/api/session/' + encodeURIComponent(tmux) + '/nag', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: true, interval: interval, message: message || ''}),
+    });
+  }
+
   function _recencyColor(epoch) {
     if (!epoch) return 'recency-gray';
     var secs = Math.round(Date.now() / 1000 - epoch);
@@ -128,6 +136,9 @@
             entry_count: s.entryCount || s.entries.length,
             context_tokens: s.contextTokens || 0,
             topics: s.topics || [],
+            nag_enabled: s.nagEnabled || false,
+            nag_interval: s.nagInterval || 15,
+            nag_message: s.nagMessage || '',
             _hasData: !!hasData,
           });
         }
@@ -179,21 +190,48 @@
         navigateTo(path);
       },
 
-      showCloseConfirm(s) {
+      showSessionActions(s) {
         var label = s.label || s.tmux_session || s.session_id.slice(0, 12);
         var tmux = s.tmux_session;
-        window.actionSheet.show({
-          title: label,
-          actions: [{
-            label: 'Close Session',
-            style: 'destructive',
-            handler: async function () {
-              if (tmux) {
-                await fetch('/api/terminal/' + encodeURIComponent(tmux) + '/kill', { method: 'POST' });
-              }
-            },
-          }],
+        var nagLabel = s.nag_enabled ? 'Disable Nag' : 'Enable Nag (15m)';
+        var actions = [];
+
+        // Nag toggle
+        actions.push({
+          label: nagLabel,
+          handler: function() {
+            fetch('/api/session/' + encodeURIComponent(tmux) + '/nag', {
+              method: s.nag_enabled ? 'DELETE' : 'PUT',
+              headers: {'Content-Type': 'application/json'},
+              body: s.nag_enabled ? undefined : JSON.stringify({enabled: true, interval: 15}),
+            });
+          },
         });
+
+        // Nag interval presets (only show if nag is enabled)
+        if (s.nag_enabled) {
+          [5, 15, 30, 60].forEach(function(mins) {
+            if (mins !== s.nag_interval) {
+              actions.push({
+                label: 'Nag every ' + mins + 'm',
+                handler: function() { _setNag(tmux, mins, s.nag_message); },
+              });
+            }
+          });
+        }
+
+        // Close session (always last, destructive)
+        actions.push({
+          label: 'Close Session',
+          style: 'destructive',
+          handler: async function() {
+            if (tmux) {
+              await fetch('/api/terminal/' + encodeURIComponent(tmux) + '/kill', { method: 'POST' });
+            }
+          },
+        });
+
+        window.actionSheet.show({title: label, actions: actions});
       },
 
       destroy() {

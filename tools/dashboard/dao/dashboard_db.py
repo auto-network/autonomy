@@ -64,6 +64,15 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN topics TEXT DEFAULT '[]'")
         _conn.commit()
+    # Migrate: add nag columns if missing
+    try:
+        _conn.execute("SELECT nag_enabled FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN nag_enabled INTEGER DEFAULT 0")
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN nag_interval INTEGER DEFAULT 15")
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN nag_message TEXT DEFAULT ''")
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN nag_last_sent REAL DEFAULT 0")
+        _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
 
@@ -204,6 +213,57 @@ def update_topics(tmux_name: str, topics: list[str]) -> None:
     conn = get_conn()
     conn.execute("UPDATE tmux_sessions SET topics=? WHERE tmux_name=?",
                  (json.dumps(topics), tmux_name))
+    conn.commit()
+
+
+def get_nag_config(tmux_name: str) -> dict | None:
+    """Return nag configuration for a session."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT nag_enabled, nag_interval, nag_message, nag_last_sent"
+        " FROM tmux_sessions WHERE tmux_name=?",
+        (tmux_name,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "enabled": bool(row["nag_enabled"]),
+        "interval": row["nag_interval"] or 15,
+        "message": row["nag_message"] or "",
+        "last_sent": row["nag_last_sent"] or 0,
+    }
+
+
+def update_nag_config(
+    tmux_name: str,
+    *,
+    enabled: bool | None = None,
+    interval: int | None = None,
+    message: str | None = None,
+) -> None:
+    """Update nag configuration for a session."""
+    conn = get_conn()
+    parts, vals = [], []
+    if enabled is not None:
+        parts.append("nag_enabled=?")
+        vals.append(1 if enabled else 0)
+    if interval is not None:
+        parts.append("nag_interval=?")
+        vals.append(interval)
+    if message is not None:
+        parts.append("nag_message=?")
+        vals.append(message)
+    if not parts:
+        return
+    vals.append(tmux_name)
+    conn.execute(f"UPDATE tmux_sessions SET {', '.join(parts)} WHERE tmux_name=?", vals)
+    conn.commit()
+
+
+def update_nag_last_sent(tmux_name: str, ts: float) -> None:
+    """Record when the last nag was sent."""
+    conn = get_conn()
+    conn.execute("UPDATE tmux_sessions SET nag_last_sent=? WHERE tmux_name=?", (ts, tmux_name))
     conn.commit()
 
 

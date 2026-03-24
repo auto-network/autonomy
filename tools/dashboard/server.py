@@ -2596,6 +2596,45 @@ async def api_session_topics(request):
     return JSONResponse({"ok": True})
 
 
+async def api_session_nag(request):
+    """Configure nag alerts for a session.
+
+    PUT /api/session/{tmux_name}/nag
+    Body: {"enabled": true, "interval": 15, "message": "Status update please."}
+    """
+    tmux_name = request.path_params["tmux_name"]
+    body = await request.json()
+    enabled = body.get("enabled")
+    interval = body.get("interval")
+    message = body.get("message")
+
+    if interval is not None:
+        if not isinstance(interval, int) or interval < 1 or interval > 120:
+            return JSONResponse({"error": "interval must be 1-120 minutes"}, status_code=400)
+    if message is not None:
+        message = str(message).strip().replace('<', '').replace('>', '')[:200]
+
+    dashboard_db.update_nag_config(
+        tmux_name,
+        enabled=enabled,
+        interval=interval,
+        message=message,
+    )
+    await event_bus.broadcast("session:registry", session_monitor.get_registry())
+    return JSONResponse({"ok": True})
+
+
+async def api_session_nag_delete(request):
+    """Disable nag for a session.
+
+    DELETE /api/session/{tmux_name}/nag
+    """
+    tmux_name = request.path_params["tmux_name"]
+    dashboard_db.update_nag_config(tmux_name, enabled=False)
+    await event_bus.broadcast("session:registry", session_monitor.get_registry())
+    return JSONResponse({"ok": True})
+
+
 async def api_upload(request):
     """Upload a file to the workspace.
 
@@ -4230,6 +4269,8 @@ routes = [
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
     Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
     Route("/api/session/{tmux_name}/topics", api_session_topics, methods=["PUT"]),
+    Route("/api/session/{tmux_name}/nag", api_session_nag, methods=["PUT"]),
+    Route("/api/session/{tmux_name}/nag", api_session_nag_delete, methods=["DELETE"]),
     Route("/api/session/send", api_session_send, methods=["POST"]),
     Route("/api/session/{project}/{session_id}/tail", api_session_tail),
     Route("/api/session/{project}/{session_id}/send", api_session_send, methods=["POST"]),
