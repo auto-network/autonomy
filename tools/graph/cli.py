@@ -53,7 +53,7 @@ from .watch import watch_sessions
 from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
-from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve, cmd_dispatch_watch
+from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag
 from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thread
 
 
@@ -2597,6 +2597,10 @@ def main():
     p_watch = dispatch_sub.add_parser("watch", help="Block until next dispatch completes")
     p_watch.add_argument("--timeout", type=int, default=600, help="Timeout in seconds (default: 600)")
     p_watch.set_defaults(func=cmd_dispatch_watch)
+
+    p_dnag = dispatch_sub.add_parser("nag", help="Enable dispatch completion nag for current session")
+    p_dnag.add_argument("--disable", action="store_true", help="Disable instead of enable")
+    p_dnag.set_defaults(func=cmd_dispatch_nag)
 
     # attach
     p = sub.add_parser("attach", help="Attach a file to the graph with hash-based dedup")

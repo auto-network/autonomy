@@ -73,6 +73,12 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN nag_message TEXT DEFAULT ''")
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN nag_last_sent REAL DEFAULT 0")
         _conn.commit()
+    # Migrate: add dispatch_nag column if missing
+    try:
+        _conn.execute("SELECT dispatch_nag FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN dispatch_nag INTEGER DEFAULT 0")
+        _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
 
@@ -265,6 +271,23 @@ def update_nag_last_sent(tmux_name: str, ts: float) -> None:
     conn = get_conn()
     conn.execute("UPDATE tmux_sessions SET nag_last_sent=? WHERE tmux_name=?", (ts, tmux_name))
     conn.commit()
+
+
+def update_dispatch_nag(tmux_name: str, enabled: bool) -> None:
+    """Enable or disable dispatch completion nag for a session."""
+    conn = get_conn()
+    conn.execute("UPDATE tmux_sessions SET dispatch_nag=? WHERE tmux_name=?",
+                 (1 if enabled else 0, tmux_name))
+    conn.commit()
+
+
+def get_dispatch_nag_sessions() -> list[str]:
+    """Return tmux_names of live sessions with dispatch_nag enabled."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT tmux_name FROM tmux_sessions WHERE dispatch_nag=1 AND is_live=1"
+    ).fetchall()
+    return [r["tmux_name"] for r in rows]
 
 
 def mark_dead(tmux_name: str) -> None:
