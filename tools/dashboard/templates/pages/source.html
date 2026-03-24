@@ -121,36 +121,69 @@
   <template x-if="state === 'ready' && !isAttachment">
     <div>
 
-      <!-- Header -->
-      <section aria-label="Source Header" class="mb-6">
-        <div class="flex items-center gap-3 mb-2">
-          <span class="px-2 py-0.5 rounded text-xs font-semibold"
-                :class="badgeCls"
-                x-text="srcType"></span>
-          <template x-if="src.project">
-            <span class="text-xs text-indigo-400" x-text="'[' + src.project + ']'"></span>
-          </template>
-          <span class="text-xs text-gray-500" x-text="date"></span>
-          <button class="text-xs text-gray-600 font-mono ml-auto hover:text-gray-400 active:text-emerald-400 transition-colors duration-150 cursor-pointer bg-transparent border-none p-0"
-                @click="
-                  navigator.clipboard.writeText('graph://' + (src.id || '').slice(0, 12));
-                  $el.textContent = 'copied!';
-                  $el.classList.add('text-emerald-400');
-                  setTimeout(() => {
-                    $el.textContent = (src.id || '').slice(0, 12);
-                    $el.classList.remove('text-emerald-400');
-                  }, 1000);
-                "
-                x-text="(src.id || '').slice(0, 12)"></button>
+      <!-- Header: card-system stats plate -->
+      <section aria-label="Source Header" class="mb-0">
+        <div class="rounded-xl overflow-hidden bg-gray-800/80 mb-0">
+          <div class="pl-2.5" :style="'border-left: 4px solid ' + borderColor">
+            <div style="padding: 8px 10px 10px 8px; display:flex; flex-direction:column; gap:2px;">
+
+              <!-- Row 1: stats plate -->
+              <div class="flex items-center gap-1.5" style="font-size:10px; font-family:ui-monospace,monospace; color:#64748b">
+                <span style="font-size:11px; font-weight:500; color:#64748b" x-text="srcType"></span>
+                <template x-if="noteVersion">
+                  <span style="color:#94a3b8; background:#0f1623; padding:1px 5px; border-radius:3px" x-text="'v' + noteVersion"></span>
+                </template>
+                <template x-if="src.project">
+                  <span style="background:#1e1b4b; color:#a5b4fc; padding:0 5px; border-radius:3px; font-size:9px; font-weight:700; height:18px; display:inline-flex; align-items:center" x-text="src.project"></span>
+                </template>
+                <button class="ml-auto" style="color:#3d4f63; background:#0f1623; padding:1px 5px; border-radius:3px; cursor:pointer; border:none; font-family:inherit; font-size:10px"
+                        @click="copyGraphLink()" x-text="(src.id || '').slice(0, 12)"></button>
+                <span style="color:#4b5e73; flex-shrink:0" x-text="date"></span>
+              </div>
+
+              <!-- Row 2: title -->
+              <div style="font-size:14px; font-weight:600; color:#f1f5f9; line-height:1.3; margin-top:1px; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical" x-text="displayTitle"></div>
+
+              <!-- Row 3: metadata (conditional) -->
+              <template x-if="authorOrMeta">
+                <div class="flex items-center gap-1.5 flex-wrap" style="margin-top:1px">
+                  <template x-if="author">
+                    <span style="font-size:11px; color:#475569" x-text="author"></span>
+                  </template>
+                  <template x-if="author && commentCount">
+                    <span style="color:#334155; font-size:10px">&middot;</span>
+                  </template>
+                  <template x-if="commentCount">
+                    <span style="font-size:11px; color:#475569" x-text="commentCount + ' comment' + (commentCount === 1 ? '' : 's')"></span>
+                  </template>
+                  <template x-if="provenanceLink">
+                    <span style="color:#334155; font-size:10px">&middot;</span>
+                  </template>
+                  <template x-if="provenanceLink">
+                    <a :href="provenanceLink" @click.prevent="navigateTo(provenanceLink)" style="font-size:11px; color:#818cf8; text-decoration:none">provenance &rarr;</a>
+                  </template>
+                </div>
+              </template>
+
+              <!-- Row 4: tags -->
+              <template x-if="tags.length > 0">
+                <div class="flex gap-1 flex-wrap" style="margin-top:2px">
+                  <template x-for="t in tags" :key="t">
+                    <a :href="'/stream/' + encodeURIComponent(t)" @click.prevent="navigateTo('/stream/' + encodeURIComponent(t))"
+                       style="display:inline-flex; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500; background:#1e293b; color:#94a3b8; text-decoration:none; cursor:pointer; transition:background 0.15s"
+                       x-text="t"></a>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
         </div>
-        <h1 class="font-bold"
-            :class="isContext ? 'text-lg' : 'text-xl'"
-            x-show="!isNote"
-            x-text="src.title || 'Untitled'"></h1>
+        <!-- Divider -->
+        <hr style="border:none; border-top:1px solid #1e293b; margin:0">
 
         <!-- Context mode sub-header -->
         <template x-if="isContext">
-          <div class="text-xs text-gray-500 mt-1">
+          <div class="text-xs text-gray-500 mt-2">
             Showing turns
             <span x-text="(targetTurn - contextWindow) + '–' + (targetTurn + contextWindow)"></span>
             of
@@ -161,30 +194,9 @@
         </template>
       </section>
 
-      <!-- Note metadata bar -->
-      <template x-if="isNote && noteMeta">
-        <div class="flex items-center gap-3 mt-2 mb-4 text-sm flex-wrap">
-          <span class="font-mono text-gray-400" x-text="src.id.slice(0, 12) + '@v' + noteVersionCount"></span>
-          <span class="text-gray-500" x-text="src.created_at.slice(0, 16)"></span>
-          <template x-if="noteMeta.author">
-            <span class="text-gray-400" x-text="noteMeta.author"></span>
-          </template>
-          <template x-if="noteProvenanceId">
-            <a :href="'/' + (noteProvenanceType === 'bead' ? 'bead' : 'graph') + '/' + noteProvenanceId"
-               class="text-indigo-400 hover:underline text-xs">provenance →</a>
-          </template>
-          <template x-for="tag in (noteMeta.tags || [])" :key="tag">
-            <a :href="'/stream/' + encodeURIComponent(tag)"
-               @click.prevent="navigateTo('/stream/' + encodeURIComponent(tag))"
-               class="px-1.5 py-0.5 bg-gray-700 text-gray-400 text-xs rounded hover:bg-gray-600 hover:text-gray-200 no-underline cursor-pointer"
-               x-text="tag"></a>
-          </template>
-        </div>
-      </template>
-
       <!-- Note layout -->
       <template x-if="isNote">
-        <div :data-source-id="src.id">
+        <div :data-source-id="src.id" class="mt-4">
           <div x-markdown="noteContent"></div>
         </div>
       </template>
@@ -226,7 +238,7 @@
 
       <!-- Chat layout (session / conversation / agent-run) -->
       <template x-if="isChat">
-        <div class="space-y-4">
+        <div class="space-y-4 mt-4">
           <template x-for="e in visibleEntries" :key="e._key">
             <div class="p-4 bg-gray-800 rounded-lg border-l-4"
                  :class="{
@@ -250,7 +262,7 @@
 
       <!-- Doc layout (docs / status / musings / etc.) -->
       <template x-if="isDoc">
-        <div class="space-y-4">
+        <div class="space-y-4 mt-4">
           <template x-for="e in visibleEntries" :key="e._key">
             <div class="text-sm" x-markdown="e.content || ''"></div>
           </template>
