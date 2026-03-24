@@ -1,5 +1,5 @@
 <style>@keyframes exp-spin { to { transform: rotate(360deg); } }</style>
-<div x-data="experimentPage()" style="display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden">
+<div x-data="experimentPage()" style="display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden;padding-top:env(safe-area-inset-top, 0px)">
 
   <!-- Loading state -->
   <template x-if="state === 'loading'">
@@ -113,7 +113,7 @@
       </div>
 
       <!-- Persistent input bar (both states) -->
-      <div style="height:50px;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:8px 12px;background:#1a2332;border-top:1px solid #1e293b;flex-shrink:0">
+      <div style="height:50px;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:8px 12px;background:#1a2332;border-top:1px solid #1e293b;flex-shrink:0;padding-bottom:env(safe-area-inset-bottom, 0px)">
         <button style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;cursor:pointer;border-radius:6px;font-size:16px"
                 title="Voice input (future)">&#127897;</button>
         <input x-model="inputText" @keydown.ctrl.enter="sendMessage()"
