@@ -450,6 +450,38 @@ def get_consecutive_failures(bead_id: str) -> tuple[int, int]:
         conn.close()
 
 
+def reset_circuit_breaker(bead_id: str) -> str:
+    """Insert a synthetic DONE record to reset the circuit breaker for a bead.
+
+    The circuit breaker in dispatcher.py checks get_consecutive_failures()
+    which scans dispatch_runs by started_at DESC and stops at the first DONE.
+    Inserting a synthetic DONE record breaks the failure streak.
+
+    Returns the run_id of the inserted record.
+    """
+    import uuid
+
+    now = datetime.now(timezone.utc)
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    run_id = f"reset-{bead_id}-{uuid.uuid4().hex[:8]}"
+
+    conn = _get_conn()
+    try:
+        conn.execute(
+            """\
+            INSERT INTO dispatch_runs (
+                id, bead_id, started_at, completed_at, duration_secs,
+                status, reason
+            ) VALUES (?, ?, ?, ?, 0, 'DONE', 'Circuit breaker reset (synthetic)')
+            """,
+            (run_id, bead_id, now_str, now_str),
+        )
+        conn.commit()
+        return run_id
+    finally:
+        conn.close()
+
+
 def update_live_stats(
     *,
     run_id: str,
