@@ -176,6 +176,30 @@
                 </div>
               </template>
 
+              <!-- ── Semantic Bash: typed command tiles ───────── -->
+              <template x-if="entry.type === 'semantic_bash'">
+                <div class="sc-tool-card">
+                  <div class="sc-line1">
+                    <span class="sc-chip" :class="{
+                      'bg-purple-900 text-purple-300': entry.semantic_type === 'note-created',
+                      'bg-blue-900 text-blue-300': entry.semantic_type === 'comment-added',
+                      'bg-amber-900 text-amber-300': entry.semantic_type === 'thought-captured',
+                      'bg-green-900 text-green-300': entry.semantic_type === 'dispatch-approved',
+                      'bg-gray-700 text-gray-300': entry.semantic_type === 'state-changed',
+                    }" x-text="{
+                      'note-created': 'Note',
+                      'comment-added': 'Comment',
+                      'thought-captured': 'Thought',
+                      'dispatch-approved': 'Dispatch',
+                      'state-changed': 'State',
+                    }[entry.semantic_type] || entry.semantic_type"></span>
+                    <span class="sc-meta text-gray-400" x-text="entry.bead_id || entry.source_id || ''"></span>
+                    <span class="sc-timestamp" x-text="formatTime(entry.timestamp)"></span>
+                  </div>
+                  <div class="sc-line2 sc-line2-truncated" x-text="entry.content"></div>
+                </div>
+              </template>
+
         </div>
       </template>
 

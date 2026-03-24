@@ -274,6 +274,7 @@
           if (entry.type === 'assistant_text') return 'sc-border-assistant';
           if (entry.type === 'thinking') return 'sc-border-thinking';
           if (entry.type === 'system') return 'sc-border-system';
+          if (entry.type === 'semantic_bash') return 'sc-border-default';
           return 'sc-border-default';
         },
 
