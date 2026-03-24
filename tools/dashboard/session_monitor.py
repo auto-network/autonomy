@@ -121,10 +121,12 @@ def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
         f'</crosstalk>'
     )
     try:
+        buf = f"nag_{_secrets.token_hex(4)}"
         path = f"/tmp/nag_{_secrets.token_hex(4)}.txt"
         Path(path).write_text(envelope, encoding="utf-8")
-        subprocess.run(["tmux", "load-buffer", "-b", "nag_msg", path], capture_output=True, timeout=5)
-        subprocess.run(["tmux", "paste-buffer", "-p", "-b", "nag_msg", "-t", tmux_name], capture_output=True, timeout=5)
+        subprocess.run(["tmux", "load-buffer", "-b", buf, path], capture_output=True, timeout=5)
+        subprocess.run(["tmux", "paste-buffer", "-p", "-b", buf, "-t", tmux_name], capture_output=True, timeout=5)
+        subprocess.run(["tmux", "delete-buffer", "-b", buf], capture_output=True, timeout=5)
         time.sleep(0.3)
         subprocess.run(["tmux", "send-keys", "-t", tmux_name, "", "Enter"], capture_output=True, timeout=5)
         Path(path).unlink(missing_ok=True)
