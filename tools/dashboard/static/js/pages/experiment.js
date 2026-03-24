@@ -42,6 +42,10 @@
           window._experimentPage = this;
           this.expId = _expIdFromPath();
           this._load();
+          var self = this;
+          this.$watch('chatOpen', function (open) {
+            if (open && !self.chatConnected) self._loadChatSessions();
+          });
         },
 
         destroy: function () {
@@ -194,10 +198,30 @@
 
         _loadChatSessions: async function () {
           try {
-            var resp = await fetch('/api/terminals');
-            var sessions = await resp.json();
-            this.chatSessions = sessions.filter(function (s) { return s.alive; });
-          } catch (_) {}
+            var terminals = await fetch('/api/terminals').then(function (r) { return r.json(); });
+            var dashSessions = [];
+            try { dashSessions = await fetch('/api/active').then(function (r) { return r.json(); }); } catch (_) {}
+            var dashMap = {};
+            dashSessions.forEach(function (s) { dashMap[s.tmux_session || s.session_id] = s; });
+
+            this.chatSessions = terminals
+              .filter(function (t) { return t.alive; })
+              .filter(function (t) { return !t.id.startsWith('chatwith-') && !t.id.startsWith('chat-'); })
+              .map(function (t) {
+                var dash = dashMap[t.id] || {};
+                return {
+                  id: t.id,
+                  label: dash.label || '',
+                  env: t.env || 'container',
+                  preview: (dash.last_message || '').slice(0, 80),
+                };
+              })
+              .sort(function (a, b) {
+                if (a.label && !b.label) return -1;
+                if (!a.label && b.label) return 1;
+                return a.id.localeCompare(b.id);
+              });
+          } catch (_) { this.chatSessions = []; }
         },
 
         // ── Auto-reconnect Chat With ──────────────────────────────────────

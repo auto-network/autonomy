@@ -63,53 +63,70 @@
 
       <!-- Chat overlay (State 2: visible when chat open) -->
       <div x-show="chatOpen" x-transition.opacity.duration.200ms
-           style="flex:1;min-height:0">
-        <div style="display:flex;flex-direction:column;height:100%;background:#1a2332;overflow:hidden">
+           style="flex:1;display:flex;flex-direction:column;background:#1a2332;overflow:hidden;min-height:0">
 
-          <!-- Not connected: session picker -->
-          <template x-if="!chatConnected">
-            <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px">
-              <span style="font-size:13px;color:#64748b">Connect to a session</span>
-              <button @click="_loadChatSessions()" style="font-size:11px;color:#818cf8;background:transparent;border:none;cursor:pointer">Refresh</button>
-              <template x-if="chatSessions.length === 0">
-                <span style="font-size:12px;color:#475569">No live sessions</span>
-              </template>
-              <div style="display:flex;flex-direction:column;gap:4px;width:100%;max-width:300px">
-                <template x-for="s in chatSessions" :key="s.id">
-                  <button @click="_connectSession(s.id)"
-                          style="text-align:left;padding:8px 12px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#e5e7eb;font-size:12px;cursor:pointer;transition:background 0.15s"
-                          x-text="s.id"></button>
-                </template>
-              </div>
-            </div>
-          </template>
-
-          <!-- Connected: chat messages -->
+        <!-- Header (always visible when chat open) -->
+        <div style="display:flex;align-items:center;padding:8px 12px;border-bottom:1px solid #1e293b;flex-shrink:0">
+          <span style="font-size:13px;font-weight:600;color:#a5b4fc;flex:1"
+                x-text="chatConnected ? 'Chat With Claude' : 'Select Session'"></span>
           <template x-if="chatConnected">
-            <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-              <div style="display:flex;align-items:center;padding:8px 12px;border-bottom:1px solid #1e293b;flex-shrink:0">
-                <span style="font-size:13px;font-weight:600;color:#a5b4fc;flex:1">Chat With Claude</span>
-                <span style="font-size:10px;color:#22c55e;margin-right:8px">&#9679; Live</span>
-                <button @click="disconnectSession()" style="font-size:10px;color:#64748b;background:transparent;border:none;cursor:pointer;margin-right:8px" title="Disconnect">Disconnect</button>
-                <button @click="chatOpen = false"
-                        style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;font-size:18px;cursor:pointer;border-radius:4px">&times;</button>
-              </div>
-              <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;min-height:0">
-                <template x-for="msg in chatMessages" :key="msg.id">
-                  <div style="font-size:13px;line-height:1.4;padding:8px 10px;border-radius:8px;max-width:90%;word-wrap:break-word"
-                       :style="msg.role === 'user'
-                         ? 'background:#312e81;color:#e0e7ff;align-self:flex-end;border-bottom-right-radius:2px'
-                         : 'background:#1e293b;color:#cbd5e1;align-self:flex-start;border-bottom-left-radius:2px'"
-                       x-text="msg.text"></div>
-                </template>
-                <div x-show="chatMessages.length === 0" style="text-align:center;color:#475569;font-size:13px;padding:24px 0">
-                  No messages yet. Type below to chat.
-                </div>
-              </div>
-            </div>
+            <span style="font-size:10px;color:#22c55e;margin-right:8px">&#9679; Live</span>
           </template>
-
+          <template x-if="chatConnected">
+            <button @click="disconnectSession()" style="font-size:10px;color:#64748b;background:transparent;border:none;cursor:pointer;margin-right:8px" title="Disconnect">Disconnect</button>
+          </template>
+          <button @click="chatOpen = false"
+                  style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;font-size:18px;cursor:pointer;border-radius:4px">&times;</button>
         </div>
+
+        <!-- Picker (when not connected) -->
+        <template x-if="!chatConnected">
+          <div style="flex:1;overflow-y:auto;padding:8px">
+            <template x-if="chatSessions.length === 0">
+              <div style="text-align:center;padding:24px;color:#475569;font-size:13px">No live sessions found</div>
+            </template>
+            <template x-for="sess in chatSessions" :key="sess.id">
+              <button @click="_connectSession(sess.id)"
+                      style="width:100%;text-align:left;padding:10px 12px;margin-bottom:4px;background:transparent;border:none;border-radius:6px;cursor:pointer;transition:background 0.15s"
+                      @mouseenter="$el.style.background='#263244'" @mouseleave="$el.style.background='transparent'">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;flex-shrink:0;box-shadow:0 0 4px rgba(34,197,94,0.4)"></span>
+                  <span style="font-size:13px;font-weight:600;color:#e2e8f0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                        x-text="sess.label || sess.id"></span>
+                  <span x-show="sess.label" style="font-size:11px;color:#475569;flex-shrink:0"
+                        x-text="sess.id"></span>
+                  <span style="font-size:10px;color:#475569;flex-shrink:0;margin-left:auto"
+                        x-text="sess.env === 'host' ? 'host' : 'container'"></span>
+                </div>
+                <div x-show="sess.preview"
+                     style="font-size:11px;color:#475569;margin-top:2px;padding-left:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                     x-text="sess.preview"></div>
+              </button>
+            </template>
+            <!-- Footer -->
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-top:1px solid #1e293b;margin-top:8px">
+              <span style="font-size:11px;color:#475569" x-text="chatSessions.length + ' sessions'"></span>
+              <button @click="_loadChatSessions()" style="font-size:11px;color:#818cf8;background:transparent;border:none;cursor:pointer">Refresh</button>
+            </div>
+          </div>
+        </template>
+
+        <!-- Chat messages (when connected) -->
+        <template x-if="chatConnected">
+          <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;min-height:0">
+            <template x-for="msg in chatMessages" :key="msg.id">
+              <div style="font-size:13px;line-height:1.4;padding:8px 10px;border-radius:8px;max-width:90%;word-wrap:break-word"
+                   :style="msg.role === 'user'
+                     ? 'background:#312e81;color:#e0e7ff;align-self:flex-end;border-bottom-right-radius:2px'
+                     : 'background:#1e293b;color:#cbd5e1;align-self:flex-start;border-bottom-left-radius:2px'"
+                   x-text="msg.text"></div>
+            </template>
+            <div x-show="chatMessages.length === 0" style="text-align:center;color:#475569;font-size:13px;padding:24px 0">
+              No messages yet. Type below to chat.
+            </div>
+          </div>
+        </template>
+
       </div>
 
       <!-- Persistent input bar (both states) -->
