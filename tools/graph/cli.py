@@ -1218,6 +1218,162 @@ def cmd_collab_tag(args):
         print(f"  Already tagged: {source['id'][:12]} \"{title}\"")
 
 
+def cmd_collab_topics(args):
+    """List tags with descriptions and note counts."""
+    db = GraphDB(args.db)
+    tags = db.list_tags(limit=args.limit)
+    db.close()
+    if not tags:
+        print("No tags found")
+        return
+    print(f"{'TAG':<24} {'NOTES':>5}  DESCRIPTION")
+    print(f"{'─' * 24} {'─' * 5}  {'─' * 50}")
+    for t in tags:
+        name = t["name"][:23]
+        count = str(t["note_count"])
+        desc = (t["description"] or "")[:50]
+        print(f"{name:<24} {count:>5}  {desc}")
+
+
+def cmd_collab_tag_describe(args):
+    """Set or update a tag's description."""
+    db = GraphDB(args.db)
+    desc = args.description
+    if desc == "-":
+        desc = sys.stdin.read().strip()
+    db.update_tag_description(args.tag_name, desc, actor=os.environ.get("BD_ACTOR", "user"))
+    db.close()
+    print(f"  \u2713 Tag '{args.tag_name}': {desc[:60]}")
+
+
+def cmd_thought(args):
+    """Capture a raw thought/idea with optional provenance."""
+    from .models import new_id
+    db = GraphDB(args.db)
+    content = " ".join(args.text) if args.text else ""
+    if args.content_stdin == "-" or not content:
+        if args.content_stdin == "-":
+            content = sys.stdin.read().strip()
+        if not content:
+            print("No content provided", file=sys.stderr)
+            db.close()
+            sys.exit(1)
+    capture_id = new_id()[:8]
+    db.insert_capture(
+        capture_id, content,
+        source_id=args.source if hasattr(args, 'source') and args.source else None,
+        turn_number=args.turn if hasattr(args, 'turn') and args.turn else None,
+        thread_id=args.thread if hasattr(args, 'thread') and args.thread else None,
+        actor=os.environ.get("BD_ACTOR", "user"),
+    )
+    thread_info = ""
+    if hasattr(args, 'thread') and args.thread:
+        thread = db.get_thread(args.thread)
+        thread_info = f' \u2192 thread "{thread["title"]}"' if thread else f" \u2192 thread {args.thread}"
+    db.close()
+    print(f"  \u2713 Captured: {capture_id}{thread_info}")
+
+
+def cmd_thoughts(args):
+    """List thought captures (inbox or by thread)."""
+    db = GraphDB(args.db)
+    since_iso = None
+    if args.since:
+        from datetime import datetime, timezone, timedelta
+        secs = _parse_duration(args.since)
+        since_iso = (datetime.now(timezone.utc) - timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    captures = db.list_captures(
+        thread_id=args.thread if hasattr(args, 'thread') and args.thread else None,
+        since=since_iso,
+        limit=args.limit,
+    )
+    db.close()
+    if not captures:
+        print("No captures found")
+        return
+    for c in captures:
+        cid = c["id"][:11]
+        date = (c.get("created_at") or "")[:10]
+        status = c.get("status", "?")[:8]
+        text = (c["content"] or "")[:60].replace("\n", " ")
+        print(f"  {cid}  {date}  [{status}]  {text}")
+
+
+_THREAD_ACTIONS = {"park", "done", "active", "assign"}
+
+
+def cmd_thread_dispatch(args):
+    """Dispatch thread subcommand: create, action, or list."""
+    parts = args.thread_args or []
+    if not parts:
+        # No args — list threads
+        cmd_threads(args)
+        return
+    if parts[0] in _THREAD_ACTIONS:
+        # Action mode: graph thread park/done/active/assign ...
+        action = parts[0]
+        if len(parts) < 2:
+            print(f"Usage: graph thread {action} <thread_id>", file=sys.stderr)
+            sys.exit(1)
+        cmd_thread_action(args, action, parts[1], parts[2] if len(parts) > 2 else None)
+    else:
+        # Create mode: graph thread "Title"
+        title = " ".join(parts)
+        cmd_thread_create(args, title)
+
+
+def cmd_thread_create(args, title: str):
+    """Create a new thread."""
+    from .models import new_id
+    db = GraphDB(args.db)
+    thread_id = "thr-" + new_id()[:4]
+    db.insert_thread(
+        thread_id, title,
+        priority=args.priority,
+        created_by=os.environ.get("BD_ACTOR", "user"),
+    )
+    db.close()
+    print(f"  \u2713 Thread: {thread_id} \"{title}\" [active, P{args.priority}]")
+
+
+def cmd_threads(args):
+    """List threads."""
+    db = GraphDB(args.db)
+    status = None if args.all else (args.status if hasattr(args, 'status') and args.status else "active")
+    threads = db.list_threads(status=status, limit=args.limit)
+    db.close()
+    if not threads:
+        print("No threads found")
+        return
+    print(f"{'ID':<12} {'P':>1} {'STATUS':<8} {'CAPS':>4}  TITLE")
+    print(f"{'─' * 12} {'─'} {'─' * 8} {'─' * 4}  {'─' * 40}")
+    for t in threads:
+        tid = t["id"][:11]
+        pri = str(t.get("priority", 1))
+        st = t.get("status", "?")[:8]
+        caps = str(t.get("capture_count", 0))
+        title = (t.get("title") or "")[:40]
+        print(f"{tid:<12} {pri:>1} {st:<8} {caps:>4}  {title}")
+
+
+def cmd_thread_action(args, action: str, thread_id: str, target: str | None = None):
+    """Thread actions: park, done, active, assign."""
+    db = GraphDB(args.db)
+    if action in ("park", "done", "active"):
+        db.update_thread_status(thread_id, "parked" if action == "park" else action)
+        thread = db.get_thread(thread_id)
+        title = thread["title"] if thread else thread_id
+        print(f"  \u2713 {action.capitalize()}: {thread_id} \"{title}\"")
+    elif action == "assign":
+        if not target:
+            print("assign requires a thread ID: graph thread assign CAPTURE_ID THREAD_ID", file=sys.stderr)
+            db.close()
+            sys.exit(1)
+        db.assign_capture_to_thread(thread_id, target)
+        print(f"  \u2713 Assigned {thread_id} \u2192 thread {target}")
+    db.close()
+
+
 def _parse_duration(s: str) -> float:
     """Parse a duration string like '1h', '30m', '2d', '1w' to seconds."""
     import re
@@ -2459,6 +2615,52 @@ def main():
     p_collab_tag = collab_sub.add_parser("tag", help="Add collab tag to an existing note")
     p_collab_tag.add_argument("source_id", help="Source ID or prefix")
     p_collab_tag.set_defaults(func=cmd_collab_tag)
+
+    p_collab_topics = collab_sub.add_parser("topics", help="List tags with descriptions and note counts")
+    p_collab_topics.add_argument("--limit", type=int, default=100)
+    p_collab_topics.set_defaults(func=cmd_collab_topics)
+
+    p_collab_desc = collab_sub.add_parser("tag-describe", help="Set tag description")
+    p_collab_desc.add_argument("tag_name", help="Tag name")
+    p_collab_desc.add_argument("description", nargs="?", default="-", help="Description text (use - for stdin)")
+    p_collab_desc.set_defaults(func=cmd_collab_tag_describe)
+
+    # thought — capture a raw idea
+    p = sub.add_parser("thought", help="Capture a raw thought/idea")
+    p.add_argument("text", nargs="*", help="Thought text")
+    p.add_argument("-c", "--content-stdin", nargs="?", const="-", help="Read from stdin")
+    p.add_argument("--source", help="Source ID (provenance)")
+    p.add_argument("--turn", type=int, help="Turn number (provenance)")
+    p.add_argument("--thread", help="Thread ID to assign to")
+    p.set_defaults(func=cmd_thought)
+
+    # thoughts — list captures
+    p = sub.add_parser("thoughts", help="List thought captures")
+    p.add_argument("--thread", help="Filter by thread ID")
+    p.add_argument("--since", help="Duration filter, e.g. 1h, 2d")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_thoughts)
+
+    # thread — create or manage threads
+    # Usage: graph thread "Title"              → create
+    #        graph thread park <id>            → park a thread
+    #        graph thread done <id>            → mark done
+    #        graph thread active <id>          → reactivate
+    #        graph thread assign <cap> <thr>   → assign capture to thread
+    p_thread = sub.add_parser("thread", help="Create or manage threads")
+    p_thread.add_argument("thread_args", nargs="*", help="Title (create) or action + IDs")
+    p_thread.add_argument("-p", "--priority", type=int, default=1, help="Priority 0-3")
+    p_thread.add_argument("--all", action="store_true", help="Include parked/done (for list fallback)")
+    p_thread.add_argument("--status", help="Filter by status (for list fallback)")
+    p_thread.add_argument("--limit", type=int, default=20)
+    p_thread.set_defaults(func=cmd_thread_dispatch)
+
+    # threads — list threads
+    p = sub.add_parser("threads", help="List threads")
+    p.add_argument("--all", action="store_true", help="Include parked/done")
+    p.add_argument("--status", help="Filter by status")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_threads)
 
     # crosstalk
     p = sub.add_parser("crosstalk", help="View CrossTalk message log")
