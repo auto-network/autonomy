@@ -67,7 +67,7 @@ window.appendSessionEntries = function(store, data) {
 
   if (!data.entries || data.entries.length === 0) return 0;
 
-  // Track tool IDs and results
+  // Track tool IDs and results; init enrichment properties for semantic_bash
   for (var i = 0; i < data.entries.length; i++) {
     var entry = data.entries[i];
     if (entry.type === 'tool_use' && entry.tool_id) {
@@ -75,6 +75,13 @@ window.appendSessionEntries = function(store, data) {
     }
     if (entry.type === 'tool_result' && entry.tool_id) {
       store.resultMap[entry.tool_id] = entry;
+    }
+    // Pre-init enrichment properties so Alpine tracks them reactively
+    if (entry.type === 'semantic_bash' && entry.source_id && !entry.hasOwnProperty('_enhanced')) {
+      entry._enhanced = false;
+      entry._enriched_title = null;
+      entry._enriched_preview = null;
+      entry._enriched_tags = null;
     }
   }
 
