@@ -256,12 +256,9 @@
 }
 
 /* ── Spacing rules ──────────────────────────────────────────── */
-/* No gap within an assistant turn — entries connect via left borders */
-.sv-entries .sc-entry + .sc-entry {
-  margin-top: 0;
-}
-/* Gap at role transitions (user ↔ assistant/tool) */
-.sv-entries .sc-entry.sc-gap {
+/* Gap at role transitions (user ↔ assistant/tool) — works in both
+   session viewer (.sv-entries) and Chat With panel */
+.sc-entry.sc-gap {
   margin-top: 14px;
 }
 
