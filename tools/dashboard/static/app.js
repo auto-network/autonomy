@@ -1529,6 +1529,20 @@ function route() {
     content.style.display = '';
   }
 
+  // Hide global header on experiment pages (control strip replaces it)
+  const isExpPage = path.startsWith('/experiments/');
+  const globalHeader = document.querySelector('header');
+  if (globalHeader) {
+    globalHeader.style.display = isExpPage ? 'none' : '';
+  }
+  // Also hide pinned beads strip
+  const pinnedStrip = document.querySelector('[x-show*="pinned"]');
+  if (pinnedStrip) {
+    pinnedStrip.style.display = isExpPage ? 'none' : '';
+  }
+  // Remove content padding for full-bleed experiment
+  content.style.padding = isExpPage ? '0' : '';
+
   // Clear header action buttons from previous page
   const headerActions = document.getElementById('header-actions');
   if (headerActions) headerActions.innerHTML = '';

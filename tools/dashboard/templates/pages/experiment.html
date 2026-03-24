@@ -1,4 +1,5 @@
-<div x-data="experimentPage()" style="display:flex;flex-direction:column;height:calc(100vh - 44px);height:calc(100dvh - 44px);margin:-24px -24px 0;overflow:hidden">
+<style>@keyframes exp-spin { to { transform: rotate(360deg); } }</style>
+<div x-data="experimentPage()" style="display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden">
 
   <!-- Loading state -->
   <template x-if="state === 'loading'">
@@ -32,10 +33,26 @@
                 title="Toggle chat">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h12v8H5l-3 3V3z"/></svg>
         </button>
-        <button @click="captureScreenshot()"
-                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent"
+        <button @click="captureScreenshot()" :disabled="captureState === 'working'"
+                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent;transition:all 0.15s"
+                :style="captureState === 'success' ? 'color:#22c55e' : captureState === 'error' ? 'color:#ef4444' : captureState === 'working' ? 'color:#a5b4fc' : 'color:#64748b'"
                 title="Capture screenshot">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="8" cy="8" r="2.5"/></svg>
+          <!-- Idle: camera icon -->
+          <template x-if="captureState === 'idle'">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="8" cy="8" r="2.5"/></svg>
+          </template>
+          <!-- Working: spinning circle -->
+          <template x-if="captureState === 'working'">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="animation:exp-spin 1s linear infinite"><circle cx="8" cy="8" r="6" stroke-dasharray="30 10"/></svg>
+          </template>
+          <!-- Success: checkmark -->
+          <template x-if="captureState === 'success'">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8l3 3 5-5"/></svg>
+          </template>
+          <!-- Error: X -->
+          <template x-if="captureState === 'error'">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+          </template>
         </button>
       </div>
 
@@ -55,16 +72,30 @@
                     style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;font-size:18px;cursor:pointer;border-radius:4px">&times;</button>
           </div>
           <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;min-height:0">
-            <template x-for="msg in chatMessages" :key="msg.id">
-              <div style="font-size:13px;line-height:1.4;padding:8px 10px;border-radius:8px;max-width:90%;word-wrap:break-word"
-                   :style="msg.role === 'user'
-                     ? 'background:#312e81;color:#e0e7ff;align-self:flex-end;border-bottom-right-radius:2px'
-                     : 'background:#1e293b;color:#cbd5e1;align-self:flex-start;border-bottom-left-radius:2px'"
-                   x-text="msg.text"></div>
+            <!-- Not connected: show connect button -->
+            <template x-if="!_tmuxSession">
+              <div style="flex:1;display:flex;align-items:center;justify-content:center">
+                <button @click="_connectChat()"
+                        style="padding:8px 16px;background:#4f46e5;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">
+                  Start Chat With Claude
+                </button>
+              </div>
             </template>
-            <div x-show="chatMessages.length === 0" style="text-align:center;color:#475569;font-size:13px;padding:24px 0">
-              No messages yet. Type below to chat.
-            </div>
+            <!-- Connected: show messages -->
+            <template x-if="_tmuxSession">
+              <div style="display:flex;flex-direction:column;gap:8px;flex:1">
+                <template x-for="msg in chatMessages" :key="msg.id">
+                  <div style="font-size:13px;line-height:1.4;padding:8px 10px;border-radius:8px;max-width:90%;word-wrap:break-word"
+                       :style="msg.role === 'user'
+                         ? 'background:#312e81;color:#e0e7ff;align-self:flex-end;border-bottom-right-radius:2px'
+                         : 'background:#1e293b;color:#cbd5e1;align-self:flex-start;border-bottom-left-radius:2px'"
+                       x-text="msg.text"></div>
+                </template>
+                <div x-show="chatMessages.length === 0" style="text-align:center;color:#475569;font-size:13px;padding:24px 0">
+                  No messages yet. Type below to chat.
+                </div>
+              </div>
+            </template>
           </div>
         </div>
       </div>
