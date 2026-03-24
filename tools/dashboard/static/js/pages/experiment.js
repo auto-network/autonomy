@@ -11,9 +11,6 @@
   }
 
   document.addEventListener('alpine:init', function () {
-    // In-memory store for Chat With session selection, keyed by series_id (or expId for standalone).
-    if (!Alpine.store('chatWith')) Alpine.store('chatWith', {});
-
     Alpine.data('experimentPage', function () {
       return {
         // State machine
@@ -32,14 +29,12 @@
         isLive: false,
 
         // Chat With session
+        chatConnected: false,
+        chatSessions: [],
         _tmuxSession: null,
 
         // Capture state: 'idle' | 'working' | 'success' | 'error'
         captureState: 'idle',
-
-        // Session picker
-        pickerVisible: false,
-        pickerSessions: [],
 
         // ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -56,6 +51,7 @@
             window._expSeriesCleanup = null;
           }
           this._tmuxSession = null;
+          this.chatConnected = false;
           this.isLive = false;
         },
 
@@ -136,7 +132,7 @@
 
         sendMessage: async function () {
           var text = (this.inputText || '').trim();
-          if (!text) return;
+          if (!text || !this.chatConnected) return;
           this.chatMessages.push({ id: Date.now(), role: 'user', text: text });
           this.inputText = '';
 
@@ -180,131 +176,56 @@
 
         // ── Chat With session management ──────────────────────────────────
 
-        _connectChat: async function () {
-          if (this._tmuxSession) return; // already connected
-          try {
-            var resp = await fetch('/api/chatwith/spawn', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ page_type: 'experiment', context_id: this.expId }),
-            });
-            var data = await resp.json();
-            if (data.error) {
-              console.error('[experimentPage] chat connect error', data.error);
-              return;
-            }
-            this._connectSession(data.session_name);
-          } catch (e) {
-            console.error('[experimentPage] chat connect failed:', e);
-          }
-        },
-
-        _chatWithKey: function () {
-          return (this.exp && this.exp.series_id) || this.expId;
-        },
-
-        _saveSession: function (tmuxSession) {
-          Alpine.store('chatWith')[this._chatWithKey()] = { tmuxSession: tmuxSession };
-        },
-
-        _loadSession: function () {
-          return Alpine.store('chatWith')[this._chatWithKey()] || null;
-        },
-
-        _connectSession: function (tmuxSession) {
-          this._tmuxSession = tmuxSession;
+        _connectSession: function (sessionId) {
+          this._tmuxSession = sessionId;
+          this.chatConnected = true;
           this.isLive = true;
-          this._saveSession(tmuxSession);
+          localStorage.setItem('exp-chat-' + this.expId, sessionId);
           initDisplayCapture(this.expId).catch(function () {});
         },
 
-        // ── Session picker ──────────────────────────────────────────────
-
-        openSessionPicker: function () {
-          var allSessions = Alpine.store('sessions');
-          var sessions = [];
-          var interactiveTypes = ['terminal', 'chatwith', 'host', 'container'];
-          for (var id in allSessions) {
-            var s = allSessions[id];
-            if (!s.isLive) continue;
-            if (!s.tmuxSession) continue;
-            if (interactiveTypes.indexOf(s.sessionType || 'terminal') === -1) continue;
-            var lastEntry = s.entries.length > 0 ? s.entries[s.entries.length - 1] : null;
-            sessions.push({
-              sessionId: id,
-              tmuxSession: s.tmuxSession,
-              project: s.project || '',
-              label: s.label || '',
-              type: s.sessionType || 'terminal',
-              preview: lastEntry ? (lastEntry.content || '').slice(0, 100) : '',
-            });
-          }
-          sessions.sort(function (a, b) {
-            if (a.label && !b.label) return -1;
-            if (!a.label && b.label) return 1;
-            return (a.tmuxSession || '').localeCompare(b.tmuxSession || '');
-          });
-          this.pickerSessions = sessions;
-          this.pickerVisible = true;
+        disconnectSession: function () {
+          this._tmuxSession = null;
+          this.chatConnected = false;
+          this.isLive = false;
+          localStorage.removeItem('exp-chat-' + this.expId);
+          this._loadChatSessions();
         },
 
-        selectSession: function (session) {
-          this.pickerVisible = false;
-          this._connectSession(session.tmuxSession);
-        },
-
-        spawnNewSession: async function () {
-          this.pickerVisible = false;
+        _loadChatSessions: async function () {
           try {
-            var res = await fetch('/api/chatwith/spawn', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ page_type: 'experiment', context_id: this.expId }),
-            });
-            var result = await res.json();
-            if (result.error) {
-              console.error('[experimentPage] spawn error', result.error);
-              return;
-            }
-            this._connectSession(result.session_name);
-          } catch (e) {
-            console.error('[experimentPage] spawnNewSession error', e);
-          }
+            var resp = await fetch('/api/terminals');
+            var sessions = await resp.json();
+            this.chatSessions = sessions.filter(function (s) { return s.alive; });
+          } catch (_) {}
         },
 
         // ── Auto-reconnect Chat With ──────────────────────────────────────
 
         _checkChatWith: async function () {
-          var saved = this._loadSession();
-          if (!saved || !saved.tmuxSession) {
-            // No saved session — auto-spawn on first visit
-            this._connectChat();
-            return;
+          var savedSession = localStorage.getItem('exp-chat-' + this.expId);
+          if (savedSession) {
+            // Verify saved session is still alive
+            try {
+              var resp = await fetch('/api/terminals');
+              var terminals = await resp.json();
+              var alive = false;
+              for (var i = 0; i < terminals.length; i++) {
+                if (terminals[i].id === savedSession && terminals[i].alive) {
+                  alive = true;
+                  break;
+                }
+              }
+              if (alive) {
+                this._connectSession(savedSession);
+                return;
+              }
+            } catch (_) {}
+            // Saved session is dead — clear and fall through to picker
+            localStorage.removeItem('exp-chat-' + this.expId);
           }
-
-          // Check if the saved session is still live in the store
-          var allSessions = Alpine.store('sessions');
-          for (var id in allSessions) {
-            var s = allSessions[id];
-            if (s.tmuxSession === saved.tmuxSession && s.isLive) {
-              this._connectSession(saved.tmuxSession);
-              return;
-            }
-          }
-
-          // Fallback: check via the chatwith/check API
-          try {
-            var check = await fetch(
-              '/api/chatwith/check?session=' + encodeURIComponent(saved.tmuxSession)
-            ).then(function (r) { return r.json(); });
-            if (check && check.exists) {
-              this._connectSession(saved.tmuxSession);
-            } else {
-              delete Alpine.store('chatWith')[this._chatWithKey()];
-              // Saved session is dead — auto-spawn a new one
-              this._connectChat();
-            }
-          } catch (e) { /* best-effort */ }
+          // No saved session — load picker options
+          this._loadChatSessions();
         },
 
         // ── SSE series subscription ───────────────────────────────────────
