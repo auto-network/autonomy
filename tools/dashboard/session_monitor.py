@@ -356,6 +356,35 @@ class SessionMonitor:
                             project=resolved.parent.name,
                         )
 
+                # Detect JSONL rollover in container sessions
+                tailable = {r["tmux_name"]: r for r in sessions}
+                for tmux_name, ts in list(self._tail_states.items()):
+                    if ts.needs_resolution:
+                        continue  # still unresolved, handled above
+                    row = tailable.get(tmux_name)
+                    if not row or not row.get("jsonl_path"):
+                        continue
+                    current_path = Path(row["jsonl_path"])
+                    if not current_path.exists():
+                        continue
+                    sessions_dir = current_path.parent
+                    jsonl_files = sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+                    if len(jsonl_files) <= 1:
+                        continue
+                    newest = jsonl_files[-1]
+                    if newest != current_path:
+                        logger.info("session_monitor: ROLLOVER %s → %s (was %s)", tmux_name, newest.name, current_path.name)
+                        from tools.dashboard.dao.dashboard_db import link_and_enrich
+                        link_and_enrich(
+                            tmux_name,
+                            session_uuid=newest.stem,
+                            jsonl_path=str(newest),
+                            project=sessions_dir.name,
+                        )
+                        # Reset tail state for new file
+                        self._tail_states.pop(tmux_name, None)
+                        self._tail_states[tmux_name] = _TailState()
+
             except Exception:
                 logger.exception("session_monitor: tailer error")
             await asyncio.sleep(1)
