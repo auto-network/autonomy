@@ -36,6 +36,10 @@
         // Capture state: 'idle' | 'working' | 'success' | 'error'
         captureState: 'idle',
 
+        // Primer injection
+        primerInjecting: false,
+        primerInjected: false,
+
         // ── Lifecycle ─────────────────────────────────────────────────────
 
         init: function () {
@@ -176,6 +180,31 @@
             self.captureState = 'error';
           }
           setTimeout(function () { self.captureState = 'idle'; }, 3000);
+        },
+
+        // ── Primer injection ─────────────────────────────────────────────
+
+        injectPrimer: async function () {
+          if (this.primerInjecting || !this._tmuxSession) return;
+          this.primerInjecting = true;
+          try {
+            var res = await fetch('/api/chatwith/primer/experiment?context=' + this.expId);
+            var data = await res.json();
+            if (data.error) { console.error('Primer error:', data.error); return; }
+
+            await fetch('/api/session/send', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ tmux_session: this._tmuxSession, message: data.primer_text }),
+            });
+            this.primerInjected = true;
+            var self = this;
+            setTimeout(function () { self.primerInjected = false; }, 5000);
+          } catch (e) {
+            console.error('Primer injection failed:', e);
+          } finally {
+            this.primerInjecting = false;
+          }
         },
 
         // ── Chat With session management ──────────────────────────────────

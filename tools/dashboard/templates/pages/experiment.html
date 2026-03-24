@@ -75,6 +75,15 @@
           <template x-if="chatConnected">
             <button @click="disconnectSession()" style="font-size:10px;color:#64748b;background:transparent;border:none;cursor:pointer;margin-right:8px" title="Disconnect">Disconnect</button>
           </template>
+          <template x-if="chatConnected">
+            <button @click="injectPrimer()"
+                    :disabled="primerInjecting"
+                    style="font-size:10px;color:#818cf8;background:transparent;border:none;cursor:pointer;margin-right:8px"
+                    :style="primerInjected && 'color:#22c55e'"
+                    :title="primerInjected ? 'Primer sent!' : 'Inject page context into session'"
+                    x-text="primerInjecting ? '...' : primerInjected ? '✓ Primed' : '⚡ Prime'">
+            </button>
+          </template>
           <button @click="chatOpen = false"
                   style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;font-size:18px;cursor:pointer;border-radius:4px">&times;</button>
         </div>
