@@ -54,7 +54,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag
-from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thread
+from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads
 
 
 def cmd_ingest(args):
@@ -1291,6 +1291,9 @@ def cmd_thought(args):
 
 def cmd_thoughts(args):
     """List thought captures (inbox or by thread)."""
+    if is_api_mode():
+        api_thoughts(args)
+        return
     db = GraphDB(args.db)
     since_iso = None
     if args.since:
@@ -1356,6 +1359,9 @@ def cmd_thread_create(args, title: str):
 
 def cmd_threads(args):
     """List threads."""
+    if is_api_mode():
+        api_threads(args)
+        return
     db = GraphDB(args.db)
     status = None if args.all else (args.status if hasattr(args, 'status') and args.status else "active")
     threads = db.list_threads(status=status, limit=args.limit)

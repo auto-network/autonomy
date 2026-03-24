@@ -4294,6 +4294,57 @@ async def api_graph_thread(request):
     return JSONResponse({"ok": True, "output": msg, "id": thread_id})
 
 
+async def api_graph_thoughts(request):
+    """List thought captures via API proxy."""
+    from tools.graph.db import GraphDB
+    limit = int(request.query_params.get("limit", "20"))
+    thread_id = request.query_params.get("thread")
+    since = request.query_params.get("since")
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        captures = db.list_captures(thread_id=thread_id, since=since, limit=limit)
+    finally:
+        db.close()
+    lines = []
+    for c in captures:
+        cid = c["id"][:11]
+        date = (c.get("created_at") or "")[:10]
+        status = c.get("status", "?")[:8]
+        text = (c["content"] or "")[:60].replace("\n", " ")
+        lines.append(f"  {cid}  {date}  [{status}]  {text}")
+    if not lines:
+        lines.append("No captures found")
+    return JSONResponse({"ok": True, "output": "\n".join(lines) + "\n"})
+
+
+async def api_graph_threads(request):
+    """List threads via API proxy."""
+    from tools.graph.db import GraphDB
+    limit = int(request.query_params.get("limit", "20"))
+    status = request.query_params.get("status", "active")
+    show_all = request.query_params.get("all") == "1"
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        threads = db.list_threads(status=None if show_all else status, limit=limit)
+    finally:
+        db.close()
+    if not threads:
+        return JSONResponse({"ok": True, "output": "No threads found\n"})
+    lines = [f"{'ID':<12} {'P':>1} {'STATUS':<8} {'CAPS':>4}  TITLE",
+             f"{'─'*12} {'─'} {'─'*8} {'─'*4}  {'─'*40}"]
+    for t in threads:
+        lines.append(f"{t['id'][:11]:<12} {t.get('priority',1):>1} {t.get('status','?')[:8]:<8} {t.get('capture_count',0):>4}  {(t.get('title') or '')[:40]}")
+    return JSONResponse({"ok": True, "output": "\n".join(lines) + "\n"})
+
+
 async def api_graph_collab_tag_describe(request):
     """Set or update a tag description via API proxy."""
     from tools.graph.db import GraphDB
@@ -4384,6 +4435,8 @@ routes = [
     Route("/api/graph/collab", api_graph_collab_list, methods=["GET"]),
     Route("/api/graph/collab/tag/{source_id}", api_graph_collab_tag, methods=["PUT"]),
     Route("/api/graph/collab/tag-describe/{name}", api_graph_collab_tag_describe, methods=["PUT"]),
+    Route("/api/graph/thoughts", api_graph_thoughts, methods=["GET"]),
+    Route("/api/graph/threads", api_graph_threads, methods=["GET"]),
     Route("/api/graph/thought", api_graph_thought, methods=["POST"]),
     Route("/api/graph/thread", api_graph_thread, methods=["POST"]),
     Route("/api/graph/{id}", api_graph_resolve),

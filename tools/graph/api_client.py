@@ -455,6 +455,26 @@ def api_thought(args) -> None:
     _print_output(result)
 
 
+def api_thoughts(args) -> None:
+    """List captures via API."""
+    params = [f"limit={args.limit}"]
+    if hasattr(args, 'thread') and args.thread:
+        params.append(f"thread={args.thread}")
+    if hasattr(args, 'since') and args.since:
+        params.append(f"since={args.since}")
+    _print_output(_get(f"/api/graph/thoughts?{'&'.join(params)}"))
+
+
+def api_threads(args) -> None:
+    """List threads via API."""
+    params = [f"limit={args.limit}"]
+    if hasattr(args, 'all') and args.all:
+        params.append("all=1")
+    elif hasattr(args, 'status') and args.status:
+        params.append(f"status={args.status}")
+    _print_output(_get(f"/api/graph/threads?{'&'.join(params)}"))
+
+
 def api_thread(args) -> None:
     """Create a thread via dashboard API."""
     parts = args.thread_args or []
