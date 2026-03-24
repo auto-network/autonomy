@@ -1168,7 +1168,20 @@ async def api_search(request):
         cmd += ["--project", project]
     if request.query_params.get("or"):
         cmd += ["--or"]
-    return JSONResponse(await run_cli_json(cmd))
+    results = await run_cli_json(cmd)
+    if not isinstance(results, list):
+        return JSONResponse(results)
+    if request.query_params.get("group"):
+        grouped = {}
+        for r in results:
+            sid = r.get("source_id", r.get("id"))
+            if sid not in grouped:
+                grouped[sid] = r
+                grouped[sid]["match_count"] = 1
+            else:
+                grouped[sid]["match_count"] = grouped[sid].get("match_count", 0) + 1
+        results = sorted(grouped.values(), key=lambda x: x.get("rank", 0))
+    return JSONResponse(results)
 
 async def api_sources(request):
     cmd = ["graph", "sources"]
@@ -3457,6 +3470,14 @@ async def api_dao_recent_sessions(request):
     sessions = await asyncio.to_thread(dao_sessions.get_recent_sessions, limit)
     return JSONResponse(sessions)
 
+async def page_search(request):
+    """Serve the search results page (full HTML shell for direct navigation)."""
+    return HTMLResponse(_load_template("base.html"))
+
+async def page_search_fragment(request):
+    """Return the search results page as an HTML fragment for SPA injection."""
+    return templates.TemplateResponse(request, "pages/search.html")
+
 async def page_streams(request):
     """Serve the streams landing page (full HTML shell for direct navigation)."""
     return HTMLResponse(_load_template("base.html"))
@@ -4593,6 +4614,8 @@ routes = [
     Route("/pages/bead", page_bead_fragment),
     Route("/pages/timeline", page_timeline_fragment),
     Route("/pages/trace", page_trace_fragment),
+    Route("/search", page_search),
+    Route("/pages/search", page_search_fragment),
     Route("/streams", page_streams),
     Route("/pages/streams", page_streams_fragment),
     Route("/stream/{tag}", page_stream),
