@@ -100,7 +100,7 @@ def cmd_ingest(args):
 def cmd_search(args):
     """Full-text search across the graph."""
     db = GraphDB(args.db)
-    results = db.search(args.query, limit=args.limit, project=getattr(args, 'project', None), or_mode=getattr(args, 'or_mode', False))
+    results = db.search(args.query, limit=args.limit, project=getattr(args, 'project', None), or_mode=getattr(args, 'or_mode', False), tag=getattr(args, 'tag', None))
 
     if args.json:
         import json as _json
@@ -2383,6 +2383,7 @@ def main():
     p.add_argument("--limit", type=int, default=10, help="Max results")
     p.add_argument("--width", "-w", type=int, default=500, help="Max chars per result (default 500)")
     p.add_argument("--or", dest="or_mode", action="store_true", help="Join terms with OR instead of AND")
+    p.add_argument("--tag", help="Filter results to sources with this tag")
     p.add_argument("--json", action="store_true", help="Output as JSON array")
     p.set_defaults(func=cmd_search)
 
