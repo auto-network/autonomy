@@ -245,3 +245,67 @@ CREATE TABLE IF NOT EXISTS note_reads (
     PRIMARY KEY (source_id, actor, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_note_reads_source ON note_reads(source_id);
+
+-- ============================================================
+-- TAGS — first-class tag entities with descriptions
+-- ============================================================
+CREATE TABLE IF NOT EXISTS tags (
+    name        TEXT PRIMARY KEY,
+    description TEXT DEFAULT '',
+    created_by  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- ============================================================
+-- THREADS — conversation threads for organizing captures
+-- ============================================================
+CREATE TABLE IF NOT EXISTS threads (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'active',
+    priority    INTEGER NOT NULL DEFAULT 1,
+    summary     TEXT,
+    created_by  TEXT,
+    metadata    TEXT DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status);
+
+-- ============================================================
+-- CAPTURES — raw thought captures (inbox → threads)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS captures (
+    id          TEXT PRIMARY KEY,
+    content     TEXT NOT NULL,
+    thread_id   TEXT REFERENCES threads(id) ON DELETE SET NULL,
+    source_id   TEXT REFERENCES sources(id) ON DELETE SET NULL,
+    turn_number INTEGER,
+    status      TEXT NOT NULL DEFAULT 'captured',
+    actor       TEXT DEFAULT 'user',
+    metadata    TEXT DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_captures_thread ON captures(thread_id);
+CREATE INDEX IF NOT EXISTS idx_captures_status ON captures(status);
+CREATE INDEX IF NOT EXISTS idx_captures_created ON captures(created_at);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS captures_fts USING fts5(
+    id UNINDEXED,
+    content,
+    content=captures,
+    content_rowid=rowid
+);
+
+-- FTS triggers for captures sync
+CREATE TRIGGER IF NOT EXISTS captures_ai AFTER INSERT ON captures BEGIN
+    INSERT INTO captures_fts(rowid, id, content) VALUES (new.rowid, new.id, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS captures_ad AFTER DELETE ON captures BEGIN
+    INSERT INTO captures_fts(captures_fts, rowid, id, content) VALUES('delete', old.rowid, old.id, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS captures_au AFTER UPDATE ON captures BEGIN
+    INSERT INTO captures_fts(captures_fts, rowid, id, content) VALUES('delete', old.rowid, old.id, old.content);
+    INSERT INTO captures_fts(rowid, id, content) VALUES (new.rowid, new.id, new.content);
+END;
