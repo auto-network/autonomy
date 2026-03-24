@@ -1677,6 +1677,20 @@ def _parse_jsonl_entry(line: str) -> dict | None:
         op = raw.get("operation")
         content = raw.get("content", "")
         if op == "enqueue" and content and not content.startswith("<task-notification"):
+            # Check for CrossTalk envelope before treating as user message
+            ct = _classify_crosstalk(content)
+            if ct:
+                return {
+                    "type": "crosstalk",
+                    "role": "crosstalk",
+                    "content": ct["message"],
+                    "sender": ct["from"],
+                    "sender_label": ct["label"],
+                    "source_id": ct["source"],
+                    "turn": ct["turn"],
+                    "timestamp": timestamp,
+                    "queued": True,
+                }
             return {"type": "user", "content": content, "timestamp": timestamp, "queued": True}
         return None
 
