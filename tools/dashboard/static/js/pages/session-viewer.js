@@ -57,6 +57,9 @@
       // Context window tokens (from usage)
       contextTokens: 0,
 
+      // Cache for enriched tile data (survives scroll, keyed by source_id)
+      _enrichCache: {},
+
       // Expand/collapse state: index → boolean
       _expanded: {},
       // Expand view mode: index → 'output' | 'input'
@@ -317,6 +320,57 @@
         const c = (entry.content || '').toLowerCase();
         if (c.includes('fail') || c.includes('error') || c.includes('block')) return 'color: #ef4444';
         return 'color: #22c55e';
+      },
+
+      // ── Lazy tile enhancement ──────────────────────────────────
+
+      async lazyEnhance(entry) {
+        if (entry._enhanced) return;
+        var sid = entry.source_id;
+        if (!sid) return;
+
+        // Mark immediately to prevent double-fetch
+        entry._enhanced = 'loading';
+
+        // Check cache first
+        if (this._enrichCache[sid]) {
+          var cached = this._enrichCache[sid];
+          entry._enriched_title = cached.title;
+          entry._enriched_preview = cached.preview;
+          entry._enriched_tags = cached.tags;
+          entry._enhanced = true;
+          return;
+        }
+
+        // Delay 1 second — only fetch if still visible (no drive-by fetches)
+        await new Promise(function(r) { setTimeout(r, 1000); });
+        if (entry._enhanced !== 'loading') return; // was scrolled away or already done
+
+        try {
+          var resp = await fetch('/api/graph/' + encodeURIComponent(sid));
+          if (!resp.ok) { entry._enhanced = true; return; }
+          var data = await resp.json();
+
+          var src = data.source || {};
+          var title = (src.title || '').replace(/^#+\s*/, '');
+          var meta = {};
+          try { meta = typeof src.metadata === 'string' ? JSON.parse(src.metadata) : (src.metadata || {}); } catch(_) {}
+          var tags = meta.tags || [];
+
+          // Preview: first 120 chars of content from first entry, skip title/heading lines
+          var content = (data.entries && data.entries[0] && data.entries[0].content) || '';
+          var lines = content.split('\n').filter(function(l) { return !l.startsWith('#') && l.trim(); });
+          var preview = lines.slice(0, 2).join(' ').slice(0, 120);
+
+          entry._enriched_title = title || entry.content;
+          entry._enriched_preview = preview;
+          entry._enriched_tags = tags;
+          entry._enhanced = true;
+
+          this._enrichCache[sid] = { title: title, preview: preview, tags: tags };
+        } catch(_) {
+          entry._enhanced = true; // fail silently, keep original content
+        }
       },
 
       // ── Group card helpers ──────────────────────────────────────
@@ -683,6 +737,13 @@
             }
             if (entry.type === 'tool_result' && entry.tool_id) {
               store.resultMap[entry.tool_id] = entry;
+            }
+            // Pre-init enrichment properties so Alpine tracks them reactively
+            if (entry.type === 'semantic_bash' && entry.source_id && !entry.hasOwnProperty('_enhanced')) {
+              entry._enhanced = false;
+              entry._enriched_title = null;
+              entry._enriched_preview = null;
+              entry._enriched_tags = null;
             }
           }
           store.entries = data.entries;
