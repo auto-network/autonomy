@@ -258,15 +258,18 @@
       },
 
       _configureChatWithPanel(sessionId, project, tmuxSession) {
-        // Configure the chatWithPanel inner component once it's rendered.
+        // Double $nextTick: first tick lets Alpine process x-show visibility
+        // change, second tick lets the inner chatWithPanel component initialize.
         this.$nextTick(() => {
-          if (this.chatWithPanelRef) {
-            this.chatWithPanelRef.configure({
-              sessionId: sessionId,
-              project: project,
-              tmuxSession: tmuxSession,
-            });
-          }
+          this.$nextTick(() => {
+            if (this.chatWithPanelRef) {
+              this.chatWithPanelRef.configure({
+                sessionId: sessionId,
+                project: project,
+                tmuxSession: tmuxSession,
+              });
+            }
+          });
         });
       },
 
