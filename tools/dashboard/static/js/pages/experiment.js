@@ -1,6 +1,6 @@
 // Experiment page Alpine component — Chrome v2.
-// Full-bleed surface, control strip, persistent input bar, two-state chat toggle.
-// Removed: variant selection, ranking, prev/next navigation, multi-iframe injection.
+// Full-bleed surface, control strip, two-state chat toggle with chatWithPanel.
+// Removed: variant selection, ranking, prev/next navigation, multi-iframe injection, inline bubble renderer.
 // Kept: experiment fetch, single iframe injection, capture, Chat With integration, SSE series subscription.
 
 (function () {
@@ -23,16 +23,12 @@
 
         // Chat toggle
         chatOpen: false,
-        chatMessages: [],
-        inputText: '',
-        inputFocused: false,
         isLive: false,
 
         // Chat With session
         chatConnected: false,
         chatSessions: [],
         _tmuxSession: null,
-        entries: [],
 
         // Capture state: 'idle' | 'working' | 'success' | 'error'
         captureState: 'idle',
@@ -137,37 +133,6 @@
           setTimeout(function () { captureTabScreenshot(expId); }, 1500);
         },
 
-        // ── Chat ──────────────────────────────────────────────────────────
-
-        sendMessage: async function () {
-          var text = (this.inputText || '').trim();
-          if (!text || !this.chatConnected) return;
-          this.chatMessages.push({ id: Date.now(), role: 'user', text: text });
-          this.inputText = '';
-
-          // Auto-open chat if not already open
-          if (!this.chatOpen) this.chatOpen = true;
-
-          // Send to Chat With session via API
-          if (this._tmuxSession) {
-            try {
-              await fetch('/api/session/send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tmux_session: this._tmuxSession, message: text }),
-              });
-            } catch (e) {
-              console.error('[experimentPage] sendMessage error', e);
-            }
-          }
-
-          // Auto-scroll chat
-          this.$nextTick(function () {
-            var el = document.getElementById('chat-messages');
-            if (el) el.scrollTop = el.scrollHeight;
-          });
-        },
-
         // ── Screenshot ────────────────────────────────────────────────────
 
         captureScreenshot: async function () {
@@ -217,29 +182,24 @@
           localStorage.setItem('exp-chat-' + this.expId, sessionId);
           initDisplayCapture(this.expId).catch(function () {});
 
-          // Initialize session store and load entries via tail API
-          var store = window.getSessionStore(sessionId);
-          window.ensureSessionMessages();
+          // Resolve project from picker data
           var session = this.chatSessions.find(function (s) { return s.id === sessionId; });
           var project = session ? session.project : 'default';
-          var self = this;
-          if (!store.loaded) {
-            var tailUrl = '/api/session/' + encodeURIComponent(project) + '/' + encodeURIComponent(sessionId) + '/tail';
-            fetch(tailUrl + '?after=0').then(function (r) { return r.json(); }).then(function (data) {
-              if (data.entries) {
-                store.entries = data.entries;
-                store.offset = data.offset || 0;
-                store.isLive = !!data.is_live;
+
+          // Configure chatWithPanel after Alpine renders the x-if template
+          this.$nextTick(function () {
+            var panelEl = document.getElementById('exp-chat-panel');
+            if (panelEl) {
+              var panelData = Alpine.$data(panelEl);
+              if (panelData && panelData.configure) {
+                panelData.configure({
+                  sessionId: sessionId,
+                  project: project,
+                  tmuxSession: sessionId,
+                });
               }
-              store.loaded = true;
-              self.entries = store.entries;
-            }).catch(function () {
-              store.loaded = true;
-              self.entries = store.entries;
-            });
-          } else {
-            this.entries = store.entries;
-          }
+            }
+          });
         },
 
         disconnectSession: function () {
