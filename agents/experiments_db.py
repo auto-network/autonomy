@@ -46,8 +46,8 @@ _initialized = False
 def _ensure_init() -> None:
     global _initialized
     if not _initialized:
-        init_db()
         _initialized = True
+        init_db()
 
 
 def _get_conn() -> sqlite3.Connection:
