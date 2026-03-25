@@ -267,6 +267,13 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
     return [_fill(s, SESSION_DEFAULTS) for s in data.get("active_sessions", [])]
 
 
+def get_session_entries(session_id: str) -> list[dict] | None:
+    """Return mock session entries for tail endpoint, or None if not found."""
+    data = _load()
+    entries_map = data.get("session_entries", {})
+    return entries_map.get(session_id)
+
+
 def get_recent_sessions(limit: int = 20) -> list[dict]:
     data = _load()
     return [_fill(s, RECENT_SESSION_DEFAULTS) for s in data.get("recent_sessions", [])][:limit]
