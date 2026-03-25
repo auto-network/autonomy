@@ -49,6 +49,12 @@ from tools.dashboard.dao.dashboard_db import (
 logger = logging.getLogger(__name__)
 
 
+def _find_primary_jsonls(directory: Path) -> list[Path]:
+    """Find JSONL files excluding subagent traces."""
+    return [f for f in directory.rglob("*.jsonl")
+            if "subagents" not in f.parts]
+
+
 def _extract_message_text(entry: dict) -> str:
     """Extract meaningful text from a JSONL entry (user or assistant)."""
     if entry.get("isSidechain"):
@@ -438,7 +444,7 @@ class SessionMonitor:
                     if not current_path.exists():
                         continue
                     sessions_dir = ts.resolution_dir or current_path.parent
-                    jsonl_files = sorted(sessions_dir.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+                    jsonl_files = sorted(_find_primary_jsonls(sessions_dir), key=lambda p: p.stat().st_mtime)
                     if len(jsonl_files) <= 1:
                         continue
                     newest = jsonl_files[-1]
@@ -598,7 +604,7 @@ class SessionMonitor:
     def _resolve_jsonl_in_dir(directory: Path) -> Path | None:
         """Find the JSONL file inside a session directory (container sessions)."""
         try:
-            jsonls = list(directory.rglob("*.jsonl"))
+            jsonls = _find_primary_jsonls(directory)
             if jsonls:
                 return max(jsonls, key=lambda p: p.stat().st_mtime)
         except OSError:
@@ -737,7 +743,7 @@ class SessionMonitor:
                     continue
 
                 sess_dir = run_dir / "sessions"
-                jsonls = list(sess_dir.rglob("*.jsonl"))
+                jsonls = _find_primary_jsonls(sess_dir)
                 if not jsonls:
                     continue
                 jsonl = max(jsonls, key=lambda p: p.stat().st_mtime)
