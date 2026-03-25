@@ -2379,6 +2379,15 @@ async def api_session_tail(request):
     session_id = request.path_params["session_id"]
     after = int(request.query_params.get("after", "0"))
 
+    # Mock mode: return fixture entries if available
+    if os.environ.get("DASHBOARD_MOCK"):
+        entries = dao_sessions.get_session_entries(session_id)
+        if entries is not None:
+            return JSONResponse({
+                "entries": entries, "offset": len(entries), "is_live": True,
+                "tmux_session": session_id, "seq": len(entries),
+            })
+
     # First, try resolving via DB (session_id may be a tmux_name)
     session_file = None
     db_row = session_monitor.get_one(session_id)

@@ -32,6 +32,7 @@
         chatConnected: false,
         chatSessions: [],
         _tmuxSession: null,
+        entries: [],
 
         // Capture state: 'idle' | 'working' | 'success' | 'error'
         captureState: 'idle',
@@ -215,6 +216,30 @@
           this.isLive = true;
           localStorage.setItem('exp-chat-' + this.expId, sessionId);
           initDisplayCapture(this.expId).catch(function () {});
+
+          // Initialize session store and load entries via tail API
+          var store = window.getSessionStore(sessionId);
+          window.ensureSessionMessages();
+          var session = this.chatSessions.find(function (s) { return s.id === sessionId; });
+          var project = session ? session.project : 'default';
+          var self = this;
+          if (!store.loaded) {
+            var tailUrl = '/api/session/' + encodeURIComponent(project) + '/' + encodeURIComponent(sessionId) + '/tail';
+            fetch(tailUrl + '?after=0').then(function (r) { return r.json(); }).then(function (data) {
+              if (data.entries) {
+                store.entries = data.entries;
+                store.offset = data.offset || 0;
+                store.isLive = !!data.is_live;
+              }
+              store.loaded = true;
+              self.entries = store.entries;
+            }).catch(function () {
+              store.loaded = true;
+              self.entries = store.entries;
+            });
+          } else {
+            this.entries = store.entries;
+          }
         },
 
         disconnectSession: function () {
@@ -251,6 +276,7 @@
                   id: s.session_id || s.tmux_session,
                   label: label,
                   role: role,
+                  project: s.project || 'default',
                   isHost: isHost,
                   isLive: s.is_live !== false,
                   preview: (s.last_message || '').slice(0, 80).replace(/</g, '').replace(/>/g, ''),
