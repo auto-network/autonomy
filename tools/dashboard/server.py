@@ -43,10 +43,16 @@ from agents.dispatch_db import (
     clear_paused, is_paused, get_pause_reason,
 )
 from agents.session_launcher import launch_session
-from agents.experiments_db import (
-    create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
-    dismiss_experiment, resolve_experiment_prefix,
-)
+if os.environ.get("DASHBOARD_MOCK"):
+    from tools.dashboard.dao.mock import (
+        create_experiment, get_experiment, submit_results,
+        list_pending_experiments, dismiss_experiment, resolve_experiment_prefix,
+    )
+else:
+    from agents.experiments_db import (
+        create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
+        dismiss_experiment, resolve_experiment_prefix,
+    )
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -3580,8 +3586,11 @@ async def page_sessions_fragment(request):
     return templates.TemplateResponse(request, "pages/sessions.html")
 
 async def api_dao_active_sessions(request):
-    # Read directly from session monitor — zero filesystem access
-    sessions = session_monitor.get_registry()
+    if os.environ.get("DASHBOARD_MOCK"):
+        sessions = dao_sessions.get_active_sessions()
+    else:
+        # Read directly from session monitor — zero filesystem access
+        sessions = session_monitor.get_registry()
     return JSONResponse(sessions)
 
 async def api_dao_recent_sessions(request):
