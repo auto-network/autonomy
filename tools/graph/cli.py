@@ -54,7 +54,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
-from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action
+from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action, api_tag_add, api_tag_remove, api_tag_merge
 
 
 def cmd_ingest(args):
@@ -1273,6 +1273,174 @@ def cmd_collab_tag_describe(args):
     db.update_tag_description(args.tag_name, desc, actor=os.environ.get("BD_ACTOR", "user"))
     db.close()
     print(f"  \u2713 Tag '{args.tag_name}': {desc[:60]}")
+
+
+# ── Tag operations ──────────────────────────────────────────
+
+
+def cmd_tag_add(args):
+    """Add tag(s) to source(s)."""
+    if is_api_mode():
+        api_tag_add(args)
+        return
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()]
+    if not tags:
+        print("Error: no tags specified", file=sys.stderr)
+        sys.exit(1)
+    db = GraphDB(args.db)
+    try:
+        for sid in args.source_ids:
+            source = db.get_source(sid)
+            if not source:
+                print(f"  ✗ No source found matching '{sid}'", file=sys.stderr)
+                continue
+            if isinstance(source, list):
+                print(f"  ✗ Multiple sources match '{sid}' — use a longer prefix", file=sys.stderr)
+                continue
+            for tag in tags:
+                added = db.add_source_tag(source["id"], tag)
+                title = (source.get("title") or "?")[:50]
+                if added:
+                    print(f"  ✓ Tagged {source['id'][:12]} \"{title}\" ← {tag}")
+                else:
+                    print(f"  Already tagged: {source['id'][:12]} \"{title}\" ← {tag}")
+    finally:
+        db.close()
+
+
+def cmd_tag_remove(args):
+    """Remove tag(s) from source(s)."""
+    if is_api_mode():
+        api_tag_remove(args)
+        return
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()]
+    if not tags:
+        print("Error: no tags specified", file=sys.stderr)
+        sys.exit(1)
+    db = GraphDB(args.db)
+    try:
+        for sid in args.source_ids:
+            source = db.get_source(sid)
+            if not source:
+                print(f"  ✗ No source found matching '{sid}'", file=sys.stderr)
+                continue
+            if isinstance(source, list):
+                print(f"  ✗ Multiple sources match '{sid}' — use a longer prefix", file=sys.stderr)
+                continue
+            for tag in tags:
+                removed = db.remove_source_tag(source["id"], tag)
+                title = (source.get("title") or "?")[:50]
+                if removed:
+                    print(f"  ✓ Untagged {source['id'][:12]} \"{title}\" ✗ {tag}")
+                else:
+                    print(f"  Not tagged: {source['id'][:12]} \"{title}\" ✗ {tag}")
+    finally:
+        db.close()
+
+
+def cmd_tag_merge(args):
+    """Merge one tag into another with auto-provenance."""
+    if is_api_mode():
+        api_tag_merge(args)
+        return
+    from_tag = args.from_tag
+    to_tag = args.to_tag
+    db = GraphDB(args.db)
+    try:
+        from_sources = db.sources_with_tag(from_tag)
+        to_sources = db.sources_with_tag(to_tag)
+        from_count = len(from_sources)
+        to_count = len(to_sources)
+
+        if from_count == 0:
+            print(f"  ✗ No sources tagged '{from_tag}'", file=sys.stderr)
+            sys.exit(1)
+
+        # Safety gate: majority into minority requires --force
+        if from_count > to_count and not args.force:
+            print(f"  ⚠ '{from_tag}' has {from_count} sources, '{to_tag}' has {to_count}. "
+                  f"Use --force to merge majority into minority.", file=sys.stderr)
+            sys.exit(1)
+
+        # Retag all --from sources to --to
+        retagged = 0
+        for src in from_sources:
+            db.remove_source_tag(src["id"], from_tag)
+            db.add_source_tag(src["id"], to_tag)
+            retagged += 1
+
+        # Create merge log note with auto-provenance
+        from .models import Source, Thought, Edge, new_id
+        reason = args.reason or ""
+        note_text = (
+            f"Tag merge: {from_tag} → {to_tag}\n"
+            f"Retagged {retagged} sources.\n"
+        )
+        if reason:
+            note_text += f"Reason: {reason}\n"
+
+        source_key = f"note:{new_id()}"
+        note_source = Source(
+            type="note",
+            platform="local",
+            project=_get_scope() or "autonomy",
+            title=f"Tag merge: {from_tag} → {to_tag}",
+            file_path=source_key,
+            metadata={"tags": ["taxonomy", "tag-merge"], "author": os.environ.get("BD_ACTOR", "user")},
+        )
+        db.insert_source(note_source)
+
+        t = Thought(
+            source_id=note_source.id,
+            content=note_text,
+            role="user",
+            turn_number=1,
+            tags=["taxonomy", "tag-merge"],
+        )
+        db.insert_thought(t)
+
+        # Auto-provenance: link merge note to current session
+        auto_src, auto_turn = _auto_provenance(db, title=f"tag merge {from_tag} {to_tag}")
+        prov_info = ""
+        if auto_src and auto_turn:
+            db.insert_edge(Edge(
+                source_id=note_source.id,
+                source_type="source",
+                target_id=auto_src["id"],
+                target_type="source",
+                relation="conceived_at",
+                metadata={"turns": {"from": auto_turn, "to": auto_turn}},
+            ))
+            prov_info = f" (linked to {auto_src['id'][:12]} turn {auto_turn})"
+
+        # Set --from tag description to deprecated pointer
+        db.update_tag_description(
+            from_tag,
+            f"Deprecated — see graph://{note_source.id[:12]}",
+            actor=os.environ.get("BD_ACTOR", "user"),
+        )
+
+        db.commit()
+        print(f"  ✓ Merged '{from_tag}' → '{to_tag}' ({retagged} sources retagged)")
+        print(f"  Provenance: graph://{note_source.id[:12]}{prov_info}")
+    finally:
+        db.close()
+
+
+def cmd_tag_router(args):
+    """Route 'graph tag' to add or subcommand."""
+    subcmd = getattr(args, "tag_subcmd", None)
+    if subcmd == "merge":
+        cmd_tag_merge(args)
+    elif subcmd is None:
+        # Default: add tags
+        if not hasattr(args, "tags") or not args.tags or not hasattr(args, "source_ids") or not args.source_ids:
+            print("Usage: graph tag <tags> <source_id...>", file=sys.stderr)
+            sys.exit(1)
+        cmd_tag_add(args)
+    else:
+        print(f"Unknown tag subcommand: {subcmd}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_thought(args):
@@ -2722,6 +2890,25 @@ def main():
     p.add_argument("source_id", nargs="?", help="Filter by source ID")
     p.add_argument("--limit", type=int, default=50, help="Max results (default 50)")
     p.set_defaults(func=cmd_attachments)
+
+    # tag — add/remove/merge tags
+    p_tag = sub.add_parser("tag", help="Add tag(s) to source(s)")
+    p_tag.add_argument("tags", nargs="?", help="Comma-separated tags")
+    p_tag.add_argument("source_ids", nargs="*", help="Source IDs")
+    p_tag.set_defaults(func=cmd_tag_router)
+    tag_sub = p_tag.add_subparsers(dest="tag_subcmd")
+    p_merge = tag_sub.add_parser("merge", help="Merge one tag into another")
+    p_merge.add_argument("--from", dest="from_tag", required=True)
+    p_merge.add_argument("--to", dest="to_tag", required=True)
+    p_merge.add_argument("--reason", default="")
+    p_merge.add_argument("--force", action="store_true")
+    p_merge.set_defaults(func=cmd_tag_merge)
+
+    # untag — remove tags from sources
+    p_untag = sub.add_parser("untag", help="Remove tag(s) from source(s)")
+    p_untag.add_argument("tags", help="Comma-separated tags")
+    p_untag.add_argument("source_ids", nargs="+", help="Source IDs")
+    p_untag.set_defaults(func=cmd_tag_remove)
 
     # collab
     p_collab = sub.add_parser("collab", help="Discover collaborative reference notes")

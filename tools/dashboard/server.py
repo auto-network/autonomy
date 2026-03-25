@@ -4660,6 +4660,158 @@ async def api_graph_collab_tag(request):
     return JSONResponse({"ok": True, "output": msg})
 
 
+async def api_graph_tag_add(request):
+    """Add a tag to a source."""
+    from tools.graph.db import GraphDB
+    source_id = request.path_params["source_id"]
+    tag_name = request.path_params["tag_name"]
+    if not _GRAPH_SOURCE_ID_RE.match(source_id):
+        return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
+    if not _GRAPH_TAGS_RE.match(tag_name):
+        return JSONResponse({"error": f"malformed tag name: {tag_name!r}"}, status_code=400)
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        source = db.get_source(source_id)
+        if not source:
+            return JSONResponse({"error": f"no source found matching '{source_id}'"}, status_code=404)
+        if isinstance(source, list):
+            return JSONResponse({"error": f"multiple sources match '{source_id}' — use a longer prefix"}, status_code=400)
+        added = db.add_source_tag(source["id"], tag_name)
+    finally:
+        db.close()
+    title = (source.get("title") or "?")[:60]
+    if added:
+        msg = f"  ✓ Tagged {source['id'][:12]} \"{title}\" ← {tag_name}"
+    else:
+        msg = f"  Already tagged: {source['id'][:12]} \"{title}\" ← {tag_name}"
+    _checkpoint_graph()
+    return JSONResponse({"ok": True, "output": msg})
+
+
+async def api_graph_tag_remove(request):
+    """Remove a tag from a source."""
+    from tools.graph.db import GraphDB
+    source_id = request.path_params["source_id"]
+    tag_name = request.path_params["tag_name"]
+    if not _GRAPH_SOURCE_ID_RE.match(source_id):
+        return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
+    if not _GRAPH_TAGS_RE.match(tag_name):
+        return JSONResponse({"error": f"malformed tag name: {tag_name!r}"}, status_code=400)
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        source = db.get_source(source_id)
+        if not source:
+            return JSONResponse({"error": f"no source found matching '{source_id}'"}, status_code=404)
+        if isinstance(source, list):
+            return JSONResponse({"error": f"multiple sources match '{source_id}' — use a longer prefix"}, status_code=400)
+        removed = db.remove_source_tag(source["id"], tag_name)
+    finally:
+        db.close()
+    title = (source.get("title") or "?")[:60]
+    if removed:
+        msg = f"  ✓ Untagged {source['id'][:12]} \"{title}\" ✗ {tag_name}"
+    else:
+        msg = f"  Not tagged: {source['id'][:12]} \"{title}\" ✗ {tag_name}"
+    _checkpoint_graph()
+    return JSONResponse({"ok": True, "output": msg})
+
+
+async def api_graph_tag_merge(request):
+    """Merge one tag into another."""
+    from tools.graph.db import GraphDB
+    from tools.graph.models import Source, Thought, Edge, new_id
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    from_tag = (body.get("from") or "").strip()
+    to_tag = (body.get("to") or "").strip()
+    if not from_tag or not to_tag:
+        return JSONResponse({"error": "'from' and 'to' are required"}, status_code=400)
+    reason = (body.get("reason") or "").strip()
+    force = body.get("force", False)
+
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        from_sources = db.sources_with_tag(from_tag)
+        to_sources = db.sources_with_tag(to_tag)
+        from_count = len(from_sources)
+        to_count = len(to_sources)
+
+        if from_count == 0:
+            return JSONResponse({"error": f"no sources tagged '{from_tag}'"}, status_code=404)
+
+        if from_count > to_count and not force:
+            return JSONResponse({
+                "error": f"'{from_tag}' has {from_count} sources, '{to_tag}' has {to_count}. "
+                         f"Use force=true to merge majority into minority."
+            }, status_code=409)
+
+        # Retag
+        retagged = 0
+        for src in from_sources:
+            db.remove_source_tag(src["id"], from_tag)
+            db.add_source_tag(src["id"], to_tag)
+            retagged += 1
+
+        # Create merge log note
+        note_text = f"Tag merge: {from_tag} → {to_tag}\nRetagged {retagged} sources.\n"
+        if reason:
+            note_text += f"Reason: {reason}\n"
+
+        source_key = f"note:{new_id()}"
+        note_source = Source(
+            type="note",
+            platform="local",
+            project="autonomy",
+            title=f"Tag merge: {from_tag} → {to_tag}",
+            file_path=source_key,
+            metadata={"tags": ["taxonomy", "tag-merge"], "author": "api"},
+        )
+        db.insert_source(note_source)
+
+        t = Thought(
+            source_id=note_source.id,
+            content=note_text,
+            role="user",
+            turn_number=1,
+            tags=["taxonomy", "tag-merge"],
+        )
+        db.insert_thought(t)
+
+        # Set deprecated tag description
+        db.update_tag_description(
+            from_tag,
+            f"Deprecated — see graph://{note_source.id[:12]}",
+            actor="api",
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    msg = (f"  ✓ Merged '{from_tag}' → '{to_tag}' ({retagged} sources retagged)\n"
+           f"  Provenance: graph://{note_source.id[:12]}")
+    _checkpoint_graph()
+    return JSONResponse({
+        "ok": True,
+        "output": msg,
+        "count": retagged,
+        "note_id": note_source.id,
+    })
+
+
 async def api_graph_thought(request):
     """Create a thought capture via API proxy."""
     from tools.graph.db import GraphDB
@@ -4939,6 +5091,9 @@ routes = [
     Route("/api/graph/collab", api_graph_collab_list, methods=["GET"]),
     Route("/api/graph/collab/tag/{source_id}", api_graph_collab_tag, methods=["PUT"]),
     Route("/api/graph/collab/tag-describe/{name}", api_graph_collab_tag_describe, methods=["PUT"]),
+    Route("/api/graph/tag/merge", api_graph_tag_merge, methods=["POST"]),
+    Route("/api/graph/tag/{source_id}/{tag_name}", api_graph_tag_add, methods=["PUT"]),
+    Route("/api/graph/tag/{source_id}/{tag_name}", api_graph_tag_remove, methods=["DELETE"]),
     Route("/api/graph/thoughts", api_graph_thoughts, methods=["GET"]),
     Route("/api/graph/threads", api_graph_threads, methods=["GET"]),
     Route("/api/graph/thought", api_graph_thought, methods=["POST"]),

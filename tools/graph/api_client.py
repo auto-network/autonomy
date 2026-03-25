@@ -432,6 +432,69 @@ def api_collab_tag_describe(args) -> None:
     _print_output(result)
 
 
+def _delete(endpoint: str) -> dict:
+    """DELETE to the dashboard API. Returns parsed JSON response."""
+    url = f"{GRAPH_API}{endpoint}"
+    req = urllib.request.Request(url, method="DELETE")
+    try:
+        resp = urllib.request.urlopen(req, timeout=30, context=_SSL_CTX)
+        result = json.loads(resp.read())
+        return result
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read())
+            error_msg = err_body.get("error", str(e))
+        except Exception:
+            error_msg = str(e)
+        print(f"API error: {error_msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def api_tag_add(args) -> None:
+    """Add tag(s) to source(s) via API."""
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()]
+    for sid in args.source_ids:
+        if not _SOURCE_ID_RE.match(sid):
+            print(f"Error: malformed source_id: {sid!r}", file=sys.stderr)
+            sys.exit(1)
+        for tag in tags:
+            if not _TAGS_RE.match(tag):
+                print(f"Error: malformed tag: {tag!r}", file=sys.stderr)
+                sys.exit(1)
+            result = _put(f"/api/graph/tag/{sid}/{tag}", {})
+            _print_output(result)
+
+
+def api_tag_remove(args) -> None:
+    """Remove tag(s) from source(s) via API."""
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()]
+    for sid in args.source_ids:
+        if not _SOURCE_ID_RE.match(sid):
+            print(f"Error: malformed source_id: {sid!r}", file=sys.stderr)
+            sys.exit(1)
+        for tag in tags:
+            if not _TAGS_RE.match(tag):
+                print(f"Error: malformed tag: {tag!r}", file=sys.stderr)
+                sys.exit(1)
+            result = _delete(f"/api/graph/tag/{sid}/{tag}")
+            _print_output(result)
+
+
+def api_tag_merge(args) -> None:
+    """Merge tags via API."""
+    data = {
+        "from": args.from_tag,
+        "to": args.to_tag,
+        "reason": args.reason or "",
+        "force": args.force,
+    }
+    result = _post("/api/graph/tag/merge", data)
+    _print_output(result)
+
+
 def api_thought(args) -> None:
     """Create a thought capture via dashboard API."""
     content = " ".join(args.text) if args.text else ""
