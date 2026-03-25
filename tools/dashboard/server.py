@@ -2870,13 +2870,36 @@ async def api_session_dispatch_nag(request):
     return JSONResponse({"ok": True})
 
 
+async def _resolve_primer(primer: str) -> str | None:
+    """Resolve a graph:// URL to its text content.  Returns None on failure."""
+    graph_id = primer.removeprefix("graph://") if primer.startswith("graph://") else primer
+    if not graph_id:
+        return None
+    try:
+        stdout, stderr, rc = await run_cli(
+            ["graph", "read", graph_id, "--max-chars", "50000"], timeout=10,
+        )
+        if rc == 0 and stdout.strip():
+            return stdout.strip()
+        logger.warning("_resolve_primer: graph read failed  id=%s  rc=%d  stderr=%s",
+                       graph_id, rc, stderr.strip())
+    except Exception:
+        logger.warning("_resolve_primer: exception resolving %s", graph_id, exc_info=True)
+    return None
+
+
 async def api_session_create(request):
     """Create a new container session and block until ready.
 
     POST /api/session/create
-    Body: {"type": "container"} (optional)
+    Body: {"type": "container", "primer": "graph://..."} (all optional)
     Returns: {"tmux_name": str, "label": str, "type": str}
     Blocks up to 30s for session to become live.
+
+    If primer is provided, the graph note content is injected as the first
+    message once the container is ready.  If primer is omitted or resolution
+    fails, a simple "Hello" is sent instead so Claude Code starts writing
+    JSONL immediately.
     """
     body = {}
     try:
@@ -2887,6 +2910,8 @@ async def api_session_create(request):
     session_type = body.get("type", "container")
     if session_type not in ("container",):
         return JSONResponse({"error": "Only container sessions supported"}, status_code=400)
+
+    primer_url = body.get("primer")  # optional graph:// URL
 
     # Generate unique tmux name
     tmux_name = f"auto-{time.strftime('%m%d-%H%M%S')}"
@@ -2932,25 +2957,55 @@ async def api_session_create(request):
         seed_message="Starting...",
     )
 
+    # Resolve primer content (best-effort) and schedule first-message injection
+    first_message = "Hello"
+    primer_error = None
+    if primer_url:
+        resolved = await _resolve_primer(primer_url)
+        if resolved:
+            first_message = resolved
+        else:
+            primer_error = f"Could not resolve primer {primer_url!r}, falling back to hello"
+            logger.warning("api_session_create: %s", primer_error)
+
+    async def _inject_first_message():
+        """Wait for container boot then inject the first message."""
+        await asyncio.sleep(5)
+        try:
+            await asyncio.to_thread(_tmux_send_message, tmux_name, first_message)
+            logger.info("api_session_create: injected first message into %s  len=%d  primer=%s",
+                        tmux_name, len(first_message), bool(primer_url and not primer_error))
+        except Exception:
+            logger.warning("api_session_create: failed to inject first message into %s",
+                           tmux_name, exc_info=True)
+
+    asyncio.create_task(_inject_first_message())
+
     # Poll dashboard.db until session is live with jsonl_path
     deadline = time.time() + 30
     while time.time() < deadline:
         row = dashboard_db.get_session(tmux_name)
         if row and row.get("is_live") and row.get("jsonl_path"):
-            return JSONResponse({
+            resp = {
                 "tmux_name": tmux_name,
                 "label": row.get("label", ""),
                 "type": "container",
-            })
+            }
+            if primer_error:
+                resp["primer_warning"] = primer_error
+            return JSONResponse(resp)
         await asyncio.sleep(1)
 
     # Timeout — session created but not yet tracked
-    return JSONResponse({
+    resp = {
         "tmux_name": tmux_name,
         "label": "",
         "type": "container",
         "warning": "Session created but not yet tracked by session monitor. It may appear shortly.",
-    }, status_code=202)
+    }
+    if primer_error:
+        resp["primer_warning"] = primer_error
+    return JSONResponse(resp, status_code=202)
 
 
 async def api_upload(request):
