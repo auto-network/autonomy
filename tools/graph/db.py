@@ -257,6 +257,35 @@ class GraphDB:
         self.update_source_metadata(source_id, meta)
         return True
 
+    def remove_source_tag(self, source_id: str, tag: str) -> bool:
+        """Remove a tag from the source's metadata.tags array. Returns True if removed, False if not present."""
+        row = self.conn.execute("SELECT metadata FROM sources WHERE id = ?", (source_id,)).fetchone()
+        if not row:
+            return False
+        meta = json.loads(row["metadata"]) if row["metadata"] else {}
+        tags = meta.get("tags", [])
+        if tag not in tags:
+            return False
+        tags.remove(tag)
+        meta["tags"] = tags
+        self.update_source_metadata(source_id, meta)
+        return True
+
+    def sources_with_tag(self, tag: str) -> list[dict]:
+        """Return all sources that have the given tag in metadata.tags."""
+        rows = self.conn.execute(
+            """SELECT * FROM sources
+               WHERE json_extract(metadata, '$.tags') LIKE '%' || ? || '%'""",
+            (tag,),
+        ).fetchall()
+        # Filter for exact tag match (the LIKE query is approximate)
+        result = []
+        for r in rows:
+            meta = json.loads(r["metadata"]) if r["metadata"] else {}
+            if tag in meta.get("tags", []):
+                result.append(dict(r))
+        return result
+
     def _ensure_note_reads_table(self):
         """Auto-migration: create note_reads table if missing. No-op on read-only DBs."""
         if self.read_only:
