@@ -5,7 +5,7 @@
 (function () {
   document.addEventListener('alpine:init', () => {
     Alpine.data('collabPage', () => ({
-      tab: localStorage.getItem('collabTab') || 'recent',
+      tab: new URLSearchParams(window.location.search).get('tab') || localStorage.getItem('collabTab') || 'recent',
       recent: [],
       thoughts: [],
       threads: [],
