@@ -28,6 +28,13 @@ def make_session(
     }
 
 
+MOCK_SESSION_ENTRIES = [
+    {"type": "system", "content": "Session started", "timestamp": 1700000000},
+    {"type": "user", "content": "Hello, can you help me with this task?", "timestamp": 1700000010},
+    {"type": "assistant_text", "content": "Of course! I'd be happy to help.", "timestamp": 1700000015},
+]
+
+
 def make_experiment(exp_id=None, title="Test Experiment", html="<h1>Test</h1>"):
     eid = exp_id or str(uuid.uuid4())
     return {
@@ -68,7 +75,8 @@ def empty_sessions():
 
 
 def standard_sessions():
-    return {"active_sessions": STANDARD_SESSIONS, "beads": [], "experiments": [make_experiment(TEST_EXPERIMENT_ID)]}
+    entries = {s["session_id"]: MOCK_SESSION_ENTRIES for s in STANDARD_SESSIONS}
+    return {"active_sessions": STANDARD_SESSIONS, "beads": [], "experiments": [make_experiment(TEST_EXPERIMENT_ID)], "session_entries": entries}
 
 
 def many_sessions(n=100):
