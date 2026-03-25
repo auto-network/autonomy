@@ -1102,9 +1102,9 @@ def cmd_attention(args):
 
     session_file = args.session
     if not session_file:
-        # Find the most recent session for the current project
-        projects_dir = Path.home() / ".claude" / "projects" / "-home-jeremy-workspace-autonomy"
-        jsonl_files = sorted(projects_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+        # Find the most recent JSONL across all project folders
+        projects_base = Path.home() / ".claude" / "projects"
+        jsonl_files = sorted(projects_base.rglob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
         if jsonl_files:
             session_file = str(jsonl_files[0])
         else:
