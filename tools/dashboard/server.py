@@ -2071,6 +2071,30 @@ def _enrich_entries(entries: list[dict], session_dir: Path | None = None) -> Non
                     break
 
 
+def _dedup_queued_entries(entries: list[dict]) -> list[dict]:
+    """Remove duplicate user/crosstalk entries that follow a queued version.
+
+    When a user sends a message while the agent is working, Claude Code writes
+    two JSONL entries: a queue-operation (enqueue) and a subsequent user entry
+    with identical content.  _parse_jsonl_entry renders both, causing duplicates.
+    This helper keeps the queued version and drops the duplicate that follows.
+    """
+    result = []
+    last_enqueue_content = None
+    for entry in entries:
+        if entry.get("queued"):
+            last_enqueue_content = entry.get("content", "").strip()
+            result.append(entry)
+        elif (entry.get("type") in ("user", "crosstalk")
+              and last_enqueue_content
+              and entry.get("content", "").strip() == last_enqueue_content):
+            last_enqueue_content = None  # consumed — skip duplicate
+        else:
+            last_enqueue_content = None
+            result.append(entry)
+    return result
+
+
 def _find_session_files(run_name: str) -> list[Path]:
     """Find JSONL session files for a run, checking multiple locations."""
     # 1. Run directory sessions — use rglob because Claude Code writes JSONL
@@ -2139,6 +2163,7 @@ async def api_dispatch_tail(request):
             else:
                 entries.append(parsed)
 
+    entries = _dedup_queued_entries(entries)
     _enrich_entries(entries, session_dir=session_file.parent / session_file.stem)
     return JSONResponse({
         "entries": entries,
@@ -2216,6 +2241,7 @@ async def _tail_from_container(run_name: str, after: int) -> tuple:
         else:
             entries.append(parsed)
 
+    entries = _dedup_queued_entries(entries)
     return entries, new_offset, True
 
 
@@ -2492,6 +2518,7 @@ async def api_session_tail(request):
             else:
                 entries.append(parsed)
 
+    entries = _dedup_queued_entries(entries)
     _enrich_entries(entries, session_dir=session_file.parent / session_file.stem)
     resp = {"entries": entries, "offset": new_offset, "is_live": is_live,
             "type": session_type, "seq": seq}
