@@ -40,7 +40,18 @@ CREATE TABLE IF NOT EXISTS experiment_variants (
 """
 
 
+_initialized = False
+
+
+def _ensure_init() -> None:
+    global _initialized
+    if not _initialized:
+        init_db()
+        _initialized = True
+
+
 def _get_conn() -> sqlite3.Connection:
+    _ensure_init()
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
@@ -260,5 +271,3 @@ def list_pending() -> list[dict]:
         conn.close()
 
 
-# Auto-init on import
-init_db()
