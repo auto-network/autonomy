@@ -54,7 +54,24 @@ BEAD_DEFAULTS: dict[str, Any] = {
 
 SESSION_DEFAULTS: dict[str, Any] = {
     "session_id": "session000000",
+    "tmux_session": "session000000",
     "project": "default",
+    "type": "container",
+    "is_live": True,
+    "started_at": "2026-01-01T00:00:00Z",
+    "graph_source_id": "",
+    "label": "",
+    "role": "",
+    "entry_count": 0,
+    "context_tokens": 0,
+    "last_activity": None,
+    "last_message": "",
+    "topics": "[]",
+    "nag_enabled": False,
+    "nag_interval": None,
+    "nag_message": None,
+    "linked": False,
+    # Legacy fields for backward compat
     "size_bytes": 1024000,
     "age_seconds": 120,
     "active": False,
@@ -164,6 +181,83 @@ def get_bead_title_priority(bead_ids: list[str]) -> dict[str, dict]:
         b["id"]: {"id": b["id"], "title": b["title"], "priority": b["priority"], "labels": b.get("labels", [])}
         for b in beads if b["id"] in bead_ids
     }
+
+
+# ── experiments mock ──────────────────────────────────────────────────
+
+EXPERIMENT_DEFAULTS: dict[str, Any] = {
+    "id": "exp-000000",
+    "title": "Untitled Experiment",
+    "description": None,
+    "fixture": None,
+    "status": "pending",
+    "series_id": None,
+    "series_seq": 1,
+    "created_at": "2026-01-01T00:00:00Z",
+    "alpine": 0,
+    "variants": [],
+    "sibling_ids": [],
+}
+
+VARIANT_DEFAULTS: dict[str, Any] = {
+    "id": "var-000000",
+    "experiment_id": "exp-000000",
+    "html": "<p>Empty variant</p>",
+    "selected": 0,
+    "rank": None,
+}
+
+
+def _experiments() -> list[dict]:
+    data = _load()
+    exps = []
+    for e in data.get("experiments", []):
+        exp = dict(EXPERIMENT_DEFAULTS)
+        exp.update(e)
+        if exp["series_id"] is None:
+            exp["series_id"] = exp["id"]
+        # Fill variant defaults
+        exp["variants"] = [
+            {**VARIANT_DEFAULTS, "experiment_id": exp["id"], **v}
+            for v in exp.get("variants", [])
+        ]
+        if not exp["sibling_ids"]:
+            exp["sibling_ids"] = [exp["id"]]
+        exps.append(exp)
+    return exps
+
+
+def get_experiment(exp_id: str) -> dict | None:
+    return next((e for e in _experiments() if e["id"] == exp_id), None)
+
+
+def list_pending_experiments() -> list[dict]:
+    return [e for e in _experiments() if e["status"] == "pending"]
+
+
+def resolve_experiment_prefix(partial_id: str) -> tuple[str | None, list[str] | None]:
+    if len(partial_id) >= 36:
+        return partial_id, None
+    matches = [e["id"] for e in _experiments() if e["id"].startswith(partial_id)]
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        return None, matches
+    return None, None
+
+
+def create_experiment(*, title, description=None, fixture=None, variants=None, series_id=None, alpine=False):
+    """No-op in mock mode — experiments are defined in fixture file."""
+    import uuid
+    return str(uuid.uuid4())
+
+
+def submit_results(exp_id, selections):
+    return True
+
+
+def dismiss_experiment(exp_id):
+    return True
 
 
 # ── sessions DAO interface ───────────────────────────────────────────
