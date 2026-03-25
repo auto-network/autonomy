@@ -236,10 +236,10 @@
 
                 <!-- ── Semantic Bash: typed command tiles ───────── -->
                 <template x-if="dEntry.type === 'semantic_bash'">
-                  <a :href="dEntry.comment_id ? '/graph/' + dEntry.comment_id : (dEntry.source_id ? '/graph/' + dEntry.source_id : (dEntry.bead_id ? '/bead/' + dEntry.bead_id : null))"
+                  <a :href="dEntry.semantic_type === 'thought-captured' ? '/collab?tab=thoughts' : (dEntry.comment_id ? '/graph/' + dEntry.comment_id : (dEntry.source_id ? '/graph/' + dEntry.source_id : (dEntry.bead_id ? '/bead/' + dEntry.bead_id : null)))"
                      class="sc-tool-card block"
                      :class="(dEntry.comment_id || dEntry.source_id || dEntry.bead_id) ? 'cursor-pointer hover:bg-gray-800/80' : ''"
-                     @click.prevent="if (dEntry.comment_id) navigateTo('/graph/' + dEntry.comment_id); else if (dEntry.source_id) navigateTo('/graph/' + dEntry.source_id); else if (dEntry.bead_id) navigateTo('/bead/' + dEntry.bead_id);">
+                     @click.prevent="if (dEntry.semantic_type === 'thought-captured') navigateTo('/collab?tab=thoughts'); else if (dEntry.comment_id) navigateTo('/graph/' + dEntry.comment_id); else if (dEntry.source_id) navigateTo('/graph/' + dEntry.source_id); else if (dEntry.bead_id) navigateTo('/bead/' + dEntry.bead_id);">
                     <div class="sc-line1">
                       <span class="sc-chip" :class="{
                         'bg-purple-900 text-purple-300': dEntry.semantic_type === 'note-created',

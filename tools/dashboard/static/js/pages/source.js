@@ -219,8 +219,11 @@
           }
 
           // Comment response — redirect to parent source with highlight
+          // Use replaceState (not navigateTo/pushState) so the intermediate
+          // /graph/{comment_id} URL doesn't remain in history — avoids back-button loop.
           if (data.type === 'comment') {
-            navigateTo(data.redirect);
+            history.replaceState({}, '', data.redirect);
+            route();
             return;
           }
 
