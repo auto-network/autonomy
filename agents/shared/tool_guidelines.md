@@ -206,6 +206,32 @@ curl -sk https://localhost:8080/api/graph/threads
 
 Use `localhost:8080`, not the Tailnet IP.
 
+## Testing
+
+Run tests before committing. Dashboard features have tests under `tools/dashboard/tests/`.
+
+```bash
+# Run all dashboard tests
+pytest
+
+# Run tests for the feature you changed
+pytest tools/dashboard/tests/session_picker
+
+# Run just the fast API tests (no browser)
+pytest tools/dashboard/tests/session_picker/test_api.py
+```
+
+If your bead includes failing test assertions in its acceptance criteria, run them and verify they pass before writing decision.json. If tests fail, your implementation is not complete.
+
+### Mock server for manual testing
+
+Boot a test server with mock data — no real database, no tmux needed:
+```bash
+DASHBOARD_MOCK=/path/to/fixtures.json python3 -m uvicorn tools.dashboard.server:app --port 8082
+```
+
+The mock DAO reads fixtures.json on every request. Edit the file to change what the UI shows. Fixture generators are in `tools/dashboard/tests/fixtures.py`.
+
 ## Working Style
 
 - Work in `/workspace/repo` — edit files, commit your changes
