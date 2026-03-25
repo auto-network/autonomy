@@ -2920,6 +2920,18 @@ async def api_session_create(request):
     subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"], capture_output=True)
     subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"], capture_output=True)
 
+    # Register with session monitor so tailer can resolve JSONL
+    agent_runs = _REPO_ROOT / "data" / "agent-runs"
+    run_dirs = sorted(agent_runs.glob(f"{tmux_name}-*"), key=lambda p: p.stat().st_mtime, reverse=True) if agent_runs.exists() else []
+    sess_dir = run_dirs[0] / "sessions" if run_dirs else agent_runs
+    await session_monitor.register(
+        tmux_name=tmux_name,
+        session_type="container",
+        project=sess_dir.name,
+        jsonl_path=sess_dir,
+        seed_message="Starting...",
+    )
+
     # Poll dashboard.db until session is live with jsonl_path
     deadline = time.time() + 30
     while time.time() < deadline:
