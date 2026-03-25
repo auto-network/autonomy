@@ -1,9 +1,3 @@
-import os
-# Ensure DB paths are writable for any test that imports server.py
-# (server.py triggers experiments_db.init_db() which fails on read-only filesystems)
-os.environ.setdefault("EXPERIMENTS_DB", "/tmp/test-experiments.db")
-os.environ.setdefault("DISPATCH_DB", "/tmp/test-dispatch.db")
-
 collect_ignore = [
     "test_agent_tool_calls.py",  # broken import: SessionState removed from session_monitor
 ]
