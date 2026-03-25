@@ -8,11 +8,17 @@ Fixture file format:
 {
   "beads": [ {bead dict}, ... ],
   "runs": [ {dispatch run dict}, ... ],
-  "bead_counts": { "open_count": 5, ... }  // optional override
+  "active_sessions": [ {session dict}, ... ],
+  "session_entries": { "session_id": [ {entry}, ... ] },
+  "recent_sessions": [ {session dict}, ... ],
+  "experiments": [ {experiment dict with "variants": [{...}]} ],
+  "bead_counts": { "open_count": 5, ... },  // optional override
+  "dispatch_beads": { "approved_waiting": [...] }  // optional override
 }
 
 Bead dicts must have at minimum: id, title, status, priority.
-See FIXTURE_DEFAULTS below for fields that get auto-filled if omitted.
+Experiment dicts must have at minimum: id, title; variants need: id, html.
+See *_DEFAULTS below for fields that get auto-filled if omitted.
 
 SSE events: Set DASHBOARD_MOCK_EVENTS=path/to/events.jsonl. The mock
 event watcher tails this file and broadcasts each new line to the event
