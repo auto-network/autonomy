@@ -365,6 +365,63 @@ def run_tier2(base_url: str) -> dict:
 
     page_results.append({"page": "/nav-badges", **_check("nav_badges", check_nav_badges)})
 
+    # Close browser from nav_badges before sessions check
+    subprocess.run(["agent-browser", "close"], capture_output=True, text=True, timeout=10)
+
+    # Sessions page cards check — verify cards render when API reports sessions
+    def check_sessions_page_cards():
+        # Step 1: Get session count from API
+        api_sess = requests.Session()
+        api_sess.verify = False
+        r = api_sess.get(f"{base_url}/api/dao/active_sessions", timeout=10)
+        if r.status_code != 200:
+            return f"API returned HTTP {r.status_code}"
+        api_sessions = r.json()
+        api_count = len(api_sessions) if isinstance(api_sessions, list) else 0
+        if api_count == 0:
+            return True  # No sessions to verify
+
+        # Step 2: Open /sessions in browser
+        try:
+            r1 = subprocess.run(
+                ["agent-browser", "open", f"{base_url}/sessions", "--ignore-https-errors"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r1.returncode != 0:
+                return f"open failed: {r1.stderr.strip()}"
+
+            subprocess.run(
+                ["agent-browser", "wait", "--load", "networkidle"],
+                capture_output=True, text=True, timeout=30,
+            )
+            # SSE registry broadcast arrives ~1s after connect; wait for Alpine to render
+            time.sleep(5)
+
+            # Step 3: Count session cards
+            r2 = subprocess.run(
+                ["agent-browser", "eval",
+                 'document.querySelectorAll("[data-testid=\\"session-card\\"]").length'],
+                capture_output=True, text=True, timeout=15,
+            )
+            card_count_str = r2.stdout.strip()
+            try:
+                card_count = int(card_count_str)
+            except ValueError:
+                return f"could not parse card count: {card_count_str!r}"
+
+            # Step 4: Fail if API has sessions but page renders none
+            if card_count == 0:
+                return f"API has {api_count} sessions but page shows 0 cards"
+            return True
+        finally:
+            subprocess.run(
+                ["agent-browser", "close"],
+                capture_output=True, text=True, timeout=10,
+            )
+
+    print("  Checking sessions page...", file=sys.stderr)
+    page_results.append({"page": "/sessions", **_check("sessions_page_cards_visible", check_sessions_page_cards)})
+
     passed = all(p["pass"] for p in page_results)
     return {"pass": passed, "skipped": False, "pages": page_results}
 
