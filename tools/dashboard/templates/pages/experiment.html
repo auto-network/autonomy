@@ -129,6 +129,9 @@
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
           </template>
         </button>
+        <span x-show="screenshotStatus" x-text="screenshotStatus"
+              style="font-size:10px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px"
+              x-transition></span>
       </div>
 
       <!-- Experiment surface (State 1: visible when chat closed) -->
