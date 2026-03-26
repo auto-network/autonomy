@@ -230,6 +230,10 @@
               if (s.entry_count) store.entryCount = s.entry_count;
               if (s.context_tokens) store.contextTokens = s.context_tokens;
               if (s.last_message !== undefined) store.lastMessage = s.last_message;
+              if (s.topics) store.topics = s.topics;
+              if (s.nag_enabled !== undefined) store.nagEnabled = !!s.nag_enabled;
+              if (s.nag_interval) store.nagInterval = s.nag_interval;
+              if (s.nag_message !== undefined) store.nagMessage = s.nag_message;
               if (s.resolved !== undefined) store.resolved = !!s.resolved;
             }
           }
