@@ -58,6 +58,9 @@ LABEL_IMAGE_MAP = {
 }
 DEFAULT_IMAGE = "autonomy-agent"
 
+# Deferred restart flag — set by _maybe_restart_dispatcher(), executed at end of cycle
+_restart_scheduled = False
+
 
 def _read_rig_image() -> str:
     """Read default container image from .beads/config.yaml."""
@@ -858,24 +861,18 @@ def _dispatcher_files_changed(branch_base: str) -> bool:
 
 
 def _maybe_restart_dispatcher(branch_base: str) -> None:
-    """Restart the dispatcher if merged commit touched dispatcher/agent files."""
+    """Schedule a dispatcher restart if merged commit touched dispatcher/agent files.
+
+    Does NOT restart immediately — sets a flag that is checked at the end of
+    dispatch_cycle(), after all bookkeeping (release_bead, _record_run, etc.)
+    is complete. This prevents the old bug where the dispatcher killed itself
+    mid-collection, orphaning bead state.
+    """
+    global _restart_scheduled
     if not _dispatcher_files_changed(branch_base):
         return
-
-    print("  Dispatcher files changed — scheduling restart...", file=sys.stderr)
-
-    if not _START_DISPATCHER_SCRIPT.exists():
-        print("  WARN: start-dispatcher.sh not found, skipping restart", file=sys.stderr)
-        return
-
-    try:
-        subprocess.run(
-            [str(_START_DISPATCHER_SCRIPT), "--restart"],
-            capture_output=True, text=True, timeout=30,
-            cwd=str(REPO_ROOT),
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"  WARN: dispatcher restart failed: {e}", file=sys.stderr)
+    print("  Dispatcher files changed — restart scheduled after cycle completes")
+    _restart_scheduled = True
 
 
 def _maybe_restart_dashboard(branch_base: str) -> None:
@@ -2106,6 +2103,21 @@ def dispatch_cycle(
             print(f"  WARNING: librarian queue check failed: {e}", file=sys.stderr)
     elif lib_slots <= 0:
         print(f"  Librarian pool at capacity ({len(running_librarians)}/{config.max_concurrent_librarians})")
+
+    # ── Deferred restart — execute only after all bookkeeping is done ────
+    global _restart_scheduled
+    if _restart_scheduled:
+        _restart_scheduled = False
+        print("  Executing scheduled dispatcher restart...")
+        if _START_DISPATCHER_SCRIPT.exists():
+            try:
+                subprocess.run(
+                    [str(_START_DISPATCHER_SCRIPT), "--restart"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(REPO_ROOT),
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                print(f"  WARN: dispatcher restart failed: {e}", file=sys.stderr)
 
     return dispatched
 
