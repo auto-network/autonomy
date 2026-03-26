@@ -180,17 +180,25 @@ class SessionMonitor:
         bead_id: str | None = None,
         seed_message: str = "",
         session_uuid: str | None = None,
+        resolution_dir: Path | None = None,
     ) -> None:
         """Register a new session — INSERT into dashboard.db."""
         path_is_dir = False
         path_str: str | None = None
+        res_dir: Path | None = resolution_dir
         if jsonl_path is not None:
             if jsonl_path.is_dir():
                 path_is_dir = True
                 # Don't store directory as jsonl_path — store None, resolve later
                 path_str = None
+                # Use the directory as resolution_dir if not explicitly provided
+                if res_dir is None:
+                    res_dir = jsonl_path
             else:
                 path_str = str(jsonl_path)
+                # Derive resolution_dir from file parent if not explicitly provided
+                if res_dir is None:
+                    res_dir = jsonl_path.parent
 
         try:
             insert_session(
@@ -200,6 +208,7 @@ class SessionMonitor:
                 bead_id=bead_id,
                 jsonl_path=path_str,
                 session_uuid=session_uuid,
+                resolution_dir=str(res_dir) if res_dir else None,
             )
         except Exception:
             logger.warning("session_monitor: INSERT failed for tmux=%s (may already exist)", tmux_name)
@@ -209,7 +218,7 @@ class SessionMonitor:
             update_tail_state(tmux_name, last_message=seed_message)
 
         # Set up ephemeral tail state
-        ts = _TailState(needs_resolution=path_is_dir, resolution_dir=jsonl_path if path_is_dir else None)
+        ts = _TailState(needs_resolution=path_is_dir, resolution_dir=res_dir)
         self._tail_states[tmux_name] = ts
 
         logger.info(
@@ -760,6 +769,9 @@ class SessionMonitor:
                     bead_id=meta.get("bead_id"),
                     jsonl_path=str(jsonl),
                     session_uuid=jsonl.stem,
+                    resolution_dir=str(jsonl.parent),
+                    session_uuids=json.dumps([jsonl.stem]),
+                    curr_jsonl_file=str(jsonl),
                     created_at=st.st_mtime - 60,
                     file_offset=st.st_size,
                     last_message=seed_msg,
@@ -797,6 +809,9 @@ class SessionMonitor:
                     project=jsonl.parent.name,
                     jsonl_path=str(jsonl),
                     session_uuid=jsonl.stem,
+                    resolution_dir=str(jsonl.parent),
+                    session_uuids=json.dumps([jsonl.stem]),
+                    curr_jsonl_file=str(jsonl),
                     created_at=st.st_mtime - 60,
                     file_offset=st.st_size,
                     last_message=seed_msg,
