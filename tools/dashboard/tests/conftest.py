@@ -151,7 +151,12 @@ def test_db(tmp_path, mock_jsonl):
         file_offset INTEGER DEFAULT 0, last_activity REAL,
         last_message TEXT DEFAULT '', entry_count INTEGER DEFAULT 0,
         context_tokens INTEGER DEFAULT 0, label TEXT DEFAULT '',
-        topics TEXT DEFAULT '[]', role TEXT DEFAULT ''
+        topics TEXT DEFAULT '[]', role TEXT DEFAULT '',
+        nag_enabled INTEGER DEFAULT 0, nag_interval INTEGER DEFAULT 15,
+        nag_message TEXT DEFAULT '', nag_last_sent REAL DEFAULT 0,
+        dispatch_nag INTEGER DEFAULT 0,
+        resolution_dir TEXT, session_uuids TEXT DEFAULT '[]',
+        curr_jsonl_file TEXT
     )""")
     now = time.time()
     for s in MOCK_SESSIONS:
