@@ -74,8 +74,9 @@ def _read_rig_image() -> str:
 
 _rig_image = _read_rig_image()
 
-# Kill containers exceeding this runtime (seconds)
-MAX_AGENT_RUNTIME = 600
+# Grace period before staleness checks can trigger a kill (seconds).
+# Gives the container time to boot and start writing JSONL.
+BOOT_GRACE_PERIOD = 60
 
 # Auto-pause after this many consecutive cross-bead merge failures
 MERGE_FAILURE_PAUSE_THRESHOLD = 3
@@ -103,6 +104,7 @@ class DispatchResult:
     branch: str = ""
     branch_base: str = ""
     labels: list[str] = field(default_factory=list)
+    reason: str = ""
 
 
 @dataclass
@@ -290,7 +292,18 @@ def classify_failure(output_dir: str, duration_secs: float) -> str:
         if not decision_path.exists():
             return "fast_crash"
 
-    if duration_secs >= MAX_AGENT_RUNTIME:
+    # Timeout is now determined by the caller via JSONL staleness, not wall-clock.
+    # Check JSONL staleness here as a fallback classification.
+    jsonl_file = _find_jsonl_file(output_dir)
+    if jsonl_file:
+        try:
+            stale_secs = time.time() - jsonl_file.stat().st_mtime
+            if stale_secs > 300:
+                return "timeout"
+        except OSError:
+            pass
+    elif duration_secs > BOOT_GRACE_PERIOD:
+        # No JSONL file found after boot grace — likely crashed before writing
         return "timeout"
 
     return "agent_failure"
@@ -423,6 +436,9 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
         elif status == "FAILED":
             _retry_bd(["update", bead_id, "-s", "open"])
             run_bd(["update", bead_id, "--append-notes", f"Failed: {reason}"])
+        elif status == "TIMEOUT":
+            _retry_bd(["update", bead_id, "-s", "open"])
+            run_bd(["update", bead_id, "--append-notes", f"Timeout: {reason}"])
         elif status == "MERGE_FAILED":
             _retry_bd(["update", bead_id, "-s", "open"])
             run_bd(["update", bead_id, "--append-notes", f"Merge failed (will retry): {reason}"])
@@ -1125,15 +1141,9 @@ def _notify_dispatch_nag(
 
         # Derive notification fields
         bead_id = agent.bead_id
-        if effective_status == "DONE":
-            status_label = "merged"
-        elif effective_status == "MERGE_FAILED":
-            status_label = "merge failed (auto-retrying)"
-        else:
-            status_label = "failed"
-        commit = result.commit_hash[:10] if result.commit_hash else "none"
         duration = int(time.time() - agent.started_at)
         dur_min, dur_sec = divmod(duration, 60)
+        dur_str = f"{dur_min}m{dur_sec:02d}s"
 
         # Get bead title via bd show (best-effort)
         title = bead_id
@@ -1159,14 +1169,20 @@ def _notify_dispatch_nag(
             except Exception:
                 pass
 
-        msg = (
-            f"Dispatch {status_label}: {bead_id} — {title}\n"
-            f"Status: {effective_status.lower()} | Commit: {commit} | Duration: {dur_min}m{dur_sec}s"
-        )
-        if effective_status == "MERGE_FAILED":
-            msg += f"\nRetry: merge conflict detected, will auto-retry with cherry-pick"
-        if lines_changed:
-            msg += f"\n{lines_changed}"
+        # Build two-line message: identity + outcome, then outcome-specific detail
+        if effective_status == "DONE":
+            line2 = dur_str
+            if lines_changed:
+                line2 += f" · {lines_changed}"
+        elif effective_status == "TIMEOUT":
+            line2 = result.reason or f"JSONL stale after {dur_str}"
+        elif effective_status == "MERGE_FAILED":
+            line2 = result.reason or "Merge conflict (auto-retrying)"
+        else:
+            # FAILED, BLOCKED, etc.
+            line2 = result.reason or result.error or f"Failed after {dur_str}"
+
+        msg = f"{bead_id} {effective_status} — {title}\n{line2}"
 
         _send_dispatch_nag_crosstalk(targets, msg)
     except Exception as e:
@@ -1490,9 +1506,11 @@ def _record_run(agent: RunningAgent, result: DispatchResult, *, effective_status
         reason = decision.get("reason", "No decision file")
 
         # Classify agent-side failures (non-zero exit, no decision, or decision != DONE)
-        # MERGE_FAILED is a dispatcher-side issue, not an agent failure — skip classification
+        # MERGE_FAILED and TIMEOUT are dispatcher-side — skip classification
         fc: str | None = None
-        if status not in ("DONE", "MERGE_FAILED") and (
+        if status == "TIMEOUT":
+            fc = "timeout"
+        elif status not in ("DONE", "MERGE_FAILED") and (
             result.exit_code != 0 or not result.decision
         ):
             duration = time.time() - agent.started_at
@@ -1698,7 +1716,7 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
     Modifies the running list in place — removes completed/timed-out agents.
     """
     completed: list[tuple[RunningAgent, int]] = []
-    timed_out: list[RunningAgent] = []
+    timed_out: list[tuple[RunningAgent, float]] = []  # (agent, stale_secs)
 
     for agent in running:
         elapsed = time.time() - agent.started_at
@@ -1707,25 +1725,22 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
         if finished:
             print(f"  Completed: {agent.bead_id} (exit={exit_code}, {elapsed:.0f}s)")
             completed.append((agent, exit_code))
-        elif elapsed > MAX_AGENT_RUNTIME:
-            # Check JSONL staleness — only timeout if agent hasn't written recently
+        else:
+            # Check JSONL staleness unconditionally (with boot grace period)
             jsonl_file = _find_jsonl_file(agent.output_dir)
             stale = True
+            stale_secs = -1.0
             if jsonl_file:
                 try:
-                    mtime = jsonl_file.stat().st_mtime
-                    stale_secs = time.time() - mtime
+                    stale_secs = time.time() - jsonl_file.stat().st_mtime
                     stale = stale_secs > 300  # 5 minutes without JSONL writes
                 except OSError:
                     pass
-            if stale:
+            if stale and elapsed > BOOT_GRACE_PERIOD:
                 print(f"  Timeout: {agent.bead_id} ({elapsed:.0f}s, JSONL stale)")
-                timed_out.append(agent)
-            else:
-                print(f"  {agent.bead_id}: {elapsed:.0f}s elapsed but JSONL active, continuing")
-        else:
-            # Still running — collect live stats (JSONL tail + cgroup reads)
-            _collect_live_stats(agent)
+                timed_out.append((agent, stale_secs))
+            elif not stale:
+                _collect_live_stats(agent)
 
     # Process normally-completed agents
     for agent, exit_code in completed:
@@ -1768,8 +1783,13 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             cleanup_worktree(agent.worktree_path)
 
     # Handle timed-out agents — kill, then try to recover results
-    for agent in timed_out:
+    for agent, stale_secs in timed_out:
         running.remove(agent)
+        elapsed = time.time() - agent.started_at
+        if stale_secs >= 0:
+            timeout_reason = f"JSONL stale {int(stale_secs)}s after {int(elapsed)}s"
+        else:
+            timeout_reason = f"No JSONL output after {int(elapsed)}s"
         print(f"  Killing timed-out: {agent.bead_id} (container: {agent.container_name})")
         kill_container(agent.container_name)
 
@@ -1781,21 +1801,23 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
                 _notify_dispatch_nag(agent, effective_status, result)
                 _record_run(agent, result, effective_status=effective_status)
             else:
-                print(f"  No results from timed-out {agent.bead_id}, marking FAILED")
-                release_bead(agent.bead_id, "FAILED",
-                             f"Agent timeout ({MAX_AGENT_RUNTIME}s)")
-                _notify_dispatch_nag(agent, "FAILED", result)
-                _record_run(agent, result, effective_status="FAILED")
+                print(f"  No results from timed-out {agent.bead_id}, marking TIMEOUT")
+                release_bead(agent.bead_id, "TIMEOUT", timeout_reason)
+                result.reason = timeout_reason
+                _notify_dispatch_nag(agent, "TIMEOUT", result)
+                _record_run(agent, result, effective_status="TIMEOUT")
                 cleanup_worktree(agent.worktree_path)
         except Exception as e:
             error_msg = f"Timeout collection error: {type(e).__name__}: {e}"
             print(f"  ERROR collecting timed-out {agent.bead_id}: {error_msg}")
-            release_bead(agent.bead_id, "FAILED", error_msg[:200])
-            _notify_dispatch_nag(agent, "FAILED", DispatchResult(
-                bead_id=agent.bead_id, exit_code=-1, error=error_msg))
+            release_bead(agent.bead_id, "TIMEOUT", timeout_reason)
+            _notify_dispatch_nag(agent, "TIMEOUT", DispatchResult(
+                bead_id=agent.bead_id, exit_code=-1, error=error_msg,
+                reason=timeout_reason))
             _record_run(agent, DispatchResult(
-                bead_id=agent.bead_id, exit_code=-1, error=error_msg),
-                effective_status="FAILED")
+                bead_id=agent.bead_id, exit_code=-1, error=error_msg,
+                reason=timeout_reason),
+                effective_status="TIMEOUT")
             cleanup_worktree(agent.worktree_path)
 
 
@@ -1816,7 +1838,8 @@ def poll_and_collect_librarians(running_librarians: list[RunningLibrarian]) -> N
             print(f"  Librarian completed: {lib.job_type}/{lib.job_id[:8]} "
                   f"(exit={exit_code}, {elapsed:.0f}s)")
             completed.append((lib, exit_code))
-        elif elapsed > MAX_AGENT_RUNTIME:
+        else:
+            # Check JSONL staleness unconditionally (with boot grace period)
             jsonl_file = _find_jsonl_file(lib.output_dir)
             stale = True
             if jsonl_file:
@@ -1825,15 +1848,12 @@ def poll_and_collect_librarians(running_librarians: list[RunningLibrarian]) -> N
                     stale = stale_secs > 300
                 except OSError:
                     pass
-            if stale:
+            if stale and elapsed > BOOT_GRACE_PERIOD:
                 print(f"  Librarian timeout: {lib.job_type}/{lib.job_id[:8]} "
                       f"({elapsed:.0f}s, JSONL stale)")
                 timed_out.append(lib)
-            else:
-                print(f"  Librarian {lib.job_id[:8]}: {elapsed:.0f}s elapsed, JSONL active")
+            elif not stale:
                 _collect_live_stats_for_librarian(lib)
-        else:
-            _collect_live_stats_for_librarian(lib)
 
     for lib, exit_code in completed:
         running_librarians.remove(lib)
