@@ -101,22 +101,10 @@
           var doc = iframe.contentDocument || iframe.contentWindow.document;
 
           var parentCSS = (document.querySelector('style') || {}).textContent || '';
-          var isAlpine = !!(data.alpine);
-
-          // For Alpine experiments: don't wrap scripts in load listener —
-          // Alpine needs to run its init before DOM is parsed.
-          var safeHtml = isAlpine ? (v.html || '') : (v.html || '').replace(
-            /<script(?![^>]*\bsrc\b)([^>]*)>([\s\S]*?)<\/script>/gi,
-            function (_, attrs, body) {
-              return '<script' + attrs + '>window.addEventListener("load",function(){' + body + '});<\/script>';
-            }
-          );
-
-          var alpineHead = isAlpine
-            ? '<link rel="stylesheet" href="/static/css/session-cards.css">' +
-              '<script>window.FIXTURE = ' + (data.fixture || '{}') + ';<\/script>' +
-              '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>'
-            : '<script>window.FIXTURE = ' + (data.fixture || '{}') + ';<\/script>';
+          var safeHtml = v.html || '';
+          var alpineHead = '<link rel="stylesheet" href="/static/css/session-cards.css">' +
+            '<script>window.FIXTURE = ' + (data.fixture || '{}') + ';<\/script>' +
+            '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>';
 
           doc.open();
           doc.write('<!DOCTYPE html><html><head><meta charset="utf-8">' +

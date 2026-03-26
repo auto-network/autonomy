@@ -2129,9 +2129,6 @@ def cmd_ui_exp(args):
         exp_data["series_id"] = args.series
     if fixture:
         exp_data["fixture"] = fixture
-    if args.alpine:
-        exp_data["alpine"] = True
-
     result = _post("/api/experiments", exp_data)
     exp_id = result["id"]
 
@@ -2209,8 +2206,6 @@ def cmd_ui_exp(args):
             }
             if fixture:
                 exp_data["fixture"] = fixture
-            if args.alpine:
-                exp_data["alpine"] = True
 
             try:
                 result = _post("/api/experiments", exp_data)
@@ -2834,7 +2829,6 @@ def main():
     p.add_argument("dir", help="Directory of .html variant files")
     p.add_argument("--series", help="Existing series ID to append to")
     p.add_argument("--fixture", help="Path to fixture JSON file")
-    p.add_argument("--alpine", action="store_true", help="Inject Alpine.js runtime for template experiments")
     p.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
     p.set_defaults(func=cmd_ui_exp)
 
