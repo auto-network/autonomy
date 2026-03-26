@@ -847,39 +847,21 @@ async function initDisplayCapture(expId) {
 }
 
 function _updateScreenshotStatus(expId, msg) {
-  if (window._experimentPage && typeof window._experimentPage.setScreenshotStatus === 'function') {
-    window._experimentPage.setScreenshotStatus(msg);
-  } else {
-    const el = document.getElementById('exp-screenshot-status');
-    if (el) el.textContent = msg;
-  }
+  Screenshot._updateScreenshotStatus(expId, msg);
 }
 
 /**
  * Build screenshot API URL, optionally including tmux_session for two-send injection.
  */
 function _screenshotUrl(expId, sessionName) {
-  let url = `/api/experiments/${expId}/screenshot`;
-  if (sessionName) url += `?tmux_session=${encodeURIComponent(sessionName)}`;
-  return url;
+  return Screenshot._screenshotUrl(expId, sessionName);
 }
 
 /**
  * Handle screenshot response — update status and trigger panel indicator.
  */
 function _handleScreenshotResponse(expId, data) {
-  const now = new Date().toLocaleTimeString();
-  if (data.injected) {
-    _updateScreenshotStatus(expId, `Screenshot injected ${now}`);
-    // Show indicator in the Chat With panel (unified viewer)
-    var panelEl = document.getElementById('exp-chat-panel');
-    if (panelEl) {
-      var panelData = Alpine.$data(panelEl);
-      if (panelData && panelData.showScreenshotInjected) panelData.showScreenshotInjected();
-    }
-  } else {
-    _updateScreenshotStatus(expId, `Screenshot saved ${now}`);
-  }
+  Screenshot._handleScreenshotResponse(expId, data);
 }
 
 /** Grab a frame from the active display stream and POST to server. */
