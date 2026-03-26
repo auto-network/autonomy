@@ -1,7 +1,22 @@
+/**
+ * Unified Session Viewer — one component for all 6 surfaces.
+ *
+ * Replaces three separate renderers: session-viewer.js, chatwith-panel.js,
+ * live-panel-viewer.js. Entry point is configure({sessionId, runDir, project}).
+ *
+ * Modes:
+ *   'page'    — session detail page, URL-driven (/session/{project}/{id})
+ *   'panel'   — experiment page chat panel, configure() called by experiment.js
+ *   'overlay' — bottom-docked overlay, controlled via _livePanelLoad/_livePanelReset
+ *
+ * Usage:
+ *   x-data="sessionViewerPage()"             — page mode (default)
+ *   x-data="sessionViewerPage({mode:'panel'})"   — panel mode
+ *   x-data="sessionViewerPage({mode:'overlay'})" — overlay mode
+ */
 (function () {
 
   function _formatProject(project) {
-    // Strip /home/<user>/workspace/ path prefix (encoded as dashes)
     const cleaned = project
       .replace(/^-home-[^-]+-workspace-/, '')
       .replace(/^-home-[^-]+-/, '')
@@ -10,106 +25,411 @@
   }
 
   document.addEventListener('alpine:init', () => {
-    Alpine.data('sessionViewerPage', () => ({
+    Alpine.data('sessionViewerPage', (opts) => ({
       // Shared renderer methods (32 methods + constants)
       ...window.SessionRenderer,
 
-      // State machine
+      // ── Mode ────────────────────────────────────────────────────
+      _mode: (opts && opts.mode) || 'page',
+
+      // ── Page state ──────────────────────────────────────────────
       state: 'loading',   // 'loading' | 'ready' | 'error'
       errorMsg: '',
 
-      // Session identity (read from URL on init)
+      // ── Session identity ────────────────────────────────────────
+      sessionKey: '',       // store key (tmux_name)
       project: '',
       sessionId: '',
       projectLabel: '',
 
-      // Entries and polling
-      entries: [],
-      offset: 0,
-      isLive: false,
-      loadProgress: 0,      // 0-100
-      loadedMB: '0',
-      totalMB: '0',
+      // ── Store-backed getters ────────────────────────────────────
+      // These read from Alpine.store('sessions')[sessionKey] directly.
+      // No duplicated state, no sync watchers needed.
+
+      get entries() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? s.entries : [];
+      },
+      get isLive() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? s.isLive : false;
+      },
+      get _tmuxSession() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? s.tmuxSession : '';
+      },
+      get _toolMap() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? s.toolMap : {};
+      },
+      get _resultMap() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? s.resultMap : {};
+      },
+      get _linked() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? s.linked : false;
+      },
+      get _label() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? (s.label || '') : '';
+      },
+      get sessionType() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? s.sessionType : '';
+      },
+      get contextTokens() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? s.contextTokens : 0;
+      },
+
+      // ── View-only state ─────────────────────────────────────────
+      displayEntries: [],
       autoScroll: true,
       _storeCleanups: [],
-
-      // Tool ID tracking (for matching tool_result to tool_use)
-      _toolMap: {},
-      // tool_id → tool_result entry (for pairing — chip metadata)
-      _resultMap: {},
-      // Context window tokens (from usage)
-      contextTokens: 0,
-
-      // Cache for enriched tile data (survives scroll, keyed by source_id)
-      _enrichCache: {},
-
-      // Expand/collapse state: index → boolean
       _expanded: {},
-      // Expand view mode: index → 'output' | 'input'
       _expandView: {},
-
-      // Grouped display layer
-      displayEntries: [],
-      // Group accordion: dIdx → expanded subIdx (or null)
       _groupExpanded: {},
-      // Group item view mode: 'dIdx-subIdx' → 'output' | 'input'
       _groupExpandView: {},
 
-      // Input
+      // Backfill progress (page mode only)
+      loadProgress: 0,
+      loadedMB: '0',
+      totalMB: '0',
+
+      // Input (Tier 3)
       inputText: '',
       sending: false,
-
-      // Multi-attach
       uploading: false,
       attachments: [],
       _nextAttachId: 0,
 
-      // User-settable label
-      _label: '',
+      // Enrichment cache (until Phase 3 removes lazy enhance)
+      _enrichCache: {},
 
-      // Session type (host or container)
-      sessionType: '',
-
-      // Link terminal state
-      linkState: 'idle',   // 'idle' | 'picking' | 'handshaking' | 'confirmed' | 'failed'
+      // Link terminal (Tier 3)
+      linkState: 'idle',
       linkCandidates: [],
       selectedTmux: '',
       linkError: '',
       HANDSHAKE_STRING: '[dashboard] confirming terminal link \u2014 please reply with I SEE IT',
 
-      // API paths set from URL params
+      // Screenshot injection indicator
+      screenshotInjected: false,
+      _screenshotTimer: null,
+
+      // Overlay mode state
+      _runDir: '',
+      _pollInterval: null,
+
+      // API path
       _tailUrl: '',
 
-      // ── Label editing ──────────────────────────────────────────
+      // ── State machine ───────────────────────────────────────────
+      // Source of truth: store.loaded, store.isLive, store.linked
+      // Returns: 'connecting' | 'live' | 'unresolved' | 'complete'
 
-      saveLabel(event) {
-        if (!this._tmuxSession || !this.isLive) return;
-        var newLabel = (event.target.textContent || '').trim();
-        // If cleared to empty or same as tmux name, treat as "no label"
-        if (newLabel === this._tmuxSession) newLabel = '';
-        if (newLabel === this._label) return;
-        this._label = newLabel;
-        // Update the store so cards reflect it too
-        var store = Alpine.store('sessions')[this.sessionId];
-        if (store) store.label = newLabel;
-        fetch('/api/session/' + encodeURIComponent(this._tmuxSession) + '/label', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ label: newLabel }),
+      deriveState() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        if (!s || !s.loaded) return 'connecting';
+        if (!s.isLive) return 'complete';
+        if (s.linked) return 'live';
+        return 'unresolved';
+      },
+
+      // ── Configure ───────────────────────────────────────────────
+      // Main entry point. Accepts {sessionId, runDir, project, tmuxSession}.
+
+      async configure(cfgOpts) {
+        var sessionId = cfgOpts.sessionId || '';
+        var project = cfgOpts.project || '';
+        var runDir = cfgOpts.runDir || '';
+        var tmuxSession = cfgOpts.tmuxSession || '';
+        var isLiveHint = cfgOpts._isLive;
+
+        // ── RunDir path: fetch dispatch tail to resolve identity ──
+        if (runDir && !sessionId) {
+          this._runDir = runDir;
+          this.state = 'loading';
+          try {
+            var res = await fetch('/api/dispatch/tail/' + encodeURIComponent(runDir) + '?after=0');
+            if (!res.ok) {
+              this.state = 'error';
+              this.errorMsg = 'Failed to load dispatch run';
+              return;
+            }
+            var data = await res.json();
+
+            sessionId = data.tmux_name || data.session_id || runDir;
+            project = data.project || project;
+            tmuxSession = data.tmux_session || tmuxSession || sessionId;
+
+            this.sessionKey = sessionId;
+            this.sessionId = sessionId;
+            this.project = project;
+
+            var store = window.getSessionStore(sessionId);
+
+            // Populate store from dispatch tail
+            if (data.entries && data.entries.length > 0) {
+              this._ingestEntries(store, data.entries);
+              store.entries = data.entries;
+            }
+            store.isLive = isLiveHint !== undefined ? !!isLiveHint : !!data.is_live;
+            store.tmuxSession = tmuxSession;
+            store.sessionType = data.type || '';
+            if (data.offset !== undefined) store.offset = data.offset;
+            if (data.seq !== undefined) store.seq = data.seq;
+            store.loaded = true;
+
+            this._rebuildDisplay();
+            this.state = 'ready';
+            this._scrollToBottom();
+
+            // Connect to SSE if session identity is known
+            if (data.session_id && data.project) {
+              window.ensureSessionMessages();
+              this._setupWatchers();
+            } else if (store.isLive) {
+              // Fallback: poll dispatch tail for live updates
+              var self = this;
+              var offset = data.offset || 0;
+              this._pollInterval = setInterval(function () {
+                self._pollTail(offset).then(function (newOffset) {
+                  if (newOffset !== undefined) offset = newOffset;
+                });
+              }, 2000);
+            }
+
+            if (this._mode === 'overlay') this._updateHeader();
+            return;
+          } catch (e) {
+            this.state = 'error';
+            this.errorMsg = 'Failed to load: ' + (e.message || e);
+            return;
+          }
+        }
+
+        // ── SessionId path: standard session connection ──
+        if (!sessionId) return;
+
+        this.sessionKey = sessionId;
+        this.sessionId = sessionId;
+        this.project = project;
+        this._tailUrl = '/api/session/' + encodeURIComponent(project) + '/' + encodeURIComponent(sessionId) + '/tail';
+
+        var store = window.getSessionStore(sessionId);
+        if (tmuxSession) store.tmuxSession = tmuxSession;
+
+        this.inputText = store.draftText || '';
+
+        if (store.loaded) {
+          // Instant render from cache — zero network
+          this._rebuildDisplay();
+          this.state = 'ready';
+          this._scrollToBottom();
+        } else {
+          // First visit — subscribe SSE before fetch to not miss events
+          store._loading = true;
+          window.ensureSessionMessages();
+
+          try {
+            await this._fetchBacklog(store);
+          } catch (e) {
+            // New session with no JSONL yet — show empty ready state
+            if (store.tmuxSession || tmuxSession) {
+              store._loading = false;
+              store.loaded = true;
+              this._rebuildDisplay();
+              this.state = 'ready';
+            } else {
+              if (this.state === 'loading') {
+                this.errorMsg = 'Failed to connect to session';
+                this.state = 'error';
+              }
+              store._loading = false;
+              return;
+            }
+          }
+
+          // Flush pending SSE events that arrived during fetch
+          var pending = store._pendingSSE;
+          store._pendingSSE = [];
+          store._loading = false;
+          store.loaded = true;
+          for (var i = 0; i < pending.length; i++) {
+            window.appendSessionEntries(store, pending[i]);
+          }
+
+          this._rebuildDisplay();
+          if (this.state === 'loading') this.state = 'ready';
+          this._scrollToBottom();
+        }
+
+        // Ensure SSE subscription (idempotent)
+        window.ensureSessionMessages();
+
+        // Set up reactive watchers
+        this._setupWatchers();
+
+        // Persist draft text to store on every keystroke
+        var self = this;
+        this.$watch('inputText', function(val) {
+          var s = window.getSessionStore(self.sessionKey);
+          if (s) s.draftText = val;
+        });
+
+        // Clipboard paste support — attach pasted files
+        this.$nextTick(function() {
+          var ta = self.$refs.messageInput;
+          if (ta) {
+            ta.addEventListener('paste', function(e) {
+              var items = e.clipboardData && e.clipboardData.items;
+              if (!items) return;
+              var files = [];
+              for (var i = 0; i < items.length; i++) {
+                if (items[i].kind === 'file') {
+                  var f = items[i].getAsFile();
+                  if (f) files.push(f);
+                }
+              }
+              if (files.length) { e.preventDefault(); self.addFiles(files); }
+            });
+          }
         });
       },
 
-      // ── Lazy tile enhancement ──────────────────────────────────
+      // ── Lifecycle ───────────────────────────────────────────────
+
+      init() {
+        if (this._mode === 'overlay') {
+          // Overlay: expose globals, wait for configure() calls
+          var self = this;
+          window._livePanelLoad = function(runDir, isLive) {
+            self._reset();
+            self.configure({ runDir: runDir, _isLive: isLive });
+          };
+          window._livePanelReset = function() {
+            self._reset();
+          };
+          return;
+        }
+
+        if (this._mode === 'panel') {
+          // Panel: wait for configure() from experiment.js
+          return;
+        }
+
+        // Page mode: parse URL and configure
+        var m = window.location.pathname.match(/^\/session\/([^/]+)\/(.+)$/);
+        if (!m) {
+          this.errorMsg = 'Invalid session URL';
+          this.state = 'error';
+          return;
+        }
+        this.project = decodeURIComponent(m[1]);
+        this.sessionId = m[2];
+        this.projectLabel = _formatProject(this.project);
+
+        var params = new URLSearchParams(window.location.search);
+        var tmuxFromUrl = params.get('tmux') || '';
+
+        this.configure({
+          sessionId: this.sessionId,
+          project: this.project,
+          tmuxSession: tmuxFromUrl,
+        });
+      },
+
+      destroy() {
+        // Do NOT unregister SSE — store keeps accumulating outside component lifecycle
+        for (var i = 0; i < this._storeCleanups.length; i++) {
+          if (typeof this._storeCleanups[i] === 'function') this._storeCleanups[i]();
+        }
+        this._storeCleanups = [];
+        if (this._pollInterval) {
+          clearInterval(this._pollInterval);
+          this._pollInterval = null;
+        }
+        if (this._screenshotTimer) {
+          clearTimeout(this._screenshotTimer);
+          this._screenshotTimer = null;
+        }
+      },
+
+      // ── Setup helpers ───────────────────────────────────────────
+
+      _setupWatchers() {
+        var self = this;
+        var sid = this.sessionKey;
+
+        // Single watcher: rebuild displayEntries + auto-scroll when entries change
+        this._storeCleanups.push(this.$watch(
+          function() {
+            var s = Alpine.store('sessions')[sid];
+            return s ? s.entries.length : 0;
+          },
+          function() {
+            self._rebuildDisplay();
+            if (self.autoScroll) {
+              self._scrollToBottom();
+            }
+            // Update overlay header if in overlay mode
+            if (self._mode === 'overlay') self._updateHeader();
+          }
+        ));
+
+        // Watch isLive for overlay header updates
+        if (this._mode === 'overlay') {
+          this._storeCleanups.push(this.$watch(
+            function() {
+              var s = Alpine.store('sessions')[sid];
+              return s ? s.isLive : true;
+            },
+            function() { self._updateHeader(); }
+          ));
+        }
+      },
+
+      // ── Scroll helpers ──────────────────────────────────────────
+
+      _scrollToBottom() {
+        // Double-RAF after $nextTick: ensures Alpine has processed the x-for
+        // template AND the browser has laid out all entries before we measure
+        // scrollHeight. Critical for initial loads with 1000+ entries.
+        var self = this;
+        this.$nextTick(function() {
+          requestAnimationFrame(function() {
+            requestAnimationFrame(function() {
+              var el = self.$refs.entriesContainer;
+              if (el) el.scrollTop = el.scrollHeight;
+            });
+          });
+        });
+      },
+
+      // ── Screenshot injection indicator ──────────────────────────
+
+      showScreenshotInjected() {
+        this.screenshotInjected = true;
+        if (this._screenshotTimer) clearTimeout(this._screenshotTimer);
+        var self = this;
+        this._screenshotTimer = setTimeout(function() {
+          self.screenshotInjected = false;
+          self._screenshotTimer = null;
+        }, 3000);
+      },
+
+      // ── Lazy tile enhancement ───────────────────────────────────
+      // Kept until Phase 3 (auto-h4gh) moves enrichment server-side.
 
       async lazyEnhance(entry) {
         if (entry._enhanced) return;
         var sid = entry.source_id;
         if (!sid) return;
 
-        // Mark immediately to prevent double-fetch
         entry._enhanced = 'loading';
 
-        // Check cache first
         if (this._enrichCache[sid]) {
           var cached = this._enrichCache[sid];
           entry._enriched_title = cached.title;
@@ -119,9 +439,8 @@
           return;
         }
 
-        // Delay 1 second — only fetch if still visible (no drive-by fetches)
         await new Promise(function(r) { setTimeout(r, 1000); });
-        if (entry._enhanced !== 'loading') return; // was scrolled away or already done
+        if (entry._enhanced !== 'loading') return;
 
         try {
           var resp = await fetch('/api/graph/' + encodeURIComponent(sid));
@@ -134,7 +453,6 @@
           try { meta = typeof src.metadata === 'string' ? JSON.parse(src.metadata) : (src.metadata || {}); } catch(_) {}
           var tags = meta.tags || [];
 
-          // Preview: first 120 chars of content from first entry, skip title/heading lines
           var content = (data.entries && data.entries[0] && data.entries[0].content) || '';
           var lines = content.split('\n').filter(function(l) { return !l.startsWith('#') && l.trim(); });
           var preview = lines.slice(0, 2).join(' ').slice(0, 120);
@@ -146,84 +464,106 @@
 
           this._enrichCache[sid] = { title: title, preview: preview, tags: tags };
         } catch(_) {
-          entry._enhanced = true; // fail silently, keep original content
+          entry._enhanced = true;
         }
       },
 
-      // ── Page-specific helpers ────────────────────────────────
+      // ── Label editing ───────────────────────────────────────────
+
+      saveLabel(event) {
+        var store = Alpine.store('sessions')[this.sessionKey];
+        if (!store || !store.tmuxSession || !store.isLive) return;
+        var newLabel = (event.target.textContent || '').trim();
+        if (newLabel === store.tmuxSession) newLabel = '';
+        if (newLabel === (store.label || '')) return;
+        store.label = newLabel;
+        fetch('/api/session/' + encodeURIComponent(store.tmuxSession) + '/label', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label: newLabel }),
+        });
+      },
+
+      // ── Page-specific helpers ───────────────────────────────────
 
       toolLabel(toolId) {
-        const info = this._toolMap[toolId];
+        var info = this._toolMap[toolId];
         return info ? info.tool_name + ' result' : 'result';
       },
 
       addFiles(fileList) {
-        for (const file of fileList) {
-          const id = ++this._nextAttachId;
-          const isImage = file.type.startsWith('image/');
-          const att = { id, name: file.name, isImage, dataUrl: null, path: null };
+        for (var fi = 0; fi < fileList.length; fi++) {
+          var file = fileList[fi];
+          var id = ++this._nextAttachId;
+          var isImage = file.type.startsWith('image/');
+          var att = { id: id, name: file.name, isImage: isImage, dataUrl: null, path: null };
           this.attachments.push(att);
 
-          // FileReader for preview (mobile Safari compat — NOT URL.createObjectURL)
           if (isImage) {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-              const found = this.attachments.find(a => a.id === id);
-              if (found) found.dataUrl = e.target.result;
-            };
-            reader.readAsDataURL(file);
+            (function(attId, self) {
+              var reader = new FileReader();
+              reader.onload = function(e) {
+                var found = self.attachments.find(function(a) { return a.id === attId; });
+                if (found) found.dataUrl = e.target.result;
+              };
+              reader.readAsDataURL(file);
+            })(id, this);
           }
 
-          // Upload to server
           this.uploading = true;
-          const form = new FormData();
+          var form = new FormData();
           form.append('file', file);
-          if (this._tmuxSession) form.append('tmux_session', this._tmuxSession);
-          fetch('/api/upload', { method: 'POST', body: form })
-            .then(r => r.json())
-            .then(data => {
-              if (data.ok) {
-                const found = this.attachments.find(a => a.id === id);
-                if (found) found.path = data.path;
-              } else {
-                console.warn('[sessionViewer] upload error:', data.error);
-              }
-            })
-            .catch(e => console.warn('[sessionViewer] upload failed:', e))
-            .finally(() => {
-              const pending = this.attachments.some(a => !a.path);
-              if (!pending) this.uploading = false;
-            });
+          var tmux = this._tmuxSession;
+          if (tmux) form.append('tmux_session', tmux);
+          var self = this;
+          (function(attId) {
+            fetch('/api/upload', { method: 'POST', body: form })
+              .then(function(r) { return r.json(); })
+              .then(function(data) {
+                if (data.ok) {
+                  var found = self.attachments.find(function(a) { return a.id === attId; });
+                  if (found) found.path = data.path;
+                } else {
+                  console.warn('[sessionViewer] upload error:', data.error);
+                }
+              })
+              .catch(function(e) { console.warn('[sessionViewer] upload failed:', e); })
+              .finally(function() {
+                var pending = self.attachments.some(function(a) { return !a.path; });
+                if (!pending) self.uploading = false;
+              });
+          })(id);
         }
       },
 
       async sendMessage() {
-        const text = this.inputText.trim();
+        var text = this.inputText.trim();
         if ((this.attachments.length === 0 && !text) || this.sending) return;
         this.sending = true;
+        var tmux = this._tmuxSession;
         try {
-          const _send = async (msg) => {
-            const res = await fetch('/api/session/send', {
+          var _send = async function(msg) {
+            var res = await fetch('/api/session/send', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ message: msg, tmux_session: this._tmuxSession }),
+              body: JSON.stringify({ message: msg, tmux_session: tmux }),
             });
             return res.json();
           };
 
-          // Two-send strategy: each attachment path sent bare with 200ms gaps, text last
-          for (const att of this.attachments) {
+          for (var ai = 0; ai < this.attachments.length; ai++) {
+            var att = this.attachments[ai];
             if (!att.path) continue;
-            const pathData = await _send(att.path);
+            var pathData = await _send(att.path);
             if (!pathData.ok) {
               console.warn('[sessionViewer] send error (path):', pathData.error);
               return;
             }
-            await new Promise(r => setTimeout(r, 200));
+            await new Promise(function(r) { setTimeout(r, 200); });
           }
 
           if (text) {
-            const data = await _send(text);
+            var data = await _send(text);
             if (!data.ok) {
               console.warn('[sessionViewer] send error:', data.error);
               return;
@@ -231,14 +571,14 @@
           }
 
           this.inputText = '';
-          var s = window.getSessionStore(this.sessionId);
+          var s = window.getSessionStore(this.sessionKey);
           if (s) s.draftText = '';
           this.clearAttachments();
-          // Dismiss mobile keyboard + reset textarea height
-          if (this.$refs.messageInput) {
-            this.$refs.messageInput.style.height = '';
-            this.$refs.messageInput.style.overflowY = 'hidden';
-            this.$refs.messageInput.blur();
+          var ta = this.$refs.messageInput;
+          if (ta) {
+            ta.style.height = '';
+            ta.style.overflowY = 'hidden';
+            ta.blur();
           }
         } catch (e) {
           console.warn('[sessionViewer] send failed:', e);
@@ -247,9 +587,11 @@
         }
       },
 
+      // ── Link terminal ───────────────────────────────────────────
+
       async showLinkPicker() {
         try {
-          const res = await fetch('/api/terminal/unclaimed');
+          var res = await fetch('/api/terminal/unclaimed');
           this.linkCandidates = await res.json();
         } catch (e) {
           this.linkCandidates = [];
@@ -263,19 +605,18 @@
         if (!this.selectedTmux) return;
         this.linkState = 'handshaking';
         try {
-          const hsResp = await fetch('/api/session/send-handshake', {
+          var hsResp = await fetch('/api/session/send-handshake', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ tmux_session: this.selectedTmux }),
           });
-          const hsData = await hsResp.json();
-          const handshake = hsData.handshake || '';
+          var hsData = await hsResp.json();
+          var handshake = hsData.handshake || '';
 
-          // Poll confirm-link (filesystem scan) until it finds the handshake
-          const deadline = Date.now() + 15000;
+          var deadline = Date.now() + 15000;
           while (Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 2000));
-            const resp = await fetch('/api/session/confirm-link', {
+            await new Promise(function(r) { setTimeout(r, 2000); });
+            var resp = await fetch('/api/session/confirm-link', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -284,14 +625,12 @@
               }),
             });
             if (resp.ok) {
-              const data = await resp.json();
-              this._tmuxSession = this.selectedTmux;
-              var ss = window.getSessionStore(this.sessionId);
+              var data = await resp.json();
+              // Write to store (getters read from store)
+              var ss = window.getSessionStore(this.sessionKey);
               ss.tmuxSession = this.selectedTmux;
               ss.linked = true;
-              this._linked = true;
               this.linkState = 'confirmed';
-              // Update project if filesystem scan found a different one
               if (data.project && data.project !== this.project) {
                 this.project = data.project;
               }
@@ -313,6 +652,8 @@
         this.linkCandidates = [];
       },
 
+      // ── Backfill fetch ──────────────────────────────────────────
+
       async _fetchBacklog(store) {
         var self = this;
         var data = await window.fetchWithProgress(
@@ -324,231 +665,129 @@
           }
         );
 
-        // Handle error responses from server
         if (data.error) throw new Error(data.error);
 
         store.offset = data.offset || 0;
         store.isLive = !!data.is_live;
         store.sessionType = data.type || '';
-        store.tmuxSession = data.tmux_session || '';
+        store.tmuxSession = data.tmux_session || store.tmuxSession || '';
         if (data.seq !== undefined) store.seq = data.seq;
 
         if (data.entries && data.entries.length > 0) {
-          for (var i = 0; i < data.entries.length; i++) {
-            var entry = data.entries[i];
-            if (entry.type === 'tool_use' && entry.tool_id) {
-              store.toolMap[entry.tool_id] = { tool_name: entry.tool_name || '?' };
-            }
-            if (entry.type === 'tool_result' && entry.tool_id) {
-              store.resultMap[entry.tool_id] = entry;
-            }
-            // Pre-init enrichment properties so Alpine tracks them reactively
-            if (entry.type === 'semantic_bash' && entry.source_id && !entry.hasOwnProperty('_enhanced')) {
-              entry._enhanced = false;
-              entry._enriched_title = null;
-              entry._enriched_preview = null;
-              entry._enriched_tags = null;
-            }
-          }
+          this._ingestEntries(store, data.entries);
           store.entries = data.entries;
         }
 
-        // Sync to component
-        this.entries = store.entries;
-        this.offset = store.offset;
-        this.isLive = store.isLive;
-        this.sessionType = store.sessionType;
-        this._label = store.label || '';
-        if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
-        this._toolMap = store.toolMap;
-        this._resultMap = store.resultMap;
         this._rebuildDisplay();
       },
 
-      async init() {
-        // Parse URL: /session/{project}/{session_id}
-        const m = window.location.pathname.match(/^\/session\/([^/]+)\/(.+)$/);
-        if (!m) {
-          this.errorMsg = 'Invalid session URL';
-          this.state = 'error';
-          return;
+      // ── Ingest entries into store (toolMap + resultMap + enrichment init) ──
+
+      _ingestEntries(store, entries) {
+        for (var i = 0; i < entries.length; i++) {
+          var entry = entries[i];
+          if (entry.type === 'tool_use' && entry.tool_id) {
+            store.toolMap[entry.tool_id] = { tool_name: entry.tool_name || '?' };
+          }
+          if (entry.type === 'tool_result' && entry.tool_id) {
+            store.resultMap[entry.tool_id] = entry;
+          }
+          if (entry.type === 'semantic_bash' && entry.source_id && !entry.hasOwnProperty('_enhanced')) {
+            entry._enhanced = false;
+            entry._enriched_title = null;
+            entry._enriched_preview = null;
+            entry._enriched_tags = null;
+          }
         }
-        this.project = decodeURIComponent(m[1]);
-        this.sessionId = m[2];
-        this.projectLabel = _formatProject(this.project);
-
-        this._tailUrl = `/api/session/${encodeURIComponent(this.project)}/${encodeURIComponent(this.sessionId)}/tail`;
-
-        // tmux session name: from query param only (no auto-detect — avoids misfiring to wrong session)
-        const params = new URLSearchParams(window.location.search);
-        this._tmuxSession = params.get('tmux') || '';
-
-        var store = window.getSessionStore(this.sessionId);
-        this._linked = store.linked || false;
-        this.inputText = store.draftText || '';
-
-        if (store.loaded) {
-          // Instant render from cache — zero network
-          this.entries = store.entries;
-          this.offset = store.offset;
-          this.isLive = store.isLive;
-          this.sessionType = store.sessionType;
-          this.contextTokens = store.contextTokens || 0;
-          this._label = store.label || '';
-          if (!this._tmuxSession) this._tmuxSession = store.tmuxSession;
-          this._toolMap = store.toolMap;
-          this._resultMap = store.resultMap;
-          this._rebuildDisplay();
-          this.state = 'ready';
-
-          // Auto-scroll to bottom
-          this.$nextTick(() => {
-            var el = this.$refs.entriesContainer;
-            if (el) el.scrollTop = el.scrollHeight;
-          });
-        } else {
-          // First visit — subscribe SSE before fetch to not miss events
-          store._loading = true;
-          window.ensureSessionMessages();
-
-          try {
-            await this._fetchBacklog(store);
-          } catch (e) {
-            // New session with no JSONL yet — show empty ready state
-            if (this._tmuxSession) {
-              store._loading = false;
-              store.loaded = true;
-              this.entries = [];
-              this._rebuildDisplay();
-              this.isLive = true;
-              this.sessionType = store.sessionType || 'terminal';
-              this.state = 'ready';
-              // Continue to set up watchers below
-            } else {
-              if (this.state === 'loading') {
-                this.errorMsg = 'Failed to connect to session';
-                this.state = 'error';
-              }
-              store._loading = false;
-              return;
-            }
-          }
-
-          // Flush pending SSE events that arrived during fetch
-          var pending = store._pendingSSE;
-          store._pendingSSE = [];
-          store._loading = false;
-          store.loaded = true;
-          for (var i = 0; i < pending.length; i++) {
-            window.appendSessionEntries(store, pending[i]);
-          }
-
-          // Sync any SSE additions to component
-          this.entries = store.entries;
-          this._toolMap = store.toolMap;
-          this._resultMap = store.resultMap;
-          this._rebuildDisplay();
-          this.contextTokens = store.contextTokens || 0;
-
-          if (this.state === 'loading') this.state = 'ready';
-
-          // Auto-scroll to bottom (matches cached path above)
-          this.$nextTick(() => {
-            var el = this.$refs.entriesContainer;
-            if (el) el.scrollTop = el.scrollHeight;
-          });
-        }
-
-        // Ensure SSE subscription (idempotent — for already-loaded live sessions)
-        window.ensureSessionMessages();
-
-        // Reactive sync — Alpine.store mutations trigger $watch automatically
-        var self = this;
-        var sid = this.sessionId;
-        this._storeCleanups.push(this.$watch(
-          function() {
-            var s = Alpine.store('sessions')[sid];
-            return s ? s.entries.length : 0;
-          },
-          function(newLen) {
-            var s = Alpine.store('sessions')[sid];
-            if (!s) return;
-            self.entries = s.entries;
-            self._toolMap = s.toolMap;
-            self._resultMap = s.resultMap;
-            self._rebuildDisplay();
-            if (self.autoScroll) {
-              self.$nextTick(function() {
-                var el = self.$refs.entriesContainer;
-                if (el) el.scrollTop = el.scrollHeight;
-              });
-            }
-          }
-        ));
-        this._storeCleanups.push(this.$watch(
-          function() {
-            var s = Alpine.store('sessions')[sid];
-            return s ? s.isLive : true;
-          },
-          function(val) { self.isLive = val; }
-        ));
-        this._storeCleanups.push(this.$watch(
-          function() {
-            var s = Alpine.store('sessions')[sid];
-            return s ? s.contextTokens : 0;
-          },
-          function(val) { self.contextTokens = val; }
-        ));
-        this._storeCleanups.push(this.$watch(
-          function() {
-            var s = Alpine.store('sessions')[sid];
-            return s ? s.label : '';
-          },
-          function(val) { self._label = val || ''; }
-        ));
-        this._storeCleanups.push(this.$watch(
-          function() {
-            var s = Alpine.store('sessions')[sid];
-            return s ? s.linked : false;
-          },
-          function(val) { self._linked = val; }
-        ));
-
-        // Persist draft text to store on every keystroke
-        var self = this;
-        this.$watch('inputText', function(val) {
-          var s = window.getSessionStore(self.sessionId);
-          if (s) s.draftText = val;
-        });
-
-        // Clipboard paste support — attach pasted files
-        this.$nextTick(() => {
-          const ta = this.$refs.messageInput;
-          if (ta) {
-            ta.addEventListener('paste', (e) => {
-              const items = e.clipboardData && e.clipboardData.items;
-              if (!items) return;
-              const files = [];
-              for (let i = 0; i < items.length; i++) {
-                if (items[i].kind === 'file') {
-                  const f = items[i].getAsFile();
-                  if (f) files.push(f);
-                }
-              }
-              if (files.length) { e.preventDefault(); this.addFiles(files); }
-            });
-          }
-        });
       },
 
-      destroy() {
-        // Do NOT unregister SSE — store keeps accumulating outside component lifecycle
-        // Do NOT clear store — it persists across navigations
+      // ── Overlay: dispatch tail polling ──────────────────────────
+
+      async _pollTail(currentOffset) {
+        if (!this._runDir) return;
+        try {
+          var res = await fetch('/api/dispatch/tail/' + encodeURIComponent(this._runDir) + '?after=' + currentOffset);
+          if (!res.ok) return currentOffset;
+          var data = await res.json();
+          var store = Alpine.store('sessions')[this.sessionKey];
+          if (!store) return currentOffset;
+
+          var wasLive = store.isLive;
+          store.isLive = !!data.is_live;
+
+          if (data.entries && data.entries.length > 0) {
+            this._ingestEntries(store, data.entries);
+            for (var i = 0; i < data.entries.length; i++) {
+              store.entries.push(data.entries[i]);
+            }
+            this._rebuildDisplay();
+            if (this.autoScroll) this._scrollToBottom();
+          }
+
+          if (wasLive !== store.isLive || (data.entries && data.entries.length > 0)) {
+            if (this._mode === 'overlay') this._updateHeader();
+          }
+
+          // Stop polling if session completed and no new data
+          if (!data.is_live && currentOffset > 0 && (!data.entries || data.entries.length === 0)) {
+            if (this._pollInterval) {
+              clearInterval(this._pollInterval);
+              this._pollInterval = null;
+            }
+            if (this._mode === 'overlay') this._updateHeader();
+          }
+          return data.offset;
+        } catch (_) {
+          return currentOffset;
+        }
+      },
+
+      // ── Overlay: reset ──────────────────────────────────────────
+
+      _reset() {
+        // Clean up watchers and polling
         for (var i = 0; i < this._storeCleanups.length; i++) {
           if (typeof this._storeCleanups[i] === 'function') this._storeCleanups[i]();
         }
         this._storeCleanups = [];
+        if (this._pollInterval) {
+          clearInterval(this._pollInterval);
+          this._pollInterval = null;
+        }
+        // Reset view state
+        this.state = 'loading';
+        this.sessionKey = '';
+        this.displayEntries = [];
+        this._expanded = {};
+        this._expandView = {};
+        this._groupExpanded = {};
+        this._groupExpandView = {};
+        this.autoScroll = true;
+        this._runDir = '';
+        this._tailUrl = '';
       },
+
+      // ── Overlay: header sync (imperative — outside Alpine scope) ──
+
+      _updateHeader() {
+        var statusEl = document.getElementById('live-panel-status');
+        var pulseEl = document.getElementById('live-pulse');
+        var badgeEl = document.getElementById('live-panel-badge');
+        if (!statusEl) return;
+
+        if (this.isLive) {
+          statusEl.textContent = 'streaming';
+          statusEl.className = 'text-xs text-green-400 ml-auto';
+          if (pulseEl) { pulseEl.style.background = '#22c55e'; pulseEl.style.animation = ''; }
+          if (badgeEl) { badgeEl.textContent = 'Live'; badgeEl.className = 'badge badge-open'; }
+        } else {
+          statusEl.textContent = this.entries.length + ' entries';
+          statusEl.className = 'text-xs text-gray-500 ml-auto';
+          if (pulseEl) { pulseEl.style.background = '#6b7280'; pulseEl.style.animation = 'none'; }
+          if (badgeEl) { badgeEl.textContent = 'Complete'; badgeEl.className = 'badge badge-closed'; }
+        }
+      },
+
     }));
   });
 })();
