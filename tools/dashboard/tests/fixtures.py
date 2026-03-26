@@ -139,3 +139,24 @@ def write_fixture(fixture_dict, path):
     """Write fixture to a JSON file for DASHBOARD_MOCK."""
     Path(path).write_text(json.dumps(fixture_dict, indent=2))
     return str(path)
+
+
+# ── State-aware session generators ───────────────────────────────────
+# These helpers produce sessions with the `linked` field set explicitly
+# for testing the viewer state machine.  Phase 3 (auto-h4gh) renames
+# linked → resolved; until then tests use `linked` to match current
+# session-store.js (line 47).
+
+def make_unresolved_session(session_id, **kwargs):
+    """Host session with linked=false (no jsonl_path) for testing Unresolved state."""
+    return {**make_session(session_id, type="host", **kwargs), "linked": False}
+
+
+def make_dead_session(session_id, **kwargs):
+    """Dead session for testing Complete state."""
+    return {**make_session(session_id, is_live=False, **kwargs), "linked": True}
+
+
+def make_linked_session(session_id, **kwargs):
+    """Linked live session for testing Live state."""
+    return {**make_session(session_id, is_live=True, **kwargs), "linked": True}
