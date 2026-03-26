@@ -1766,6 +1766,96 @@ def _upconvert_graph_result(content: str, timestamp: str) -> dict | None:
     return None
 
 
+def _enrich_semantic_tile(entry: dict) -> None:
+    """Enrich note-created/thought-captured/comment-added tiles with graph.db data.
+
+    One SQLite read per semantic tile. Mutates entry in place, adding title,
+    preview, and tags fields. Graceful fallback: if graph.db unavailable or
+    source not found, the entry is left unchanged (raw CLI output).
+    """
+    source_id = entry.get("source_id") or entry.get("comment_id")
+    if not source_id:
+        return
+
+    db_path = _graph_db_path()
+    try:
+        if db_path:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        else:
+            # Default path
+            default = Path(__file__).resolve().parents[2] / "data" / "graph.db"
+            if not default.exists():
+                return
+            conn = sqlite3.connect(f"file:{default}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except (sqlite3.OperationalError, OSError):
+        return
+
+    try:
+        # For comments, look up the parent note's metadata
+        lookup_id = source_id
+        row = conn.execute(
+            "SELECT id, title, metadata FROM sources WHERE id = ?", (lookup_id,)
+        ).fetchone()
+        if not row:
+            # Try prefix match
+            row = conn.execute(
+                "SELECT id, title, metadata FROM sources WHERE id LIKE ? LIMIT 1",
+                (f"{lookup_id}%",),
+            ).fetchone()
+        if not row:
+            return
+
+        meta = {}
+        try:
+            meta = json.loads(row["metadata"]) if row["metadata"] else {}
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # For comment-added, use the parent note's data
+        if entry.get("semantic_type") == "comment-added" and meta.get("parent_source_id"):
+            parent_row = conn.execute(
+                "SELECT id, title, metadata FROM sources WHERE id = ?",
+                (meta["parent_source_id"],),
+            ).fetchone()
+            if not parent_row:
+                parent_row = conn.execute(
+                    "SELECT id, title, metadata FROM sources WHERE id LIKE ? LIMIT 1",
+                    (f"{meta['parent_source_id']}%",),
+                ).fetchone()
+            if parent_row:
+                row = parent_row
+                try:
+                    meta = json.loads(parent_row["metadata"]) if parent_row["metadata"] else {}
+                except (json.JSONDecodeError, TypeError):
+                    meta = {}
+
+        # Extract title (strip leading # headings)
+        title = (row["title"] or "").lstrip("#").strip()
+
+        # Extract tags from metadata
+        tags = meta.get("tags", [])
+
+        # Extract preview from first content entry, skip heading lines
+        content_row = conn.execute(
+            "SELECT content FROM thoughts WHERE source_id = ? ORDER BY turn_number LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        preview = ""
+        if content_row and content_row["content"]:
+            lines = content_row["content"].split("\n")
+            body_lines = [l for l in lines if not l.startswith("#") and l.strip()]
+            preview = " ".join(body_lines)[:120]
+
+        entry["title"] = title
+        entry["preview"] = preview
+        entry["tags"] = tags if isinstance(tags, list) else []
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        pass  # graceful fallback
+    finally:
+        conn.close()
+
+
 def _classify_system_message(text: str) -> dict | None:
     """Detect harness-injected system messages in user entries.
 
@@ -1871,6 +1961,7 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                     # Upconvert graph note/thought/comment results to semantic tiles
                     sem = _upconvert_graph_result(result_content, timestamp)
                     if sem:
+                        _enrich_semantic_tile(sem)
                         tool_results.append(sem)
                         continue
                     if len(result_content) > 2000:
@@ -2000,6 +2091,7 @@ def _parse_jsonl_entry(line: str) -> dict | None:
         # Upconvert graph note/thought/comment results to semantic tiles
         sem = _upconvert_graph_result(result_content, timestamp)
         if sem:
+            _enrich_semantic_tile(sem)
             return sem
         if len(result_content) > 2000:
             result_content = result_content[:2000] + "\n... (truncated)"
