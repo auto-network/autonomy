@@ -197,7 +197,15 @@
       <!-- Note layout -->
       <template x-if="isNote">
         <div :data-source-id="src.id" class="mt-4">
-          <div x-markdown="noteContent"></div>
+          <div class="flex gap-1 mb-3">
+            <button @click="mdZoom = 'compact'"
+                    :class="mdZoom === 'compact' ? 'bg-indigo-900/50 text-indigo-300' : 'text-gray-500 hover:text-gray-300'"
+                    class="px-2 py-0.5 rounded text-xs">Compact</button>
+            <button @click="mdZoom = 'normal'"
+                    :class="mdZoom === 'normal' ? 'bg-indigo-900/50 text-indigo-300' : 'text-gray-500 hover:text-gray-300'"
+                    class="px-2 py-0.5 rounded text-xs">Normal</button>
+          </div>
+          <div :class="mdZoom === 'compact' ? 'text-sm' : 'text-base'" x-markdown="noteContent"></div>
         </div>
       </template>
 
