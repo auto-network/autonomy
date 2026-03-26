@@ -32,6 +32,7 @@
 
         // Capture state: 'idle' | 'working' | 'success' | 'error'
         captureState: 'idle',
+        screenshotStatus: '',
 
         // Primer injection
         primerInjecting: false,
@@ -122,6 +123,8 @@
         },
 
         // ── Screenshot ────────────────────────────────────────────────────
+
+        setScreenshotStatus: function (msg) { this.screenshotStatus = msg; },
 
         captureScreenshot: async function () {
           if (this.captureState === 'working') return; // prevent double-click
