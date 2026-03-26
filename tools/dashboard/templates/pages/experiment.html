@@ -211,7 +211,8 @@
         <template x-if="chatConnected">
           <div id="exp-chat-panel" x-data="sessionViewerPage({mode:'panel'})" style="flex:1;display:flex;flex-direction:column;min-height:0">
             <!-- Scrollable entries container -->
-            <div class="flex-1 overflow-y-auto px-2 py-3" x-ref="entriesContainer" @scroll="onScroll()">
+            <div x-ref="entriesContainer" @scroll="onScroll()"
+                 style="flex:1; overflow-y:auto; min-height:0; padding:8px;">
               {% include "partials/session-entries.html" %}
             </div>
             <!-- Screenshot injected indicator -->
