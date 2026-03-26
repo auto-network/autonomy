@@ -180,7 +180,7 @@
             last_activity: s.lastActivity || 0,
             latest: lastEntry ? (lastEntry.content || '').slice(0, 150) : (s.lastMessage || ''),
             type: s.sessionType || 'terminal',
-            tmux_session: s.tmuxSession || '',
+            tmux_session: id,
             bead_id: s.beadId || '',
             entry_count: s.entryCount || s.entries.length,
             context_tokens: s.contextTokens || 0,
@@ -197,7 +197,7 @@
           var mapped = all.map(_mapActive);
           var interactiveTypes = ['terminal', 'chatwith', 'host', 'container'];
           this.interactive = mapped.filter(s =>
-            s.tmux_session && interactiveTypes.indexOf(s.type) !== -1
+            s.session_id && interactiveTypes.indexOf(s.type) !== -1
           );
           this.loading = false;
         }
@@ -221,7 +221,7 @@
               var store = window.getSessionStore(s.session_id);
               store.project = s.project || '';
               store.sessionType = s.type || '';
-              store.tmuxSession = s.tmux_session || '';
+              // tmux_session removed in auto-h4gh; session_id is the store key
               store.label = s.label || '';
               if (s.role) store.role = s.role;
               store.isLive = s.is_live !== false;
@@ -230,7 +230,7 @@
               if (s.entry_count) store.entryCount = s.entry_count;
               if (s.context_tokens) store.contextTokens = s.context_tokens;
               if (s.last_message !== undefined) store.lastMessage = s.last_message;
-              if (s.linked !== undefined) store.linked = !!s.linked;
+              if (s.resolved !== undefined) store.resolved = !!s.resolved;
             }
           }
         } catch (e) {
@@ -241,13 +241,13 @@
       navigate(s) {
         if (window.actionSheet.isOpen()) return;
         var path = '/session/' + encodeURIComponent(s.project) + '/' + s.session_id
-          + (s.tmux_session ? '?tmux=' + encodeURIComponent(s.tmux_session) : '');
+          + '?tmux=' + encodeURIComponent(s.session_id);
         navigateTo(path);
       },
 
       showSessionActions(s) {
-        var label = s.label || s.tmux_session || s.session_id.slice(0, 12);
-        var tmux = s.tmux_session;
+        var label = s.label || s.session_id.slice(0, 12);
+        var tmux = s.session_id;
         var nagLabel = s.nag_enabled ? 'Disable Nag' : 'Enable Nag (15m)';
         var actions = [];
 
