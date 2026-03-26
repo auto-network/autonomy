@@ -43,6 +43,75 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
 """
 
 
+def _backfill_new_columns(conn: sqlite3.Connection) -> None:
+    """Backfill resolution_dir, session_uuids, curr_jsonl_file for existing rows.
+
+    Called once when the new columns are first added.
+    """
+    import json as _json
+
+    rows = conn.execute(
+        "SELECT tmux_name, type, bead_id, jsonl_path FROM tmux_sessions"
+    ).fetchall()
+    if not rows:
+        return
+
+    agent_runs = Path(__file__).resolve().parents[3] / "data" / "agent-runs"
+    updated = 0
+    for row in rows:
+        tmux_name = row[0]
+        stype = row[1]
+        bead_id = row[2]
+        jsonl_path = row[3]
+
+        resolution_dir: str | None = None
+        session_uuids: list[str] = []
+        curr_jsonl_file: str | None = None
+
+        if jsonl_path:
+            jp = Path(jsonl_path)
+
+            # Validate: clear subagent paths (graph://301b0811-0f1 bug)
+            if "subagents" in str(jp):
+                logger.warning("dashboard_db: backfill clearing subagent path for %s: %s", tmux_name, jsonl_path)
+                conn.execute(
+                    "UPDATE tmux_sessions SET jsonl_path=NULL, session_uuid=NULL WHERE tmux_name=?",
+                    (tmux_name,),
+                )
+                continue
+
+            # Derive resolution_dir from jsonl_path parent
+            resolution_dir = str(jp.parent)
+            session_uuids = [jp.stem]
+            curr_jsonl_file = jsonl_path
+        elif stype == "container" and bead_id:
+            # Container without jsonl_path: derive from bead_id
+            if agent_runs.exists():
+                matches = sorted(
+                    agent_runs.glob(f"{bead_id}-*"),
+                    key=lambda p: p.stat().st_mtime, reverse=True,
+                )
+                for m in matches:
+                    sess_dir = m / "sessions"
+                    if sess_dir.exists():
+                        # Find project subdirs
+                        subdirs = [d for d in sess_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+                        if subdirs:
+                            resolution_dir = str(subdirs[0])
+                        break
+
+        if resolution_dir or session_uuids or curr_jsonl_file:
+            conn.execute(
+                "UPDATE tmux_sessions SET resolution_dir=?, session_uuids=?, curr_jsonl_file=? WHERE tmux_name=?",
+                (resolution_dir, _json.dumps(session_uuids), curr_jsonl_file, tmux_name),
+            )
+            updated += 1
+
+    conn.commit()
+    if updated:
+        logger.info("dashboard_db: backfilled %d rows with resolution_dir/session_uuids/curr_jsonl_file", updated)
+
+
 def init_db(db_path: Path | None = None) -> None:
     """Initialise dashboard.db and create schema. Idempotent."""
     global _conn
@@ -87,6 +156,15 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN role TEXT DEFAULT ''")
         _conn.commit()
+    # Migrate: add resolution_dir, session_uuids, curr_jsonl_file columns (Phase 0)
+    try:
+        _conn.execute("SELECT resolution_dir FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN resolution_dir TEXT")
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN session_uuids TEXT DEFAULT '[]'")
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN curr_jsonl_file TEXT")
+        _conn.commit()
+        _backfill_new_columns(_conn)
     logger.info("dashboard_db: initialised at %s", path)
 
 
@@ -109,30 +187,59 @@ def insert_session(
     bead_id: str | None = None,
     jsonl_path: str | None = None,
     session_uuid: str | None = None,
+    resolution_dir: str | None = None,
 ) -> None:
     """INSERT a new session row. Raises sqlite3.IntegrityError on duplicate name."""
+    import json as _json
+
     conn = get_conn()
+    # Build session_uuids and curr_jsonl_file from initial values
+    session_uuids = _json.dumps([session_uuid]) if session_uuid else "[]"
+    curr_jsonl_file = jsonl_path  # initially same as jsonl_path
     conn.execute(
         "INSERT INTO tmux_sessions"
-        " (tmux_name, type, project, bead_id, jsonl_path, session_uuid, created_at, is_live)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
-        (tmux_name, session_type, project, bead_id, jsonl_path, session_uuid, time.time()),
+        " (tmux_name, type, project, bead_id, jsonl_path, session_uuid,"
+        "  resolution_dir, session_uuids, curr_jsonl_file, created_at, is_live)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+        (tmux_name, session_type, project, bead_id, jsonl_path, session_uuid,
+         resolution_dir, session_uuids, curr_jsonl_file, time.time()),
     )
     conn.commit()
 
 
 def update_jsonl_link(tmux_name: str, session_uuid: str, jsonl_path: str, project: str | None = None) -> None:
-    """LINK step: set session_uuid and jsonl_path after watcher discovers the file."""
+    """LINK step: set session_uuid, jsonl_path, and append to session_uuids.
+
+    Also updates curr_jsonl_file and derives resolution_dir from the file path.
+    """
+    import json as _json
+
     conn = get_conn()
+    # Read current session_uuids and append new UUID if not already present
+    row = conn.execute(
+        "SELECT session_uuids FROM tmux_sessions WHERE tmux_name=?", (tmux_name,)
+    ).fetchone()
+    uuids: list[str] = _json.loads(row[0] or "[]") if row and row[0] else []
+    if session_uuid not in uuids:
+        uuids.append(session_uuid)
+
+    resolution_dir = str(Path(jsonl_path).parent)
+
     if project:
         conn.execute(
-            "UPDATE tmux_sessions SET session_uuid=?, jsonl_path=?, project=? WHERE tmux_name=?",
-            (session_uuid, jsonl_path, project, tmux_name),
+            "UPDATE tmux_sessions SET session_uuid=?, jsonl_path=?, project=?,"
+            " resolution_dir=COALESCE(resolution_dir, ?), session_uuids=?,"
+            " curr_jsonl_file=? WHERE tmux_name=?",
+            (session_uuid, jsonl_path, project, resolution_dir, _json.dumps(uuids),
+             jsonl_path, tmux_name),
         )
     else:
         conn.execute(
-            "UPDATE tmux_sessions SET session_uuid=?, jsonl_path=? WHERE tmux_name=?",
-            (session_uuid, jsonl_path, tmux_name),
+            "UPDATE tmux_sessions SET session_uuid=?, jsonl_path=?,"
+            " resolution_dir=COALESCE(resolution_dir, ?), session_uuids=?,"
+            " curr_jsonl_file=? WHERE tmux_name=?",
+            (session_uuid, jsonl_path, resolution_dir, _json.dumps(uuids),
+             jsonl_path, tmux_name),
         )
     conn.commit()
 
@@ -386,21 +493,41 @@ def upsert_session(
     bead_id: str | None = None,
     jsonl_path: str | None = None,
     session_uuid: str | None = None,
+    resolution_dir: str | None = None,
+    session_uuids: str = "[]",
+    curr_jsonl_file: str | None = None,
     created_at: float | None = None,
     file_offset: int = 0,
     last_message: str = "",
     is_live: bool = True,
     label: str = "",
 ) -> None:
-    """INSERT OR REPLACE — used for seeding on first run."""
+    """INSERT ... ON CONFLICT — used for seeding on first run.
+
+    Preserves existing label, topics, role, and nag settings on re-registration.
+    Only file resolution fields and liveness are updated on conflict.
+    """
     conn = get_conn()
     conn.execute(
-        "INSERT OR REPLACE INTO tmux_sessions"
+        "INSERT INTO tmux_sessions"
         " (tmux_name, type, project, bead_id, jsonl_path, session_uuid,"
+        "  resolution_dir, session_uuids, curr_jsonl_file,"
         "  created_at, is_live, file_offset, last_message, label)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(tmux_name) DO UPDATE SET"
+        "  jsonl_path = excluded.jsonl_path,"
+        "  session_uuid = excluded.session_uuid,"
+        "  resolution_dir = COALESCE(excluded.resolution_dir, resolution_dir),"
+        "  session_uuids = CASE WHEN excluded.session_uuids != '[]'"
+        "    THEN excluded.session_uuids ELSE session_uuids END,"
+        "  curr_jsonl_file = COALESCE(excluded.curr_jsonl_file, curr_jsonl_file),"
+        "  file_offset = excluded.file_offset,"
+        "  last_message = CASE WHEN excluded.last_message != ''"
+        "    THEN excluded.last_message ELSE last_message END,"
+        "  is_live = excluded.is_live",
         (
             tmux_name, session_type, project, bead_id, jsonl_path, session_uuid,
+            resolution_dir, session_uuids, curr_jsonl_file,
             created_at or time.time(), 1 if is_live else 0, file_offset, last_message,
             label,
         ),
