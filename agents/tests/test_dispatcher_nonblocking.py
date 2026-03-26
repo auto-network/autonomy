@@ -287,7 +287,7 @@ class TestPollAndCollect:
     def test_timed_out_agent_killed(self, mock_poll, mock_kill,
                                      mock_collect,
                                      mock_release, mock_cleanup):
-        """Agent exceeding MAX_AGENT_RUNTIME is killed and released."""
+        """Agent with stale JSONL past boot grace is killed and released as TIMEOUT."""
         agent = _make_running_agent(
             started_at=time.time() - 9999  # Way past timeout
         )
