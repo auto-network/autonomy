@@ -196,17 +196,24 @@ def _make_store():
         "isLive": True,
         "toolMap": {},
         "resultMap": {},
+        "_loading": False,
+        "_needsBackfill": False,
     }
 
 
 def _append_session_entries(store, data):
     """Python mirror of window.appendSessionEntries() from session-store.js.
 
-    Exactly replicates the seq dedup logic (lines 62-91 of session-store.js).
+    Exactly replicates the seq dedup logic with seq regression detection.
     """
     # Seq dedup — skip if already seen
+    # Detect seq regression (server restart resets seq to 0)
     if data.get("seq") is not None and data["seq"] <= store["seq"]:
-        return 0
+        # If seq dropped to less than half the old value, it's a server restart
+        if store["seq"] > 1 and data["seq"] * 2 < store["seq"]:
+            store["seq"] = data["seq"]
+        else:
+            return 0
     if data.get("seq") is not None:
         store["seq"] = data["seq"]
 
