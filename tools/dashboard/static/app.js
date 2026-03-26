@@ -847,7 +847,7 @@ async function initDisplayCapture(expId) {
 }
 
 function _updateScreenshotStatus(expId, msg) {
-  if (window._experimentPage) {
+  if (window._experimentPage && typeof window._experimentPage.setScreenshotStatus === 'function') {
     window._experimentPage.setScreenshotStatus(msg);
   } else {
     const el = document.getElementById('exp-screenshot-status');
