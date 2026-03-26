@@ -55,8 +55,8 @@
         return s ? s.isLive : false;
       },
       get _tmuxSession() {
-        var s = Alpine.store('sessions')[this.sessionKey];
-        return s ? s.tmuxSession : '';
+        // sessionKey is tmux_name — the stable identifier
+        return this.sessionKey;
       },
       get _toolMap() {
         var s = Alpine.store('sessions')[this.sessionKey];
@@ -66,9 +66,9 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.resultMap : {};
       },
-      get _linked() {
+      get _resolved() {
         var s = Alpine.store('sessions')[this.sessionKey];
-        return s ? s.linked : false;
+        return s ? s.resolved : false;
       },
       get _label() {
         var s = Alpine.store('sessions')[this.sessionKey];
@@ -104,9 +104,6 @@
       attachments: [],
       _nextAttachId: 0,
 
-      // Enrichment cache (until Phase 3 removes lazy enhance)
-      _enrichCache: {},
-
       // Link terminal (Tier 3)
       linkState: 'idle',
       linkCandidates: [],
@@ -126,14 +123,14 @@
       _tailUrl: '',
 
       // ── State machine ───────────────────────────────────────────
-      // Source of truth: store.loaded, store.isLive, store.linked
+      // Source of truth: store.loaded, store.isLive, store.resolved
       // Returns: 'connecting' | 'live' | 'unresolved' | 'complete'
 
       deriveState() {
         var s = Alpine.store('sessions')[this.sessionKey];
         if (!s || !s.loaded) return 'connecting';
         if (!s.isLive) return 'complete';
-        if (s.linked) return 'live';
+        if (s.resolved) return 'live';
         return 'unresolved';
       },
 
@@ -176,7 +173,6 @@
               store.entries = data.entries;
             }
             store.isLive = isLiveHint !== undefined ? !!isLiveHint : !!data.is_live;
-            store.tmuxSession = tmuxSession;
             store.sessionType = data.type || '';
             if (data.offset !== undefined) store.offset = data.offset;
             if (data.seq !== undefined) store.seq = data.seq;
@@ -219,7 +215,6 @@
         this._tailUrl = '/api/session/' + encodeURIComponent(project) + '/' + encodeURIComponent(sessionId) + '/tail';
 
         var store = window.getSessionStore(sessionId);
-        if (tmuxSession) store.tmuxSession = tmuxSession;
 
         this.inputText = store.draftText || '';
 
@@ -237,7 +232,7 @@
             await this._fetchBacklog(store);
           } catch (e) {
             // New session with no JSONL yet — show empty ready state
-            if (store.tmuxSession || tmuxSession) {
+            if (this.sessionKey) {
               store._loading = false;
               store.loaded = true;
               this._rebuildDisplay();
@@ -434,64 +429,16 @@
         }, 3000);
       },
 
-      // ── Lazy tile enhancement ───────────────────────────────────
-      // Kept until Phase 3 (auto-h4gh) moves enrichment server-side.
-
-      async lazyEnhance(entry) {
-        if (entry._enhanced) return;
-        var sid = entry.source_id;
-        if (!sid) return;
-
-        entry._enhanced = 'loading';
-
-        if (this._enrichCache[sid]) {
-          var cached = this._enrichCache[sid];
-          entry._enriched_title = cached.title;
-          entry._enriched_preview = cached.preview;
-          entry._enriched_tags = cached.tags;
-          entry._enhanced = true;
-          return;
-        }
-
-        await new Promise(function(r) { setTimeout(r, 1000); });
-        if (entry._enhanced !== 'loading') return;
-
-        try {
-          var resp = await fetch('/api/graph/' + encodeURIComponent(sid));
-          if (!resp.ok) { entry._enhanced = true; return; }
-          var data = await resp.json();
-
-          var src = data.source || {};
-          var title = (src.title || '').replace(/^#+\s*/, '');
-          var meta = {};
-          try { meta = typeof src.metadata === 'string' ? JSON.parse(src.metadata) : (src.metadata || {}); } catch(_) {}
-          var tags = meta.tags || [];
-
-          var content = (data.entries && data.entries[0] && data.entries[0].content) || '';
-          var lines = content.split('\n').filter(function(l) { return !l.startsWith('#') && l.trim(); });
-          var preview = lines.slice(0, 2).join(' ').slice(0, 120);
-
-          entry._enriched_title = title || entry.content;
-          entry._enriched_preview = preview;
-          entry._enriched_tags = tags;
-          entry._enhanced = true;
-
-          this._enrichCache[sid] = { title: title, preview: preview, tags: tags };
-        } catch(_) {
-          entry._enhanced = true;
-        }
-      },
-
       // ── Label editing ───────────────────────────────────────────
 
       saveLabel(event) {
         var store = Alpine.store('sessions')[this.sessionKey];
-        if (!store || !store.tmuxSession || !store.isLive) return;
+        if (!store || !this.sessionKey || !store.isLive) return;
         var newLabel = (event.target.textContent || '').trim();
-        if (newLabel === store.tmuxSession) newLabel = '';
+        if (newLabel === this.sessionKey) newLabel = '';
         if (newLabel === (store.label || '')) return;
         store.label = newLabel;
-        fetch('/api/session/' + encodeURIComponent(store.tmuxSession) + '/label', {
+        fetch('/api/session/' + encodeURIComponent(this.sessionKey) + '/label', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ label: newLabel }),
@@ -642,8 +589,7 @@
               var data = await resp.json();
               // Write to store (getters read from store)
               var ss = window.getSessionStore(this.sessionKey);
-              ss.tmuxSession = this.selectedTmux;
-              ss.linked = true;
+              ss.resolved = true;
               this.linkState = 'confirmed';
               if (data.project && data.project !== this.project) {
                 this.project = data.project;
@@ -684,7 +630,7 @@
         store.offset = data.offset || 0;
         store.isLive = !!data.is_live;
         store.sessionType = data.type || '';
-        store.tmuxSession = data.tmux_session || store.tmuxSession || '';
+        // tmux_session from response is for reference only; sessionKey is authoritative
         if (data.seq !== undefined) store.seq = data.seq;
 
         if (data.entries && data.entries.length > 0) {
@@ -705,12 +651,6 @@
           }
           if (entry.type === 'tool_result' && entry.tool_id) {
             store.resultMap[entry.tool_id] = entry;
-          }
-          if (entry.type === 'semantic_bash' && entry.source_id && !entry.hasOwnProperty('_enhanced')) {
-            entry._enhanced = false;
-            entry._enriched_title = null;
-            entry._enriched_preview = null;
-            entry._enriched_tags = null;
           }
         }
       },

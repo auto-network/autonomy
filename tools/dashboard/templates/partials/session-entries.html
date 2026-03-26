@@ -209,28 +209,23 @@
                   <span class="sc-meta text-gray-400" x-text="resolveEntry(dEntry).bead_id || resolveEntry(dEntry).comment_id || resolveEntry(dEntry).source_id || ''"></span>
                   <span class="sc-timestamp" x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
                 </div>
-                <!-- Line 2: content (enriched title after lazy load, raw CLI output initially) -->
-                <div class="sc-line2 sc-line2-truncated" x-text="resolveEntry(dEntry)._enriched_title || resolveEntry(dEntry).content"></div>
+                <!-- Line 2: content (server-enriched title, fallback to raw CLI output) -->
+                <div class="sc-line2 sc-line2-truncated" x-text="resolveEntry(dEntry).title || resolveEntry(dEntry).content"></div>
 
-                <!-- Line 3: enriched preview (appears after lazy load) -->
-                <template x-if="resolveEntry(dEntry)._enriched_preview">
-                  <div class="text-xs mt-1 truncate" style="color:#6b7280" x-text="resolveEntry(dEntry)._enriched_preview"></div>
+                <!-- Line 3: enriched preview -->
+                <template x-if="resolveEntry(dEntry).preview">
+                  <div class="text-xs mt-1 truncate" style="color:#6b7280" x-text="resolveEntry(dEntry).preview"></div>
                 </template>
 
-                <!-- Line 4: enriched tags (appears after lazy load) -->
-                <template x-if="resolveEntry(dEntry)._enriched_tags && resolveEntry(dEntry)._enriched_tags.length > 0">
+                <!-- Line 4: enriched tags -->
+                <template x-if="resolveEntry(dEntry).tags && resolveEntry(dEntry).tags.length > 0">
                   <div class="flex gap-1 flex-wrap mt-1">
-                    <template x-for="t in resolveEntry(dEntry)._enriched_tags" :key="t">
+                    <template x-for="t in resolveEntry(dEntry).tags" :key="t">
                       <a :href="'/stream/' + t" @click.prevent.stop="navigateTo('/stream/' + t)"
                          style="display:inline-flex; padding:0 5px; border-radius:3px; font-size:9px; background:#1e293b; color:#94a3b8; text-decoration:none"
                          x-text="t"></a>
                     </template>
                   </div>
-                </template>
-
-                <!-- Lazy enhancement trigger -->
-                <template x-if="resolveEntry(dEntry).source_id && !resolveEntry(dEntry)._enhanced">
-                  <div x-intersect:enter.margin.100px="lazyEnhance(resolveEntry(dEntry))" style="height:1px"></div>
                 </template>
               </a>
             </template>

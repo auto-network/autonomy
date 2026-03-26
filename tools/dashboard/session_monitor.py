@@ -257,7 +257,6 @@ class SessionMonitor:
                 "session_id": s["tmux_name"],
                 "project": s["project"],
                 "type": s["type"],
-                "tmux_session": s["tmux_name"],
                 "is_live": bool(s["is_live"]),
                 "started_at": s["created_at"],
                 "graph_source_id": s.get("graph_source_id"),
@@ -271,7 +270,10 @@ class SessionMonitor:
                 "nag_enabled": bool(s.get("nag_enabled")),
                 "nag_interval": s.get("nag_interval") or 15,
                 "nag_message": s.get("nag_message") or "",
-                "linked": bool(s.get("jsonl_path")),
+                # jsonl_path is the legacy bridge; session_uuids is canonical after Phase 4
+                "resolved": bool(s.get("jsonl_path")) or (
+                    bool(s.get("session_uuids")) and s["session_uuids"] != "[]"
+                ),
             }
             for s in sessions
         ]
