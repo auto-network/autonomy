@@ -198,7 +198,7 @@
       <template x-if="isNote">
         <div :data-source-id="src.id" class="mt-4">
           {% include 'partials/zoom-toggle.html' %}
-          <div :class="zoom === 'compact' ? 'text-sm' : zoom === 'expanded' ? 'text-lg' : 'text-base'" x-markdown="noteContent"></div>
+          <div :style="'font-size:' + mdSizes[zoom]" x-markdown="noteContent"></div>
         </div>
       </template>
 
