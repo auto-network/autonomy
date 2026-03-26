@@ -270,6 +270,7 @@ class SessionMonitor:
                 "nag_enabled": bool(s.get("nag_enabled")),
                 "nag_interval": s.get("nag_interval") or 15,
                 "nag_message": s.get("nag_message") or "",
+                "dispatch_nag": bool(s.get("dispatch_nag")),
                 # jsonl_path is the legacy bridge; session_uuids is canonical after Phase 4
                 "resolved": bool(s.get("jsonl_path")) or (
                     bool(s.get("session_uuids")) and s["session_uuids"] != "[]"
