@@ -199,3 +199,10 @@ body.zoom-expanded .sc-card-list { gap: 8px; }
 }
 .sc-zoom-btn:hover { color: #94a3b8; }
 .sc-zoom-btn.active { background: #334155; color: #e2e8f0; }
+
+/* Markdown table horizontal scroll (iOS Safari needs CSS class, not inline styles) */
+.md-table-scroll {
+    overflow-x: auto;
+    max-width: 100%;
+    -webkit-overflow-scrolling: touch;
+}
