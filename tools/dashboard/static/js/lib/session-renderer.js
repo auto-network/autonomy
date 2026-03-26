@@ -326,6 +326,10 @@
 
     // ── Internal helpers ───────────────────────────────────────
 
+    resolveEntry(dEntry) {
+      return window.SessionDisplay.resolve(dEntry, this.entries);
+    },
+
     _rebuildDisplay() {
       this.displayEntries = window.SessionDisplay.buildAll(this.entries);
     },
