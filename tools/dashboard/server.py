@@ -2370,27 +2370,6 @@ async def api_dispatch_latest(request):
 
 # ── Session Tail & Send API ────────────────────────────────────
 
-def _session_file_path(project: str, session_id: str) -> Path | None:
-    """Resolve the JSONL path for a session, guarding against path traversal.
-
-    Searches two locations:
-    1. ~/.claude/projects/{project}/{session_id}.jsonl  (host sessions)
-    2. data/agent-runs/*/sessions/{project}/{session_id}.jsonl  (container sessions)
-    """
-    # Neither component may contain path separators
-    if "/" in project or "\\" in project or "/" in session_id or "\\" in session_id:
-        return None
-    # Try host path first
-    host_path = Path.home() / ".claude" / "projects" / project / f"{session_id}.jsonl"
-    if host_path.exists():
-        return host_path
-    # Try container session paths
-    agent_runs = _REPO_ROOT / "data" / "agent-runs"
-    if agent_runs.exists():
-        for match in agent_runs.glob(f"*/sessions/{project}/{session_id}.jsonl"):
-            return match
-    return None
-
 
 async def api_session_tail(request):
     """Tail JSONL entries for any session by project/session_id.
@@ -2421,10 +2400,6 @@ async def api_session_tail(request):
         candidate = Path(db_row["jsonl_path"])
         if candidate.exists():
             session_file = candidate
-
-    # Fallback: legacy path resolution by UUID
-    if session_file is None:
-        session_file = _session_file_path(project, session_id)
 
     if session_file is None:
         # Session file not resolved — check if it's a newly created session

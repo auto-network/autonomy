@@ -731,7 +731,7 @@ async function renderTerminal(cmd, attach) {
 
 // ── Live Session Panel ───────────────────────────────────────
 // Panel shell (show/hide/collapse) is imperative; body is Alpine-managed
-// via the livePanelViewer component (live-panel-viewer.js).
+// via the unified session viewer (session-viewer.js, overlay mode).
 
 function _showPanel(runDir, isLive) {
   const panel = document.getElementById('live-panel');
@@ -871,9 +871,11 @@ function _handleScreenshotResponse(expId, data) {
   const now = new Date().toLocaleTimeString();
   if (data.injected) {
     _updateScreenshotStatus(expId, `Screenshot injected ${now}`);
-    // Show indicator in the Chat With panel
-    if (window._experimentPage && window._experimentPage.chatWithPanelRef) {
-      window._experimentPage.chatWithPanelRef.showScreenshotInjected();
+    // Show indicator in the Chat With panel (unified viewer)
+    var panelEl = document.getElementById('exp-chat-panel');
+    if (panelEl) {
+      var panelData = Alpine.$data(panelEl);
+      if (panelData && panelData.showScreenshotInjected) panelData.showScreenshotInjected();
     }
   } else {
     _updateScreenshotStatus(expId, `Screenshot saved ${now}`);
