@@ -174,19 +174,25 @@
           var session = this.chatSessions.find(function (s) { return s.id === sessionId; });
           var project = session ? session.project : 'default';
 
-          // Configure chatWithPanel after Alpine renders the x-if template
+          // Configure unified viewer after Alpine renders the x-if template.
+          // setTimeout(100ms) needed: x-if="chatConnected" template doesn't exist
+          // until Alpine processes the flag change. $nextTick fires before the child
+          // component's x-init has run (Alpine timing race — see pitfall notes).
+          var self = this;
           this.$nextTick(function () {
-            var panelEl = document.getElementById('exp-chat-panel');
-            if (panelEl) {
-              var panelData = Alpine.$data(panelEl);
-              if (panelData && panelData.configure) {
-                panelData.configure({
-                  sessionId: sessionId,
-                  project: project,
-                  tmuxSession: sessionId,
-                });
+            setTimeout(function () {
+              var panelEl = document.getElementById('exp-chat-panel');
+              if (panelEl) {
+                var panelData = Alpine.$data(panelEl);
+                if (panelData && panelData.configure) {
+                  panelData.configure({
+                    sessionId: sessionId,
+                    project: project,
+                    tmuxSession: sessionId,
+                  });
+                }
               }
-            }
+            }, 100);
           });
         },
 
