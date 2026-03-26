@@ -209,7 +209,7 @@
 
         <!-- Chat panel (when connected) — powered by unified session viewer -->
         <template x-if="chatConnected">
-          <div id="exp-chat-panel" x-data="sessionViewerPage({mode:'panel'})" style="flex:1;display:flex;flex-direction:column;min-height:0">
+          <div id="exp-chat-panel" x-data="sessionViewerPage({mode:'panel'})" style="flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden">
             <!-- Scrollable entries container -->
             <div x-ref="entriesContainer" @scroll="onScroll()"
                  style="flex:1; overflow-y:auto; min-height:0; padding:8px;">
