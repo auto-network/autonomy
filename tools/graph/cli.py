@@ -1094,88 +1094,107 @@ def cmd_link(args):
     db.close()
 
 
+def _query_attention(db, since=None, search=None, last=None, session=None):
+    """Query human input across all sessions from graph.db.
+
+    Returns list of dicts with keys: created_at, content, source_id,
+    turn_number, is_queued, session_name, session_type.
+
+    Reusable by graph news, graph catchup, and other consumers.
+    """
+    conditions = [
+        "s.type = 'session'",
+        "s.platform = 'claude-code'",
+        "t.role = 'user'",
+        # Human-present session types (terminal, chatwith, or host/pre-container NULL)
+        """(json_extract(s.metadata, '$.session_type') IN ('terminal', 'chatwith')
+            OR json_extract(s.metadata, '$.session_type') IS NULL)""",
+        # Filter system noise
+        "t.content NOT LIKE '<crosstalk %'",
+        "t.content NOT LIKE '<system-%'",
+        "t.content NOT LIKE '<local-command%'",
+        "t.content NOT LIKE '<task-notification%'",
+        "t.content NOT LIKE '<command-name>%'",
+    ]
+    params = []
+
+    if since:
+        try:
+            secs = _parse_duration(since)
+        except ValueError:
+            secs = None
+        if secs is not None:
+            from datetime import datetime, timezone, timedelta
+            since_iso = (datetime.now(timezone.utc) - timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conditions.append("t.created_at >= ?")
+            params.append(since_iso)
+        else:
+            # Assume raw ISO timestamp
+            conditions.append("t.created_at >= ?")
+            params.append(since)
+
+    if search:
+        conditions.append("t.content LIKE ?")
+        params.append(f"%{search}%")
+
+    if session:
+        conditions.append("json_extract(s.metadata, '$.session_id') = ?")
+        params.append(session)
+
+    where = " AND ".join(conditions)
+    limit_val = last if last else 500
+    limit_clause = f"LIMIT {int(limit_val)}"
+
+    rows = db.conn.execute(f"""
+        SELECT t.created_at, t.content, t.source_id, t.turn_number,
+               json_extract(t.metadata, '$.queued') as is_queued,
+               json_extract(s.metadata, '$.session_id') as session_name,
+               json_extract(s.metadata, '$.session_type') as session_type
+        FROM thoughts t
+        JOIN sources s ON s.id = t.source_id
+        WHERE {where}
+        ORDER BY t.created_at DESC
+        {limit_clause}
+    """, params).fetchall()
+
+    # Reverse for chronological display when using --last
+    results = list(reversed(rows)) if last else list(rows)
+
+    return [
+        {
+            "created_at": r[0] or "",
+            "content": r[1] or "",
+            "source_id": r[2] or "",
+            "turn_number": r[3],
+            "is_queued": bool(r[4]),
+            "session_name": r[5] or "host",
+            "session_type": r[6] or "host",
+        }
+        for r in results
+    ]
+
+
 def cmd_attention(args):
     """Show human input from sessions, chronologically. Fast query for sovereign content."""
     db = GraphDB(args.db)
-    import json as _json
-    from pathlib import Path
 
-    session_file = args.session
-    if not session_file:
-        # Find the most recent JSONL across all project folders
-        projects_base = Path.home() / ".claude" / "projects"
-        jsonl_files = sorted(projects_base.rglob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-        if jsonl_files:
-            session_file = str(jsonl_files[0])
-        else:
-            print("No session found.")
-            db.close()
-            return
+    rows = _query_attention(
+        db,
+        since=getattr(args, "since", None),
+        search=getattr(args, "search", None),
+        last=getattr(args, "last", None),
+        session=getattr(args, "session", None),
+    )
 
-    messages = []
-    with open(session_file) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                e = _json.loads(line)
-            except:
-                continue
-
-            if e.get("isSidechain"):
-                continue
-
-            etype = e.get("type")
-            content = ""
-
-            if etype == "user" and not e.get("isMeta"):
-                c = e.get("message", {}).get("content", "")
-                if isinstance(c, str) and len(c) > 5:
-                    content = c
-                    msg_type = "input"
-
-            elif etype == "queue-operation":
-                c = e.get("content", e.get("message", {}).get("content", ""))
-                if isinstance(c, str) and len(c) > 5:
-                    content = c
-                    msg_type = "queued"
-
-            if not content:
-                continue
-
-            # Skip command outputs and task notifications
-            if content.startswith("<local-command") or content.startswith("<task-notification"):
-                continue
-            if content.startswith("<command-name>"):
-                continue
-
-            ts = e.get("timestamp", "")[:19]
-            uuid = e.get("uuid", "")[:12]
-
-            messages.append({
-                "ts": ts,
-                "uuid": uuid,
-                "type": msg_type,
-                "text": content,
-            })
-
-    # Apply filters
-    if args.last:
-        messages = messages[-args.last:]
-
-    if args.search:
-        query = args.search.lower()
-        messages = [m for m in messages if query in m["text"].lower()]
-
-    for m in messages:
-        tag = " [queued]" if m["type"] == "queued" else ""
-        preview = m["text"][:200].replace("\n", " ")
-        if len(m["text"]) > 200:
+    for m in rows:
+        ts = m["created_at"][:16]
+        tag = " [queued]" if m["is_queued"] else ""
+        preview = m["content"][:200].replace("\n", " ")
+        if len(m["content"]) > 200:
             preview += "…"
-        print(f"  [{m['ts']}]{tag}  {preview}")
+        print(f"  [{ts}]{tag}  ({m['session_name']}) {preview}")
 
-    print(f"\n  {len(messages)} messages")
+    print(f"\n  {len(rows)} messages")
     db.close()
 
 
@@ -2759,8 +2778,9 @@ def main():
 
     # attention
     p = sub.add_parser("attention", help="Show human input from sessions chronologically")
-    p.add_argument("--session", help="Path to specific session JSONL (default: most recent)")
+    p.add_argument("--session", help="Filter to a specific session_id (e.g. auto-0325-000318)")
     p.add_argument("--last", type=int, help="Show only last N messages")
+    p.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d, 1w")
     p.add_argument("--search", "-s", help="Filter to messages containing this text")
     p.set_defaults(func=cmd_attention)
 
