@@ -90,8 +90,8 @@
   <template x-if="state === 'ready'">
     <div style="display:flex;flex-direction:column;flex:1;min-height:0">
 
-      <!-- Control strip (40px) -->
-      <div style="height:40px;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:6px 10px;background:#1a2332;border-bottom:1px solid #1e293b;flex-shrink:0;z-index:10">
+      <!-- Control strip (48px) -->
+      <div style="height:48px;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:8px 12px;background:#1a2332;border-bottom:1px solid #1e293b;flex-shrink:0;z-index:10">
         <button @click="document.getElementById('sidebar').classList.toggle('-translate-x-full')"
                 style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent"
                 title="Toggle sidebar">
@@ -101,15 +101,15 @@
         </button>
         <span style="flex:1;min-width:0;font-size:12px;font-weight:500;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
               x-text="exp?.title || 'Experiment'"></span>
-        <span style="font-size:11px;font-family:ui-monospace,monospace;color:#475569;white-space:nowrap;flex-shrink:0">iter <span style="color:#94a3b8" x-text="iterCount"></span></span>
+        <span style="font-size:11px;font-family:ui-monospace,monospace;color:#475569;white-space:nowrap;flex-shrink:0">v<span style="color:#94a3b8" x-text="iterCount"></span></span>
         <button @click="chatOpen = !chatOpen"
-                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent;transition:all 0.15s"
+                style="width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent;transition:all 0.15s"
                 :style="chatOpen ? 'background:#312e81;color:#a5b4fc' : 'color:#64748b'"
                 title="Toggle chat">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h12v8H5l-3 3V3z"/></svg>
         </button>
         <button @click="captureScreenshot()" :disabled="captureState === 'working'"
-                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent;transition:all 0.15s"
+                style="width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent;transition:all 0.15s"
                 :style="captureState === 'success' ? 'color:#22c55e' : captureState === 'error' ? 'color:#ef4444' : captureState === 'working' ? 'color:#a5b4fc' : 'color:#64748b'"
                 title="Capture screenshot">
           <!-- Idle: camera icon -->
