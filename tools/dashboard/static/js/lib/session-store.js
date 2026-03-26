@@ -29,7 +29,6 @@ window.getSessionStore = function(sessionId) {
       seq: 0,
       isLive: true,
       sessionType: '',
-      tmuxSession: '',
       project: '',
       label: '',
       role: '',
@@ -44,7 +43,7 @@ window.getSessionStore = function(sessionId) {
       lastActivity: 0,
       lastMessage: '',
       draftText: '',
-      linked: false,
+      resolved: false,
       toolMap: {},       // tool_id -> { tool_name }
       resultMap: {},     // tool_id -> tool_result entry
       loaded: false,
@@ -61,14 +60,22 @@ window.getSessionStore = function(sessionId) {
  */
 window.appendSessionEntries = function(store, data) {
   // Seq dedup — skip if already seen
-  if (data.seq !== undefined && data.seq <= store.seq) return 0;
+  // Detect seq regression (server restart resets seq to 0)
+  if (data.seq !== undefined && data.seq <= store.seq) {
+    // If seq dropped to less than half the old value, it's a server restart
+    if (store.seq > 1 && data.seq * 2 < store.seq) {
+      store.seq = data.seq;
+    } else {
+      return 0;
+    }
+  }
   if (data.seq !== undefined) store.seq = data.seq;
 
   if (data.is_live !== undefined) store.isLive = data.is_live;
 
   if (!data.entries || data.entries.length === 0) return 0;
 
-  // Track tool IDs and results; init enrichment properties for semantic_bash
+  // Track tool IDs and results
   for (var i = 0; i < data.entries.length; i++) {
     var entry = data.entries[i];
     if (entry.type === 'tool_use' && entry.tool_id) {
@@ -76,13 +83,6 @@ window.appendSessionEntries = function(store, data) {
     }
     if (entry.type === 'tool_result' && entry.tool_id) {
       store.resultMap[entry.tool_id] = entry;
-    }
-    // Pre-init enrichment properties so Alpine tracks them reactively
-    if (entry.type === 'semantic_bash' && entry.source_id && !entry.hasOwnProperty('_enhanced')) {
-      entry._enhanced = false;
-      entry._enriched_title = null;
-      entry._enriched_preview = null;
-      entry._enriched_tags = null;
     }
   }
 
@@ -134,7 +134,6 @@ window.ensureSessionMessages = function() {
       var store = window.getSessionStore(s.session_id);
       store.project = s.project || '';
       store.sessionType = s.type || '';
-      store.tmuxSession = s.tmux_session || '';
       store.label = s.label || '';
       store.role = s.role || '';
       store.entryCount = s.entry_count || 0;
@@ -147,7 +146,7 @@ window.ensureSessionMessages = function() {
       store.startedAt = s.started_at || 0;
       if (s.last_activity) store.lastActivity = s.last_activity;
       if (s.last_message !== undefined) store.lastMessage = s.last_message;
-      store.linked = !!s.linked;
+      store.resolved = !!s.resolved;
     }
     // Mark removed sessions as dead
     var allSessions = Alpine.store('sessions');
@@ -162,11 +161,9 @@ window.ensureSessionMessages = function() {
   window.registerHandler('label_update', function(data) {
     if (!data || !data.session_id) return;
     var sessions = Alpine.store('sessions');
-    for (var id in sessions) {
-      var s = sessions[id];
-      if (s.tmuxSession === data.session_id || id === data.session_id) {
-        s.label = data.label || '';
-      }
+    // Store key is tmux_name, which is the session_id
+    if (sessions[data.session_id]) {
+      sessions[data.session_id].label = data.label || '';
     }
   });
 };
