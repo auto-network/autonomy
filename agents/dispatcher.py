@@ -8,8 +8,9 @@ completion each cycle. This enables: concurrent dispatch, resilience to
 dispatcher restarts, and responsive polling between agent runs.
 
 Dispatches all readiness:approved beads by priority, routing each to the
-correct container image via LABEL_IMAGE_MAP. The --queue flag optionally
-narrows to a specific label.
+container image configured in .beads/config.yaml (the rig default). Per-bead
+label overrides via LABEL_IMAGE_MAP are available but rarely needed. The
+--queue flag optionally narrows to a specific label.
 
 Usage:
     python -m agents.dispatcher                  # Dispatch all approved beads
@@ -56,6 +57,22 @@ LABEL_IMAGE_MAP = {
     # "scraper": "autonomy-agent:scraper",
 }
 DEFAULT_IMAGE = "autonomy-agent"
+
+
+def _read_rig_image() -> str:
+    """Read default container image from .beads/config.yaml."""
+    config_path = Path(os.environ.get("BEADS_DIR", ".beads")) / "config.yaml"
+    try:
+        for line in config_path.read_text().splitlines():
+            m = re.match(r"^image:\s*(.+)$", line)
+            if m:
+                return m.group(1).strip()
+    except Exception:
+        pass
+    return DEFAULT_IMAGE
+
+
+_rig_image = _read_rig_image()
 
 # Kill containers exceeding this runtime (seconds)
 MAX_AGENT_RUNTIME = 600
@@ -428,12 +445,12 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
 
 
 def image_for_bead(bead: dict) -> str:
-    """Select the container image based on bead labels."""
+    """Select container image. Rig default, with per-bead label override."""
     labels = bead.get("labels") or []
     for label in labels:
         if label in LABEL_IMAGE_MAP:
             return LABEL_IMAGE_MAP[label]
-    return DEFAULT_IMAGE
+    return _rig_image
 
 
 # ── Non-blocking agent lifecycle ─────────────────────────────────
@@ -1575,7 +1592,7 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
         prompt=prompt,
         metadata={"job_id": job_id, "job_type": job_type},
         detach=True,
-        image=DEFAULT_IMAGE,
+        image=_rig_image,
         output_dir=output_dir,
     )
     if not container_id:
@@ -1603,7 +1620,7 @@ def _record_librarian_launch(lib: RunningLibrarian) -> None:
             started_at=lib.started_at,
             branch="",
             branch_base="",
-            image=DEFAULT_IMAGE,
+            image=_rig_image,
             container_name=lib.container_name,
             output_dir=lib.output_dir,
             librarian_type=lib.job_type,
@@ -1628,7 +1645,7 @@ def _record_librarian_run(lib: RunningLibrarian, exit_code: int, status: str) ->
             commit_hash="",
             branch="",
             branch_base="",
-            image=DEFAULT_IMAGE,
+            image=_rig_image,
             container_name=lib.container_name,
             exit_code=exit_code,
             output_dir=lib.output_dir,

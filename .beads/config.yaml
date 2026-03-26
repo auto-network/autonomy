@@ -1,4 +1,5 @@
 no-git-ops: true
+image: autonomy-agent:dashboard
 
 # Pin dolt SQL server to a fixed port so containers (--network=host) can
 # reach the host's dolt instance reliably without port-file discovery.
