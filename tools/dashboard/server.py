@@ -2794,6 +2794,7 @@ async def api_session_get(request):
         "type": session.get("type"),
         "project": session.get("project"),
         "is_live": bool(session.get("is_live")),
+        "dispatch_nag": bool(session.get("dispatch_nag")),
     })
 
 
