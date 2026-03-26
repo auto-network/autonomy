@@ -207,10 +207,82 @@
           </div>
         </template>
 
-        <!-- Chat panel (when connected) — powered by chatWithPanel component -->
+        <!-- Chat panel (when connected) — powered by unified session viewer -->
         <template x-if="chatConnected">
-          <div id="exp-chat-panel" x-data="chatWithPanel()" style="flex:1;display:flex;flex-direction:column;min-height:0">
-            {% include "partials/chatwith-panel.html" %}
+          <div id="exp-chat-panel" x-data="sessionViewerPage({mode:'panel'})" style="flex:1;display:flex;flex-direction:column;min-height:0">
+            <!-- Scrollable entries container -->
+            <div class="flex-1 overflow-y-auto px-2 py-3" x-ref="entriesContainer" @scroll="onScroll()">
+              {% include "partials/session-entries.html" %}
+            </div>
+            <!-- Screenshot injected indicator -->
+            <div x-show="screenshotInjected" x-transition
+                 class="px-2 py-1 bg-green-900/50 text-green-400 text-xs text-center flex-shrink-0">
+              Screenshot injected into agent context
+            </div>
+            <!-- Input bar (shown when session is live and connected) -->
+            <template x-if="isLive && _tmuxSession">
+              <div class="flex flex-col px-2 bg-gray-800 border-t border-gray-700 flex-shrink-0"
+                   style="padding-top:6px; padding-bottom:6px;"
+                   @dragenter.prevent="$el.classList.add('drop-highlight')"
+                   @dragover.prevent="$el.classList.add('drop-highlight')"
+                   @dragleave.prevent="$el.classList.remove('drop-highlight')"
+                   @drop.prevent="$el.classList.remove('drop-highlight'); addFiles($event.dataTransfer.files)">
+                <!-- Attachment preview strip -->
+                <div x-show="attachments.length > 0" class="flex" style="gap:6px; padding:2px 2px 4px; overflow:visible;">
+                  <template x-for="att in attachments" :key="att.id">
+                    <div class="thumb-wrap">
+                      <template x-if="att.isImage && att.dataUrl">
+                        <img :src="att.dataUrl">
+                      </template>
+                      <template x-if="!att.isImage || !att.dataUrl">
+                        <div class="thumb-file">
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                            <polyline points="14 2 14 8 20 8"/>
+                          </svg>
+                          <span x-text="att.name"></span>
+                        </div>
+                      </template>
+                      <button class="thumb-x" @click="removeAttachment(att.id)">&times;</button>
+                    </div>
+                  </template>
+                </div>
+                <div class="flex gap-2 items-end">
+                  <input type="file" x-ref="fileInput" accept="image/*,*/*" multiple class="hidden"
+                         @change="addFiles($event.target.files); $event.target.value=''">
+                  <button @click="$refs.fileInput.click()" :disabled="uploading" title="Attach file"
+                          class="flex-shrink-0 flex items-center justify-center bg-transparent hover:bg-gray-700 text-gray-400 hover:text-gray-200 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150"
+                          style="width:40px; height:40px;">
+                    <template x-if="!uploading">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                    </template>
+                    <template x-if="uploading">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="animate-spin"><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>
+                    </template>
+                  </button>
+                  <textarea x-model="inputText" x-ref="messageInput"
+                            @keydown.ctrl.enter.prevent="sendMessage()"
+                            @keydown.meta.enter.prevent="sendMessage()"
+                            @input="$el.style.height='auto'; let c=Math.min($el.scrollHeight,160); $el.style.height=c+'px'; $el.style.overflowY=$el.scrollHeight>160?'auto':'hidden'"
+                            :placeholder="('ontouchstart' in window || window.innerWidth < 768) ? 'Message\u2026' : 'Message\u2026 (Ctrl+Enter to send)'"
+                            rows="1" autocomplete="off" autocorrect="off" autocapitalize="sentences" enterkeyhint="send"
+                            class="flex-1 bg-gray-700 text-gray-100 px-3 py-2 rounded-lg text-base leading-normal resize-none focus:outline-none border-2 border-transparent focus:border-indigo-500 font-sans transition-colors duration-150"
+                            style="min-height: 40px; max-height: 160px; overflow-y: hidden;"></textarea>
+                  <button @click="sendMessage()"
+                          :disabled="(attachments.length === 0 && !inputText.trim()) || sending"
+                          class="flex-shrink-0 px-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-semibold disabled:opacity-30 disabled:cursor-default whitespace-nowrap flex items-center justify-center gap-1.5 transition-colors duration-150"
+                          style="height:40px;">
+                    <template x-if="!sending">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+                    </template>
+                    <template x-if="sending">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="animate-spin"><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>
+                    </template>
+                    <span x-text="sending ? 'Sending' : 'Send'"></span>
+                  </button>
+                </div>
+              </div>
+            </template>
           </div>
         </template>
 
