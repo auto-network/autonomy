@@ -363,14 +363,28 @@
         var self = this;
         var sid = this.sessionKey;
 
-        // Single watcher: rebuild displayEntries + auto-scroll when entries change
+        // Single watcher: incremental append + auto-scroll when entries change
+        var lastLen = this.entries.length;
         this._storeCleanups.push(this.$watch(
           function() {
             var s = Alpine.store('sessions')[sid];
             return s ? s.entries.length : 0;
           },
-          function() {
-            self._rebuildDisplay();
+          function(newLen) {
+            if (newLen > lastLen) {
+              // Incremental: append each new entry (O(1) per entry)
+              var s = Alpine.store('sessions')[sid];
+              if (s) {
+                for (var i = lastLen; i < newLen; i++) {
+                  window.SessionDisplay.appendOne(self.displayEntries, s.entries, i);
+                }
+              }
+              lastLen = newLen;
+            } else {
+              // Length decreased or reset — full rebuild
+              self._rebuildDisplay();
+              lastLen = newLen;
+            }
             if (self.autoScroll) {
               self._scrollToBottom();
             }

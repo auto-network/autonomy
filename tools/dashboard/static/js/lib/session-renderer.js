@@ -36,10 +36,6 @@
 
   window.SessionRenderer = {
 
-    // ── Constants ───────────────────────────────────────────────
-
-    _GROUPABLE: new Set(['Bash', 'Read', 'Edit', 'Grep', 'Glob']),
-
     // ── Render helpers ─────────────────────────────────────────
 
     formatTime(ts) {
@@ -223,11 +219,13 @@
     /** Returns true if a role-transition gap should precede this entry. */
     hasGap(idx) {
       if (idx === 0) return false;
-      const prev = this.displayEntries[idx - 1];
-      const curr = this.displayEntries[idx];
+      const prevD = this.displayEntries[idx - 1];
+      const currD = this.displayEntries[idx];
+      if (!prevD || !currD) return false;
+      // Resolve descriptors to get actual entry types
+      const prev = window.SessionDisplay.resolve(prevD, this.entries);
+      const curr = window.SessionDisplay.resolve(currD, this.entries);
       if (!prev || !curr) return false;
-      // Skip hidden entries (tool_result) for gap calculation
-      // Gap when transitioning from user to non-user, or non-user to user
       const prevIsUser = prev.type === 'user';
       const currIsUser = curr.type === 'user';
       return prevIsUser !== currIsUser;
@@ -328,38 +326,8 @@
 
     // ── Internal helpers ───────────────────────────────────────
 
-    _buildDisplayEntries() {
-      const out = [];
-      const entries = this.entries;
-      let i = 0;
-      while (i < entries.length) {
-        const e = entries[i];
-        if (e.type === 'tool_use' && this._GROUPABLE.has(e.tool_name)) {
-          let j = i + 1;
-          while (j < entries.length &&
-                 entries[j].type === 'tool_use' &&
-                 entries[j].tool_name === e.tool_name) {
-            j++;
-          }
-          if (j - i >= 2) {
-            out.push({
-              type: 'tool_group',
-              tool_name: e.tool_name,
-              items: entries.slice(i, j),
-              timestamp: e.timestamp,
-            });
-            i = j;
-            continue;
-          }
-        }
-        out.push(e);
-        i++;
-      }
-      return out;
-    },
-
     _rebuildDisplay() {
-      this.displayEntries = this._buildDisplayEntries();
+      this.displayEntries = window.SessionDisplay.buildAll(this.entries);
     },
 
     _smartPath(path) {

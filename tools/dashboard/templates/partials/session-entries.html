@@ -2,8 +2,8 @@
    Extracted from session-view.html for reuse across all session viewer surfaces.
 
    Contract — required variables (from consuming Alpine component):
-     displayEntries    — array of display entries (built by _buildDisplayEntries)
-     entries           — raw entries array (for auto-scroll button visibility)
+     displayEntries    — array of display descriptors (built by SessionDisplay.buildAll)
+     entries           — raw entries array (source of truth, for resolve + auto-scroll)
      autoScroll        — boolean, whether auto-scroll is active
 
    Contract — required methods (from SessionRenderer mixin):
@@ -16,30 +16,31 @@
      expandContent(entry, idx), sysIconColor(entry), sysIcon(entry),
      resumeScroll()
 
-   No $store, window globals, or page-specific dependencies. #}
+   Descriptors are resolved via SessionDisplay.resolve() at render time.
+   No entry data is duplicated — descriptors reference store.entries[] by index. #}
 
 <template x-for="(dEntry, dIdx) in displayEntries" :key="dIdx">
-  <div>
+  <div x-data="{ get r() { return SessionDisplay.resolve(dEntry, entries) } }">
 
     <!-- ── Grouped tool calls (combined card) ────────── -->
-    <template x-if="dEntry.type === 'tool_group'">
+    <template x-if="r.type === 'tool_group'">
       <div class="sc-entry"
-           :class="[borderClass(dEntry), hasGap(dIdx) ? 'sc-gap' : '']">
+           :class="[borderClass(r), hasGap(dIdx) ? 'sc-gap' : '']">
         <div>
           <!-- Header: chip + count + aggregated meta + timestamp -->
           <div class="sc-line1">
-            <span class="sc-chip" :class="chipClass(dEntry.tool_name)" x-text="dEntry.tool_name"></span>
-            <span class="sc-meta sc-meta-gray" x-text="'\u00d7' + dEntry.items.length"></span>
-            <template x-for="badge in groupMeta(dEntry)" :key="badge.text">
+            <span class="sc-chip" :class="chipClass(r.tool_name)" x-text="r.tool_name"></span>
+            <span class="sc-meta sc-meta-gray" x-text="'\u00d7' + r.items.length"></span>
+            <template x-for="badge in groupMeta(r)" :key="badge.text">
               <span class="sc-meta" :class="badge.cls" x-text="badge.text"></span>
             </template>
-            <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+            <span class="sc-timestamp" x-text="formatTime(r.timestamp)"></span>
           </div>
           <!-- Per-invocation lines -->
-          <template x-for="(item, subIdx) in dEntry.items" :key="subIdx">
+          <template x-for="(item, subIdx) in r.items" :key="subIdx">
             <div>
               <div class="sc-group-item" @click="toggleGroupItem(dIdx, subIdx)">
-                <template x-if="dEntry.tool_name === 'Bash'">
+                <template x-if="r.tool_name === 'Bash'">
                   <span class="sc-group-status" :style="bashStatusColor(item)" x-text="bashStatus(item)"></span>
                 </template>
                 <span class="sc-group-item-text" x-text="headline(item)"></span>
@@ -63,56 +64,56 @@
     </template>
 
     <!-- ── Regular entries (skip tool_result) ────────── -->
-    <template x-if="dEntry.type !== 'tool_result' && dEntry.type !== 'tool_group'">
+    <template x-if="r.type !== 'tool_result' && r.type !== 'tool_group'">
       <div class="sc-entry"
            :class="[
-             borderClass(dEntry),
+             borderClass(r),
              hasGap(dIdx) ? 'sc-gap' : '',
-             dEntry.type === 'user' ? 'sc-entry-user' : '',
-             dEntry.type === 'assistant_text' ? 'sc-entry-assistant' : '',
-             dEntry.type === 'thinking' ? 'sc-entry-thinking' : '',
-             dEntry.type === 'system' ? 'sc-entry-system' : '',
-             dEntry.type === 'crosstalk' ? 'sc-entry-crosstalk' : '',
-             dEntry.type === 'crosstalk' && dEntry.direction === 'sent' ? 'sc-entry-crosstalk-sent' : '',
+             r.type === 'user' ? 'sc-entry-user' : '',
+             r.type === 'assistant_text' ? 'sc-entry-assistant' : '',
+             r.type === 'thinking' ? 'sc-entry-thinking' : '',
+             r.type === 'system' ? 'sc-entry-system' : '',
+             r.type === 'crosstalk' ? 'sc-entry-crosstalk' : '',
+             r.type === 'crosstalk' && r.direction === 'sent' ? 'sc-entry-crosstalk-sent' : '',
            ]">
 
             <!-- ── User message ────────────────────────────── -->
-            <template x-if="dEntry.type === 'user'">
+            <template x-if="r.type === 'user'">
               <div>
                 <div class="flex items-center gap-2 mb-1">
                   <span class="sc-user-label">USER</span>
-                  <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+                  <span class="sc-timestamp" x-text="formatTime(r.timestamp)"></span>
                 </div>
-                <div class="sc-user-content" x-text="dEntry.content || ''"></div>
+                <div class="sc-user-content" x-text="r.content || ''"></div>
               </div>
             </template>
 
             <!-- ── Assistant text (markdown) ───────────────── -->
-            <template x-if="dEntry.type === 'assistant_text'">
+            <template x-if="r.type === 'assistant_text'">
               <div>
                 <div class="flex items-center gap-2 mb-1">
                   <span class="sc-asst-label">ASSISTANT</span>
-                  <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+                  <span class="sc-timestamp" x-text="formatTime(r.timestamp)"></span>
                 </div>
-                <div class="sc-asst-content" x-markdown="dEntry.content || ''"></div>
+                <div class="sc-asst-content" x-markdown="r.content || ''"></div>
               </div>
             </template>
 
             <!-- ── Tool use: two-line chip card ────────────── -->
-            <template x-if="dEntry.type === 'tool_use'">
+            <template x-if="r.type === 'tool_use'">
               <div class="sc-tool-card" @click="toggleExpand(dIdx)">
                 <!-- Line 1: chip + meta + timestamp -->
                 <div class="sc-line1">
-                  <span class="sc-chip" :class="chipClass(dEntry.tool_name)" x-text="dEntry.tool_name || '?'"></span>
-                  <template x-for="badge in metaDisplay(dEntry)" :key="badge.text">
+                  <span class="sc-chip" :class="chipClass(r.tool_name)" x-text="r.tool_name || '?'"></span>
+                  <template x-for="badge in metaDisplay(r)" :key="badge.text">
                     <span class="sc-meta" :class="badge.cls" x-text="badge.text"></span>
                   </template>
-                  <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+                  <span class="sc-timestamp" x-text="formatTime(r.timestamp)"></span>
                 </div>
                 <!-- Line 2: headline -->
                 <div class="sc-line2"
                      :class="isExpanded(dIdx) ? 'sc-line2-expanded' : 'sc-line2-truncated'"
-                     x-text="headline(dEntry)"></div>
+                     x-text="headline(r)"></div>
                 <!-- Detail panel (expanded) -->
                 <template x-if="isExpanded(dIdx)">
                   <div @click.stop>
@@ -124,102 +125,102 @@
                             :class="expandViewMode(dIdx) === 'input' ? 'sc-detail-tab-active' : ''"
                             >Input</span>
                     </div>
-                    <pre class="sc-detail" x-text="expandContent(dEntry, dIdx)"></pre>
+                    <pre class="sc-detail" x-text="expandContent(r, dIdx)"></pre>
                   </div>
                 </template>
               </div>
             </template>
 
             <!-- ── Thinking (collapsed by default) ─────────── -->
-            <template x-if="dEntry.type === 'thinking'">
+            <template x-if="r.type === 'thinking'">
               <div class="sc-tool-card" @click="toggleExpand(dIdx)">
                 <div class="sc-line1">
                   <span class="sc-think-label">thinking...</span>
-                  <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+                  <span class="sc-timestamp" x-text="formatTime(r.timestamp)"></span>
                 </div>
                 <template x-if="isExpanded(dIdx)">
-                  <div class="sc-detail" style="font-style: italic;" x-text="dEntry.content || ''"></div>
+                  <div class="sc-detail" style="font-style: italic;" x-text="r.content || ''"></div>
                 </template>
               </div>
             </template>
 
             <!-- ── System / harness message ────────────────── -->
-            <template x-if="dEntry.type === 'system'">
+            <template x-if="r.type === 'system'">
               <div class="sc-tool-card" @click="toggleExpand(dIdx)">
                 <div class="flex items-center gap-2">
-                  <span class="sc-sys-icon" :style="sysIconColor(dEntry)" x-text="sysIcon(dEntry)"></span>
-                  <span class="sc-sys-label" x-text="dEntry.content || ''"></span>
-                  <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+                  <span class="sc-sys-icon" :style="sysIconColor(r)" x-text="sysIcon(r)"></span>
+                  <span class="sc-sys-label" x-text="r.content || ''"></span>
+                  <span class="sc-timestamp" x-text="formatTime(r.timestamp)"></span>
                 </div>
                 <template x-if="isExpanded(dIdx)">
-                  <div class="sc-detail" x-text="dEntry.content || ''"></div>
+                  <div class="sc-detail" x-text="r.content || ''"></div>
                 </template>
               </div>
             </template>
 
             <!-- ── CrossTalk peer message ──────────────────── -->
-            <template x-if="dEntry.type === 'crosstalk'">
+            <template x-if="r.type === 'crosstalk'">
               <div>
                 <div class="flex items-center gap-2 mb-1">
-                  <span class="sc-ct-label" x-text="dEntry.direction === 'sent' ? 'SENT' : 'CROSSTALK'"></span>
-                  <template x-if="dEntry.direction === 'sent'">
-                    <span class="sc-ct-sender" x-text="'→ ' + dEntry.target"></span>
+                  <span class="sc-ct-label" x-text="r.direction === 'sent' ? 'SENT' : 'CROSSTALK'"></span>
+                  <template x-if="r.direction === 'sent'">
+                    <span class="sc-ct-sender" x-text="'→ ' + r.target"></span>
                   </template>
-                  <template x-if="dEntry.direction !== 'sent' && dEntry.source_id">
+                  <template x-if="r.direction !== 'sent' && r.source_id">
                     <a class="sc-ct-sender"
-                       :href="'/graph/' + dEntry.source_id"
-                       x-text="dEntry.sender_label || dEntry.sender"></a>
+                       :href="'/graph/' + r.source_id"
+                       x-text="r.sender_label || r.sender"></a>
                   </template>
-                  <template x-if="dEntry.direction !== 'sent' && !dEntry.source_id">
+                  <template x-if="r.direction !== 'sent' && !r.source_id">
                     <span class="sc-ct-sender"
-                          x-text="dEntry.sender_label || dEntry.sender"></span>
+                          x-text="r.sender_label || r.sender"></span>
                   </template>
-                  <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+                  <span class="sc-timestamp" x-text="formatTime(r.timestamp)"></span>
                 </div>
-                <div class="sc-ct-content" x-text="dEntry.content || ''"></div>
-                <div class="sc-ct-provenance" x-show="dEntry.source_id">
-                  <a :href="'/graph/' + dEntry.source_id + '?turn=' + dEntry.turn">
-                    <span x-text="'turn ' + dEntry.turn"></span>
+                <div class="sc-ct-content" x-text="r.content || ''"></div>
+                <div class="sc-ct-provenance" x-show="r.source_id">
+                  <a :href="'/graph/' + r.source_id + '?turn=' + r.turn">
+                    <span x-text="'turn ' + r.turn"></span>
                   </a>
                 </div>
               </div>
             </template>
 
             <!-- ── Semantic Bash: typed command tiles ───────── -->
-            <template x-if="dEntry.type === 'semantic_bash'">
-              <a :href="dEntry.semantic_type === 'thought-captured' ? '/collab?tab=thoughts' : (dEntry.comment_id ? '/graph/' + dEntry.comment_id : (dEntry.source_id ? '/graph/' + dEntry.source_id : (dEntry.bead_id ? '/bead/' + dEntry.bead_id : null)))"
+            <template x-if="r.type === 'semantic_bash'">
+              <a :href="r.semantic_type === 'thought-captured' ? '/collab?tab=thoughts' : (r.comment_id ? '/graph/' + r.comment_id : (r.source_id ? '/graph/' + r.source_id : (r.bead_id ? '/bead/' + r.bead_id : null)))"
                  class="sc-tool-card block"
-                 :class="(dEntry.comment_id || dEntry.source_id || dEntry.bead_id) ? 'cursor-pointer hover:bg-gray-800/80' : ''"
-                 @click.prevent="if (dEntry.semantic_type === 'thought-captured') navigateTo('/collab?tab=thoughts'); else if (dEntry.comment_id) navigateTo('/graph/' + dEntry.comment_id); else if (dEntry.source_id) navigateTo('/graph/' + dEntry.source_id); else if (dEntry.bead_id) navigateTo('/bead/' + dEntry.bead_id);">
+                 :class="(r.comment_id || r.source_id || r.bead_id) ? 'cursor-pointer hover:bg-gray-800/80' : ''"
+                 @click.prevent="if (r.semantic_type === 'thought-captured') navigateTo('/collab?tab=thoughts'); else if (r.comment_id) navigateTo('/graph/' + r.comment_id); else if (r.source_id) navigateTo('/graph/' + r.source_id); else if (r.bead_id) navigateTo('/bead/' + r.bead_id);">
                 <div class="sc-line1">
                   <span class="sc-chip" :class="{
-                    'bg-purple-900 text-purple-300': dEntry.semantic_type === 'note-created',
-                    'bg-blue-900 text-blue-300': dEntry.semantic_type === 'comment-added',
-                    'bg-amber-900 text-amber-300': dEntry.semantic_type === 'thought-captured',
-                    'bg-green-900 text-green-300': dEntry.semantic_type === 'dispatch-approved',
-                    'bg-gray-700 text-gray-300': dEntry.semantic_type === 'state-changed',
+                    'bg-purple-900 text-purple-300': r.semantic_type === 'note-created',
+                    'bg-blue-900 text-blue-300': r.semantic_type === 'comment-added',
+                    'bg-amber-900 text-amber-300': r.semantic_type === 'thought-captured',
+                    'bg-green-900 text-green-300': r.semantic_type === 'dispatch-approved',
+                    'bg-gray-700 text-gray-300': r.semantic_type === 'state-changed',
                   }" x-text="{
                     'note-created': 'Note',
                     'comment-added': 'Comment',
                     'thought-captured': 'Thought',
                     'dispatch-approved': 'Dispatch',
                     'state-changed': 'State',
-                  }[dEntry.semantic_type] || dEntry.semantic_type"></span>
-                  <span class="sc-meta text-gray-400" x-text="dEntry.bead_id || dEntry.comment_id || dEntry.source_id || ''"></span>
-                  <span class="sc-timestamp" x-text="formatTime(dEntry.timestamp)"></span>
+                  }[r.semantic_type] || r.semantic_type"></span>
+                  <span class="sc-meta text-gray-400" x-text="r.bead_id || r.comment_id || r.source_id || ''"></span>
+                  <span class="sc-timestamp" x-text="formatTime(r.timestamp)"></span>
                 </div>
                 <!-- Line 2: content (enriched title after lazy load, raw CLI output initially) -->
-                <div class="sc-line2 sc-line2-truncated" x-text="dEntry._enriched_title || dEntry.content"></div>
+                <div class="sc-line2 sc-line2-truncated" x-text="r._enriched_title || r.content"></div>
 
                 <!-- Line 3: enriched preview (appears after lazy load) -->
-                <template x-if="dEntry._enriched_preview">
-                  <div class="text-xs mt-1 truncate" style="color:#6b7280" x-text="dEntry._enriched_preview"></div>
+                <template x-if="r._enriched_preview">
+                  <div class="text-xs mt-1 truncate" style="color:#6b7280" x-text="r._enriched_preview"></div>
                 </template>
 
                 <!-- Line 4: enriched tags (appears after lazy load) -->
-                <template x-if="dEntry._enriched_tags && dEntry._enriched_tags.length > 0">
+                <template x-if="r._enriched_tags && r._enriched_tags.length > 0">
                   <div class="flex gap-1 flex-wrap mt-1">
-                    <template x-for="t in dEntry._enriched_tags" :key="t">
+                    <template x-for="t in r._enriched_tags" :key="t">
                       <a :href="'/stream/' + t" @click.prevent.stop="navigateTo('/stream/' + t)"
                          style="display:inline-flex; padding:0 5px; border-radius:3px; font-size:9px; background:#1e293b; color:#94a3b8; text-decoration:none"
                          x-text="t"></a>
@@ -228,8 +229,8 @@
                 </template>
 
                 <!-- Lazy enhancement trigger -->
-                <template x-if="dEntry.source_id && !dEntry._enhanced">
-                  <div x-intersect:enter.margin.100px="lazyEnhance(dEntry)" style="height:1px"></div>
+                <template x-if="r.source_id && !r._enhanced">
+                  <div x-intersect:enter.margin.100px="lazyEnhance(r)" style="height:1px"></div>
                 </template>
               </a>
             </template>
