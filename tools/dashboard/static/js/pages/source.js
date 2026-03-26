@@ -47,6 +47,7 @@
       unrefAttachments: [],
       highlightId: '',
       zoom: localStorage.getItem('mdZoom') || 'compact',
+      mdSizes: { compact: '0.875rem', normal: '1rem', expanded: '1.125rem' },
       setZoom: function(level) {
         this.zoom = level;
         localStorage.setItem('mdZoom', level);
