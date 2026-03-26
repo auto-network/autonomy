@@ -29,9 +29,7 @@ document.addEventListener('alpine:init', () => {
       // Wrap tables in horizontally-scrollable containers for mobile
       el.querySelectorAll('table').forEach(function(t) {
         var wrapper = document.createElement('div');
-        wrapper.style.overflowX = 'auto';
-        wrapper.style.maxWidth = '100%';
-        wrapper.style.WebkitOverflowScrolling = 'touch';
+        wrapper.className = 'md-table-scroll';
         t.parentNode.insertBefore(wrapper, t);
         wrapper.appendChild(t);
       });

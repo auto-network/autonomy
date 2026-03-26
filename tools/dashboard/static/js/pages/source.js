@@ -46,7 +46,11 @@
       attachments: [],
       unrefAttachments: [],
       highlightId: '',
-      mdZoom: localStorage.getItem('mdZoom') || 'compact',
+      zoom: localStorage.getItem('mdZoom') || 'compact',
+      setZoom: function(level) {
+        this.zoom = level;
+        localStorage.setItem('mdZoom', level);
+      },
 
       // Context mode
       isContext: false,
@@ -191,7 +195,6 @@
       attData: null,
 
       async init() {
-        this.$watch('mdZoom', v => localStorage.setItem('mdZoom', v));
         const path = window.location.pathname;
         const m = path.match(/^\/(graph|source)\/(.+)$/);
         this.id = m ? m[2] : '';
