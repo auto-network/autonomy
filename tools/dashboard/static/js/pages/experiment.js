@@ -1,5 +1,5 @@
 // Experiment page Alpine component — Chrome v2.
-// Full-bleed surface, control strip, two-state chat toggle with chatWithPanel.
+// Full-bleed surface, control strip, two-state chat toggle with unified session viewer.
 // Removed: variant selection, ranking, prev/next navigation, multi-iframe injection, inline bubble renderer.
 // Kept: experiment fetch, single iframe injection, capture, Chat With integration, SSE series subscription.
 
