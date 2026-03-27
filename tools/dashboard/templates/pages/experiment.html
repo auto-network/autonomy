@@ -1,5 +1,31 @@
 <style>
-@keyframes exp-spin { to { transform: rotate(360deg); } }
+/* ── Toolbar state classes (from Design Studio experiment a8ee8212) ── */
+
+/* Chat toggle states (Alpine :class bindings) */
+.chat-disconnected { color: #64748b; }
+.chat-connected-hidden { color: #22c55e; }
+.chat-connected-hidden:hover { background: rgba(34,197,94,0.1); }
+.chat-open { background: #312e81; color: #a5b4fc; }
+.chat-connected-shown { background: #14532d; color: #22c55e; }
+
+/* Capture states (Alpine :class bindings) */
+.capture-idle { color: #64748b; }
+.capture-working { color: #a5b4fc; }
+.capture-working svg { animation: toolbar-spin 1s linear infinite; }
+.capture-success { color: #22c55e; }
+.capture-error { color: #ef4444; }
+
+/* Prime states (Alpine :class bindings) */
+.prime-idle { color: #818cf8; }
+.prime-idle:hover { background: #1e293b; color: #a5b4fc; }
+.prime-working { color: #a5b4fc; }
+.prime-working svg { animation: toolbar-spin 1s linear infinite; }
+.prime-done { color: #22c55e; }
+
+/* Disconnect hover */
+.disconnect:hover { color: #f87171; background: rgba(239,68,68,0.08); }
+
+@keyframes toolbar-spin { to { transform: rotate(360deg); } }
 
 /* Session picker — from Design Studio experiment 3b9d8d82 */
 .picker-list {
@@ -90,48 +116,139 @@
   <template x-if="state === 'ready'">
     <div style="display:flex;flex-direction:column;flex:1;min-height:0">
 
-      <!-- Control strip (48px) -->
-      <div style="height:48px;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:8px 12px;background:#1a2332;border-bottom:1px solid #1e293b;flex-shrink:0;z-index:10">
-        <button @click="document.getElementById('sidebar').classList.toggle('-translate-x-full')"
-                style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent"
-                title="Toggle sidebar">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/>
-          </svg>
-        </button>
-        <span style="flex:1;min-width:0;font-size:12px;font-weight:500;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-              x-text="exp?.title || 'Experiment'"></span>
-        <span style="font-size:11px;font-family:ui-monospace,monospace;color:#475569;white-space:nowrap;flex-shrink:0">v<span style="color:#94a3b8" x-text="iterCount"></span></span>
-        <button @click="chatOpen = !chatOpen"
-                style="width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent;transition:all 0.15s"
-                :style="chatOpen ? 'background:#312e81;color:#a5b4fc' : 'color:#64748b'"
-                title="Toggle chat">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h12v8H5l-3 3V3z"/></svg>
-        </button>
-        <button @click="captureScreenshot()" :disabled="captureState === 'working'"
-                style="width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;cursor:pointer;border-radius:6px;-webkit-tap-highlight-color:transparent;transition:all 0.15s"
-                :style="captureState === 'success' ? 'color:#22c55e' : captureState === 'error' ? 'color:#ef4444' : captureState === 'working' ? 'color:#a5b4fc' : 'color:#64748b'"
-                title="Capture screenshot">
-          <!-- Idle: camera icon -->
-          <template x-if="captureState === 'idle'">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="8" cy="8" r="2.5"/></svg>
+      <!-- ═══ UNIFIED TOOLBAR — from Design Studio experiment a8ee8212 ═══ -->
+      <div data-testid="exp-toolbar"
+           class="flex flex-wrap items-center px-3 bg-[#1a2332] border-b border-[#1e293b] min-h-[48px]"
+           style="flex-shrink:0;z-index:10">
+
+        <!-- Row 1 -->
+        <div class="flex items-center gap-2 w-full h-12">
+
+          <!-- Hamburger: shown mobile, hidden desktop -->
+          <button data-testid="toolbar-hamburger"
+                  @click="document.getElementById('sidebar').classList.toggle('-translate-x-full')"
+                  class="md:hidden w-9 h-11 flex items-center justify-center bg-transparent border-none text-gray-500 cursor-pointer rounded-lg flex-shrink-0"
+                  title="Toggle sidebar">
+            <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/></svg>
+          </button>
+
+          <!-- Experiment title -->
+          <span data-testid="toolbar-title"
+                class="flex-1 min-w-0 text-sm font-medium text-gray-400 truncate"
+                :style="toolbarState === 'PICKER' ? 'color:#a5b4fc;font-weight:600' : ''"
+                x-text="toolbarState === 'PICKER' ? 'Select Session' : (exp?.title || 'Experiment')"></span>
+
+          <!-- Iter nav — desktop only -->
+          <template x-if="toolbar.showIterNav">
+            <div data-testid="toolbar-iter-desktop"
+                 class="hidden md:flex flex-1 justify-center items-center gap-0.5 flex-shrink-0">
+              <button @click="prevIteration()"
+                      class="w-7 h-7 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 disabled:text-gray-700 disabled:cursor-default transition-all"
+                      :disabled="!canGoBack" title="Previous">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 2L4 7l5 5"/></svg>
+              </button>
+              <span class="text-xs font-mono text-gray-400 min-w-[2.25rem] text-center">v<span x-text="iterCount"></span></span>
+              <button @click="nextIteration()"
+                      class="w-7 h-7 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 disabled:text-gray-700 disabled:cursor-default transition-all"
+                      :disabled="!canGoForward" title="Next">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 2l5 5-5 5"/></svg>
+              </button>
+            </div>
           </template>
-          <!-- Working: spinning circle -->
-          <template x-if="captureState === 'working'">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="animation:exp-spin 1s linear infinite"><circle cx="8" cy="8" r="6" stroke-dasharray="30 10"/></svg>
-          </template>
-          <!-- Success: checkmark -->
-          <template x-if="captureState === 'success'">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8l3 3 5-5"/></svg>
-          </template>
-          <!-- Error: X -->
-          <template x-if="captureState === 'error'">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
-          </template>
-        </button>
-        <span x-show="screenshotStatus" x-text="screenshotStatus"
-              style="font-size:10px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px"
-              x-transition></span>
+
+          <!-- Right actions -->
+          <div class="flex items-center gap-1 flex-shrink-0">
+            <!-- Capture — desktop only -->
+            <template x-if="toolbar.captureVisible">
+              <button data-testid="toolbar-capture"
+                      @click="captureScreenshot()" :disabled="captureState === 'working'"
+                      class="hidden md:flex w-11 h-11 items-center justify-center bg-transparent border-none cursor-pointer rounded-lg transition-all"
+                      :class="'capture-' + captureState"
+                      title="Capture screenshot">
+                <template x-if="captureState === 'idle'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3.5" width="14" height="11" rx="1.5"/><circle cx="9" cy="9" r="3"/></svg></template>
+                <template x-if="captureState === 'working'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9" cy="9" r="7" stroke-dasharray="34 12"/></svg></template>
+                <template x-if="captureState === 'success'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9l4 4 6-7"/></svg></template>
+                <template x-if="captureState === 'error'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 5l8 8M13 5l-8 8"/></svg></template>
+              </button>
+            </template>
+
+            <!-- Chat toggle -->
+            <button data-testid="toolbar-chat-toggle"
+                    @click="chatOpen = !chatOpen"
+                    class="w-11 h-11 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-lg transition-all"
+                    :class="toolbar.chatIconClass" title="Toggle chat">
+              <svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h14v9H6l-4 4V3z"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Row 2a: iteration nav — mobile only -->
+        <template x-if="toolbar.showIterNav">
+          <div data-testid="toolbar-iter-mobile"
+               class="flex md:hidden items-center w-full h-12 pb-0.5 justify-center relative">
+            <div class="flex items-center gap-0.5">
+              <button @click="prevIteration()"
+                      class="w-7 h-7 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 disabled:text-gray-700 disabled:cursor-default transition-all"
+                      :disabled="!canGoBack">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 2L4 7l5 5"/></svg>
+              </button>
+              <span class="text-xs font-mono text-gray-400 min-w-[2.25rem] text-center">v<span x-text="iterCount"></span></span>
+              <button @click="nextIteration()"
+                      class="w-7 h-7 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 disabled:text-gray-700 disabled:cursor-default transition-all"
+                      :disabled="!canGoForward">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 2l5 5-5 5"/></svg>
+              </button>
+            </div>
+            <!-- Capture — mobile position -->
+            <template x-if="toolbar.captureVisible">
+              <div class="absolute right-0 flex items-center">
+                <button data-testid="toolbar-capture-mobile"
+                        @click="captureScreenshot()" :disabled="captureState === 'working'"
+                        class="w-11 h-11 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-lg transition-all"
+                        :class="'capture-' + captureState"
+                        title="Capture screenshot">
+                  <template x-if="captureState === 'idle'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3.5" width="14" height="11" rx="1.5"/><circle cx="9" cy="9" r="3"/></svg></template>
+                  <template x-if="captureState === 'working'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9" cy="9" r="7" stroke-dasharray="34 12"/></svg></template>
+                  <template x-if="captureState === 'success'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9l4 4 6-7"/></svg></template>
+                  <template x-if="captureState === 'error'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 5l8 8M13 5l-8 8"/></svg></template>
+                </button>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Row 2b: session row (LIVE_CHAT) -->
+        <template x-if="toolbar.row2Session">
+          <div data-testid="toolbar-session-row"
+               class="flex items-center gap-1.5 w-full h-12 md:h-9 pb-0.5 md:pb-1">
+            <span data-testid="toolbar-session-title"
+                  class="flex-1 min-w-0 text-xs font-semibold text-green-500 truncate pl-0.5"
+                  x-text="chatSessionLabel"></span>
+            <div class="flex items-center gap-1 flex-shrink-0">
+              <!-- Prime: icon-only mobile, text+icon desktop -->
+              <button data-testid="toolbar-prime"
+                      @click="injectPrimer()"
+                      :disabled="primerState === 'working'"
+                      class="w-11 h-11 md:w-auto md:h-8 md:px-2.5 flex items-center justify-center gap-1.5 bg-transparent border-none cursor-pointer rounded-lg text-xs font-semibold transition-all"
+                      :class="primerState === 'working' ? 'prime-working' : primerState === 'done' ? 'prime-done' : 'prime-idle'"
+                      :title="primerState === 'working' ? 'Injecting primer…' : primerState === 'done' ? 'Primer sent!' : 'Inject experiment context into session'">
+                <template x-if="primerState === 'idle'"><svg class="w-[18px] h-[18px] md:w-3.5 md:h-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8.5 1.5L3 9h4.5v5.5L13 7H8.5V1.5z"/></svg></template>
+                <template x-if="primerState === 'working'"><svg class="w-[18px] h-[18px] md:w-3.5 md:h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 1a7 7 0 017 7" stroke-linecap="round"/></svg></template>
+                <template x-if="primerState === 'done'"><svg class="w-[18px] h-[18px] md:w-3.5 md:h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8l4 4 6-7"/></svg></template>
+                <span class="hidden md:inline" x-text="primerState === 'working' ? 'Priming…' : primerState === 'done' ? 'Primed' : 'Prime'"></span>
+              </button>
+              <!-- Disconnect: icon-only mobile, text+icon desktop -->
+              <button data-testid="toolbar-disconnect"
+                      @click="disconnectSession()"
+                      class="w-11 h-11 md:w-auto md:h-8 md:px-2.5 flex items-center justify-center gap-1.5 bg-transparent border-none cursor-pointer rounded-lg text-xs font-semibold text-gray-500 transition-all disconnect"
+                      title="Disconnect session">
+                <svg class="w-[18px] h-[18px] md:w-3.5 md:h-3.5" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><path d="M6.5 6.5l5 5M11.5 6.5l-5 5"/></svg>
+                <span class="hidden md:inline">Disconnect</span>
+              </button>
+            </div>
+          </div>
+        </template>
+
       </div>
 
       <!-- Experiment surface (State 1: visible when chat closed) -->
@@ -142,29 +259,6 @@
       <!-- Chat overlay (State 2: visible when chat open) -->
       <div x-show="chatOpen" x-transition.opacity.duration.200ms
            class="flex" style="flex:1;flex-direction:column;background:#1a2332;overflow:hidden;min-height:0">
-
-        <!-- Header (always visible when chat open) -->
-        <div style="display:flex;align-items:center;padding:8px 12px;border-bottom:1px solid #1e293b;flex-shrink:0">
-          <span style="font-size:13px;font-weight:600;color:#a5b4fc;flex:1"
-                x-text="chatConnected ? 'Chat With Claude' : 'Select Session'"></span>
-          <template x-if="chatConnected">
-            <span style="font-size:10px;color:#22c55e;margin-right:8px">&#9679; Live</span>
-          </template>
-          <template x-if="chatConnected">
-            <button @click="disconnectSession()" style="font-size:10px;color:#64748b;background:transparent;border:none;cursor:pointer;margin-right:8px" title="Disconnect">Disconnect</button>
-          </template>
-          <template x-if="chatConnected">
-            <button @click="injectPrimer()"
-                    :disabled="primerInjecting"
-                    style="font-size:10px;color:#818cf8;background:transparent;border:none;cursor:pointer;margin-right:8px"
-                    :style="primerInjected && 'color:#22c55e'"
-                    :title="primerInjected ? 'Primer sent!' : 'Inject page context into session'"
-                    x-text="primerInjecting ? '...' : primerInjected ? '✓ Primed' : '⚡ Prime'">
-            </button>
-          </template>
-          <button @click="chatOpen = false"
-                  style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#64748b;font-size:18px;cursor:pointer;border-radius:4px">&times;</button>
-        </div>
 
         <!-- Picker (when not connected) — from Design Studio experiment 3b9d8d82 -->
         <template x-if="!chatConnected">
