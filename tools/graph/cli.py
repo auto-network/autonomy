@@ -25,6 +25,21 @@ def _get_scope() -> str | None:
     return os.environ.get("GRAPH_SCOPE")
 
 
+def _get_session_name() -> str:
+    """Resolve the current session name from environment.
+
+    Checks AUTONOMY_SESSION first, falls back to parsing BD_ACTOR.
+    """
+    name = os.environ.get("AUTONOMY_SESSION")
+    if name:
+        return name
+    bd_actor = os.environ.get("BD_ACTOR")
+    if bd_actor and ":" in bd_actor:
+        return bd_actor.split(":", 1)[1]
+    print("Error: cannot determine session name. Set $AUTONOMY_SESSION or $BD_ACTOR.", file=sys.stderr)
+    sys.exit(1)
+
+
 def _get_db_path() -> Path:
     """Get DB path with resolution order: (a) GRAPH_DB env, (b) ./data/graph.db, (c) legacy parents[2] fallback."""
     env_db = os.environ.get("GRAPH_DB")
@@ -54,7 +69,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
-from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action, api_tag_add, api_tag_remove, api_tag_merge
+from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_set_topics, api_set_role, api_set_nag, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action, api_tag_add, api_tag_remove, api_tag_merge
 
 
 def cmd_ingest(args):
@@ -715,42 +730,167 @@ def cmd_sessions(args):
 
 def cmd_set_label(args):
     """Set the label for the current session."""
-    import urllib.parse
-    import urllib.request
-
-    bd_actor = os.environ.get("BD_ACTOR")
-    if not bd_actor or ":" not in bd_actor:
-        print("Error: $BD_ACTOR not set. Cannot identify current session.", file=sys.stderr)
-        print("This command must be run inside a dashboard-managed session.", file=sys.stderr)
-        sys.exit(1)
-    tmux_name = bd_actor.split(":", 1)[1]
-
     if is_api_mode():
         api_set_label(args)
         return
+    _session_put("label", {"label": " ".join(args.text)})
+    print(f"  \u2713 Label set: {' '.join(args.text)}")
 
-    label = " ".join(args.text)
-    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+
+def cmd_set_topics(args):
+    """Set topic status lines on the session card."""
+    if is_api_mode():
+        api_set_topics(args)
+        return
+    _session_put("topics", {"topics": args.topics})
+    print(f"  \u2713 Topics set ({len(args.topics)} lines)")
+
+
+def cmd_set_role(args):
+    """Set the session role."""
+    if is_api_mode():
+        api_set_role(args)
+        return
+    role = " ".join(args.role)
+    _session_put("role", {"role": role})
+    print(f"  \u2713 Role set: {role}")
+
+
+def cmd_set_nag(args):
+    """Enable or disable the session idle nag."""
+    if is_api_mode():
+        api_set_nag(args)
+        return
+    if args.off:
+        _session_delete("nag")
+        print("  \u2713 Nag disabled")
+    else:
+        if not args.interval:
+            print("Error: --interval required (or use --off)", file=sys.stderr)
+            sys.exit(1)
+        payload = {"enabled": True, "interval": args.interval}
+        if args.message:
+            payload["message"] = " ".join(args.message)
+        _session_put("nag", payload)
+        print(f"  \u2713 Nag enabled (every {args.interval}m)")
+
+
+def cmd_crosstalk_send(args):
+    """Send a CrossTalk message to a peer session."""
+    if getattr(args, 'content_stdin', None) == "-":
+        message = sys.stdin.read().strip()
+    elif args.message:
+        message = " ".join(args.message)
+    else:
+        print("Error: message text required (or use -c -)", file=sys.stderr)
+        sys.exit(1)
+
+    if not message:
+        print("Error: empty message", file=sys.stderr)
+        sys.exit(1)
+
+    token = os.environ.get("CROSSTALK_TOKEN")
+    if not token:
+        print("Error: $CROSSTALK_TOKEN not set.", file=sys.stderr)
+        sys.exit(1)
+
     import ssl
+    import urllib.parse
+    import urllib.request
+
+    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    url = f"{api_base}/api/session/{urllib.parse.quote(tmux_name)}/label"
+    url = f"{api_base}/api/crosstalk/send"
+    body = json.dumps({"target": args.target, "message": message}).encode()
     req = urllib.request.Request(
         url,
-        data=json.dumps({"label": label}).encode(),
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=30, context=ctx)
+        result = json.loads(resp.read())
+        print(f"  \u2713 Message delivered to {args.target}")
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read())
+            error_msg = err_body.get("error", str(e))
+        except Exception:
+            error_msg = str(e)
+        print(f"  \u2717 Failed: {error_msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"  \u2717 Cannot reach dashboard: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _session_put(endpoint_suffix: str, payload: dict):
+    """PUT JSON to /api/session/{name}/{suffix}. Used by set-label, set-topics, etc."""
+    import ssl
+    import urllib.parse
+    import urllib.request
+
+    session_name = _get_session_name()
+    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    url = f"{api_base}/api/session/{urllib.parse.quote(session_name)}/{endpoint_suffix}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
         method="PUT",
         headers={"Content-Type": "application/json"},
     )
     try:
         resp = urllib.request.urlopen(req, timeout=10, context=ctx)
-        if resp.status == 200:
-            print(f"  \u2713 Label set: {label}")
-        else:
+        if resp.status != 200:
             print(f"  \u2717 Failed: HTTP {resp.status}", file=sys.stderr)
             sys.exit(1)
     except urllib.error.HTTPError as e:
-        print(f"  \u2717 Failed: HTTP {e.code}", file=sys.stderr)
+        try:
+            err_body = json.loads(e.read())
+            error_msg = err_body.get("error", str(e))
+        except Exception:
+            error_msg = str(e)
+        print(f"  \u2717 Failed: {error_msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"  \u2717 Cannot reach dashboard: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _session_delete(endpoint_suffix: str):
+    """DELETE /api/session/{name}/{suffix}."""
+    import ssl
+    import urllib.parse
+    import urllib.request
+
+    session_name = _get_session_name()
+    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    url = f"{api_base}/api/session/{urllib.parse.quote(session_name)}/{endpoint_suffix}"
+    req = urllib.request.Request(url, method="DELETE")
+    try:
+        resp = urllib.request.urlopen(req, timeout=10, context=ctx)
+        if resp.status != 200:
+            print(f"  \u2717 Failed: HTTP {resp.status}", file=sys.stderr)
+            sys.exit(1)
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read())
+            error_msg = err_body.get("error", str(e))
+        except Exception:
+            error_msg = str(e)
+        print(f"  \u2717 Failed: {error_msg}", file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
         print(f"  \u2717 Cannot reach dashboard: {e.reason}", file=sys.stderr)
@@ -2579,6 +2719,21 @@ def _parse_duration(s: str) -> float:
     return val * mult[unit]
 
 
+def cmd_crosstalk_router(args):
+    """Route 'graph crosstalk' to list or send."""
+    if args.rest and args.rest[0] == "send":
+        # graph crosstalk send <target> "message"
+        rest = args.rest[1:]
+        if len(rest) < 1:
+            print("Error: usage: graph crosstalk send <target-session> \"message\"", file=sys.stderr)
+            sys.exit(1)
+        args.target = rest[0]
+        args.message = rest[1:] if len(rest) > 1 else []
+        cmd_crosstalk_send(args)
+    else:
+        cmd_crosstalk(args)
+
+
 def cmd_crosstalk(args):
     """Display recent CrossTalk messages."""
     from datetime import datetime
@@ -2700,6 +2855,23 @@ def main():
     p = sub.add_parser("set-label", help="Set a working title for the current session")
     p.add_argument("text", nargs="+", help="Label text")
     p.set_defaults(func=cmd_set_label)
+
+    # set-topics
+    p = sub.add_parser("set-topics", help="Set topic status lines on the session card")
+    p.add_argument("topics", nargs="+", help="Topic strings (1-4 lines)")
+    p.set_defaults(func=cmd_set_topics)
+
+    # set-role
+    p = sub.add_parser("set-role", help="Set the session role")
+    p.add_argument("role", nargs="+", help="Role string (free-text)")
+    p.set_defaults(func=cmd_set_role)
+
+    # set-nag
+    p = sub.add_parser("set-nag", help="Enable or disable the session idle nag")
+    p.add_argument("--off", action="store_true", help="Disable the nag")
+    p.add_argument("--interval", type=int, help="Minutes between nags (1-120)")
+    p.add_argument("--message", nargs="+", help="Nag message text")
+    p.set_defaults(func=cmd_set_nag)
 
     # sessions
     p = sub.add_parser("sessions", help="Ingest Claude Code sessions")
@@ -2980,11 +3152,14 @@ def main():
     p.set_defaults(func=cmd_threads)
 
     # crosstalk
-    p = sub.add_parser("crosstalk", help="View CrossTalk message log")
+    p = sub.add_parser("crosstalk", help="View CrossTalk message log or send messages")
+    p.add_argument("rest", nargs="*", help="'send <target> <message>' or empty for log view")
+    p.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None,
+                   help="Read message from stdin (for send)")
     p.add_argument("--session", help="Filter by sender or target session")
     p.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d")
     p.add_argument("--limit", type=int, default=30, help="Max messages (default: 30)")
-    p.set_defaults(func=cmd_crosstalk)
+    p.set_defaults(func=cmd_crosstalk_router)
 
     args = parser.parse_args()
 
