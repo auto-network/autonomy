@@ -118,7 +118,7 @@ class PickerTestHarness:
 
     def open_experiment(self):
         ab_raw("close")
-        ab_raw("open", f"http://localhost:{TEST_PORT}/experiments/{self.exp_id}",
+        ab_raw("open", f"http://localhost:{TEST_PORT}/design/{self.exp_id}",
                "--ignore-https-errors")
         time.sleep(2)
         ab_raw("set", "viewport", "390", "844")
@@ -223,7 +223,7 @@ class PickerTestHarness:
         return result if isinstance(result, dict) else {"count": 0, "status": "error"}
 
     def get_localstorage(self):
-        result = ab("storage", "local", f"exp-chat-{self.exp_id}")
+        result = ab("storage", "local", f"design-chat-{self.exp_id}")
         if isinstance(result, dict):
             return result.get("value")
         return result

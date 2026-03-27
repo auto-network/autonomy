@@ -35,18 +35,19 @@ MOCK_SESSION_ENTRIES = [
 ]
 
 
-def make_experiment(exp_id=None, title="Test Experiment", html="<h1>Test</h1>"):
+def make_experiment(exp_id=None, title="Test Design", html="<h1>Test</h1>"):
     eid = exp_id or str(uuid.uuid4())
     return {
         "id": eid,
         "title": title,
         "status": "pending",
-        "series_id": eid,
-        "series_seq": 1,
+        "design_id": eid,
+        "revision_seq": 1,
         "alpine": 0,
         "variants": [
             {"id": str(uuid.uuid4()), "html": html}
         ],
+        "revisions": [eid],
     }
 
 
