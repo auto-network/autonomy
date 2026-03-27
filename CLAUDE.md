@@ -140,14 +140,13 @@ graph attention --search "keyword"            # find when user discussed somethi
 
 ### Session self-management
 ```bash
-graph set-label "topic description"                      # set your session label
-curl -sk -X PUT https://localhost:8080/api/session/$AUTONOMY_SESSION/topics \
-  -H 'Content-Type: application/json' \
-  -d '{"topics":["Status line 1","Status line 2"]}'      # set 1-4 topic lines on card
-curl -sk -X PUT https://localhost:8080/api/session/$AUTONOMY_SESSION/nag \
-  -H 'Content-Type: application/json' \
-  -d '{"enabled":true,"interval":10,"message":"Check in"}' # enable idle nag (1-120 min)
-curl -sk -X DELETE https://localhost:8080/api/session/$AUTONOMY_SESSION/nag  # disable nag
+graph set-label "topic description"                        # working title
+graph set-topics "Status line 1" "Status line 2"           # card status lines (1-4)
+graph set-role researcher                                  # session role
+graph set-nag --interval 10 --message "Check in"           # enable nag
+graph set-nag --off                                        # disable nag
+graph crosstalk send <session> "message"                   # send message
+graph crosstalk send <session> -c - < /tmp/msg.txt         # pipe long message
 ```
 
 ## Environment
