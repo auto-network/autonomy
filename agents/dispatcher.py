@@ -2182,7 +2182,36 @@ def reconcile_state(running: list[RunningAgent]) -> None:
     except Exception as e:
         print(f"  WARNING: reconcile Dolt in_progress failed: {e}", file=sys.stderr)
 
-    # 3. Clean orphaned worktrees with no new commits
+    # 3. Mark orphaned librarian jobs as failed
+    # Librarians are not recovered across restarts, so any 'running' job is orphaned.
+    try:
+        from agents.librarian_db import _get_conn as _get_lib_conn
+        lib_conn = _get_lib_conn()
+        lib_conn.row_factory = sqlite3.Row
+        try:
+            stuck_libs = lib_conn.execute(
+                "SELECT id, job_type FROM librarian_jobs WHERE status = 'running'"
+            ).fetchall()
+            for row in stuck_libs:
+                print(f"  reconcile: marking librarian job {row['id'][:8]} ({row['job_type']}) "
+                      f"as failed (no container at startup)")
+                lib_conn.execute(
+                    "UPDATE librarian_jobs SET status='failed', "
+                    "completed_at=datetime('now') "
+                    "WHERE id=? AND status='running'",
+                    (row["id"],),
+                )
+            if stuck_libs:
+                lib_conn.commit()
+                print(f"  reconcile: cleaned {len(stuck_libs)} orphaned librarian job(s)")
+            else:
+                print("  reconcile: no orphaned librarian jobs")
+        finally:
+            lib_conn.close()
+    except Exception as e:
+        print(f"  WARNING: reconcile librarian jobs failed: {e}", file=sys.stderr)
+
+    # 4. Clean orphaned worktrees with no new commits
     worktrees_dir = REPO_ROOT / ".worktrees"
     if not worktrees_dir.exists():
         return
