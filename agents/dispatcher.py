@@ -1609,6 +1609,7 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
         detach=True,
         image=_rig_image,
         output_dir=output_dir,
+        model="claude-sonnet-4-6",
     )
     if not container_id:
         return None
