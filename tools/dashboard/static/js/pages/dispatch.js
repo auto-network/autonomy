@@ -17,6 +17,7 @@
 //   _tok:        string                              — formatted token count, e.g. "18.2K"
 //   _tools:      string                              — formatted tool call count, e.g. "14"
 //   _turns:      string                              — formatted turn count, e.g. "8"
+//   _last:       string                              — elapsed since last activity, e.g. "12s"
 //
 // Server fields consumed (active beads):
 //   cpu_pct, cpu_usec, mem_mb, token_count, tool_count, turn_count, duration_secs, last_activity, container, run_dir
@@ -66,6 +67,14 @@
     return String(count);
   }
 
+  function _formatLastActivity(ts) {
+    if (!ts) return '';
+    const secs = Math.floor(Date.now() / 1000 - ts);
+    if (secs < 60) return secs + 's';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm';
+    return Math.floor(secs / 3600) + 'h';
+  }
+
   function _computeDot(b) {
     if (b.container) return { color: 'green', pulse: true };
     const now = Date.now() / 1000;
@@ -94,6 +103,7 @@
       _tok: _formatTokens(b.token_count),
       _tools: b.tool_count != null ? String(b.tool_count) : '',
       _turns: b.turn_count != null ? String(b.turn_count) : '',
+      _last: _formatLastActivity(b.last_activity),
     };
   }
 
@@ -114,6 +124,7 @@
       _tok: '',
       _tools: '',
       _turns: '',
+      _last: '',
     };
   }
 
@@ -134,6 +145,7 @@
       _tok: '',
       _tools: '',
       _turns: '',
+      _last: '',
     };
   }
 
