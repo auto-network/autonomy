@@ -302,6 +302,20 @@ def api_link(args) -> None:
     _print_output(_post("/api/graph/link", data))
 
 
+def api_journal_write(args) -> None:
+    """Write a journal entry via API."""
+    raw = sys.stdin.read().strip() if args.content == "-" else args.content
+    if not raw:
+        print("Error: no JSON content provided", file=sys.stderr)
+        sys.exit(1)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"Error: invalid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    _print_output(_post("/api/graph/journal", data))
+
+
 def api_sessions(args) -> None:
     """Ingest sessions via API."""
     data = {}
