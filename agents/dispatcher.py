@@ -2108,16 +2108,15 @@ def dispatch_cycle(
     global _restart_scheduled
     if _restart_scheduled:
         _restart_scheduled = False
-        print("  Executing scheduled dispatcher restart...")
-        if _START_DISPATCHER_SCRIPT.exists():
-            try:
-                subprocess.run(
-                    [str(_START_DISPATCHER_SCRIPT), "--restart"],
-                    capture_output=True, text=True, timeout=30,
-                    cwd=str(REPO_ROOT),
-                )
-            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-                print(f"  WARN: dispatcher restart failed: {e}", file=sys.stderr)
+        print("  Executing scheduled dispatcher restart via os.execv (same PID)...")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, [
+            sys.executable, "-u", "-m", "agents.dispatcher",
+            "--loop",
+            "--interval", str(config.interval),
+            "--max-concurrent", str(config.max_concurrent),
+        ])
 
     return dispatched
 
