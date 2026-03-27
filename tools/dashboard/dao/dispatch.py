@@ -42,7 +42,7 @@ _TS_FIELDS = {"started_at", "completed_at", "last_activity"}
 def _coerce_ts(row: dict) -> dict:
     """Append Z to bare UTC timestamp strings returned from SQLite."""
     return {
-        k: (v + "Z") if (k in _TS_FIELDS and isinstance(v, str)) else v
+        k: (v + "Z") if (k in _TS_FIELDS and isinstance(v, str) and not v.endswith("Z")) else v
         for k, v in row.items()
     }
 
