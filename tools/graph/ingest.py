@@ -631,6 +631,7 @@ def ingest_claude_code_session(
                     turn_number=turn["turn_number"],
                     message_id=turn.get("message_id"),
                     metadata={"timestamp": turn.get("timestamp", "")},
+                    created_at=turn.get("timestamp") or now_iso(),
                 )
                 db.insert_thought(t)
                 thoughts.append(t)
@@ -649,6 +650,7 @@ def ingest_claude_code_session(
                     turn_number=turn["turn_number"],
                     message_id=turn.get("message_id"),
                     metadata={"timestamp": turn.get("timestamp", "")},
+                    created_at=turn.get("timestamp") or now_iso(),
                 )
                 db.insert_derivation(d)
                 derivations.append(d)
@@ -758,6 +760,7 @@ def ingest_claude_code_session(
                 turn_number=turn["turn_number"],
                 message_id=turn.get("message_id"),
                 metadata={"timestamp": turn.get("timestamp", "")},
+                created_at=turn.get("timestamp") or now_iso(),
             )
             db.insert_thought(t)
             thoughts.append(t)
@@ -776,6 +779,7 @@ def ingest_claude_code_session(
                 turn_number=turn["turn_number"],
                 message_id=turn.get("message_id"),
                 metadata={"timestamp": turn.get("timestamp", "")},
+                created_at=turn.get("timestamp") or now_iso(),
             )
             db.insert_derivation(d)
             derivations.append(d)
