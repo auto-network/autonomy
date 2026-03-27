@@ -110,7 +110,7 @@
           doc.open();
           doc.write('<!DOCTYPE html><html><head><meta charset="utf-8">' +
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
-            '<link rel="stylesheet" href="/static/tailwind.css">' +
+            '<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"><\/script>' +
             '<style>' + parentCSS + '</style>' +
             '<style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;}</style>' +
             alpineHead +
