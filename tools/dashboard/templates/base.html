@@ -606,7 +606,7 @@
                             transform -translate-x-full md:translate-x-0
                             transition-transform duration-200 ease-in-out">
     <div id="nav-indicators">
-      <button id="indicator-capture" class="nav-indicator" style="display:none" onclick="_displayStream && _displayStream.getVideoTracks()[0].stop()" title="Stop screen capture">
+      <button id="indicator-capture" class="nav-indicator" style="display:none" onclick="stopDisplayCapture()" title="Stop screen capture">
         <span class="nav-indicator-dot"></span> REC
       </button>
     </div>

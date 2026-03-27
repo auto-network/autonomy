@@ -856,6 +856,17 @@ async function initDisplayCapture(expId) {
   }
 }
 
+/** Stop display capture: kill the track and clear all global state. */
+function stopDisplayCapture() {
+  if (_displayStream) {
+    _displayStream.getVideoTracks().forEach(t => t.stop());
+  }
+  _displayStream = null;
+  _captureVideo = null;
+  _showCaptureIndicator(false);
+  _updateNavIndicators();
+}
+
 /** Show/hide the REC indicator in the nav toolbar. */
 function _showCaptureIndicator(show) {
   const el = document.getElementById('indicator-capture');
