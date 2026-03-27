@@ -147,7 +147,7 @@
                       :disabled="!canGoBack" title="Previous">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 2L4 7l5 5"/></svg>
               </button>
-              <span class="text-xs font-mono text-gray-400 min-w-[2.25rem] text-center">v<span x-text="iterCount"></span></span>
+              <span class="text-xs font-mono text-gray-400 min-w-[2.25rem] text-center" x-text="(iterIndex + 1) === iterCount ? 'Latest' : (iterIndex + 1) + ' of ' + iterCount"></span>
               <button @click="nextIteration()"
                       class="w-7 h-7 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 disabled:text-gray-700 disabled:cursor-default transition-all"
                       :disabled="!canGoForward" title="Next">
@@ -192,7 +192,7 @@
                       :disabled="!canGoBack">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 2L4 7l5 5"/></svg>
               </button>
-              <span class="text-xs font-mono text-gray-400 min-w-[2.25rem] text-center">v<span x-text="iterCount"></span></span>
+              <span class="text-xs font-mono text-gray-400 min-w-[2.25rem] text-center" x-text="(iterIndex + 1) === iterCount ? 'Latest' : (iterIndex + 1) + ' of ' + iterCount"></span>
               <button @click="nextIteration()"
                       class="w-7 h-7 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 disabled:text-gray-700 disabled:cursor-default transition-all"
                       :disabled="!canGoForward">
