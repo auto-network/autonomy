@@ -5212,6 +5212,82 @@ async def api_graph_threads(request):
     return JSONResponse({"threads": items})
 
 
+async def api_journal(request):
+    """List journal entries with three zoom levels."""
+    from tools.graph.db import GraphDB
+    limit = int(request.query_params.get("limit", "50"))
+    since_param = request.query_params.get("since")
+    since_iso = None
+    if since_param:
+        since_iso = _parse_range(since_param)
+
+    db_args = {}
+    p = _graph_db_path()
+    if p:
+        db_args["db_path"] = p
+    db = GraphDB(**db_args)
+    try:
+        sources = db.list_sources(source_type="journal", since=since_iso, limit=limit)
+        entries = []
+        for s in sources:
+            meta = s.get("metadata")
+            if meta and isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+
+            # Fetch normal-level content from thoughts table
+            rows = db.conn.execute(
+                "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = 1",
+                (s["id"],),
+            ).fetchall()
+            normal = rows[0]["content"] if rows else ""
+
+            entries.append({
+                "id": s["id"],
+                "compact": s.get("title", ""),
+                "normal": normal,
+                "expanded": meta.get("expanded", ""),
+                "timestamp_start": meta.get("timestamp_start", ""),
+                "timestamp_end": meta.get("timestamp_end", ""),
+                "entry_type": meta.get("entry_type", ""),
+                "created_at": s.get("created_at", ""),
+            })
+        return JSONResponse({"entries": entries})
+    finally:
+        db.close()
+
+
+async def api_graph_journal_write(request):
+    """Write a journal entry via graph CLI proxy."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"ok": True, "output": "  \u2713 Mock: journal write skipped"})
+
+    body = await request.json()
+
+    # Validate required fields
+    for field in ("compact", "normal", "timestamp_start", "timestamp_end"):
+        if field not in body:
+            return JSONResponse({"error": f"missing required field: {field}"}, status_code=400)
+
+    # Shell out to graph journal write via CLI
+    import json as _json
+    stdin_data = _json.dumps(body)
+    stdout, stderr, rc = await run_cli(
+        ["graph", "journal", "write", "-c", "-"],
+        timeout=30,
+        stdin_data=stdin_data,
+    )
+
+    if rc != 0:
+        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    _checkpoint_graph()
+    return JSONResponse({"ok": True, "output": stdout})
+
+
 async def api_graph_collab_tag_describe(request):
     """Set or update a tag description via API proxy."""
     if os.environ.get("DASHBOARD_MOCK"):
@@ -5315,6 +5391,7 @@ routes = [
     Route("/api/graph/tag/merge", api_graph_tag_merge, methods=["POST"]),
     Route("/api/graph/tag/{source_id}/{tag_name}", api_graph_tag_add, methods=["PUT"]),
     Route("/api/graph/tag/{source_id}/{tag_name}", api_graph_tag_remove, methods=["DELETE"]),
+    Route("/api/journal", api_journal, methods=["GET"]),
     Route("/api/graph/thoughts", api_graph_thoughts, methods=["GET"]),
     Route("/api/graph/threads", api_graph_threads, methods=["GET"]),
     Route("/api/graph/thought", api_graph_thought, methods=["POST"]),
@@ -5366,6 +5443,7 @@ routes = [
     Route("/api/graph/comment/integrate", api_graph_comment_integrate, methods=["POST"]),
     Route("/api/graph/bead", api_graph_bead, methods=["POST"]),
     Route("/api/graph/link", api_graph_link, methods=["POST"]),
+    Route("/api/graph/journal", api_graph_journal_write, methods=["POST"]),
     Route("/api/graph/sessions", api_graph_sessions, methods=["POST"]),
     Route("/api/graph/attach", api_graph_attach, methods=["POST"]),
 
