@@ -177,6 +177,20 @@
       from { opacity: 0; transform: translateY(-0.25rem); }
       to { opacity: 1; transform: translateY(0); }
     }
+    /* Nav indicator toolbar */
+    #nav-indicators { display: none; align-items: center; justify-content: flex-end; gap: 0.5rem; margin-bottom: 0.25rem; }
+    #nav-indicators.active { display: flex; }
+    .nav-indicator {
+      display: flex; align-items: center; gap: 0.25rem;
+      padding: 0.125rem 0.375rem; border-radius: 0.25rem;
+      background: transparent; border: none; color: #e5e7eb;
+      font-size: 0.625rem; cursor: pointer; line-height: 1;
+    }
+    .nav-indicator:hover { background: rgba(255,255,255,0.1); }
+    .nav-indicator-dot {
+      width: 0.4rem; height: 0.4rem; border-radius: 50%;
+      background: #ef4444; animation: pulse 2s infinite; flex-shrink: 0;
+    }
     /* Toast notifications */
     #toast-container {
       position: fixed; top: 1rem; right: 1rem; z-index: 100;
@@ -591,7 +605,12 @@
                             fixed md:static inset-y-0 left-0 z-40
                             transform -translate-x-full md:translate-x-0
                             transition-transform duration-200 ease-in-out">
-    <h1 class="text-lg font-bold text-indigo-400 mb-4 pl-16 md:pl-0">Autonomy</h1>
+    <div id="nav-indicators">
+      <button id="indicator-capture" class="nav-indicator" style="display:none" onclick="_displayStream && _displayStream.getVideoTracks()[0].stop()" title="Stop screen capture">
+        <span class="nav-indicator-dot"></span> REC
+      </button>
+    </div>
+    <h1 class="text-lg font-bold text-indigo-400 mb-4 pl-16 md:pl-2">Autonomy</h1>
     <div class="space-y-1 mb-6">
       <a href="/beads" class="nav-link" data-page="beads" onclick="closeSidebar()">Beads <span id="badge-beads" data-testid="badge-beads" class="nav-badge nav-badge-indigo"></span></a>
       <a href="/dispatch" class="nav-link" data-page="dispatch" onclick="closeSidebar()">Dispatch <span class="dispatch-badges" id="badge-dispatch" data-testid="badge-dispatch"></span></a>

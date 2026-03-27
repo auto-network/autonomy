@@ -10,6 +10,7 @@ const globalSearch = document.getElementById('global-search');
 // Persistent MediaStream for tab capture; survives page navigations within SPA.
 let _displayStream = null;
 let _captureVideo = null;
+let _displayCapturePending = false;
 
 // ── Markdown Rendering ───────────────────────────────────────
 
@@ -815,12 +816,13 @@ async function getLiveSnippet(runDir) {
  * Falls back gracefully if unavailable or denied.
  */
 async function initDisplayCapture(expId) {
-  if (_displayStream) return; // already have a live stream
+  if (_displayStream || _displayCapturePending) return; // already have a live stream or prompt pending
   if (!navigator.mediaDevices?.getDisplayMedia) {
     console.warn('[screenshot] getDisplayMedia not available (non-HTTPS?)');
     _updateScreenshotStatus(expId, 'Auto-capture unavailable — use Capture button');
     return;
   }
+  _displayCapturePending = true;
   try {
     _displayStream = await navigator.mediaDevices.getDisplayMedia({
       video: { displaySurface: 'browser' },
@@ -834,7 +836,11 @@ async function initDisplayCapture(expId) {
       _displayStream = null;
       _captureVideo = null;
       _updateScreenshotStatus(expId, 'Capture stream ended — click Capture to restart');
+      _showCaptureIndicator(false);
+      _updateNavIndicators();
     });
+    _showCaptureIndicator(true);
+    _updateNavIndicators();
     _updateScreenshotStatus(expId, 'Auto-capture active');
     // Stream is now ready — capture after a short delay for rendering
     setTimeout(() => captureTabScreenshot(expId), 1500);
@@ -842,8 +848,27 @@ async function initDisplayCapture(expId) {
     console.warn('[screenshot] getDisplayMedia denied or failed:', e.message);
     _displayStream = null;
     _captureVideo = null;
+    _showCaptureIndicator(false);
+    _updateNavIndicators();
     _updateScreenshotStatus(expId, 'Auto-capture denied — use Capture button');
+  } finally {
+    _displayCapturePending = false;
   }
+}
+
+/** Show/hide the REC indicator in the nav toolbar. */
+function _showCaptureIndicator(show) {
+  const el = document.getElementById('indicator-capture');
+  if (!el) return;
+  el.style.display = show ? 'flex' : 'none';
+}
+
+/** Show nav-indicators toolbar if any child is visible, hide otherwise. */
+function _updateNavIndicators() {
+  const bar = document.getElementById('nav-indicators');
+  if (!bar) return;
+  const hasVisible = Array.from(bar.children).some(c => c.style.display !== 'none');
+  bar.classList.toggle('active', hasVisible);
 }
 
 function _updateScreenshotStatus(expId, msg) {
