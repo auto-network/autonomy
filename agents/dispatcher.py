@@ -2185,9 +2185,10 @@ def reconcile_state(running: list[RunningAgent]) -> None:
     # 3. Mark orphaned librarian jobs as failed
     # Librarians are not recovered across restarts, so any 'running' job is orphaned.
     try:
+        import sqlite3 as _sqlite3
         from agents.librarian_db import _get_conn as _get_lib_conn
         lib_conn = _get_lib_conn()
-        lib_conn.row_factory = sqlite3.Row
+        lib_conn.row_factory = _sqlite3.Row
         try:
             stuck_libs = lib_conn.execute(
                 "SELECT id, job_type FROM librarian_jobs WHERE status = 'running'"
