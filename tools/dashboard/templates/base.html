@@ -141,8 +141,8 @@
     }
     .live-pulse { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: #22c55e; animation: pulse 2s infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-    /* Sidebar experiment indicator */
-    #sidebar-experiments:empty { display: none; }
+    /* Sidebar design indicator */
+    #sidebar-designs:empty { display: none; }
     .sidebar-exp {
       display: flex; align-items: center; gap: 0.5rem;
       padding: 0.375rem 0.5rem; border-radius: 0.375rem;
@@ -507,7 +507,7 @@
       #page-title,
       #toast-container,
       #terminal-page,
-      #sidebar-experiments,
+      #sidebar-designs,
       .action-sheet,
       .action-sheet-overlay,
       .sse-banner,
@@ -622,7 +622,7 @@
       <a href="/search" class="nav-link" data-page="search" onclick="closeSidebar()">Search <span id="badge-search" data-testid="badge-search" class="nav-badge nav-badge-gray"></span></a>
     </div>
     <div class="mt-auto">
-      <div id="sidebar-experiments" class="mb-2 space-y-1"></div>
+      <div id="sidebar-designs" class="mb-2 space-y-1"></div>
       <div class="text-xs text-gray-500" id="stats-summary">loading...</div>
     </div>
   </nav>
@@ -1013,6 +1013,6 @@
   <script src="/static/js/pages/terminal.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/action-sheet.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/test-harness.js?v=__STATIC_VERSION__"></script>
-  <script src="/static/js/pages/experiment.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/pages/design.js?v=__STATIC_VERSION__"></script>
 </body>
 </html>

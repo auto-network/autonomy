@@ -327,21 +327,21 @@ async function renderStreamFragment() {
 
 // ── Experiment Page (Jinja2 fragment + Alpine) ───────────────
 
-async function renderExperimentFragment() {
-  pageTitle.textContent = 'Experiment';
+async function renderDesignFragment() {
+  pageTitle.textContent = 'Design';
   // Belt-and-suspenders: clean up any SSE subscription before replacing DOM
   // (Alpine destroy() will also fire, but ordering is not guaranteed).
-  if (window._expSeriesCleanup) {
-    window._expSeriesCleanup();
-    window._expSeriesCleanup = null;
+  if (window._designSeriesCleanup) {
+    window._designSeriesCleanup();
+    window._designSeriesCleanup = null;
   }
   let html;
-  if (_fragmentCache.has('/pages/experiment')) {
-    html = _fragmentCache.get('/pages/experiment');
+  if (_fragmentCache.has('/pages/design')) {
+    html = _fragmentCache.get('/pages/design');
   } else {
-    const res = await fetch('/pages/experiment');
+    const res = await fetch('/pages/design');
     html = await res.text();
-    _fragmentCache.set('/pages/experiment', html);
+    _fragmentCache.set('/pages/design', html);
   }
   content.innerHTML = html;
   if (window.Alpine) {
@@ -364,7 +364,7 @@ function destroyChatWith() {
   _chatWithFitAddon = null;
 }
 
-// Called by the experiment Alpine component when expanding the Chat With panel.
+// Called by the design Alpine component when expanding the Chat With panel.
 function _fitChatWithAddon() {
   if (_chatWithFitAddon) _chatWithFitAddon.fit();
 }
@@ -375,9 +375,9 @@ function connectChatWithTerminal(sessionName) {
   const container = document.getElementById('chatwith-container');
   if (!container) return;
 
-  // Use Alpine bridge if the experiment Alpine component is active; otherwise
+  // Use Alpine bridge if the design Alpine component is active; otherwise
   // fall back to direct DOM manipulation for the legacy (non-Alpine) path.
-  const page = window._experimentPage;
+  const page = window._designPage;
   if (page) {
     page.showChatWithPanel();
     page.setKillVisible(true);
@@ -466,8 +466,8 @@ function toggleChatWithPanel() {
   if (!_chatWithCollapsed && _chatWithFitAddon) setTimeout(() => _chatWithFitAddon.fit(), 50);
 }
 
-async function killChatWithSession(expId) {
-  const sessionName = `chatwith-${expId}`;
+async function killChatWithSession(designId) {
+  const sessionName = `chatwith-${designId}`;
   destroyChatWith();
   const panel = document.getElementById('chatwith-panel');
   if (panel) panel.style.display = 'none';
@@ -1030,38 +1030,38 @@ async function manualCaptureScreenshot(expId, sessionName) {
   await _captureWithHtml2Canvas(expId, sessionName);
 }
 
-async function renderExperiment(expId) {
-  // Clean up any previous experiment SSE subscription
-  if (window._expSeriesCleanup) {
-    window._expSeriesCleanup();
-    window._expSeriesCleanup = null;
+async function renderExperiment(revisionId) {
+  // Clean up any previous design SSE subscription
+  if (window._designSeriesCleanup) {
+    window._designSeriesCleanup();
+    window._designSeriesCleanup = null;
   }
 
-  pageTitle.textContent = 'Experiment';
-  content.innerHTML = '<div class="text-gray-400">Loading experiment...</div>';
+  pageTitle.textContent = 'Design';
+  content.innerHTML = '<div class="text-gray-400">Loading design...</div>';
   destroyChatWith();
   _chatWithCollapsed = false;
 
-  const exp = await api(`/api/experiments/${expId}/full`);
+  const exp = await api(`/api/design/${revisionId}/full`);
   if (exp.error) {
-    content.innerHTML = `<div class="text-red-400">Experiment not found</div>`;
+    content.innerHTML = `<div class="text-red-400">Design not found</div>`;
     return;
   }
 
   const variants = exp.variants || [];
   const isCompleted = exp.status === 'completed';
 
-  // Session context: use series_id when available so all series iterations
-  // share one persistent Chat With session ("chatwith-{series_id}")
-  const sessionCtx = exp.series_id || expId;
+  // Session context: use design_id when available so all design revisions
+  // share one persistent Chat With session ("chatwith-{design_id}")
+  const sessionCtx = exp.design_id || revisionId;
 
-  // Series navigation
-  const siblingIds = exp.sibling_ids || [expId];
-  const seriesIdx = siblingIds.indexOf(expId);
-  const seriesTotal = siblingIds.length;
-  const isInSeries = seriesTotal > 1;
-  const prevId = isInSeries && seriesIdx > 0 ? siblingIds[seriesIdx - 1] : null;
-  const nextId = isInSeries && seriesIdx < seriesTotal - 1 ? siblingIds[seriesIdx + 1] : null;
+  // Revision navigation
+  const revisionIds = exp.revisions || [revisionId];
+  const revisionIdx = revisionIds.indexOf(revisionId);
+  const revisionCount = revisionIds.length;
+  const isInSeries = revisionCount > 1;
+  const prevId = isInSeries && revisionIdx > 0 ? revisionIds[revisionIdx - 1] : null;
+  const nextId = isInSeries && revisionIdx < revisionCount - 1 ? revisionIds[revisionIdx + 1] : null;
 
   // Track selection state
   const selected = new Map();
@@ -1072,11 +1072,11 @@ async function renderExperiment(expId) {
   const seriesNav = isInSeries ? `
     <div class="flex items-center gap-3 mb-3 text-sm">
       ${prevId
-        ? `<button class="text-indigo-400 hover:text-indigo-300" onclick="navigateTo('/experiments/${_esc(prevId)}')">\u2190 Prev</button>`
+        ? `<button class="text-indigo-400 hover:text-indigo-300" onclick="navigateTo('/design/${_esc(prevId)}')">\u2190 Prev</button>`
         : `<span class="text-gray-600">\u2190 Prev</span>`}
-      <span class="text-gray-400">Iteration ${seriesIdx + 1} of ${seriesTotal}</span>
+      <span class="text-gray-400">Revision ${revisionIdx + 1} of ${revisionCount}</span>
       ${nextId
-        ? `<button class="text-indigo-400 hover:text-indigo-300" onclick="navigateTo('/experiments/${_esc(nextId)}')">Next \u2192</button>`
+        ? `<button class="text-indigo-400 hover:text-indigo-300" onclick="navigateTo('/design/${_esc(nextId)}')">Next \u2192</button>`
         : `<span class="text-gray-600">Next \u2192</span>`}
     </div>` : '';
 
@@ -1085,7 +1085,7 @@ async function renderExperiment(expId) {
   if (headerActions) {
     headerActions.innerHTML = `
       <span id="exp-screenshot-status" class="text-xs text-gray-500"></span>
-      <button onclick="manualCaptureScreenshot('${_esc(expId)}')"
+      <button onclick="manualCaptureScreenshot('${_esc(revisionId)}')"
               class="text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
         Capture
       </button>
@@ -1132,7 +1132,7 @@ async function renderExperiment(expId) {
     html += `
       <div class="exp-submit-bar" id="exp-submit-bar">
         <span class="text-sm text-gray-400" id="exp-selection-hint">Select variants to rank them</span>
-        <button class="exp-submit-btn" id="exp-submit-btn" disabled onclick="submitExperiment('${expId}')">Submit Rankings</button>
+        <button class="exp-submit-btn" id="exp-submit-btn" disabled onclick="submitExperiment('${revisionId}')">Submit Rankings</button>
       </div>`;
   }
 
@@ -1177,7 +1177,7 @@ async function renderExperiment(expId) {
         if (btn) btn.textContent = 'Reconnect';
         connectChatWithTerminal(sessionName);
         // Active Chat With session — init display capture for screenshots
-        initDisplayCapture(expId).catch(() => {});
+        initDisplayCapture(revisionId).catch(() => {});
       }
     } catch(e) { /* ignore — check is best-effort */ }
   })();
@@ -1227,36 +1227,36 @@ ${_safeHtml}
       _screenshotTimer = setTimeout(async () => {
         // Try display stream capture first; fall back to iframe html2canvas (mobile)
         if (_displayStream) {
-          await captureTabScreenshot(expId);
+          await captureTabScreenshot(revisionId);
         } else {
-          await _captureViaIframeHtml2Canvas(expId);
+          await _captureViaIframeHtml2Canvas(revisionId);
         }
       }, 1500);
     }
   });
 
-  // Subscribe to series SSE topic so gallery auto-updates when a new variant is posted
-  const seriesId = exp.series_id;
-  if (seriesId) {
-    const seriesTopic = `experiments:${seriesId}`;
+  // Subscribe to design SSE topic so gallery auto-updates when a new revision is posted
+  const designId = exp.design_id;
+  if (designId) {
+    const designTopic = `design:${designId}`;
 
-    function _onNewSeriesExperiment(data) {
-      // Ignore replays of the current experiment
-      const currentId = window.location.pathname.split('/experiments/')[1];
-      if (!currentId || data.experiment_id === currentId) return;
-      // Only act if still on an experiment page (user may have navigated away)
-      if (!window.location.pathname.startsWith('/experiments/')) return;
-      navigateTo(`/experiments/${data.experiment_id}`);
+    function _onNewDesignRevision(data) {
+      // Ignore replays of the current revision
+      const currentId = window.location.pathname.split('/design/')[1];
+      if (!currentId || data.revision_id === currentId) return;
+      // Only act if still on a design page (user may have navigated away)
+      if (!window.location.pathname.startsWith('/design/')) return;
+      navigateTo(`/design/${data.revision_id}`);
     }
 
-    registerHandler(seriesTopic, _onNewSeriesExperiment);
-    window._expSeriesCleanup = () => unregisterHandler(seriesTopic, _onNewSeriesExperiment);
+    registerHandler(designTopic, _onNewDesignRevision);
+    window._designSeriesCleanup = () => unregisterHandler(designTopic, _onNewDesignRevision);
   }
 
   // Display capture is initiated when Chat With spawns, not on page load.
   // If a stream is already active (from a previous Chat With), auto-capture.
   if (!isCompleted && _displayStream) {
-    setTimeout(() => captureTabScreenshot(expId), 1500);
+    setTimeout(() => captureTabScreenshot(revisionId), 1500);
   }
 
   if (isCompleted) {
@@ -1316,7 +1316,7 @@ ${_safeHtml}
   window._expSelected = selected;
 }
 
-async function submitExperiment(expId) {
+async function submitExperiment(revisionId) {
   const selected = window._expSelected;
   if (!selected || selected.size === 0) return;
 
@@ -1335,7 +1335,7 @@ async function submitExperiment(expId) {
   // If only 1 selected, rank is 1
   if (selections.length === 1) selections[0].rank = 1;
 
-  const res = await fetch(`/api/experiments/${expId}/submit`, {
+  const res = await fetch(`/api/design/${revisionId}/submit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ selections }),
@@ -1344,11 +1344,11 @@ async function submitExperiment(expId) {
 
   if (data.ok) {
     btn.textContent = 'Submitted';
-    // Dismiss sidebar indicator for this experiment
-    const indicator = document.querySelector(`[data-exp-id="${expId}"]`);
+    // Dismiss sidebar indicator for this design
+    const indicator = document.querySelector(`[data-design-id="${revisionId}"]`);
     if (indicator) indicator.remove();
     // Refresh page to show completed state
-    setTimeout(() => renderExperiment(expId), 500);
+    setTimeout(() => renderExperiment(revisionId), 500);
   } else {
     btn.disabled = false;
     btn.textContent = 'Submit Rankings';
@@ -1361,13 +1361,13 @@ function _esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── Sidebar Experiment Indicator ─────────────────────────────
+// ── Sidebar Design Indicator ─────────────────────────────
 
-async function dismissExperiment(expId, seriesKey, triggerEl) {
-  const sessionName = `chatwith-${seriesKey}`;
-  const toastEl = triggerEl.closest('[data-exp-id]');
+async function dismissDesign(revisionId, designKey, triggerEl) {
+  const sessionName = `chatwith-${designKey}`;
+  const toastEl = triggerEl.closest('[data-design-id]');
   const hasChatWith = toastEl && toastEl.dataset.hasChatwith === 'true';
-  const confirmMsg = hasChatWith ? 'End experiment and Chat With session?' : 'End?';
+  const confirmMsg = hasChatWith ? 'End design and Chat With session?' : 'End?';
 
   const confirmed = await new Promise(resolve => {
     const confirm = document.createElement('span');
@@ -1379,9 +1379,9 @@ async function dismissExperiment(expId, seriesKey, triggerEl) {
   });
   if (!confirmed) return;
   try {
-    await fetch(`/api/experiments/${expId}/dismiss`, { method: 'POST' });
+    await fetch(`/api/design/${revisionId}/dismiss`, { method: 'POST' });
   } catch (e) {
-    console.warn('[dismiss] Failed to dismiss experiment:', e);
+    console.warn('[dismiss] Failed to dismiss design:', e);
   }
   if (hasChatWith) {
     try {
@@ -1390,17 +1390,17 @@ async function dismissExperiment(expId, seriesKey, triggerEl) {
       console.warn('[dismiss] Failed to kill Chat With session:', e);
     }
   }
-  const el = document.querySelector(`[data-exp-id="${seriesKey}"]`);
+  const el = document.querySelector(`[data-design-id="${designKey}"]`);
   if (el) el.remove();
 }
 
 
-async function checkPendingExperiments() {
-  const container = document.getElementById('sidebar-experiments');
+async function checkPendingDesigns() {
+  const container = document.getElementById('sidebar-designs');
   if (!container) return;
   try {
     const [pending, chatData] = await Promise.all([
-      api('/api/experiments/pending'),
+      api('/api/design/pending'),
       api('/api/chatwith/sessions').catch(() => ({ sessions: [] })),
     ]);
     // Build a mutable set of active chatwith session names; we'll delete matched ones
@@ -1409,24 +1409,24 @@ async function checkPendingExperiments() {
     const keys = new Set();
 
     if (Array.isArray(pending)) {
-      pending.forEach(exp => {
-        // Use series_id as the stable key so the toast represents the whole series
-        const seriesKey = exp.series_id || exp.id;
-        keys.add(seriesKey);
-        const sessionName = `chatwith-${seriesKey}`;
+      pending.forEach(des => {
+        // Use design_id as the stable key so the toast represents the whole design
+        const designKey = des.design_id || des.id;
+        keys.add(designKey);
+        const sessionName = `chatwith-${designKey}`;
         const hasChatWith = activeSessions.has(sessionName);
         // Consume session so it isn't treated as orphaned below
         activeSessions.delete(sessionName);
 
-        const iterLabel = exp.iteration_count > 1
-          ? `${_esc(exp.title)} <span class="text-gray-500 text-xs">(${exp.iteration_count} iterations)</span>`
-          : _esc(exp.title);
-        const existing = container.querySelector(`[data-exp-id="${seriesKey}"]`);
+        const iterLabel = des.iteration_count > 1
+          ? `${_esc(des.title)} <span class="text-gray-500 text-xs">(${des.iteration_count} revisions)</span>`
+          : _esc(des.title);
+        const existing = container.querySelector(`[data-design-id="${designKey}"]`);
         if (existing) {
           // Update link target, label, and Chat With indicator
           existing.dataset.hasChatwith = hasChatWith ? 'true' : 'false';
-          existing.href = `/experiments/${exp.id}`;
-          existing.onclick = (e) => { e.preventDefault(); navigateTo(`/experiments/${exp.id}`); };
+          existing.href = `/design/${des.id}`;
+          existing.onclick = (e) => { e.preventDefault(); navigateTo(`/design/${des.id}`); };
           const textEl = existing.querySelector('.sidebar-exp-text');
           if (textEl) textEl.innerHTML = iterLabel;
           // Sync pulsing dot
@@ -1443,24 +1443,24 @@ async function checkPendingExperiments() {
         }
         const link = document.createElement('a');
         link.className = 'sidebar-exp';
-        link.dataset.expId = seriesKey;
+        link.dataset.designId = designKey;
         link.dataset.hasChatwith = hasChatWith ? 'true' : 'false';
-        // Navigate to latest iteration (exp.id is already the latest from the API)
-        link.href = `/experiments/${exp.id}`;
-        link.onclick = (e) => { e.preventDefault(); navigateTo(`/experiments/${exp.id}`); };
+        // Navigate to latest revision (des.id is already the latest from the API)
+        link.href = `/design/${des.id}`;
+        link.onclick = (e) => { e.preventDefault(); navigateTo(`/design/${des.id}`); };
         const chatDot = hasChatWith ? '<span class="sidebar-exp-chat-dot"></span>' : '';
-        link.innerHTML = `<span class="sidebar-exp-icon">\uD83E\uDDEA</span>${chatDot}<span class="sidebar-exp-text">${iterLabel}</span>`;
+        link.innerHTML = `<span class="sidebar-exp-icon">\uD83C\uDFA8</span>${chatDot}<span class="sidebar-exp-text">${iterLabel}</span>`;
         const btn = document.createElement('button');
         btn.className = 'sidebar-exp-dismiss';
         btn.title = 'Dismiss';
         btn.textContent = '\u00d7';
-        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); dismissExperiment(exp.id, seriesKey, btn); };
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); dismissDesign(des.id, designKey, btn); };
         link.appendChild(btn);
         container.appendChild(link);
       });
     }
 
-    // Auto-kill orphaned chatwith/chat sessions — no parent experiment remains
+    // Auto-kill orphaned chatwith/chat sessions — no parent design remains
     for (const sessionName of activeSessions) {
       if (!sessionName.startsWith('chatwith-') && !sessionName.startsWith('chat-')) continue;
       try {
@@ -1468,9 +1468,9 @@ async function checkPendingExperiments() {
       } catch (_) {}
     }
 
-    // Remove indicators for series that are no longer pending (server is source of truth)
-    container.querySelectorAll('[data-exp-id]').forEach(el => {
-      if (!keys.has(el.dataset.expId)) el.remove();
+    // Remove indicators for designs that are no longer pending (server is source of truth)
+    container.querySelectorAll('[data-design-id]').forEach(el => {
+      if (!keys.has(el.dataset.designId)) el.remove();
     });
   } catch(e) {}
 }
@@ -1499,19 +1499,19 @@ function route() {
     content.style.display = '';
   }
 
-  // Hide global header on experiment pages (control strip replaces it)
-  const isExpPage = path.startsWith('/experiments/');
+  // Hide global header on design pages (control strip replaces it)
+  const isDesignPage = path.startsWith('/design/');
   const globalHeader = document.querySelector('header');
   if (globalHeader) {
-    globalHeader.style.display = isExpPage ? 'none' : '';
+    globalHeader.style.display = isDesignPage ? 'none' : '';
   }
   // Also hide pinned beads strip
   const pinnedStrip = document.querySelector('[x-show*="pinned"]');
   if (pinnedStrip) {
-    pinnedStrip.style.display = isExpPage ? 'none' : '';
+    pinnedStrip.style.display = isDesignPage ? 'none' : '';
   }
-  // Remove content padding for full-bleed experiment
-  content.style.padding = isExpPage ? '0' : '';
+  // Remove content padding for full-bleed design
+  content.style.padding = isDesignPage ? '0' : '';
 
   // Clear header action buttons from previous page
   const headerActions = document.getElementById('header-actions');
@@ -1555,8 +1555,8 @@ function route() {
   } else if (isTerminalPage) {
     const sessionId = path.startsWith('/terminal/') ? path.split('/terminal/')[1] : null;
     renderTerminal(null, sessionId);
-  } else if (path.startsWith('/experiments/')) {
-    renderExperimentFragment();
+  } else if (path.startsWith('/design/')) {
+    renderDesignFragment();
   } else if (path === '/search') {
     renderSearchFragment();
   } else {
@@ -1665,9 +1665,9 @@ api('/api/stats').then(data => {
 
 // connectEvents() is defined in static/js/events.js (loaded before this file).
 
-// Check for pending experiments
-checkPendingExperiments();
-setInterval(checkPendingExperiments, 10000);
+// Check for pending designs
+checkPendingDesigns();
+setInterval(checkPendingDesigns, 10000);
 
 // ── Toast notifications ──────────────────────────────────────
 

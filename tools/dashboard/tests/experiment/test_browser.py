@@ -142,7 +142,7 @@ class TestCaptureButton:
         exp_id = experiment_server["exp_id"]
 
         ab_raw("close")
-        ab_raw("open", f"http://localhost:{TEST_PORT}/experiments/{exp_id}",
+        ab_raw("open", f"http://localhost:{TEST_PORT}/design/{exp_id}",
                "--ignore-https-errors")
         time.sleep(3)
 
@@ -193,7 +193,7 @@ class TestCaptureButton:
         exp_id = experiment_server["exp_id"]
 
         ab_raw("close")
-        ab_raw("open", f"http://localhost:{TEST_PORT}/experiments/{exp_id}",
+        ab_raw("open", f"http://localhost:{TEST_PORT}/design/{exp_id}",
                "--ignore-https-errors")
         time.sleep(3)
 
@@ -206,7 +206,7 @@ class TestCaptureButton:
             };
         """)
 
-        assert result is not None, "Could not evaluate JS on experiment page"
+        assert result is not None, "Could not evaluate JS on design page"
         assert result.get("hasModule"), "Screenshot module not loaded"
         assert result.get("hasUrl"), "_screenshotUrl not available"
         assert result.get("hasStatus"), "_updateScreenshotStatus not available"

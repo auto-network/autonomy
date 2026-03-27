@@ -18,14 +18,14 @@ describe('_screenshotUrl', () => {
   it('basic URL', () => {
     assert.equal(
       Screenshot._screenshotUrl('abc123'),
-      '/api/experiments/abc123/screenshot'
+      '/api/design/abc123/screenshot'
     );
   });
 
   it('with session name', () => {
     assert.equal(
       Screenshot._screenshotUrl('abc123', 'my-session'),
-      '/api/experiments/abc123/screenshot?tmux_session=my-session'
+      '/api/design/abc123/screenshot?tmux_session=my-session'
     );
   });
 
@@ -37,21 +37,21 @@ describe('_screenshotUrl', () => {
   it('no session parameter when sessionName is empty string', () => {
     assert.equal(
       Screenshot._screenshotUrl('x', ''),
-      '/api/experiments/x/screenshot'
+      '/api/design/x/screenshot'
     );
   });
 
   it('no session parameter when sessionName is null', () => {
     assert.equal(
       Screenshot._screenshotUrl('x', null),
-      '/api/experiments/x/screenshot'
+      '/api/design/x/screenshot'
     );
   });
 
   it('no session parameter when sessionName is undefined', () => {
     assert.equal(
       Screenshot._screenshotUrl('x', undefined),
-      '/api/experiments/x/screenshot'
+      '/api/design/x/screenshot'
     );
   });
 });
@@ -65,29 +65,29 @@ describe('_updateScreenshotStatus', () => {
     global.document = { getElementById: () => null };
   });
 
-  it('calls setScreenshotStatus when experimentPage exists', () => {
+  it('calls setScreenshotStatus when designPage exists', () => {
     let called = null;
-    global.window._experimentPage = { setScreenshotStatus: (m) => { called = m; } };
+    global.window._designPage = { setScreenshotStatus: (m) => { called = m; } };
     Screenshot._updateScreenshotStatus('x', 'test msg');
     assert.equal(called, 'test msg');
   });
 
-  it('does not throw when experimentPage has no setScreenshotStatus', () => {
-    global.window._experimentPage = {};
+  it('does not throw when designPage has no setScreenshotStatus', () => {
+    global.window._designPage = {};
     assert.doesNotThrow(() => Screenshot._updateScreenshotStatus('x', 'test'));
   });
 
-  it('does not throw when experimentPage is null', () => {
-    global.window._experimentPage = null;
+  it('does not throw when designPage is null', () => {
+    global.window._designPage = null;
     assert.doesNotThrow(() => Screenshot._updateScreenshotStatus('x', 'test'));
   });
 
-  it('does not throw when experimentPage is undefined', () => {
-    delete global.window._experimentPage;
+  it('does not throw when designPage is undefined', () => {
+    delete global.window._designPage;
     assert.doesNotThrow(() => Screenshot._updateScreenshotStatus('x', 'test'));
   });
 
-  it('falls back to DOM element when experimentPage missing', () => {
+  it('falls back to DOM element when designPage missing', () => {
     let textSet = null;
     global.document.getElementById = (id) => {
       if (id === 'exp-screenshot-status') return { set textContent(v) { textSet = v; } };
@@ -113,19 +113,19 @@ describe('_handleScreenshotResponse', () => {
 
   it('sets "Screenshot saved" status for non-injected response', () => {
     let statusMsg = null;
-    global.window._experimentPage = { setScreenshotStatus: (m) => { statusMsg = m; } };
+    global.window._designPage = { setScreenshotStatus: (m) => { statusMsg = m; } };
     Screenshot._handleScreenshotResponse('x', { injected: false });
     assert(statusMsg.startsWith('Screenshot saved'), `expected "Screenshot saved..." got "${statusMsg}"`);
   });
 
   it('sets "Screenshot injected" status for injected response', () => {
     let statusMsg = null;
-    global.window._experimentPage = { setScreenshotStatus: (m) => { statusMsg = m; } };
+    global.window._designPage = { setScreenshotStatus: (m) => { statusMsg = m; } };
     Screenshot._handleScreenshotResponse('x', { injected: true });
     assert(statusMsg.startsWith('Screenshot injected'), `expected "Screenshot injected..." got "${statusMsg}"`);
   });
 
-  it('does not throw when experimentPage is missing', () => {
+  it('does not throw when designPage is missing', () => {
     assert.doesNotThrow(() => Screenshot._handleScreenshotResponse('x', { injected: true }));
   });
 });

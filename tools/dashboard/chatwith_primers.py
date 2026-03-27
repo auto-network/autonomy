@@ -10,7 +10,7 @@ Pattern mirrors tools/graph/primer.py:collect_primer_data():
   collect data as a pure dict → format as markdown string.
 
 Usage:
-    result = get_primer("experiment", "some-uuid")
+    result = get_primer("design", "some-uuid")
     # result = {"primer_text": "..."}
 """
 
@@ -25,11 +25,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from agents.experiments_db import get_experiment
+from agents.design_db import get_design
 
 # ── Constants ────────────────────────────────────────────────────
 
-VALID_PAGE_TYPES = ["experiment"]
+VALID_PAGE_TYPES = ["design"]
 
 _TAILWIND_INPUT = Path(__file__).parent / "tailwind.input.css"
 
@@ -43,23 +43,23 @@ Do NOT use CDN script tags. Source config: `tools/dashboard/tailwind.input.css`
 - **Pattern:** Server-rendered HTML fragments, Alpine.js for interactivity, \
 SSE for live updates
 
-Experiment variants render inside `<iframe>` elements. Each variant must be a \
+Design variants render inside `<iframe>` elements. Each variant must be a \
 self-contained HTML document (full `<html>` with `<head>` and `<body>`) that \
 references `/static/tailwind.css` for styling.\
 """
 
 
-# ── Experiment primer ────────────────────────────────────────────
+# ── Design primer ────────────────────────────────────────────
 
 
-def _collect_experiment_data(experiment_id: str) -> dict:
-    """Collect raw data for an experiment primer. Returns structured dict."""
-    exp = get_experiment(experiment_id)
-    if not exp:
-        raise ValueError(f"Experiment not found: {experiment_id!r}")
+def _collect_design_data(revision_id: str) -> dict:
+    """Collect raw data for a design primer. Returns structured dict."""
+    design = get_design(revision_id)
+    if not design:
+        raise ValueError(f"Design not found: {revision_id!r}")
 
     # Parse fixture
-    fixture_raw = exp.get("fixture")
+    fixture_raw = design.get("fixture")
     fixture_parsed = None
     if fixture_raw:
         try:
@@ -67,35 +67,32 @@ def _collect_experiment_data(experiment_id: str) -> dict:
         except (json.JSONDecodeError, TypeError):
             fixture_parsed = fixture_raw  # keep as-is if unparseable
 
-    # Series info — series feature may not be implemented yet; handle gracefully
-    series_id = exp.get("series_id")
-    series_name = exp.get("series_name")
-    iteration_count = exp.get("iteration_count")  # populated by series query if available
+    # Design info
+    design_id = design.get("design_id")
+    iteration_count = design.get("iteration_count")
 
     return {
-        "experiment_id": experiment_id,
-        "title": exp.get("title", "Untitled Experiment"),
-        "description": exp.get("description") or "",
-        "status": exp.get("status", "pending"),
-        "created_at": exp.get("created_at", ""),
+        "revision_id": revision_id,
+        "title": design.get("title", "Untitled Design"),
+        "description": design.get("description") or "",
+        "status": design.get("status", "pending"),
+        "created_at": design.get("created_at", ""),
         "fixture": fixture_parsed,
-        "variants": exp.get("variants", []),
-        "series_id": series_id,
-        "series_name": series_name,
+        "variants": design.get("variants", []),
+        "design_id": design_id,
         "iteration_count": iteration_count,
     }
 
 
-def _format_experiment_primer(data: dict) -> str:
-    """Render experiment data as a Chat With primer markdown string."""
-    exp_id = data["experiment_id"]
+def _format_design_primer(data: dict) -> str:
+    """Render design data as a Chat With primer markdown string."""
+    rev_id = data["revision_id"]
     title = data["title"]
     description = data["description"]
     status = data["status"]
     fixture = data["fixture"]
     variants = data["variants"]
-    series_id = data["series_id"]
-    series_name = data["series_name"]
+    design_id = data["design_id"]
     iteration_count = data["iteration_count"]
 
     lines = []
@@ -119,22 +116,20 @@ def _format_experiment_primer(data: dict) -> str:
 
     # ── Current State ─────────────────────────────────────────
     lines.append("## Current State\n")
-    lines.append(f"- **Experiment ID:** `{exp_id}`")
+    lines.append(f"- **Revision ID:** `{rev_id}`")
     lines.append(f"- **Title:** {title}")
     lines.append(f"- **Status:** {status}")
     if description:
         lines.append(f"- **Description:** {description}")
 
-    if series_id:
-        lines.append(f"- **Series ID:** `{series_id}`")
-        if series_name:
-            lines.append(f"- **Series Name:** {series_name}")
+    if design_id:
+        lines.append(f"- **Design ID:** `{design_id}`")
         if iteration_count is not None:
-            lines.append(f"- **Iteration:** #{iteration_count} in series")
+            lines.append(f"- **Iteration:** #{iteration_count} in design")
         else:
-            lines.append(f"- **Iteration:** (series iteration count not yet available)")
+            lines.append(f"- **Iteration:** (revision count not yet available)")
     else:
-        lines.append("- **Series:** None (standalone experiment)")
+        lines.append("- **Design:** None (standalone)")
 
     lines.append("\n---\n")
 
@@ -153,7 +148,7 @@ def _format_experiment_primer(data: dict) -> str:
     lines.append("## Current Variant HTML\n")
     if variants:
         lines.append(
-            f"This experiment has {len(variants)} variant(s). "
+            f"This design has {len(variants)} variant(s). "
             "Each variant is the full source HTML rendered in an iframe:\n"
         )
         for v in variants:
@@ -185,18 +180,16 @@ def _format_experiment_primer(data: dict) -> str:
     lines.append("## Tools Available\n")
     lines.append("### Create next iteration\n")
     lines.append(
-        "POST a new experiment to create the next iteration. "
+        "POST a new design revision to create the next iteration. "
         "The user will see the new variants in the gallery immediately.\n"
     )
 
-    # Show series_id in the example if we have one
-    series_example = f'\n  "series_id": "{series_id}",' if series_id else ""
-
-    lines.append("### Preferred: `graph ui-exp` file watcher\n")
+    # Show design_id in the example if we have one
+    lines.append("### Preferred: `graph ui-design` file watcher\n")
     lines.append(
         "Write each variant as an HTML file in a working directory. "
-        "The `graph ui-exp` tool watches the directory and auto-posts changes to the "
-        "experiment API. The browser updates in real-time via SSE.\n\n"
+        "The `graph ui-design` tool watches the directory and auto-posts changes to the "
+        "design API. The browser updates in real-time via SSE.\n\n"
         "```bash\n"
         "# Set up a working directory with one .html file per variant\n"
         "mkdir -p /tmp/variants\n"
@@ -206,12 +199,12 @@ def _format_experiment_primer(data: dict) -> str:
         "# Each filename (without .html) becomes the variant ID.\n"
         "\n"
     )
-    if series_id:
-        lines.append(f"# Start watching (appends to this experiment's series):\n")
-        lines.append(f"graph ui-exp \"Iteration N: <description>\" /tmp/variants/ --series {series_id}\n")
+    if design_id:
+        lines.append(f"# Start watching (appends to this design):\n")
+        lines.append(f"graph ui-design \"Iteration N: <description>\" /tmp/variants/ --design {design_id}\n")
     else:
-        lines.append(f"# Start watching (creates a new series):\n")
-        lines.append(f"graph ui-exp \"<experiment title>\" /tmp/variants/\n")
+        lines.append(f"# Start watching (creates a new design):\n")
+        lines.append(f"graph ui-design \"<design title>\" /tmp/variants/\n")
     lines.append(
         "```\n\n"
         "The watcher runs in the foreground. Edit any .html file and save — the browser "
@@ -223,28 +216,28 @@ def _format_experiment_primer(data: dict) -> str:
     lines.append("### Alternative: direct API\n")
     lines.append(
         "```bash\n"
-        "curl -sk https://localhost:8080/api/experiments \\\n"
+        "curl -sk https://localhost:8080/api/design \\\n"
         "  -X POST -H 'Content-Type: application/json' \\\n"
         "  -d '{\n"
     )
-    series_field = f'"series_id": "{series_id}",' if series_id else '"series_id": "<optional>",'
+    design_field = f'"design_id": "{design_id}",' if design_id else '"design_id": "<optional>",'
     lines.append(f'  "title": "Iteration N: <description>",\n')
-    lines.append(f'  {series_field}\n')
+    lines.append(f'  {design_field}\n')
     lines.append('  "variants": [{"id": "variant-a", "html": "<full HTML>"}]\n')
     lines.append("  }'\n```\n")
 
     # ── Screenshots ──────────────────────────────────────────
     lines.append("### Screenshots\n")
     lines.append(
-        "The user's browser auto-captures a screenshot of the experiment page after each "
-        "variant loads. When using `graph ui-exp`, the screenshot is automatically copied "
+        "The user's browser auto-captures a screenshot of the design page after each "
+        "variant loads. When using `graph ui-design`, the screenshot is automatically copied "
         "into your working directory as `screenshot.png`. Read it any time to see exactly "
         "what the user sees:\n\n"
         "  `<your-variants-dir>/screenshot.png`\n\n"
         "The screenshot updates automatically after each iteration.\n"
     )
-    # Check if a screenshot already exists for the current experiment
-    screenshot_path = Path(f"data/experiments/{exp_id}/screenshot.png")
+    # Check if a screenshot already exists for the current revision
+    screenshot_path = Path(f"data/experiments/{rev_id}/screenshot.png")
     if screenshot_path.exists():
         abs_path = str(screenshot_path.resolve())
         lines.append(f"**A screenshot already exists — read it now:** `{abs_path}`\n")
@@ -256,7 +249,7 @@ def _format_experiment_primer(data: dict) -> str:
         "1. **First:** Read the latest screenshot (if one exists above) to see what the user sees.\n"
         "2. Study the fixture and current variant HTML above.\n"
         "3. Ask the user what aspect of the design they want to refine.\n"
-        "4. Start `graph ui-exp` watching a variants directory (see Tools above).\n"
+        "4. Start `graph ui-design` watching a variants directory (see Tools above).\n"
         "5. Write improved variant HTML to .html files in the watched directory — "
         "the browser updates automatically on every save.\n"
         "6. Read the latest screenshot to verify your changes rendered correctly.\n"
@@ -268,21 +261,21 @@ def _format_experiment_primer(data: dict) -> str:
     return "\n".join(lines)
 
 
-def build_experiment_primer(experiment_id: str) -> dict:
-    """Build a Chat With primer for the experiment/design-studio page.
+def build_design_primer(revision_id: str) -> dict:
+    """Build a Chat With primer for the design studio page.
 
     Returns {"primer_text": str}.
-    Raises ValueError if the experiment is not found.
+    Raises ValueError if the design is not found.
     """
-    data = _collect_experiment_data(experiment_id)
-    primer_text = _format_experiment_primer(data)
+    data = _collect_design_data(revision_id)
+    primer_text = _format_design_primer(data)
     return {"primer_text": primer_text}
 
 
 # ── Registry ─────────────────────────────────────────────────────
 
 _BUILDERS = {
-    "experiment": build_experiment_primer,
+    "design": build_design_primer,
 }
 
 
