@@ -1524,13 +1524,6 @@ class TestTraceOverlayBehavior:
         assert c.get("has_decision"), \
             "User should see the Decision section with status, reason, and scores"
 
-    @pytest.mark.xfail(
-        reason="BUG: Overlay panel contains raw {% include %} because base.html "
-               "is served via _load_template() (no Jinja rendering). User sees "
-               "literal template syntax instead of rendered session entries when "
-               "the panel opens.",
-        strict=True,
-    )
     def test_no_raw_jinja_in_overlay(self):
         """Overlay session panel must not contain raw Jinja template directives.
 
