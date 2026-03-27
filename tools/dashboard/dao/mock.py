@@ -631,10 +631,6 @@ def update_nag_config(tmux_name: str, **kwargs) -> None:
 def update_dispatch_nag(tmux_name: str, enabled: bool) -> None:
     pass
 
-# Allowed roles constant (mirrors dashboard_db)
-_ALLOWED_ROLES = {"", "coordinator", "reviewer", "builder", "designer", "validator", "researcher"}
-
-
 # ── Mock event watcher (replaces _dispatch_watcher) ─────────────────
 
 EVENTS_PATH = Path(os.environ.get("DASHBOARD_MOCK_EVENTS", ""))
