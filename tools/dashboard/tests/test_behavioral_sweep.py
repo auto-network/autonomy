@@ -148,11 +148,191 @@ SWEEP_SESSION_ENTRIES = {
     for s in SWEEP_SESSIONS
 }
 
-# Minimal beads + runs for nav SSE (dispatch page not tested yet)
+# ── Beads (used by /beads, /bead/{id}, /dispatch, nav SSE) ───────────
+
 SWEEP_BEADS = [
-    {"id": "auto-sweep-b1", "title": "Sweep test bead", "priority": 1,
-     "status": "open", "labels": []},
+    {
+        "id": "auto-sweep-b1", "title": "Sweep alpha task",
+        "priority": 1, "status": "open", "issue_type": "task",
+        "labels": ["readiness:approved"], "created_by": "librarian",
+        "description": "First test bead for behavioral sweep",
+    },
+    {
+        "id": "auto-sweep-b2", "title": "Sweep beta bug",
+        "priority": 2, "status": "in_progress", "issue_type": "bug",
+        "labels": ["readiness:specified", "dashboard"], "created_by": "user",
+        "description": "Second test bead with dependencies",
+    },
+    {
+        "id": "auto-sweep-b3", "title": "Sweep gamma feature",
+        "priority": 0, "status": "open", "issue_type": "feature",
+        "labels": [], "created_by": "librarian",
+    },
 ]
+
+# ── Dispatch runs (used by /timeline, /dispatch/trace) ───────────────
+
+SWEEP_RUNS = [
+    {
+        "id": "run-sweep-001", "bead_id": "auto-sweep-b1",
+        "status": "DONE", "title": "Sweep alpha task",
+        "priority": 1, "duration_secs": 300,
+        "started_at": "2026-03-25T10:00:00Z",
+        "completed_at": "2026-03-25T10:05:00Z",
+        "lines_added": 45, "lines_removed": 12, "files_changed": 3,
+        "reason": "All tests pass",
+        "scores": {"tooling": 4, "clarity": 5, "confidence": 4},
+        "time_breakdown": {
+            "research_pct": 20, "coding_pct": 60,
+            "debugging_pct": 15, "tooling_workaround_pct": 5,
+        },
+    },
+    {
+        "id": "run-sweep-002", "bead_id": "auto-sweep-b2",
+        "status": "FAILED", "title": "Sweep beta bug",
+        "priority": 2, "duration_secs": 120,
+        "started_at": "2026-03-25T09:00:00Z",
+        "completed_at": "2026-03-25T09:02:00Z",
+        "reason": "Tests failed on assertion",
+    },
+]
+
+# ── Timeline data ────────────────────────────────────────────────────
+
+SWEEP_TIMELINE_ENTRIES = SWEEP_RUNS  # timeline uses same shape as runs
+
+SWEEP_TIMELINE_STATS = {
+    "completed_count": 5,
+    "success_rate": 0.8,
+    "failed_count": 1,
+    "blocked_count": 0,
+    "avg_duration": 240.0,
+    "avg_tooling_score": 3.5,
+    "avg_confidence_score": 4.0,
+    "avg_clarity_score": 3.8,
+}
+
+# ── Collab data ──────────────────────────────────────────────────────
+
+SWEEP_COLLAB_NOTES = [
+    {
+        "id": "note-sweep-001", "title": "Architecture decision on auth",
+        "created_at": "2026-03-25T08:00:00Z", "author": "agent-alpha",
+        "project": "autonomy", "tags": ["architecture", "auth"],
+        "comment_count": 2, "version": 1, "source_type": "note",
+        "preview": "Passkey authentication requires WebAuthn support",
+    },
+    {
+        "id": "note-sweep-002", "title": "Testing strategy update",
+        "created_at": "2026-03-24T12:00:00Z", "author": "agent-beta",
+        "project": "autonomy", "tags": ["testing"],
+        "comment_count": 0, "version": 1, "source_type": "note",
+        "preview": "L2.B behavioral sweep covers all pages",
+    },
+]
+
+SWEEP_THOUGHTS = [
+    {
+        "id": "thought-sweep-001", "content": "Auth needs passkeys for MFA",
+        "status": "captured", "thread_id": None,
+        "source_id": None, "turn_number": None,
+        "created_at": "2026-03-25T09:00:00Z",
+    },
+    {
+        "id": "thought-sweep-002", "content": "Consider Alpine.js migration path",
+        "status": "actioned", "thread_id": "thread-sweep-001",
+        "source_id": None, "turn_number": None,
+        "created_at": "2026-03-24T14:00:00Z",
+    },
+]
+
+SWEEP_THREADS = [
+    {
+        "id": "thread-sweep-001", "title": "Passkey auth design",
+        "status": "active", "priority": 1, "capture_count": 3,
+        "created_at": "2026-03-24T10:00:00Z",
+        "updated_at": "2026-03-25T09:00:00Z",
+    },
+    {
+        "id": "thread-sweep-002", "title": "Performance optimization",
+        "status": "resolved", "priority": 2, "capture_count": 1,
+        "created_at": "2026-03-23T10:00:00Z",
+        "updated_at": "2026-03-24T10:00:00Z",
+    },
+]
+
+# ── Streams data ─────────────────────────────────────────────────────
+
+SWEEP_STREAMS = [
+    {"tag": "pitfall", "count": 12, "description": "Operational hazards and gotchas",
+     "last_active": "2026-03-25T10:00:00Z"},
+    {"tag": "architecture", "count": 8, "description": "Design decisions and patterns",
+     "last_active": "2026-03-24T10:00:00Z"},
+    {"tag": "testing", "count": 5, "description": "Testing strategies and patterns",
+     "last_active": "2026-03-23T10:00:00Z"},
+]
+
+# ── Trace / primer / deps data ───────────────────────────────────────
+
+SWEEP_TRACES = {
+    "run-sweep-001": {
+        "id": "run-sweep-001", "bead_id": "auto-sweep-b1",
+        "status": "DONE", "reason": "All tests pass",
+        "duration_secs": 300,
+        "started_at": "2026-03-25T10:00:00Z",
+        "completed_at": "2026-03-25T10:05:00Z",
+        "commit_hash": "abc123def456789",
+        "lines_added": 45, "lines_removed": 12, "files_changed": 3,
+        "is_live": False,
+        "decision": {
+            "status": "DONE", "reason": "All tests pass",
+            "scores": {"tooling": 4, "clarity": 5, "confidence": 4},
+            "time_breakdown": {
+                "research_pct": 20, "coding_pct": 60,
+                "debugging_pct": 15, "tooling_workaround_pct": 5,
+            },
+        },
+    },
+}
+
+SWEEP_PRIMERS = {
+    "auto-sweep-b1": {
+        "bead_id": "auto-sweep-b1", "title": "Sweep alpha task",
+        "description": "First test bead for behavioral sweep",
+        "priority": 1, "status": "open",
+        "pitfalls": [],
+        "provenance": [],
+        "similar_beads": [],
+    },
+}
+
+SWEEP_BEAD_DEPS = {
+    "auto-sweep-b2": {
+        "blockers": [{"id": "auto-sweep-b1", "title": "Sweep alpha task", "status": "open"}],
+        "dependents": [],
+    },
+}
+
+# ── Dispatch SSE event (pushed after browser connects) ───────────────
+
+DISPATCH_SSE_DATA = {
+    "active": [
+        {"id": "auto-sweep-b1", "title": "Sweep alpha task",
+         "priority": 1, "status": "RUNNING", "duration_secs": 120,
+         "snippet": "Working on tests"},
+    ],
+    "waiting": [
+        {"id": "auto-sweep-b3", "title": "Sweep gamma feature",
+         "priority": 0, "status": "waiting"},
+    ],
+    "blocked": [
+        {"id": "auto-sweep-b2", "title": "Sweep beta bug",
+         "priority": 2, "status": "blocked",
+         "blockers": [{"id": "auto-sweep-b1", "title": "Sweep alpha task"}]},
+    ],
+    "paused": {"dispatch": False, "merge": False},
+    "pause_reasons": {},
+}
 
 
 def _build_fixture() -> dict:
@@ -162,8 +342,17 @@ def _build_fixture() -> dict:
         "session_entries": SWEEP_SESSION_ENTRIES,
         "recent_sessions": SWEEP_RECENT_SESSIONS,
         "beads": SWEEP_BEADS,
-        "runs": [],
+        "runs": SWEEP_RUNS,
         "experiments": [],
+        "timeline_entries": SWEEP_TIMELINE_ENTRIES,
+        "timeline_stats": SWEEP_TIMELINE_STATS,
+        "collab_notes": SWEEP_COLLAB_NOTES,
+        "thoughts": SWEEP_THOUGHTS,
+        "threads": SWEEP_THREADS,
+        "streams": SWEEP_STREAMS,
+        "traces": SWEEP_TRACES,
+        "primers": SWEEP_PRIMERS,
+        "bead_deps": SWEEP_BEAD_DEPS,
     }
 
 
@@ -177,7 +366,7 @@ def sweep_server(tmp_path_factory):
     fixture_path.write_text(json.dumps(_build_fixture(), indent=2))
 
     events_path = tmpdir / "events.jsonl"
-    events_path.write_text("")  # empty — no SSE events needed for sessions page
+    events_path.write_text("")  # empty — SSE events written after browser connects
 
     port = 8091
     env = {
@@ -217,7 +406,12 @@ def sweep_server(tmp_path_factory):
         out, err = proc.communicate(timeout=3)
         pytest.fail(f"Sweep server failed to start:\nstdout: {out.decode()}\nstderr: {err.decode()}")
 
-    yield {"port": port, "url": f"http://127.0.0.1:{port}", "fixture_path": str(fixture_path)}
+    yield {
+        "port": port,
+        "url": f"http://127.0.0.1:{port}",
+        "fixture_path": str(fixture_path),
+        "events_path": str(events_path),
+    }
 
     proc.terminate()
     try:
@@ -239,7 +433,16 @@ def browser(sweep_server):
         ["agent-browser", "wait", "--load", "networkidle"],
         capture_output=True, timeout=10,
     )
-    # Give Alpine + HTTP fallback time to populate the store
+
+    # Push dispatch SSE events so _sseCache is populated for /dispatch page
+    events_path = sweep_server["events_path"]
+    with open(events_path, "a") as f:
+        f.write(json.dumps({"topic": "dispatch", "data": DISPATCH_SSE_DATA}) + "\n")
+        f.write(json.dumps({"topic": "nav", "data": {
+            "open_beads": 3, "running_agents": 1, "approved_waiting": 1,
+        }}) + "\n")
+
+    # Give Alpine + HTTP fallback + SSE events time to propagate
     time.sleep(1.5)
     yield sweep_server
     subprocess.run(["agent-browser", "close"], capture_output=True, timeout=5)
@@ -402,6 +605,326 @@ SESSIONS_PAGE_CHECKS = """
     r.has_recent_section = !!document.querySelector('[data-testid="recent-sessions-section"]');
 """
 
+# ── Dispatch page JS check bundle ────────────────────────────────────
+
+DISPATCH_PAGE_CHECKS = """
+    var bodyText = document.body.innerText;
+
+    // Section headings visible
+    var h2s = document.querySelectorAll('h2');
+    var headings = [];
+    h2s.forEach(function(h) { headings.push(h.textContent.trim()); });
+    r.headings = headings;
+    r.has_active_heading = headings.some(function(t) { return t.indexOf('Active') !== -1; });
+    r.has_waiting_heading = headings.some(function(t) { return t.indexOf('Waiting') !== -1; });
+    r.has_blocked_heading = headings.some(function(t) { return t.indexOf('Blocked') !== -1; });
+
+    // Bead titles from fixture visible in active/waiting/blocked sections
+    r.has_alpha_title = bodyText.indexOf('Sweep alpha') !== -1;
+    r.has_gamma_title = bodyText.indexOf('Sweep gamma') !== -1;
+    r.has_beta_title = bodyText.indexOf('Sweep beta') !== -1;
+
+    // Pause toggle buttons visible (rendered from paused object keys)
+    var allBtns = document.querySelectorAll('button');
+    var pauseLabels = [];
+    allBtns.forEach(function(b) {
+        var t = b.textContent.trim();
+        if (t === 'dispatch' || t === 'merge') pauseLabels.push(t);
+    });
+    r.pause_labels = pauseLabels;
+    r.has_pause_controls = pauseLabels.length >= 2;
+
+    // Status indicators — running count visible
+    r.has_running_stat = bodyText.indexOf('running:') !== -1;
+
+    // No template artifacts
+    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+"""
+
+# ── Beads page JS check bundle ───────────────────────────────────────
+
+BEADS_PAGE_CHECKS = """
+    var bodyText = document.body.innerText;
+
+    // View switcher tabs visible
+    var tabs = document.querySelectorAll('[role="tab"]');
+    var tabLabels = [];
+    tabs.forEach(function(t) { tabLabels.push(t.textContent.trim()); });
+    r.tab_labels = tabLabels;
+    r.has_list_tab = tabLabels.some(function(t) { return t.indexOf('List') !== -1; });
+    r.has_board_tab = tabLabels.some(function(t) { return t.indexOf('Board') !== -1; });
+    r.has_tree_tab = tabLabels.some(function(t) { return t.indexOf('Tree') !== -1; });
+    r.has_deps_tab = tabLabels.some(function(t) { return t.indexOf('Deps') !== -1; });
+
+    // Table rows visible (list view is default)
+    var rows = document.querySelectorAll('.bead-table-row');
+    r.row_count = rows.length;
+    r.has_rows = rows.length > 0;
+
+    // Bead titles visible
+    r.has_alpha_bead = bodyText.indexOf('Sweep alpha task') !== -1;
+    r.has_beta_bead = bodyText.indexOf('Sweep beta bug') !== -1;
+
+    // Priority badges visible
+    r.has_p0 = bodyText.indexOf('P0') !== -1;
+    r.has_p1 = bodyText.indexOf('P1') !== -1;
+    r.has_p2 = bodyText.indexOf('P2') !== -1;
+
+    // Bead IDs visible in table
+    r.has_bead_ids = bodyText.indexOf('auto-sweep-b1') !== -1;
+
+    // Filter controls — priority chips
+    var filterBtns = document.querySelectorAll('button[aria-pressed]');
+    r.filter_count = filterBtns.length;
+    r.has_filters = filterBtns.length >= 5;  // at least P0-P4
+
+    // Column headers
+    var ths = document.querySelectorAll('.bead-th');
+    var colHeaders = [];
+    ths.forEach(function(th) {
+        var t = th.textContent.trim();
+        if (t) colHeaders.push(t);
+    });
+    r.col_headers = colHeaders;
+    r.has_title_col = colHeaders.some(function(h) { return h.indexOf('Title') !== -1; });
+    r.has_pri_col = colHeaders.some(function(h) { return h.indexOf('Pri') !== -1; });
+
+    // No template artifacts
+    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+"""
+
+# ── Timeline page JS check bundle ────────────────────────────────────
+
+TIMELINE_PAGE_CHECKS = """
+    var bodyText = document.body.innerText;
+
+    // Timeframe toggle visible (1D, 1W, 1M, All buttons)
+    var rangeBtns = [];
+    document.querySelectorAll('button').forEach(function(b) {
+        var t = b.textContent.trim();
+        if (['1D', '1W', '1M', 'All'].indexOf(t) !== -1) rangeBtns.push(t);
+    });
+    r.range_buttons = rangeBtns;
+    r.has_range_toggle = rangeBtns.length === 4;
+
+    // Stats tiles visible — check for tile labels
+    r.has_completed_tile = bodyText.indexOf('Completed') !== -1;
+    r.has_failed_tile = bodyText.indexOf('Failed') !== -1 || bodyText.indexOf('Blocked') !== -1;
+    r.has_duration_tile = bodyText.indexOf('Avg Duration') !== -1;
+    r.has_tooling_tile = bodyText.indexOf('Avg Tooling') !== -1;
+    r.has_confidence_tile = bodyText.indexOf('Avg Confidence') !== -1;
+
+    // Stats values present (from SWEEP_TIMELINE_STATS)
+    r.has_completed_count = bodyText.indexOf('5') !== -1;
+    r.has_success_pct = bodyText.indexOf('80%') !== -1;
+
+    // Feed heading
+    r.has_feed_heading = bodyText.indexOf('Feed') !== -1;
+
+    // Feed entries visible (timeline cards)
+    var tlCards = document.querySelectorAll('.tl-card');
+    r.feed_count = tlCards.length;
+    r.has_feed_entries = tlCards.length > 0;
+
+    // Status dots visible
+    var dots = document.querySelectorAll('.tl-dot');
+    r.dot_count = dots.length;
+    r.has_status_dots = dots.length > 0;
+
+    // Duration/time visible
+    r.has_duration_text = bodyText.indexOf('5m') !== -1 || bodyText.indexOf('2m') !== -1;
+
+    // Stars visible (avg scores from stats tiles)
+    var stars = document.querySelectorAll('.tl-star-on, .tl-star-off');
+    r.star_count = stars.length;
+    r.has_stars = stars.length > 0;
+
+    // No template artifacts
+    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+"""
+
+# ── Collab page JS check bundle ──────────────────────────────────────
+
+COLLAB_PAGE_CHECKS = """
+    var bodyText = document.body.innerText;
+
+    // Tab strip visible (Recent, Thoughts, Threads, Topics)
+    var tabs = document.querySelectorAll('.collab-tab');
+    var tabLabels = [];
+    tabs.forEach(function(t) { tabLabels.push(t.textContent.trim()); });
+    r.tab_labels = tabLabels;
+    r.has_recent_tab = tabLabels.some(function(t) { return t.indexOf('Recent') !== -1; });
+    r.has_thoughts_tab = tabLabels.some(function(t) { return t.indexOf('Thoughts') !== -1; });
+    r.has_threads_tab = tabLabels.some(function(t) { return t.indexOf('Threads') !== -1; });
+    r.has_topics_tab = tabLabels.some(function(t) { return t.indexOf('Topics') !== -1; });
+    r.tab_count = tabs.length;
+
+    // Recent tab content — note cards visible (Recent is default tab)
+    var noteCards = document.querySelectorAll('.note-card');
+    r.note_count = noteCards.length;
+    r.has_notes = noteCards.length > 0;
+
+    // Note titles visible
+    var noteTitles = [];
+    document.querySelectorAll('.note-title').forEach(function(el) {
+        var t = el.textContent.trim();
+        if (t) noteTitles.push(t);
+    });
+    r.note_titles = noteTitles;
+    r.has_note_titles = noteTitles.length > 0;
+
+    // Note type badges visible
+    var typeLabels = [];
+    document.querySelectorAll('.note-type').forEach(function(el) {
+        var t = el.textContent.trim();
+        if (t) typeLabels.push(t);
+    });
+    r.type_labels = typeLabels;
+    r.has_type_labels = typeLabels.length > 0;
+
+    // Tags visible
+    var tagEls = document.querySelectorAll('.note-tag');
+    var tagTexts = [];
+    tagEls.forEach(function(el) {
+        var t = el.textContent.trim();
+        if (t) tagTexts.push(t);
+    });
+    r.tags = tagTexts;
+    r.has_tags = tagTexts.length > 0;
+
+    // Tab counts visible (monospace count after tab label)
+    var tabCounts = document.querySelectorAll('.collab-tab-count');
+    var countTexts = [];
+    tabCounts.forEach(function(el) {
+        var t = el.textContent.trim();
+        if (t) countTexts.push(t);
+    });
+    r.tab_counts = countTexts;
+    r.has_tab_counts = countTexts.length > 0;
+
+    // Thought capture input present (even though thoughts tab is not active)
+    // We check it exists in the DOM (it's rendered but hidden via x-show)
+    var thoughtInput = document.querySelector('.thought-input');
+    r.has_thought_input = !!thoughtInput;
+
+    // No template artifacts
+    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+"""
+
+# ── Streams page JS check bundle ─────────────────────────────────────
+
+STREAMS_PAGE_CHECKS = """
+    var bodyText = document.body.innerText;
+
+    // Page heading
+    r.has_heading = bodyText.indexOf('Streams') !== -1;
+
+    // Stream tag entries visible
+    r.has_pitfall = bodyText.indexOf('#pitfall') !== -1;
+    r.has_architecture = bodyText.indexOf('#architecture') !== -1;
+    r.has_testing = bodyText.indexOf('#testing') !== -1;
+
+    // Counts visible ("N notes")
+    r.has_12_notes = bodyText.indexOf('12 notes') !== -1;
+    r.has_8_notes = bodyText.indexOf('8 notes') !== -1;
+
+    // Descriptions visible
+    r.has_description = bodyText.indexOf('Operational hazards') !== -1
+                     || bodyText.indexOf('Design decisions') !== -1;
+
+    // Links to stream detail pages
+    var links = document.querySelectorAll('a[href*="/stream/"]');
+    r.link_count = links.length;
+    r.has_stream_links = links.length >= 3;
+
+    // No template artifacts
+    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+"""
+
+# ── Bead detail page JS check bundle ─────────────────────────────────
+
+BEAD_DETAIL_CHECKS = """
+    var bodyText = document.body.innerText;
+
+    // Bead title visible
+    r.has_title = bodyText.indexOf('Sweep alpha task') !== -1;
+
+    // Bead ID visible
+    r.has_bead_id = bodyText.indexOf('auto-sweep-b1') !== -1;
+
+    // Priority badge visible
+    r.has_priority = bodyText.indexOf('P1') !== -1;
+
+    // Status badge visible
+    r.has_status = bodyText.indexOf('open') !== -1;
+
+    // Description section visible
+    r.has_description = bodyText.indexOf('First test bead') !== -1
+                     || bodyText.indexOf('behavioral sweep') !== -1;
+
+    // Labels visible
+    r.has_label = bodyText.indexOf('readiness:approved') !== -1;
+
+    // Issue type visible
+    r.has_issue_type = bodyText.indexOf('task') !== -1;
+
+    // State is ready (not loading or error)
+    var loadingText = document.querySelector('[x-show*="loading"]');
+    var errorText = document.querySelector('[x-show*="error"]');
+    r.no_loading = !loadingText || loadingText.offsetParent === null
+                || loadingText.style.display === 'none';
+
+    // No template artifacts
+    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+"""
+
+# ── Trace page JS check bundle ───────────────────────────────────────
+
+TRACE_PAGE_CHECKS = """
+    var bodyText = document.body.innerText;
+
+    // Header with bead title (scoped to trace section, not global header)
+    var traceSection = document.querySelector('[aria-label="Trace"]');
+    var h1 = traceSection ? traceSection.querySelector('h1') : null;
+    r.title_text = h1 ? h1.textContent.trim() : '';
+    r.has_title = bodyText.indexOf('Sweep alpha') !== -1;
+
+    // Bead ID link
+    r.has_bead_link = bodyText.indexOf('auto-sweep-b1') !== -1;
+
+    // Back link to dispatch
+    var backLink = document.querySelector('a[href="/dispatch"]');
+    r.has_back_link = !!backLink;
+
+    // Decision section visible
+    r.has_decision_heading = bodyText.indexOf('Decision') !== -1;
+    r.has_status = bodyText.indexOf('DONE') !== -1;
+    r.has_reason = bodyText.indexOf('All tests pass') !== -1;
+
+    // Scores visible (stars)
+    var stars = document.querySelectorAll('.tl-star-on, .tl-star-off');
+    r.star_count = stars.length;
+    r.has_stars = stars.length > 0;
+
+    // Score labels
+    r.has_tooling_label = bodyText.indexOf('Tooling') !== -1;
+    r.has_clarity_label = bodyText.indexOf('Clarity') !== -1;
+    r.has_confidence_label = bodyText.indexOf('Confidence') !== -1;
+
+    // Duration visible
+    r.has_duration = bodyText.indexOf('5m') !== -1;
+
+    // Diff stats visible
+    r.has_diff_add = bodyText.indexOf('+45') !== -1;
+    r.has_diff_del = bodyText.indexOf('-12') !== -1;
+
+    // Commit hash visible
+    r.has_commit = bodyText.indexOf('abc123def4') !== -1;
+
+    // No template artifacts
+    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+"""
+
 
 # ── Tests ─────────────────────────────────────────────────────────────
 
@@ -509,3 +1032,344 @@ class TestSessionsPageBehavior:
         c = self._checks
         assert c.get("host_card_count", 0) == 1, f"Expected 1 host card, got {c.get('host_card_count')}"
         assert c.get("container_card_count", 0) == 4, f"Expected 4 container cards, got {c.get('container_card_count')}"
+
+
+class TestDispatchPageBehavior:
+    """Dispatch page behavioral sweep — section headings, bead cards, pause controls."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check("/dispatch", DISPATCH_PAGE_CHECKS, wait_ms=1000)
+        request.cls._checks = result
+
+    def test_section_headings(self):
+        """User sees Active, Waiting, and Blocked section headings."""
+        c = self._checks
+        assert c.get("has_active_heading"), f"No 'Active' heading, got: {c.get('headings')}"
+        assert c.get("has_waiting_heading"), f"No 'Waiting' heading, got: {c.get('headings')}"
+        assert c.get("has_blocked_heading"), f"No 'Blocked' heading, got: {c.get('headings')}"
+
+    def test_bead_titles_visible(self):
+        """User sees bead titles from fixture data in the dispatch sections."""
+        c = self._checks
+        assert c.get("has_alpha_title"), "Alpha bead title not visible"
+        assert c.get("has_gamma_title"), "Gamma bead title not visible"
+        assert c.get("has_beta_title"), "Beta bead title not visible"
+
+    def test_pause_controls(self):
+        """User sees dispatch/merge pause toggle buttons."""
+        c = self._checks
+        assert c.get("has_pause_controls"), f"Pause controls missing, found: {c.get('pause_labels')}"
+
+    def test_running_stat(self):
+        """User sees 'running: N' stat indicator."""
+        c = self._checks
+        assert c.get("has_running_stat"), "No 'running:' stat visible"
+
+    def test_no_template_artifacts(self):
+        """No raw Jinja template syntax visible."""
+        c = self._checks
+        assert c.get("no_jinja"), "Raw Jinja template syntax visible on dispatch page"
+
+
+class TestBeadsPageBehavior:
+    """Beads page behavioral sweep — view tabs, table rows, filters."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check("/beads", BEADS_PAGE_CHECKS, wait_ms=1000)
+        request.cls._checks = result
+
+    def test_view_tabs(self):
+        """User sees List, Board, Tree, and Deps view tabs."""
+        c = self._checks
+        assert c.get("has_list_tab"), f"No 'List' tab, got: {c.get('tab_labels')}"
+        assert c.get("has_board_tab"), f"No 'Board' tab, got: {c.get('tab_labels')}"
+        assert c.get("has_tree_tab"), f"No 'Tree' tab, got: {c.get('tab_labels')}"
+        assert c.get("has_deps_tab"), f"No 'Deps' tab, got: {c.get('tab_labels')}"
+
+    def test_bead_rows(self):
+        """User sees bead rows in the list view."""
+        c = self._checks
+        assert c.get("has_rows"), f"No bead rows visible (count={c.get('row_count')})"
+        assert c["row_count"] >= 3, f"Expected at least 3 rows, got {c['row_count']}"
+
+    def test_bead_titles(self):
+        """User sees bead titles from fixture data."""
+        c = self._checks
+        assert c.get("has_alpha_bead"), "Alpha bead title not visible"
+        assert c.get("has_beta_bead"), "Beta bead title not visible"
+
+    def test_priority_badges(self):
+        """User sees priority badges (P0, P1, P2)."""
+        c = self._checks
+        assert c.get("has_p1"), "P1 badge not visible"
+        assert c.get("has_p2"), "P2 badge not visible"
+
+    def test_bead_ids_visible(self):
+        """User sees bead IDs in the table."""
+        c = self._checks
+        assert c.get("has_bead_ids"), "Bead IDs not visible in table"
+
+    def test_filter_controls(self):
+        """User sees filter controls (priority chips, phase chips)."""
+        c = self._checks
+        assert c.get("has_filters"), f"Not enough filter controls (count={c.get('filter_count')})"
+
+    def test_column_headers(self):
+        """User sees table column headers (Title, Pri, etc.)."""
+        c = self._checks
+        assert c.get("has_title_col"), f"No 'Title' column header, got: {c.get('col_headers')}"
+        assert c.get("has_pri_col"), f"No 'Pri' column header, got: {c.get('col_headers')}"
+
+    def test_no_template_artifacts(self):
+        """No raw Jinja template syntax visible."""
+        c = self._checks
+        assert c.get("no_jinja"), "Raw Jinja template syntax visible on beads page"
+
+
+class TestTimelinePageBehavior:
+    """Timeline page behavioral sweep — stats tiles, feed entries, status indicators."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check("/timeline", TIMELINE_PAGE_CHECKS, wait_ms=1000)
+        request.cls._checks = result
+
+    def test_range_toggle(self):
+        """User sees timeframe toggle buttons (1D, 1W, 1M, All)."""
+        c = self._checks
+        assert c.get("has_range_toggle"), f"Missing range toggle, found: {c.get('range_buttons')}"
+
+    def test_stats_tiles(self):
+        """User sees stats tiles (Completed, Failed/Blocked, Avg Duration, etc.)."""
+        c = self._checks
+        assert c.get("has_completed_tile"), "No 'Completed' tile visible"
+        assert c.get("has_duration_tile"), "No 'Avg Duration' tile visible"
+        assert c.get("has_tooling_tile"), "No 'Avg Tooling' tile visible"
+        assert c.get("has_confidence_tile"), "No 'Avg Confidence' tile visible"
+
+    def test_stats_values(self):
+        """User sees actual stats values from fixture data."""
+        c = self._checks
+        assert c.get("has_completed_count"), "Completed count '5' not visible"
+        assert c.get("has_success_pct"), "Success rate '80%' not visible"
+
+    def test_feed_entries(self):
+        """User sees feed entries (timeline cards)."""
+        c = self._checks
+        assert c.get("has_feed_entries"), f"No feed entries visible (count={c.get('feed_count')})"
+
+    def test_status_indicators(self):
+        """User sees status dots on timeline entries."""
+        c = self._checks
+        assert c.get("has_status_dots"), f"No status dots visible (count={c.get('dot_count')})"
+
+    def test_stars_visible(self):
+        """User sees star ratings in stats tiles."""
+        c = self._checks
+        assert c.get("has_stars"), f"No stars visible (count={c.get('star_count')})"
+
+    def test_no_template_artifacts(self):
+        """No raw Jinja template syntax visible."""
+        c = self._checks
+        assert c.get("no_jinja"), "Raw Jinja template syntax visible on timeline page"
+
+
+class TestCollabPageBehavior:
+    """Collab page behavioral sweep — tabs, notes, thought input."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check("/collab", COLLAB_PAGE_CHECKS, wait_ms=1000)
+        request.cls._checks = result
+
+    def test_tab_strip(self):
+        """User sees tab strip with Recent, Thoughts, Threads, Topics."""
+        c = self._checks
+        assert c.get("has_recent_tab"), f"No 'Recent' tab, got: {c.get('tab_labels')}"
+        assert c.get("has_thoughts_tab"), f"No 'Thoughts' tab, got: {c.get('tab_labels')}"
+        assert c.get("has_threads_tab"), f"No 'Threads' tab, got: {c.get('tab_labels')}"
+        assert c.get("has_topics_tab"), f"No 'Topics' tab, got: {c.get('tab_labels')}"
+        assert c.get("tab_count") == 4, f"Expected 4 tabs, got {c.get('tab_count')}"
+
+    def test_recent_notes(self):
+        """User sees recent note cards in the default tab."""
+        c = self._checks
+        assert c.get("has_notes"), f"No note cards visible (count={c.get('note_count')})"
+        assert c.get("note_count") >= 2, f"Expected at least 2 notes, got {c.get('note_count')}"
+
+    def test_note_titles(self):
+        """User sees note titles from fixture data."""
+        c = self._checks
+        assert c.get("has_note_titles"), f"No note titles visible"
+        titles = c.get("note_titles", [])
+        title_text = " ".join(titles)
+        assert "Architecture" in title_text or "Testing" in title_text, \
+            f"Expected fixture note titles, got: {titles}"
+
+    def test_type_labels(self):
+        """User sees note type labels (NOTE, THOUGHT, etc.)."""
+        c = self._checks
+        assert c.get("has_type_labels"), f"No type labels visible"
+
+    def test_tags_visible(self):
+        """User sees tag chips on note cards."""
+        c = self._checks
+        assert c.get("has_tags"), f"No tags visible"
+        tags = c.get("tags", [])
+        assert any("architecture" in t or "testing" in t or "auth" in t for t in tags), \
+            f"Expected fixture tags, got: {tags}"
+
+    def test_tab_counts(self):
+        """User sees counts next to tab labels."""
+        c = self._checks
+        assert c.get("has_tab_counts"), f"No tab counts visible, got: {c.get('tab_counts')}"
+
+    def test_thought_input(self):
+        """Thought capture input exists in DOM (rendered for Thoughts tab)."""
+        c = self._checks
+        assert c.get("has_thought_input"), "No thought capture input found in DOM"
+
+    def test_no_template_artifacts(self):
+        """No raw Jinja template syntax visible."""
+        c = self._checks
+        assert c.get("no_jinja"), "Raw Jinja template syntax visible on collab page"
+
+
+class TestStreamsPageBehavior:
+    """Streams page behavioral sweep — heading, stream entries, counts."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check("/streams", STREAMS_PAGE_CHECKS, wait_ms=1000)
+        request.cls._checks = result
+
+    def test_heading(self):
+        """User sees 'Streams' heading."""
+        c = self._checks
+        assert c.get("has_heading"), "No 'Streams' heading visible"
+
+    def test_stream_tags(self):
+        """User sees stream tag names (#pitfall, #architecture, #testing)."""
+        c = self._checks
+        assert c.get("has_pitfall"), "No '#pitfall' stream visible"
+        assert c.get("has_architecture"), "No '#architecture' stream visible"
+        assert c.get("has_testing"), "No '#testing' stream visible"
+
+    def test_counts(self):
+        """User sees note counts for each stream."""
+        c = self._checks
+        assert c.get("has_12_notes"), "No '12 notes' count visible for #pitfall"
+        assert c.get("has_8_notes"), "No '8 notes' count visible for #architecture"
+
+    def test_descriptions(self):
+        """User sees descriptions for streams."""
+        c = self._checks
+        assert c.get("has_description"), "No stream descriptions visible"
+
+    def test_links(self):
+        """User sees links to stream detail pages."""
+        c = self._checks
+        assert c.get("has_stream_links"), f"Not enough stream links (count={c.get('link_count')})"
+
+    def test_no_template_artifacts(self):
+        """No raw Jinja template syntax visible."""
+        c = self._checks
+        assert c.get("no_jinja"), "Raw Jinja template syntax visible on streams page"
+
+
+class TestBeadDetailPageBehavior:
+    """Bead detail page behavioral sweep — title, priority, status, description."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check("/bead/auto-sweep-b1", BEAD_DETAIL_CHECKS, wait_ms=1000)
+        request.cls._checks = result
+
+    def test_title(self):
+        """User sees the bead title."""
+        c = self._checks
+        assert c.get("has_title"), "Bead title 'Sweep alpha task' not visible"
+
+    def test_bead_id(self):
+        """User sees the bead ID."""
+        c = self._checks
+        assert c.get("has_bead_id"), "Bead ID 'auto-sweep-b1' not visible"
+
+    def test_priority_badge(self):
+        """User sees priority badge (P1)."""
+        c = self._checks
+        assert c.get("has_priority"), "Priority badge P1 not visible"
+
+    def test_status_badge(self):
+        """User sees status badge (open)."""
+        c = self._checks
+        assert c.get("has_status"), "Status badge 'open' not visible"
+
+    def test_description(self):
+        """User sees the bead description text."""
+        c = self._checks
+        assert c.get("has_description"), "Bead description not visible"
+
+    def test_labels(self):
+        """User sees the bead labels."""
+        c = self._checks
+        assert c.get("has_label"), "Label 'readiness:approved' not visible"
+
+    def test_no_template_artifacts(self):
+        """No raw Jinja template syntax visible."""
+        c = self._checks
+        assert c.get("no_jinja"), "Raw Jinja template syntax visible on bead detail page"
+
+
+class TestTracePageBehavior:
+    """Trace page behavioral sweep — header, decision, scores."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check(
+            "/dispatch/trace/run-sweep-001", TRACE_PAGE_CHECKS, wait_ms=1000,
+        )
+        request.cls._checks = result
+
+    def test_title(self):
+        """User sees the bead title in the trace header."""
+        c = self._checks
+        assert c.get("has_title"), f"Bead title not visible, h1 text: '{c.get('title_text')}'"
+
+    def test_bead_link(self):
+        """User sees a link to the bead detail page."""
+        c = self._checks
+        assert c.get("has_bead_link"), "Bead ID link not visible"
+
+    def test_back_link(self):
+        """User sees a back link to dispatch page."""
+        c = self._checks
+        assert c.get("has_back_link"), "Back link to /dispatch not found"
+
+    def test_decision_section(self):
+        """User sees the Decision section with status and reason."""
+        c = self._checks
+        assert c.get("has_decision_heading"), "Decision heading not visible"
+        assert c.get("has_status"), "Status 'DONE' not visible"
+        assert c.get("has_reason"), "Reason 'All tests pass' not visible"
+
+    def test_scores(self):
+        """User sees star ratings for tooling, clarity, confidence."""
+        c = self._checks
+        assert c.get("has_stars"), f"No stars visible (count={c.get('star_count')})"
+        assert c.get("has_tooling_label"), "Tooling label not visible"
+        assert c.get("has_clarity_label"), "Clarity label not visible"
+        assert c.get("has_confidence_label"), "Confidence label not visible"
+
+    def test_diff_stats(self):
+        """User sees diff stats (+added -removed)."""
+        c = self._checks
+        assert c.get("has_diff_add"), "+45 not visible"
+        assert c.get("has_diff_del"), "-12 not visible"
+
+    def test_no_template_artifacts(self):
+        """No raw Jinja template syntax visible."""
+        c = self._checks
+        assert c.get("no_jinja"), "Raw Jinja template syntax visible on trace page"
