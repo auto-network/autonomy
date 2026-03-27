@@ -25,13 +25,16 @@ graph dispatch approve <bead-id>  # Approve bead(s) for dispatch (accepts multip
 graph context <src_id> last       # Latest turns of a source
 graph notes --since 1h            # Recent notes (orientation)
 graph crosstalk --since 30m       # Recent CrossTalk messages
+graph crosstalk send <s> "msg"    # Send CrossTalk message (-c - for stdin)
+graph crosstalk broadcast "msg"   # Send to all live sessions
 graph thought "text" --tags x     # Capture idea discovered during work
+graph thread create "title"       # Create a thought thread
+graph thread park/done/active <id> # Manage thread lifecycle
 graph dispatch watch              # Block until next dispatch completes
 graph set-label "title"           # Set session working title
-graph set-topics "Line 1" "..."   # Set card status lines (1-4)
+graph set-topics "Line 1" "..."   # Set card status lines
 graph set-role analyst            # Set session role
 graph set-nag --interval 10       # Enable idle nag (--off to disable)
-graph crosstalk send <s> "msg"    # Send CrossTalk message (-c - for stdin)
 ```
 
 **Dispatch workflow:**
