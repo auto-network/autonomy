@@ -146,23 +146,36 @@ async def run_cli_json(cmd: list[str], timeout: int = 30) -> list | dict:
 # ── API Endpoints ─────────────────────────────────────────────
 
 async def api_beads_ready(request):
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse(dao_beads.get_open_beads())
     return JSONResponse(await run_cli_json(["bd", "ready", "--json"]))
 
 async def api_beads_list(request):
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse(dao_beads.get_open_beads(limit=100))
     return JSONResponse(await run_cli_json(["bd", "list", "--json", "-n", "100", "--sort", "updated"]))
 
 async def api_bead_show(request):
     bead_id = request.path_params["id"]
+    if os.environ.get("DASHBOARD_MOCK"):
+        bead = dao_beads.get_bead(bead_id)
+        if not bead:
+            return JSONResponse({"error": "bead not found"}, status_code=404)
+        return JSONResponse(bead)
     return JSONResponse(await run_cli_json(["bd", "show", bead_id, "--json"]))
 
 async def api_bead_tree(request):
     bead_id = request.path_params["id"]
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse(dao_beads.get_bead_deps(bead_id))
     return JSONResponse(await run_cli_json(["bd", "dep", "tree", bead_id, "--json"]))
 
 
 async def api_bead_deps(request):
     """Return both blockers (down) and dependents (up) for a bead."""
     bead_id = request.path_params["id"]
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse(dao_beads.get_bead_deps(bead_id))
     down, up = await asyncio.gather(
         run_cli_json(["bd", "dep", "list", bead_id, "--json"]),
         run_cli_json(["bd", "dep", "list", bead_id, "--direction=up", "--json"]),
@@ -177,6 +190,16 @@ async def api_beads_search(request):
     q = request.query_params.get("q", "").strip().lower()
     if not q:
         return JSONResponse({"error": "missing q parameter"})
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        # Search mock beads by title/description
+        beads = dao_beads.get_open_beads(limit=500)
+        terms = q.split()
+        results = [
+            b for b in beads
+            if all(t in f"{b.get('title', '')} {b.get('description', '')}".lower() for t in terms)
+        ]
+        return JSONResponse(results)
 
     # Try bd search first
     stdout, stderr, rc = await run_cli(["bd", "search", q, "--json"], timeout=10)
@@ -213,6 +236,8 @@ async def api_beads_search(request):
 async def api_bead_approve(request):
     """Set readiness=approved on a bead, releasing it for dispatch."""
     bead_id = request.path_params["id"]
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"ok": True, "bead_id": bead_id})
     stdout, stderr, rc = await run_cli(["bd", "set-state", bead_id, "readiness=approved",
                                          "--reason", "dashboard: approved for dispatch"])
     if rc != 0:
@@ -272,6 +297,8 @@ def _get_pause_reasons() -> dict:
 
 async def api_dispatch_pause_get(request):
     """GET /api/dispatch/pause — return current pause state for all label queues."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"paused": {}, "reasons": {}})
     return JSONResponse({"paused": _get_pause_state(), "reasons": _get_pause_reasons()})
 
 
@@ -302,6 +329,9 @@ async def api_dispatch_pause_post(request):
 
 async def api_dispatch_resume(request):
     """POST /api/dispatch/resume — clear auth-failure pause so dispatcher resumes launching."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        await event_bus.broadcast("dispatcher_state", {"paused": False, "reason": None})
+        return JSONResponse({"ok": True, "was_paused": False, "cleared_reason": None})
     was_paused = is_paused()
     reason = get_pause_reason() if was_paused else None
     clear_paused()
@@ -312,6 +342,8 @@ async def api_dispatch_resume(request):
 
 async def api_dispatch_pause_state(request):
     """GET /api/dispatch/pause-state — return dispatcher pause state from SQLite."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"paused": False, "reason": None})
     paused = is_paused()
     reason = get_pause_reason() if paused else None
     return JSONResponse({"paused": paused, "reason": reason})
@@ -349,6 +381,14 @@ async def api_dispatch_status(request):
     Reads the dispatch dimension (queued/launching/running/collecting/merging/done/failed)
     from bd labels + docker ps for containers. Adds currently-running runs from SQLite.
     """
+    if os.environ.get("DASHBOARD_MOCK"):
+        running = dao_dispatch.get_running_with_stats()
+        return JSONResponse({
+            "claimed": [],
+            "dispatching": [],
+            "containers": [],
+            "running_runs": running,
+        })
     claimed = await run_cli_json(["bd", "query", 'label="work:claimed"', "--json"])
     # Also query beads with active dispatch states for richer status
     dispatching = await run_cli_json(["bd", "query", 'label="dispatch:running" OR label="dispatch:launching" OR label="dispatch:collecting" OR label="dispatch:merging" OR label="dispatch:queued"', "--json"])
@@ -377,6 +417,8 @@ async def api_dispatch_approved(request):
     For each approved bead, checks dependencies via `bd dep list`.
     Blocked beads include their open blockers so the frontend can link to them.
     """
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse(dao_beads.get_dispatch_beads())
     all_beads = await run_cli_json(["bd", "list", "--json", "-n", "100"])
     bead_list = all_beads if isinstance(all_beads, list) else []
 
@@ -554,6 +596,10 @@ def _enrich_dispatch_runs(runs: list[dict]) -> None:
 
 async def api_dispatch_runs(request):
     """List dispatch runs from SQLite (includes RUNNING rows)."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        all_runs = dao_dispatch.get_recent_runs(limit=50)
+        running = dao_dispatch.get_running_with_stats()
+        return JSONResponse([*running, *all_runs])
     db_rows = await asyncio.to_thread(list_runs)
     runs = []
     for row in db_rows:
@@ -1012,6 +1058,21 @@ async def api_timeline(request):
 
     Returns reverse-chronological array of timeline entries.
     """
+    if os.environ.get("DASHBOARD_MOCK"):
+        range_str = request.query_params.get("range")
+        limit = min(int(request.query_params.get("limit", "200")), 1000)
+        entries = dao_dispatch.get_timeline_entries(range_str, limit)
+        # Enrich with bead title/priority from mock beads
+        bead_ids = [e["bead_id"] for e in entries if e.get("bead_id")]
+        if bead_ids:
+            meta = dao_beads.get_bead_title_priority(bead_ids)
+            for entry in entries:
+                bid = entry.get("bead_id")
+                if bid and bid in meta:
+                    entry["title"] = meta[bid].get("title") or entry["bead_id"]
+                    entry["priority"] = meta[bid].get("priority")
+        return JSONResponse(entries)
+
     range_str = request.query_params.get("range")
     project = request.query_params.get("project")
     q = request.query_params.get("q")
@@ -1068,6 +1129,10 @@ async def api_timeline_stats(request):
     Returns: completed_count, success_rate, failed_count, blocked_count,
              avg_duration, avg_tooling_score, avg_confidence_score
     """
+    if os.environ.get("DASHBOARD_MOCK"):
+        range_str = request.query_params.get("range")
+        return JSONResponse(dao_dispatch.get_timeline_stats(range_str))
+
     range_str = request.query_params.get("range")
     project = request.query_params.get("project")
 
@@ -1131,6 +1196,28 @@ async def api_dispatch_trace(request):
     git diff) are still read from disk on demand.
     """
     run_name = request.path_params["run"]
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        trace = dao_dispatch.get_trace(run_name)
+        if not trace:
+            return JSONResponse({"error": "run not found"}, status_code=404)
+        return JSONResponse({
+            "run": trace.get("id", run_name),
+            "bead_id": trace.get("bead_id", ""),
+            "bead": dao_beads.get_bead(trace.get("bead_id", "")),
+            "decision": trace.get("decision"),
+            "experience_report": trace.get("experience_report", ""),
+            "commit_hash": trace.get("commit_hash", ""),
+            "branch": trace.get("branch", ""),
+            "diff": trace.get("diff", ""),
+            "has_session": False,
+            "is_live": False,
+            "duration_secs": trace.get("duration_secs"),
+            "commit_message": trace.get("commit_message", ""),
+            "lines_added": trace.get("lines_added"),
+            "lines_removed": trace.get("lines_removed"),
+            "files_changed": trace.get("files_changed"),
+        })
 
     # Get structured metadata from SQLite
     row = await asyncio.to_thread(get_run, run_name)
@@ -1247,6 +1334,11 @@ async def api_search(request):
     q = request.query_params.get("q", "")
     if not q:
         return JSONResponse({"error": "missing q parameter"})
+    if os.environ.get("DASHBOARD_MOCK"):
+        limit = int(request.query_params.get("limit", "20"))
+        project = request.query_params.get("project")
+        results = dao_beads.search(q, limit=limit, project=project)
+        return JSONResponse(results)
     cmd = ["graph", "search", q, "--json", "--limit", request.query_params.get("limit", "20")]
     project = request.query_params.get("project")
     if project:
@@ -1269,6 +1361,8 @@ async def api_search(request):
     return JSONResponse(results)
 
 async def api_sources(request):
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"results": "", "error": None})
     cmd = ["graph", "sources"]
     project = request.query_params.get("project")
     if project:
@@ -1282,12 +1376,19 @@ async def api_sources(request):
 
 async def api_source_read(request):
     source_id = request.path_params["id"]
+    if os.environ.get("DASHBOARD_MOCK"):
+        source = dao_beads.get_source(source_id)
+        if not source:
+            return JSONResponse({"error": "source not found"}, status_code=404)
+        return JSONResponse(source)
     max_chars = request.query_params.get("max_chars", "50000")
     return JSONResponse(await run_cli_json(
         ["graph", "read", source_id, "--json", "--max-chars", max_chars, "--first"]
     ))
 
 async def api_context(request):
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"content": "", "error": None})
     source_id = request.path_params["id"]
     turn = request.path_params["turn"]
     window = request.query_params.get("window", "3")
@@ -1295,14 +1396,20 @@ async def api_context(request):
     return JSONResponse({"content": stdout, "error": stderr if rc != 0 else None})
 
 async def api_projects(request):
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"results": "", "error": None})
     stdout, stderr, rc = await run_cli(["graph", "projects"])
     return JSONResponse({"results": stdout, "error": stderr if rc != 0 else None})
 
 async def api_stats(request):
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"results": "", "error": None})
     stdout, stderr, rc = await run_cli(["graph", "stats"])
     return JSONResponse({"results": stdout, "error": stderr if rc != 0 else None})
 
 async def api_attention(request):
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"results": "", "error": None})
     cmd = ["graph", "attention"]
     last = request.query_params.get("last")
     if last:
@@ -1531,6 +1638,11 @@ async def api_crosstalk_peers(request):
 
 async def api_primer(request):
     bead_id = request.path_params["id"]
+    if os.environ.get("DASHBOARD_MOCK"):
+        primer = dao_beads.get_primer(bead_id)
+        if not primer:
+            return JSONResponse({"error": "bead not found"}, status_code=404)
+        return JSONResponse(primer)
     stdout, stderr, rc = await run_cli(["graph", "primer", bead_id, "--format", "dashboard"])
     if rc != 0:
         return JSONResponse({"error": stderr or "primer generation failed"}, status_code=500)
@@ -2808,6 +2920,9 @@ async def api_session_label(request):
     tmux_name = request.path_params["tmux_name"]
     body = await request.json()
     label = body.get("label", "").strip()
+    if os.environ.get("DASHBOARD_MOCK"):
+        await event_bus.broadcast("session:registry", dao_sessions.get_active_sessions())
+        return JSONResponse({"ok": True})
     dashboard_db.update_label(tmux_name, label)
     # Also update graph source title if the session has been ingested
     session_row = dashboard_db.get_session(tmux_name)
@@ -2851,6 +2966,9 @@ async def api_session_topics(request):
         if clean:
             topics.append(clean)
 
+    if os.environ.get("DASHBOARD_MOCK"):
+        await event_bus.broadcast("session:registry", dao_sessions.get_active_sessions())
+        return JSONResponse({"ok": True})
     dashboard_db.update_topics(tmux_name, topics)
     # Broadcast via SSE so all clients update
     await event_bus.broadcast("session:registry", session_monitor.get_registry())
@@ -2874,12 +2992,16 @@ async def api_session_role(request):
         return JSONResponse({"error": "role must be a string"}, status_code=400)
 
     role = role.strip().lower()
-    if role not in dashboard_db._ALLOWED_ROLES:
+    _allowed = dao_beads._ALLOWED_ROLES if os.environ.get("DASHBOARD_MOCK") else dashboard_db._ALLOWED_ROLES
+    if role not in _allowed:
         return JSONResponse(
-            {"error": f"invalid role: must be one of {sorted(dashboard_db._ALLOWED_ROLES - {''})} or empty string"},
+            {"error": f"invalid role: must be one of {sorted(_allowed - {''})} or empty string"},
             status_code=400,
         )
 
+    if os.environ.get("DASHBOARD_MOCK"):
+        await event_bus.broadcast("session:registry", dao_sessions.get_active_sessions())
+        return JSONResponse({"ok": True})
     dashboard_db.update_role(tmux_name, role)
     await event_bus.broadcast("session:registry", session_monitor.get_registry())
     return JSONResponse({"ok": True})
@@ -2903,6 +3025,9 @@ async def api_session_nag(request):
     if message is not None:
         message = str(message).strip().replace('<', '').replace('>', '')[:200]
 
+    if os.environ.get("DASHBOARD_MOCK"):
+        await event_bus.broadcast("session:registry", dao_sessions.get_active_sessions())
+        return JSONResponse({"ok": True})
     dashboard_db.update_nag_config(
         tmux_name,
         enabled=enabled,
@@ -2919,6 +3044,9 @@ async def api_session_nag_delete(request):
     DELETE /api/session/{tmux_name}/nag
     """
     tmux_name = request.path_params["tmux_name"]
+    if os.environ.get("DASHBOARD_MOCK"):
+        await event_bus.broadcast("session:registry", dao_sessions.get_active_sessions())
+        return JSONResponse({"ok": True})
     dashboard_db.update_nag_config(tmux_name, enabled=False)
     await event_bus.broadcast("session:registry", session_monitor.get_registry())
     return JSONResponse({"ok": True})
@@ -2933,6 +3061,9 @@ async def api_session_dispatch_nag(request):
     tmux_name = request.path_params["tmux_name"]
     body = await request.json()
     enabled = bool(body.get("enabled", False))
+    if os.environ.get("DASHBOARD_MOCK"):
+        await event_bus.broadcast("session:registry", dao_sessions.get_active_sessions())
+        return JSONResponse({"ok": True})
     dashboard_db.update_dispatch_nag(tmux_name, enabled)
     await event_bus.broadcast("session:registry", session_monitor.get_registry())
     return JSONResponse({"ok": True})
@@ -4590,6 +4721,12 @@ def _checkpoint_graph():
 
 async def api_graph_stream(request):
     """List notes matching a tag as a chronological feed."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        tag = request.path_params["tag"]
+        limit = int(request.query_params.get("limit", "50"))
+        items = dao_beads.get_stream_items(tag, limit)
+        return JSONResponse({"tag": tag, "count": len(items), "items": items})
+
     from tools.graph.db import GraphDB
 
     tag = request.path_params["tag"]
@@ -4629,6 +4766,9 @@ async def api_graph_stream(request):
 
 async def api_graph_streams(request):
     """List active tag streams with note counts, descriptions, and last_active."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"streams": dao_beads.get_streams()})
+
     from tools.graph.db import GraphDB
 
     db_args = {}
@@ -4674,6 +4814,10 @@ async def api_graph_streams(request):
 
 async def api_graph_collab_list(request):
     """List collab-tagged notes as structured JSON."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        limit = int(request.query_params.get("limit", "20"))
+        return JSONResponse({"notes": dao_beads.get_collab_notes(limit)})
+
     from tools.graph.db import GraphDB
     import json as _json
     limit = int(request.query_params.get("limit", "20"))
@@ -4705,6 +4849,8 @@ async def api_graph_collab_list(request):
 
 async def api_graph_collab_tag(request):
     """Add the 'collab' tag to an existing source."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"ok": True, "output": "  \u2713 Mock: tag operation skipped"})
     from tools.graph.db import GraphDB
     source_id = request.path_params["source_id"]
     if not _GRAPH_SOURCE_ID_RE.match(source_id):
@@ -4730,6 +4876,8 @@ async def api_graph_collab_tag(request):
 
 async def api_graph_tag_add(request):
     """Add a tag to a source."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"ok": True, "output": "  \u2713 Mock: tag add operation skipped"})
     from tools.graph.db import GraphDB
     source_id = request.path_params["source_id"]
     tag_name = request.path_params["tag_name"]
@@ -4762,6 +4910,8 @@ async def api_graph_tag_add(request):
 
 async def api_graph_tag_remove(request):
     """Remove a tag from a source."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"ok": True, "output": "  \u2713 Mock: tag remove operation skipped"})
     from tools.graph.db import GraphDB
     source_id = request.path_params["source_id"]
     tag_name = request.path_params["tag_name"]
@@ -4794,6 +4944,8 @@ async def api_graph_tag_remove(request):
 
 async def api_graph_tag_merge(request):
     """Merge one tag into another."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"ok": True, "output": "  \u2713 Mock: tag merge operation skipped"})
     from tools.graph.db import GraphDB
     from tools.graph.models import Source, Thought, Edge, new_id
     try:
@@ -4995,6 +5147,12 @@ async def api_graph_thread_action(request):
 
 async def api_graph_thoughts(request):
     """List thought captures as structured JSON."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        limit = int(request.query_params.get("limit", "50"))
+        thread_id = request.query_params.get("thread")
+        since_param = request.query_params.get("since")
+        return JSONResponse({"thoughts": dao_beads.get_thoughts(limit, thread_id, since_param)})
+
     from tools.graph.db import GraphDB
     limit = int(request.query_params.get("limit", "50"))
     thread_id = request.query_params.get("thread")
@@ -5031,6 +5189,12 @@ async def api_graph_thoughts(request):
 
 async def api_graph_threads(request):
     """List threads as structured JSON."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        limit = int(request.query_params.get("limit", "20"))
+        status = request.query_params.get("status", "active")
+        show_all = request.query_params.get("all")
+        return JSONResponse({"threads": dao_beads.get_threads(limit, status=None if show_all else status)})
+
     from tools.graph.db import GraphDB
     limit = int(request.query_params.get("limit", "20"))
     status = request.query_params.get("status", "active")
@@ -5063,6 +5227,8 @@ async def api_graph_threads(request):
 
 async def api_graph_collab_tag_describe(request):
     """Set or update a tag description via API proxy."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"ok": True, "output": "  \u2713 Mock: tag describe operation skipped"})
     from tools.graph.db import GraphDB
     tag_name = request.path_params["name"]
     if not _GRAPH_TAGS_RE.match(tag_name):
@@ -5238,6 +5404,28 @@ routes = [
 ]
 
 async def _on_startup():
+    if os.environ.get("DASHBOARD_MOCK"):
+        # Mock mode: skip real database init and session monitor.
+        # Broadcast initial SSE events from fixture data so SSE-dependent
+        # pages (dispatch) render without waiting.
+        # NOTE: session:registry is NOT broadcast here — pages fetch fresh
+        # data from /api/dao/active_sessions, and broadcasting cached data
+        # in the event bus breaks test isolation when fixtures are swapped
+        # dynamically between page loads.
+        runs = dao_dispatch.get_running_with_stats()
+        await event_bus.broadcast("dispatch", {"active": runs, "waiting": [], "blocked": []})
+        # Nav counts from fixture beads
+        counts = dao_beads.get_bead_counts()
+        running_count = len(runs)
+        await event_bus.broadcast("nav", {
+            "open_beads": counts.get("total_open_count", 0),
+            "running_agents": running_count,
+        })
+        if os.environ.get("DASHBOARD_MOCK_EVENTS"):
+            from tools.dashboard.dao.mock import mock_event_watcher
+            asyncio.create_task(mock_event_watcher())
+        return
+
     from agents.dispatch_db import init_db
     init_db()  # ensure dispatch schema exists
     dashboard_db.init_db()  # ensure dashboard.db schema exists
