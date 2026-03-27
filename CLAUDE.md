@@ -30,7 +30,7 @@ data/                 — extracted/collected data
 |------|------|-----|-------------|
 | Graph | `tools/graph/` | `graph <cmd>` | Knowledge graph with FTS5 search, 6000+ sources, project scoping |
 | Scraper | `tools/scraper/` | HTTP REPL :8765 | Stealth browser + DOM extraction for ChatGPT/Claude.ai |
-| Dashboard | `tools/dashboard/` | (planned) | Web UI for beads, sessions, graph, monitoring |
+| Dashboard | `tools/dashboard/` | `dashboard-mock` | Web UI for beads, sessions, graph, monitoring |
 | Analytics | `tools/analytics/` | (planned) | Session log analysis, tool use metrics |
 
 Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
@@ -95,6 +95,17 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph bead "title"` | Create bead with provenance link (preferred over `bd create`) | `graph bead "Fix X" -p 1 --source 8cdc1d85 --turns 286 -d - < desc.txt` |
 | `bd dep tree <id>` | Show dependency tree | |
 | `bd close <id> --reason "..."` | Close a completed bead | |
+
+### Mock Dashboard (`dashboard-mock`)
+
+Invoke as `python3 -m tools.dashboard.mock_server` or `./tools/dashboard/bin/dashboard-mock`.
+
+| Command | What | Example |
+|---------|------|---------|
+| `dashboard-mock start` | Start mock server (self-daemonizing) | `dashboard-mock start --port 8082` |
+| `dashboard-mock start --fixture <path>` | Start with custom fixture data | `dashboard-mock start --port 8082 --fixture /tmp/f.json` |
+| `dashboard-mock stop` | Stop mock server via PID file | `dashboard-mock stop --port 8082` |
+| `dashboard-mock status` | Check if mock server is running | `dashboard-mock status --port 8082` |
 
 ## Workflows
 
