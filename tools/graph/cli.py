@@ -2526,10 +2526,30 @@ def cmd_wait(args):
                 print(f"  Last known state: {last_status}", file=sys.stderr)
             sys.exit(1)
 
-        # Query dispatch_runs for a completed row
+        # Query dispatch_runs — check for active run first, then completed
         try:
             conn = sqlite3.connect(f"file:{dispatch_db}?immutable=1", uri=True)
             conn.row_factory = sqlite3.Row
+
+            # Check for active (RUNNING) run first
+            running_row = conn.execute(
+                """SELECT started_at FROM dispatch_runs
+                   WHERE bead_id = ? AND status = 'RUNNING'
+                   ORDER BY started_at DESC LIMIT 1""",
+                (bead_id,),
+            ).fetchone()
+
+            if running_row:
+                # Active run exists — keep polling regardless of prior completed rows
+                conn.close()
+                current_status = "Running..."
+                if current_status != last_status:
+                    print(current_status, file=sys.stderr)
+                    last_status = current_status
+                time.sleep(poll_interval)
+                continue
+
+            # No active run — check for completed result
             row = conn.execute(
                 """SELECT * FROM dispatch_runs
                    WHERE bead_id = ? AND completed_at IS NOT NULL
@@ -2538,6 +2558,7 @@ def cmd_wait(args):
             ).fetchone()
             conn.close()
         except sqlite3.Error:
+            running_row = None
             row = None
 
         if row:
@@ -2595,25 +2616,8 @@ def cmd_wait(args):
 
             sys.exit(0 if status == "DONE" else 1)
 
-        # Not completed yet — check current state for status messages
-        try:
-            conn = sqlite3.connect(f"file:{dispatch_db}?immutable=1", uri=True)
-            conn.row_factory = sqlite3.Row
-            running_row = conn.execute(
-                """SELECT * FROM dispatch_runs
-                   WHERE bead_id = ? AND completed_at IS NULL
-                   ORDER BY started_at DESC LIMIT 1""",
-                (bead_id,),
-            ).fetchone()
-            conn.close()
-        except sqlite3.Error:
-            running_row = None
-
-        if running_row and running_row["started_at"]:
-            current_status = "Running..."
-        else:
-            current_status = "Waiting for dispatch..."
-
+        # Neither running nor completed — waiting for dispatch
+        current_status = "Waiting for dispatch..."
         if current_status != last_status:
             print(current_status, file=sys.stderr)
             last_status = current_status
