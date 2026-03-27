@@ -1586,20 +1586,19 @@ def cmd_tag_merge(args):
         db.close()
 
 
-def cmd_tag_router(args):
-    """Route 'graph tag' to add or subcommand."""
-    subcmd = getattr(args, "tag_subcmd", None)
-    if subcmd == "merge":
-        cmd_tag_merge(args)
-    elif subcmd is None:
-        # Default: add tags
-        if not hasattr(args, "tags") or not args.tags or not hasattr(args, "source_ids") or not args.source_ids:
-            print("Usage: graph tag <tags> <source_id...>", file=sys.stderr)
-            sys.exit(1)
-        cmd_tag_add(args)
-    else:
-        print(f"Unknown tag subcommand: {subcmd}", file=sys.stderr)
-        sys.exit(1)
+def cmd_tag_help(args):
+    """Show tag usage when no subcommand given."""
+    print("usage: graph tag {add,remove,merge} ...", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("  add         Add tag(s) to source(s)", file=sys.stderr)
+    print("  remove      Remove tag(s) from source(s)", file=sys.stderr)
+    print("  merge       Merge one tag into another", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("Examples:", file=sys.stderr)
+    print("  graph tag add pitfall,auth abc123def", file=sys.stderr)
+    print("  graph tag remove stale abc123def", file=sys.stderr)
+    print("  graph tag merge --from old-name --to new-name", file=sys.stderr)
+    sys.exit(1)
 
 
 def cmd_thought(args):
@@ -1703,6 +1702,17 @@ def cmd_thread_dispatch(args):
             return
         title = " ".join(parts)
         cmd_thread_create(args, title)
+
+
+def cmd_thread_create_sub(args):
+    """Entry point for 'graph thread create' subcommand."""
+    title = " ".join(args.title)
+    if is_api_mode():
+        # Bridge to API — set thread_args for compatibility
+        args.thread_args = args.title
+        api_thread(args)
+        return
+    cmd_thread_create(args, title)
 
 
 def cmd_thread_create(args, title: str):
@@ -2719,19 +2729,69 @@ def _parse_duration(s: str) -> float:
     return val * mult[unit]
 
 
-def cmd_crosstalk_router(args):
-    """Route 'graph crosstalk' to list or send."""
-    if args.rest and args.rest[0] == "send":
-        # graph crosstalk send <target> "message"
-        rest = args.rest[1:]
-        if len(rest) < 1:
-            print("Error: usage: graph crosstalk send <target-session> \"message\"", file=sys.stderr)
-            sys.exit(1)
-        args.target = rest[0]
-        args.message = rest[1:] if len(rest) > 1 else []
-        cmd_crosstalk_send(args)
+def cmd_crosstalk_broadcast(args):
+    """Send a CrossTalk message to all live peer sessions."""
+    if getattr(args, 'content_stdin', None) == "-":
+        message = sys.stdin.read().strip()
+    elif args.message:
+        message = " ".join(args.message)
     else:
-        cmd_crosstalk(args)
+        print("Error: message text required (or use -c -)", file=sys.stderr)
+        sys.exit(1)
+
+    if not message:
+        print("Error: empty message", file=sys.stderr)
+        sys.exit(1)
+
+    token = os.environ.get("CROSSTALK_TOKEN")
+    if not token:
+        print("Error: $CROSSTALK_TOKEN not set.", file=sys.stderr)
+        sys.exit(1)
+
+    import ssl
+    import urllib.request
+
+    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    # Fetch active sessions
+    url = f"{api_base}/api/dao/active_sessions"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        resp = urllib.request.urlopen(req, timeout=30, context=ctx)
+        sessions = json.loads(resp.read())
+    except Exception as e:
+        print(f"  \u2717 Cannot fetch active sessions: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    my_session = _get_session_name()
+    peers = [s["session_id"] for s in sessions if s.get("session_id") != my_session]
+
+    if not peers:
+        print("  No peer sessions to broadcast to")
+        return
+
+    tagged_message = f"(broadcast) {message}"
+    sent = 0
+    for target in peers:
+        url = f"{api_base}/api/crosstalk/send"
+        body = json.dumps({"target": target, "message": tagged_message}).encode()
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+        )
+        try:
+            urllib.request.urlopen(req, timeout=30, context=ctx)
+            sent += 1
+        except Exception as e:
+            print(f"  \u2717 Failed to send to {target}: {e}", file=sys.stderr)
+
+    print(f"  \u2713 Broadcast delivered to {sent}/{len(peers)} peers")
 
 
 def cmd_crosstalk(args):
@@ -2858,12 +2918,12 @@ def main():
 
     # set-topics
     p = sub.add_parser("set-topics", help="Set topic status lines on the session card")
-    p.add_argument("topics", nargs="+", help="Topic strings (1-4 lines)")
+    p.add_argument("topics", nargs="+", help="Topic strings for session card")
     p.set_defaults(func=cmd_set_topics)
 
     # set-role
     p = sub.add_parser("set-role", help="Set the session role")
-    p.add_argument("role", nargs="+", help="Role string (free-text)")
+    p.add_argument("role", nargs="+", help="Role name (joined if multiple words)")
     p.set_defaults(func=cmd_set_role)
 
     # set-nag
@@ -2957,8 +3017,13 @@ def main():
     p.set_defaults(func=cmd_attention)
 
     # note (handles both create and update)
-    p_note = sub.add_parser("note", help="Create or update trail marker notes")
-    p_note.add_argument("text", nargs="*", help="Note text, or 'update <src_id> <new text>'")
+    p_note = sub.add_parser("note", help="Create or update trail marker notes",
+                            epilog="Create: graph note \"text\" --tags pitfall\n"
+                                   "Update: graph note update <src_id> -c - < revised.txt\n"
+                                   "  The update form reads new content from -c - (stdin) or positional text.\n"
+                                   "  Use --integrate <comment_id> to mark comments as rolled in.",
+                            formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_note.add_argument("text", nargs="*", help="Note text (or 'update <src_id>' to update an existing note)")
     p_note.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None, help="Read content from stdin")
     p_note.add_argument("--project", "-p", help="Project to tag with")
     p_note.add_argument("--tags", "-t", help="Comma-separated tags")
@@ -3077,12 +3142,21 @@ def main():
     p.add_argument("--limit", type=int, default=50, help="Max results (default 50)")
     p.set_defaults(func=cmd_attachments)
 
-    # tag — add/remove/merge tags
-    p_tag = sub.add_parser("tag", help="Add tag(s) to source(s)")
-    p_tag.add_argument("tags", nargs="?", help="Comma-separated tags")
-    p_tag.add_argument("source_ids", nargs="*", help="Source IDs")
-    p_tag.set_defaults(func=cmd_tag_router)
+    # tag — subcommands: add, remove, merge
+    p_tag = sub.add_parser("tag", help="Manage tags on sources")
+    p_tag.set_defaults(func=cmd_tag_help)
     tag_sub = p_tag.add_subparsers(dest="tag_subcmd")
+
+    p_tag_add = tag_sub.add_parser("add", help="Add tag(s) to source(s)")
+    p_tag_add.add_argument("tags", help="Comma-separated tags")
+    p_tag_add.add_argument("source_ids", nargs="+", help="Source IDs")
+    p_tag_add.set_defaults(func=cmd_tag_add)
+
+    p_tag_remove = tag_sub.add_parser("remove", help="Remove tag(s) from source(s)")
+    p_tag_remove.add_argument("tags", help="Comma-separated tags")
+    p_tag_remove.add_argument("source_ids", nargs="+", help="Source IDs")
+    p_tag_remove.set_defaults(func=cmd_tag_remove)
+
     p_merge = tag_sub.add_parser("merge", help="Merge one tag into another")
     p_merge.add_argument("--from", dest="from_tag", required=True)
     p_merge.add_argument("--to", dest="to_tag", required=True)
@@ -3130,19 +3204,42 @@ def main():
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_thoughts)
 
-    # thread — create or manage threads
-    # Usage: graph thread "Title"              → create
-    #        graph thread park <id>            → park a thread
-    #        graph thread done <id>            → mark done
-    #        graph thread active <id>          → reactivate
-    #        graph thread assign <cap> <thr>   → assign capture to thread
-    p_thread = sub.add_parser("thread", help="Create or manage threads")
-    p_thread.add_argument("thread_args", nargs="*", help="Title (create) or action + IDs")
-    p_thread.add_argument("-p", "--priority", type=int, default=1, help="Priority 0-3")
-    p_thread.add_argument("--all", action="store_true", help="Include parked/done (for list fallback)")
-    p_thread.add_argument("--status", help="Filter by status (for list fallback)")
+    # thread — subcommands: create, park, done, active, assign, list
+    # `graph thread` with no args → list (default).
+    p_thread = sub.add_parser("thread", help="Create or manage thought threads")
+    p_thread.add_argument("--all", action="store_true", help="Include parked/done")
+    p_thread.add_argument("--status", help="Filter by status")
     p_thread.add_argument("--limit", type=int, default=20)
-    p_thread.set_defaults(func=cmd_thread_dispatch)
+    p_thread.set_defaults(func=cmd_threads)
+    thread_sub = p_thread.add_subparsers(dest="thread_subcmd")
+
+    p_th_create = thread_sub.add_parser("create", help="Create a new thread")
+    p_th_create.add_argument("title", nargs="+", help="Thread title")
+    p_th_create.add_argument("-p", "--priority", type=int, default=1, help="Priority 0-3")
+    p_th_create.set_defaults(func=cmd_thread_create_sub)
+
+    p_th_park = thread_sub.add_parser("park", help="Park a thread")
+    p_th_park.add_argument("thread_id", help="Thread ID or prefix")
+    p_th_park.set_defaults(func=lambda args: cmd_thread_action(args, "park", args.thread_id))
+
+    p_th_done = thread_sub.add_parser("done", help="Mark thread as done")
+    p_th_done.add_argument("thread_id", help="Thread ID or prefix")
+    p_th_done.set_defaults(func=lambda args: cmd_thread_action(args, "done", args.thread_id))
+
+    p_th_active = thread_sub.add_parser("active", help="Reactivate a parked thread")
+    p_th_active.add_argument("thread_id", help="Thread ID or prefix")
+    p_th_active.set_defaults(func=lambda args: cmd_thread_action(args, "active", args.thread_id))
+
+    p_th_assign = thread_sub.add_parser("assign", help="Assign a capture to a thread")
+    p_th_assign.add_argument("capture_id", help="Capture ID to assign")
+    p_th_assign.add_argument("thread_id", help="Target thread ID")
+    p_th_assign.set_defaults(func=lambda args: cmd_thread_action(args, "assign", args.capture_id, args.thread_id))
+
+    p_th_list = thread_sub.add_parser("list", help="List threads (default)")
+    p_th_list.add_argument("--all", action="store_true", help="Include parked/done")
+    p_th_list.add_argument("--status", help="Filter by status")
+    p_th_list.add_argument("--limit", type=int, default=20)
+    p_th_list.set_defaults(func=cmd_threads)
 
     # threads — list threads
     p = sub.add_parser("threads", help="List threads")
@@ -3151,15 +3248,32 @@ def main():
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_threads)
 
-    # crosstalk
-    p = sub.add_parser("crosstalk", help="View CrossTalk message log or send messages")
-    p.add_argument("rest", nargs="*", help="'send <target> <message>' or empty for log view")
-    p.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None,
-                   help="Read message from stdin (for send)")
-    p.add_argument("--session", help="Filter by sender or target session")
-    p.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d")
-    p.add_argument("--limit", type=int, default=30, help="Max messages (default: 30)")
-    p.set_defaults(func=cmd_crosstalk_router)
+    # crosstalk — subcommands: send, broadcast, log
+    p_ct = sub.add_parser("crosstalk", help="CrossTalk messaging between sessions")
+    p_ct.add_argument("--session", help="Filter by sender or target session")
+    p_ct.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d")
+    p_ct.add_argument("--limit", type=int, default=30, help="Max messages (default: 30)")
+    p_ct.set_defaults(func=cmd_crosstalk)
+    ct_sub = p_ct.add_subparsers(dest="ct_subcmd")
+
+    p_ct_send = ct_sub.add_parser("send", help="Send message to a session")
+    p_ct_send.add_argument("target", help="Target session name")
+    p_ct_send.add_argument("message", nargs="*", help="Message text")
+    p_ct_send.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None,
+                           help="Read message from stdin")
+    p_ct_send.set_defaults(func=cmd_crosstalk_send)
+
+    p_ct_broadcast = ct_sub.add_parser("broadcast", help="Send message to all live sessions")
+    p_ct_broadcast.add_argument("message", nargs="*", help="Message text")
+    p_ct_broadcast.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None,
+                                help="Read message from stdin")
+    p_ct_broadcast.set_defaults(func=cmd_crosstalk_broadcast)
+
+    p_ct_log = ct_sub.add_parser("log", help="View message log")
+    p_ct_log.add_argument("--session", help="Filter by sender or target session")
+    p_ct_log.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d")
+    p_ct_log.add_argument("--limit", type=int, default=30, help="Max messages (default: 30)")
+    p_ct_log.set_defaults(func=cmd_crosstalk)
 
     args = parser.parse_args()
 

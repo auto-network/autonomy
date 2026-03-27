@@ -73,14 +73,19 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph ui-exp "title" <dir>` | Create UI experiment from HTML files + live-watch for changes | `graph ui-exp "Input redesign" /tmp/cards/` |
 | `graph set-label "text"` | Set a working title for the current session | `graph set-label "Passkey auth design"` |
 | `graph notes --since <dur>` | List notes by recency with duration filter | `graph notes --since 1h --tags pitfall` |
-| `graph crosstalk` | Query CrossTalk message log | `graph crosstalk --since 1h --session auto-0323-022132` |
+| `graph crosstalk` | CrossTalk message log (default) | `graph crosstalk --since 1h --session auto-0323-022132` |
+| `graph crosstalk send <target> "msg"` | Send message to a session | `graph crosstalk send auto-0325-123456 "check this"` |
+| `graph crosstalk broadcast "msg"` | Send message to all live sessions | `graph crosstalk broadcast "deploy in 5m"` |
 | `graph dispatch watch` | Block until next dispatch completes | `graph dispatch watch --timeout 300` |
 | `graph collab topics` | List tags with descriptions and note counts | `graph collab topics` |
 | `graph collab tag-describe <tag> "desc"` | Set or update a tag description | `graph collab tag-describe pitfall "Operational hazards..."` |
 | `graph thought "text"` | Capture a raw idea with optional provenance | `graph thought "auth needs passkeys" --tags auth` |
 | `graph thoughts` | List recent thoughts | `graph thoughts --since 1h` |
-| `graph thread "title"` | Create a thought thread | `graph thread "Passkey auth design" -p 1` |
-| `graph threads` | List active threads | `graph threads --all` |
+| `graph thread create "title"` | Create a thought thread | `graph thread create "Passkey auth design" -p 1` |
+| `graph thread park <id>` | Park a thread | `graph thread park abc123` |
+| `graph thread done <id>` | Mark thread as done | `graph thread done abc123` |
+| `graph thread assign <cap> <thr>` | Assign capture to thread | `graph thread assign cap123 thr456` |
+| `graph thread` / `graph threads` | List active threads | `graph threads --all` |
 
 ### Beads (`bd`)
 | Command | What | Example |
@@ -141,12 +146,13 @@ graph attention --search "keyword"            # find when user discussed somethi
 ### Session self-management
 ```bash
 graph set-label "topic description"                        # working title
-graph set-topics "Status line 1" "Status line 2"           # card status lines (1-4)
+graph set-topics "Status line 1" "Status line 2"           # card status lines
 graph set-role researcher                                  # session role
 graph set-nag --interval 10 --message "Check in"           # enable nag
 graph set-nag --off                                        # disable nag
 graph crosstalk send <session> "message"                   # send message
 graph crosstalk send <session> -c - < /tmp/msg.txt         # pipe long message
+graph crosstalk broadcast "message"                        # send to all live sessions
 ```
 
 ## Environment

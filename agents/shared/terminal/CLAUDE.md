@@ -32,14 +32,16 @@ graph context <src_id> last             # latest turns (no turn number needed)
 graph sessions --status                  # live session table from dashboard
 graph notes --since 1h                   # recent notes by time
 graph crosstalk --since 1h               # recent CrossTalk messages
+graph crosstalk send <s> "msg"           # send CrossTalk message (-c - for stdin)
+graph crosstalk broadcast "msg"          # send to all live sessions
 graph thought "text" --tags tag          # capture a raw idea
-graph thread "title"                     # create a thought thread
+graph thread create "title"              # create a thought thread
+graph thread park/done/active <id>       # manage thread lifecycle
 graph collab topics                      # browse tag taxonomy with descriptions
 graph set-label "title"                  # set session working title
-graph set-topics "Line 1" "Line 2"       # set card status lines (1-4)
+graph set-topics "Line 1" "Line 2"       # set card status lines
 graph set-role researcher                # set session role
 graph set-nag --interval 10              # enable idle nag (--off to disable)
-graph crosstalk send <s> "msg"           # send CrossTalk message (-c - for stdin)
 ```
 Run `graph --help` for full reference.
 
