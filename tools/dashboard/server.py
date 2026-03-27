@@ -4082,7 +4082,10 @@ async def _collect_dispatch_data() -> dict:
                 int(time.time() - datetime.fromisoformat(run["started_at"]).replace(tzinfo=timezone.utc).timestamp())
                 if run.get("started_at") else None
             ),
-            "last_activity": run.get("last_activity"),
+            "last_activity": (
+                datetime.fromisoformat(run["last_activity"]).replace(tzinfo=timezone.utc).timestamp()
+                if run.get("last_activity") else None
+            ),
         })
 
     # Exclude running beads from waiting/blocked to avoid double-counting
@@ -5416,6 +5419,9 @@ async def _on_startup():
         # in the event bus breaks test isolation when fixtures are swapped
         # dynamically between page loads.
         runs = dao_dispatch.get_running_with_stats()
+        for r in runs:
+            if r.get("last_activity") and isinstance(r["last_activity"], str):
+                r["last_activity"] = datetime.fromisoformat(r["last_activity"]).replace(tzinfo=timezone.utc).timestamp()
         await event_bus.broadcast("dispatch", {"active": runs, "waiting": [], "blocked": []})
         # Nav counts from fixture beads
         counts = dao_beads.get_bead_counts()
