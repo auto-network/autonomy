@@ -118,7 +118,7 @@
 
       <!-- ═══ UNIFIED TOOLBAR — from Design Studio experiment a8ee8212 ═══ -->
       <div data-testid="exp-toolbar"
-           class="flex flex-wrap items-center px-3 bg-[#1a2332] border-b border-[#1e293b] min-h-[48px]"
+           class="flex flex-wrap items-center px-3 bg-[#1a2332] border-b border-[#1e293b] min-h-[48px] select-none"
            style="flex-shrink:0;z-index:10">
 
         <!-- Row 1 -->
@@ -147,11 +147,16 @@
                       :disabled="!canGoBack" title="Previous">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 2L4 7l5 5"/></svg>
               </button>
-              <span class="text-xs font-mono text-gray-400 min-w-[2.25rem] text-center" x-text="(iterIndex + 1) === iterCount ? 'Latest' : (iterIndex + 1) + ' of ' + iterCount"></span>
+              <span class="text-xs font-mono text-gray-400 w-[5.5rem] text-center" x-text="(iterIndex + 1) === iterCount ? 'v' + iterCount : (iterIndex + 1) + ' of ' + iterCount"></span>
               <button @click="nextIteration()"
                       class="w-7 h-7 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 disabled:text-gray-700 disabled:cursor-default transition-all"
                       :disabled="!canGoForward" title="Next">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 2l5 5-5 5"/></svg>
+              </button>
+              <button x-show="iterIndex < iterCount - 2" @click="jumpToLatest()"
+                      class="w-7 h-7 ml-2 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 transition-all"
+                      title="Jump to latest">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 2l5 5-5 5"/><path d="M8 2l5 5-5 5"/></svg>
               </button>
             </div>
           </template>
@@ -192,11 +197,16 @@
                       :disabled="!canGoBack">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 2L4 7l5 5"/></svg>
               </button>
-              <span class="text-xs font-mono text-gray-400 min-w-[2.25rem] text-center" x-text="(iterIndex + 1) === iterCount ? 'Latest' : (iterIndex + 1) + ' of ' + iterCount"></span>
+              <span class="text-xs font-mono text-gray-400 w-[5.5rem] text-center" x-text="(iterIndex + 1) === iterCount ? 'v' + iterCount : (iterIndex + 1) + ' of ' + iterCount"></span>
               <button @click="nextIteration()"
                       class="w-7 h-7 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 disabled:text-gray-700 disabled:cursor-default transition-all"
                       :disabled="!canGoForward">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 2l5 5-5 5"/></svg>
+              </button>
+              <button x-show="iterIndex < iterCount - 2" @click="jumpToLatest()"
+                      class="w-7 h-7 ml-2 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 transition-all"
+                      title="Jump to latest">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 2l5 5-5 5"/><path d="M8 2l5 5-5 5"/></svg>
               </button>
             </div>
             <!-- Capture — mobile position -->
