@@ -334,15 +334,88 @@ DISPATCH_SSE_DATA = {
     "pause_reasons": {},
 }
 
+# ── Additional fixture data for trace overlay, bead viewer, host session tests ──
+
+SWEEP_BEAD_DISPATCHED = {
+    "id": "auto-sweep-b2",
+    "title": "Sweep dispatched bead",
+    "priority": 1,
+    "status": "closed",
+    "labels": [],
+    "description": "A test bead that was dispatched and completed successfully.",
+}
+
+SWEEP_DISPATCH_RUN = {
+    "id": "auto-sweep-b2-20260327-120000",
+    "bead_id": "auto-sweep-b2",
+    "dir": "auto-sweep-b2-20260327-120000",
+    "status": "DONE",
+    "started_at": "2026-03-27T12:00:00Z",
+    "completed_at": "2026-03-27T12:05:00Z",
+    "duration_secs": 300,
+    "commit_hash": "abc123def456789",
+    "lines_added": 50,
+    "lines_removed": 10,
+    "files_changed": 3,
+    "decision": {
+        "status": "DONE",
+        "reason": "All tests pass",
+        "scores": {"tooling": 4, "clarity": 5, "confidence": 4},
+    },
+}
+
+SWEEP_TRACE_DATA = {
+    "auto-sweep-b2-20260327-120000": {
+        "id": "auto-sweep-b2-20260327-120000",
+        "bead_id": "auto-sweep-b2",
+        "status": "DONE",
+        "reason": "All tests pass",
+        "duration_secs": 300,
+        "commit_hash": "abc123def456789",
+        "decision": {
+            "status": "DONE",
+            "reason": "All tests pass",
+            "scores": {"tooling": 4, "clarity": 5, "confidence": 4},
+        },
+        "experience_report": "# Experience Report\n\nEverything went smoothly.",
+        "diff": "+++ tools/test.py\n+def test_it():\n+    assert True",
+    },
+}
+
+SWEEP_PRIMER_DATA = {
+    "auto-sweep-b2": {
+        "bead_id": "auto-sweep-b2",
+        "title": "Sweep dispatched bead",
+        "description": "A test bead that was dispatched and completed.",
+        "priority": 1,
+        "status": "closed",
+    },
+}
+
+# Session entries for dispatch run (for overlay panel / bead detail viewer)
+SWEEP_DISPATCH_ENTRIES = [
+    {"type": "system", "content": "Session started", "timestamp": NOW - 600},
+    {"type": "user", "content": "Implement the sweep feature", "timestamp": NOW - 590},
+    {"type": "assistant_text", "content": "I will implement the sweep feature now.", "timestamp": NOW - 580},
+    {"type": "tool_use", "tool_name": "Edit", "content": "Editing sweep.py",
+     "timestamp": NOW - 570},
+    {"type": "tool_result", "content": "File saved", "timestamp": NOW - 565},
+    {"type": "assistant_text", "content": "The feature is implemented and tests pass.",
+     "timestamp": NOW - 550},
+]
+
 
 def _build_fixture() -> dict:
     """Build the complete fixture dict for behavioral sweep tests."""
+    entries = dict(SWEEP_SESSION_ENTRIES)
+    # Add dispatch run entries keyed by run dir name (for dispatch tail)
+    entries["auto-sweep-b2-20260327-120000"] = SWEEP_DISPATCH_ENTRIES
     return {
         "active_sessions": SWEEP_SESSIONS,
-        "session_entries": SWEEP_SESSION_ENTRIES,
+        "session_entries": entries,
         "recent_sessions": SWEEP_RECENT_SESSIONS,
-        "beads": SWEEP_BEADS,
-        "runs": SWEEP_RUNS,
+        "beads": SWEEP_BEADS + [SWEEP_BEAD_DISPATCHED],
+        "runs": SWEEP_RUNS + [SWEEP_DISPATCH_RUN],
         "experiments": [],
         "timeline_entries": SWEEP_TIMELINE_ENTRIES,
         "timeline_stats": SWEEP_TIMELINE_STATS,
@@ -350,8 +423,8 @@ def _build_fixture() -> dict:
         "thoughts": SWEEP_THOUGHTS,
         "threads": SWEEP_THREADS,
         "streams": SWEEP_STREAMS,
-        "traces": SWEEP_TRACES,
-        "primers": SWEEP_PRIMERS,
+        "traces": {**SWEEP_TRACES, **SWEEP_TRACE_DATA},
+        "primers": {**SWEEP_PRIMERS, **SWEEP_PRIMER_DATA},
         "bead_deps": SWEEP_BEAD_DEPS,
     }
 
@@ -1373,3 +1446,356 @@ class TestTracePageBehavior:
         """No raw Jinja template syntax visible."""
         c = self._checks
         assert c.get("no_jinja"), "Raw Jinja template syntax visible on trace page"
+
+
+# ── Trace overlay JS check bundle (Bug #1: raw Jinja in overlay) ─────
+
+TRACE_OVERLAY_CHECKS = """
+    // Trace page loaded — look for title inside #content (not site header)
+    var content = document.getElementById('content');
+    var titleEl = content ? content.querySelector('h1') : null;
+    r.has_title = !!(titleEl && titleEl.textContent.trim().length > 0);
+    r.title_text = titleEl ? titleEl.textContent.trim() : '';
+
+    // Decision section rendered
+    var decisionSection = content ? content.querySelector('section[aria-label="Decision"]') : null;
+    r.has_decision = !!decisionSection;
+
+    // Trace section exists (Alpine component rendered the fragment)
+    var traceSection = content ? content.querySelector('section[aria-label="Trace"]') : null;
+    r.trace_section_exists = !!traceSection;
+
+    // No raw Jinja syntax in the live panel overlay body.
+    // base.html serves the overlay panel via _load_template() which does NOT
+    // render Jinja. The {% include "partials/session-entries.html" %} appears
+    // as literal text in the DOM instead of the rendered partial content.
+    var panelBody = document.getElementById('live-panel-body');
+    r.panel_body_exists = !!panelBody;
+    if (panelBody) {
+        r.overlay_has_raw_jinja = panelBody.innerHTML.indexOf('{%') >= 0;
+        r.overlay_has_include = panelBody.innerHTML.indexOf('include') >= 0
+            && panelBody.innerHTML.indexOf('{%') >= 0;
+    } else {
+        r.overlay_has_raw_jinja = false;
+        r.overlay_has_include = false;
+    }
+
+    // Check visible page text for raw Jinja (only catches visible content)
+    var bodyText = document.body.innerText;
+    r.no_jinja_visible = bodyText.indexOf('{%') === -1 && bodyText.indexOf('{{') === -1;
+"""
+
+
+class TestTraceOverlayBehavior:
+    """Trace page overlay behavioral sweep — verifies overlay panel
+    does not contain raw Jinja template syntax.
+
+    Bug: base.html is served via _load_template() (raw file read) instead of
+    Jinja rendering. The {% include "partials/session-entries.html" %} directive
+    in the overlay panel body appears as literal text, visible when the panel
+    opens for live or completed dispatch runs.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        """Navigate to trace page, run check bundle, cache results."""
+        result = _navigate_and_check(
+            "/dispatch/trace/auto-sweep-b2-20260327-120000",
+            TRACE_OVERLAY_CHECKS,
+            wait_ms=3000,
+        )
+        request.cls._checks = result
+
+    def test_trace_section_exists(self):
+        """Trace page fragment was loaded and Alpine component initialised."""
+        c = self._checks
+        assert c.get("trace_section_exists"), \
+            "Trace section[aria-label='Trace'] not found — fragment may not have loaded"
+
+    def test_trace_loads(self):
+        """Trace page renders the bead title after fetching trace data."""
+        c = self._checks
+        assert c.get("has_title"), \
+            f"Trace page title not rendered in #content (title='{c.get('title_text', '')}')"
+
+    def test_decision_visible(self):
+        """Decision section is rendered with status and scores."""
+        c = self._checks
+        assert c.get("has_decision"), \
+            "User should see the Decision section with status, reason, and scores"
+
+    @pytest.mark.xfail(
+        reason="BUG: Overlay panel contains raw {% include %} because base.html "
+               "is served via _load_template() (no Jinja rendering). User sees "
+               "literal template syntax instead of rendered session entries when "
+               "the panel opens.",
+        strict=True,
+    )
+    def test_no_raw_jinja_in_overlay(self):
+        """Overlay session panel must not contain raw Jinja template directives.
+
+        The user should see rendered session entries, not literal
+        {% include "partials/session-entries.html" %} text.
+        """
+        c = self._checks
+        assert c.get("panel_body_exists"), "Overlay panel body (#live-panel-body) missing from DOM"
+        assert not c.get("overlay_has_raw_jinja"), \
+            ("Overlay panel HTML contains raw Jinja syntax ({%%). "
+             "The {% include %} directive was not processed by the template engine. "
+             "User would see literal template text instead of session entries.")
+
+
+# ── Host session viewer JS check bundle ──────────────────────────
+
+HOST_SESSION_CHECKS = """
+    // Session viewer — scope to #content to avoid matching overlay panel
+    var content = document.getElementById('content');
+    var viewerEl = content ? content.querySelector('.session-viewer') : null;
+    r.viewer_exists = !!viewerEl;
+
+    // State machine — check if ready (.sv-ready appears when state='ready')
+    var readyEl = content ? content.querySelector('.sv-ready') : null;
+    r.is_ready = !!readyEl;
+
+    // Session entries visible (in the page viewer, not the overlay)
+    var entries = content ? content.querySelectorAll('.sc-entry') : [];
+    r.entry_count = entries.length;
+    r.has_entries = entries.length > 0;
+
+    // Textarea / input bar exists (for sending messages to live session)
+    // x-ref is not a DOM attribute; query by element type + parent class
+    var textarea = content ? content.querySelector('.sv-input textarea') : null;
+    r.has_textarea = !!textarea;
+
+    // Input bar container
+    var inputBar = content ? content.querySelector('.sv-input') : null;
+    r.has_input_bar = !!inputBar;
+
+    // Session header visible
+    var header = content ? content.querySelector('[data-testid="session-header"]') : null;
+    r.has_header = !!header;
+
+    // No raw template syntax
+    var bodyText = document.body.innerText;
+    r.no_jinja = bodyText.indexOf('{%') === -1 && bodyText.indexOf('{{') === -1;
+"""
+
+
+class TestHostSessionInputBehavior:
+    """Host session viewer behavioral sweep — verifies input bar exists for
+    live host sessions.
+
+    Bug: In production, /api/session/{project}/{id}/tail returns is_live: false
+    for idle host sessions because it checks .meta.json + 120s mtime freshness
+    instead of reading the DB is_live field. The session viewer then hides the
+    input bar.
+
+    In mock mode, the tail endpoint hardcodes is_live: true and omits the
+    `type` field, so the textarea may appear (masking the production bug).
+    The L2.A contract test below catches the missing `type` field.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        """Navigate to host session viewer, run check bundle."""
+        result = _navigate_and_check(
+            "/session/autonomy/host-sweep-delta",
+            HOST_SESSION_CHECKS,
+            wait_ms=3000,
+        )
+        request.cls._checks = result
+
+    def test_session_loads(self):
+        """Session viewer reaches ready state."""
+        c = self._checks
+        assert c.get("viewer_exists"), "Session viewer component not found in #content"
+        assert c.get("is_ready"), "Session viewer did not reach 'ready' state"
+
+    def test_entries_visible(self):
+        """User sees session conversation entries."""
+        c = self._checks
+        assert c.get("has_entries"), \
+            f"No session entries visible (count={c.get('entry_count', 0)})"
+
+    @pytest.mark.xfail(
+        reason="BUG: Host session textarea may not appear. In mock mode this "
+               "may pass because mock tail omits `type` field (sessionType is "
+               "empty, bypassing host check). In production, is_live is false "
+               "for idle host sessions so the textarea is hidden.",
+        strict=False,
+    )
+    def test_textarea_for_live_host(self):
+        """Live host session should show a textarea for sending messages.
+
+        The user should be able to type and send messages to a live host session.
+        """
+        c = self._checks
+        assert c.get("has_textarea"), \
+            ("No textarea visible for live host session. "
+             "User cannot send messages to this session. "
+             "Expected a message input area.")
+
+    def test_no_template_artifacts(self):
+        """No raw Jinja template syntax visible on session viewer page."""
+        c = self._checks
+        assert c.get("no_jinja"), "Raw Jinja template syntax visible on session viewer page"
+
+
+class TestHostSessionTailContract:
+    """L2.A contract test: /api/session/{project}/{id}/tail must return
+    `type` and `is_live` consistent with the session registry.
+
+    The mock tail handler currently omits the `type` field, so the session
+    viewer cannot distinguish host from container sessions. This masks the
+    production bug where host sessions show no input bar.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def tail_response(self, browser, request):
+        """Fetch tail response for host session directly via HTTP.
+
+        Depends on `browser` fixture to ensure sweep_server is running.
+        """
+        import urllib.request
+        port = browser["port"]
+        url = f"http://127.0.0.1:{port}/api/session/autonomy/host-sweep-delta/tail?after=0"
+        resp = urllib.request.urlopen(url, timeout=5)
+        data = json.loads(resp.read().decode())
+        request.cls._tail = data
+
+    @pytest.mark.xfail(
+        reason="BUG: Mock tail endpoint omits `type` field. The session viewer "
+               "cannot distinguish host from container sessions, so host-specific "
+               "UI (Link Terminal / input bar) does not render correctly.",
+        strict=True,
+    )
+    def test_tail_returns_type(self):
+        """Tail response must include `type` field for host sessions.
+
+        The session viewer needs `type: 'host'` to show the correct UI
+        (Link Terminal flow instead of direct textarea).
+        """
+        t = self._tail
+        assert "type" in t, \
+            ("Tail response missing `type` field. "
+             "Session viewer cannot distinguish host from container sessions. "
+             f"Response keys: {list(t.keys())}")
+        assert t["type"] == "host", \
+            f"Expected type='host' for host session, got type='{t.get('type')}'"
+
+    def test_tail_returns_is_live(self):
+        """Tail response must include is_live: true for a live host session."""
+        t = self._tail
+        assert "is_live" in t, "Tail response missing `is_live` field"
+        assert t["is_live"] is True, \
+            f"Expected is_live=true for live host session, got is_live={t.get('is_live')}"
+
+
+# ── Bead viewer JS check bundle (Bug #3: viewer not wired) ──────
+
+BEAD_VIEWER_CHECKS = """
+    // Bead page loaded — scope to #content to avoid site header
+    var content = document.getElementById('content');
+    var titleEl = content ? content.querySelector('h1') : null;
+    r.has_title = !!(titleEl && titleEl.textContent.trim().length > 0);
+    r.title_text = titleEl ? titleEl.textContent.trim() : '';
+
+    // Bead ID visible (font-mono span in the header)
+    var idEls = content ? content.querySelectorAll('.font-mono.text-sm') : [];
+    var foundId = false;
+    for (var i = 0; i < idEls.length; i++) {
+        if (idEls[i].textContent.trim().indexOf('auto-sweep') >= 0) { foundId = true; break; }
+    }
+    r.has_bead_id = foundId;
+
+    // Description section
+    var descSection = content ? content.querySelector('section[aria-label="Description"]') : null;
+    r.has_description = !!descSection;
+
+    // Dispatch History section (shown for completed runs with status DONE)
+    var dispatchSection = content ? content.querySelector('section[aria-label="Dispatch History"]') : null;
+    r.has_dispatch_history = !!dispatchSection;
+
+    // View Trace link (shown for completed, non-running beads with a runDir)
+    var traceLinks = content ? content.querySelectorAll('a[href*="/dispatch/trace/"]') : [];
+    r.has_trace_link = traceLinks.length > 0;
+
+    // Agent conversation content — session entries visible on the bead page.
+    // Check for session entry elements or assistant/user messages in #content.
+    var sessionEntries = content ? content.querySelectorAll('.sc-entry') : [];
+    r.session_entry_count = sessionEntries.length;
+
+    var assistantMsgs = content ? content.querySelectorAll('.sc-asst-content, .sc-user-content') : [];
+    r.has_conversation_messages = assistantMsgs.length > 0;
+
+    // Check the overlay panel for session content too
+    var panelEntries = document.querySelectorAll('#live-panel-body .sc-entry');
+    r.panel_entry_count = panelEntries.length;
+
+    // Overall: user can see agent conversation somewhere on the page
+    r.conversation_visible = sessionEntries.length > 0
+        || assistantMsgs.length > 0
+        || panelEntries.length > 0;
+"""
+
+
+class TestBeadDetailViewerBehavior:
+    """Bead detail page behavioral sweep — verifies that a bead with a
+    completed dispatch run shows the agent's conversation content.
+
+    Bug: The bead detail page renders bead metadata (title, description,
+    dispatch history, trace link) but never shows the actual session
+    conversation. For completed beads, configure() is never called on
+    the session viewer — sessionKey stays 'NOT SET' and no backfill
+    is triggered. The user must click 'View Trace' and then 'View
+    Session Log' to see any conversation, which is two clicks away.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        """Navigate to bead detail page, run check bundle."""
+        result = _navigate_and_check(
+            "/bead/auto-sweep-b2",
+            BEAD_VIEWER_CHECKS,
+            wait_ms=3000,
+        )
+        request.cls._checks = result
+
+    def test_bead_loads(self):
+        """Bead detail page renders the bead title."""
+        c = self._checks
+        assert c.get("has_title"), \
+            f"Bead title not rendered in #content (title='{c.get('title_text', '')}')"
+
+    def test_bead_id_visible(self):
+        """Bead ID is visible on the page."""
+        c = self._checks
+        assert c.get("has_bead_id"), "Bead ID (auto-sweep-b2) not visible in page content"
+
+    def test_description_visible(self):
+        """Bead description section is rendered."""
+        c = self._checks
+        assert c.get("has_description"), \
+            "User should see the bead description"
+
+    @pytest.mark.xfail(
+        reason="BUG: Bead detail page does not show agent conversation content. "
+               "The session viewer component is never configured for completed "
+               "dispatch runs — sessionKey stays empty, no backfill is triggered. "
+               "User only sees a 'View Trace' link, not the actual conversation.",
+        strict=True,
+    )
+    def test_conversation_content_visible(self):
+        """User should see agent conversation entries on the bead detail page.
+
+        When a bead has a completed dispatch run, the agent's session log
+        (messages, tool calls, responses) should be visible directly on the
+        bead page, not hidden behind two clicks (View Trace → View Session Log).
+        """
+        c = self._checks
+        assert c.get("conversation_visible"), \
+            ("No agent conversation content visible on bead detail page. "
+             f"Session entries: {c.get('session_entry_count', 0)}, "
+             f"Panel entries: {c.get('panel_entry_count', 0)}. "
+             "User should see the agent's messages and tool calls directly, "
+             "not just a 'View Trace' link.")
