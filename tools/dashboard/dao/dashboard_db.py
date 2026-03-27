@@ -337,9 +337,6 @@ def update_topics(tmux_name: str, topics: list[str]) -> None:
     conn.commit()
 
 
-_ALLOWED_ROLES = {"coordinator", "reviewer", "builder", "designer", "validator", "researcher", ""}
-
-
 def update_role(tmux_name: str, role: str) -> None:
     """Set or clear the explicit role for a session."""
     conn = get_conn()

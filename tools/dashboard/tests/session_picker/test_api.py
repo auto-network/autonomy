@@ -72,9 +72,18 @@ class TestSessionRoleAPI:
         resp = test_client.put("/api/session/auto-test-designer/role", json={"role": "builder"})
         assert resp.status_code == 200
 
-    def test_reject_invalid_role(self, test_client):
-        resp = test_client.put("/api/session/auto-test-designer/role", json={"role": "supreme_overlord"})
+    def test_set_custom_role(self, test_client):
+        resp = test_client.put("/api/session/auto-test-designer/role", json={"role": "analyst"})
+        assert resp.status_code == 200
+
+    def test_clear_role(self, test_client):
+        resp = test_client.put("/api/session/auto-test-designer/role", json={"role": ""})
+        assert resp.status_code == 200
+
+    def test_reject_role_too_long(self, test_client):
+        resp = test_client.put("/api/session/auto-test-designer/role", json={"role": "a" * 33})
         assert resp.status_code == 400
+        assert "max 32" in resp.json()["error"]
 
 
 # ── Connect/Disconnect Wiring ─────────────────────────────────────────
