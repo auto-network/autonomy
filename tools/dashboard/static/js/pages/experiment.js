@@ -48,10 +48,21 @@
         init: function () {
           window._experimentPage = this;
           this.expId = _expIdFromPath();
+          this.chatOpen = localStorage.getItem('exp-chatOpen-' + this.expId) === 'true';
           this._load();
           var self = this;
           this.$watch('chatOpen', function (open) {
+            localStorage.setItem('exp-chatOpen-' + self.expId, open ? 'true' : 'false');
             if (open && !self.chatConnected) self._loadChatSessions();
+            if (open && self.chatConnected) {
+              self.$nextTick(function () {
+                var panelEl = document.getElementById('exp-chat-panel');
+                if (panelEl) {
+                  var panelData = Alpine.$data(panelEl);
+                  if (panelData && panelData._scrollToBottom) panelData._scrollToBottom();
+                }
+              });
+            }
           });
         },
 
@@ -181,6 +192,12 @@
           var siblings = this.exp && this.exp.sibling_ids;
           if (!siblings || this.iterIndex >= siblings.length - 1) return;
           navigateTo('/experiments/' + siblings[this.iterIndex + 1]);
+        },
+
+        jumpToLatest: function () {
+          var siblings = this.exp && this.exp.sibling_ids;
+          if (!siblings || siblings.length === 0) return;
+          navigateTo('/experiments/' + siblings[siblings.length - 1]);
         },
 
         // ── Chat With session management ──────────────────────────────────
