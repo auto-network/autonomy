@@ -468,6 +468,307 @@ def cmd_dispatch_nag(args):
         sys.exit(1)
 
 
+def _parse_since(since_str: str) -> float:
+    """Parse duration string like '7d', '30d', '1w' to seconds."""
+    import re
+    m = re.match(r'^(\d+)\s*([smhdw])$', since_str.strip())
+    if not m:
+        print(f"Invalid duration: {since_str!r}. Use e.g. 7d, 30d, 1w", file=sys.stderr)
+        sys.exit(1)
+    val, unit = int(m.group(1)), m.group(2)
+    multipliers = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800}
+    return val * multipliers[unit]
+
+
+def _fetch_runs_for_stats() -> list[dict]:
+    """Fetch dispatch runs from dashboard API."""
+    base = _get_dashboard_url()
+    ctx = _make_ssl_ctx()
+    try:
+        return _api_call(base, "/api/dispatch/runs", ctx)
+    except (urllib.error.URLError, OSError):
+        print(f"Dashboard not reachable at {base} — is it running?")
+        sys.exit(1)
+
+
+def _extract_run_fields(run: dict) -> dict:
+    """Normalize a run dict, extracting nested decision fields."""
+    decision = run.get("decision") or {}
+    if not isinstance(decision, dict):
+        decision = {}
+    scores = decision.get("scores") or {}
+    time_breakdown = decision.get("time_breakdown") or {}
+    return {
+        "bead_id": run.get("bead_id") or "",
+        "status": run.get("status") or "",
+        "duration_secs": run.get("duration_secs"),
+        "timestamp": run.get("timestamp") or "",
+        "score_tooling": scores.get("tooling"),
+        "workaround_pct": time_breakdown.get("tooling_workaround_pct"),
+        "failure_category": decision.get("failure_category") or "",
+        # dir field encodes image info for some runs: image-bead-timestamp
+        "dir": run.get("dir") or "",
+    }
+
+
+def _filter_runs(runs: list[dict], args) -> list[dict]:
+    """Filter out librarian runs, RUNNING runs, and apply --since."""
+    # Exclude librarian runs (empty bead_id) and in-progress runs
+    filtered = [r for r in runs if r["bead_id"] and r["status"] != "RUNNING"]
+
+    if args.since:
+        from datetime import timedelta
+        secs = _parse_since(args.since)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=secs)
+        cutoff_str = cutoff.strftime("%Y%m%d")
+        result = []
+        for r in filtered:
+            ts = r["timestamp"].replace("-", "")[:8]
+            if ts and ts >= cutoff_str:
+                result.append(r)
+        filtered = result
+
+    return filtered
+
+
+def _week_from_timestamp(ts: str) -> str:
+    """Extract ISO week label from timestamp like '20260327-171826' or '20260327--171826'."""
+    digits = ts.replace("-", "")[:8]
+    if len(digits) < 8:
+        return "?"
+    try:
+        dt = datetime.strptime(digits, "%Y%m%d")
+        iso_year, iso_week, _ = dt.isocalendar()
+        return f"{iso_year}-W{iso_week:02d}"
+    except ValueError:
+        return "?"
+
+
+def _image_from_dir(dir_name: str) -> str:
+    """Infer image name from the run dir.
+
+    Dir format is typically: <bead>-<date>-<time> or <image>-<bead>-<date>-<time>.
+    If the dir starts with a known image prefix, extract it.
+    """
+    # dir looks like: auto-0ncj-20260327-131825 or librarian-review_report-xxx
+    # For image breakdown, we parse the prefix before the bead_id pattern
+    # Simple heuristic: if it doesn't start with 'auto-' or 'librarian-', it has an image prefix
+    if not dir_name:
+        return "(unknown)"
+    parts = dir_name.split("-")
+    # Standard pattern: bead-date-time → no image prefix
+    # Image pattern: image-bead-date-time
+    if len(parts) >= 4 and parts[0] not in ("auto", "librarian"):
+        # Reconstruct image from prefix parts before the bead ID
+        # Find where the bead_id starts (auto-XXXX)
+        for i, p in enumerate(parts):
+            if p == "auto" and i + 1 < len(parts):
+                return "-".join(parts[:i])
+        return parts[0]
+    return "(default)"
+
+
+def cmd_dispatch_stats(args):
+    """Aggregate statistics and trends over dispatch runs."""
+    raw_runs = _fetch_runs_for_stats()
+    runs = [_extract_run_fields(r) for r in raw_runs]
+    runs = _filter_runs(runs, args)
+
+    if not runs:
+        print("No dispatch runs found.")
+        return
+
+    if args.trend:
+        _stats_trend(runs, args)
+    elif args.by_image:
+        _stats_by_image(runs, args)
+    else:
+        _stats_summary(runs, args)
+
+
+def _stats_summary(runs, args):
+    """Default summary output."""
+    from collections import Counter
+
+    total = len(runs)
+    status_counts = Counter(r["status"] for r in runs)
+
+    done = status_counts.get("DONE", 0)
+    failed = status_counts.get("FAILED", 0)
+    merge_failed = status_counts.get("MERGE_FAILED", 0)
+    timeout = status_counts.get("TIMEOUT", 0)
+    blocked = status_counts.get("BLOCKED", 0)
+    success_pct = round(100 * done / total) if total else 0
+
+    # Duration
+    durations = sorted(r["duration_secs"] for r in runs if r["duration_secs"] is not None)
+    avg_dur = sum(durations) / len(durations) if durations else None
+    median_dur = durations[len(durations) // 2] if durations else None
+
+    # Tooling scores
+    tooling_scores = [r["score_tooling"] for r in runs if r["score_tooling"] is not None]
+    tooling_avg = sum(tooling_scores) / len(tooling_scores) if tooling_scores else None
+    tooling_dist = Counter(tooling_scores)
+
+    # Workaround %
+    wa_values = [r["workaround_pct"] for r in runs if r["workaround_pct"] is not None]
+    wa_avg = sum(wa_values) / len(wa_values) if wa_values else None
+
+    # Top failure categories
+    fail_cats = Counter(
+        r["failure_category"] for r in runs
+        if r["failure_category"]
+    )
+
+    if args.json:
+        data = {
+            "total": total,
+            "success_pct": success_pct,
+            "status_breakdown": dict(status_counts),
+            "duration_avg_secs": round(avg_dur) if avg_dur else None,
+            "duration_median_secs": median_dur,
+            "tooling_avg": round(tooling_avg, 1) if tooling_avg else None,
+            "tooling_distribution": {str(k): v for k, v in sorted(tooling_dist.items(), reverse=True)},
+            "workaround_avg_pct": round(wa_avg, 1) if wa_avg else None,
+            "top_failures": dict(fail_cats.most_common(5)),
+        }
+        print(json.dumps(data, default=str))
+        return
+
+    since_label = f"since {args.since}" if args.since else "all time"
+    print(f"Dispatch Stats ({since_label}, {total} runs)")
+
+    status_parts = []
+    for label, count in [("DONE", done), ("FAILED", failed), ("MERGE_FAILED", merge_failed),
+                         ("BLOCKED", blocked), ("TIMEOUT", timeout)]:
+        if count:
+            status_parts.append(f"{count} {label}")
+    print(f"  Success: {success_pct}% ({', '.join(status_parts)})")
+
+    avg_s = _format_duration(avg_dur) if avg_dur else "?"
+    med_s = _format_duration(median_dur) if median_dur else "?"
+    print(f"  Duration: avg {avg_s}, median {med_s}")
+
+    if tooling_avg is not None:
+        dist_parts = [f"score {k}: {v}" for k, v in sorted(tooling_dist.items(), reverse=True)]
+        print(f"  Tooling: avg {tooling_avg:.1f}/5 ({', '.join(dist_parts)})")
+
+    if wa_avg is not None:
+        print(f"  Workaround: avg {wa_avg:.1f}%")
+
+    if fail_cats:
+        fail_parts = [f"{cat} ({cnt})" for cat, cnt in fail_cats.most_common(5)]
+        print(f"  Top failures: {', '.join(fail_parts)}")
+
+
+def _stats_trend(runs, args):
+    """Weekly trend output."""
+    from collections import defaultdict
+
+    buckets = defaultdict(list)
+    for r in runs:
+        week = _week_from_timestamp(r["timestamp"])
+        buckets[week].append(r)
+
+    weeks = sorted(buckets.keys())
+    if not weeks:
+        print("No dispatch runs found.")
+        return
+
+    if args.json:
+        data = []
+        for w in weeks:
+            bucket = buckets[w]
+            n = len(bucket)
+            done = sum(1 for r in bucket if r["status"] == "DONE")
+            tooling = [r["score_tooling"] for r in bucket if r["score_tooling"] is not None]
+            wa = [r["workaround_pct"] for r in bucket if r["workaround_pct"] is not None]
+            durs = [r["duration_secs"] for r in bucket if r["duration_secs"] is not None]
+            data.append({
+                "week": w,
+                "runs": n,
+                "success_pct": round(100 * done / n) if n else 0,
+                "tooling_avg": round(sum(tooling) / len(tooling), 1) if tooling else None,
+                "workaround_avg_pct": round(sum(wa) / len(wa), 1) if wa else None,
+                "duration_avg_secs": round(sum(durs) / len(durs)) if durs else None,
+            })
+        print(json.dumps(data, default=str))
+        return
+
+    print(f"{'Week':<13} {'Runs':>4}  {'Success':>7}  {'Tooling':>7}  {'Workaround':>10}  {'Duration':>8}")
+
+    prev_success = None
+    for w in weeks:
+        bucket = buckets[w]
+        n = len(bucket)
+        done = sum(1 for r in bucket if r["status"] == "DONE")
+        success = round(100 * done / n) if n else 0
+
+        tooling_vals = [r["score_tooling"] for r in bucket if r["score_tooling"] is not None]
+        tooling = f"{sum(tooling_vals)/len(tooling_vals):.1f}" if tooling_vals else "\u2014"
+
+        wa_vals = [r["workaround_pct"] for r in bucket if r["workaround_pct"] is not None]
+        wa = f"{sum(wa_vals)/len(wa_vals):.1f}%" if wa_vals else "\u2014"
+
+        dur_vals = [r["duration_secs"] for r in bucket if r["duration_secs"] is not None]
+        dur = _format_duration(sum(dur_vals) / len(dur_vals)) if dur_vals else "\u2014"
+
+        indicator = ""
+        if prev_success is not None:
+            if success > prev_success:
+                indicator = " \u2191"
+            elif success < prev_success:
+                indicator = " \u2193"
+        prev_success = success
+
+        print(f"{w:<13} {n:>4}  {success:>6}%  {tooling:>7}  {wa:>10}  {dur:>8}{indicator}")
+
+
+def _stats_by_image(runs, args):
+    """Breakdown by container image."""
+    from collections import defaultdict
+
+    buckets = defaultdict(list)
+    for r in runs:
+        img = _image_from_dir(r["dir"])
+        buckets[img].append(r)
+
+    images = sorted(buckets.keys(), key=lambda k: -len(buckets[k]))
+
+    if args.json:
+        data = []
+        for img in images:
+            bucket = buckets[img]
+            n = len(bucket)
+            done = sum(1 for r in bucket if r["status"] == "DONE")
+            tooling = [r["score_tooling"] for r in bucket if r["score_tooling"] is not None]
+            wa = [r["workaround_pct"] for r in bucket if r["workaround_pct"] is not None]
+            data.append({
+                "image": img,
+                "runs": n,
+                "success_pct": round(100 * done / n) if n else 0,
+                "tooling_avg": round(sum(tooling) / len(tooling), 1) if tooling else None,
+                "workaround_avg_pct": round(sum(wa) / len(wa), 1) if wa else None,
+            })
+        print(json.dumps(data, default=str))
+        return
+
+    print(f"{'Image':<35} {'Runs':>4}  {'Success':>7}  {'Tooling':>7}  {'Workaround':>10}")
+    for img in images:
+        bucket = buckets[img]
+        n = len(bucket)
+        done = sum(1 for r in bucket if r["status"] == "DONE")
+        success = round(100 * done / n) if n else 0
+
+        tooling_vals = [r["score_tooling"] for r in bucket if r["score_tooling"] is not None]
+        tooling = f"{sum(tooling_vals)/len(tooling_vals):.1f}" if tooling_vals else "\u2014"
+
+        wa_vals = [r["workaround_pct"] for r in bucket if r["workaround_pct"] is not None]
+        wa = f"{sum(wa_vals)/len(wa_vals):.1f}%" if wa_vals else "\u2014"
+
+        print(f"{img[:35]:<35} {n:>4}  {success:>6}%  {tooling:>7}  {wa:>10}")
+
+
 def cmd_dispatch_status(args):
     """Print compact one-liner summary."""
     base = _get_dashboard_url()

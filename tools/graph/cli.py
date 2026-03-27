@@ -68,7 +68,7 @@ from .watch import watch_sessions
 from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
-from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
+from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_stats, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
 from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_set_topics, api_set_role, api_set_nag, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action, api_tag_add, api_tag_remove, api_tag_merge
 
 
@@ -3155,6 +3155,13 @@ def main():
     p_reset = dispatch_sub.add_parser("reset", help="Reset circuit breaker for a bead")
     p_reset.add_argument("bead_id", help="Bead ID to reset")
     p_reset.set_defaults(func=cmd_dispatch_reset)
+
+    p_stats = dispatch_sub.add_parser("stats", help="Aggregate statistics and trends")
+    p_stats.add_argument("--trend", action="store_true", help="Show weekly trend")
+    p_stats.add_argument("--by-image", action="store_true", help="Break down by container image")
+    p_stats.add_argument("--since", help="Duration filter, e.g. 7d, 30d")
+    p_stats.add_argument("--json", action="store_true", help="JSON output")
+    p_stats.set_defaults(func=cmd_dispatch_stats)
 
     # attach
     p = sub.add_parser("attach", help="Attach a file to the graph with hash-based dedup")
