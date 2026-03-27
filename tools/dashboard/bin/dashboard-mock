@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Self-daemonizing mock dashboard server for agent worktree testing.
+# See tools/dashboard/mock_server.py for implementation.
+REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+exec python3 -m tools.dashboard.mock_server "$@"
