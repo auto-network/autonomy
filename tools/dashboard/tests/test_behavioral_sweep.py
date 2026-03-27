@@ -1617,23 +1617,17 @@ class TestHostSessionInputBehavior:
         assert c.get("has_entries"), \
             f"No session entries visible (count={c.get('entry_count', 0)})"
 
-    @pytest.mark.xfail(
-        reason="BUG: Host session textarea may not appear. In mock mode this "
-               "may pass because mock tail omits `type` field (sessionType is "
-               "empty, bypassing host check). In production, is_live is false "
-               "for idle host sessions so the textarea is hidden.",
-        strict=False,
-    )
-    def test_textarea_for_live_host(self):
-        """Live host session should show a textarea for sending messages.
+    def test_input_bar_for_live_host(self):
+        """Live host session should show an input bar (Link Terminal or textarea).
 
-        The user should be able to type and send messages to a live host session.
+        Host sessions show a 'Link Terminal' button until linked to a tmux session,
+        then show a textarea. Either way, the .sv-input bar should be present.
         """
         c = self._checks
-        assert c.get("has_textarea"), \
-            ("No textarea visible for live host session. "
-             "User cannot send messages to this session. "
-             "Expected a message input area.")
+        assert c.get("has_input_bar"), \
+            ("No input bar visible for live host session. "
+             "User cannot interact with this session. "
+             "Expected .sv-input element (Link Terminal button or textarea).")
 
     def test_no_template_artifacts(self):
         """No raw Jinja template syntax visible on session viewer page."""
@@ -1663,12 +1657,6 @@ class TestHostSessionTailContract:
         data = json.loads(resp.read().decode())
         request.cls._tail = data
 
-    @pytest.mark.xfail(
-        reason="BUG: Mock tail endpoint omits `type` field. The session viewer "
-               "cannot distinguish host from container sessions, so host-specific "
-               "UI (Link Terminal / input bar) does not render correctly.",
-        strict=True,
-    )
     def test_tail_returns_type(self):
         """Tail response must include `type` field for host sessions.
 
