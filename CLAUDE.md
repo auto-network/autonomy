@@ -76,6 +76,9 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph crosstalk` | CrossTalk message log (default) | `graph crosstalk --since 1h --session auto-0323-022132` |
 | `graph crosstalk send <target> "msg"` | Send message to a session | `graph crosstalk send auto-0325-123456 "check this"` |
 | `graph crosstalk broadcast "msg"` | Send message to all live sessions | `graph crosstalk broadcast "deploy in 5m"` |
+| `graph dispatch stats` | Aggregate statistics: success rate, tooling scores, top failures | `graph dispatch stats --since 7d` |
+| `graph dispatch stats --trend` | Weekly trend with direction indicators | `graph dispatch stats --trend` |
+| `graph dispatch stats --by-image` | Break down stats by container image | `graph dispatch stats --by-image` |
 | `graph dispatch watch` | Block until next dispatch completes | `graph dispatch watch --timeout 300` |
 | `graph collab topics` | List tags with descriptions and note counts | `graph collab topics` |
 | `graph collab tag-describe <tag> "desc"` | Set or update a tag description | `graph collab tag-describe pitfall "Operational hazards..."` |
