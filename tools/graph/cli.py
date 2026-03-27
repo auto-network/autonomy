@@ -1234,11 +1234,13 @@ def cmd_link(args):
     db.close()
 
 
-def _query_attention(db, since=None, search=None, last=None, session=None):
+def _query_attention(db, since=None, search=None, last=None, session=None, context=0):
     """Query human input across all sessions from graph.db.
 
     Returns list of dicts with keys: created_at, content, source_id,
     turn_number, is_queued, session_name, session_type.
+    When context > 0, each dict also has a 'context' key with up to N
+    surrounding agent derivations.
 
     Reusable by graph news, graph catchup, and other consumers.
     """
@@ -1300,7 +1302,7 @@ def _query_attention(db, since=None, search=None, last=None, session=None):
     # Reverse for chronological display when using --last
     results = list(reversed(rows)) if last else list(rows)
 
-    return [
+    items = [
         {
             "created_at": r[0] or "",
             "content": r[1] or "",
@@ -1313,17 +1315,39 @@ def _query_attention(db, since=None, search=None, last=None, session=None):
         for r in results
     ]
 
+    if context and context > 0:
+        for item in items:
+            src_id = item["source_id"]
+            turn = item["turn_number"]
+            if turn is None:
+                item["context"] = []
+                continue
+            derivs = db.conn.execute("""
+                SELECT turn_number, content, created_at
+                FROM derivations
+                WHERE source_id = ? AND turn_number BETWEEN ? AND ?
+                ORDER BY turn_number
+            """, (src_id, turn, turn + context)).fetchall()
+            item["context"] = [
+                {"turn": d[0], "content": d[1] or "", "created_at": d[2] or ""}
+                for d in derivs
+            ]
+
+    return items
+
 
 def cmd_attention(args):
     """Show human input from sessions, chronologically. Fast query for sovereign content."""
     db = GraphDB(args.db)
 
+    ctx = getattr(args, "context", 0)
     rows = _query_attention(
         db,
         since=getattr(args, "since", None),
         search=getattr(args, "search", None),
         last=getattr(args, "last", None),
         session=getattr(args, "session", None),
+        context=ctx,
     )
 
     for m in rows:
@@ -1333,6 +1357,12 @@ def cmd_attention(args):
         if len(m["content"]) > 200:
             preview += "…"
         print(f"  [{ts}]{tag}  ({m['session_name']}) {preview}")
+        if ctx and "context" in m:
+            for d in m["context"]:
+                d_preview = d["content"][:200].replace("\n", " ")
+                if len(d["content"]) > 200:
+                    d_preview += "…"
+                print(f"      AGENT: {d_preview}")
 
     print(f"\n  {len(rows)} messages")
     db.close()
@@ -3014,6 +3044,8 @@ def main():
     p.add_argument("--last", type=int, help="Show only last N messages")
     p.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d, 1w")
     p.add_argument("--search", "-s", help="Filter to messages containing this text")
+    p.add_argument("--context", type=int, default=0,
+                   help="Include N surrounding agent responses per message")
     p.set_defaults(func=cmd_attention)
 
     # note (handles both create and update)
