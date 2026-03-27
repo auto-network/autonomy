@@ -27,7 +27,7 @@
   </div>
 
   <!-- Active Sessions (interactive: host, chatwith, terminal) -->
-  <section aria-label="Active Sessions" class="mb-8">
+  <section aria-label="Active Sessions" class="mb-8" data-testid="active-sessions-section">
     <div class="flex items-center justify-between mb-3">
       <h2 class="text-lg font-semibold text-green-400">● Active Sessions</h2>
       {% include 'partials/zoom-toggle.html' %}
@@ -73,7 +73,7 @@
             <div class="sc-stats">
               <span class="sc-dot" :class="s.is_live ? 'sc-dot-live' : 'sc-dot-dead'"></span>
               <span class="sc-nag" :class="s.nag_enabled ? '' : 'sc-nag-off'">🔔</span>
-              <span class="sc-role" :class="s._roleCls" x-text="s._roleBadge" x-show="s._roleBadge"></span>
+              <span class="sc-role" :class="s._roleCls" x-text="s._roleBadge" x-show="s._roleBadge" data-testid="session-role"></span>
               <span class="sc-t3">
                 <span class="sc-t3-val" :class="s._ctxWarn ? 'warn' : ''" x-text="s._turnsStr"></span>
                 <span class="sc-t3-sep">·</span>
@@ -124,7 +124,7 @@
   </section>
 
   <!-- Recent Sessions -->
-  <section aria-label="Recent Sessions">
+  <section aria-label="Recent Sessions" data-testid="recent-sessions-section">
     <h2 class="text-lg font-semibold mb-3 text-gray-400">Recent Sessions</h2>
     <template x-if="recent.length === 0">
       <div class="text-gray-500 text-sm">No recent sessions</div>
@@ -133,6 +133,7 @@
       <template x-for="s in recent" :key="s.id">
         <a :href="'/graph/' + s.id"
            class="flex items-center gap-3 p-3 bg-gray-800 rounded-lg hover:bg-gray-750 border border-gray-700 no-underline"
+           data-testid="recent-session-row"
            :data-session-id="s.id">
           <span class="font-mono text-xs text-gray-500" x-text="s.id.slice(0, 12)"></span>
           <span class="text-xs text-gray-400" x-text="s.date"></span>
