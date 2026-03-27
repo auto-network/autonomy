@@ -231,14 +231,21 @@ pytest tools/dashboard/tests/session_picker/test_api.py
 
 If your bead includes failing test assertions in its acceptance criteria, run them and verify they pass before writing decision.json. If tests fail, your implementation is not complete.
 
-### Mock server for manual testing
+### Visual testing with mock dashboard
 
-Boot a test server with mock data — no real database, no tmux needed:
+Start a self-daemonizing mock server that serves your worktree code with mock data:
 ```bash
-DASHBOARD_MOCK=/path/to/fixtures.json python3 -m uvicorn tools.dashboard.server:app --port 8082
+dashboard-mock start --port 8082                    # start, prints "Ready on :8082", exits 0
+dashboard-mock start --port 8082 --fixture /tmp/f.json  # custom fixture
+dashboard-mock stop --port 8082                     # kill via PID file
+dashboard-mock status --port 8082                   # check if running
 ```
 
-The mock DAO reads fixtures.json on every request. Edit the file to change what the UI shows. Fixture generators are in `tools/dashboard/tests/fixtures.py`.
+The mock DAO reads fixtures.json on every request — edit the file, refresh the page, see new data.
+Fixture generators are in `tools/dashboard/tests/fixtures.py`.
+
+The server self-daemonizes (fork + setsid) so it survives after the bash tool returns — no SIGPIPE.
+See `agents/shared/dashboard/agent-browser-primer.md` for visual validation patterns.
 
 ## Working Style
 
