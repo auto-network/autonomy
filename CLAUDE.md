@@ -141,13 +141,13 @@ graph attention --search "keyword"            # find when user discussed somethi
 ### Session self-management
 ```bash
 graph set-label "topic description"                      # set your session label
-curl -sk -X PUT https://localhost:8080/api/session/$TMUX/topics \
+curl -sk -X PUT https://localhost:8080/api/session/$AUTONOMY_SESSION/topics \
   -H 'Content-Type: application/json' \
   -d '{"topics":["Status line 1","Status line 2"]}'      # set 1-4 topic lines on card
-curl -sk -X PUT https://localhost:8080/api/session/$TMUX/nag \
+curl -sk -X PUT https://localhost:8080/api/session/$AUTONOMY_SESSION/nag \
   -H 'Content-Type: application/json' \
   -d '{"enabled":true,"interval":10,"message":"Check in"}' # enable idle nag (1-120 min)
-curl -sk -X DELETE https://localhost:8080/api/session/$TMUX/nag  # disable nag
+curl -sk -X DELETE https://localhost:8080/api/session/$AUTONOMY_SESSION/nag  # disable nag
 ```
 
 ## Environment
