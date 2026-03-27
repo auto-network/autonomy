@@ -1,6 +1,5 @@
-// Experiment page Alpine component — Chrome v2.
-// Full-bleed surface, control strip, two-state chat toggle with unified session viewer.
-// Removed: variant selection, ranking, prev/next navigation, multi-iframe injection, inline bubble renderer.
+// Experiment page Alpine component — Unified toolbar (Design Studio experiment a8ee8212).
+// 4-state toolbar: DISCONNECTED, PICKER, LIVE_UI, LIVE_CHAT.
 // Kept: experiment fetch, single iframe injection, capture, Chat With integration, SSE series subscription.
 
 (function () {
@@ -20,6 +19,7 @@
         expId: '',
         exp: null,
         iterCount: 0,
+        iterIndex: 0,
 
         // Chat toggle
         chatOpen: false,
@@ -28,15 +28,20 @@
         // Chat With session
         chatConnected: false,
         chatSessions: [],
+        chatSessionLabel: '',
         _tmuxSession: null,
 
         // Capture state: 'idle' | 'working' | 'success' | 'error'
         captureState: 'idle',
-        screenshotStatus: '',
 
-        // Primer injection
-        primerInjecting: false,
-        primerInjected: false,
+        // Primer state: 'idle' | 'working' | 'done'
+        primerState: 'idle',
+
+        // ── Computed: toolbar state machine ─────────────────────────────
+        get toolbarState() { return deriveToolbarState(this.chatOpen, this.chatConnected); },
+        get toolbar() { return toolbarElements(this.toolbarState); },
+        get canGoBack() { return this.iterIndex > 0; },
+        get canGoForward() { return this.iterIndex < this.iterCount - 1; },
 
         // ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -73,7 +78,10 @@
               return;
             }
             this.exp = data;
-            this.iterCount = (data.sibling_ids || []).length || 1;
+            var siblings = data.sibling_ids || [];
+            this.iterCount = siblings.length || 1;
+            this.iterIndex = siblings.length > 0 ? siblings.indexOf(this.expId) : 0;
+            if (this.iterIndex < 0) this.iterIndex = siblings.length - 1;
             this.state = 'ready';
 
             // Post-render: inject iframe content
@@ -124,8 +132,6 @@
 
         // ── Screenshot ────────────────────────────────────────────────────
 
-        setScreenshotStatus: function (msg) { this.screenshotStatus = msg; },
-
         captureScreenshot: async function () {
           if (this.captureState === 'working') return; // prevent double-click
           this.captureState = 'working';
@@ -142,26 +148,39 @@
         // ── Primer injection ─────────────────────────────────────────────
 
         injectPrimer: async function () {
-          if (this.primerInjecting || !this._tmuxSession) return;
-          this.primerInjecting = true;
+          if (this.primerState === 'working' || !this._tmuxSession) return;
+          this.primerState = 'working';
           try {
             var res = await fetch('/api/chatwith/primer/experiment?context=' + this.expId);
             var data = await res.json();
-            if (data.error) { console.error('Primer error:', data.error); return; }
+            if (data.error) { console.error('Primer error:', data.error); this.primerState = 'idle'; return; }
 
             await fetch('/api/session/send', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ tmux_session: this._tmuxSession, message: data.primer_text }),
             });
-            this.primerInjected = true;
+            this.primerState = 'done';
             var self = this;
-            setTimeout(function () { self.primerInjected = false; }, 5000);
+            setTimeout(function () { self.primerState = 'idle'; }, 5000);
           } catch (e) {
             console.error('Primer injection failed:', e);
-          } finally {
-            this.primerInjecting = false;
+            this.primerState = 'idle';
           }
+        },
+
+        // ── Iteration navigation ────────────────────────────────────────
+
+        prevIteration: function () {
+          var siblings = this.exp && this.exp.sibling_ids;
+          if (!siblings || this.iterIndex <= 0) return;
+          navigateTo('/experiments/' + siblings[this.iterIndex - 1]);
+        },
+
+        nextIteration: function () {
+          var siblings = this.exp && this.exp.sibling_ids;
+          if (!siblings || this.iterIndex >= siblings.length - 1) return;
+          navigateTo('/experiments/' + siblings[this.iterIndex + 1]);
         },
 
         // ── Chat With session management ──────────────────────────────────
@@ -173,8 +192,9 @@
           localStorage.setItem('exp-chat-' + this.expId, sessionId);
           initDisplayCapture(this.expId).catch(function () {});
 
-          // Resolve project from picker data
+          // Resolve project and label from picker data
           var session = this.chatSessions.find(function (s) { return s.id === sessionId; });
+          this.chatSessionLabel = session ? (session.label || session.id) : sessionId;
           var project = session ? session.project : 'default';
 
           // Configure unified viewer after Alpine renders the x-if template.
