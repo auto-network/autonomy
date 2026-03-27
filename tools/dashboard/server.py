@@ -45,13 +45,13 @@ from agents.dispatch_db import (
 from agents.session_launcher import launch_session
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao.mock import (
-        create_experiment, get_experiment, submit_results,
-        list_pending_experiments, dismiss_experiment, resolve_experiment_prefix,
+        create_design, get_design, submit_results,
+        list_pending_designs, dismiss_design, resolve_design_prefix,
     )
 else:
-    from agents.experiments_db import (
-        create_experiment, get_experiment, submit_results, list_pending as list_pending_experiments,
-        dismiss_experiment, resolve_experiment_prefix,
+    from agents.design_db import (
+        create_design, get_design, submit_results, list_pending as list_pending_designs,
+        dismiss_design, resolve_design_prefix,
     )
 logging.basicConfig(
     level=logging.INFO,
@@ -1663,7 +1663,7 @@ async def api_chatwith_primer(request):
                 {"error": msg, "valid_types": VALID_PAGE_TYPES},
                 status_code=400,
             )
-        # Resource not found (experiment missing, etc.)
+        # Resource not found (design missing, etc.)
         return JSONResponse({"error": msg}, status_code=404)
 
 
@@ -3573,11 +3573,11 @@ async def page_session_view_fragment(request):
     return templates.TemplateResponse(request, "pages/session-view.html")
 
 
-# ── Experiments API ────────────────────────────────────────────
+# ── Design Studio API ────────────────────────────────────────────
 
-def _resolve_exp_id_or_error(raw_id: str):
-    """Resolve partial experiment UUID. Returns (full_id, None) or (None, JSONResponse)."""
-    full_id, matches = resolve_experiment_prefix(raw_id)
+def _resolve_design_id_or_error(raw_id: str):
+    """Resolve partial design/revision UUID. Returns (full_id, None) or (None, JSONResponse)."""
+    full_id, matches = resolve_design_prefix(raw_id)
     if full_id:
         return full_id, None
     if matches:
@@ -3587,14 +3587,15 @@ def _resolve_exp_id_or_error(raw_id: str):
     return None, JSONResponse({"error": "not found"}, status_code=404)
 
 
-async def api_experiments_create(request):
-    """Create a new experiment. Returns {id: uuid}."""
+async def api_design_create(request):
+    """Create a new design revision. Returns {id: uuid}."""
     body = await request.json()
-    title = body.get("title", "Untitled Experiment")
+    title = body.get("title", "Untitled Design")
     description = body.get("description")
     fixture = body.get("fixture")  # JSON string or dict
     variants = body.get("variants", [])
-    series_id = body.get("series_id")  # optional — links experiment into a series
+    # Accept both new and legacy field names
+    design_id = body.get("design_id") or body.get("series_id")
     alpine = bool(body.get("alpine"))  # inject Alpine.js runtime in iframe
 
     if not variants:
@@ -3604,100 +3605,100 @@ async def api_experiments_create(request):
     if fixture and not isinstance(fixture, str):
         fixture = json.dumps(fixture)
 
-    exp_id = await asyncio.to_thread(
-        create_experiment,
+    rev_id = await asyncio.to_thread(
+        create_design,
         title=title,
         description=description,
         fixture=fixture,
         variants=variants,
-        series_id=series_id,
+        design_id=design_id,
         alpine=alpine,
     )
 
     # Broadcast to SSE so gallery pages auto-update without refresh
-    exp_data = await asyncio.to_thread(get_experiment, exp_id)
-    if exp_data:
-        topic = f"experiments:{exp_data['series_id']}"
+    design_data = await asyncio.to_thread(get_design, rev_id)
+    if design_data:
+        topic = f"design:{design_data['design_id']}"
         await event_bus.broadcast(topic, {
-            "experiment_id": exp_id,
-            "series_id": exp_data["series_id"],
-            "series_seq": exp_data["series_seq"],
+            "revision_id": rev_id,
+            "design_id": design_data["design_id"],
+            "revision_seq": design_data["revision_seq"],
         })
 
-    return JSONResponse({"id": exp_id}, status_code=201)
+    return JSONResponse({"id": rev_id}, status_code=201)
 
 
-async def api_experiments_poll(request):
-    """Poll experiment status. 202 while pending, 200 with results when completed."""
-    exp_id, err = _resolve_exp_id_or_error(request.path_params["id"])
+async def api_design_poll(request):
+    """Poll design revision status. 202 while pending, 200 with results when completed."""
+    rev_id, err = _resolve_design_id_or_error(request.path_params["id"])
     if err:
         return err
-    exp = await asyncio.to_thread(get_experiment, exp_id)
-    if not exp:
+    design = await asyncio.to_thread(get_design, rev_id)
+    if not design:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    if exp["status"] == "pending":
-        return JSONResponse({"status": "pending", "id": exp_id}, status_code=202)
+    if design["status"] == "pending":
+        return JSONResponse({"status": "pending", "id": rev_id}, status_code=202)
 
     # Completed — return results
     results = []
-    for v in exp["variants"]:
+    for v in design["variants"]:
         if v["selected"]:
             results.append({"id": v["id"], "rank": v["rank"]})
     results.sort(key=lambda x: x["rank"] or 999)
     return JSONResponse({
         "status": "completed",
-        "id": exp_id,
+        "id": rev_id,
         "results": results,
     })
 
 
-async def api_experiments_get(request):
-    """Get full experiment data for gallery rendering."""
-    exp_id, err = _resolve_exp_id_or_error(request.path_params["id"])
+async def api_design_get(request):
+    """Get full design revision data for gallery rendering."""
+    rev_id, err = _resolve_design_id_or_error(request.path_params["id"])
     if err:
         return err
-    exp = await asyncio.to_thread(get_experiment, exp_id)
-    if not exp:
+    design = await asyncio.to_thread(get_design, rev_id)
+    if not design:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse(exp)
+    return JSONResponse(design)
 
 
-async def api_experiments_submit(request):
+async def api_design_submit(request):
     """Submit ranking results."""
-    exp_id, err = _resolve_exp_id_or_error(request.path_params["id"])
+    rev_id, err = _resolve_design_id_or_error(request.path_params["id"])
     if err:
         return err
     body = await request.json()
     selections = body.get("selections", [])
-    ok = await asyncio.to_thread(submit_results, exp_id, selections)
+    ok = await asyncio.to_thread(submit_results, rev_id, selections)
     if not ok:
-        return JSONResponse({"error": "experiment not found"}, status_code=404)
+        return JSONResponse({"error": "design not found"}, status_code=404)
     return JSONResponse({"ok": True})
 
 
-async def api_experiments_pending(request):
-    """List pending experiments (for toast notifications)."""
-    pending = await asyncio.to_thread(list_pending_experiments)
+async def api_design_pending(request):
+    """List pending designs (for toast notifications)."""
+    pending = await asyncio.to_thread(list_pending_designs)
     return JSONResponse(pending)
 
 
-async def api_experiments_dismiss(request):
-    """Dismiss an experiment and all pending siblings in its series."""
-    exp_id, err = _resolve_exp_id_or_error(request.path_params["id"])
+async def api_design_dismiss(request):
+    """Dismiss a design and all pending revisions."""
+    rev_id, err = _resolve_design_id_or_error(request.path_params["id"])
     if err:
         return err
-    ok = await asyncio.to_thread(dismiss_experiment, exp_id)
+    ok = await asyncio.to_thread(dismiss_design, rev_id)
     if not ok:
-        return JSONResponse({"error": "experiment not found"}, status_code=404)
+        return JSONResponse({"error": "design not found"}, status_code=404)
     return JSONResponse({"ok": True})
 
 
 
-async def api_experiments_screenshot(request):
-    """Save a screenshot blob for an experiment and optionally inject into agent.
+async def api_design_screenshot(request):
+    """Save a screenshot blob for a design revision and optionally inject into agent.
 
-    POST /api/experiments/{id}/screenshot?tmux_session=chatwith-xxx
+    POST /api/design/{id}/screenshot?tmux_session=chatwith-xxx
     Body: raw image bytes (Content-Type: image/png or image/*)
     Returns: {path: "/absolute/path/to/screenshot.png", injected: bool}
 
@@ -3706,18 +3707,18 @@ async def api_experiments_screenshot(request):
     2. Send bare image path as first message (triggers isMeta=True image injection)
     3. 200ms later, send follow-up text so agent knows to act on the image
     """
-    exp_id, err = _resolve_exp_id_or_error(request.path_params["id"])
+    rev_id, err = _resolve_design_id_or_error(request.path_params["id"])
     if err:
         return err
     content_type = request.headers.get("content-type", "")
     if not content_type.startswith("image/"):
         return JSONResponse({"error": "content-type must be image/*"}, status_code=400)
 
-    exp = await asyncio.to_thread(get_experiment, exp_id)
-    if not exp:
+    design = await asyncio.to_thread(get_design, rev_id)
+    if not design:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    screenshot_dir = _REPO_ROOT / "data" / "experiments" / exp_id
+    screenshot_dir = _REPO_ROOT / "data" / "experiments" / rev_id
     screenshot_dir.mkdir(parents=True, exist_ok=True)
     screenshot_path = screenshot_dir / "screenshot.png"
 
@@ -3755,18 +3756,23 @@ async def api_experiments_screenshot(request):
     return JSONResponse({"path": abs_path, "injected": injected})
 
 
-async def page_experiment(request):
+async def page_design(request):
     return HTMLResponse(_load_template("base.html"))
 
-async def page_experiment_fragment(request):
-    """Return the Experiment page as an HTML fragment for SPA injection.
+async def page_design_fragment(request):
+    """Return the Design page as an HTML fragment for SPA injection.
 
     Rendered via Jinja2 so {% include %} partials work.
     The fragment is injected into #content by the client router, then
-    Alpine.initTree() initialises the x-data="experimentPage()" component.
-    The component reads the experiment ID from window.location.pathname on init.
+    Alpine.initTree() initialises the x-data="designPage()" component.
+    The component reads the design ID from window.location.pathname on init.
     """
-    return templates.TemplateResponse(request, "pages/experiment.html")
+    return templates.TemplateResponse(request, "pages/design.html")
+
+async def page_experiments_redirect(request):
+    """Redirect /experiments/{id} to /design/{id} for backwards compat."""
+    exp_id = request.path_params["id"]
+    return RedirectResponse(url=f"/design/{exp_id}", status_code=301)
 
 
 # ── HTML Pages ────────────────────────────────────────────────
@@ -5300,7 +5306,7 @@ routes = [
     Route("/terminal", page_terminal),
     Route("/terminal/{session_id}", page_terminal),
     Route("/pages/terminal", page_terminal_fragment),
-    Route("/pages/experiment", page_experiment_fragment),
+    Route("/pages/design", page_design_fragment),
     Route("/session/{project}/{session_id}", page_session_view),
     Route("/pages/session-view", page_session_view_fragment),
 
@@ -5402,15 +5408,17 @@ routes = [
     # Attachment serving
     Route("/api/attachment/{attachment_id}", api_attachment_serve),
 
-    # Experiments
-    Route("/api/experiments", api_experiments_create, methods=["POST"]),
-    Route("/api/experiments/pending", api_experiments_pending),
-    Route("/api/experiments/{id}", api_experiments_poll),
-    Route("/api/experiments/{id}/full", api_experiments_get),
-    Route("/api/experiments/{id}/dismiss", api_experiments_dismiss, methods=["POST"]),
-    Route("/api/experiments/{id}/submit", api_experiments_submit, methods=["POST"]),
-    Route("/api/experiments/{id}/screenshot", api_experiments_screenshot, methods=["POST"]),
-    Route("/experiments/{id}", page_experiment),
+    # Design Studio (formerly Experiments)
+    Route("/api/design", api_design_create, methods=["POST"]),
+    Route("/api/design/pending", api_design_pending),
+    Route("/api/design/{id}", api_design_poll),
+    Route("/api/design/{id}/full", api_design_get),
+    Route("/api/design/{id}/dismiss", api_design_dismiss, methods=["POST"]),
+    Route("/api/design/{id}/submit", api_design_submit, methods=["POST"]),
+    Route("/api/design/{id}/screenshot", api_design_screenshot, methods=["POST"]),
+    Route("/design/{id}", page_design),
+    # Backwards compat redirects
+    Route("/experiments/{id}", page_experiments_redirect),
 
     # Static
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),

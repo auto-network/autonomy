@@ -20,7 +20,7 @@ graph sources                     # List sources (--project X --type Y)
 graph note "text" --tags x,y      # Drop a searchable trail marker
 graph link <bead> <src> -r rel    # Create provenance edge
 graph attention --last N          # Show recent human input
-graph ui-exp "title" <dir>        # Create UI experiment from HTML files + live-watch for changes
+graph ui-design "title" <dir>     # Create Design Studio design from HTML files + live-watch for changes
 graph dispatch approve <bead-id>  # Approve bead(s) for dispatch (accepts multiple IDs)
 graph context <src_id> last       # Latest turns of a source
 graph notes --since 1h            # Recent notes (orientation)
@@ -176,33 +176,33 @@ your branch is merged and the dashboard restarts.
 
 All curl commands MUST use `curl -sk` (silent + insecure for self-signed cert).
 
-### Design Studio experiments
+### Design Studio designs
 
-If your bead references a Design Studio experiment, you MUST fetch and use the experiment
-template. The experiment is the source of truth for the visual design. Do NOT write your
-own HTML/CSS — copy the experiment template and wire the DAO.
+If your bead references a Design Studio design, you MUST fetch and use the design
+template. The design is the source of truth for the visual design. Do NOT write your
+own HTML/CSS — copy the design template and wire the DAO.
 
-If you cannot access the experiment template after trying the steps below, set your
-decision status to BLOCKED with reason "cannot access experiment template." Do NOT
+If you cannot access the design template after trying the steps below, set your
+decision status to BLOCKED with reason "cannot access design template." Do NOT
 proceed without it.
 
 ```bash
-# Step 1: List experiments to find the full UUID from a partial ID
-curl -sk https://localhost:8080/api/experiments/pending | python3 -c "
+# Step 1: List designs to find the full UUID from a partial ID
+curl -sk https://localhost:8080/api/design/pending | python3 -c "
 import json,sys
 for e in json.load(sys.stdin):
     print(e['id'], e.get('title',''))
 "
 
-# Step 2: Fetch the experiment HTML using the FULL UUID
-curl -sk https://localhost:8080/api/experiments/{FULL-UUID}/full | python3 -c "
+# Step 2: Fetch the design HTML using the FULL UUID
+curl -sk https://localhost:8080/api/design/{FULL-UUID}/full | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 for v in d['variants']:
     print(v['html'])
 "
 ```
 
-NOTE: Experiment files referenced as /tmp/ paths in bead specs do NOT exist in your
+NOTE: Design files referenced as /tmp/ paths in bead specs do NOT exist in your
 container. Always fetch via the API above.
 
 ### Other dashboard APIs

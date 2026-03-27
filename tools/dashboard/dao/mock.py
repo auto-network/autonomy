@@ -201,62 +201,75 @@ def get_bead_title_priority(bead_ids: list[str]) -> dict[str, dict]:
     }
 
 
-# ── experiments mock ──────────────────────────────────────────────────
+# ── designs mock ──────────────────────────────────────────────────
 
-EXPERIMENT_DEFAULTS: dict[str, Any] = {
+DESIGN_DEFAULTS: dict[str, Any] = {
     "id": "exp-000000",
-    "title": "Untitled Experiment",
+    "title": "Untitled Design",
     "description": None,
     "fixture": None,
     "status": "pending",
-    "series_id": None,
-    "series_seq": 1,
+    "design_id": None,
+    "revision_seq": 1,
     "created_at": "2026-01-01T00:00:00Z",
     "alpine": 0,
     "variants": [],
-    "sibling_ids": [],
+    "revisions": [],
 }
 
 VARIANT_DEFAULTS: dict[str, Any] = {
     "id": "var-000000",
-    "experiment_id": "exp-000000",
+    "revision_id": "exp-000000",
     "html": "<p>Empty variant</p>",
     "selected": 0,
     "rank": None,
 }
 
 
-def _experiments() -> list[dict]:
+def _designs() -> list[dict]:
     data = _load()
-    exps = []
+    designs = []
     for e in data.get("experiments", []):
-        exp = dict(EXPERIMENT_DEFAULTS)
-        exp.update(e)
-        if exp["series_id"] is None:
-            exp["series_id"] = exp["id"]
+        des = dict(DESIGN_DEFAULTS)
+        des.update(e)
+        # Support both old and new field names in fixture data
+        if des["design_id"] is None:
+            des["design_id"] = des.pop("series_id", None) or des["id"]
+        if "series_id" in des:
+            if des["design_id"] is None:
+                des["design_id"] = des.pop("series_id")
+            else:
+                des.pop("series_id", None)
+        if "series_seq" in des and "revision_seq" not in e:
+            des["revision_seq"] = des.pop("series_seq")
+        elif "series_seq" in des:
+            des.pop("series_seq", None)
         # Fill variant defaults
-        exp["variants"] = [
-            {**VARIANT_DEFAULTS, "experiment_id": exp["id"], **v}
-            for v in exp.get("variants", [])
+        des["variants"] = [
+            {**VARIANT_DEFAULTS, "revision_id": des["id"], **v}
+            for v in des.get("variants", [])
         ]
-        if not exp["sibling_ids"]:
-            exp["sibling_ids"] = [exp["id"]]
-        exps.append(exp)
-    return exps
+        # Support both old and new field names for revisions list
+        if not des["revisions"]:
+            des["revisions"] = des.pop("sibling_ids", None) or [des["id"]]
+        elif "sibling_ids" in des:
+            des.pop("sibling_ids", None)
+        designs.append(des)
+    return designs
 
 
-def get_experiment(exp_id: str) -> dict | None:
-    return next((e for e in _experiments() if e["id"] == exp_id), None)
+def get_design(rev_id: str) -> dict | None:
+    return next((e for e in _designs() if e["id"] == rev_id), None)
 
 
-def list_pending_experiments() -> list[dict]:
-    return [e for e in _experiments() if e["status"] == "pending"]
+def list_pending_designs() -> list[dict]:
+    return [e for e in _designs() if e["status"] == "pending"]
 
 
-def resolve_experiment_prefix(partial_id: str) -> tuple[str | None, list[str] | None]:
+def resolve_design_prefix(partial_id: str) -> tuple[str | None, list[str] | None]:
     if len(partial_id) >= 36:
         return partial_id, None
-    matches = [e["id"] for e in _experiments() if e["id"].startswith(partial_id)]
+    matches = [e["id"] for e in _designs() if e["id"].startswith(partial_id)]
     if len(matches) == 1:
         return matches[0], None
     if len(matches) > 1:
@@ -264,17 +277,17 @@ def resolve_experiment_prefix(partial_id: str) -> tuple[str | None, list[str] | 
     return None, None
 
 
-def create_experiment(*, title, description=None, fixture=None, variants=None, series_id=None, alpine=False):
-    """No-op in mock mode — experiments are defined in fixture file."""
+def create_design(*, title, description=None, fixture=None, variants=None, design_id=None, alpine=False):
+    """No-op in mock mode — designs are defined in fixture file."""
     import uuid
     return str(uuid.uuid4())
 
 
-def submit_results(exp_id, selections):
+def submit_results(rev_id, selections):
     return True
 
 
-def dismiss_experiment(exp_id):
+def dismiss_design(rev_id):
     return True
 
 

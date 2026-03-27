@@ -2445,8 +2445,8 @@ def cmd_watch(args):
     )
 
 
-def cmd_ui_exp(args):
-    """Create a UI experiment from HTML files and watch for changes."""
+def cmd_ui_design(args):
+    """Create a Design Studio design from HTML files and watch for changes."""
     import time as _time
     import urllib.request
     import ssl
@@ -2503,20 +2503,20 @@ def cmd_ui_exp(args):
         "title": args.title,
         "variants": [{"id": vid, "html": html} for vid, html in variants.items()],
     }
-    if args.series:
-        exp_data["series_id"] = args.series
+    if args.design:
+        exp_data["design_id"] = args.design
     if fixture:
         exp_data["fixture"] = fixture
-    result = _post("/api/experiments", exp_data)
+    result = _post("/api/design", exp_data)
     exp_id = result["id"]
 
-    # If no series was specified, use this experiment's ID as the series
-    series_id = args.series or exp_id
+    # If no design was specified, use this revision's ID as the design
+    design_id = args.design or exp_id
 
-    print(f"  Created experiment: {exp_id}")
-    print(f"  Series: {series_id}")
+    print(f"  Created design revision: {exp_id}")
+    print(f"  Design: {design_id}")
     print(f"  Variants: {', '.join(variants.keys())}")
-    print(f"  URL: {api_base}/experiments/{exp_id}")
+    print(f"  URL: {api_base}/design/{exp_id}")
     print(f"  Screenshot: {dir_path}/screenshot.png (auto-updated from browser)")
     print(f"\n  Watching {dir_path}/ for changes... (Ctrl+C to stop)\n")
 
@@ -2525,7 +2525,7 @@ def cmd_ui_exp(args):
     _screenshot_linked = False  # True once symlink points to current experiment
 
     def _link_screenshot():
-        """Symlink screenshot.png to the latest experiment's screenshot."""
+        """Symlink screenshot.png to the latest design revision's screenshot."""
         nonlocal _screenshot_linked
         if _screenshot_linked:
             return
@@ -2579,14 +2579,14 @@ def cmd_ui_exp(args):
 
             exp_data = {
                 "title": args.title,
-                "series_id": series_id,
+                "design_id": design_id,
                 "variants": [{"id": vid, "html": html} for vid, html in variants.items()],
             }
             if fixture:
                 exp_data["fixture"] = fixture
 
             try:
-                result = _post("/api/experiments", exp_data)
+                result = _post("/api/design", exp_data)
                 new_id = result["id"]
                 latest_exp_id = new_id
                 _screenshot_linked = False  # New experiment, need fresh symlink
@@ -2597,7 +2597,7 @@ def cmd_ui_exp(args):
             prev_states = curr_states
 
     except KeyboardInterrupt:
-        print(f"\n  Stopped watching. Series: {series_id}")
+        print(f"\n  Stopped watching. Design: {design_id}")
 
 
 def cmd_related(args):
@@ -3316,13 +3316,22 @@ def main():
     p.add_argument("--timeout", type=int, default=600, help="Max wait seconds (default: 600)")
     p.set_defaults(func=cmd_wait)
 
-    p = sub.add_parser("ui-exp", help="Create and live-watch a UI experiment from HTML files")
-    p.add_argument("title", help="Experiment title")
+    p = sub.add_parser("ui-design", help="Create and live-watch a Design Studio design from HTML files")
+    p.add_argument("title", help="Design title")
     p.add_argument("dir", help="Directory of .html variant files")
-    p.add_argument("--series", help="Existing series ID to append to")
+    p.add_argument("--design", help="Existing design ID to append to")
     p.add_argument("--fixture", help="Path to fixture JSON file")
     p.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
-    p.set_defaults(func=cmd_ui_exp)
+    p.set_defaults(func=cmd_ui_design)
+
+    # Legacy alias for backwards compat
+    p_alias = sub.add_parser("ui-exp", help="(deprecated, use ui-design)")
+    p_alias.add_argument("title", help="Design title")
+    p_alias.add_argument("dir", help="Directory of .html variant files")
+    p_alias.add_argument("--series", dest="design", help="Existing design ID to append to")
+    p_alias.add_argument("--fixture", help="Path to fixture JSON file")
+    p_alias.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
+    p_alias.set_defaults(func=cmd_ui_design)
 
     # dispatch
     p_dispatch = sub.add_parser("dispatch", help="Show dispatch state (running/queued/history)")

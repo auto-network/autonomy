@@ -405,17 +405,17 @@ SWEEP_DISPATCH_ENTRIES = [
 ]
 
 
-# ── Experiment data (used by /experiments/{id}) ──────────────────────
+# ── Design data (used by /design/{id}) ──────────────────────
 
 SWEEP_EXPERIMENT_ID = "exp-sweep-00000000-0000-0000-0000-000000000001"
 
 SWEEP_EXPERIMENT = {
     "id": SWEEP_EXPERIMENT_ID,
-    "title": "Sweep Toolbar Experiment",
+    "title": "Sweep Toolbar Design",
     "status": "pending",
-    "series_id": SWEEP_EXPERIMENT_ID,
-    "series_seq": 3,
-    "sibling_ids": [
+    "design_id": SWEEP_EXPERIMENT_ID,
+    "revision_seq": 3,
+    "revisions": [
         "exp-sweep-00000000-0000-0000-0000-000000000001",
         "exp-sweep-00000000-0000-0000-0000-000000000002",
         "exp-sweep-00000000-0000-0000-0000-000000000003",
@@ -1697,12 +1697,12 @@ class TestHostSessionTailContract:
 # ── Experiment toolbar JS check bundle ────────────────────────────
 
 EXPERIMENT_TOOLBAR_CHECKS = """(async () => {
-  // Wait for the experiment page component to initialize (up to 8s)
-  for (var i = 0; i < 80 && !window._experimentPage; i++) {
+  // Wait for the design page component to initialize (up to 8s)
+  for (var i = 0; i < 80 && !window._designPage; i++) {
     await new Promise(r => setTimeout(r, 100));
   }
-  var ep = window._experimentPage;
-  if (!ep) return JSON.stringify({error: 'no _experimentPage after 8s'});
+  var ep = window._designPage;
+  if (!ep) return JSON.stringify({error: 'no _designPage after 8s'});
   // Wait for state=ready (API call completes, toolbar renders)
   for (var i = 0; i < 50 && ep.state !== 'ready'; i++) {
     await new Promise(r => setTimeout(r, 100));
@@ -1806,9 +1806,9 @@ class TestExperimentToolbar:
 
     @pytest.fixture(scope="class", autouse=True)
     def checks(self, browser, request):
-        """Navigate to experiment page, wait for Alpine, run async check bundle."""
+        """Navigate to design page, wait for Alpine, run async check bundle."""
         result = _navigate_and_eval_async(
-            f"/experiments/{SWEEP_EXPERIMENT_ID}",
+            f"/design/{SWEEP_EXPERIMENT_ID}",
             EXPERIMENT_TOOLBAR_CHECKS,
             wait_ms=1000,
         )

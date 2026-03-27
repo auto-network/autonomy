@@ -70,7 +70,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph dispatch runs --completed` | Filter to completed (DONE) runs only | `graph dispatch runs --completed --limit 10` |
 | `graph dispatch runs --primer` | Rich per-run output: title, commit, diff, scores, merge state | `graph dispatch runs --primer --completed` |
 | `graph primer <bead-id>` | Dynamic context primer for a bead (description + pitfalls + provenance) | `graph primer auto-n9qa` |
-| `graph ui-exp "title" <dir>` | Create UI experiment from HTML files + live-watch for changes | `graph ui-exp "Input redesign" /tmp/cards/` |
+| `graph ui-design "title" <dir>` | Create Design Studio design from HTML files + live-watch for changes | `graph ui-design "Input redesign" /tmp/cards/` |
 | `graph set-label "text"` | Set a working title for the current session | `graph set-label "Passkey auth design"` |
 | `graph notes --since <dur>` | List notes by recency with duration filter | `graph notes --since 1h --tags pitfall` |
 | `graph crosstalk` | CrossTalk message log (default) | `graph crosstalk --since 1h --session auto-0323-022132` |
@@ -186,3 +186,13 @@ graph crosstalk broadcast "message"                        # send to all live se
 - Research before building — mine the graph for context before creating beads
 - Scoped agent access via `GRAPH_SCOPE` env var and `graph-<project>` wrappers
 - Set your session label when starting a new topic: `graph set-label "topic description"`
+
+## Naming: Design Studio (formerly "experiments")
+
+The Design Studio was previously called "experiments" in the codebase.
+- URL: /design/{design_id} (was /experiments/)
+- API: /api/design/ (was /api/experiments/)
+- CLI: graph ui-design (was graph ui-exp)
+- Data: design_id (was series_id), revisions (was sibling_ids), revision_seq (was series_seq)
+
+If you encounter "experiments", "series_id", "sibling_ids", or /experiments/ in code or docs, these are stale.

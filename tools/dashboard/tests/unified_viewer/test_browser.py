@@ -129,7 +129,7 @@ class ViewerTestHarness:
     def open_experiment(self):
         """Navigate to the experiment page."""
         ab_raw("close")
-        ab_raw("open", f"http://localhost:{TEST_PORT}/experiments/{self.exp_id}",
+        ab_raw("open", f"http://localhost:{TEST_PORT}/design/{self.exp_id}",
                "--ignore-https-errors")
         time.sleep(2)
         ab_raw("set", "viewport", "390", "844")
