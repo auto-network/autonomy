@@ -2582,8 +2582,6 @@ async def api_session_tail(request):
     Returns {entries: [...], offset: N, is_live: bool}.
     Increment `after` with each poll to receive only new entries.
     """
-    import time as _time
-
     project = request.path_params["project"]
     session_id = request.path_params["session_id"]
     after = int(request.query_params.get("after", "0"))
@@ -2592,10 +2590,20 @@ async def api_session_tail(request):
     if os.environ.get("DASHBOARD_MOCK"):
         entries = dao_sessions.get_session_entries(session_id)
         if entries is not None:
-            return JSONResponse({
-                "entries": entries, "offset": len(entries), "is_live": True,
-                "tmux_session": session_id, "seq": len(entries),
-            })
+            # Look up session metadata from mock DAO for is_live and type
+            mock_session = next(
+                (s for s in dao_sessions.get_active_sessions()
+                 if s.get("session_id") == session_id),
+                {},
+            )
+            resp = {
+                "entries": entries, "offset": len(entries),
+                "is_live": bool(mock_session.get("is_live", True)),
+                "type": mock_session.get("type", ""),
+                "tmux_session": mock_session.get("tmux_session", session_id),
+                "seq": len(entries),
+            }
+            return JSONResponse(resp)
 
     # First, try resolving via DB (session_id may be a tmux_name)
     session_file = None
@@ -2634,42 +2642,10 @@ async def api_session_tail(request):
     home_projects = Path.home() / ".claude" / "projects"
     session_type = "host" if session_file.is_relative_to(home_projects) else "container"
 
-    # Check liveness: try multiple meta locations + mtime fallback
-    is_live = False
-    tmux_name = ""
+    # Liveness from DB — dashboard.db is the sole owner after initial seed
+    is_live = bool(db_row.get("is_live")) if db_row else False
+    tmux_name = db_row.get("tmux_name", "") if db_row else ""
 
-    # 1. Container-style: .session_meta.json in parent's parent
-    meta_path = session_file.parent.parent / ".session_meta.json"
-    if meta_path.exists():
-        try:
-            meta = json.loads(meta_path.read_text())
-            tmux_name = meta.get("tmux_session", "")
-            if tmux_name and _tmux_session_exists(tmux_name):
-                is_live = True
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    # 2. Host-style: per-file {session_id}.meta.json alongside the JSONL
-    if not tmux_name:
-        per_file_meta = session_file.with_suffix(".meta.json")
-        if per_file_meta.exists():
-            try:
-                meta = json.loads(per_file_meta.read_text())
-                tmux_name = meta.get("tmux_session", "")
-                if tmux_name and _tmux_session_exists(tmux_name):
-                    is_live = True
-            except (json.JSONDecodeError, OSError):
-                pass
-
-    # 3. Fallback: if JSONL was modified recently, consider it live (handles orphaned sessions)
-    if not is_live and session_type == "host":
-        import time as _time2
-        age = _time2.time() - session_file.stat().st_mtime
-        if age < 120:
-            is_live = True
-
-    # Look up current broadcast seq from monitor
-    monitor_state = session_monitor.get_one(session_id)
     seq = 0  # broadcast_seq is now on ephemeral _TailState, not in DB row
 
     base_resp = {"entries": [], "offset": file_size, "is_live": is_live,
