@@ -62,13 +62,46 @@ agent-browser click [3]                # interact with element ref [3]
 agent-browser diff snapshot            # shows what changed in DOM
 ```
 
+## Visual Verification — see your worktree changes rendered
+
+The production dashboard at `:8080` serves code from master, not your worktree.
+Use `dashboard-mock` to start a mock server that runs **your** code with mock data:
+
+```bash
+dashboard-mock start --port 8082
+agent-browser open http://localhost:8082 --ignore-https-errors
+agent-browser wait --load networkidle
+agent-browser screenshot --annotate
+# ... make changes, then refresh ...
+agent-browser eval "location.reload()"
+agent-browser wait --load networkidle
+agent-browser screenshot --annotate
+dashboard-mock stop --port 8082
+```
+
+The server self-daemonizes (fork + setsid) so it survives after the bash tool returns — no SIGPIPE.
+
+**Custom fixture data:**
+```bash
+dashboard-mock start --port 8082 --fixture /tmp/my-fixtures.json
+```
+
+**Default port is 8082.** Use `--port` to run multiple servers simultaneously.
+
 ## Mock DAO — Testing with Controlled Data
 
 The dashboard has a mock DAO layer that reads fixture data from a JSON file instead of hitting Dolt/SQLite. This lets you test with controlled data — XSS payloads, empty states, edge cases — without touching production databases.
 
-**Start a mock dashboard:**
+**Start a mock dashboard (preferred — self-daemonizing):**
 ```bash
-# Write fixture data
+dashboard-mock start --port 8082                           # default fixture, survives SIGPIPE
+dashboard-mock start --port 8082 --fixture /tmp/f.json     # custom fixture
+dashboard-mock stop --port 8082                            # clean shutdown via PID file
+dashboard-mock status --port 8082                          # check if running
+```
+
+**Manual start (for debugging — foreground, blocks terminal):**
+```bash
 cat > /tmp/fixtures.json << 'EOF'
 {
   "beads": [
@@ -82,11 +115,10 @@ cat > /tmp/fixtures.json << 'EOF'
 }
 EOF
 
-# Boot on a different port — no Dolt or SQLite needed
-> /tmp/events.jsonl  # create empty events file
+> /tmp/events.jsonl
 DASHBOARD_MOCK=/tmp/fixtures.json DASHBOARD_MOCK_EVENTS=/tmp/events.jsonl \
   PYTHONPATH=/workspace/repo \
-  uvicorn tools.dashboard.server:app --host 0.0.0.0 --port 8081 &
+  uvicorn tools.dashboard.server:app --host 0.0.0.0 --port 8081
 ```
 
 **Mock is HTTP (no TLS), so no `--ignore-https-errors` needed:**
