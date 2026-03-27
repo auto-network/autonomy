@@ -4533,23 +4533,30 @@ async def api_graph_link(request):
     return JSONResponse({"ok": True, "output": stdout})
 
 
+_ingest_lock = asyncio.Lock()
+
+
 async def api_graph_sessions(request):
     """Ingest sessions via graph CLI."""
-    body = await request.json()
+    if _ingest_lock.locked():
+        return JSONResponse({"ok": True, "output": "ingest already in progress", "skipped": True})
 
-    cmd = ["graph", "sessions"]
-    if body.get("all"):
-        cmd += ["--all"]
-    if body.get("project"):
-        cmd += ["--project", body["project"]]
-    if body.get("force"):
-        cmd += ["--force"]
+    async with _ingest_lock:
+        body = await request.json()
 
-    stdout, stderr, rc = await run_cli(cmd, timeout=120)
+        cmd = ["graph", "sessions"]
+        if body.get("all"):
+            cmd += ["--all"]
+        if body.get("project"):
+            cmd += ["--project", body["project"]]
+        if body.get("force"):
+            cmd += ["--force"]
 
-    if rc != 0:
-        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-    return JSONResponse({"ok": True, "output": stdout})
+        stdout, stderr, rc = await run_cli(cmd, timeout=120)
+
+        if rc != 0:
+            return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+        return JSONResponse({"ok": True, "output": stdout})
 
 
 async def api_graph_attach(request):
