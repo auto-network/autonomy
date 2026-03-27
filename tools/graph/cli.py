@@ -522,9 +522,22 @@ def cmd_sources(args):
     db.close()
 
 
+def _auto_ingest(db: GraphDB) -> None:
+    """Silently ingest latest sessions so queries see fresh data (~100ms when unchanged)."""
+    if is_api_mode():
+        import io, contextlib
+        with contextlib.redirect_stdout(io.StringIO()):
+            api_sessions(type('Args', (), {'all': True, 'project': None, 'force': False, 'status': False})())
+    else:
+        ingest_all_claude_code(db, force=False)
+
+
 def cmd_context(args):
     """Show turns around a specific turn in a source — useful for expanding search hits."""
     db = GraphDB(args.db)
+
+    # Auto-ingest to ensure fresh data
+    _auto_ingest(db)
 
     # Find the source
     source = db.get_source(args.source)
@@ -1339,6 +1352,9 @@ def _query_attention(db, since=None, search=None, last=None, session=None, conte
 def cmd_attention(args):
     """Show human input from sessions, chronologically. Fast query for sovereign content."""
     db = GraphDB(args.db)
+
+    # Auto-ingest to ensure fresh data
+    _auto_ingest(db)
 
     ctx = getattr(args, "context", 0)
     rows = _query_attention(
