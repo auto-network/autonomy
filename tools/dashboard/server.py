@@ -2982,7 +2982,7 @@ async def api_session_role(request):
     Body: {"role": "coordinator"}
     Returns: {"ok": true}
 
-    Allowed values: coordinator, reviewer, builder, designer, validator, researcher, "" (empty clears).
+    Any string up to 32 characters accepted. Empty string clears the role.
     """
     tmux_name = request.path_params["tmux_name"]
     body = await request.json()
@@ -2992,12 +2992,8 @@ async def api_session_role(request):
         return JSONResponse({"error": "role must be a string"}, status_code=400)
 
     role = role.strip().lower()
-    _allowed = dao_beads._ALLOWED_ROLES if os.environ.get("DASHBOARD_MOCK") else dashboard_db._ALLOWED_ROLES
-    if role not in _allowed:
-        return JSONResponse(
-            {"error": f"invalid role: must be one of {sorted(_allowed - {''})} or empty string"},
-            status_code=400,
-        )
+    if len(role) > 32:
+        return JSONResponse({"error": "role too long (max 32 chars)"}, status_code=400)
 
     if os.environ.get("DASHBOARD_MOCK"):
         await event_bus.broadcast("session:registry", dao_sessions.get_active_sessions())
