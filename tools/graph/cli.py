@@ -69,7 +69,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_stats, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
-from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_sessions, api_set_label, api_set_topics, api_set_role, api_set_nag, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action, api_tag_add, api_tag_remove, api_tag_merge
+from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_journal_write, api_sessions, api_set_label, api_set_topics, api_set_role, api_set_nag, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action, api_tag_add, api_tag_remove, api_tag_merge
 
 
 def cmd_ingest(args):
@@ -1888,6 +1888,169 @@ def cmd_notes(args):
         db.close()
 
 
+def cmd_journal(args):
+    """Route 'graph journal' to write or list subcommands."""
+    subcmd = getattr(args, "journal_cmd", None)
+    if subcmd == "write":
+        cmd_journal_write(args)
+    else:
+        cmd_journal_list(args)
+
+
+def cmd_journal_write(args):
+    """Write a structured journal entry from JSON stdin."""
+    if is_api_mode():
+        api_journal_write(args)
+        return
+
+    raw = sys.stdin.read().strip() if args.content == "-" else args.content
+    if not raw:
+        print("Error: no JSON content provided", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"Error: invalid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate required fields
+    for field in ("compact", "normal", "timestamp_start", "timestamp_end"):
+        if field not in data:
+            print(f"Error: missing required field: {field}", file=sys.stderr)
+            sys.exit(1)
+
+    from .models import Source, Thought, Edge, new_id
+
+    db = GraphDB(args.db)
+    source_key = f"journal:{new_id()}"
+    src = Source(
+        type="journal",
+        platform="autonomy",
+        project=_get_scope() or "autonomy",
+        title=data["compact"],
+        file_path=source_key,
+        metadata={
+            "expanded": data.get("expanded", ""),
+            "timestamp_start": data["timestamp_start"],
+            "timestamp_end": data["timestamp_end"],
+            "entry_type": data.get("entry_type", "attention"),
+        },
+        created_at=data["timestamp_start"],
+    )
+    db.insert_source(src)
+
+    # Store normal-level content as a thought (FTS indexed)
+    t = Thought(
+        source_id=src.id,
+        content=data["normal"],
+        role="user",
+        turn_number=1,
+    )
+    db.insert_thought(t)
+
+    # Create provenance edges
+    edge_count = 0
+    for edge_data in data.get("edges", []):
+        target = edge_data.get("target")
+        if not target:
+            continue
+        # Resolve prefix to full UUID
+        resolved_src = db.get_source(target)
+        resolved = resolved_src["id"] if resolved_src else target
+        edge = Edge(
+            source_id=src.id,
+            source_type="source",
+            target_id=resolved,
+            target_type="source",
+            relation=edge_data.get("relation", "drew_from"),
+            metadata={"turn": edge_data.get("turn")},
+        )
+        db.insert_edge(edge)
+        edge_count += 1
+
+    db.commit()
+    db.close()
+    print(f"  \u2713 Journal entry saved (src:{src.id[:12]}) \u2014 {edge_count} edges")
+
+
+def cmd_journal_list(args):
+    """List journal entries, optionally filtered by recency."""
+    db = GraphDB(args.db)
+    try:
+        since_iso = None
+        if args.since:
+            try:
+                secs = _parse_duration(args.since)
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+            from datetime import datetime, timezone, timedelta
+            since_dt = datetime.now(timezone.utc) - timedelta(seconds=secs)
+            since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        sources = db.list_sources(
+            source_type="journal",
+            since=since_iso,
+            limit=args.limit,
+        )
+        if not sources:
+            print("No journal entries found")
+            return
+
+        for s in sources:
+            sid = s["id"][:12]
+            meta = s.get("metadata")
+            if meta and isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+
+            ts_start = meta.get("timestamp_start", "")
+            ts_end = meta.get("timestamp_end", "")
+            # Format time range
+            start_time = ts_start[11:16] if len(ts_start) > 16 else ts_start[:16]
+            end_time = ts_end[11:16] if len(ts_end) > 16 else ts_end[:16]
+            time_range = f"{start_time}-{end_time}" if start_time else ""
+
+            if getattr(args, "expanded", False):
+                # Show expanded level
+                expanded = meta.get("expanded", "")
+                print(f"\n{'=' * 60}")
+                print(f"  {sid}  {time_range}")
+                print(f"  {s.get('title', '')}")
+                if expanded:
+                    print(f"\n{expanded}")
+                else:
+                    # Fall back to normal level from thought
+                    rows = db.conn.execute(
+                        "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = 1",
+                        (s["id"],),
+                    ).fetchall()
+                    if rows:
+                        print(f"\n{rows[0]['content']}")
+            elif getattr(args, "normal", False):
+                # Show normal level (from thought content)
+                rows = db.conn.execute(
+                    "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = 1",
+                    (s["id"],),
+                ).fetchall()
+                content = rows[0]["content"] if rows else ""
+                print(f"\n  {sid}  {time_range}")
+                if content:
+                    for line in content.split("\n"):
+                        print(f"  {line}")
+            else:
+                # Compact level (title only)
+                title = s.get("title", "")
+                print(f"  {sid}  {time_range}  {title}")
+    finally:
+        db.close()
+
+
 def cmd_note_router(args):
     """Route 'graph note ...' to create or update."""
     if args.text and args.text[0] == "update":
@@ -3078,6 +3241,26 @@ def main():
     p_notes.add_argument("--short", action="store_true", help="One-line compact output")
     p_notes.add_argument("--headline", action="store_true", help="Digest table: id, time, tags, title, author")
     p_notes.set_defaults(func=cmd_notes)
+
+    # journal
+    p_journal = sub.add_parser("journal", help="Attention journal — structured timeline entries")
+    p_journal.add_argument("--since", help="Duration filter (e.g. 24h, 7d)")
+    p_journal.add_argument("--limit", type=int, default=20, help="Max entries (default: 20)")
+    p_journal.add_argument("--normal", action="store_true", help="Show normal zoom level")
+    p_journal.add_argument("--expanded", action="store_true", help="Show expanded zoom level")
+    p_journal.set_defaults(func=cmd_journal)
+    journal_sub = p_journal.add_subparsers(dest="journal_cmd")
+
+    p_jwrite = journal_sub.add_parser("write", help="Write a journal entry from JSON stdin")
+    p_jwrite.add_argument("-c", "--content", default="-", help="JSON content (- for stdin)")
+    p_jwrite.set_defaults(func=cmd_journal)
+
+    p_jlist = journal_sub.add_parser("list", help="List recent journal entries")
+    p_jlist.add_argument("--since", help="Duration filter (e.g. 24h, 7d)")
+    p_jlist.add_argument("--limit", type=int, default=20, help="Max entries (default: 20)")
+    p_jlist.add_argument("--normal", action="store_true", help="Show normal zoom level")
+    p_jlist.add_argument("--expanded", action="store_true", help="Show expanded zoom level")
+    p_jlist.set_defaults(func=cmd_journal)
 
     # comment (handles both add and integrate)
     p_comment = sub.add_parser("comment", help="Add or manage comments on notes")
