@@ -389,17 +389,56 @@ def api_attach(args) -> None:
         sys.exit(1)
 
 
+def _get_session_name() -> str:
+    """Resolve the current session name from environment."""
+    name = os.environ.get("AUTONOMY_SESSION")
+    if name:
+        return name
+    bd_actor = os.environ.get("BD_ACTOR")
+    if bd_actor and ":" in bd_actor:
+        return bd_actor.split(":", 1)[1]
+    print("Error: cannot determine session name. Set $AUTONOMY_SESSION or $BD_ACTOR.", file=sys.stderr)
+    sys.exit(1)
+
+
 def api_set_label(args) -> None:
     """Set session label via dashboard API."""
-    bd_actor = os.environ.get("BD_ACTOR")
-    if not bd_actor or ":" not in bd_actor:
-        print("Error: $BD_ACTOR not set. Cannot identify current session.", file=sys.stderr)
-        print("This command must be run inside a dashboard-managed session.", file=sys.stderr)
-        sys.exit(1)
-    tmux_name = bd_actor.split(":", 1)[1]
+    session = _get_session_name()
     label = " ".join(args.text)
-    result = _put(f"/api/session/{urllib.parse.quote(tmux_name)}/label", {"label": label})
+    _put(f"/api/session/{urllib.parse.quote(session)}/label", {"label": label})
     print(f"  \u2713 Label set: {label}")
+
+
+def api_set_topics(args) -> None:
+    """Set session topics via dashboard API."""
+    session = _get_session_name()
+    _put(f"/api/session/{urllib.parse.quote(session)}/topics", {"topics": args.topics})
+    print(f"  \u2713 Topics set ({len(args.topics)} lines)")
+
+
+def api_set_role(args) -> None:
+    """Set session role via dashboard API."""
+    session = _get_session_name()
+    role = " ".join(args.role)
+    _put(f"/api/session/{urllib.parse.quote(session)}/role", {"role": role})
+    print(f"  \u2713 Role set: {role}")
+
+
+def api_set_nag(args) -> None:
+    """Enable or disable session nag via dashboard API."""
+    session = _get_session_name()
+    if args.off:
+        _delete(f"/api/session/{urllib.parse.quote(session)}/nag")
+        print("  \u2713 Nag disabled")
+    else:
+        if not args.interval:
+            print("Error: --interval required (or use --off)", file=sys.stderr)
+            sys.exit(1)
+        payload = {"enabled": True, "interval": args.interval}
+        if args.message:
+            payload["message"] = " ".join(args.message)
+        _put(f"/api/session/{urllib.parse.quote(session)}/nag", payload)
+        print(f"  \u2713 Nag enabled (every {args.interval}m)")
 
 
 def api_collab_list(args) -> None:

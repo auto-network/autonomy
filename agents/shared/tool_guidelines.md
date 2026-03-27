@@ -27,6 +27,11 @@ graph notes --since 1h            # Recent notes (orientation)
 graph crosstalk --since 30m       # Recent CrossTalk messages
 graph thought "text" --tags x     # Capture idea discovered during work
 graph dispatch watch              # Block until next dispatch completes
+graph set-label "title"           # Set session working title
+graph set-topics "Line 1" "..."   # Set card status lines (1-4)
+graph set-role analyst            # Set session role
+graph set-nag --interval 10       # Enable idle nag (--off to disable)
+graph crosstalk send <s> "msg"    # Send CrossTalk message (-c - for stdin)
 ```
 
 **Dispatch workflow:**
