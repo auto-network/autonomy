@@ -177,6 +177,7 @@
               store.entries = data.entries;
             }
             store.isLive = isLiveHint !== undefined ? !!isLiveHint : !!data.is_live;
+            if (data.resolved !== undefined) store.resolved = !!data.resolved;
             store.sessionType = data.type || '';
             if (data.offset !== undefined) store.offset = data.offset;
             if (data.seq !== undefined) store.seq = data.seq;
@@ -633,6 +634,7 @@
 
         store.offset = data.offset || 0;
         store.isLive = !!data.is_live;
+        if (data.resolved !== undefined) store.resolved = !!data.resolved;
         store.sessionType = data.type || '';
         // tmux_session from response is for reference only; sessionKey is authoritative
         if (data.seq !== undefined) store.seq = data.seq;

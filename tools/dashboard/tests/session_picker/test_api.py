@@ -59,6 +59,13 @@ class TestSessionTailAPI:
         types = {e.get("type") for e in data.get("entries", [])}
         assert "assistant_text" in types, f"Expected parsed types, got: {types}"
 
+    def test_tail_returns_resolved_field(self, test_client):
+        """Tail response must include 'resolved' so the viewer state machine
+        can enter 'live' state without waiting for SSE registry."""
+        data = test_client.get("/api/session/autonomy/auto-test-designer/tail?after=0").json()
+        assert "resolved" in data, f"Missing 'resolved' in tail response: {list(data.keys())}"
+        assert data["resolved"] is True, "Mock sessions with entries should be resolved"
+
     def test_nonexistent_session_handled(self, test_client):
         resp = test_client.get("/api/session/autonomy/doesnt-exist/tail?after=0")
         assert resp.status_code in (200, 400, 404), f"Unexpected: {resp.status_code}"
