@@ -405,6 +405,28 @@ SWEEP_DISPATCH_ENTRIES = [
 ]
 
 
+# ── Experiment data (used by /experiments/{id}) ──────────────────────
+
+SWEEP_EXPERIMENT_ID = "exp-sweep-00000000-0000-0000-0000-000000000001"
+
+SWEEP_EXPERIMENT = {
+    "id": SWEEP_EXPERIMENT_ID,
+    "title": "Sweep Toolbar Experiment",
+    "status": "pending",
+    "series_id": SWEEP_EXPERIMENT_ID,
+    "series_seq": 3,
+    "sibling_ids": [
+        "exp-sweep-00000000-0000-0000-0000-000000000001",
+        "exp-sweep-00000000-0000-0000-0000-000000000002",
+        "exp-sweep-00000000-0000-0000-0000-000000000003",
+    ],
+    "alpine": 0,
+    "variants": [
+        {"id": "v-sweep-001", "html": "<h1>Sweep toolbar test</h1>"}
+    ],
+}
+
+
 def _build_fixture() -> dict:
     """Build the complete fixture dict for behavioral sweep tests."""
     entries = dict(SWEEP_SESSION_ENTRIES)
@@ -416,7 +438,7 @@ def _build_fixture() -> dict:
         "recent_sessions": SWEEP_RECENT_SESSIONS,
         "beads": SWEEP_BEADS + [SWEEP_BEAD_DISPATCHED],
         "runs": SWEEP_RUNS + [SWEEP_DISPATCH_RUN],
-        "experiments": [],
+        "experiments": [SWEEP_EXPERIMENT],
         "timeline_entries": SWEEP_TIMELINE_ENTRIES,
         "timeline_stats": SWEEP_TIMELINE_STATS,
         "collab_notes": SWEEP_COLLAB_NOTES,
@@ -1670,3 +1692,212 @@ class TestHostSessionTailContract:
         assert "is_live" in t, "Tail response missing `is_live` field"
         assert t["is_live"] is True, \
             f"Expected is_live=true for live host session, got is_live={t.get('is_live')}"
+
+
+# ── Experiment toolbar JS check bundle ────────────────────────────
+
+EXPERIMENT_TOOLBAR_CHECKS = """(async () => {
+  // Wait for the experiment page component to initialize (up to 8s)
+  for (var i = 0; i < 80 && !window._experimentPage; i++) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  var ep = window._experimentPage;
+  if (!ep) return JSON.stringify({error: 'no _experimentPage after 8s'});
+  // Wait for state=ready (API call completes, toolbar renders)
+  for (var i = 0; i < 50 && ep.state !== 'ready'; i++) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  if (ep.state !== 'ready') return JSON.stringify({error: 'state=' + ep.state});
+  var q = (id) => document.querySelector('[data-testid="' + id + '"]');
+  var r = {};
+  var tick = async () => { await Alpine.nextTick(); await new Promise(r => setTimeout(r, 150)); };
+
+  // DISCONNECTED: chatOpen=false, chatConnected=false (initial state)
+  ep.chatOpen = false; ep.chatConnected = false;
+  await tick();
+  r.disc_iter = !!q('toolbar-iter-desktop');
+  r.disc_no_capture = !q('toolbar-capture');
+  r.disc_chat_class = q('toolbar-chat-toggle')?.classList.contains('chat-disconnected');
+  r.disc_no_session = !q('toolbar-session-row');
+
+  // PICKER: chatOpen=true, chatConnected=false
+  ep.chatOpen = true;
+  await tick();
+  r.picker_title = q('toolbar-title')?.textContent?.includes('Select');
+  r.picker_chat_class = q('toolbar-chat-toggle')?.classList.contains('chat-open');
+  r.picker_no_capture = !q('toolbar-capture');
+  r.picker_no_iter = !q('toolbar-iter-desktop');
+
+  // LIVE_CHAT: chatOpen=true, chatConnected=true
+  ep.chatConnected = true; ep.chatSessionLabel = 'Test session label';
+  await tick();
+  r.chat_no_capture = !q('toolbar-capture');
+  r.chat_session = !!q('toolbar-session-row');
+  r.chat_prime = !!q('toolbar-prime');
+  r.chat_disconnect = !!q('toolbar-disconnect');
+  r.chat_icon = q('toolbar-chat-toggle')?.classList.contains('chat-connected-shown');
+  r.chat_no_iter = !q('toolbar-iter-desktop');
+
+  // LIVE_UI: chatOpen=false, chatConnected=true
+  ep.chatOpen = false;
+  await tick();
+  r.live_capture = !!q('toolbar-capture');
+  r.live_chat_green = q('toolbar-chat-toggle')?.classList.contains('chat-connected-hidden');
+
+  return JSON.stringify(r);
+})()"""
+
+
+def _navigate_and_eval_async(path: str, js_expr: str, wait_ms: int = 800) -> dict:
+    """SPA-navigate to a page, wait, run an async JS expression, return parsed dict.
+
+    Unlike _navigate_and_check (which wraps in `var r = {}; ... return r;`), this
+    passes the JS expression directly — suitable for async IIFEs that return Promises.
+    """
+    nav_js = f"navigateTo('{path}')"
+    subprocess.run(
+        ["agent-browser", "eval", nav_js],
+        capture_output=True, timeout=10,
+    )
+    time.sleep(wait_ms / 1000)
+
+    result = subprocess.run(
+        ["agent-browser", "--json", "eval", js_expr],
+        capture_output=True, text=True, timeout=15,
+    )
+    stdout = result.stdout.strip()
+    if not stdout:
+        return {}
+    # Parse last JSON line that has success+data shape
+    for line in reversed(stdout.split("\n")):
+        try:
+            parsed = json.loads(line)
+            if isinstance(parsed, dict) and "data" in parsed:
+                data = parsed["data"]
+                if isinstance(data, dict) and "result" in data:
+                    val = data["result"]
+                    # If result is a JSON string, parse it
+                    if isinstance(val, str):
+                        try:
+                            return json.loads(val)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    if isinstance(val, dict):
+                        return val
+                    return {}
+                if isinstance(data, dict):
+                    return data
+            if isinstance(parsed, str):
+                try:
+                    return json.loads(parsed)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        except json.JSONDecodeError:
+            continue
+    return {}
+
+
+class TestExperimentToolbar:
+    """Experiment toolbar behavioral sweep — 4-state state machine via Alpine.nextTick().
+
+    One async batched eval cycles through all 4 states (DISCONNECTED, LIVE_UI,
+    LIVE_CHAT, PICKER) using await Alpine.nextTick() between state changes.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        """Navigate to experiment page, wait for Alpine, run async check bundle."""
+        result = _navigate_and_eval_async(
+            f"/experiments/{SWEEP_EXPERIMENT_ID}",
+            EXPERIMENT_TOOLBAR_CHECKS,
+            wait_ms=1000,
+        )
+        request.cls._checks = result
+
+    # ── DISCONNECTED state ────────────────────────────────────────
+
+    def test_disconnected_iter_nav(self):
+        """DISCONNECTED: iteration nav is visible."""
+        c = self._checks
+        assert c.get("disc_iter"), "Iter nav not visible in DISCONNECTED state"
+
+    def test_disconnected_no_capture(self):
+        """DISCONNECTED: capture button is hidden."""
+        c = self._checks
+        assert c.get("disc_no_capture"), "Capture button should be hidden in DISCONNECTED"
+
+    def test_disconnected_chat_class(self):
+        """DISCONNECTED: chat toggle has chat-disconnected class."""
+        c = self._checks
+        assert c.get("disc_chat_class"), "Chat toggle missing 'chat-disconnected' class"
+
+    def test_disconnected_no_session_row(self):
+        """DISCONNECTED: no session row visible."""
+        c = self._checks
+        assert c.get("disc_no_session"), "Session row should be hidden in DISCONNECTED"
+
+    # ── LIVE_UI state ─────────────────────────────────────────────
+
+    def test_live_ui_capture(self):
+        """LIVE_UI: capture button is visible."""
+        c = self._checks
+        assert c.get("live_capture"), "Capture button not visible in LIVE_UI"
+
+    def test_live_ui_chat_green(self):
+        """LIVE_UI: chat toggle has chat-connected-hidden class."""
+        c = self._checks
+        assert c.get("live_chat_green"), "Chat toggle missing 'chat-connected-hidden' class"
+
+    # ── LIVE_CHAT state ───────────────────────────────────────────
+
+    def test_live_chat_no_capture(self):
+        """LIVE_CHAT: capture button is hidden."""
+        c = self._checks
+        assert c.get("chat_no_capture"), "Capture should be hidden in LIVE_CHAT"
+
+    def test_live_chat_session_row(self):
+        """LIVE_CHAT: session row is visible."""
+        c = self._checks
+        assert c.get("chat_session"), "Session row not visible in LIVE_CHAT"
+
+    def test_live_chat_prime(self):
+        """LIVE_CHAT: prime button is visible."""
+        c = self._checks
+        assert c.get("chat_prime"), "Prime button not visible in LIVE_CHAT"
+
+    def test_live_chat_disconnect(self):
+        """LIVE_CHAT: disconnect button is visible."""
+        c = self._checks
+        assert c.get("chat_disconnect"), "Disconnect button not visible in LIVE_CHAT"
+
+    def test_live_chat_icon(self):
+        """LIVE_CHAT: chat toggle has chat-connected-shown class."""
+        c = self._checks
+        assert c.get("chat_icon"), "Chat toggle missing 'chat-connected-shown' class"
+
+    def test_live_chat_no_iter(self):
+        """LIVE_CHAT: iteration nav is hidden."""
+        c = self._checks
+        assert c.get("chat_no_iter"), "Iter nav should be hidden in LIVE_CHAT"
+
+    # ── PICKER state ──────────────────────────────────────────────
+
+    def test_picker_title(self):
+        """PICKER: title contains 'Select'."""
+        c = self._checks
+        assert c.get("picker_title"), "Title should contain 'Select' in PICKER state"
+
+    def test_picker_chat_class(self):
+        """PICKER: chat toggle has chat-open class."""
+        c = self._checks
+        assert c.get("picker_chat_class"), "Chat toggle missing 'chat-open' class"
+
+    def test_picker_no_capture(self):
+        """PICKER: capture button is hidden."""
+        c = self._checks
+        assert c.get("picker_no_capture"), "Capture should be hidden in PICKER"
+
+    def test_picker_no_iter(self):
+        """PICKER: iteration nav is hidden."""
+        c = self._checks
+        assert c.get("picker_no_iter"), "Iter nav should be hidden in PICKER"
