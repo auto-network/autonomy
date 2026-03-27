@@ -13,7 +13,19 @@ Fixture file format:
   "recent_sessions": [ {session dict}, ... ],
   "experiments": [ {experiment dict with "variants": [{...}]} ],
   "bead_counts": { "open_count": 5, ... },  // optional override
-  "dispatch_beads": { "approved_waiting": [...] }  // optional override
+  "dispatch_beads": { "approved_waiting": [...] },  // optional override
+  "timeline_entries": [ {run dict}, ... ],
+  "timeline_stats": { "completed_count": 0, ... },
+  "collab_notes": [ {note dict}, ... ],
+  "thoughts": [ {thought dict}, ... ],
+  "threads": [ {thread dict}, ... ],
+  "streams": [ {stream dict}, ... ],
+  "stream_items": { "tag": [ {item dict}, ... ] },
+  "traces": { "run-id": {trace dict} },
+  "primers": { "bead-id": {primer dict} },
+  "bead_deps": { "bead-id": {"blockers": [], "dependents": []} },
+  "search_results": [ {result dict}, ... ],
+  "graph_sources": { "source-id": {source dict} }
 }
 
 Bead dicts must have at minimum: id, title, status, priority.
@@ -302,6 +314,325 @@ def get_run(run_id: str) -> dict | None:
 
 def get_runs_for_bead(bead_id: str) -> list[dict]:
     return [r for r in _runs() if r.get("bead_id") == bead_id]
+
+
+# ── timeline DAO interface ──────────────────────────────────────────
+
+TIMELINE_ENTRY_DEFAULTS: dict[str, Any] = {
+    "id": "run-mock-001",
+    "bead_id": "auto-test",
+    "status": "DONE",
+    "title": "Mock task",
+    "priority": 2,
+    "started_at": "2026-01-01T00:00:00Z",
+    "completed_at": "2026-01-01T00:05:00Z",
+    "duration_secs": 300,
+    "commit_hash": None,
+    "commit_message": None,
+    "lines_added": None,
+    "lines_removed": None,
+    "files_changed": None,
+    "scores": None,
+    "time_breakdown": None,
+    "failure_category": None,
+    "reason": None,
+    "discovered_beads_count": 0,
+    "has_experience_report": False,
+}
+
+TIMELINE_STATS_DEFAULTS: dict[str, Any] = {
+    "completed_count": 0,
+    "success_rate": 0.0,
+    "failed_count": 0,
+    "blocked_count": 0,
+    "avg_duration": None,
+    "avg_tooling_score": None,
+    "avg_confidence_score": None,
+    "avg_clarity_score": None,
+}
+
+
+def get_timeline_entries(range_str: str | None = None, limit: int = 200) -> list[dict]:
+    data = _load()
+    entries = [_fill(e, TIMELINE_ENTRY_DEFAULTS) for e in data.get("timeline_entries", [])]
+    return entries[:limit]
+
+
+def get_timeline_stats(range_str: str | None = None) -> dict:
+    data = _load()
+    if "timeline_stats" in data:
+        stats = dict(TIMELINE_STATS_DEFAULTS)
+        stats.update(data["timeline_stats"])
+        return stats
+    # Auto-compute from timeline_entries
+    entries = data.get("timeline_entries", [])
+    if not entries:
+        return dict(TIMELINE_STATS_DEFAULTS)
+    total = len(entries)
+    completed = sum(1 for e in entries if e.get("status") == "DONE")
+    failed = sum(1 for e in entries if e.get("status") == "FAILED")
+    blocked = sum(1 for e in entries if e.get("status") == "BLOCKED")
+    durations = [e["duration_secs"] for e in entries if e.get("duration_secs") is not None]
+    return {
+        "completed_count": completed,
+        "success_rate": round(completed / total, 4) if total > 0 else 0.0,
+        "failed_count": failed,
+        "blocked_count": blocked,
+        "avg_duration": round(sum(durations) / len(durations), 1) if durations else None,
+        "avg_tooling_score": None,
+        "avg_confidence_score": None,
+        "avg_clarity_score": None,
+    }
+
+
+# ── graph collab DAO interface ──────────────────────────────────────
+
+COLLAB_NOTE_DEFAULTS: dict[str, Any] = {
+    "id": "note-mock-001",
+    "title": "Mock note",
+    "created_at": "2026-01-01T00:00:00Z",
+    "author": "",
+    "project": "",
+    "tags": [],
+    "comment_count": 0,
+    "version": 1,
+}
+
+
+def get_collab_notes(limit: int = 20) -> list[dict]:
+    data = _load()
+    return [_fill(n, COLLAB_NOTE_DEFAULTS) for n in data.get("collab_notes", [])][:limit]
+
+
+# ── graph thoughts DAO interface ────────────────────────────────────
+
+THOUGHT_DEFAULTS: dict[str, Any] = {
+    "id": "thought-mock-001",
+    "content": "Mock thought",
+    "status": "captured",
+    "thread_id": None,
+    "source_id": None,
+    "turn_number": None,
+    "created_at": "2026-01-01T00:00:00Z",
+}
+
+
+def get_thoughts(limit: int = 50, thread_id: str | None = None, since: str | None = None) -> list[dict]:
+    data = _load()
+    items = [_fill(t, THOUGHT_DEFAULTS) for t in data.get("thoughts", [])]
+    if thread_id:
+        items = [t for t in items if t.get("thread_id") == thread_id]
+    return items[:limit]
+
+
+# ── graph threads DAO interface ─────────────────────────────────────
+
+THREAD_DEFAULTS: dict[str, Any] = {
+    "id": "thread-mock-001",
+    "title": "Mock thread",
+    "status": "active",
+    "priority": 1,
+    "capture_count": 0,
+    "created_at": "2026-01-01T00:00:00Z",
+    "updated_at": "2026-01-01T00:00:00Z",
+}
+
+
+def get_threads(limit: int = 20, status: str | None = "active") -> list[dict]:
+    data = _load()
+    items = [_fill(t, THREAD_DEFAULTS) for t in data.get("threads", [])]
+    if status:
+        items = [t for t in items if t.get("status") == status]
+    return items[:limit]
+
+
+# ── graph streams DAO interface ─────────────────────────────────────
+
+STREAM_DEFAULTS: dict[str, Any] = {
+    "tag": "mock",
+    "count": 0,
+    "description": "",
+    "last_active": "2026-01-01T00:00:00Z",
+}
+
+
+def get_streams() -> list[dict]:
+    data = _load()
+    return [_fill(s, STREAM_DEFAULTS) for s in data.get("streams", [])]
+
+
+STREAM_ITEM_DEFAULTS: dict[str, Any] = {
+    "id": "note-mock-001",
+    "title": "Mock stream item",
+    "created_at": "2026-01-01T00:00:00Z",
+    "author": "",
+    "tags": [],
+    "source_type": "note",
+    "preview": "",
+}
+
+
+def get_stream_items(tag: str, limit: int = 50) -> list[dict]:
+    data = _load()
+    items_map = data.get("stream_items", {})
+    items = items_map.get(tag, [])
+    return [_fill(i, STREAM_ITEM_DEFAULTS) for i in items][:limit]
+
+
+# ── dispatch trace DAO interface ────────────────────────────────────
+
+TRACE_DEFAULTS: dict[str, Any] = {
+    "id": "run-mock-001",
+    "bead_id": "auto-test",
+    "status": "DONE",
+    "reason": "Completed successfully",
+    "duration_secs": 300,
+    "started_at": "2026-01-01T00:00:00Z",
+    "completed_at": "2026-01-01T00:05:00Z",
+    "commit_hash": None,
+    "commit_message": None,
+    "branch": None,
+    "branch_base": None,
+    "lines_added": None,
+    "lines_removed": None,
+    "files_changed": None,
+    "decision": None,
+    "experience_report": None,
+    "diff": None,
+}
+
+
+def get_trace(run_id: str) -> dict | None:
+    data = _load()
+    traces = data.get("traces", {})
+    # Try exact match, then bead_id match via runs
+    if run_id in traces:
+        return _fill(traces[run_id], TRACE_DEFAULTS)
+    # Fall back to matching a run and building trace from it
+    run = get_run(run_id)
+    if run:
+        return _fill(run, TRACE_DEFAULTS)
+    # Try as bead_id
+    bead_runs = get_runs_for_bead(run_id)
+    if bead_runs:
+        return _fill(bead_runs[0], TRACE_DEFAULTS)
+    return None
+
+
+# ── primer DAO interface ────────────────────────────────────────────
+
+PRIMER_DEFAULTS: dict[str, Any] = {
+    "bead_id": "auto-test",
+    "title": "Mock bead",
+    "description": "Mock description",
+    "priority": 2,
+    "status": "open",
+    "pitfalls": [],
+    "provenance": [],
+    "similar_beads": [],
+}
+
+
+def get_primer(bead_id: str) -> dict | None:
+    data = _load()
+    primers = data.get("primers", {})
+    if bead_id in primers:
+        result = dict(PRIMER_DEFAULTS)
+        result.update(primers[bead_id])
+        return result
+    # Fall back to building from bead data
+    bead = get_bead(bead_id)
+    if bead:
+        return {
+            "bead_id": bead["id"],
+            "title": bead.get("title", ""),
+            "description": bead.get("description", ""),
+            "priority": bead.get("priority", 2),
+            "status": bead.get("status", "open"),
+            "pitfalls": [],
+            "provenance": [],
+            "similar_beads": [],
+        }
+    return None
+
+
+# ── bead deps DAO interface ─────────────────────────────────────────
+
+def get_bead_deps(bead_id: str) -> dict:
+    data = _load()
+    deps_map = data.get("bead_deps", {})
+    if bead_id in deps_map:
+        return deps_map[bead_id]
+    return {"blockers": [], "dependents": []}
+
+
+# ── search DAO interface ────────────────────────────────────────────
+
+SEARCH_RESULT_DEFAULTS: dict[str, Any] = {
+    "id": "src-mock-001",
+    "source_id": "src-mock-001",
+    "title": "Mock result",
+    "type": "note",
+    "project": "",
+    "rank": 1.0,
+    "snippet": "",
+    "turn_number": None,
+}
+
+
+def search(query: str, limit: int = 20, project: str | None = None) -> list[dict]:
+    data = _load()
+    results = [_fill(r, SEARCH_RESULT_DEFAULTS) for r in data.get("search_results", [])]
+    if project:
+        results = [r for r in results if r.get("project") == project]
+    return results[:limit]
+
+
+# ── graph source DAO interface ──────────────────────────────────────
+
+SOURCE_DEFAULTS: dict[str, Any] = {
+    "id": "src-mock-001",
+    "title": "Mock source",
+    "type": "note",
+    "project": "",
+    "created_at": "2026-01-01T00:00:00Z",
+    "metadata": "{}",
+    "content": "Mock content",
+}
+
+
+def get_source(source_id: str) -> dict | None:
+    data = _load()
+    sources = data.get("graph_sources", {})
+    if source_id in sources:
+        return _fill(sources[source_id], SOURCE_DEFAULTS)
+    # Try prefix match
+    for sid, src in sources.items():
+        if sid.startswith(source_id):
+            return _fill(src, SOURCE_DEFAULTS)
+    return None
+
+
+# ── session mutation stubs (no-ops in mock mode) ────────────────────
+# These prevent crashes when session management endpoints are called in mock mode.
+
+def update_label(tmux_name: str, label: str) -> None:
+    pass
+
+def update_topics(tmux_name: str, topics: list) -> None:
+    pass
+
+def update_role(tmux_name: str, role: str) -> None:
+    pass
+
+def update_nag_config(tmux_name: str, **kwargs) -> None:
+    pass
+
+def update_dispatch_nag(tmux_name: str, enabled: bool) -> None:
+    pass
+
+# Allowed roles constant (mirrors dashboard_db)
+_ALLOWED_ROLES = {"", "coordinator", "reviewer", "builder", "designer", "validator", "researcher"}
 
 
 # ── Mock event watcher (replaces _dispatch_watcher) ─────────────────
