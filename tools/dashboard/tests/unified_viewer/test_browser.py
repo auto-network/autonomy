@@ -423,17 +423,8 @@ class TestOverlayPanel:
 class TestUnresolvedState:
     """Unresolved state — host sessions with no JSONL path (linked=false)."""
 
-    @pytest.mark.xfail(
-        reason="unified viewer Unresolved state not implemented yet",
-        strict=True,
-    )
     def test_link_button_visible(self, h):
-        """Host session with linked=false → Link Terminal button.
-
-        EXPECTED FAIL: The current viewer has no explicit Unresolved state.
-        auto-vl46 will add derive_state() which enables this:
-        when state="unresolved", show a Link Terminal button.
-        """
+        """Host session with linked=false → Link Terminal button."""
         h.open_session_page("autonomy", "host-test-unresolved")
         time.sleep(2)
         text = h.visible_text()
