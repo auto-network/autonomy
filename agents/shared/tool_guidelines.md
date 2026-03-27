@@ -30,6 +30,9 @@ graph crosstalk broadcast "msg"   # Send to all live sessions
 graph thought "text" --tags x     # Capture idea discovered during work
 graph thread create "title"       # Create a thought thread
 graph thread park/done/active <id> # Manage thread lifecycle
+graph dispatch stats              # Aggregate stats: success rate, tooling, failures
+graph dispatch stats --trend      # Weekly trend with direction indicators
+graph dispatch stats --by-image   # Break down by container image
 graph dispatch watch              # Block until next dispatch completes
 graph set-label "title"           # Set session working title
 graph set-topics "Line 1" "..."   # Set card status lines
