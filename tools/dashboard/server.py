@@ -2602,6 +2602,7 @@ async def api_session_tail(request):
                 "type": mock_session.get("type", ""),
                 "tmux_session": mock_session.get("tmux_session", session_id),
                 "seq": len(entries),
+                "resolved": bool(mock_session.get("resolved", True)),
             }
             return JSONResponse(resp)
 
@@ -2622,7 +2623,7 @@ async def api_session_tail(request):
                 "entries": [], "offset": 0, "is_live": True,
                 "type": monitor_state.get("type", ""),
                 "tmux_session": monitor_state.get("tmux_name", ""),
-                "seq": 0,
+                "seq": 0, "resolved": False,
             })
         return JSONResponse({"error": "Invalid project or session_id"}, status_code=400)
     if not session_file.exists():
@@ -2633,7 +2634,7 @@ async def api_session_tail(request):
                 "entries": [], "offset": 0, "is_live": True,
                 "type": monitor_state.get("type", ""),
                 "tmux_session": monitor_state.get("tmux_name", ""),
-                "seq": 0,
+                "seq": 0, "resolved": False,
             })
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
@@ -2645,11 +2646,15 @@ async def api_session_tail(request):
     # Liveness from DB — dashboard.db is the sole owner after initial seed
     is_live = bool(db_row.get("is_live")) if db_row else False
     tmux_name = db_row.get("tmux_name", "") if db_row else ""
+    # Resolved: session has a linked JSONL path or non-empty session_uuids
+    resolved = bool(db_row.get("jsonl_path")) or (
+        bool(db_row.get("session_uuids")) and db_row["session_uuids"] != "[]"
+    ) if db_row else False
 
     seq = 0  # broadcast_seq is now on ephemeral _TailState, not in DB row
 
     base_resp = {"entries": [], "offset": file_size, "is_live": is_live,
-                 "type": session_type, "seq": seq}
+                 "type": session_type, "seq": seq, "resolved": resolved}
     if tmux_name:
         base_resp["tmux_session"] = tmux_name
     if after >= file_size:
@@ -2676,7 +2681,7 @@ async def api_session_tail(request):
     entries = _dedup_queued_entries(entries)
     _enrich_entries(entries, session_dir=session_file.parent / session_file.stem)
     resp = {"entries": entries, "offset": new_offset, "is_live": is_live,
-            "type": session_type, "seq": seq}
+            "type": session_type, "seq": seq, "resolved": resolved}
     if tmux_name:
         resp["tmux_session"] = tmux_name
     return JSONResponse(resp)
