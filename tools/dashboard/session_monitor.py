@@ -115,8 +115,9 @@ def count_tool_uses(jsonl_path: Path) -> int:
 
 
 def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
-    """Send a nag message to a session via CrossTalk envelope in tmux paste-buffer."""
-    import secrets as _secrets
+    """Send a nag message to a session via CrossTalk envelope."""
+    from tools.dashboard.tmux_send import tmux_send_sync
+
     iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     envelope = (
         f'<crosstalk from="dashboard-nag"\n'
@@ -127,15 +128,7 @@ def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
         f'</crosstalk>'
     )
     try:
-        buf = f"nag_{_secrets.token_hex(4)}"
-        path = f"/tmp/nag_{_secrets.token_hex(4)}.txt"
-        Path(path).write_text(envelope, encoding="utf-8")
-        subprocess.run(["tmux", "load-buffer", "-b", buf, path], capture_output=True, timeout=5)
-        subprocess.run(["tmux", "paste-buffer", "-p", "-b", buf, "-t", tmux_name], capture_output=True, timeout=5)
-        subprocess.run(["tmux", "delete-buffer", "-b", buf], capture_output=True, timeout=5)
-        time.sleep(0.3)
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name, "", "Enter"], capture_output=True, timeout=5)
-        Path(path).unlink(missing_ok=True)
+        tmux_send_sync(tmux_name, envelope)
     except Exception:
         pass  # best-effort — don't crash monitor
 

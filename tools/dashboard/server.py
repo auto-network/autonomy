@@ -70,26 +70,7 @@ else:
     from tools.dashboard.dao import dispatch as dao_dispatch
     from tools.dashboard.dao import sessions as dao_sessions
 
-import secrets as _secrets
-import tempfile as _tempfile
-
-
-def _tmux_inject(target: str, text: str) -> None:
-    """Inject text into a tmux pane via paste-buffer with a unique buffer name."""
-    buf = f"inject_{_secrets.token_hex(4)}"
-    tmp_path = None
-    try:
-        with _tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(text)
-            tmp_path = f.name
-        subprocess.run(["tmux", "load-buffer", "-b", buf, tmp_path], capture_output=True)
-        subprocess.run(["tmux", "paste-buffer", "-p", "-b", buf, "-t", target], capture_output=True)
-        subprocess.run(["tmux", "delete-buffer", "-b", buf], capture_output=True)
-    finally:
-        if tmp_path:
-            os.unlink(tmp_path)
+from tools.dashboard.tmux_send import tmux_send, tmux_send_sync
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -1599,10 +1580,8 @@ async def api_crosstalk_send(request):
         f'</crosstalk>'
     )
 
-    # Inject via tmux paste-buffer (unique buffer per operation)
-    _tmux_inject(target, envelope)
-    await asyncio.sleep(0.3)
-    subprocess.run(["tmux", "send-keys", "-t", target, "\r"], capture_output=True)
+    # Inject via unified tmux_send (per-session lock + double-Enter retry)
+    await tmux_send(target, envelope)
 
     # Store in crosstalk_messages
     await asyncio.to_thread(
@@ -2727,15 +2706,10 @@ async def api_session_send(request):
             status_code=404,
         )
 
-    # Inject via paste-buffer (unique buffer per operation)
+    # Inject via unified tmux_send (per-session lock + double-Enter retry)
     logger.warning("[session-send] tmux=%r message=%r", tmux_session, message)
     try:
-        _tmux_inject(tmux_session, message)
-        await asyncio.sleep(0.3)
-        subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_session, "\r"],
-            capture_output=True,
-        )
+        await tmux_send(tmux_session, message)
     except FileNotFoundError:
         return JSONResponse(
             {"error": "tmux is not available in this environment"},
@@ -2799,15 +2773,10 @@ async def api_session_send_handshake(request):
             status_code=404,
         )
 
-    # Inject via paste-buffer (unique buffer per operation)
+    # Inject via unified tmux_send (per-session lock + double-Enter retry)
     logger.warning("[send-handshake] tmux=%r", tmux_session)
     try:
-        _tmux_inject(tmux_session, handshake)
-        await asyncio.sleep(0.3)
-        subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_session, "\r"],
-            capture_output=True,
-        )
+        await tmux_send(tmux_session, handshake)
     except FileNotFoundError:
         return JSONResponse(
             {"error": "tmux is not available in this environment"},
@@ -3148,7 +3117,7 @@ async def api_session_create(request):
         """Wait for container boot then inject the first message."""
         await asyncio.sleep(5)
         try:
-            await asyncio.to_thread(_tmux_send_message, tmux_name, first_message)
+            await tmux_send(tmux_name, first_message)
             logger.info("api_session_create: injected first message into %s  len=%d  primer=%s",
                         tmux_name, len(first_message), bool(primer_url and not primer_error))
         except Exception:
@@ -3724,23 +3693,6 @@ async def api_experiments_dismiss(request):
     return JSONResponse({"ok": True})
 
 
-def _tmux_send_message(tmux_session: str, message: str) -> bool:
-    """Send a message to a tmux session via paste-buffer injection.
-
-    Returns True on success, False on failure.
-    """
-    try:
-        _tmux_inject(tmux_session, message)
-        import time
-        time.sleep(0.15)
-        subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_session, "\r"],
-            capture_output=True,
-        )
-        return True
-    except FileNotFoundError:
-        return False
-
 
 async def api_experiments_screenshot(request):
     """Save a screenshot blob for an experiment and optionally inject into agent.
@@ -3786,18 +3738,14 @@ async def api_experiments_screenshot(request):
         )
         if cp_result.returncode == 0:
             # First send: bare image path (triggers isMeta=True image injection)
-            ok1 = await asyncio.to_thread(
-                _tmux_send_message, tmux_session, container_image_path
+            await tmux_send(tmux_session, container_image_path)
+            # Second send: follow-up text so agent sees the image and acts
+            await tmux_send(
+                tmux_session,
+                "Screenshot captured — describe what you see and continue iterating",
             )
-            if ok1:
-                await asyncio.sleep(0.2)
-                # Second send: follow-up text so agent sees the image and acts
-                await asyncio.to_thread(
-                    _tmux_send_message, tmux_session,
-                    "Screenshot captured — describe what you see and continue iterating",
-                )
-                injected = True
-                logger.info("[screenshot] Two-send injection complete for %s", tmux_session)
+            injected = True
+            logger.info("[screenshot] Two-send injection complete for %s", tmux_session)
         else:
             logger.warning(
                 "[screenshot] docker cp failed for %s: %s",
