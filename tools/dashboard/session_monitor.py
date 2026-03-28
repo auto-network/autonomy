@@ -176,6 +176,7 @@ class SessionMonitor:
         self._wd_to_session: dict[int, str] = {}         # file wd → tmux_name
         self._dir_wd_sessions: dict[int, set[str]] = {}  # dir wd → set of tmux_names
         self._dir_path_to_wd: dict[str, int] = {}        # dir path → wd (dedup)
+        self._wd_to_dir_path: dict[int, str] = {}        # reverse: wd → dir path
 
     # ── Registration ──────────────────────────────────────────────
 
@@ -321,14 +322,27 @@ class SessionMonitor:
             await self._broadcast_registry()
 
     def _recover_unresolved_sessions(self) -> None:
-        """On startup, recreate TailState for container sessions with NULL jsonl_path."""
+        """On startup, recreate TailState for live sessions with NULL jsonl_path.
+
+        For container sessions: derive resolution_dir from agent-runs, set needs_resolution.
+        For host sessions: attempt .session_meta.json scan; if that fails, add dir watch.
+        For all unresolved sessions with resolution_dir: add IN_CREATE dir watch.
+        """
         sessions = get_live_sessions()
         agent_runs = Path(__file__).resolve().parents[2] / "data" / "agent-runs"
         recovered = 0
         for row in sessions:
             tmux_name = row["tmux_name"]
             if row.get("jsonl_path"):
-                continue  # already resolved
+                # Already resolved — ensure dir watch exists for rollover detection
+                res_dir = row.get("resolution_dir") or str(Path(row["jsonl_path"]).parent)
+                if self._use_inotify and res_dir:
+                    if tmux_name not in self._tail_states:
+                        self._tail_states[tmux_name] = _TailState(
+                            resolution_dir=Path(res_dir),
+                        )
+                    self._add_dir_watch(tmux_name, res_dir)
+                continue
             if row.get("type") == "host":
                 # Host resolution: scan Claude projects dirs for .meta.json matching tmux_name
                 jsonl = self._resolve_host_jsonl(tmux_name)
@@ -342,6 +356,22 @@ class SessionMonitor:
                     )
                     recovered += 1
                     logger.info("session_monitor: recovered host %s → %s", tmux_name, jsonl.name)
+                    # Add dir watch for future rollovers
+                    if self._use_inotify:
+                        self._add_dir_watch(tmux_name, str(jsonl.parent))
+                else:
+                    # Unresolved host — add dir watch on resolution_dir if known
+                    res_dir = row.get("resolution_dir")
+                    if res_dir:
+                        if tmux_name not in self._tail_states:
+                            self._tail_states[tmux_name] = _TailState(
+                                needs_resolution=True,
+                                resolution_dir=Path(res_dir),
+                            )
+                        if self._use_inotify:
+                            self._add_dir_watch(tmux_name, res_dir)
+                        recovered += 1
+                        logger.info("session_monitor: RECOVERED unresolved host %s → watch %s", tmux_name, res_dir)
                 continue
             if tmux_name in self._tail_states:
                 continue  # already has a tail state
@@ -357,6 +387,9 @@ class SessionMonitor:
                         needs_resolution=True,
                         resolution_dir=sess_dir,
                     )
+                    # Add IN_CREATE dir watch for file discovery
+                    if self._use_inotify:
+                        self._add_dir_watch(tmux_name, str(sess_dir))
                     recovered += 1
                     logger.info("session_monitor: RECOVERED unresolved %s → %s", tmux_name, sess_dir)
         if recovered:
@@ -454,6 +487,7 @@ class SessionMonitor:
             logger.warning("session_monitor: add_watch CREATE failed for %s: %s", dir_path, exc)
             return
         self._dir_path_to_wd[dir_path] = wd
+        self._wd_to_dir_path[wd] = dir_path
         self._dir_wd_sessions[wd] = {tmux_name}
         ts = self._tail_states.get(tmux_name)
         if ts:
@@ -485,6 +519,7 @@ class SessionMonitor:
                 except OSError:
                     pass
                 self._dir_wd_sessions.pop(wd, None)
+                self._wd_to_dir_path.pop(wd, None)
                 for path, w in list(self._dir_path_to_wd.items()):
                     if w == wd:
                         del self._dir_path_to_wd[path]
@@ -741,13 +776,7 @@ class SessionMonitor:
                         if name:
                             modified.add(name)
                     if event.mask & _iflags.CREATE:
-                        # Phase 4b stub — log directory creation events
-                        ds = self._dir_wd_sessions.get(event.wd)
-                        if ds:
-                            logger.debug(
-                                "session_monitor: IN_CREATE wd=%d name=%s sessions=%s",
-                                event.wd, event.name, ds,
-                            )
+                        await self._handle_in_create(event)
                     if event.mask & _iflags.IGNORED:
                         # Kernel auto-removed the watch (file deleted/moved)
                         gone = self._wd_to_session.pop(event.wd, None)
@@ -776,6 +805,193 @@ class SessionMonitor:
             except Exception:
                 logger.exception("session_monitor: inotify tailer error")
                 await asyncio.sleep(1)
+
+    # ── IN_CREATE handling ───────────────────────────────────────
+
+    async def _handle_in_create(self, event) -> None:
+        """Handle IN_CREATE on a watched directory — new file appeared."""
+        filename = event.name
+        if not filename or not filename.endswith(".jsonl"):
+            return
+        # Skip subagent paths (should not fire due to non-recursive watches,
+        # but guard defensively)
+        if "subagents" in filename:
+            return
+
+        dir_path = self._wd_to_dir_path.get(event.wd)
+        if not dir_path:
+            return
+        new_file = Path(dir_path) / filename
+
+        sessions = self._dir_wd_sessions.get(event.wd, set())
+        if not sessions:
+            return
+
+        # Determine session types sharing this directory
+        # Container sessions have isolated dirs (one session per dir)
+        # Host sessions share dirs (multiple sessions per dir)
+        for tmux_name in list(sessions):
+            row = get_session(tmux_name)
+            if not row:
+                continue
+            session_type = row.get("type", "container")
+            if session_type == "container":
+                await self._handle_container_create(tmux_name, row, new_file)
+            else:
+                await self._handle_host_create(tmux_name, row, new_file, dir_path)
+
+    async def _handle_container_create(
+        self, tmux_name: str, row: dict, new_file: Path,
+    ) -> None:
+        """Handle IN_CREATE in an isolated container directory.
+
+        Any new JSONL in a container's resolution_dir belongs to this session.
+        """
+        new_uuid = new_file.stem
+        uuids = json.loads(row.get("session_uuids") or "[]")
+        was_empty = len(uuids) == 0
+
+        from tools.dashboard.dao.dashboard_db import link_and_enrich
+        link_and_enrich(
+            tmux_name,
+            session_uuid=new_uuid,
+            jsonl_path=str(new_file),
+            project=new_file.parent.name,
+        )
+        logger.info(
+            "session_monitor: IN_CREATE container %s → %s%s",
+            tmux_name, new_file.name,
+            " (first file — resolved)" if was_empty else " (rollover)",
+        )
+
+        # Swap IN_MODIFY watch to new file
+        self._add_file_watch(tmux_name, str(new_file))
+
+        # Reset file_offset for new file
+        update_tail_state(tmux_name, file_offset=0)
+
+        # Reset ephemeral tail state, preserving resolution_dir
+        ts = self._tail_states.get(tmux_name)
+        old_resolution_dir = ts.resolution_dir if ts else None
+        self._tail_states[tmux_name] = _TailState(resolution_dir=old_resolution_dir)
+
+        if was_empty:
+            await self._broadcast_registry()
+
+    async def _handle_host_create(
+        self, tmux_name: str, row: dict, new_file: Path, dir_path: str,
+    ) -> None:
+        """Handle IN_CREATE in a shared host project directory.
+
+        Must read parentUuid to determine if this is a rollover for an existing
+        session or a brand-new session. NEVER use mtime for host resolution.
+        """
+        # Read parentUuid from first line
+        parent_uuid = await asyncio.to_thread(self._read_parent_uuid, new_file)
+
+        if parent_uuid is None:
+            # New session, not a rollover. Ignore — wait for .session_meta.json
+            # or linking handshake.
+            return
+
+        # parentUuid is non-null → rollover. Find predecessor.
+        predecessor_uuid = await asyncio.to_thread(
+            self._find_predecessor_by_parentuuid,
+            parent_uuid, new_file, dir_path,
+        )
+
+        if predecessor_uuid is None:
+            logger.warning(
+                "session_monitor: unexpected rollover — no predecessor found. "
+                "file=%s parentUuid=%s dir=%s",
+                new_file.name, parent_uuid, dir_path,
+            )
+            return
+
+        # Look up which session owns the predecessor UUID
+        owner = self._find_session_by_uuid(predecessor_uuid)
+        if not owner:
+            logger.warning(
+                "session_monitor: unexpected rollover — predecessor UUID not in DB. "
+                "file=%s parentUuid=%s predecessor=%s dir=%s",
+                new_file.name, parent_uuid, predecessor_uuid, dir_path,
+            )
+            return
+
+        new_uuid = new_file.stem
+        from tools.dashboard.dao.dashboard_db import link_and_enrich
+        link_and_enrich(
+            owner,
+            session_uuid=new_uuid,
+            jsonl_path=str(new_file),
+            project=new_file.parent.name,
+        )
+        logger.info(
+            "session_monitor: IN_CREATE host rollover %s → %s (predecessor %s)",
+            owner, new_file.name, predecessor_uuid,
+        )
+
+        # Swap IN_MODIFY watch to new file
+        self._add_file_watch(owner, str(new_file))
+
+        # Reset file_offset for new file
+        update_tail_state(owner, file_offset=0)
+
+        # Reset ephemeral tail state, preserving resolution_dir
+        ts = self._tail_states.get(owner)
+        old_resolution_dir = ts.resolution_dir if ts else None
+        self._tail_states[owner] = _TailState(resolution_dir=old_resolution_dir)
+
+    @staticmethod
+    def _read_parent_uuid(jsonl_path: Path) -> str | None:
+        """Read parentUuid from the first line of a JSONL file.
+
+        Returns None if the file is empty, unreadable, or parentUuid is null.
+        """
+        try:
+            with open(jsonl_path) as f:
+                first_line = f.readline().strip()
+                if not first_line:
+                    return None
+                entry = json.loads(first_line)
+                parent = entry.get("parentUuid")
+                return parent if parent else None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _find_predecessor_by_parentuuid(
+        parent_uuid: str, new_file: Path, dir_path: str,
+    ) -> str | None:
+        """Find which JSONL file contains the entry with uuid == parentUuid.
+
+        Uses grep -rl to find the predecessor file, then returns its filename stem (UUID).
+        """
+        try:
+            result = subprocess.run(
+                ["grep", "-rl", "--include=*.jsonl",
+                 f"--exclude={new_file.name}",
+                 parent_uuid, dir_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # May return multiple files; take the first match
+                match_path = Path(result.stdout.strip().split("\n")[0])
+                return match_path.stem
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return None
+
+    @staticmethod
+    def _find_session_by_uuid(uuid: str) -> str | None:
+        """Find the tmux_name that owns a given JSONL UUID in session_uuids."""
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT tmux_name FROM tmux_sessions"
+            " WHERE is_live=1 AND session_uuids LIKE ?",
+            (f"%{uuid}%",),
+        ).fetchone()
+        return row["tmux_name"] if row else None
 
     @staticmethod
     def _enrich_agent_entries(row: dict, ts: _TailState, entries: list) -> None:

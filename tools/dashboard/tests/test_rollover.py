@@ -342,14 +342,12 @@ class TestHostRolloverViaParentUuid:
     In host mode, multiple sessions share a directory. Rollover cannot use mtime
     (newest file might belong to a different session). Instead, the first entry's
     parentUuid must match the last entry's uuid of an existing file.
-
-    NOTE: parentUuid-based rollover is NOT yet implemented. All tests expected RED.
     """
 
     def test_parentuuid_matches_predecessor(self, host_shared_dir):
-        """New file with parentUuid matching last entry of existing file → rollover detected.
+        """New file with parentUuid matching last entry of existing file → predecessor found.
 
-        Expected: RED — parentUuid matching not implemented; rollover uses mtime only.
+        Tests _read_parent_uuid + _find_predecessor_by_parentuuid together.
         """
         project_dir = host_shared_dir["project_dir"]
 
@@ -358,70 +356,50 @@ class TestHostRolloverViaParentUuid:
             {"type": "user", "message": {"content": "continued A"}, "uuid": "a-003", "parentUuid": "a-002"},
         ], mtime_offset=5)
 
-        # For parentUuid-based detection, the monitor should:
-        # 1. Read first entry of new file → parentUuid = "a-002"
-        # 2. Search existing files for last entry with uuid = "a-002"
-        # 3. Find session_a → this is a rollover of session A
-        #
-        # Since this isn't implemented, we test the data structure that SHOULD exist:
-        # A function that, given a new file, returns the session it continues.
-        with pytest.raises((AttributeError, TypeError)):
-            # This method doesn't exist yet — test documents the expected interface
-            monitor = SessionMonitor()
-            result = monitor._match_parentuuid(continuation, project_dir)
-            # When implemented, should return the predecessor file/session
-            assert result is not None
+        # Read parentUuid from the new file
+        parent_uuid = SessionMonitor._read_parent_uuid(continuation)
+        assert parent_uuid == "a-002"
+
+        # Find the predecessor file containing "a-002"
+        predecessor_uuid = SessionMonitor._find_predecessor_by_parentuuid(
+            parent_uuid, continuation, str(project_dir),
+        )
+        assert predecessor_uuid == "aaaa-1111", (
+            f"Should find aaaa-1111 as predecessor, got {predecessor_uuid}"
+        )
 
     def test_parentuuid_null_is_new_session(self, host_shared_dir):
-        """New file with parentUuid=null → NOT a rollover, should be ignored.
-
-        Expected: RED — parentUuid matching not implemented.
-        """
+        """New file with parentUuid=null → _read_parent_uuid returns None (not a rollover)."""
         project_dir = host_shared_dir["project_dir"]
 
         new_session = _make_jsonl(project_dir, "eeee-5555", [
             {"type": "user", "message": {"content": "brand new"}, "uuid": "e-001", "parentUuid": None},
         ], mtime_offset=5)
 
-        # Read the first entry's parentUuid
-        with open(new_session) as f:
-            first_entry = json.loads(f.readline())
-
-        # A null parentUuid means this is a brand new session, not a continuation
-        assert first_entry.get("parentUuid") is None
-        # The detection logic should NOT consider this a rollover
-        # When parentUuid-based detection exists, null parentUuid → skip
-        # For now, verify the data is as expected (this part passes)
-        # The actual integration test would be:
-        with pytest.raises((AttributeError, TypeError)):
-            monitor = SessionMonitor()
-            result = monitor._match_parentuuid(new_session, project_dir)
+        parent_uuid = SessionMonitor._read_parent_uuid(new_session)
+        assert parent_uuid is None, "Null parentUuid should return None (new session, not rollover)"
 
     def test_no_predecessor_logs_warning(self, host_shared_dir, caplog):
-        """parentUuid non-null but no file contains matching uuid → warning logged.
-
-        Expected: RED — parentUuid matching not implemented.
-        """
+        """parentUuid non-null but no file contains matching uuid → None returned."""
         project_dir = host_shared_dir["project_dir"]
 
-        # Create file with parentUuid that doesn't match any existing file
         orphan = _make_jsonl(project_dir, "ffff-6666", [
             {"type": "user", "message": {"content": "orphan"}, "uuid": "f-001", "parentUuid": "nonexistent-uuid"},
         ], mtime_offset=5)
 
-        with pytest.raises((AttributeError, TypeError)):
-            monitor = SessionMonitor()
-            result = monitor._match_parentuuid(orphan, project_dir)
-            # When implemented, should log a warning and return None
+        parent_uuid = SessionMonitor._read_parent_uuid(orphan)
+        assert parent_uuid == "nonexistent-uuid"
+
+        predecessor = SessionMonitor._find_predecessor_by_parentuuid(
+            parent_uuid, orphan, str(project_dir),
+        )
+        assert predecessor is None, "No predecessor with uuid 'nonexistent-uuid' should exist"
 
     def test_grep_excludes_self(self, host_shared_dir):
         """When searching for parentUuid match, the new file itself must be excluded.
 
-        Expected: RED — parentUuid matching not implemented.
-
-        This test documents that when parentUuid search is implemented, the search
-        must not match the new file against itself (which contains the parentUuid
-        as a value, not as a last-entry uuid).
+        The new file contains "a-002" as a parentUuid value — grep must exclude it
+        to avoid matching the file against itself.
         """
         project_dir = host_shared_dir["project_dir"]
 
@@ -431,16 +409,16 @@ class TestHostRolloverViaParentUuid:
             {"type": "user", "message": {"content": "cont"}, "uuid": "g-001", "parentUuid": "a-002"},
         ], mtime_offset=5)
 
-        # The search implementation must exclude `continuation` from candidates
-        with pytest.raises((AttributeError, TypeError)):
-            monitor = SessionMonitor()
-            result = monitor._match_parentuuid(continuation, project_dir)
+        predecessor_uuid = SessionMonitor._find_predecessor_by_parentuuid(
+            "a-002", continuation, str(project_dir),
+        )
+        # Should find aaaa-1111 (session A), NOT gggg-7777 (self)
+        assert predecessor_uuid == "aaaa-1111", (
+            f"Should find aaaa-1111 as predecessor (not self), got {predecessor_uuid}"
+        )
 
     def test_correct_session_identified(self, host_shared_dir):
-        """In shared dir with 3 sessions' files, grep finds the right predecessor.
-
-        Expected: RED — parentUuid matching not implemented.
-        """
+        """In shared dir with 3 sessions' files, grep finds the right predecessor."""
         project_dir = host_shared_dir["project_dir"]
 
         # Add a third session's file
@@ -453,13 +431,13 @@ class TestHostRolloverViaParentUuid:
             {"type": "user", "message": {"content": "continued A"}, "uuid": "a-003", "parentUuid": "a-002"},
         ], mtime_offset=5)
 
-        # When parentUuid matching is implemented:
-        # - It should find that "a-002" is the last uuid in session_a (aaaa-1111.jsonl)
-        # - It should NOT match session_b or session C
-        # - The correct session (session A) should have its session_uuids updated
-        with pytest.raises((AttributeError, TypeError)):
-            monitor = SessionMonitor()
-            result = monitor._match_parentuuid(continuation, project_dir)
+        predecessor_uuid = SessionMonitor._find_predecessor_by_parentuuid(
+            "a-002", continuation, str(project_dir),
+        )
+        # Should find session A's file (aaaa-1111), not B (cccc-3333) or C (hhhh-8888)
+        assert predecessor_uuid == "aaaa-1111", (
+            f"Should identify session A as predecessor, got {predecessor_uuid}"
+        )
 
 
 # ── TestHostMtimeProhibition ──────────────────────────────────────────────
