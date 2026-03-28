@@ -177,6 +177,10 @@ graph crosstalk broadcast "message"                        # send to all live se
 - WSL2 on Windows, browser visible via WSLg (`DISPLAY=:0`)
 - Key packages: `scrapling[all]`, `markdownify`, `beautifulsoup4`
 
+## Testing convention
+
+Always tee test output: `pytest ... 2>&1 | tee /tmp/test-results.txt`. Never re-run to re-read.
+
 ## Conventions
 
 - Tools live under `tools/<name>/` with a `TOOL.md`
