@@ -10,6 +10,7 @@ FROM autonomy-agent
 # ── Dashboard Python deps (Starlette TestClient / API contract tests) ──
 USER root
 RUN pip install --break-system-packages --no-cache-dir \
-        starlette httpx uvicorn jinja2 pymysql sse-starlette
+        starlette httpx uvicorn jinja2 pymysql sse-starlette \
+        inotify_simple pytest-asyncio
 USER agent
 ENTRYPOINT ["claude", "--dangerously-skip-permissions"]

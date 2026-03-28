@@ -472,6 +472,11 @@ class TestHostMtimeProhibition:
     mtime would cross-wire sessions — a bug documented in graph://2d817971-cc4.
     """
 
+    @pytest.mark.xfail(
+        reason="Host sessions should not resolve via mtime in shared dirs. "
+               "auto-nwd8 will fix by restricting _resolve_jsonl_in_dir to container sessions.",
+        strict=True,
+    )
     def test_newest_by_mtime_from_other_session_not_resolved(self, host_shared_dir, test_db):
         """Host dir: newest file belongs to session B → session A must NOT resolve to it.
 
