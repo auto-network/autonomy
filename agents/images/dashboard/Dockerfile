@@ -10,7 +10,8 @@ USER root
 
 # Dashboard dependencies (python3-pip already in base image)
 RUN pip install --break-system-packages --no-cache-dir \
-       starlette uvicorn websockets httptools
+       starlette uvicorn websockets httptools \
+       inotify_simple pytest-asyncio
 
 # Copy dashboard source into image
 COPY tools/dashboard/ /opt/autonomy/tools/dashboard/
