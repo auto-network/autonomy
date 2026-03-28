@@ -235,10 +235,11 @@ class TestMonitorRecovery:
         # Now a JSONL appears in the directory (Claude started writing)
         jsonl = _make_jsonl(sess_dir, "late-arriving-uuid")
 
-        # The resolution logic should find it
-        resolved = SessionMonitor._resolve_jsonl_in_dir(sess_dir)
-        assert resolved is not None
-        assert resolved.name == "late-arriving-uuid.jsonl"
+        # The resolution logic should find it via _find_primary_jsonls
+        # (IN_CREATE handler uses this to discover files in the directory)
+        primaries = _find_primary_jsonls(sess_dir)
+        assert len(primaries) == 1
+        assert primaries[0].name == "late-arriving-uuid.jsonl"
 
     def test_stale_subagent_path_cleared_on_recovery(self, test_env):
         """DB has jsonl_path pointing to subagent file → should be detected as invalid.
