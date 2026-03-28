@@ -30,6 +30,7 @@ graph crosstalk broadcast "msg"   # Send to all live sessions
 graph thought "text" --tags x     # Capture idea discovered during work
 graph thread create "title"       # Create a thought thread
 graph thread park/done/active <id> # Manage thread lifecycle
+graph dispatch status <bead-id>   # Post-dispatch detail: decision, experience, session links
 graph dispatch stats              # Aggregate stats: success rate, tooling, failures
 graph dispatch stats --trend      # Weekly trend with direction indicators
 graph dispatch stats --by-image   # Break down by container image
@@ -44,6 +45,7 @@ graph set-nag --interval 10       # Enable idle nag (--off to disable)
 1. `graph dispatch approve <bead-id>` — release bead for dispatch
 2. `graph wait <bead-id>` — block until dispatched bead completes
 3. `graph dispatch status` — check overall queue at any time
+4. `graph dispatch status <bead-id>` — inspect a completed run's results
 
 ## Beads (`bd`)
 
