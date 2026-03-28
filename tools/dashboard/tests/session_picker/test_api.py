@@ -97,11 +97,11 @@ class TestSessionRoleAPI:
 
 class TestConnectWiring:
     """Does _connectSession actually initialize the chat panel?
-    These read experiment.js as text — no browser needed, instant results."""
+    These read design.js as text — no browser needed, instant results."""
 
     def _get_function_body(self, func_name, end_marker):
         repo_root = Path(__file__).resolve().parents[4]
-        js = (repo_root / "tools/dashboard/static/js/pages/experiment.js").read_text()
+        js = (repo_root / "tools/dashboard/static/js/pages/design.js").read_text()
         start = js.find(f"{func_name}:")
         end = js.find(f"{end_marker}:", start)
         assert start != -1, f"{func_name} not found"

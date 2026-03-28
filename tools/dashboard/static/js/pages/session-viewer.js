@@ -6,7 +6,7 @@
  *
  * Modes:
  *   'page'    — session detail page, URL-driven (/session/{project}/{id})
- *   'panel'   — experiment page chat panel, configure() called by experiment.js
+ *   'panel'   — design page chat panel, configure() called by design.js
  *   'overlay' — bottom-docked overlay, controlled via _livePanelLoad/_livePanelReset
  *
  * Usage:
@@ -316,7 +316,7 @@
         }
 
         if (this._mode === 'panel') {
-          // Panel: wait for configure() from experiment.js
+          // Panel: wait for configure() from design.js
           return;
         }
 
