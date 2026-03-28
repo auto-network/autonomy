@@ -3348,7 +3348,8 @@ def main():
     p_runs.add_argument("--json", action="store_true", help="Output as JSON")
     p_runs.set_defaults(func=cmd_dispatch_runs)
 
-    p_dstatus = dispatch_sub.add_parser("status", help="Compact one-liner summary")
+    p_dstatus = dispatch_sub.add_parser("status", help="Compact one-liner summary, or detail for a bead")
+    p_dstatus.add_argument("bead_id", nargs="?", help="Bead ID for detailed view")
     p_dstatus.add_argument("--json", action="store_true", help="Output as JSON")
     p_dstatus.set_defaults(func=cmd_dispatch_status)
 
