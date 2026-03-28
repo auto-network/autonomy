@@ -308,70 +308,12 @@ class TestInotifyTailerLoop:
             except asyncio.CancelledError:
                 pass
 
-    @pytest.mark.asyncio
-    async def test_polling_fallback_works(self, setup_env):
-        """When inotify is disabled, polling loop still delivers entries."""
-        tmp_path, db_path = setup_env
-
-        sess_dir = tmp_path / "sessions"
-        sess_dir.mkdir()
-        jsonl = sess_dir / "test.jsonl"
-        jsonl.touch()
-        _insert_session(db_path, "auto-poll-test", str(jsonl), str(sess_dir))
-
+    def test_polling_tailer_removed(self, setup_env):
+        """Polling tailer has been removed — only inotify path exists."""
         import tools.dashboard.session_monitor as sm
-        from tools.dashboard.event_bus import EventBus
-
-        original = sm._HAS_INOTIFY
-        try:
-            sm._HAS_INOTIFY = False
-            mon = sm.SessionMonitor()
-            bus = EventBus()
-
-            def simple_parser(line: str):
-                try:
-                    return json.loads(line)
-                except Exception:
-                    return None
-
-            # Mock tmux check so liveness loop doesn't kill our test session
-            with patch.object(sm.SessionMonitor, "_check_tmux", staticmethod(lambda name: True)):
-                await mon.start(event_bus=bus, entry_parser=simple_parser)
-                assert mon._use_inotify is False
-
-                q = bus.subscribe()
-                await asyncio.sleep(0.1)
-                while not q.empty():
-                    q.get_nowait()
-
-                _write_jsonl_entry(jsonl, _make_assistant_entry("polling test"))
-
-                deadline = time.monotonic() + 3.0
-                topic = data = None
-                while time.monotonic() < deadline:
-                    remaining = deadline - time.monotonic()
-                    try:
-                        topic, data, seq = await asyncio.wait_for(q.get(), timeout=max(0.01, remaining))
-                        if topic == "session:messages":
-                            break
-                    except asyncio.TimeoutError:
-                        break
-
-                assert topic == "session:messages", f"Expected session:messages, got {topic}"
-                assert data["session_id"] == "auto-poll-test"
-
-                mon._tailer_task.cancel()
-                mon._liveness_task.cancel()
-                try:
-                    await mon._tailer_task
-                except asyncio.CancelledError:
-                    pass
-                try:
-                    await mon._liveness_task
-                except asyncio.CancelledError:
-                    pass
-        finally:
-            sm._HAS_INOTIFY = original
+        assert not hasattr(sm.SessionMonitor, "_polling_tailer_loop"), (
+            "_polling_tailer_loop should have been removed"
+        )
 
 
 class TestRegisterDeregister:

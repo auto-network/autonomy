@@ -281,13 +281,13 @@ class TestContainerRollover:
             )
 
     def test_first_file_sets_resolved(self, container_session):
-        """First JSONL in empty session → resolves via _resolve_jsonl_in_dir.
+        """First JSONL in empty session → discoverable via _find_primary_jsonls.
 
-        Expected: GREEN — _resolve_jsonl_in_dir returns newest JSONL in dir.
+        Expected: GREEN — _find_primary_jsonls returns the JSONL in dir.
         """
-        resolved = SessionMonitor._resolve_jsonl_in_dir(container_session["resolution_dir"])
-        assert resolved is not None
-        assert resolved.name == f"{container_session['uuid']}.jsonl"
+        primaries = _find_primary_jsonls(container_session["resolution_dir"])
+        assert len(primaries) == 1
+        assert primaries[0].name == f"{container_session['uuid']}.jsonl"
 
     def test_subagent_file_does_not_trigger(self, container_session):
         """Subagent JSONL (in uuid/subagents/) → no rollover, session_uuids unchanged.
@@ -445,73 +445,33 @@ class TestHostRolloverViaParentUuid:
 class TestHostMtimeProhibition:
     """Host sessions must NEVER use mtime to match files across sessions.
 
-    The mtime-based resolution is fine for container sessions (isolated directory,
-    all files belong to one session). But for host sessions in a shared directory,
-    mtime would cross-wire sessions — a bug documented in graph://2d817971-cc4.
+    The mtime-based _resolve_jsonl_in_dir has been removed entirely (auto-uhnw).
+    Host resolution uses only: meta.json match, handshake, or parentUuid chain.
     """
 
-    @pytest.mark.xfail(
-        reason="Host sessions should not resolve via mtime in shared dirs. "
-               "auto-nwd8 will fix by restricting _resolve_jsonl_in_dir to container sessions.",
-        strict=True,
-    )
-    def test_newest_by_mtime_from_other_session_not_resolved(self, host_shared_dir, test_db):
-        """Host dir: newest file belongs to session B → session A must NOT resolve to it.
+    def test_mtime_resolution_method_removed(self):
+        """_resolve_jsonl_in_dir no longer exists — mtime scanning is gone.
 
-        Expected: RED — current code uses mtime via _resolve_jsonl_in_dir which would
-        return session B's file as "newest". The test asserts this is wrong behavior.
+        Expected: GREEN — the method was removed as dead code.
         """
-        project_dir = host_shared_dir["project_dir"]
-        session_a = host_shared_dir["session_a"]
-        session_b = host_shared_dir["session_b"]
-
-        # Make session B's file the newest
-        os.utime(session_b, (time.time() + 100, time.time() + 100))
-
-        # If we naively use _resolve_jsonl_in_dir on the shared dir, it returns
-        # the newest file — which belongs to session B, not session A.
-        resolved = SessionMonitor._resolve_jsonl_in_dir(project_dir)
-
-        # Current behavior: resolved == session_b (WRONG for session A)
-        # Desired behavior: host resolution should NOT use _resolve_jsonl_in_dir at all
-        # This test FAILS because the function returns session_b
-        assert resolved != session_b, (
-            "_resolve_jsonl_in_dir should not be used for host sessions in shared dirs. "
-            f"It returned {resolved.name} which belongs to session B, not session A."
+        assert not hasattr(SessionMonitor, "_resolve_jsonl_in_dir"), (
+            "_resolve_jsonl_in_dir should have been removed — "
+            "mtime-based resolution is not valid for host sessions in shared dirs."
         )
 
     def test_only_valid_resolution_paths(self, host_shared_dir):
         """Host session resolves ONLY via: meta.json match, handshake, or parentUuid chain.
 
-        Expected: RED — _resolve_jsonl_in_dir uses mtime, which is not a valid
-        resolution path for host sessions.
-
-        This test documents the valid resolution methods for host sessions.
+        Expected: GREEN — _resolve_jsonl_in_dir is gone, only valid paths remain.
         """
-        project_dir = host_shared_dir["project_dir"]
-
-        # Create a .meta.json that identifies which file belongs to which session
-        meta_a = project_dir / "aaaa-1111.meta.json"
-        meta_a.write_text(json.dumps({"tmux_session": "host-session-a"}))
-
-        # Valid path 1: .meta.json match — file next to meta with matching tmux_session
-        # This is what _resolve_host_jsonl does (correct)
+        # Valid path 1: .meta.json match — _resolve_host_jsonl
         monitor = SessionMonitor()
-        with patch.object(Path, "home", return_value=host_shared_dir["project_dir"].parent.parent):
-            # _resolve_host_jsonl scans ~/.claude/projects/*/.meta.json
-            # We can't easily test this without mocking home(), so verify the
-            # method exists and would be the correct path
-            assert hasattr(monitor, "_resolve_host_jsonl")
+        assert hasattr(monitor, "_resolve_host_jsonl")
 
-        # Invalid path: mtime-based resolution in shared directory
-        # _resolve_jsonl_in_dir returns newest by mtime — wrong for host sessions
-        resolved_by_mtime = SessionMonitor._resolve_jsonl_in_dir(project_dir)
-        # This returns the newest file regardless of session ownership — WRONG
-        # Test that this SHOULD NOT be the resolution method for host sessions
-        assert resolved_by_mtime is not None, (
-            "Precondition: _resolve_jsonl_in_dir finds a file (it just shouldn't be used for host)"
+        # Valid path 2: IN_CREATE + parentUuid chain — _handle_host_create
+        assert hasattr(monitor, "_handle_host_create")
+
+        # Invalid path: mtime-based resolution — removed
+        assert not hasattr(SessionMonitor, "_resolve_jsonl_in_dir"), (
+            "mtime-based resolution must not exist"
         )
-        # The real assertion: host sessions should never reach _resolve_jsonl_in_dir
-        # We verify this by checking that host sessions in _recover_unresolved_sessions
-        # use _resolve_host_jsonl instead
-        # (The implementation correctly branches on type=="host" — this test documents the invariant)
