@@ -308,13 +308,9 @@ class SessionMonitor:
         self._entry_parser = entry_parser
         self._entry_enricher = entry_enricher
         self._init_inotify()
-        tailer = self._inotify_tailer_loop if self._use_inotify else self._polling_tailer_loop
-        self._tailer_task = asyncio.create_task(tailer())
+        self._tailer_task = asyncio.create_task(self._inotify_tailer_loop())
         self._liveness_task = asyncio.create_task(self._liveness_loop())
-        logger.info(
-            "session_monitor: background tasks started (mode=%s)",
-            "inotify" if self._use_inotify else "polling",
-        )
+        logger.info("session_monitor: background tasks started (mode=inotify)")
         # Re-scan unresolved container sessions from prior server lifetime
         self._recover_unresolved_sessions()
         # Broadcast registry for any sessions that exist in DB
@@ -528,115 +524,6 @@ class SessionMonitor:
 
     # ── JSONL Tailer ──────────────────────────────────────────────
 
-    async def _polling_tailer_loop(self) -> None:
-        """Check all live sessions for new JSONL content every 1s."""
-        while True:
-            try:
-                sessions = get_tailable_sessions()
-                for row in sessions:
-                    tmux_name = row["tmux_name"]
-                    # Ensure we have ephemeral tail state
-                    if tmux_name not in self._tail_states:
-                        self._tail_states[tmux_name] = _TailState()
-                        logger.info(
-                            "session_monitor: tailer picked up %s  jsonl=%s  offset=%d",
-                            tmux_name, Path(row["jsonl_path"]).name, row.get("file_offset", 0),
-                        )
-
-                    ts = self._tail_states[tmux_name]
-                    _, new_entries = await asyncio.to_thread(
-                        self._tail_one, row, ts
-                    )
-                    if new_entries:
-                        # Dedup queued messages: if an enqueue entry is followed
-                        # by a user entry with the same content, drop the duplicate.
-                        # Uses a one-slot lookahead on _TailState — no accumulation.
-                        deduped = []
-                        for entry in new_entries:
-                            if entry.get("queued"):
-                                ts.last_enqueue_content = entry.get("content", "").strip()
-                                deduped.append(entry)
-                            elif (entry.get("type") == "user"
-                                  and ts.last_enqueue_content
-                                  and entry.get("content", "").strip() == ts.last_enqueue_content):
-                                ts.last_enqueue_content = None  # consumed — skip this duplicate
-                            else:
-                                ts.last_enqueue_content = None
-                                deduped.append(entry)
-                        new_entries = deduped
-
-                        self._enrich_agent_entries(row, ts, new_entries)
-                    if new_entries and self._event_bus:
-                        ts.broadcast_seq += 1
-                        # Re-read to get updated values
-                        updated = get_session(tmux_name)
-                        # session_id is ALWAYS tmux_name — the one identifier that's
-                        # stable from creation to death. Never changes mid-lifecycle.
-                        await self._event_bus.broadcast(
-                            "session:messages",
-                            {
-                                "session_id": tmux_name,
-                                "entries": new_entries,
-                                "is_live": bool(updated["is_live"]) if updated else True,
-                                "seq": ts.broadcast_seq,
-                                "context_tokens": updated["context_tokens"] if updated else 0,
-                                "size_bytes": Path(row["jsonl_path"]).stat().st_size if row.get("jsonl_path") else 0,
-                            },
-                            dedup=False,
-                        )
-
-                # Also try to resolve sessions that need directory resolution
-                unresolved = [
-                    (name, ts) for name, ts in self._tail_states.items()
-                    if ts.needs_resolution and ts.resolution_dir is not None
-                ]
-                for tmux_name, ts in unresolved:
-                    resolved = await asyncio.to_thread(self._resolve_jsonl_in_dir, ts.resolution_dir)
-                    if resolved:
-                        ts.needs_resolution = False
-                        # Keep resolution_dir for rollover detection
-                        # Use link_and_enrich so container sessions also get graph_source_id
-                        from tools.dashboard.dao.dashboard_db import link_and_enrich
-                        link_and_enrich(
-                            tmux_name,
-                            session_uuid=resolved.stem,
-                            jsonl_path=str(resolved),
-                            project=resolved.parent.name,
-                        )
-
-                # Detect JSONL rollover in container sessions
-                tailable = {r["tmux_name"]: r for r in sessions}
-                for tmux_name, ts in list(self._tail_states.items()):
-                    if ts.needs_resolution:
-                        continue  # still unresolved, handled above
-                    row = tailable.get(tmux_name)
-                    if not row or not row.get("jsonl_path"):
-                        continue
-                    current_path = Path(row["jsonl_path"])
-                    if not current_path.exists():
-                        continue
-                    sessions_dir = ts.resolution_dir or current_path.parent
-                    jsonl_files = sorted(_find_primary_jsonls(sessions_dir), key=lambda p: p.stat().st_mtime)
-                    if len(jsonl_files) <= 1:
-                        continue
-                    newest = jsonl_files[-1]
-                    if newest != current_path:
-                        logger.info("session_monitor: ROLLOVER %s → %s (was %s)", tmux_name, newest.name, current_path.name)
-                        from tools.dashboard.dao.dashboard_db import link_and_enrich
-                        link_and_enrich(
-                            tmux_name,
-                            session_uuid=newest.stem,
-                            jsonl_path=str(newest),
-                            project=sessions_dir.name,
-                        )
-                        # Reset tail state for new file, preserving resolution_dir
-                        old_resolution_dir = self._tail_states.pop(tmux_name, _TailState()).resolution_dir
-                        self._tail_states[tmux_name] = _TailState(resolution_dir=old_resolution_dir)
-
-            except Exception:
-                logger.exception("session_monitor: tailer error")
-            await asyncio.sleep(1)
-
     async def _process_tail_entries(
         self, tmux_name: str, row: dict, ts: _TailState, new_entries: list,
     ) -> None:
@@ -675,94 +562,10 @@ class SessionMonitor:
                 dedup=False,
             )
 
-    async def _resolve_and_rollover(self) -> None:
-        """Resolve unresolved sessions and detect JSONL rollover."""
-        # Resolve sessions that need directory resolution
-        unresolved = [
-            (name, ts) for name, ts in self._tail_states.items()
-            if ts.needs_resolution and ts.resolution_dir is not None
-        ]
-        for tmux_name, ts in unresolved:
-            resolved = await asyncio.to_thread(self._resolve_jsonl_in_dir, ts.resolution_dir)
-            if resolved:
-                ts.needs_resolution = False
-                from tools.dashboard.dao.dashboard_db import link_and_enrich
-                link_and_enrich(
-                    tmux_name,
-                    session_uuid=resolved.stem,
-                    jsonl_path=str(resolved),
-                    project=resolved.parent.name,
-                )
-                # Add inotify watches for newly resolved file
-                if self._use_inotify:
-                    self._add_file_watch(tmux_name, str(resolved))
-                    if ts.resolution_dir:
-                        self._add_dir_watch(tmux_name, str(ts.resolution_dir))
-
-        # Detect JSONL rollover in container sessions
-        sessions = get_tailable_sessions()
-        tailable = {r["tmux_name"]: r for r in sessions}
-        for tmux_name, ts in list(self._tail_states.items()):
-            if ts.needs_resolution:
-                continue
-            row = tailable.get(tmux_name)
-            if not row or not row.get("jsonl_path"):
-                continue
-            current_path = Path(row["jsonl_path"])
-            if not current_path.exists():
-                continue
-            sessions_dir = ts.resolution_dir or current_path.parent
-            jsonl_files = sorted(
-                _find_primary_jsonls(sessions_dir), key=lambda p: p.stat().st_mtime,
-            )
-            if len(jsonl_files) <= 1:
-                continue
-            newest = jsonl_files[-1]
-            if newest != current_path:
-                logger.info(
-                    "session_monitor: ROLLOVER %s → %s (was %s)",
-                    tmux_name, newest.name, current_path.name,
-                )
-                from tools.dashboard.dao.dashboard_db import link_and_enrich
-                link_and_enrich(
-                    tmux_name,
-                    session_uuid=newest.stem,
-                    jsonl_path=str(newest),
-                    project=sessions_dir.name,
-                )
-                # Swap watches to new file
-                if self._use_inotify:
-                    self._remove_watches(tmux_name)
-                old_resolution_dir = self._tail_states.pop(tmux_name, _TailState()).resolution_dir
-                self._tail_states[tmux_name] = _TailState(resolution_dir=old_resolution_dir)
-                if self._use_inotify:
-                    self._add_file_watch(tmux_name, str(newest))
-                    if old_resolution_dir:
-                        self._add_dir_watch(tmux_name, str(old_resolution_dir))
-
-        # Ensure watches exist for all tailable sessions (picks up newly registered ones)
-        if self._use_inotify:
-            for row in sessions:
-                tmux_name = row["tmux_name"]
-                ts = self._tail_states.get(tmux_name)
-                if not ts:
-                    continue
-                if ts.watch_descriptor is None and row.get("jsonl_path"):
-                    self._add_file_watch(tmux_name, row["jsonl_path"])
-                if ts.dir_watch_descriptor is None:
-                    dp = row.get("resolution_dir") or (
-                        str(Path(row["jsonl_path"]).parent) if row.get("jsonl_path") else None
-                    )
-                    if dp:
-                        self._add_dir_watch(tmux_name, dp)
-
     # ── inotify tailer ────────────────────────────────────────────
 
     async def _inotify_tailer_loop(self) -> None:
         """inotify-driven tailer — instant delivery on IN_MODIFY, 1s fallback tick."""
-        _HOUSEKEEP_INTERVAL = 5.0  # seconds between resolution / rollover checks
-        last_housekeep = 0.0
-
         while True:
             try:
                 # Block up to 1 s waiting for inotify events
@@ -795,12 +598,6 @@ class SessionMonitor:
                     ts = self._tail_states[tmux_name]
                     _, new_entries = await asyncio.to_thread(self._tail_one, row, ts)
                     await self._process_tail_entries(tmux_name, row, ts, new_entries)
-
-                # Periodic housekeeping
-                now = time.monotonic()
-                if now - last_housekeep >= _HOUSEKEEP_INTERVAL:
-                    last_housekeep = now
-                    await self._resolve_and_rollover()
 
             except Exception:
                 logger.exception("session_monitor: inotify tailer error")
@@ -1127,17 +924,6 @@ class SessionMonitor:
         # Update offset even if no entries parsed (whitespace lines)
         update_tail_state(tmux_name, file_offset=new_offset)
         return False, parsed_entries
-
-    @staticmethod
-    def _resolve_jsonl_in_dir(directory: Path) -> Path | None:
-        """Find the JSONL file inside a session directory (container sessions)."""
-        try:
-            jsonls = _find_primary_jsonls(directory)
-            if jsonls:
-                return max(jsonls, key=lambda p: p.stat().st_mtime)
-        except OSError:
-            pass
-        return None
 
     # ── Liveness Checker ──────────────────────────────────────────
 

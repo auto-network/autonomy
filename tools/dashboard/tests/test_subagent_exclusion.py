@@ -3,10 +3,9 @@
 Subagent JSONL files (in uuid/subagents/) must NEVER interfere with primary
 session file management. The _find_primary_jsonls fix (auto-uq0b) filters them.
 
-Three historically buggy code paths (graph://b478c977):
-  1. Initial resolution — _resolve_jsonl_in_dir
-  2. Rollover detection — _find_primary_jsonls in tailer loop
-  3. Recovery — _recover_unresolved_sessions
+Two code paths that use _find_primary_jsonls:
+  1. IN_CREATE handler — file discovery in resolution_dir
+  2. Recovery — _recover_unresolved_sessions
 
 Uses tmp_path with real filesystem. No real sessions.
 """
@@ -73,10 +72,9 @@ class TestSubagentExclusion:
     """Subagent files must never be selected as primary session JSONL."""
 
     def test_subagent_newer_than_primary_ignored(self, session_with_subagents):
-        """Subagent file has newer mtime → primary still selected by _resolve_jsonl_in_dir.
+        """Subagent file has newer mtime → _find_primary_jsonls excludes it.
 
-        Expected: GREEN — _find_primary_jsonls (used by _resolve_jsonl_in_dir) excludes
-        paths containing "subagents".
+        Expected: GREEN — _find_primary_jsonls excludes paths containing "subagents".
         """
         rd = session_with_subagents["resolution_dir"]
         primary = session_with_subagents["jsonl"]
@@ -86,10 +84,10 @@ class TestSubagentExclusion:
         assert sub.stat().st_mtime > primary.stat().st_mtime, \
             "Precondition: subagent file should be newer than primary"
 
-        resolved = SessionMonitor._resolve_jsonl_in_dir(rd)
-        assert resolved is not None
-        assert resolved == primary, (
-            f"Should resolve to primary {primary.name}, not subagent {sub.name}"
+        primaries = _find_primary_jsonls(rd)
+        assert len(primaries) == 1
+        assert primaries[0] == primary, (
+            f"Should find primary {primary.name}, not subagent {sub.name}"
         )
 
     def test_find_primary_jsonls_excludes_subagents(self, session_with_subagents):
