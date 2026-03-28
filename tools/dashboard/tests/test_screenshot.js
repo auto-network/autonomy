@@ -134,7 +134,7 @@ describe('_handleScreenshotResponse', () => {
 
 describe('capture state machine', () => {
   /**
-   * Minimal simulation of the experiment.js captureScreenshot state machine.
+   * Minimal simulation of the design.js captureScreenshot state machine.
    * Tests the state transitions without requiring Alpine or a browser.
    */
   function makeStateMachine(manualCaptureFn) {
