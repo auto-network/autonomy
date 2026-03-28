@@ -36,7 +36,11 @@ def mock_fixture(tmp_path):
 
 @pytest.fixture
 def test_client(mock_fixture, monkeypatch):
-    """TestClient backed by DASHBOARD_MOCK — no real DBs needed."""
+    """TestClient backed by DASHBOARD_MOCK — no real DBs needed.
+
+    Reloads server into mock mode for the test, then restores it afterward
+    so subsequent test files don't inherit mock-mode server state.
+    """
     monkeypatch.setenv("DASHBOARD_MOCK", mock_fixture)
 
     # Reload mock DAO so it picks up the new DASHBOARD_MOCK path
@@ -50,3 +54,8 @@ def test_client(mock_fixture, monkeypatch):
     from starlette.testclient import TestClient
     with TestClient(server.app) as client:
         yield client
+
+    # Restore server to non-mock state so later test files get a clean module
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+    importlib.reload(mock_mod)
+    importlib.reload(server)
