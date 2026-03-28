@@ -49,11 +49,10 @@
         init: function () {
           window._designPage = this;
           this.revisionId = _revisionIdFromPath();
-          this.chatOpen = localStorage.getItem('design-chatOpen-' + this.revisionId) === 'true';
           this._load();
           var self = this;
           this.$watch('chatOpen', function (open) {
-            localStorage.setItem('design-chatOpen-' + self.revisionId, open ? 'true' : 'false');
+            localStorage.setItem('design-chatOpen-' + self.designId, open ? 'true' : 'false');
             if (open && !self.chatConnected) self._loadChatSessions();
             if (open && self.chatConnected) {
               self.$nextTick(function () {
@@ -101,8 +100,7 @@
             this._migrateLocalStorage();
 
             // Restore chat state from design-scoped key
-            var designChatOpen = localStorage.getItem('design-chatOpen-' + this.designId);
-            if (designChatOpen === 'true') this.chatOpen = true;
+            this.chatOpen = localStorage.getItem('design-chatOpen-' + this.designId) === 'true';
 
             // Post-render: inject iframe content
             this.$nextTick(function () { this._injectIframe(data); }.bind(this));
