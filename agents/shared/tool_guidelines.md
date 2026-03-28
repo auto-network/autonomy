@@ -221,19 +221,28 @@ Use `localhost:8080`, not the Tailnet IP.
 
 ## Testing
 
-Run tests before committing. Dashboard features have tests under `tools/dashboard/tests/`.
+ALWAYS pipe test output through `tee` — never run pytest without it:
 
 ```bash
-# Run all dashboard tests
-pytest
-
-# Run tests for the feature you changed
-pytest tools/dashboard/tests/session_picker
-
-# Run just the fast API tests (no browser)
-pytest tools/dashboard/tests/session_picker/test_api.py
+python3 -m pytest tools/dashboard/tests/ -q --tb=short 2>&1 | tee /tmp/test-results.txt
 ```
 
+This captures all output to a file while still showing live progress. If you need to inspect specific failures afterward:
+
+```bash
+grep FAILED /tmp/test-results.txt
+cat /tmp/test-results.txt
+```
+
+NEVER re-run the full suite just to see a different part of the output. The file has everything.
+
+For faster iteration on specific failures, run individual test files:
+
+```bash
+python3 -m pytest tools/dashboard/tests/test_specific.py -v --tb=short 2>&1 | tee /tmp/test-results.txt
+```
+
+Dashboard features have tests under `tools/dashboard/tests/`.
 If your bead includes failing test assertions in its acceptance criteria, run them and verify they pass before writing decision.json. If tests fail, your implementation is not complete.
 
 ### Visual testing with mock dashboard
