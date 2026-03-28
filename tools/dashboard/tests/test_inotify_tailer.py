@@ -19,6 +19,11 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+# Skip entire module when inotify_simple or pytest-asyncio aren't installed
+# (these are container-only deps, added in the dashboard Docker image)
+pytest.importorskip("inotify_simple")
+pytest.importorskip("pytest_asyncio")
+
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
