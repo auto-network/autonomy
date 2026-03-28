@@ -769,8 +769,42 @@ def _stats_by_image(runs, args):
         print(f"{img[:35]:<35} {n:>4}  {success:>6}%  {tooling:>7}  {wa:>10}")
 
 
+def _find_session_source_id(run_dir: str) -> str | None:
+    """Find the graph source ID for the session JSONL in a run directory.
+
+    Queries the graph DB for sources whose file_path contains the run dir name
+    under an agent-runs/ directory with sessions/ in the path.
+    """
+    import sqlite3
+
+    # Try graph DB paths: $GRAPH_DB env var, then local data/graph.db
+    db_path = os.environ.get("GRAPH_DB")
+    if not db_path:
+        from pathlib import Path
+        local = Path(__file__).resolve().parent.parent.parent / "data" / "graph.db"
+        if local.exists():
+            db_path = str(local)
+    if not db_path:
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        row = conn.execute(
+            "SELECT id FROM sources WHERE file_path LIKE ? AND type = 'session' LIMIT 1",
+            (f"%agent-runs/{run_dir}/sessions/%",),
+        ).fetchone()
+        conn.close()
+        return row[0] if row else None
+    except (sqlite3.Error, OSError):
+        return None
+
+
 def cmd_dispatch_status(args):
-    """Print compact one-liner summary."""
+    """Print compact one-liner summary, or detail for a specific bead."""
+    bead_id = getattr(args, "bead_id", None)
+    if bead_id:
+        return _cmd_dispatch_status_detail(args, bead_id)
+
     base = _get_dashboard_url()
     ctx = _make_ssl_ctx()
 
@@ -809,3 +843,98 @@ def cmd_dispatch_status(args):
     if failed_today:
         parts.append(f"{failed_today} failed")
     print(", ".join(parts))
+
+
+def _cmd_dispatch_status_detail(args, bead_id: str):
+    """Print detailed status for a specific bead's dispatch run."""
+    base = _get_dashboard_url()
+    ctx = _make_ssl_ctx()
+
+    try:
+        runs = _api_call(base, "/api/dispatch/runs", ctx)
+    except (urllib.error.URLError, OSError):
+        print(f"Dashboard not reachable at {base} \u2014 is it running?")
+        sys.exit(1)
+
+    # Find runs for this bead, sorted by timestamp descending (latest first)
+    bead_runs = [r for r in runs if r.get("bead_id") == bead_id]
+    if not bead_runs:
+        print(f"No dispatch run found for {bead_id}", file=sys.stderr)
+        sys.exit(1)
+
+    # Latest run (runs are typically returned newest-first, but sort to be safe)
+    bead_runs.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+    run = bead_runs[0]
+
+    status = run.get("status", "?")
+    duration = _format_duration(run.get("duration_secs"))
+    commit_hash = run.get("commit_hash") or ""
+    run_dir = run.get("dir") or ""
+
+    # Merge state
+    merged = _is_merged(commit_hash) if commit_hash else False
+    merge_label = "merged" if merged else "unmerged" if commit_hash else ""
+    status_extra = f" ({merge_label})" if merge_label else ""
+
+    if args.json:
+        source_id = _find_session_source_id(run_dir) if run_dir else None
+        print(json.dumps({
+            "bead_id": bead_id,
+            "status": status,
+            "merge_state": merge_label or None,
+            "duration": run.get("duration_secs"),
+            "commit_hash": commit_hash,
+            "lines_added": run.get("lines_added"),
+            "lines_removed": run.get("lines_removed"),
+            "files_changed": run.get("files_changed"),
+            "scores": (run.get("decision") or {}).get("scores") if isinstance(run.get("decision"), dict) else None,
+            "decision_path": f"data/agent-runs/{run_dir}/decision.json" if run_dir else None,
+            "session_source_id": source_id,
+        }, default=str))
+        return
+
+    # Header
+    print(f"\n{bead_id} {status}{status_extra} \u2014 {duration}")
+
+    # Commit
+    if commit_hash:
+        short_hash = commit_hash[:7]
+        la = run.get("lines_added") or 0
+        lr = run.get("lines_removed") or 0
+        fc = run.get("files_changed") or 0
+        print(f"Commit: {short_hash} (+{la} -{lr}, {fc} file{'s' if fc != 1 else ''})")
+
+    # Scores
+    decision = run.get("decision") or {}
+    scores = decision.get("scores") if isinstance(decision, dict) else None
+    if scores and isinstance(scores, dict):
+        parts = []
+        for key in ("tooling", "clarity", "confidence"):
+            val = scores.get(key)
+            if val is not None:
+                parts.append(f"{key}={val}")
+        if parts:
+            print(f"Scores: {' '.join(parts)}")
+
+    # Reason (for failures)
+    if status in ("FAILED", "BLOCKED"):
+        reason = decision.get("reason", "") if isinstance(decision, dict) else ""
+        if reason:
+            print(f"Reason: {reason[:120]}")
+
+    print()
+
+    # Decision path
+    if run_dir:
+        print(f"Decision:    data/agent-runs/{run_dir}/decision.json")
+
+    # Session/Experience source
+    source_id = _find_session_source_id(run_dir) if run_dir else None
+    if source_id:
+        short_src = source_id[:12] if len(source_id) > 12 else source_id
+        print(f"Experience:  graph read {short_src}")
+        print(f"Session:     graph context {short_src} last")
+    elif run_dir:
+        print(f"Experience:  (source not found \u2014 run `graph agent-runs` to ingest)")
+        print(f"Session:     (source not found)")
+    print()
