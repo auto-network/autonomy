@@ -166,8 +166,10 @@ graph://225a4af7-ee5 — full guide covering fixture states, responsive patterns
 graph set-label "topic description"                        # working title
 graph set-topics "Status line 1" "Status line 2"           # card status lines
 graph set-role researcher                                  # session role
-graph set-nag --interval 10 --message "Check in"           # enable nag
-graph set-nag --off                                        # disable nag
+graph set-nag --interval 10 --message "Check in"           # idle nag
+graph set-nag --dispatch                                   # notify on every dispatch completion
+graph set-nag --off                                        # disable idle nag
+graph set-nag --dispatch --off                             # disable dispatch nag
 graph crosstalk send <session> "message"                   # send message
 graph crosstalk send <session> -c - < /tmp/msg.txt         # pipe long message
 graph crosstalk broadcast "message"                        # send to all live sessions
