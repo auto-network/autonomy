@@ -198,7 +198,21 @@
       <template x-if="isNote">
         <div :data-source-id="src.id" class="mt-4">
           {% include 'partials/zoom-toggle.html' %}
-          <div :style="'font-size:' + mdSizes[zoom]" x-markdown="noteContent"></div>
+          <!-- Rich-content note: inline HTML + toggle -->
+          <template x-if="isRichContent && richHtmlContent">
+            <div style="position:relative;margin:0.5rem 0;">
+              <button @click="showingRichHtml = !showingRichHtml"
+                      class="embed-toggle"
+                      style="position:absolute;top:4px;right:4px;font-size:11px;padding:2px 8px;background:var(--bg,#0f0f23);border:1px solid var(--border,#333);border-radius:4px;color:var(--text-muted,#888);cursor:pointer;z-index:10;"
+                      x-text="showingRichHtml ? 'Text' : 'Diagram'"></button>
+              <div x-show="showingRichHtml" x-html="richHtmlContent" class="rich-content-view" style="border:1px solid var(--border,#333);border-radius:6px;padding:1rem;background:#fff;color:#1a1a2e;"></div>
+              <div x-show="!showingRichHtml" :style="'font-size:' + mdSizes[zoom]" x-markdown="noteContent"></div>
+            </div>
+          </template>
+          <!-- Plain note: markdown -->
+          <template x-if="!isRichContent || !richHtmlContent">
+            <div :style="'font-size:' + mdSizes[zoom]" x-markdown="noteContent"></div>
+          </template>
         </div>
       </template>
 

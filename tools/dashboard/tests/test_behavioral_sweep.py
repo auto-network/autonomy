@@ -486,6 +486,7 @@ SWEEP_GRAPH_ATTACHMENTS = {
         "alt_text": "",
         "size_bytes": 2048,
         "created_at": "2026-03-30T12:00:00Z",
+        "content": "<html><body><h2>Three distinct pause scopes</h2><table><tr><th>Scope</th><th>Trigger</th><th>Effect</th></tr><tr><td>Global</td><td>Auth failure</td><td>All blocked</td></tr><tr><td>Per-label</td><td>Smoke failure</td><td>Label skipped</td></tr></table></body></html>",
     },
     SWEEP_IMAGE_ATT_ID: {
         "id": SWEEP_IMAGE_ATT_ID,
@@ -1844,7 +1845,10 @@ def _navigate_and_eval_async(path: str, js_expr: str, wait_ms: int = 800) -> dic
     """SPA-navigate to a page, wait, run an async JS expression, return parsed dict.
 
     Unlike _navigate_and_check (which wraps in `var r = {}; ... return r;`), this
-    passes the JS expression directly — suitable for async IIFEs that return Promises.
+    supports async expressions.  If the expression is already an IIFE (starts with '('),
+    it is passed through directly.  Otherwise it is auto-wrapped in an async IIFE with
+    a pre-declared `r` object and returned via JSON.stringify, mirroring _navigate_and_check
+    but allowing `await`.
     """
     nav_js = f"navigateTo('{path}')"
     subprocess.run(
@@ -1852,6 +1856,11 @@ def _navigate_and_eval_async(path: str, js_expr: str, wait_ms: int = 800) -> dic
         capture_output=True, timeout=10,
     )
     time.sleep(wait_ms / 1000)
+
+    # Auto-wrap non-IIFE expressions
+    stripped = js_expr.strip()
+    if not stripped.startswith('('):
+        js_expr = f"(async () => {{ var r = {{}}; {js_expr} return JSON.stringify(r); }})()"
 
     result = subprocess.run(
         ["agent-browser", "--json", "eval", js_expr],
