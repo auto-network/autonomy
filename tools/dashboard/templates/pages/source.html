@@ -211,8 +211,8 @@
                       data-testid="rich-content-iframe"
                       :src="richAttachmentUrl"
                       sandbox="allow-scripts allow-same-origin"
-                      style="width:100%;border:1px solid #30363d;border-radius:6px;min-height:200px;"
-                      @load="$el.style.height = ($el.contentDocument.body.scrollHeight + 32) + 'px'"></iframe>
+                      style="width:100%;border:none;border-radius:6px;min-height:200px;display:block;"
+                      @load="try { var d = $el.contentDocument; d.documentElement.style.overflow = 'hidden'; d.body.style.overflow = 'hidden'; $el.style.height = Math.max(d.documentElement.scrollHeight, d.body.offsetHeight) + 'px'; } catch(e) {}"></iframe>
               <div x-show="!showingRichHtml" :style="'font-size:' + mdSizes[zoom]" x-markdown="noteContent"></div>
             </div>
           </template>
