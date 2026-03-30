@@ -5622,9 +5622,22 @@ class _CSPMiddleware(BaseHTTPMiddleware):
         "frame-ancestors 'none'"
     )
 
+    _CSP_FRAMEABLE = (
+        "default-src 'self'; "
+        "script-src 'self' cdn.jsdelivr.net 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' cdn.jsdelivr.net 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self' ws: wss:; "
+        "frame-ancestors 'self'"
+    )
+
     async def dispatch(self, request, call_next):
         response = await call_next(request)
-        response.headers["Content-Security-Policy"] = self._CSP
+        # Allow same-origin framing for attachment URLs (rich-content iframes)
+        if request.url.path.startswith("/api/attachment/"):
+            response.headers["Content-Security-Policy"] = self._CSP_FRAMEABLE
+        else:
+            response.headers["Content-Security-Policy"] = self._CSP
         return response
 
 
