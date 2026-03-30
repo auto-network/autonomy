@@ -31,6 +31,9 @@ function _createEmbedPlaceholder(embedId) {
   return wrapper;
 }
 
+// Exposed globally so source.js can reuse for direct rich-content view
+window.renderRichEmbed = _renderEmbed;
+
 function _renderEmbed(wrapper, data) {
   wrapper.innerHTML = '';
   wrapper.style.position = 'relative';

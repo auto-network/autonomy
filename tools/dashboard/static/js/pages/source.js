@@ -60,8 +60,7 @@
 
       // Rich-content note state
       isRichContent: false,
-      richAttachmentUrl: '',
-      richHtmlContent: '',
+      _richResolveData: null,
       showingRichHtml: true,
 
       // Type flags (computed after fetch)
@@ -297,20 +296,13 @@
             }
           }
 
-          // Detect and fetch rich-content note HTML
+          // Detect rich-content note — render via shared _renderEmbed after DOM ready
           if (this.isNote && this.noteMeta && this.noteMeta.rich_content) {
             this.isRichContent = true;
             try {
               const resolveRes = await fetch('/api/resolve/' + encodeURIComponent(this.id));
               if (resolveRes.ok) {
-                const resolveData = await resolveRes.json();
-                if (resolveData.attachment_url) {
-                  this.richAttachmentUrl = resolveData.attachment_url;
-                  const htmlRes = await fetch(resolveData.attachment_url);
-                  if (htmlRes.ok) {
-                    this.richHtmlContent = await htmlRes.text();
-                  }
-                }
+                this._richResolveData = await resolveRes.json();
               }
             } catch (_) {
               // Fall back to markdown rendering
@@ -319,6 +311,16 @@
 
           this._updateVisibleEntries();
           this.state = 'ready';
+
+          // Render rich-content via shared embed renderer (same as ![[id]] path)
+          if (this.isRichContent && this._richResolveData) {
+            this.$nextTick(() => {
+              const container = document.querySelector('[data-testid="rich-content-container"]');
+              if (container && window.renderRichEmbed) {
+                window.renderRichEmbed(container, this._richResolveData);
+              }
+            });
+          }
 
           // Update page title
           const titleEl = document.getElementById('page-title');
