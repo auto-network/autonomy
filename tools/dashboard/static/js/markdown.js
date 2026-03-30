@@ -50,13 +50,15 @@ function _renderEmbed(wrapper, data) {
     iframe.setAttribute('data-testid', 'rich-content-iframe');
     iframe.src = data.attachment_url;
     iframe.sandbox = 'allow-same-origin';
-    iframe.style.cssText = 'width:100%;border:1px solid var(--border,#333);border-radius:6px;min-height:200px;background:#fff;';
-    iframe.setAttribute('loading', 'lazy');
-    // Auto-resize via postMessage
+    iframe.style.cssText = 'width:100%;border:none;border-radius:6px;min-height:200px;display:block;';
+    // Auto-resize: kill scrollbar inside content, then match height
     iframe.addEventListener('load', () => {
       try {
-        const h = iframe.contentDocument.documentElement.scrollHeight;
-        if (h > 0) iframe.style.height = h + 'px';
+        const d = iframe.contentDocument;
+        d.documentElement.style.overflow = 'hidden';
+        d.body.style.overflow = 'hidden';
+        const h = Math.max(d.documentElement.scrollHeight, d.body.offsetHeight);
+        iframe.style.height = h + 'px';
       } catch (e) { /* cross-origin, ignore */ }
     });
     contentArea.appendChild(iframe);
