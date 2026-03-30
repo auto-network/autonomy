@@ -230,6 +230,7 @@ CREATE TABLE IF NOT EXISTS attachments (
     source_id   TEXT,                   -- linked graph source (session/note)
     turn_number INTEGER,               -- conversation turn
     metadata    TEXT DEFAULT '{}',      -- JSON: width, height, description, tags
+    alt_text    TEXT,                   -- textual description / alt-text for accessibility and agent consumption
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_attachments_hash ON attachments(hash);

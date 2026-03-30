@@ -319,6 +319,88 @@ def _resolve_source_for_link(db, source_arg):
     return result, None
 
 
+def _resolve_embed(db, embed_id):
+    """Resolve a ![[id]] embed reference. Returns (type, marker_line, body_text) or None."""
+    # Try as a source (rich-content note)
+    source = db.get_source(embed_id)
+    if source:
+        meta = source.get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        if meta.get("rich_content"):
+            # Rich-content note — get content as alt-text, find HTML attachment
+            entries = db.get_source_content(source["id"])
+            content_text = entries[0]["content"] if entries else ""
+            # Find latest HTML attachment
+            html_atts = db.list_attachments(source_id=source["id"])
+            # Also check versioned attachments
+            versioned = db.conn.execute(
+                "SELECT * FROM attachments WHERE source_id LIKE ? ORDER BY created_at DESC LIMIT 1",
+                (f"{source['id']}@%",)
+            ).fetchone()
+            html_att = dict(versioned) if versioned else None
+            if html_att:
+                marker = f"[attachment(text/html): graph://{html_att['id'][:12]} — {html_att['filename']}]"
+            else:
+                marker = f"[rich-content note: {source['id'][:12]}]"
+            return "rich-content", marker, content_text, source
+        else:
+            # Plain note embed — just inline content
+            entries = db.get_source_content(source["id"])
+            content_text = entries[0]["content"] if entries else ""
+            return "note", f"[note: {source['id'][:12]}]", content_text, source
+
+    # Try as an attachment
+    att = db.get_attachment(embed_id)
+    if att:
+        mime = att.get("mime_type") or "application/octet-stream"
+        marker = f"[attachment({mime}): graph://{att['id'][:12]} — {att['filename']}]"
+        alt_text = att.get("alt_text") or ""
+        return "attachment", marker, alt_text, None
+
+    return None
+
+
+def _resolve_embeds_in_text(db, text):
+    """Replace ![[id]] references in text with resolved content."""
+    import re
+    embed_re = re.compile(r'!\[\[([^\]]+)\]\]')
+
+    def replace_embed(m):
+        embed_id = m.group(1)
+        resolved = _resolve_embed(db, embed_id)
+        if resolved is None:
+            return m.group(0)  # Leave unresolved
+        etype, marker, body, _ = resolved
+        lines = [marker]
+        if body:
+            lines.append("")
+            lines.append(body)
+        return "\n".join(lines)
+
+    return embed_re.sub(replace_embed, text)
+
+
+def _get_html_for_version(db, source_id, version):
+    """Get the HTML attachment content for a specific note version."""
+    row = db.conn.execute(
+        "SELECT * FROM attachments WHERE source_id = ?",
+        (f"{source_id}@{version}",)
+    ).fetchone()
+    if not row:
+        return None
+    att = dict(row)
+    file_path = Path(att["file_path"])
+    if not file_path.is_absolute():
+        file_path = Path(db.db_path).parent.parent / att["file_path"]
+    if file_path.exists():
+        return file_path.read_text()
+    return None
+
+
 def cmd_read(args):
     """Read full content of a source by ID or title search."""
     db = GraphDB(args.db)
@@ -367,6 +449,31 @@ def cmd_read(args):
         except sqlite3.OperationalError:
             pass
 
+    # Check if this is a rich-content note
+    meta_raw = source.get("metadata") or {}
+    if isinstance(meta_raw, str):
+        try:
+            meta_raw = json.loads(meta_raw)
+        except (json.JSONDecodeError, TypeError):
+            meta_raw = {}
+    is_rich = meta_raw.get("rich_content", False)
+    want_html = getattr(args, "html_output", False)
+
+    # --html flag on a rich-content note: output raw HTML source
+    if want_html and is_rich:
+        target_version = version_req if isinstance(version_req, int) else None
+        if target_version is None:
+            # Get latest version
+            max_v = db.get_max_note_version(source["id"])
+            target_version = max_v if max_v > 0 else 1
+        html_content = _get_html_for_version(db, source["id"], target_version)
+        if html_content:
+            print(html_content)
+        else:
+            print(f"No HTML attachment found for version {target_version}", file=sys.stderr)
+        db.close()
+        return
+
     # Handle version requests for notes
     if version_req is not None:
         if version_req == "list":
@@ -393,7 +500,10 @@ def cmd_read(args):
             print(f"Title:  {source.get('title', '?')}")
             print(f"Date:   {ver['created_at'][:10]}")
             print(f"{'─' * 72}")
-            print(f"\n{ver['content']}")
+            content = ver['content']
+            # Resolve embeds
+            content = _resolve_embeds_in_text(db, content)
+            print(f"\n{content}")
             db.close()
             return
 
@@ -477,6 +587,10 @@ def cmd_read(args):
         label = "USER" if etype == "thought" else f"ASSISTANT ({role})"
         content = e["content"]
 
+        # Resolve ![[id]] embeds in note content
+        if source.get("type") == "note":
+            content = _resolve_embeds_in_text(db, content)
+
         if args.max_chars and len(content) > args.max_chars:
             content = content[:args.max_chars] + f"\n... [{len(content) - args.max_chars} chars truncated]"
 
@@ -494,6 +608,25 @@ def cmd_read(args):
                 status = " [integrated]" if c["integrated"] else ""
                 print(f"\n**{c['actor']}** · {c['created_at'][:16]}{status}  (id:{c['id'][:12]})")
                 print(c["content"])
+
+        # Cascade comments from embedded child notes (--all-comments)
+        if include_integrated:
+            import re as _re
+            for e in entries:
+                embed_ids = _re.findall(r'!\[\[([^\]]+)\]\]', e.get("content", ""))
+                for eid in embed_ids:
+                    resolved = _resolve_embed(db, eid)
+                    if resolved and resolved[3]:  # has a source object
+                        child_source = resolved[3]
+                        child_comments = db.get_comments(child_source["id"], include_integrated=include_integrated)
+                        if child_comments:
+                            child_title = child_source.get("title", child_source["id"][:12])
+                            print(f"\n{'─' * 72}")
+                            print(f"## Comments on ![[{eid}]] — {child_title[:50]} ({len(child_comments)})")
+                            for c in child_comments:
+                                status = " [integrated]" if c["integrated"] else ""
+                                print(f"\n**{c['actor']}** · {c['created_at'][:16]}{status}  (id:{c['id'][:12]})")
+                                print(c["content"])
 
     db.close()
 
@@ -2123,17 +2256,37 @@ def cmd_note(args):
     db = GraphDB(args.db)
     tags = args.tags.split(",") if args.tags else []
 
+    html_path = getattr(args, "html", None)
+    is_rich = bool(html_path)
+
     from .models import Source, Thought, new_id, now_iso
     source_key = f"note:{new_id()}"
+    meta = {"tags": tags, "author": args.author or os.environ.get("BD_ACTOR", "user")}
+    if is_rich:
+        meta["rich_content"] = True
     source = Source(
         type="note",
         platform="local",
         project=args.project or _get_scope(),
         title=text[:80],
         file_path=source_key,
-        metadata={"tags": tags, "author": args.author or os.environ.get("BD_ACTOR", "user")},
+        metadata=meta,
     )
     db.insert_source(source)
+
+    # Handle --html: store HTML as version-paired attachment
+    if is_rich:
+        html_file = Path(html_path)
+        if not html_file.is_file():
+            print(f"Error: HTML file not found: {html_path}", file=sys.stderr)
+            db.close()
+            sys.exit(1)
+        # Version 1 — source_id = "<note-id>@1"
+        html_att = _store_attachment(db, html_path, source_id=f"{source.id}@1")
+        if html_att is None:
+            db.close()
+            sys.exit(1)
+        print(f"  ✓ HTML attachment ({html_att.id[:12]})")
 
     # Handle --attach: store files and substitute placeholders
     attach_paths = getattr(args, "attach", None) or []
@@ -2159,6 +2312,9 @@ def cmd_note(args):
     )
     db.insert_thought(t)
 
+    # Store version 1 in note_versions
+    db.insert_note_version(source.id, 1, text)
+
     from .ingest import extract_entities
     for name, etype in extract_entities(text):
         eid = db.upsert_entity(name, etype)
@@ -2180,7 +2336,8 @@ def cmd_note(args):
     db.commit()
     _lines = text.count("\n") + (1 if text else 0)
     prov_info = f" turn {auto_turn}" if auto_src and auto_turn else ""
-    print(f"  ✓ Note saved (src:{source.id[:12]}{prov_info}) — {_lines} lines, {len(text)} chars")
+    rc_label = " (rich-content)" if is_rich else ""
+    print(f"  ✓ Note saved (src:{source.id[:12]}{prov_info}){rc_label} — {_lines} lines, {len(text)} chars")
     db.close()
 
 
@@ -2294,6 +2451,21 @@ def cmd_note_update(args):
 
     source_id = source["id"]
 
+    # Check if this is a rich-content note — enforce dual update
+    meta = source.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+    is_rich = meta.get("rich_content", False)
+    html_path = getattr(args, "html", None)
+
+    if is_rich and not html_path:
+        print("Error: rich-content note requires --html on update (both markdown and HTML must be updated together)", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+
     # Handle --attach: store files and substitute placeholders
     attach_paths = getattr(args, "attach", None) or []
     if attach_paths:
@@ -2327,6 +2499,24 @@ def cmd_note_update(args):
 
     # Insert new version
     db.insert_note_version(source_id, next_version, new_content)
+
+    # Handle --html: store version-paired HTML attachment
+    if html_path:
+        html_file = Path(html_path)
+        if not html_file.is_file():
+            print(f"Error: HTML file not found: {html_path}", file=sys.stderr)
+            db.close()
+            sys.exit(1)
+        html_att = _store_attachment(db, html_path, source_id=f"{source_id}@{next_version}")
+        if html_att is None:
+            db.close()
+            sys.exit(1)
+        print(f"  ✓ HTML attachment ({html_att.id[:12]}) for version {next_version}")
+        # If note wasn't already rich-content, mark it now
+        if not is_rich:
+            meta["rich_content"] = True
+            db.conn.execute("UPDATE sources SET metadata = ? WHERE id = ?",
+                            (json.dumps(meta), source_id))
 
     # Update the live thought content (FTS trigger handles re-indexing)
     db.update_thought_content(thought["id"], new_content)
@@ -2810,7 +3000,7 @@ def cmd_wait(args):
         time.sleep(poll_interval)
 
 
-def _store_attachment(db, file_path_str, source_id=None, turn_number=None):
+def _store_attachment(db, file_path_str, source_id=None, turn_number=None, alt_text=None):
     """Hash, dedup, store a file and insert an attachment record.
 
     Returns the Attachment object (new or existing).
@@ -2834,13 +3024,23 @@ def _store_attachment(db, file_path_str, source_id=None, turn_number=None):
     existing = db.get_attachment_by_hash(file_hash)
     if existing:
         # Update source_id if provided and not already set
+        updates = []
+        params = []
         if source_id and not existing.get("source_id"):
-            db.conn.execute("UPDATE attachments SET source_id = ? WHERE id = ?", (source_id, existing["id"]))
+            updates.append("source_id = ?")
+            params.append(source_id)
+        if alt_text and not existing.get("alt_text"):
+            updates.append("alt_text = ?")
+            params.append(alt_text)
+        if updates:
+            params.append(existing["id"])
+            db.conn.execute(f"UPDATE attachments SET {', '.join(updates)} WHERE id = ?", params)
             db.conn.commit()
         return Attachment(
             id=existing["id"], hash=file_hash, filename=filename,
             mime_type=existing.get("mime_type"), size_bytes=size_bytes,
             file_path=existing["file_path"], source_id=source_id or existing.get("source_id"),
+            alt_text=alt_text or existing.get("alt_text"),
         )
 
     mime_type, _ = mimetypes.guess_type(filename)
@@ -2858,6 +3058,7 @@ def _store_attachment(db, file_path_str, source_id=None, turn_number=None):
         file_path=str(store_path),
         source_id=source_id,
         turn_number=int(turn_number) if turn_number else None,
+        alt_text=alt_text,
     )
     db.insert_attachment(att)
     return att
@@ -2881,8 +3082,19 @@ def cmd_attach(args):
             source_id = auto_src["id"]
             turn_number = auto_turn
 
+    # Resolve alt-text
+    alt_text = getattr(args, "alt", None)
+    alt_file = getattr(args, "alt_file", None)
+    if alt_file:
+        alt_path = Path(alt_file)
+        if not alt_path.is_file():
+            print(f"Error: alt-text file not found: {alt_file}", file=sys.stderr)
+            db.close()
+            sys.exit(1)
+        alt_text = alt_path.read_text().strip()
+
     att = _store_attachment(db, args.file_path, source_id=source_id,
-                            turn_number=turn_number)
+                            turn_number=turn_number, alt_text=alt_text)
     if att is None:
         db.close()
         sys.exit(1)
@@ -2910,6 +3122,11 @@ def cmd_attachment(args):
     print(f"  source_id:   {att['source_id'] or '—'}")
     print(f"  turn:        {att['turn_number'] if att['turn_number'] is not None else '—'}")
     print(f"  created_at:  {att['created_at']}")
+    if att.get("alt_text"):
+        preview = att["alt_text"][:120].replace("\n", " ")
+        if len(att["alt_text"]) > 120:
+            preview += "…"
+        print(f"  alt_text:    {preview}")
     meta = att.get("metadata", "{}")
     if isinstance(meta, str):
         try:
@@ -3086,6 +3303,7 @@ def main():
     p.add_argument("--max-chars", type=int, default=0, help="Max chars per turn (0=unlimited)")
     p.add_argument("--json", action="store_true", help="Output as structured JSON (source + entries + edges)")
     p.add_argument("--all-comments", action="store_true", help="Include integrated comments")
+    p.add_argument("--html", dest="html_output", action="store_true", help="Output raw HTML source for rich-content notes")
     p.set_defaults(func=cmd_read)
 
     # sources
@@ -3253,6 +3471,7 @@ def main():
     p_note.add_argument("--force", action="store_true", help="Bypass single-line length check")
     p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
     p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement. For images use markdown syntax: ![alt]({1}). Unplaced attachments appear as downloads")
+    p_note.add_argument("--html", help="HTML file for rich-content note (creates version-paired attachment)")
     p_note.set_defaults(func=cmd_note_router)
 
     # notes (list notes with optional recency filter)
@@ -3388,6 +3607,8 @@ def main():
     p.add_argument("file_path", help="Path to file to attach")
     p.add_argument("--source", help="Source ID to link as provenance")
     p.add_argument("--turn", type=int, help="Turn number in source conversation")
+    p.add_argument("--alt", help="Alt-text description for the attachment")
+    p.add_argument("--alt-file", help="Read alt-text from file")
     p.set_defaults(func=cmd_attach)
 
     # attachment (show single)
