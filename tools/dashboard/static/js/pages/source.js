@@ -303,6 +303,7 @@
               const resolveRes = await fetch('/api/resolve/' + encodeURIComponent(this.id));
               if (resolveRes.ok) {
                 this._richResolveData = await resolveRes.json();
+                this._richResolveData._directView = true;
               }
             } catch (_) {
               // Fall back to markdown rendering

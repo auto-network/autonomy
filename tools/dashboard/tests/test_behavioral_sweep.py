@@ -2067,6 +2067,27 @@ RICH_NOTE_DIRECT_CHECKS = """
     } else {
         r.iframe_no_scrollbar = false;
     }
+
+    // View Source button should NOT appear on direct view
+    var viewSourceBtn = null;
+    var allBtns = document.querySelectorAll('button');
+    for (var i = 0; i < allBtns.length; i++) {
+        if (allBtns[i].textContent.trim() === 'View Source') { viewSourceBtn = allBtns[i]; break; }
+    }
+    r.has_view_source = !!viewSourceBtn;
+
+    // Count visible markdown-rendered blocks (tables) — should be exactly 1 (inside the embed toggle)
+    // If the fallback x-markdown also renders, there will be 2+ visible tables
+    var tables = document.querySelectorAll('table');
+    var visibleTables = 0;
+    for (var i = 0; i < tables.length; i++) {
+        if (tables[i].offsetParent !== null) visibleTables++;
+    }
+    r.visible_table_count = visibleTables;
+
+    // Version-paired attachments should not appear in the download list
+    var attachmentSection = document.body.textContent || '';
+    r.has_attachment_list = attachmentSection.indexOf('Attachments') >= 0 && attachmentSection.indexOf('.html') >= 0;
 """
 
 
@@ -2113,6 +2134,22 @@ class TestRichNoteDirectView:
         """Iframe has no scrollbar (height matches content)."""
         assert self._checks.get("iframe_no_scrollbar"), \
             "Iframe has a scrollbar — height doesn't match content"
+
+    def test_no_view_source_on_direct(self):
+        """View Source button should not appear when already viewing the source note."""
+        assert not self._checks.get("has_view_source"), \
+            "View Source button shown on direct view — redundant"
+
+    def test_no_visible_markdown_in_diagram_mode(self):
+        """Default view shows diagram, not markdown — no visible tables on the parent page."""
+        count = self._checks.get("visible_table_count", 0)
+        assert count == 0, \
+            f"Expected 0 visible tables in diagram mode, got {count} — fallback markdown leaking through"
+
+    def test_no_version_attachments_listed(self):
+        """Version-paired HTML attachments should not show in the attachment download list."""
+        assert not self._checks.get("has_attachment_list"), \
+            "Version-paired attachments showing in download list — should be hidden for rich-content notes"
 
 
 # ── Source page: parent note with ![[id]] embeds ────────────────────
