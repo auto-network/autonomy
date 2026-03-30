@@ -80,7 +80,15 @@ class GraphDB:
     def _init_schema(self):
         schema = SCHEMA_PATH.read_text()
         self.conn.executescript(schema)
+        self._migrate_attachments_alt_text()
         self._seed_tags()
+
+    def _migrate_attachments_alt_text(self):
+        """Add alt_text column to attachments table if missing (idempotent)."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(attachments)").fetchall()}
+        if "alt_text" not in cols:
+            self.conn.execute("ALTER TABLE attachments ADD COLUMN alt_text TEXT")
+            self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -914,10 +922,10 @@ class GraphDB:
     def insert_attachment(self, att: Attachment) -> Attachment:
         self.conn.execute(
             """INSERT INTO attachments (id, hash, filename, mime_type, size_bytes, file_path,
-                                        source_id, turn_number, metadata, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        source_id, turn_number, metadata, alt_text, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (att.id, att.hash, att.filename, att.mime_type, att.size_bytes, att.file_path,
-             att.source_id, att.turn_number, json.dumps(att.metadata), att.created_at),
+             att.source_id, att.turn_number, json.dumps(att.metadata), att.alt_text, att.created_at),
         )
         self.conn.commit()
         return att
