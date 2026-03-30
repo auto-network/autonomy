@@ -58,6 +58,12 @@
       targetTurn: 0,
       contextWindow: 5,
 
+      // Rich-content note state
+      isRichContent: false,
+      richAttachmentUrl: '',
+      richHtmlContent: '',
+      showingRichHtml: true,
+
       // Type flags (computed after fetch)
       srcType: '',
       badgeCls: '',
@@ -288,6 +294,26 @@
               );
             } catch (_) {
               // Non-critical — just skip attachment list
+            }
+          }
+
+          // Detect and fetch rich-content note HTML
+          if (this.isNote && this.noteMeta && this.noteMeta.rich_content) {
+            this.isRichContent = true;
+            try {
+              const resolveRes = await fetch('/api/resolve/' + encodeURIComponent(this.id));
+              if (resolveRes.ok) {
+                const resolveData = await resolveRes.json();
+                if (resolveData.attachment_url) {
+                  this.richAttachmentUrl = resolveData.attachment_url;
+                  const htmlRes = await fetch(resolveData.attachment_url);
+                  if (htmlRes.ok) {
+                    this.richHtmlContent = await htmlRes.text();
+                  }
+                }
+              }
+            } catch (_) {
+              // Fall back to markdown rendering
             }
           }
 
