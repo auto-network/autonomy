@@ -55,8 +55,10 @@ function _renderEmbed(wrapper, data) {
     iframe.addEventListener('load', () => {
       try {
         const d = iframe.contentDocument;
-        d.documentElement.style.overflow = 'hidden';
-        d.body.style.overflow = 'hidden';
+        d.documentElement.style.overflowY = 'hidden';
+        d.documentElement.style.overflowX = 'auto';
+        d.body.style.overflowY = 'hidden';
+        d.body.style.overflowX = 'auto';
         const h = Math.max(d.documentElement.scrollHeight, d.body.offsetHeight);
         iframe.style.height = h + 'px';
       } catch (e) { /* cross-origin, ignore */ }
