@@ -1371,11 +1371,11 @@ async function dismissDesign(revisionId, designKey, triggerEl) {
 
   const confirmed = await new Promise(resolve => {
     const confirm = document.createElement('span');
-    confirm.className = 'exp-dismiss-confirm';
-    confirm.innerHTML = `${confirmMsg} <button class="exp-dismiss-yes">Yes</button><button class="exp-dismiss-no">No</button>`;
+    confirm.className = 'design-dismiss-confirm';
+    confirm.innerHTML = `${confirmMsg} <button class="design-dismiss-yes">Yes</button><button class="design-dismiss-no">No</button>`;
     triggerEl.replaceWith(confirm);
-    confirm.querySelector('.exp-dismiss-yes').onclick = (e) => { e.stopPropagation(); resolve(true); };
-    confirm.querySelector('.exp-dismiss-no').onclick = (e) => { e.stopPropagation(); confirm.replaceWith(triggerEl); resolve(false); };
+    confirm.querySelector('.design-dismiss-yes').onclick = (e) => { e.stopPropagation(); resolve(true); };
+    confirm.querySelector('.design-dismiss-no').onclick = (e) => { e.stopPropagation(); confirm.replaceWith(triggerEl); resolve(false); };
   });
   if (!confirmed) return;
   try {
@@ -1408,6 +1408,10 @@ async function checkPendingDesigns() {
     const activeSessions = new Set((chatData && chatData.sessions) || []);
     const keys = new Set();
 
+    // Detect if we're currently viewing a design page
+    const currentDesignPath = window.location.pathname.startsWith('/design/')
+      ? window.location.pathname.split('/design/')[1] : null;
+
     if (Array.isArray(pending)) {
       pending.forEach(des => {
         // Use design_id as the stable key so the toast represents the whole design
@@ -1418,6 +1422,9 @@ async function checkPendingDesigns() {
         // Consume session so it isn't treated as orphaned below
         activeSessions.delete(sessionName);
 
+        // Check if this design is currently being viewed
+        const isActive = currentDesignPath && (currentDesignPath === des.id || currentDesignPath === designKey);
+
         const iterLabel = des.iteration_count > 1
           ? `${_esc(des.title)} <span class="text-gray-500 text-xs">(${des.iteration_count} revisions)</span>`
           : _esc(des.title);
@@ -1427,14 +1434,15 @@ async function checkPendingDesigns() {
           existing.dataset.hasChatwith = hasChatWith ? 'true' : 'false';
           existing.href = `/design/${des.id}`;
           existing.onclick = (e) => { e.preventDefault(); navigateTo(`/design/${des.id}`); };
-          const textEl = existing.querySelector('.sidebar-exp-text');
+          existing.classList.toggle('sidebar-design-active', !!isActive);
+          const textEl = existing.querySelector('.sidebar-design-text');
           if (textEl) textEl.innerHTML = iterLabel;
           // Sync pulsing dot
-          let dot = existing.querySelector('.sidebar-exp-chat-dot');
+          let dot = existing.querySelector('.sidebar-design-chat-dot');
           if (hasChatWith && !dot) {
             dot = document.createElement('span');
-            dot.className = 'sidebar-exp-chat-dot';
-            const icon = existing.querySelector('.sidebar-exp-icon');
+            dot.className = 'sidebar-design-chat-dot';
+            const icon = existing.querySelector('.sidebar-design-icon');
             existing.insertBefore(dot, icon ? icon.nextSibling : textEl);
           } else if (!hasChatWith && dot) {
             dot.remove();
@@ -1442,16 +1450,16 @@ async function checkPendingDesigns() {
           return;
         }
         const link = document.createElement('a');
-        link.className = 'sidebar-exp';
+        link.className = 'sidebar-design' + (isActive ? ' sidebar-design-active' : '');
         link.dataset.designId = designKey;
         link.dataset.hasChatwith = hasChatWith ? 'true' : 'false';
         // Navigate to latest revision (des.id is already the latest from the API)
         link.href = `/design/${des.id}`;
         link.onclick = (e) => { e.preventDefault(); navigateTo(`/design/${des.id}`); };
-        const chatDot = hasChatWith ? '<span class="sidebar-exp-chat-dot"></span>' : '';
-        link.innerHTML = `<span class="sidebar-exp-icon">\uD83C\uDFA8</span>${chatDot}<span class="sidebar-exp-text">${iterLabel}</span>`;
+        const chatDot = hasChatWith ? '<span class="sidebar-design-chat-dot"></span>' : '';
+        link.innerHTML = `<span class="sidebar-design-icon">\uD83C\uDFA8</span>${chatDot}<span class="sidebar-design-text">${iterLabel}</span>`;
         const btn = document.createElement('button');
-        btn.className = 'sidebar-exp-dismiss';
+        btn.className = 'sidebar-design-dismiss';
         btn.title = 'Dismiss';
         btn.textContent = '\u00d7';
         btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); dismissDesign(des.id, designKey, btn); };
