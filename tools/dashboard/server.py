@@ -575,12 +575,26 @@ def _enrich_dispatch_runs(runs: list[dict]) -> None:
         pass
 
 
+def _enrich_librarian_fields(runs: list[dict]) -> None:
+    """Populate librarian-specific fields: synthetic title, fallback bead_id."""
+    for run in runs:
+        librarian_type = run.get("librarian_type")
+        if not librarian_type:
+            continue
+        if not run.get("bead_id"):
+            run["bead_id"] = run.get("dir") or run.get("id") or ""
+        if not run.get("title"):
+            run["title"] = f"Librarian: {librarian_type}"
+
+
 async def api_dispatch_runs(request):
     """List dispatch runs from SQLite (includes RUNNING rows)."""
     if os.environ.get("DASHBOARD_MOCK"):
         all_runs = dao_dispatch.get_recent_runs(limit=50)
         running = dao_dispatch.get_running_with_stats()
-        return JSONResponse([*running, *all_runs])
+        combined = [*running, *all_runs]
+        _enrich_librarian_fields(combined)
+        return JSONResponse(combined)
     db_rows = await asyncio.to_thread(list_runs)
     runs = []
     for row in db_rows:
@@ -626,10 +640,21 @@ async def api_dispatch_runs(request):
             if len(parts) >= 3:
                 timestamp = f"{parts[1]}-{parts[2]}"
 
+        librarian_type = row.get("librarian_type") or None
+        dir_name = row.get("id", "")
+        bead_id = row.get("bead_id", "")
+        # Librarian runs have empty bead_id — use dir name as identifier
+        if not bead_id and librarian_type:
+            bead_id = dir_name
+        # Synthetic title for librarian runs
+        title = None
+        if librarian_type:
+            title = f"Librarian: {librarian_type}"
+
         runs.append({
-            "bead_id": row.get("bead_id", ""),
+            "bead_id": bead_id,
             "timestamp": timestamp,
-            "dir": row.get("id", ""),
+            "dir": dir_name,
             "decision": decision,
             "status": row.get("status") or "",
             "has_experience_report": bool(row.get("has_experience_report")),
@@ -642,10 +667,12 @@ async def api_dispatch_runs(request):
             "commit_message": row.get("commit_message") or "",
             "smoke_result": None,
             "librarian_review": None,
+            "librarian_type": librarian_type,
+            "title": title,
             # internal fields for enrichment — stripped before response
             "_run_id": row.get("id", ""),
             "_output_dir": row.get("output_dir") or "",
-            "_librarian_type": row.get("librarian_type"),
+            "_librarian_type": librarian_type,
             "_started_at": row.get("started_at") or "",
             "_completed_at": row.get("completed_at") or "",
         })
@@ -4008,6 +4035,7 @@ async def _collect_dispatch_data() -> dict:
     active = []
     for run in running_runs:
         bead_id = run.get("bead_id", "")
+        librarian_type = run.get("librarian_type") or None
         meta = bead_meta.get(bead_id, {})
         container = None
         if run.get("container_name"):
@@ -4016,11 +4044,18 @@ async def _collect_dispatch_data() -> dict:
                 "image": run.get("image"),
                 "status": None,
             }
+        # Librarian runs: use dir name as id, synthetic title, no priority
+        effective_id = bead_id or run.get("id", "")
+        if librarian_type:
+            effective_title = f"Librarian: {librarian_type}"
+        else:
+            effective_title = meta.get("title") or bead_id
         active.append({
-            "id": bead_id,
-            "title": meta.get("title") or bead_id,
-            "priority": meta.get("priority"),
+            "id": effective_id,
+            "title": effective_title,
+            "priority": meta.get("priority") if not librarian_type else None,
             "labels": meta.get("labels", []),
+            "librarian_type": librarian_type,
             "container": container,
             "run_dir": run.get("id"),
             "last_snippet": run.get("last_snippet"),
