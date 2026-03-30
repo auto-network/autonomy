@@ -24,6 +24,8 @@ import pytest
 pytest.importorskip("inotify_simple")
 pytest.importorskip("pytest_asyncio")
 
+from tools.dashboard.server import _parse_jsonl_entry
+
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -265,15 +267,9 @@ class TestInotifyTailerLoop:
         bus = EventBus()
         mon = SessionMonitor()
 
-        def simple_parser(line: str):
-            try:
-                return json.loads(line)
-            except Exception:
-                return None
-
         # Mock tmux check so liveness loop doesn't kill our test session
         with patch.object(SessionMonitor, "_check_tmux", staticmethod(lambda name: True)):
-            await mon.start(event_bus=bus, entry_parser=simple_parser)
+            await mon.start(event_bus=bus, entry_parser=_parse_jsonl_entry)
             assert mon._use_inotify is True
 
             q = bus.subscribe()
