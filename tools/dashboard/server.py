@@ -3261,6 +3261,19 @@ async def _watch_for_host_session_jsonl(
                     jsonl_path=str(new_jsonl),
                     project=projects_dir.name,
                 )
+
+                # Add inotify watches so the tailer picks up this session
+                session_monitor._add_file_watch(tmux_name, str(new_jsonl))
+                session_monitor._add_dir_watch(tmux_name, str(projects_dir))
+
+                # Ensure tail state exists with resolution_dir for rollover detection
+                if tmux_name not in session_monitor._tail_states:
+                    from tools.dashboard.session_monitor import _TailState
+                    session_monitor._tail_states[tmux_name] = _TailState(
+                        resolution_dir=projects_dir)
+
+                # Broadcast registry so clients see resolved=true
+                await session_monitor._broadcast_registry()
                 return
         logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
 
