@@ -137,7 +137,7 @@ def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
     try:
         tmux_send_sync(tmux_name, envelope)
     except Exception:
-        pass  # best-effort — don't crash monitor
+        logger.warning("nag delivery failed for %s", tmux_name, exc_info=True)
 
 
 @dataclass
