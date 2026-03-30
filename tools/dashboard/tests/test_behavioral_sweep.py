@@ -486,7 +486,7 @@ SWEEP_GRAPH_ATTACHMENTS = {
         "alt_text": "",
         "size_bytes": 2048,
         "created_at": "2026-03-30T12:00:00Z",
-        "content": "<html><body><h2>Three distinct pause scopes</h2><table><tr><th>Scope</th><th>Trigger</th><th>Effect</th></tr><tr><td>Global</td><td>Auth failure</td><td>All blocked</td></tr><tr><td>Per-label</td><td>Smoke failure</td><td>Label skipped</td></tr></table></body></html>",
+        "content": '<!DOCTYPE html><html><head><style>body{margin:0;padding:0.5rem;width:fit-content;min-width:100%;background:#0d1117;color:#c9d1d9;font-family:sans-serif;}.diagram{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:0.75rem;}svg{display:block;}</style></head><body><div class="diagram"><svg viewBox="0 0 900 200" width="900" height="200"><rect x="30" y="40" width="180" height="60" rx="6" fill="#1a2332" stroke="#58a6ff" stroke-width="2"/><text x="120" y="75" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="600">Phase 1</text><rect x="250" y="40" width="180" height="60" rx="6" fill="#1a2332" stroke="#58a6ff" stroke-width="2"/><text x="340" y="75" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="600">Phase 2</text><rect x="470" y="40" width="180" height="60" rx="6" fill="#0d2818" stroke="#3fb950" stroke-width="2"/><text x="560" y="75" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="600">Phase 3</text><rect x="690" y="40" width="180" height="60" rx="6" fill="#1e1533" stroke="#bc8cff" stroke-width="2"/><text x="780" y="75" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="600">Phase 4</text></svg></div></body></html>',
     },
     SWEEP_IMAGE_ATT_ID: {
         "id": SWEEP_IMAGE_ATT_ID,
@@ -2315,7 +2315,6 @@ NARROW_VIEWPORT_CHECKS = """
 """
 
 
-@pytest.mark.xfail(reason="Mock server doesn't serve real HTML attachment content — iframe is empty at narrow width")
 class TestRichContentNarrowViewport:
     """At narrow viewport (600px), wide diagrams must scroll horizontally, not clip."""
 
