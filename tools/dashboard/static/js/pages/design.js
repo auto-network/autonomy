@@ -152,8 +152,7 @@
 
           var parentCSS = (document.querySelector('style') || {}).textContent || '';
           var safeHtml = v.html || '';
-          var alpineHead = '<link rel="stylesheet" href="/static/css/session-cards.css">' +
-            '<script>window.FIXTURE = ' + (data.fixture || '{}') + ';<\/script>' +
+          var alpineHead = '<script>window.FIXTURE = ' + (data.fixture || '{}') + ';<\/script>' +
             '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>';
 
           doc.open();
