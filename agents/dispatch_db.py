@@ -429,7 +429,7 @@ def get_consecutive_failures(bead_id: str) -> tuple[int, int]:
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT status FROM dispatch_runs "
+            "SELECT status, failure_class FROM dispatch_runs "
             "WHERE bead_id = ? ORDER BY started_at DESC",
             (bead_id,),
         ).fetchall()
@@ -438,9 +438,14 @@ def get_consecutive_failures(bead_id: str) -> tuple[int, int]:
         merge_failures = 0
         for row in rows:
             status = row["status"]
+            fc = row["failure_class"]
             if status == "DONE":
                 break
             elif status == "MERGE_FAILED":
+                merge_failures += 1
+            elif status == "BLOCKED" and fc == "merge":
+                # Stash pop conflict: host-side merge issue, not agent's fault.
+                # Counts toward merge failures, not agent failures.
                 merge_failures += 1
             elif status in ("FAILED", "BLOCKED"):
                 agent_failures += 1
