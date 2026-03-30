@@ -146,7 +146,13 @@ def cmd_dispatch_runs(args):
     for r in runs:
         status = r.get("status", "?")
         bead_id = r.get("bead_id") or ""
-        label = bead_id if bead_id else "(librarian)"
+        librarian_type = r.get("librarian_type")
+        if librarian_type:
+            label = f"(librarian:{librarian_type})"
+        elif bead_id:
+            label = bead_id
+        else:
+            label = "(librarian)"
         duration = _format_duration(r.get("duration_secs"))
         decision = r.get("decision") or {}
         reason = (decision.get("reason", "") if isinstance(decision, dict) else "")[:50]
@@ -339,12 +345,12 @@ def cmd_dispatch_watch(args):
     seen_completed = set()
     for r in runs:
         if r.get("completed_at") or r.get("status") in ("DONE", "FAILED", "done", "failed"):
-            seen_completed.add(r.get("bead_id") or r.get("id"))
+            seen_completed.add(r.get("bead_id") or r.get("dir") or r.get("id") or "unknown")
 
     running_ids = set()
     for r in runs:
         if not r.get("completed_at") and r.get("status") not in ("DONE", "FAILED", "done", "failed"):
-            running_ids.add(r.get("bead_id") or r.get("id"))
+            running_ids.add(r.get("bead_id") or r.get("dir") or r.get("id") or "unknown")
 
     if not running_ids:
         print("No running dispatch — nothing to watch")
@@ -360,7 +366,7 @@ def cmd_dispatch_watch(args):
             continue
         runs = data if isinstance(data, list) else data.get("runs", data.get("active", []))
         for r in runs:
-            rid = r.get("bead_id") or r.get("id")
+            rid = r.get("bead_id") or r.get("dir") or r.get("id") or "unknown"
             is_done = r.get("completed_at") or r.get("status") in ("DONE", "FAILED", "done", "failed")
             if is_done and rid not in seen_completed:
                 status = r.get("status", "DONE")

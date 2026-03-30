@@ -1,1 +1,2 @@
-<span class="ft-badge" :class="'badge-p' + b.priority" x-text="'P' + b.priority"></span>
+<template x-if="b.priority != null && !b.librarian_type"><span class="ft-badge" :class="'badge-p' + b.priority" x-text="'P' + b.priority"></span></template>
+<template x-if="b.librarian_type"><span class="ft-badge" style="background:#312e81;color:#a5b4fc">Lib</span></template>
