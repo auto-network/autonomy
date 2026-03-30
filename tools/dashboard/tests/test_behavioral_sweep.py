@@ -2088,6 +2088,25 @@ RICH_NOTE_DIRECT_CHECKS = """
     // Version-paired attachments should not appear in the download list
     var attachmentSection = document.body.textContent || '';
     r.has_attachment_list = attachmentSection.indexOf('Attachments') >= 0 && attachmentSection.indexOf('.html') >= 0;
+
+    // Toggle to text view, check that alt-text respects zoom font-size
+    if (toggle) {
+        toggle.click();
+        // Find the alt-text container that should have a font-size set
+        var altContainers = document.querySelectorAll('.embed-alt, .embed-content .markdown-body');
+        r.alt_has_font_size = false;
+        for (var i = 0; i < altContainers.length; i++) {
+            var fs = altContainers[i].style.fontSize || window.getComputedStyle(altContainers[i]).fontSize;
+            if (fs && fs !== '16px' && fs !== '') {
+                r.alt_has_font_size = true;
+                break;
+            }
+        }
+        // Toggle back to diagram
+        toggle.click();
+    } else {
+        r.alt_has_font_size = false;
+    }
 """
 
 
@@ -2150,6 +2169,11 @@ class TestRichNoteDirectView:
         """Version-paired HTML attachments should not show in the attachment download list."""
         assert not self._checks.get("has_attachment_list"), \
             "Version-paired attachments showing in download list — should be hidden for rich-content notes"
+
+    def test_alt_text_respects_zoom(self):
+        """Alt-text in text view should have a zoom-responsive font-size, not browser default."""
+        assert self._checks.get("alt_has_font_size"), \
+            "Alt-text has no custom font-size — zoom level not applied"
 
 
 # ── Source page: parent note with ![[id]] embeds ────────────────────

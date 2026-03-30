@@ -200,7 +200,7 @@
           {% include 'partials/zoom-toggle.html' %}
           <!-- Rich-content note: rendered by shared renderRichEmbed (markdown.js) -->
           <template x-if="isRichContent">
-            <div data-testid="rich-content-container" style="margin:0.5rem 0;"></div>
+            <div data-testid="rich-content-container" :style="'font-size:' + mdSizes[zoom] + ';margin:0.5rem 0;'"></div>
           </template>
           <!-- Plain note: markdown -->
           <template x-if="!isRichContent">
