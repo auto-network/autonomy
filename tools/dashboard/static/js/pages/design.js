@@ -9,6 +9,42 @@
     return m ? m[1] : '';
   }
 
+  // ── State picker HTML generator (for multi-state fixtures) ────────────────
+  function _buildStatePickerHtml(stateKeys) {
+    var pills = stateKeys.map(function (key, i) {
+      var isActive = i === 0;
+      var bg = isActive ? '#334155' : 'transparent';
+      var color = isActive ? '#f1f5f9' : '#94a3b8';
+      var esc = key.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      return '<button data-fixture-state="' + esc + '" style="padding:5px 12px;border:none;border-radius:8px;' +
+        'font-size:12px;font-weight:500;cursor:pointer;background:' + bg + ';color:' + color +
+        ';font-family:inherit;transition:all 0.15s;">' + esc + '</button>';
+    }).join('');
+
+    var script = '<script>' +
+      'document.getElementById("fixture-state-picker").addEventListener("click",function(e){' +
+      'var btn=e.target.closest("[data-fixture-state]");if(!btn)return;' +
+      'var key=btn.dataset.fixtureState;' +
+      'window.FIXTURE=window.FIXTURE_STATES[key];' +
+      'var root=document.querySelector("[x-data]");' +
+      'if(root&&typeof Alpine!=="undefined"){' +
+      'var d=Alpine.$data(root),s=window.FIXTURE_STATES[key];' +
+      'Object.keys(s).forEach(function(k){d[k]=s[k]});' +
+      '}' +
+      'this.querySelectorAll("[data-fixture-state]").forEach(function(b){' +
+      'var a=b.dataset.fixtureState===key;' +
+      'b.style.background=a?"#334155":"transparent";' +
+      'b.style.color=a?"#f1f5f9":"#94a3b8"});' +
+      'window.dispatchEvent(new CustomEvent("fixture-state-change",{detail:{state:key,data:window.FIXTURE}}))' +
+      '});' +
+      '<\/script>';
+
+    return '<div id="fixture-state-picker" style="position:fixed;bottom:12px;left:50%;transform:translateX(-50%);' +
+      'display:flex;align-items:center;gap:2px;background:#0f172a;border:1px solid #1e293b;' +
+      'border-radius:10px;padding:3px;box-shadow:0 4px 24px rgba(0,0,0,0.5);z-index:100;">' +
+      pills + '</div>' + script;
+  }
+
   document.addEventListener('alpine:init', function () {
     Alpine.data('designPage', function () {
       return {
@@ -163,8 +199,25 @@
 
           var parentCSS = (document.querySelector('style') || {}).textContent || '';
           var safeHtml = v.html || '';
-          var alpineHead = '<script>window.FIXTURE = ' + (data.fixture || '{}') + ';<\/script>' +
-            '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>';
+
+          // Parse fixture — multi-state fixtures get a picker bar
+          var fixtureRaw = data.fixture || '{}';
+          var fixtureObj;
+          try { fixtureObj = JSON.parse(fixtureRaw); } catch (e) { fixtureObj = null; }
+
+          var alpineHead, pickerHtml = '';
+          if (fixtureObj && fixtureObj.states && typeof fixtureObj.states === 'object' &&
+              Object.keys(fixtureObj.states).length > 0) {
+            var stateKeys = Object.keys(fixtureObj.states);
+            var firstState = fixtureObj.states[stateKeys[0]];
+            alpineHead = '<script>window.FIXTURE = ' + JSON.stringify(firstState) + ';' +
+              'window.FIXTURE_STATES = ' + JSON.stringify(fixtureObj.states) + ';<\/script>' +
+              '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>';
+            pickerHtml = _buildStatePickerHtml(stateKeys);
+          } else {
+            alpineHead = '<script>window.FIXTURE = ' + fixtureRaw + ';<\/script>' +
+              '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>';
+          }
 
           doc.open();
           doc.write('<!DOCTYPE html><html><head><meta charset="utf-8">' +
@@ -173,7 +226,7 @@
             '<style>' + parentCSS + '</style>' +
             '<style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;}</style>' +
             alpineHead +
-            '</head><body>' + safeHtml + '</body></html>');
+            '</head><body>' + safeHtml + pickerHtml + '</body></html>');
           doc.close();
 
           // Auto-capture after render
