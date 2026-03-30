@@ -509,6 +509,26 @@ def cmd_read(args):
 
     entries = db.get_source_content(source["id"])
 
+    # --save: export raw content to file (no turn headers, no JSON)
+    save_path = getattr(args, "save", None)
+    if save_path:
+        parts = []
+        for e in entries:
+            content = e["content"]
+            if source.get("type") == "note":
+                content = _resolve_embeds_in_text(db, content)
+            if args.max_chars and len(content) > args.max_chars:
+                content = content[:args.max_chars]
+            parts.append(content)
+        raw = "\n\n".join(parts)
+        save_file = Path(save_path)
+        save_file.parent.mkdir(parents=True, exist_ok=True)
+        save_file.write_text(raw)
+        _lines = raw.count("\n") + (1 if raw else 0)
+        print(f"  ✓ Saved to {save_path} ({_lines} lines, {len(raw)} chars)")
+        db.close()
+        return
+
     # Get edges for this source
     edges = db.conn.execute(
         """SELECT * FROM edges
@@ -2206,6 +2226,15 @@ def cmd_journal_list(args):
         db.close()
 
 
+def _auto_save_note(source_id: str, content: str) -> str:
+    """Save note content to /tmp/graph-notes/{source_id}.md and return path."""
+    save_dir = Path("/tmp/graph-notes")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"{source_id}.md"
+    save_path.write_text(content)
+    return str(save_path)
+
+
 def cmd_note_router(args):
     """Route 'graph note ...' to create or update."""
     if args.text and args.text[0] == "update":
@@ -2245,6 +2274,8 @@ def _check_single_line_content(content: str, force: bool) -> None:
 
 def cmd_note(args):
     """Drop a searchable trail marker into the graph."""
+    if getattr(args, "html", None):
+        _require_read("c62b0142", "Agents must read the Rich-Content Creation Guide before creating/updating rich-content notes.\n  See: graph://c62b0142-fb3")
     if getattr(args, 'content_stdin', None) == "-":
         text = sys.stdin.read().strip()
     elif args.text:
@@ -2338,6 +2369,8 @@ def cmd_note(args):
     prov_info = f" turn {auto_turn}" if auto_src and auto_turn else ""
     rc_label = " (rich-content)" if is_rich else ""
     print(f"  ✓ Note saved (src:{source.id[:12]}{prov_info}){rc_label} — {_lines} lines, {len(text)} chars")
+    local_path = _auto_save_note(source.id, text)
+    print(f"  Local copy: {local_path}")
     db.close()
 
 
@@ -2423,6 +2456,8 @@ def cmd_comment_integrate(args):
 
 def cmd_note_update(args):
     """Update a note with versioned history."""
+    if getattr(args, "html", None):
+        _require_read("c62b0142", "Agents must read the Rich-Content Creation Guide before creating/updating rich-content notes.\n  See: graph://c62b0142-fb3")
     _require_read("843a8137", "Agents must read the Note Revision Protocol before updating notes.\n  See: graph://843a8137-3c7")
     db = GraphDB(args.db)
 
@@ -2546,6 +2581,8 @@ def cmd_note_update(args):
         else:
             print(f"  ⚠ Comment {cid} not found on this note", file=sys.stderr)
 
+    local_path = _auto_save_note(source_id, new_content)
+    print(f"  Local copy: {local_path}")
     db.close()
 
 
@@ -3304,6 +3341,7 @@ def main():
     p.add_argument("--json", action="store_true", help="Output as structured JSON (source + entries + edges)")
     p.add_argument("--all-comments", action="store_true", help="Include integrated comments")
     p.add_argument("--html", dest="html_output", action="store_true", help="Output raw HTML source for rich-content notes")
+    p.add_argument("--save", metavar="PATH", help="Save raw content to file (no headers/JSON)")
     p.set_defaults(func=cmd_read)
 
     # sources
