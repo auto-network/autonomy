@@ -441,7 +441,13 @@ def api_set_role(args) -> None:
 def api_set_nag(args) -> None:
     """Enable or disable session nag via dashboard API."""
     session = _get_session_name()
-    if args.off:
+    if getattr(args, "dispatch", False):
+        # Dispatch completion nag
+        enabled = not args.off
+        _put(f"/api/session/{urllib.parse.quote(session)}/dispatch-nag", {"enabled": enabled})
+        state = "enabled" if enabled else "disabled"
+        print(f"  \u2713 Dispatch nag {state}")
+    elif args.off:
         _delete(f"/api/session/{urllib.parse.quote(session)}/nag")
         print("  \u2713 Nag disabled")
     else:

@@ -39,6 +39,7 @@ graph set-label "title"           # Set session working title
 graph set-topics "Line 1" "..."   # Set card status lines
 graph set-role analyst            # Set session role
 graph set-nag --interval 10       # Enable idle nag (--off to disable)
+graph set-nag --dispatch          # Enable dispatch completion nag (--off to disable)
 ```
 
 **Dispatch workflow:**

@@ -770,11 +770,17 @@ def cmd_set_role(args):
 
 
 def cmd_set_nag(args):
-    """Enable or disable the session idle nag."""
+    """Enable or disable session nags (idle or dispatch)."""
     if is_api_mode():
         api_set_nag(args)
         return
-    if args.off:
+    if getattr(args, "dispatch", False):
+        # Dispatch completion nag
+        enabled = not args.off
+        _session_put("dispatch-nag", {"enabled": enabled})
+        state = "enabled" if enabled else "disabled"
+        print(f"  \u2713 Dispatch nag {state}")
+    elif args.off:
         _session_delete("nag")
         print("  \u2713 Nag disabled")
     else:
@@ -3140,10 +3146,11 @@ def main():
     p.set_defaults(func=cmd_set_role)
 
     # set-nag
-    p = sub.add_parser("set-nag", help="Enable or disable the session idle nag")
+    p = sub.add_parser("set-nag", help="Enable or disable session nags (idle or dispatch)")
     p.add_argument("--off", action="store_true", help="Disable the nag")
-    p.add_argument("--interval", type=int, help="Minutes between nags (1-120)")
-    p.add_argument("--message", nargs="+", help="Nag message text")
+    p.add_argument("--dispatch", action="store_true", help="Configure dispatch completion nag instead of idle nag")
+    p.add_argument("--interval", type=int, help="Minutes between nags (1-120, idle nag only)")
+    p.add_argument("--message", nargs="+", help="Nag message text (idle nag only)")
     p.set_defaults(func=cmd_set_nag)
 
     # sessions
