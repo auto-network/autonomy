@@ -5641,4 +5641,5 @@ def main():
         log_level="info",
         reload=True,
         reload_dirs=["tools/dashboard"],
+        reload_excludes=["tools/dashboard/tests"],
     )
