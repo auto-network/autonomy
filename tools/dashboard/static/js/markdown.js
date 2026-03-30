@@ -76,29 +76,48 @@ function _renderEmbed(wrapper, data) {
 
     wrapper.appendChild(contentArea);
 
-    // Toggle button
+    // Controls bar (top-left)
+    const controls = document.createElement('div');
+    controls.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;';
+    const btnStyle = 'font-size:11px;padding:3px 10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;transition:all 0.15s ease;';
+    const btnHover = (btn) => {
+      btn.addEventListener('mouseenter', () => { btn.style.color = '#58a6ff'; btn.style.borderColor = '#58a6ff'; });
+      btn.addEventListener('mouseleave', () => { btn.style.color = '#8b949e'; btn.style.borderColor = '#30363d'; });
+    };
+
     if (hasAlt) {
       const toggle = document.createElement('button');
       toggle.setAttribute('data-testid', 'rich-toggle');
-      toggle.textContent = 'Text';
-      toggle.style.cssText = 'position:absolute;top:8px;right:8px;font-size:11px;padding:3px 10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;z-index:10;transition:all 0.15s ease;';
-      toggle.addEventListener('mouseenter', () => { toggle.style.color = '#58a6ff'; toggle.style.borderColor = '#58a6ff'; });
-      toggle.addEventListener('mouseleave', () => { toggle.style.color = '#8b949e'; toggle.style.borderColor = '#30363d'; });
+      toggle.textContent = 'Show Text';
+      toggle.style.cssText = btnStyle;
+      btnHover(toggle);
       toggle.addEventListener('click', () => {
         if (showingHtml.value) {
           iframe.style.display = 'none';
           altDiv.style.display = 'block';
-          toggle.textContent = 'Diagram';
+          toggle.textContent = 'Show Diagram';
           showingHtml.value = false;
         } else {
           altDiv.style.display = 'none';
           iframe.style.display = 'block';
-          toggle.textContent = 'Text';
+          toggle.textContent = 'Show Text';
           showingHtml.value = true;
         }
       });
-      wrapper.appendChild(toggle);
+      controls.appendChild(toggle);
     }
+
+    // View Source link
+    if (data.id) {
+      const viewSrc = document.createElement('button');
+      viewSrc.textContent = 'View Source';
+      viewSrc.style.cssText = btnStyle;
+      btnHover(viewSrc);
+      viewSrc.addEventListener('click', () => { navigateTo('/graph/' + data.id.slice(0, 12)); });
+      controls.appendChild(viewSrc);
+    }
+
+    wrapper.insertBefore(controls, wrapper.firstChild);
 
   } else if (data.type === 'attachment' && data.mime_type && data.mime_type.startsWith('image/')) {
     // Image attachment — img + alt toggle
@@ -124,28 +143,38 @@ function _renderEmbed(wrapper, data) {
 
     wrapper.appendChild(contentArea);
 
+    // Controls bar (top-left)
+    const controls = document.createElement('div');
+    controls.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;';
+    const btnStyle = 'font-size:11px;padding:3px 10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;transition:all 0.15s ease;';
+    const btnHover = (btn) => {
+      btn.addEventListener('mouseenter', () => { btn.style.color = '#58a6ff'; btn.style.borderColor = '#58a6ff'; });
+      btn.addEventListener('mouseleave', () => { btn.style.color = '#8b949e'; btn.style.borderColor = '#30363d'; });
+    };
+
     if (hasAlt) {
       const toggle = document.createElement('button');
       toggle.setAttribute('data-testid', 'rich-toggle');
-      toggle.textContent = 'Alt';
-      toggle.style.cssText = 'position:absolute;top:8px;right:8px;font-size:11px;padding:3px 10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;z-index:10;transition:all 0.15s ease;';
-      toggle.addEventListener('mouseenter', () => { toggle.style.color = '#58a6ff'; toggle.style.borderColor = '#58a6ff'; });
-      toggle.addEventListener('mouseleave', () => { toggle.style.color = '#8b949e'; toggle.style.borderColor = '#30363d'; });
+      toggle.textContent = 'Show Alt';
+      toggle.style.cssText = btnStyle;
+      btnHover(toggle);
       toggle.addEventListener('click', () => {
         if (showingImg.value) {
           img.style.display = 'none';
           altDiv.style.display = 'block';
-          toggle.textContent = 'Image';
+          toggle.textContent = 'Show Image';
           showingImg.value = false;
         } else {
           altDiv.style.display = 'none';
           img.style.display = 'block';
-          toggle.textContent = 'Alt';
+          toggle.textContent = 'Show Alt';
           showingImg.value = true;
         }
       });
-      wrapper.appendChild(toggle);
+      controls.appendChild(toggle);
     }
+
+    wrapper.insertBefore(controls, wrapper.firstChild);
 
   } else if (data.type === 'attachment') {
     // Non-image attachment — download link

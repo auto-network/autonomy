@@ -200,13 +200,15 @@
           {% include 'partials/zoom-toggle.html' %}
           <!-- Rich-content note: sandboxed iframe + toggle -->
           <template x-if="isRichContent && richAttachmentUrl">
-            <div style="position:relative;margin:0.5rem 0;">
-              <button data-testid="rich-toggle"
-                      @click="showingRichHtml = !showingRichHtml"
-                      style="position:absolute;top:8px;right:8px;font-size:11px;padding:3px 10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;z-index:10;transition:all 0.15s ease;"
-                      @mouseover="$el.style.color='#58a6ff';$el.style.borderColor='#58a6ff'"
-                      @mouseout="$el.style.color='#8b949e';$el.style.borderColor='#30363d'"
-                      x-text="showingRichHtml ? 'Text' : 'Diagram'"></button>
+            <div style="margin:0.5rem 0;">
+              <div style="display:flex;gap:6px;margin-bottom:6px;">
+                <button data-testid="rich-toggle"
+                        @click="showingRichHtml = !showingRichHtml"
+                        style="font-size:11px;padding:3px 10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;transition:all 0.15s ease;"
+                        @mouseover="$el.style.color='#58a6ff';$el.style.borderColor='#58a6ff'"
+                        @mouseout="$el.style.color='#8b949e';$el.style.borderColor='#30363d'"
+                        x-text="showingRichHtml ? 'Show Text' : 'Show Diagram'"></button>
+              </div>
               <iframe x-show="showingRichHtml"
                       data-testid="rich-content-iframe"
                       :src="richAttachmentUrl"

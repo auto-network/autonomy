@@ -2089,9 +2089,9 @@ class TestRichNoteDirectView:
         assert self._checks.get("has_toggle"), "No toggle[data-testid='rich-toggle'] found"
 
     def test_toggle_default_label(self):
-        """Default toggle label is 'Text' (click to see markdown)."""
-        assert self._checks.get("toggle_label") == "Text", \
-            f"Expected 'Text', got '{self._checks.get('toggle_label')}'"
+        """Default toggle label is 'Show Text' (click to see markdown)."""
+        assert self._checks.get("toggle_label") == "Show Text", \
+            f"Expected 'Show Text', got '{self._checks.get('toggle_label')}'"
 
     def test_nav_not_broken(self):
         """Page navigation is still visible (diagram CSS did not leak)."""
