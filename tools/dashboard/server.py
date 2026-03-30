@@ -4609,11 +4609,31 @@ async def api_attachment_serve(request):
 
 async def api_graph_resolve(request):
     """Universal graph entity resolver — sources, attachments, partial ID prefix."""
-    from tools.graph.db import GraphDB
-
     id = request.path_params["id"]
     if not _GRAPH_SOURCE_ID_RE.match(id):
         return JSONResponse({"error": f"malformed id: {id!r}"}, status_code=400)
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        from tools.dashboard.dao import mock as mock_dao
+        result = mock_dao.resolve_source_for_api(id)
+        if result:
+            return JSONResponse(result)
+        att = mock_dao.get_attachment(id)
+        if att:
+            return JSONResponse({
+                "type": "attachment",
+                "id": att["id"],
+                "filename": att.get("filename", ""),
+                "mime_type": att.get("mime_type", ""),
+                "size_bytes": att.get("size_bytes", 0),
+                "source_id": att.get("source_id", ""),
+                "turn": att.get("turn"),
+                "created_at": att.get("created_at", ""),
+                "url": f"/api/attachment/{att['id'][:12]}",
+            })
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    from tools.graph.db import GraphDB
     db = GraphDB()
     try:
         source = db.get_source(id)
@@ -4661,13 +4681,20 @@ async def api_resolve_embed(request):
 
     Returns type, attachment URL, alt-text, and mime type for rendering iframes/images/toggles.
     """
-    from tools.graph.db import GraphDB
-
     embed_id = request.path_params["id"]
     if not _GRAPH_SOURCE_ID_RE.match(embed_id):
         return JSONResponse({"error": f"malformed id: {embed_id!r}"}, status_code=400)
 
     version = request.query_params.get("version")
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        from tools.dashboard.dao import mock as mock_dao
+        result = mock_dao.resolve_embed(embed_id, version)
+        if result:
+            return JSONResponse(result)
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    from tools.graph.db import GraphDB
     db = GraphDB()
     try:
         # Try as a source (note)

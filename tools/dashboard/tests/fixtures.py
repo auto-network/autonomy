@@ -136,6 +136,111 @@ def only_chatwith():
     ], "beads": [], "experiments": [make_experiment(TEST_EXPERIMENT_ID)]}
 
 
+# ── Graph note fixtures ───────────────────────────────────────────────
+
+TEST_PLAIN_NOTE_ID = "aa000000-0000-0000-0000-000000000001"
+TEST_RICH_NOTE_ID = "bb000000-0000-0000-0000-000000000002"
+TEST_RICH_HTML_ATT_ID = "cc000000-0000-0000-0000-000000000003"
+TEST_IMAGE_ATT_ID = "dd000000-0000-0000-0000-000000000004"
+TEST_PARENT_NOTE_ID = "ee000000-0000-0000-0000-000000000005"
+TEST_LEGACY_IMAGE_ATT_ID = "ff000000-0000-0000-0000-000000000006"
+TEST_NO_ALT_ATT_ID = "aa100000-0000-0000-0000-000000000007"
+
+
+def make_note(note_id, title="Test Note", content="# Test\n\nSome content.", metadata=None):
+    return {
+        "id": note_id,
+        "title": title,
+        "type": "note",
+        "project": "autonomy",
+        "created_at": "2026-03-30T12:00:00Z",
+        "metadata": json.dumps(metadata or {}),
+        "content": content,
+    }
+
+
+def make_attachment(att_id, filename="file.bin", mime_type="application/octet-stream",
+                    source_id="", alt_text="", size_bytes=1024):
+    return {
+        "id": att_id,
+        "filename": filename,
+        "mime_type": mime_type,
+        "source_id": source_id,
+        "alt_text": alt_text,
+        "size_bytes": size_bytes,
+        "created_at": "2026-03-30T12:00:00Z",
+    }
+
+
+def rich_content_fixtures():
+    """Fixture set for testing rich-content note rendering."""
+    plain_note = make_note(
+        TEST_PLAIN_NOTE_ID,
+        title="Plain Note",
+        content="# Plain Note\n\n| Col A | Col B |\n|-------|-------|\n| 1 | 2 |\n\nSome paragraph text.",
+    )
+    rich_note = make_note(
+        TEST_RICH_NOTE_ID,
+        title="Pause Mechanisms",
+        content="## Pause Mechanisms\n\nThree distinct pause scopes:\n\n| Scope | Trigger | Effect |\n|-------|---------|--------|\n| Global | Auth failure | All blocked |\n| Global | Merge cascade | All blocked |\n| Per-label | Smoke failure | Label skipped |",
+        metadata={"rich_content": True},
+    )
+    html_att = make_attachment(
+        TEST_RICH_HTML_ATT_ID,
+        filename="pause-mechanisms.html",
+        mime_type="text/html",
+        source_id=f"{TEST_RICH_NOTE_ID}@1",
+        size_bytes=2048,
+    )
+    image_att = make_attachment(
+        TEST_IMAGE_ATT_ID,
+        filename="screenshot.png",
+        mime_type="image/png",
+        alt_text="Dispatch page showing 3 running beads with progress bars.",
+        size_bytes=45000,
+    )
+    legacy_image_att = make_attachment(
+        TEST_LEGACY_IMAGE_ATT_ID,
+        filename="legacy-shot.png",
+        mime_type="image/png",
+        alt_text="Legacy screenshot",
+        size_bytes=30000,
+    )
+    no_alt_att = make_attachment(
+        TEST_NO_ALT_ATT_ID,
+        filename="diagram.png",
+        mime_type="image/png",
+        size_bytes=20000,
+    )
+    parent_note = make_note(
+        TEST_PARENT_NOTE_ID,
+        title="Dispatch Lifecycle Signpost",
+        content=f"# Dispatch Lifecycle\n\n## Pause Mechanisms\n\n![[{TEST_RICH_NOTE_ID[:12]}]]\n\n## Screenshot\n\n![[{TEST_IMAGE_ATT_ID[:12]}]]\n\n## No Alt\n\n![[{TEST_NO_ALT_ATT_ID[:12]}]]",
+    )
+    legacy_note = make_note(
+        "bb100000-0000-0000-0000-000000000008",
+        title="Legacy Embed Note",
+        content=f"# Legacy\n\n![old screenshot](graph://{TEST_LEGACY_IMAGE_ATT_ID[:12]})",
+    )
+    return {
+        "active_sessions": [],
+        "beads": [],
+        "experiments": [make_experiment(TEST_EXPERIMENT_ID)],
+        "graph_sources": {
+            TEST_PLAIN_NOTE_ID: plain_note,
+            TEST_RICH_NOTE_ID: rich_note,
+            TEST_PARENT_NOTE_ID: parent_note,
+            "bb100000-0000-0000-0000-000000000008": legacy_note,
+        },
+        "graph_attachments": {
+            TEST_RICH_HTML_ATT_ID: html_att,
+            TEST_IMAGE_ATT_ID: image_att,
+            TEST_LEGACY_IMAGE_ATT_ID: legacy_image_att,
+            TEST_NO_ALT_ATT_ID: no_alt_att,
+        },
+    }
+
+
 def write_fixture(fixture_dict, path):
     """Write fixture to a JSON file for DASHBOARD_MOCK."""
     Path(path).write_text(json.dumps(fixture_dict, indent=2))
