@@ -136,6 +136,16 @@ def run(graph_id, base_url="https://localhost:8080"):
                 r.diagram_clientWidth = diagram.clientWidth;
                 r.diagram_covers_svg = diagram.scrollWidth <= diagram.clientWidth + 2;
             }
+            // SVG must render at its intended width (from viewBox), not scaled down
+            var svg = d.querySelector('svg');
+            if (svg) {
+                var vb = svg.getAttribute('viewBox');
+                var intended = vb ? parseInt(vb.split(' ')[2]) : 0;
+                var actual = svg.getBoundingClientRect().width;
+                r.svg_intended_width = intended;
+                r.svg_actual_width = Math.round(actual);
+                r.svg_not_scaled = actual >= intended * 0.95;
+            }
             var ox = window.getComputedStyle(d.documentElement).overflowX;
             r.overflow_x = ox;
             r.scroll_enabled = ox === 'auto' || ox === 'scroll' || ox === 'visible';
@@ -163,6 +173,9 @@ def run(graph_id, base_url="https://localhost:8080"):
     check("body_extends_to_content", mobile.get("body_extends"),
           f"Body ({mobile.get('body_clientWidth')}px) narrower than content ({mobile.get('body_scrollWidth')}px) — content clipped, no scrollbar")
     check("diagram_scrollable", mobile.get("scrollable"), "Cannot scroll horizontally at narrow viewport")
+    if mobile.get("svg_intended_width"):
+        check("svg_not_scaled_down", mobile.get("svg_not_scaled"),
+              f"SVG rendered at {mobile.get('svg_actual_width')}px, intended {mobile.get('svg_intended_width')}px — use fixed width attribute, not width=\"100%\"")
     if mobile.get("diagram_clientWidth") is not None:
         check("diagram_background_extends", mobile.get("diagram_covers_svg"),
               f".diagram ({mobile.get('diagram_clientWidth')}px) narrower than its content — background clipped when scrolling right")
