@@ -47,6 +47,7 @@ function _renderEmbed(wrapper, data) {
 
     // Iframe view
     const iframe = document.createElement('iframe');
+    iframe.setAttribute('data-testid', 'rich-content-iframe');
     iframe.src = data.attachment_url;
     iframe.sandbox = 'allow-same-origin';
     iframe.style.cssText = 'width:100%;border:1px solid var(--border,#333);border-radius:6px;min-height:200px;background:#fff;';
@@ -74,11 +75,11 @@ function _renderEmbed(wrapper, data) {
     // Toggle button
     if (hasAlt) {
       const toggle = document.createElement('button');
-      toggle.className = 'embed-toggle';
+      toggle.setAttribute('data-testid', 'rich-toggle');
       toggle.textContent = 'Text';
-      toggle.style.cssText = 'position:absolute;top:4px;right:4px;font-size:11px;padding:2px 8px;background:var(--bg,#0f0f23);border:1px solid var(--border,#333);border-radius:4px;color:var(--text-muted,#888);cursor:pointer;z-index:10;';
-      toggle.addEventListener('mouseenter', () => { toggle.style.color = 'var(--accent,#6366f1)'; toggle.style.borderColor = 'var(--accent,#6366f1)'; });
-      toggle.addEventListener('mouseleave', () => { toggle.style.color = 'var(--text-muted,#888)'; toggle.style.borderColor = 'var(--border,#333)'; });
+      toggle.style.cssText = 'position:absolute;top:8px;right:8px;font-size:11px;padding:3px 10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;z-index:10;transition:all 0.15s ease;';
+      toggle.addEventListener('mouseenter', () => { toggle.style.color = '#58a6ff'; toggle.style.borderColor = '#58a6ff'; });
+      toggle.addEventListener('mouseleave', () => { toggle.style.color = '#8b949e'; toggle.style.borderColor = '#30363d'; });
       toggle.addEventListener('click', () => {
         if (showingHtml.value) {
           iframe.style.display = 'none';
@@ -121,11 +122,11 @@ function _renderEmbed(wrapper, data) {
 
     if (hasAlt) {
       const toggle = document.createElement('button');
-      toggle.className = 'embed-toggle';
+      toggle.setAttribute('data-testid', 'rich-toggle');
       toggle.textContent = 'Alt';
-      toggle.style.cssText = 'position:absolute;top:4px;right:4px;font-size:11px;padding:2px 8px;background:var(--bg,#0f0f23);border:1px solid var(--border,#333);border-radius:4px;color:var(--text-muted,#888);cursor:pointer;z-index:10;';
-      toggle.addEventListener('mouseenter', () => { toggle.style.color = 'var(--accent,#6366f1)'; toggle.style.borderColor = 'var(--accent,#6366f1)'; });
-      toggle.addEventListener('mouseleave', () => { toggle.style.color = 'var(--text-muted,#888)'; toggle.style.borderColor = 'var(--border,#333)'; });
+      toggle.style.cssText = 'position:absolute;top:8px;right:8px;font-size:11px;padding:3px 10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;z-index:10;transition:all 0.15s ease;';
+      toggle.addEventListener('mouseenter', () => { toggle.style.color = '#58a6ff'; toggle.style.borderColor = '#58a6ff'; });
+      toggle.addEventListener('mouseleave', () => { toggle.style.color = '#8b949e'; toggle.style.borderColor = '#30363d'; });
       toggle.addEventListener('click', () => {
         if (showingImg.value) {
           img.style.display = 'none';

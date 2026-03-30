@@ -2044,34 +2044,27 @@ class TestPlainNoteBehavior:
 # ── Source page: rich-content note (direct view) ────────────────────
 
 RICH_NOTE_DIRECT_CHECKS = """
-    var body = document.body.textContent || '';
+    // Rich content MUST render in a sandboxed iframe for CSS isolation
+    var iframe = document.querySelector('[data-testid="rich-content-iframe"]');
+    r.has_iframe = !!iframe;
+    r.iframe_visible = !!(iframe && iframe.offsetParent !== null);
 
-    // User should see a toggle button labeled "Text" (to switch to markdown view)
-    var toggleText = '';
-    var buttons = document.querySelectorAll('button');
-    for (var i = 0; i < buttons.length; i++) {
-        var txt = buttons[i].textContent.trim();
-        if (txt === 'Text' || txt === 'Diagram') {
-            toggleText = txt;
-            break;
-        }
-    }
-    r.sees_toggle = toggleText.length > 0;
-    r.toggle_label = toggleText;
+    // Toggle button must use data-testid for stable test hooks
+    var toggle = document.querySelector('[data-testid="rich-toggle"]');
+    r.has_toggle = !!toggle;
+    r.toggle_label = toggle ? toggle.textContent.trim() : '';
 
-    // User should see the rich visual content (rendered HTML), not just the markdown table
-    // The HTML diagram has "Three distinct pause scopes" as a label
-    // If we only see the markdown table text but no visual rendering, the feature is broken
-    r.sees_rich_content = body.indexOf('Three distinct pause scopes') >= 0;
+    // The nav/sidebar must not be broken by leaked CSS
+    var sidebar = document.querySelector('[data-testid="sidebar"]') || document.querySelector('nav') || document.querySelector('aside');
+    r.nav_intact = !!(sidebar && sidebar.offsetParent !== null);
 
-    // The raw markdown table headers should NOT be the primary visible content
-    // (they'd appear in the toggle alt-text view, not the default view)
-    r.sees_only_table = body.indexOf('| Scope |') >= 0 && !r.sees_toggle;
+    // Note title still visible
+    r.sees_title = (document.body.textContent || '').indexOf('Pause Mechanisms') >= 0;
 """
 
 
 class TestRichNoteDirectView:
-    """Direct view of a rich-content note shows the rendered diagram with a toggle."""
+    """Direct view of a rich-content note shows diagram in sandboxed iframe with toggle."""
 
     @pytest.fixture(scope="class", autouse=True)
     def checks(self, browser, request):
@@ -2082,24 +2075,32 @@ class TestRichNoteDirectView:
         )
         request.cls._checks = result
 
-    def test_sees_toggle(self):
-        """User sees a toggle button for switching between diagram and text."""
-        assert self._checks.get("sees_toggle"), "No toggle button visible"
+    def test_renders_in_iframe(self):
+        """Rich content renders in a sandboxed iframe (required for CSS isolation)."""
+        assert self._checks.get("has_iframe"), \
+            "No iframe[data-testid='rich-content-iframe'] — content will leak CSS into parent"
+
+    def test_iframe_visible(self):
+        """The iframe is visible on the page."""
+        assert self._checks.get("iframe_visible"), "Iframe exists but is not visible"
+
+    def test_toggle_present(self):
+        """Toggle button with data-testid='rich-toggle' is visible."""
+        assert self._checks.get("has_toggle"), "No toggle[data-testid='rich-toggle'] found"
 
     def test_toggle_default_label(self):
         """Default toggle label is 'Text' (click to see markdown)."""
         assert self._checks.get("toggle_label") == "Text", \
-            f"Expected toggle label 'Text', got '{self._checks.get('toggle_label')}'"
+            f"Expected 'Text', got '{self._checks.get('toggle_label')}'"
 
-    def test_sees_rich_content(self):
-        """User sees the rendered diagram content."""
-        assert self._checks.get("sees_rich_content"), \
-            "Rich diagram content not visible on page"
+    def test_nav_not_broken(self):
+        """Page navigation is still visible (diagram CSS did not leak)."""
+        assert self._checks.get("nav_intact"), \
+            "Nav/sidebar not visible — diagram CSS leaked into parent page"
 
-    def test_not_showing_only_raw_table(self):
-        """The default view is NOT just the raw markdown table without a toggle."""
-        assert not self._checks.get("sees_only_table"), \
-            "Showing raw markdown table as primary view — rich rendering missing"
+    def test_title_visible(self):
+        """Note title is still visible."""
+        assert self._checks.get("sees_title"), "Title 'Pause Mechanisms' not visible"
 
 
 # ── Source page: parent note with ![[id]] embeds ────────────────────
@@ -2110,37 +2111,36 @@ PARENT_EMBED_CHECKS = """
 
     var body = document.body.textContent || '';
 
-    // User sees the parent note title
+    // Parent note title visible
     r.sees_title = body.indexOf('Dispatch Lifecycle') >= 0;
 
-    // User sees the embedded rich diagram content (from the child note's HTML)
-    r.sees_embedded_diagram = body.indexOf('Auth failure') >= 0 || body.indexOf('pause scopes') >= 0;
+    // Embedded rich-content must render in iframes (CSS isolation)
+    var richIframes = document.querySelectorAll('[data-testid="rich-content-iframe"]');
+    r.rich_iframe_count = richIframes.length;
 
-    // User sees the image alt-text or the image itself is rendered
-    // (look for alt text content that would appear in toggle view)
+    // Embedded images must render as visible img elements
     var visibleImages = 0;
     var imgs = document.querySelectorAll('img');
     for (var i = 0; i < imgs.length; i++) {
         if (imgs[i].offsetParent !== null) visibleImages++;
     }
-    r.sees_image = visibleImages > 0 || body.indexOf('running beads') >= 0;
+    r.visible_image_count = visibleImages;
 
-    // User sees toggle buttons for embeds that have alt-text
-    var toggleLabels = [];
-    var buttons = document.querySelectorAll('button');
-    for (var i = 0; i < buttons.length; i++) {
-        var txt = buttons[i].textContent.trim();
-        if (txt === 'Text' || txt === 'Diagram' || txt === 'Alt' || txt === 'Image') {
-            toggleLabels.push(txt);
-        }
-    }
-    r.toggle_count = toggleLabels.length;
-    r.toggle_labels = toggleLabels;
+    // Toggle buttons use data-testid
+    var toggles = document.querySelectorAll('[data-testid="rich-toggle"]');
+    r.toggle_count = toggles.length;
+    var labels = [];
+    toggles.forEach(function(t) { labels.push(t.textContent.trim()); });
+    r.toggle_labels = labels;
+
+    // Nav must survive embedded content
+    var sidebar = document.querySelector('[data-testid="sidebar"]') || document.querySelector('nav') || document.querySelector('aside');
+    r.nav_intact = !!(sidebar && sidebar.offsetParent !== null);
 """
 
 
 class TestParentNoteEmbeds:
-    """Parent note with ![[id]] embeds renders rich content inline."""
+    """Parent note with ![[id]] embeds renders rich content in iframes inline."""
 
     @pytest.fixture(scope="class", autouse=True)
     def checks(self, browser, request):
@@ -2155,21 +2155,25 @@ class TestParentNoteEmbeds:
         """User sees the parent note's title text."""
         assert self._checks.get("sees_title"), "Parent note title not visible"
 
-    def test_sees_embedded_diagram_content(self):
-        """User sees content from the embedded rich-content diagram."""
-        assert self._checks.get("sees_embedded_diagram"), \
-            "Embedded diagram content (pause mechanisms) not visible"
+    def test_rich_embed_in_iframe(self):
+        """Embedded rich-content note renders in an iframe (CSS isolation)."""
+        assert self._checks.get("rich_iframe_count", 0) >= 1, \
+            "No iframe[data-testid='rich-content-iframe'] for embedded rich content"
 
-    def test_sees_embedded_image(self):
-        """User sees the embedded image or its alt-text description."""
-        assert self._checks.get("sees_image"), \
-            "Embedded image not visible (no img and no alt-text)"
+    def test_image_embed_visible(self):
+        """Embedded image is visible on the page."""
+        assert self._checks.get("visible_image_count", 0) >= 1, \
+            "No visible image for embedded image attachment"
 
-    def test_toggles_for_embeds_with_alt(self):
-        """User sees toggle buttons for embeds that have alt-text (rich + image), but not for no-alt embed."""
+    def test_toggles_for_alt_embeds(self):
+        """Embeds with alt-text have toggles (rich + image-with-alt = 2), no-alt embed has none."""
         count = self._checks.get("toggle_count", 0)
         assert count == 2, \
-            f"Expected 2 toggles (rich diagram + image with alt), got {count}: {self._checks.get('toggle_labels')}"
+            f"Expected 2 toggles[data-testid='rich-toggle'], got {count}: {self._checks.get('toggle_labels')}"
+
+    def test_nav_survives_embeds(self):
+        """Page navigation still works with embedded content."""
+        assert self._checks.get("nav_intact"), "Nav broken by embedded content"
 
 
 # ── Source page: legacy ![alt](graph://id) embed ────────────────────
