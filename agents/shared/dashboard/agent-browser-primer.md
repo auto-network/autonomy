@@ -156,6 +156,15 @@ The mock watcher tails the file every 0.5s and broadcasts new lines to the event
   agent-browser eval "(() => { const x = ...; return x; })()"
   ```
 
+## Validating Design Studio designs
+
+When validating a UI bead that references a Design Studio design:
+- Fetch the design via API and diff the HTML against the template
+- If the design has multi-state fixtures, validate every named state
+- Use device preview (390px viewport) to verify mobile breakpoints
+
+See the full Design Studio guide: graph://225a4af7-ee5
+
 ## Command Reference
 
 | Command | What it does |

@@ -168,7 +168,21 @@ that are not fully captured in the bead description. Read them carefully for any
 would aid implementation. When the description and a user message conflict, the user message
 is authoritative.
 
-## Dashboard & Experiments
+## Design Studio
+
+UI beads MUST be implemented from a Design Studio design, not from prose descriptions.
+
+Before implementing any UI bead:
+1. Read the Design Studio guide: graph://225a4af7-ee5
+2. Fetch the design: `curl -sk https://localhost:8080/api/design/{design_id}/full`
+3. Extract the HTML from `variants[last].html`
+4. Copy the HTML + CSS directly into the template — do NOT rewrite or improvise
+5. Replace `window.FIXTURE` references with real component data properties
+6. The design uses Tailwind `md:` classes and Alpine directives — these are production code
+
+If the design is inaccessible, set status: BLOCKED. Do not fall back to implementing from the bead description.
+
+## Dashboard & Design Studio
 
 The **live** dashboard runs on the host at `https://localhost:8080` (HTTPS, self-signed cert).
 From inside the container (`--network=host`), you can query its APIs to read data.
