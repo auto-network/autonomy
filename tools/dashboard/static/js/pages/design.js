@@ -56,7 +56,7 @@
             if (open && !self.chatConnected) self._loadChatSessions();
             if (open && self.chatConnected) {
               self.$nextTick(function () {
-                var panelEl = document.getElementById('exp-chat-panel');
+                var panelEl = document.getElementById('design-chat-panel');
                 if (panelEl) {
                   var panelData = Alpine.$data(panelEl);
                   if (panelData && panelData._scrollToBottom) panelData._scrollToBottom();
@@ -146,7 +146,7 @@
           var v = variants.length > 0 ? variants[variants.length - 1] : null;
           if (!v) return;
 
-          var iframe = document.getElementById('exp-iframe');
+          var iframe = document.getElementById('design-iframe');
           if (!iframe) return;
           var doc = iframe.contentDocument || iframe.contentWindow.document;
 
@@ -251,7 +251,7 @@
           var self = this;
           this.$nextTick(function () {
             setTimeout(function () {
-              var panelEl = document.getElementById('exp-chat-panel');
+              var panelEl = document.getElementById('design-chat-panel');
               if (panelEl) {
                 var panelData = Alpine.$data(panelEl);
                 if (panelData && panelData.configure) {

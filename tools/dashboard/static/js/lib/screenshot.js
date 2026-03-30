@@ -27,7 +27,7 @@
         typeof window._designPage.setScreenshotStatus === 'function') {
       window._designPage.setScreenshotStatus(msg);
     } else if (typeof document !== 'undefined') {
-      var el = document.getElementById('exp-screenshot-status');
+      var el = document.getElementById('design-screenshot-status');
       if (el) el.textContent = msg;
     }
   }
@@ -40,7 +40,7 @@
     if (data.injected) {
       _updateScreenshotStatus(revisionId, 'Screenshot injected ' + now);
       if (typeof document !== 'undefined') {
-        var panelEl = document.getElementById('exp-chat-panel');
+        var panelEl = document.getElementById('design-chat-panel');
         if (panelEl && typeof Alpine !== 'undefined') {
           var panelData = Alpine.$data(panelEl);
           if (panelData && panelData.showScreenshotInjected) panelData.showScreenshotInjected();

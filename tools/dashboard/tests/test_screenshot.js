@@ -90,7 +90,7 @@ describe('_updateScreenshotStatus', () => {
   it('falls back to DOM element when designPage missing', () => {
     let textSet = null;
     global.document.getElementById = (id) => {
-      if (id === 'exp-screenshot-status') return { set textContent(v) { textSet = v; } };
+      if (id === 'design-screenshot-status') return { set textContent(v) { textSet = v; } };
       return null;
     };
     Screenshot._updateScreenshotStatus('x', 'fallback msg');

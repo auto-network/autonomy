@@ -950,7 +950,7 @@ async function _ensureHtml2Canvas(doc, win) {
  * Returns true on success, false on failure.
  */
 async function _captureViaIframeHtml2Canvas(expId, sessionName) {
-  const iframe = document.querySelector('iframe.exp-variant-iframe[data-variant]');
+  const iframe = document.querySelector('iframe.design-variant-iframe[data-variant]');
   if (!iframe) return false;
   try {
     const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
@@ -1084,7 +1084,7 @@ async function renderExperiment(revisionId) {
   const headerActions = document.getElementById('header-actions');
   if (headerActions) {
     headerActions.innerHTML = `
-      <span id="exp-screenshot-status" class="text-xs text-gray-500"></span>
+      <span id="design-screenshot-status" class="text-xs text-gray-500"></span>
       <button onclick="manualCaptureScreenshot('${_esc(revisionId)}')"
               class="text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
         Capture
@@ -1098,16 +1098,16 @@ async function renderExperiment(revisionId) {
       ${seriesNav}
       ${exp.description ? `<p class="text-gray-400 text-sm mb-4">${_esc(exp.description)}</p>` : ''}
       ${isCompleted ? '<p class="text-green-400 text-sm mb-4 font-semibold">Results submitted</p>' : ''}
-      <div id="exp-variants">`;
+      <div id="design-variants">`;
 
   variants.forEach(v => {
     const isSelected = isCompleted && v.selected;
     html += `
-        <div class="exp-variant" data-variant-id="${_esc(v.id)}">
-          <div class="exp-variant-header">
-            <span class="exp-variant-label">${_esc(v.id)}</span>
+        <div class="design-variant" data-variant-id="${_esc(v.id)}">
+          <div class="design-variant-header">
+            <span class="design-variant-label">${_esc(v.id)}</span>
             <div class="flex items-center gap-2">
-              <span class="exp-rank-wrap" style="display:none;">
+              <span class="design-rank-wrap" style="display:none;">
                 <label class="text-xs text-gray-400 mr-1">Rank</label>
                 <select class="exp-rank-select" data-variant="${_esc(v.id)}" ${isCompleted ? 'disabled' : ''}>
                   ${variants.map((_, i) => `<option value="${i+1}">${i+1}</option>`).join('')}
@@ -1122,7 +1122,7 @@ async function renderExperiment(revisionId) {
               </button>
             </div>
           </div>
-          <iframe class="exp-variant-iframe" data-variant="${_esc(v.id)}" style="min-height:300px;"></iframe>
+          <iframe class="design-variant-iframe" data-variant="${_esc(v.id)}" style="min-height:300px;"></iframe>
         </div>`;
   });
 
@@ -1263,7 +1263,7 @@ ${_safeHtml}
     // Show rank badges on completed variants
     variants.forEach(v => {
       if (v.selected && v.rank != null) {
-        const rankWrap = content.querySelector(`[data-variant="${v.id}"]`)?.closest('.exp-variant')?.querySelector('.exp-rank-wrap');
+        const rankWrap = content.querySelector(`[data-variant="${v.id}"]`)?.closest('.design-variant')?.querySelector('.exp-rank-wrap');
         if (rankWrap) {
           rankWrap.style.display = '';
           rankWrap.querySelector('.exp-rank-select').value = v.rank;
@@ -1277,7 +1277,7 @@ ${_safeHtml}
   function updateSelectionUI() {
     const count = selected.size;
     const showRanks = count >= 2;
-    content.querySelectorAll('.exp-rank-wrap').forEach(el => {
+    content.querySelectorAll('.design-rank-wrap').forEach(el => {
       const vid = el.querySelector('.exp-rank-select').dataset.variant;
       el.style.display = (showRanks && selected.has(vid)) ? '' : 'none';
     });
