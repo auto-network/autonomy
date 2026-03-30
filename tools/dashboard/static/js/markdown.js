@@ -17,15 +17,214 @@ const SECURE_CONFIG = {
   FORBID_ATTR: ['onerror','onload','onclick','onmouseover','onfocus','onblur','style'],
 };
 
+// ── Embed resolution ──────────────────────────────────────────────
+// ![[id]] embeds are resolved asynchronously via /api/resolve/{id}.
+// Each embed gets a placeholder div that is filled in after the fetch.
+
+const EMBED_RE = /!\[\[([^\]]+)\]\]/g;
+
+function _createEmbedPlaceholder(embedId) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'embed-wrapper';
+  wrapper.dataset.embedId = embedId;
+  wrapper.innerHTML = '<div class="embed-skeleton" style="height:60px;background:var(--bg-secondary,#1a1a2e);border:1px solid var(--border,#333);border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--text-muted,#888);font-size:13px;">Loading embed…</div>';
+  return wrapper;
+}
+
+function _renderEmbed(wrapper, data) {
+  wrapper.innerHTML = '';
+  wrapper.style.position = 'relative';
+  wrapper.style.margin = '1rem 0';
+
+  if (data.type === 'rich-content' && data.attachment_url) {
+    // Rich-content note — iframe + toggle
+    const hasAlt = data.alt_text && data.alt_text.trim();
+    const showingHtml = { value: true };
+
+    // Content area
+    const contentArea = document.createElement('div');
+    contentArea.className = 'embed-content';
+
+    // Iframe view
+    const iframe = document.createElement('iframe');
+    iframe.src = data.attachment_url;
+    iframe.sandbox = 'allow-same-origin';
+    iframe.style.cssText = 'width:100%;border:1px solid var(--border,#333);border-radius:6px;min-height:200px;background:#fff;';
+    iframe.setAttribute('loading', 'lazy');
+    // Auto-resize via postMessage
+    iframe.addEventListener('load', () => {
+      try {
+        const h = iframe.contentDocument.documentElement.scrollHeight;
+        if (h > 0) iframe.style.height = h + 'px';
+      } catch (e) { /* cross-origin, ignore */ }
+    });
+    contentArea.appendChild(iframe);
+
+    // Alt-text view (hidden by default)
+    const altDiv = document.createElement('div');
+    altDiv.className = 'embed-alt markdown-body';
+    altDiv.style.display = 'none';
+    if (hasAlt) {
+      altDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.alt_text), SECURE_CONFIG);
+    }
+    contentArea.appendChild(altDiv);
+
+    wrapper.appendChild(contentArea);
+
+    // Toggle button
+    if (hasAlt) {
+      const toggle = document.createElement('button');
+      toggle.className = 'embed-toggle';
+      toggle.textContent = 'Text';
+      toggle.style.cssText = 'position:absolute;top:4px;right:4px;font-size:11px;padding:2px 8px;background:var(--bg,#0f0f23);border:1px solid var(--border,#333);border-radius:4px;color:var(--text-muted,#888);cursor:pointer;z-index:10;';
+      toggle.addEventListener('mouseenter', () => { toggle.style.color = 'var(--accent,#6366f1)'; toggle.style.borderColor = 'var(--accent,#6366f1)'; });
+      toggle.addEventListener('mouseleave', () => { toggle.style.color = 'var(--text-muted,#888)'; toggle.style.borderColor = 'var(--border,#333)'; });
+      toggle.addEventListener('click', () => {
+        if (showingHtml.value) {
+          iframe.style.display = 'none';
+          altDiv.style.display = 'block';
+          toggle.textContent = 'Diagram';
+          showingHtml.value = false;
+        } else {
+          altDiv.style.display = 'none';
+          iframe.style.display = 'block';
+          toggle.textContent = 'Text';
+          showingHtml.value = true;
+        }
+      });
+      wrapper.appendChild(toggle);
+    }
+
+  } else if (data.type === 'attachment' && data.mime_type && data.mime_type.startsWith('image/')) {
+    // Image attachment — img + alt toggle
+    const hasAlt = data.alt_text && data.alt_text.trim();
+    const showingImg = { value: true };
+
+    const contentArea = document.createElement('div');
+    contentArea.className = 'embed-content';
+
+    const img = document.createElement('img');
+    img.src = data.attachment_url;
+    img.alt = data.alt_text || data.filename || '';
+    img.style.cssText = 'max-width:100%;border-radius:6px;';
+    contentArea.appendChild(img);
+
+    const altDiv = document.createElement('div');
+    altDiv.className = 'embed-alt markdown-body';
+    altDiv.style.display = 'none';
+    if (hasAlt) {
+      altDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.alt_text), SECURE_CONFIG);
+    }
+    contentArea.appendChild(altDiv);
+
+    wrapper.appendChild(contentArea);
+
+    if (hasAlt) {
+      const toggle = document.createElement('button');
+      toggle.className = 'embed-toggle';
+      toggle.textContent = 'Alt';
+      toggle.style.cssText = 'position:absolute;top:4px;right:4px;font-size:11px;padding:2px 8px;background:var(--bg,#0f0f23);border:1px solid var(--border,#333);border-radius:4px;color:var(--text-muted,#888);cursor:pointer;z-index:10;';
+      toggle.addEventListener('mouseenter', () => { toggle.style.color = 'var(--accent,#6366f1)'; toggle.style.borderColor = 'var(--accent,#6366f1)'; });
+      toggle.addEventListener('mouseleave', () => { toggle.style.color = 'var(--text-muted,#888)'; toggle.style.borderColor = 'var(--border,#333)'; });
+      toggle.addEventListener('click', () => {
+        if (showingImg.value) {
+          img.style.display = 'none';
+          altDiv.style.display = 'block';
+          toggle.textContent = 'Image';
+          showingImg.value = false;
+        } else {
+          altDiv.style.display = 'none';
+          img.style.display = 'block';
+          toggle.textContent = 'Alt';
+          showingImg.value = true;
+        }
+      });
+      wrapper.appendChild(toggle);
+    }
+
+  } else if (data.type === 'attachment') {
+    // Non-image attachment — download link
+    const link = document.createElement('a');
+    link.href = data.attachment_url;
+    link.textContent = data.filename || 'Download attachment';
+    link.className = 'text-indigo-400 hover:underline';
+    link.setAttribute('download', '');
+    if (data.alt_text) {
+      const desc = document.createElement('p');
+      desc.textContent = data.alt_text;
+      desc.style.cssText = 'font-size:13px;color:var(--text-muted,#888);margin-top:4px;';
+      wrapper.appendChild(link);
+      wrapper.appendChild(desc);
+    } else {
+      wrapper.appendChild(link);
+    }
+
+  } else if (data.type === 'note' && data.content) {
+    // Plain note embed — render inline as markdown
+    const div = document.createElement('div');
+    div.className = 'embed-note markdown-body';
+    div.style.cssText = 'border-left:3px solid var(--border,#333);padding-left:1rem;margin:0.5rem 0;';
+    div.innerHTML = DOMPurify.sanitize(marked.parse(data.content), SECURE_CONFIG);
+    wrapper.appendChild(div);
+
+  } else {
+    // Fallback — error or unknown type
+    wrapper.innerHTML = '<div style="color:var(--text-muted,#888);font-size:13px;padding:8px;border:1px dashed var(--border,#333);border-radius:4px;">Embed not found</div>';
+  }
+}
+
+async function _resolveEmbeds(el) {
+  const placeholders = el.querySelectorAll('.embed-wrapper[data-embed-id]');
+  for (const wrapper of placeholders) {
+    const embedId = wrapper.dataset.embedId;
+    try {
+      const resp = await fetch('/api/resolve/' + encodeURIComponent(embedId));
+      if (resp.ok) {
+        const data = await resp.json();
+        _renderEmbed(wrapper, data);
+      } else {
+        wrapper.innerHTML = '<div style="color:var(--text-muted,#888);font-size:13px;">Embed not found: ' + DOMPurify.sanitize(embedId) + '</div>';
+      }
+    } catch (e) {
+      wrapper.innerHTML = '<div style="color:var(--text-muted,#888);font-size:13px;">Failed to load embed</div>';
+    }
+  }
+}
+
 document.addEventListener('alpine:init', () => {
   Alpine.directive('markdown', (el, { expression }, { effect, evaluate }) => {
     effect(() => {
       let text = evaluate(expression) || '';
       // Rewrite graph:// image refs BEFORE DOMPurify (which strips unknown protocols)
       text = text.replace(/!\[([^\]]*)\]\(graph:\/\/([^)]+)\)/g, '![$1](/api/attachment/$2)');
-      const html = DOMPurify.sanitize(marked.parse(text), SECURE_CONFIG);
+
+      // Replace ![[id]] embeds with placeholder markers BEFORE markdown parsing
+      // We use a unique HTML comment that survives marked.parse + DOMPurify
+      const embedIds = [];
+      text = text.replace(EMBED_RE, (match, id) => {
+        embedIds.push(id);
+        return `<p data-embed-placeholder="${DOMPurify.sanitize(id)}"></p>`;
+      });
+
+      const embedConfig = embedIds.length > 0 ? {
+        ...SECURE_CONFIG,
+        // Allow data-embed-placeholder through DOMPurify for embed placeholders
+        ALLOWED_ATTR: [...SECURE_CONFIG.ALLOWED_ATTR, 'data-embed-placeholder'],
+        ADD_ATTR: [...(SECURE_CONFIG.ADD_ATTR || []), 'data-embed-placeholder'],
+      } : SECURE_CONFIG;
+      const html = DOMPurify.sanitize(marked.parse(text), embedConfig);
       el.classList.add('markdown-body');
       el.innerHTML = html;
+
+      // Replace placeholder <p> elements with actual embed wrappers
+      el.querySelectorAll('p[data-embed-placeholder]').forEach(p => {
+        const embedId = p.dataset.embedPlaceholder;
+        if (embedId) {
+          const wrapper = _createEmbedPlaceholder(embedId);
+          p.parentNode.replaceChild(wrapper, p);
+        }
+      });
+
       // Wrap tables in horizontally-scrollable containers for mobile
       el.querySelectorAll('table').forEach(function(t) {
         var wrapper = document.createElement('div');
@@ -84,6 +283,11 @@ document.addEventListener('alpine:init', () => {
         }
         if (last < node.textContent.length) frag.appendChild(document.createTextNode(node.textContent.slice(last)));
         node.parentNode.replaceChild(frag, node);
+      }
+
+      // Async-resolve embeds
+      if (embedIds.length > 0) {
+        _resolveEmbeds(el);
       }
     });
   });
