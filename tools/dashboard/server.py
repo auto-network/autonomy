@@ -31,7 +31,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
@@ -4585,9 +4585,30 @@ async def api_source_attachments(request):
 
 async def api_attachment_serve(request):
     """Serve an attachment file by ID with correct Content-Type."""
-    from tools.graph.db import GraphDB
-
     attachment_id = request.path_params["attachment_id"]
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        from tools.dashboard.dao import mock as mock_dao
+        att = mock_dao.get_attachment(attachment_id)
+        if not att:
+            return JSONResponse({"error": "attachment not found"}, status_code=404)
+        content = att.get("content")
+        if content:
+            if isinstance(content, str):
+                content = content.encode()
+            return Response(content, media_type=att.get("mime_type", "application/octet-stream"))
+        mime = att.get("mime_type", "")
+        if mime.startswith("image/"):
+            import base64
+            png = base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+            )
+            return Response(png, media_type="image/png")
+        if mime == "text/html":
+            return Response(b"<html><body>Mock HTML attachment</body></html>", media_type="text/html")
+        return Response(b"mock content", media_type=mime or "application/octet-stream")
+
+    from tools.graph.db import GraphDB
     db = GraphDB()
     try:
         att = db.get_attachment(attachment_id)
