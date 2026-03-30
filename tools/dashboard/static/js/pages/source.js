@@ -290,6 +290,7 @@
               this.unrefAttachments = this.attachments.filter(
                 a => !this.noteContent.includes('graph://' + a.id.slice(0, 12))
                      && !this.noteContent.includes('graph://' + a.id)
+                     && !(a.source_id && a.source_id.includes('@'))
               );
             } catch (_) {
               // Non-critical — just skip attachment list
