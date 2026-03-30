@@ -381,3 +381,70 @@ class TestRegisterDeregister:
 
         assert old_wd not in mon._wd_to_session
         assert "auto-dereg-test" not in mon._tail_states
+
+
+class TestHostSessionWatcherAddsWatches:
+    """After JSONL watcher links a host session, inotify watches must exist."""
+
+    @pytest.mark.asyncio
+    async def test_watcher_adds_inotify_watches(self, setup_env):
+        """_watch_for_host_session_jsonl adds file+dir watches after link_and_enrich."""
+        tmp_path, db_path = setup_env
+
+        projects_dir = tmp_path / "projects" / "myproject"
+        projects_dir.mkdir(parents=True)
+        tmux_name = "host-test-watcher"
+
+        # Insert a host session row (no jsonl_path yet)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO tmux_sessions"
+            " (tmux_name, type, project, created_at, is_live)"
+            " VALUES (?, 'host', 'myproject', ?, 1)",
+            (tmux_name, time.time()),
+        )
+        conn.commit()
+        conn.close()
+
+        # Build a SessionMonitor with real inotify
+        from tools.dashboard.session_monitor import SessionMonitor, _TailState
+        from tools.dashboard.event_bus import EventBus
+
+        bus = EventBus()
+        mon = SessionMonitor()
+        mon._init_inotify()
+        mon._event_bus = bus
+        assert mon._use_inotify
+
+        # Patch session_monitor singleton so server.py's watcher uses our monitor
+        import tools.dashboard.server as srv
+        original_mon = srv.session_monitor
+        srv.session_monitor = mon
+
+        try:
+            # Start the watcher — no JSONL yet, so it will poll
+            task = asyncio.create_task(
+                srv._watch_for_host_session_jsonl(projects_dir, tmux_name, timeout=5.0)
+            )
+
+            # Simulate Claude creating the JSONL after a short delay
+            await asyncio.sleep(0.3)
+            new_jsonl = projects_dir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+            new_jsonl.write_text('{"type":"system"}\n')
+
+            # Wait for the watcher to find it
+            await asyncio.wait_for(task, timeout=5.0)
+
+            # Verify: inotify file watch exists
+            ts = mon._tail_states.get(tmux_name)
+            assert ts is not None, "TailState should exist after watcher links"
+            assert ts.watch_descriptor is not None, "File watch should be set"
+            assert mon._wd_to_session[ts.watch_descriptor] == tmux_name
+
+            # Verify: inotify dir watch exists
+            assert str(projects_dir) in mon._dir_path_to_wd, "Dir watch should be set"
+
+            # Verify: resolution_dir is set for rollover detection
+            assert ts.resolution_dir == projects_dir
+        finally:
+            srv.session_monitor = original_mon
