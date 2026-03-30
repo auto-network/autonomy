@@ -35,6 +35,7 @@ from typing import Any
 
 from tools.dashboard.dao.dashboard_db import (
     get_conn,
+    get_dispatch_nag_sessions,
     get_live_sessions,
     get_session,
     get_tailable_sessions,
@@ -148,6 +149,60 @@ def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
         logger.warning("session_monitor: nag send failed for %s", tmux_name, exc_info=True)
 
 
+def _get_dispatch_pause_message() -> str | None:
+    """Build a human-readable pause nag message, or None if not paused.
+
+    Checks both the global dispatcher pause (dispatch_db) and per-label
+    pauses (dispatch.state file).  Returns the first match.
+    """
+    # 1. Global dispatcher pause (auth failure, merge cascade)
+    try:
+        from agents.dispatch_db import is_paused, get_pause_reason
+        if is_paused():
+            info = get_pause_reason() or {}
+            reason = info.get("message") or info.get("reason") or "unknown"
+            paused_at = info.get("paused_at")
+            duration = _format_pause_duration(paused_at)
+            return f"Dispatch paused: {reason}{duration}"
+    except Exception:
+        logger.debug("session_monitor: dispatch_db pause check failed", exc_info=True)
+
+    # 2. Per-label pauses (smoke failure, etc.) via dispatch.state file
+    try:
+        state_path = Path(__file__).resolve().parents[2] / "data" / "dispatch.state"
+        if state_path.exists():
+            state = json.loads(state_path.read_text())
+            for key, val in state.items():
+                if key.endswith("_reason") or not val:
+                    continue
+                reason = state.get(f"{key}_reason", f"{key} queue paused")
+                return f"Dispatch paused: {reason}"
+    except Exception:
+        logger.debug("session_monitor: dispatch.state pause check failed", exc_info=True)
+
+    return None
+
+
+def _format_pause_duration(paused_at: str | None) -> str:
+    """Format ' (Xm ago)' suffix from an ISO timestamp, or '' if unavailable."""
+    if not paused_at:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(paused_at.replace("Z", "+00:00"))
+        elapsed = datetime.now(timezone.utc) - dt
+        mins = int(elapsed.total_seconds() / 60)
+        if mins < 1:
+            return " (<1m ago)"
+        if mins < 60:
+            return f" ({mins}m ago)"
+        hours = mins // 60
+        remaining = mins % 60
+        return f" ({hours}h{remaining}m ago)"
+    except Exception:
+        return ""
+
+
 @dataclass
 class _TailState:
     """Ephemeral per-session state for the tailer (not persisted in DB)."""
@@ -178,6 +233,7 @@ class SessionMonitor:
         self._entry_parser = None
         self._entry_enricher = None
         self._started = False
+        self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
         # inotify state — populated by _init_inotify()
         self._inotify: Any = None                        # INotify instance
         self._use_inotify: bool = False
@@ -999,9 +1055,42 @@ class SessionMonitor:
                     else:
                         logger.debug("session_monitor: nag skip %s (idle=%ds interval=%ds since_nag=%ds)", tmux_name, int(idle_secs), nag_interval, int(now - nag_last_sent))
 
+                # Dispatch pause nag — alert dispatch_nag subscribers when queue is stuck
+                await self._check_dispatch_pause_nag(now)
+
             except Exception:
                 logger.exception("session_monitor: liveness error")
             await asyncio.sleep(10)
+
+    _PAUSE_NAG_INTERVAL = 15 * 60  # 15 minutes between dispatch-pause nags
+
+    async def _check_dispatch_pause_nag(self, now: float) -> None:
+        """Send periodic nag to dispatch_nag subscribers when dispatch is paused."""
+        if (now - self._last_pause_nag_sent) < self._PAUSE_NAG_INTERVAL:
+            return  # Too soon since last pause nag
+
+        pause_msg = await asyncio.to_thread(_get_dispatch_pause_message)
+        if not pause_msg:
+            return  # Not paused
+
+        subscribers = get_dispatch_nag_sessions()
+        if not subscribers:
+            return
+
+        # Check at least one subscriber is alive before sending
+        sent = False
+        for tmux_name in subscribers:
+            alive = await asyncio.to_thread(self._check_tmux, tmux_name)
+            if alive:
+                logger.info(
+                    "session_monitor: dispatch pause nag → %s: %s",
+                    tmux_name, pause_msg,
+                )
+                await asyncio.to_thread(_send_nag_crosstalk, tmux_name, pause_msg)
+                sent = True
+
+        if sent:
+            self._last_pause_nag_sent = now
 
     @staticmethod
     def _check_tmux(name: str) -> bool:
