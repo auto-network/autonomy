@@ -4656,6 +4656,88 @@ async def api_graph_resolve(request):
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
+async def api_resolve_embed(request):
+    """Resolve a ![[id]] embed reference for the dashboard renderer.
+
+    Returns type, attachment URL, alt-text, and mime type for rendering iframes/images/toggles.
+    """
+    from tools.graph.db import GraphDB
+
+    embed_id = request.path_params["id"]
+    if not _GRAPH_SOURCE_ID_RE.match(embed_id):
+        return JSONResponse({"error": f"malformed id: {embed_id!r}"}, status_code=400)
+
+    version = request.query_params.get("version")
+    db = GraphDB()
+    try:
+        # Try as a source (note)
+        source = db.get_source(embed_id)
+        if source:
+            meta = source.get("metadata") or {}
+            if isinstance(meta, str):
+                import json as _json
+                try:
+                    meta = _json.loads(meta)
+                except Exception:
+                    meta = {}
+            if meta.get("rich_content"):
+                # Rich-content note — find HTML attachment
+                if version:
+                    versioned_key = f"{source['id']}@{version}"
+                else:
+                    # Find latest versioned attachment
+                    row = db.conn.execute(
+                        "SELECT * FROM attachments WHERE source_id LIKE ? ORDER BY created_at DESC LIMIT 1",
+                        (f"{source['id']}@%",)
+                    ).fetchone()
+                    versioned_key = dict(row)["source_id"] if row else None
+                att = None
+                if versioned_key:
+                    att_row = db.conn.execute(
+                        "SELECT * FROM attachments WHERE source_id = ? LIMIT 1",
+                        (versioned_key,)
+                    ).fetchone()
+                    if att_row:
+                        att = dict(att_row)
+                # Get alt-text from note content
+                entries = db.get_source_content(source["id"])
+                alt_text = entries[0]["content"] if entries else ""
+                return JSONResponse({
+                    "type": "rich-content",
+                    "id": source["id"],
+                    "title": source.get("title", ""),
+                    "attachment_url": f"/api/attachment/{att['id'][:12]}" if att else None,
+                    "alt_text": alt_text,
+                    "mime_type": "text/html",
+                })
+            else:
+                # Plain note
+                entries = db.get_source_content(source["id"])
+                content = entries[0]["content"] if entries else ""
+                return JSONResponse({
+                    "type": "note",
+                    "id": source["id"],
+                    "title": source.get("title", ""),
+                    "content": content,
+                })
+
+        # Try as an attachment
+        att = db.get_attachment(embed_id)
+        if att:
+            return JSONResponse({
+                "type": "attachment",
+                "id": att["id"],
+                "filename": att["filename"],
+                "attachment_url": f"/api/attachment/{att['id'][:12]}",
+                "alt_text": att.get("alt_text") or "",
+                "mime_type": att.get("mime_type") or "application/octet-stream",
+            })
+    finally:
+        db.close()
+
+    return JSONResponse({"error": "not found"}, status_code=404)
+
+
 def _graph_db_path() -> str | None:
     """Resolve graph DB path: GRAPH_DB env var, then default."""
     import os
@@ -5422,7 +5504,8 @@ routes = [
     Route("/api/crosstalk/send", api_crosstalk_send, methods=["POST"]),
     Route("/api/crosstalk/peers", api_crosstalk_peers, methods=["GET"]),
 
-    # Attachment serving
+    # Embed resolution + attachment serving
+    Route("/api/resolve/{id}", api_resolve_embed),
     Route("/api/attachment/{attachment_id}", api_attachment_serve),
 
     # Design Studio (formerly Experiments)

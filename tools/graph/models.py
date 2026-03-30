@@ -105,6 +105,7 @@ class Attachment:
     source_id: str | None = None
     turn_number: int | None = None
     metadata: dict = field(default_factory=dict)
+    alt_text: str | None = None
     created_at: str = field(default_factory=now_iso)
 
 
