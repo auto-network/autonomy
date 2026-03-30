@@ -320,6 +320,11 @@ DISPATCH_SSE_DATA = {
         {"id": "auto-sweep-b1", "title": "Sweep alpha task",
          "priority": 1, "status": "RUNNING", "duration_secs": 120,
          "snippet": "Working on tests"},
+        {"id": "librarian-review_report-abc-20260330-120000",
+         "title": "Librarian: review_report",
+         "priority": None, "status": "RUNNING", "duration_secs": 45,
+         "librarian_type": "review_report",
+         "snippet": "Reviewing experience report"},
     ],
     "waiting": [
         {"id": "auto-sweep-b3", "title": "Sweep gamma feature",
@@ -827,6 +832,31 @@ DISPATCH_PAGE_CHECKS = """
 
     // No template artifacts
     r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+
+    // Librarian card checks — L2.B
+    r.has_librarian_title = bodyText.indexOf('Librarian: review_report') !== -1;
+    r.no_pnull = bodyText.indexOf('Pnull') === -1 && bodyText.indexOf('Pundefined') === -1;
+
+    // Check that librarian cards have data-librarian attribute
+    var libCards = document.querySelectorAll('[data-librarian]');
+    r.librarian_card_count = 0;
+    libCards.forEach(function(card) {
+        var attr = card.getAttribute('data-librarian');
+        if (attr && attr !== 'false') r.librarian_card_count++;
+    });
+
+    // Check that no priority badge (P0, P1, ...) appears on librarian cards
+    r.librarian_has_no_priority_badge = true;
+    libCards.forEach(function(card) {
+        var attr = card.getAttribute('data-librarian');
+        if (attr && attr !== 'false') {
+            var badges = card.querySelectorAll('.ft-badge');
+            badges.forEach(function(badge) {
+                var text = badge.textContent.trim();
+                if (/^P\\d+$/.test(text)) r.librarian_has_no_priority_badge = false;
+            });
+        }
+    });
 """
 
 # ── Beads page JS check bundle ───────────────────────────────────────
@@ -1258,6 +1288,27 @@ class TestDispatchPageBehavior:
         """No raw Jinja template syntax visible."""
         c = self._checks
         assert c.get("no_jinja"), "Raw Jinja template syntax visible on dispatch page"
+
+    def test_librarian_card_shows_title(self):
+        """Librarian card shows 'Librarian: review_report' title, not 'Pnull'."""
+        c = self._checks
+        assert c.get("has_librarian_title"), "Librarian title not visible on dispatch page"
+
+    def test_no_pnull_on_dispatch_page(self):
+        """No 'Pnull' or 'Pundefined' text on dispatch page."""
+        c = self._checks
+        assert c.get("no_pnull"), "Found 'Pnull' or 'Pundefined' on dispatch page"
+
+    def test_librarian_card_has_no_priority_badge(self):
+        """Librarian card does not show a numeric priority badge (P0, P1, ...)."""
+        c = self._checks
+        assert c.get("librarian_has_no_priority_badge"), "Librarian card has a priority badge"
+
+    def test_librarian_card_has_distinct_style(self):
+        """At least one librarian card is detected via data-librarian attribute."""
+        c = self._checks
+        assert c.get("librarian_card_count", 0) >= 1, \
+            f"No librarian cards found (count={c.get('librarian_card_count')})"
 
 
 class TestBeadsPageBehavior:
