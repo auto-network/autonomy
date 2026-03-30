@@ -151,6 +151,22 @@ def _post_multipart(endpoint: str, fields: dict, files: list[tuple[str, str, byt
         sys.exit(1)
 
 
+def _auto_save_note(source_id: str, content: str) -> str:
+    """Save note content to /tmp/graph-notes/{source_id}.md and return path."""
+    from pathlib import Path
+    save_dir = Path("/tmp/graph-notes")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"{source_id}.md"
+    save_path.write_text(content)
+    return str(save_path)
+
+
+def _extract_source_id(output: str) -> str | None:
+    """Extract source ID from note output like 'src:704995f1-3b5'."""
+    m = re.search(r"src:([0-9a-f][\w-]+)", output)
+    return m.group(1) if m else None
+
+
 def api_note(args) -> None:
     """Create a note via API."""
     if getattr(args, 'content_stdin', None) == "-":
@@ -160,6 +176,10 @@ def api_note(args) -> None:
     else:
         print("Error: note text required", file=sys.stderr)
         sys.exit(1)
+
+    if getattr(args, "html", None):
+        from .cli import _require_read
+        _require_read("c62b0142", "Agents must read the Rich-Content Creation Guide before creating/updating rich-content notes.\n  See: graph://c62b0142-fb3")
 
     attach_paths = getattr(args, "attach", None) or []
     if attach_paths:
@@ -183,7 +203,7 @@ def api_note(args) -> None:
                 sys.exit(1)
             mime, _ = mimetypes.guess_type(p.name)
             files.append(("attachments", p.name, p.read_bytes(), mime or "application/octet-stream"))
-        _print_output(_post_multipart("/api/graph/note", fields, files))
+        result = _post_multipart("/api/graph/note", fields, files)
     else:
         data = {"content": text}
         if args.tags:
@@ -195,11 +215,19 @@ def api_note(args) -> None:
         scope = os.environ.get("GRAPH_SCOPE")
         if scope and not args.project:
             data["project"] = scope
-        _print_output(_post("/api/graph/note", data))
+        result = _post("/api/graph/note", data)
+    _print_output(result)
+    sid = _extract_source_id(result.get("output", ""))
+    if sid:
+        local_path = _auto_save_note(sid, text)
+        print(f"  Local copy: {local_path}")
 
 
 def api_note_update(args) -> None:
     """Update a note via API."""
+    if getattr(args, "html", None):
+        from .cli import _require_read
+        _require_read("c62b0142", "Agents must read the Rich-Content Creation Guide before creating/updating rich-content notes.\n  See: graph://c62b0142-fb3")
     if getattr(args, 'content_stdin', None) == "-":
         new_content = sys.stdin.read().strip()
     else:
@@ -224,7 +252,7 @@ def api_note_update(args) -> None:
                 sys.exit(1)
             mime, _ = mimetypes.guess_type(p.name)
             files.append(("attachments", p.name, p.read_bytes(), mime or "application/octet-stream"))
-        _print_output(_post_multipart("/api/graph/note/update", fields, files))
+        result = _post_multipart("/api/graph/note/update", fields, files)
     else:
         data = {
             "source_id": args.source,
@@ -232,7 +260,12 @@ def api_note_update(args) -> None:
         }
         if args.integrate_ids:
             data["integrate_ids"] = args.integrate_ids
-        _print_output(_post("/api/graph/note/update", data))
+        result = _post("/api/graph/note/update", data)
+    _print_output(result)
+    sid = _extract_source_id(result.get("output", ""))
+    if sid:
+        local_path = _auto_save_note(sid, new_content)
+        print(f"  Local copy: {local_path}")
 
 
 def api_comment_add(args) -> None:
