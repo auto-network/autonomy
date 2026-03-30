@@ -203,7 +203,7 @@
             <div data-testid="rich-content-container" style="margin:0.5rem 0;"></div>
           </template>
           <!-- Plain note: markdown -->
-          <template x-if="!isRichContent || !richHtmlContent">
+          <template x-if="!isRichContent">
             <div :style="'font-size:' + mdSizes[zoom]" x-markdown="noteContent"></div>
           </template>
         </div>

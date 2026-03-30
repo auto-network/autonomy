@@ -110,8 +110,8 @@ function _renderEmbed(wrapper, data) {
       controls.appendChild(toggle);
     }
 
-    // View Source link
-    if (data.id) {
+    // View Source link (hidden on direct view — already on the source page)
+    if (data.id && !data._directView) {
       const viewSrc = document.createElement('button');
       viewSrc.textContent = 'View Source';
       viewSrc.style.cssText = btnStyle;
