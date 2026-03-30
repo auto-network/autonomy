@@ -21,6 +21,8 @@ import pytest
 pytest.importorskip("inotify_simple")
 pytest.importorskip("pytest_asyncio")
 
+from tools.dashboard.server import _parse_jsonl_entry
+
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -156,29 +158,6 @@ class MockEventBus:
         return [(t, d) for t, d in self.events if t == topic]
 
 
-def _simple_parser(line: str) -> dict | None:
-    """Minimal entry parser that returns parsed JSON."""
-    try:
-        raw = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    entry_type = raw.get("type")
-    if entry_type in ("user", "assistant"):
-        msg = raw.get("message", {})
-        content_raw = msg.get("content", "")
-        if isinstance(content_raw, list):
-            for block in content_raw:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    content_raw = block.get("text", "")
-                    break
-        return {
-            "type": entry_type,
-            "content": content_raw,
-            "timestamp": raw.get("timestamp", ""),
-        }
-    return None
-
-
 @pytest.fixture
 def setup_env(tmp_path):
     """Set up a test environment with DB."""
@@ -209,7 +188,7 @@ async def _start_monitor(bus):
         SessionMonitor, "_check_tmux", staticmethod(lambda name: True),
     )
     patcher.start()
-    await mon.start(event_bus=bus, entry_parser=_simple_parser)
+    await mon.start(event_bus=bus, entry_parser=_parse_jsonl_entry)
     return mon, patcher
 
 
