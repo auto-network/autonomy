@@ -2279,3 +2279,77 @@ class TestLegacyEmbedBackwardsCompat:
         """User sees an image from the legacy embed syntax."""
         assert self._checks.get("sees_image"), "Legacy image embed not visible"
 
+
+# ── Rich content at narrow viewport — horizontal scroll ─────────────
+
+NARROW_VIEWPORT_CHECKS = """
+    // At 600px wide, the 900px SVG diagrams must be horizontally scrollable
+    // inside the iframe, not clipped
+
+    await new Promise(r => setTimeout(r, 1500));
+
+    var iframe = document.querySelector('[data-testid="rich-content-iframe"]');
+    r.has_iframe = !!iframe;
+
+    if (iframe) {
+        try {
+            var d = iframe.contentDocument;
+            var body = d.body;
+            // Content wider than iframe = scrollable
+            r.content_wider_than_iframe = body.scrollWidth > iframe.clientWidth;
+            // Body must allow horizontal scroll (not hidden/clip)
+            var bodyOverflowX = window.getComputedStyle(d.documentElement).overflowX;
+            r.overflow_x = bodyOverflowX;
+            r.overflow_allows_scroll = bodyOverflowX === 'auto' || bodyOverflowX === 'scroll' || bodyOverflowX === 'visible';
+            // The user must be able to scroll — scrollWidth > clientWidth AND overflow allows it
+            r.is_scrollable = r.content_wider_than_iframe && r.overflow_allows_scroll;
+        } catch (e) {
+            r.content_wider_than_iframe = false;
+            r.is_scrollable = false;
+            r.overflow_x = 'error: ' + e.message;
+        }
+    } else {
+        r.content_wider_than_iframe = false;
+        r.is_scrollable = false;
+    }
+"""
+
+
+@pytest.mark.xfail(reason="Mock server doesn't serve real HTML attachment content — iframe is empty at narrow width")
+class TestRichContentNarrowViewport:
+    """At narrow viewport (600px), wide diagrams must scroll horizontally, not clip."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        # Set narrow viewport
+        subprocess.run(
+            ["agent-browser", "set", "viewport", "600", "800"],
+            capture_output=True, timeout=5,
+        )
+        time.sleep(0.3)
+        result = _navigate_and_eval_async(
+            f"/graph/{SWEEP_RICH_NOTE_ID[:12]}",
+            NARROW_VIEWPORT_CHECKS,
+            wait_ms=1500,
+        )
+        # Restore default viewport
+        subprocess.run(
+            ["agent-browser", "set", "viewport", "1280", "720"],
+            capture_output=True, timeout=5,
+        )
+        request.cls._checks = result
+
+    def test_content_wider_than_iframe(self):
+        """At 600px viewport, 900px SVG content is wider than the iframe."""
+        assert self._checks.get("content_wider_than_iframe"), \
+            "Content is not wider than iframe at 600px — SVG may be scaling down"
+
+    def test_horizontal_scroll_enabled(self):
+        """Iframe content allows horizontal scrolling (overflow-x is auto or scroll)."""
+        assert self._checks.get("overflow_allows_scroll"), \
+            f"overflow-x is '{self._checks.get('overflow_x')}' — should be 'auto' or 'scroll'"
+
+    def test_diagram_is_scrollable(self):
+        """User can scroll horizontally to see the full diagram at narrow width."""
+        assert self._checks.get("is_scrollable"), \
+            "Diagram is not scrollable at narrow viewport — content is clipped"
