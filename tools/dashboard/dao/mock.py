@@ -626,6 +626,99 @@ def get_source(source_id: str) -> dict | None:
     return None
 
 
+def get_attachment(attachment_id: str) -> dict | None:
+    """Get attachment from fixture data by ID or prefix."""
+    data = _load()
+    attachments = data.get("graph_attachments", {})
+    if attachment_id in attachments:
+        return attachments[attachment_id]
+    for aid, att in attachments.items():
+        if aid.startswith(attachment_id):
+            return att
+    return None
+
+
+def resolve_source_for_api(source_id: str) -> dict | None:
+    """Return a graph-read-shaped response for a source, suitable for api_graph_resolve.
+
+    Returns the same shape as `graph read --json --first`:
+    {source: {...}, entries: [{content: ...}], edges: [], comments: [], version_count: N}
+    """
+    src = get_source(source_id)
+    if not src:
+        return None
+    content = src.pop("content", "Mock content")
+    entries = src.pop("entries", None)
+    if entries is None:
+        entries = [{"id": "entry-001", "entry_type": "thought", "role": "user",
+                    "turn_number": 1, "content": content, "message_id": None, "metadata": {}}]
+    comments = src.pop("comments", [])
+    version_count = src.pop("version_count", 1)
+    return {
+        "source": src,
+        "entries": entries,
+        "edges": [],
+        "comments": comments,
+        "version_count": version_count,
+    }
+
+
+def resolve_embed(embed_id: str, version: str | None = None) -> dict | None:
+    """Return embed resolution data for a ![[id]] reference.
+
+    Checks sources first (rich-content note), then attachments.
+    """
+    src = get_source(embed_id)
+    if src:
+        meta = src.get("metadata", "{}")
+        if isinstance(meta, str):
+            import json as _json
+            try:
+                meta = _json.loads(meta)
+            except Exception:
+                meta = {}
+        content = src.get("content", "")
+        if meta.get("rich_content"):
+            # Find HTML attachment for this rich-content note
+            data = _load()
+            attachments = data.get("graph_attachments", {})
+            html_att = None
+            for aid, att in attachments.items():
+                att_source = att.get("source_id", "")
+                if att_source.startswith(src["id"]):
+                    if version and att_source == f"{src['id']}@{version}":
+                        html_att = att
+                        break
+                    elif not version:
+                        html_att = att  # take latest
+            return {
+                "type": "rich-content",
+                "id": src["id"],
+                "title": src.get("title", ""),
+                "attachment_url": f"/api/attachment/{html_att['id'][:12]}" if html_att else None,
+                "alt_text": content,
+                "mime_type": "text/html",
+            }
+        else:
+            return {
+                "type": "note",
+                "id": src["id"],
+                "title": src.get("title", ""),
+                "content": content,
+            }
+    att = get_attachment(embed_id)
+    if att:
+        return {
+            "type": "attachment",
+            "id": att["id"],
+            "filename": att.get("filename", ""),
+            "attachment_url": f"/api/attachment/{att['id'][:12]}",
+            "alt_text": att.get("alt_text", ""),
+            "mime_type": att.get("mime_type", "application/octet-stream"),
+        }
+    return None
+
+
 # ── session mutation stubs (no-ops in mock mode) ────────────────────
 # These prevent crashes when session management endpoints are called in mock mode.
 

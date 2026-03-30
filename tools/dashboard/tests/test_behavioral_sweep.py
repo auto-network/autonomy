@@ -427,6 +427,96 @@ SWEEP_EXPERIMENT = {
 }
 
 
+# ── Graph source / note fixture data ────────────────────────────────
+
+SWEEP_PLAIN_NOTE_ID = "aa000000-0000-0000-0000-000000000001"
+SWEEP_RICH_NOTE_ID = "bb000000-0000-0000-0000-000000000002"
+SWEEP_RICH_HTML_ATT_ID = "cc000000-0000-0000-0000-000000000003"
+SWEEP_IMAGE_ATT_ID = "dd000000-0000-0000-0000-000000000004"
+SWEEP_PARENT_NOTE_ID = "ee000000-0000-0000-0000-000000000005"
+SWEEP_LEGACY_ATT_ID = "ff000000-0000-0000-0000-000000000006"
+SWEEP_NO_ALT_ATT_ID = "aa100000-0000-0000-0000-000000000007"
+SWEEP_LEGACY_NOTE_ID = "bb100000-0000-0000-0000-000000000008"
+
+SWEEP_GRAPH_SOURCES = {
+    SWEEP_PLAIN_NOTE_ID: {
+        "id": SWEEP_PLAIN_NOTE_ID,
+        "title": "Plain Note",
+        "type": "note",
+        "project": "autonomy",
+        "created_at": "2026-03-30T12:00:00Z",
+        "metadata": "{}",
+        "content": "# Plain Note\n\n| Col A | Col B |\n|-------|-------|\n| 1 | 2 |\n\nSome paragraph text.",
+    },
+    SWEEP_RICH_NOTE_ID: {
+        "id": SWEEP_RICH_NOTE_ID,
+        "title": "Pause Mechanisms",
+        "type": "note",
+        "project": "autonomy",
+        "created_at": "2026-03-30T12:00:00Z",
+        "metadata": json.dumps({"rich_content": True}),
+        "content": "## Pause Mechanisms\n\n| Scope | Trigger | Effect |\n|-------|---------|--------|\n| Global | Auth failure | All blocked |\n| Per-label | Smoke failure | Label skipped |",
+    },
+    SWEEP_PARENT_NOTE_ID: {
+        "id": SWEEP_PARENT_NOTE_ID,
+        "title": "Dispatch Lifecycle Signpost",
+        "type": "note",
+        "project": "autonomy",
+        "created_at": "2026-03-30T12:00:00Z",
+        "metadata": "{}",
+        "content": f"# Dispatch Lifecycle\n\n## Pause Mechanisms\n\n![[{SWEEP_RICH_NOTE_ID[:12]}]]\n\n## Screenshot\n\n![[{SWEEP_IMAGE_ATT_ID[:12]}]]\n\n## No Alt\n\n![[{SWEEP_NO_ALT_ATT_ID[:12]}]]",
+    },
+    SWEEP_LEGACY_NOTE_ID: {
+        "id": SWEEP_LEGACY_NOTE_ID,
+        "title": "Legacy Embed Note",
+        "type": "note",
+        "project": "autonomy",
+        "created_at": "2026-03-30T12:00:00Z",
+        "metadata": "{}",
+        "content": f"# Legacy\n\n![old screenshot](graph://{SWEEP_LEGACY_ATT_ID[:12]})",
+    },
+}
+
+SWEEP_GRAPH_ATTACHMENTS = {
+    SWEEP_RICH_HTML_ATT_ID: {
+        "id": SWEEP_RICH_HTML_ATT_ID,
+        "filename": "pause-mechanisms.html",
+        "mime_type": "text/html",
+        "source_id": f"{SWEEP_RICH_NOTE_ID}@1",
+        "alt_text": "",
+        "size_bytes": 2048,
+        "created_at": "2026-03-30T12:00:00Z",
+    },
+    SWEEP_IMAGE_ATT_ID: {
+        "id": SWEEP_IMAGE_ATT_ID,
+        "filename": "screenshot.png",
+        "mime_type": "image/png",
+        "source_id": "",
+        "alt_text": "Dispatch page showing 3 running beads with progress bars.",
+        "size_bytes": 45000,
+        "created_at": "2026-03-30T12:00:00Z",
+    },
+    SWEEP_LEGACY_ATT_ID: {
+        "id": SWEEP_LEGACY_ATT_ID,
+        "filename": "legacy-shot.png",
+        "mime_type": "image/png",
+        "source_id": "",
+        "alt_text": "Legacy screenshot",
+        "size_bytes": 30000,
+        "created_at": "2026-03-30T12:00:00Z",
+    },
+    SWEEP_NO_ALT_ATT_ID: {
+        "id": SWEEP_NO_ALT_ATT_ID,
+        "filename": "diagram.png",
+        "mime_type": "image/png",
+        "source_id": "",
+        "alt_text": "",
+        "size_bytes": 20000,
+        "created_at": "2026-03-30T12:00:00Z",
+    },
+}
+
+
 def _build_fixture() -> dict:
     """Build the complete fixture dict for behavioral sweep tests."""
     entries = dict(SWEEP_SESSION_ENTRIES)
@@ -448,6 +538,8 @@ def _build_fixture() -> dict:
         "traces": {**SWEEP_TRACES, **SWEEP_TRACE_DATA},
         "primers": {**SWEEP_PRIMERS, **SWEEP_PRIMER_DATA},
         "bead_deps": SWEEP_BEAD_DEPS,
+        "graph_sources": SWEEP_GRAPH_SOURCES,
+        "graph_attachments": SWEEP_GRAPH_ATTACHMENTS,
     }
 
 
@@ -1901,3 +1993,203 @@ class TestExperimentToolbar:
         """PICKER: iteration nav is hidden."""
         c = self._checks
         assert c.get("picker_no_iter"), "Iter nav should be hidden in PICKER"
+
+
+# ── Source page: plain note ─────────────────────────────────────────
+
+PLAIN_NOTE_CHECKS = """
+    var body = document.body.textContent || '';
+    r.sees_table_data = body.indexOf('Col A') >= 0 && body.indexOf('Col B') >= 0;
+    r.sees_paragraph = body.indexOf('Some paragraph text') >= 0;
+    r.title_not_in_body = body.indexOf('Plain Note') >= 0;  // title shown in header area
+    r.title_in_header = !!(document.querySelector('[data-testid="source-title"]') ||
+        document.querySelector('h1, h2, .text-xl, .text-2xl'));
+"""
+
+
+class TestPlainNoteBehavior:
+    """Plain note renders readable markdown content."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check(
+            f"/graph/{SWEEP_PLAIN_NOTE_ID[:12]}",
+            PLAIN_NOTE_CHECKS,
+            wait_ms=1000,
+        )
+        request.cls._checks = result
+
+    def test_table_data_visible(self):
+        """User sees table column headers from the note."""
+        assert self._checks.get("sees_table_data"), "Table data (Col A, Col B) not visible"
+
+    def test_paragraph_visible(self):
+        """User sees paragraph text from the note."""
+        assert self._checks.get("sees_paragraph"), "Paragraph text not visible"
+
+    def test_title_visible(self):
+        """Note title is visible on the page."""
+        assert self._checks.get("title_not_in_body"), "Note title not visible anywhere"
+
+
+# ── Source page: rich-content note (direct view) ────────────────────
+
+RICH_NOTE_DIRECT_CHECKS = """
+    var body = document.body.textContent || '';
+
+    // User should see a toggle button labeled "Text" (to switch to markdown view)
+    var toggleText = '';
+    var buttons = document.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) {
+        var txt = buttons[i].textContent.trim();
+        if (txt === 'Text' || txt === 'Diagram') {
+            toggleText = txt;
+            break;
+        }
+    }
+    r.sees_toggle = toggleText.length > 0;
+    r.toggle_label = toggleText;
+
+    // User should see the rich visual content (rendered HTML), not just the markdown table
+    // The HTML diagram has "Three distinct pause scopes" as a label
+    // If we only see the markdown table text but no visual rendering, the feature is broken
+    r.sees_rich_content = body.indexOf('Three distinct pause scopes') >= 0;
+
+    // The raw markdown table headers should NOT be the primary visible content
+    // (they'd appear in the toggle alt-text view, not the default view)
+    r.sees_only_table = body.indexOf('| Scope |') >= 0 && !r.sees_toggle;
+"""
+
+
+class TestRichNoteDirectView:
+    """Direct view of a rich-content note shows the rendered diagram with a toggle."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check(
+            f"/graph/{SWEEP_RICH_NOTE_ID[:12]}",
+            RICH_NOTE_DIRECT_CHECKS,
+            wait_ms=1200,
+        )
+        request.cls._checks = result
+
+    def test_sees_toggle(self):
+        """User sees a toggle button for switching between diagram and text."""
+        assert self._checks.get("sees_toggle"), "No toggle button visible"
+
+    def test_toggle_default_label(self):
+        """Default toggle label is 'Text' (click to see markdown)."""
+        assert self._checks.get("toggle_label") == "Text", \
+            f"Expected toggle label 'Text', got '{self._checks.get('toggle_label')}'"
+
+    def test_sees_rich_content(self):
+        """User sees the rendered diagram content."""
+        assert self._checks.get("sees_rich_content"), \
+            "Rich diagram content not visible on page"
+
+    def test_not_showing_only_raw_table(self):
+        """The default view is NOT just the raw markdown table without a toggle."""
+        assert not self._checks.get("sees_only_table"), \
+            "Showing raw markdown table as primary view — rich rendering missing"
+
+
+# ── Source page: parent note with ![[id]] embeds ────────────────────
+
+PARENT_EMBED_CHECKS = """
+    // Wait for async embed resolution
+    await new Promise(r => setTimeout(r, 1500));
+
+    var body = document.body.textContent || '';
+
+    // User sees the parent note title
+    r.sees_title = body.indexOf('Dispatch Lifecycle') >= 0;
+
+    // User sees the embedded rich diagram content (from the child note's HTML)
+    r.sees_embedded_diagram = body.indexOf('Auth failure') >= 0 || body.indexOf('pause scopes') >= 0;
+
+    // User sees the image alt-text or the image itself is rendered
+    // (look for alt text content that would appear in toggle view)
+    var visibleImages = 0;
+    var imgs = document.querySelectorAll('img');
+    for (var i = 0; i < imgs.length; i++) {
+        if (imgs[i].offsetParent !== null) visibleImages++;
+    }
+    r.sees_image = visibleImages > 0 || body.indexOf('running beads') >= 0;
+
+    // User sees toggle buttons for embeds that have alt-text
+    var toggleLabels = [];
+    var buttons = document.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) {
+        var txt = buttons[i].textContent.trim();
+        if (txt === 'Text' || txt === 'Diagram' || txt === 'Alt' || txt === 'Image') {
+            toggleLabels.push(txt);
+        }
+    }
+    r.toggle_count = toggleLabels.length;
+    r.toggle_labels = toggleLabels;
+"""
+
+
+class TestParentNoteEmbeds:
+    """Parent note with ![[id]] embeds renders rich content inline."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            f"/graph/{SWEEP_PARENT_NOTE_ID[:12]}",
+            PARENT_EMBED_CHECKS,
+            wait_ms=1500,
+        )
+        request.cls._checks = result
+
+    def test_sees_parent_title(self):
+        """User sees the parent note's title text."""
+        assert self._checks.get("sees_title"), "Parent note title not visible"
+
+    def test_sees_embedded_diagram_content(self):
+        """User sees content from the embedded rich-content diagram."""
+        assert self._checks.get("sees_embedded_diagram"), \
+            "Embedded diagram content (pause mechanisms) not visible"
+
+    def test_sees_embedded_image(self):
+        """User sees the embedded image or its alt-text description."""
+        assert self._checks.get("sees_image"), \
+            "Embedded image not visible (no img and no alt-text)"
+
+    def test_toggles_for_embeds_with_alt(self):
+        """User sees toggle buttons for embeds that have alt-text (rich + image), but not for no-alt embed."""
+        count = self._checks.get("toggle_count", 0)
+        assert count == 2, \
+            f"Expected 2 toggles (rich diagram + image with alt), got {count}: {self._checks.get('toggle_labels')}"
+
+
+# ── Source page: legacy ![alt](graph://id) embed ────────────────────
+
+LEGACY_EMBED_CHECKS = """
+    // User should see an image on the page (from the old ![alt](graph://id) syntax)
+    var visibleImages = 0;
+    var imgs = document.querySelectorAll('img');
+    for (var i = 0; i < imgs.length; i++) {
+        if (imgs[i].offsetParent !== null) visibleImages++;
+    }
+    r.sees_image = visibleImages > 0;
+
+"""
+
+
+class TestLegacyEmbedBackwardsCompat:
+    """Old ![alt](graph://id) syntax still renders visible images."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check(
+            f"/graph/{SWEEP_LEGACY_NOTE_ID[:12]}",
+            LEGACY_EMBED_CHECKS,
+            wait_ms=1000,
+        )
+        request.cls._checks = result
+
+    def test_sees_image(self):
+        """User sees an image from the legacy embed syntax."""
+        assert self._checks.get("sees_image"), "Legacy image embed not visible"
+
