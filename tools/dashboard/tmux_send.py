@@ -20,6 +20,7 @@ import os
 import secrets
 import subprocess
 import tempfile
+import time
 
 _session_locks: dict[str, asyncio.Lock] = {}
 
@@ -40,9 +41,18 @@ async def _tmux_send_worker(target: str, text: str) -> None:
 
 
 def tmux_send_sync(target: str, text: str) -> None:
-    """Schedule a tmux_send from a sync context (thread-safe)."""
-    loop = asyncio.get_event_loop()
-    asyncio.run_coroutine_threadsafe(tmux_send(target, text), loop)
+    """Send from any context — async event loop or thread."""
+    try:
+        loop = asyncio.get_running_loop()
+        # We're on the event loop — schedule as a task
+        loop.create_task(tmux_send(target, text))
+    except RuntimeError:
+        # We're in a thread — no running loop, call subprocesses directly
+        _tmux_paste(target, text)
+        time.sleep(0.3)
+        _tmux_enter(target)
+        time.sleep(0.5)
+        _tmux_enter(target)
 
 
 def _tmux_paste(target: str, text: str) -> None:
