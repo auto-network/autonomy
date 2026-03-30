@@ -2060,6 +2060,13 @@ RICH_NOTE_DIRECT_CHECKS = """
 
     // Note title still visible
     r.sees_title = (document.body.textContent || '').indexOf('Pause Mechanisms') >= 0;
+
+    // Iframe must not have a scrollbar (height matches content)
+    if (iframe) {
+        r.iframe_no_scrollbar = iframe.scrollHeight <= iframe.clientHeight + 2;
+    } else {
+        r.iframe_no_scrollbar = false;
+    }
 """
 
 
@@ -2101,6 +2108,11 @@ class TestRichNoteDirectView:
     def test_title_visible(self):
         """Note title is still visible."""
         assert self._checks.get("sees_title"), "Title 'Pause Mechanisms' not visible"
+
+    def test_no_scrollbar(self):
+        """Iframe has no scrollbar (height matches content)."""
+        assert self._checks.get("iframe_no_scrollbar"), \
+            "Iframe has a scrollbar — height doesn't match content"
 
 
 # ── Source page: parent note with ![[id]] embeds ────────────────────
