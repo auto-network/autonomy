@@ -601,6 +601,49 @@ def test_consecutive_failures_skips_running():
     assert db.get_consecutive_failures("auto-rn") == (2, 0)
 
 
+def _insert_run_with_fc(bead_id: str, status: str, started_at: float,
+                        failure_class: str | None = None):
+    """Helper: insert a minimal completed run with optional failure_class."""
+    run_id = f"{bead_id}-{int(started_at)}"
+    db.insert_run(
+        run_id=run_id, bead_id=bead_id,
+        started_at=started_at, completed_at=started_at + 60,
+        status=status, reason=f"test {status}",
+        decision={"status": status}, commit_hash="", branch="",
+        branch_base="", image="", container_name="",
+        exit_code=0 if status == "DONE" else 1, output_dir="",
+        failure_class=failure_class,
+    )
+
+
+def test_stash_pop_blocked_counts_as_merge_failure():
+    """BLOCKED with failure_class='merge' counts toward merge_failures, not agent."""
+    _use_temp_db()
+    _insert_run_with_fc("auto-sp", "BLOCKED", 1000, failure_class="merge")
+    _insert_run_with_fc("auto-sp", "BLOCKED", 2000, failure_class="merge")
+    assert db.get_consecutive_failures("auto-sp") == (0, 2)
+
+
+def test_stash_pop_blocked_mixed_with_agent_blocked():
+    """Stash pop BLOCKED (merge) and agent BLOCKED count in separate buckets."""
+    _use_temp_db()
+    _insert_run_simple("auto-mx", "BLOCKED", 1000)  # agent BLOCKED (no fc)
+    _insert_run_with_fc("auto-mx", "BLOCKED", 2000, failure_class="merge")
+    _insert_run_simple("auto-mx", "FAILED", 3000)
+    # Most recent first: FAILED → agent, BLOCKED+merge → merge, BLOCKED → agent
+    assert db.get_consecutive_failures("auto-mx") == (2, 1)
+
+
+def test_stash_pop_blocked_resets_at_done():
+    """BLOCKED+merge counter resets at DONE like all other failures."""
+    _use_temp_db()
+    _insert_run_with_fc("auto-rd", "BLOCKED", 1000, failure_class="merge")
+    _insert_run_simple("auto-rd", "DONE", 2000)
+    _insert_run_with_fc("auto-rd", "BLOCKED", 3000, failure_class="merge")
+    # Most recent first: BLOCKED+merge(3000), DONE(2000) → stops
+    assert db.get_consecutive_failures("auto-rd") == (0, 1)
+
+
 # ── reset_circuit_breaker tests ────────────────────────────────
 
 

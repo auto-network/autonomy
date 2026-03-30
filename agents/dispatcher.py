@@ -997,6 +997,7 @@ def process_decision(dispatch_result: DispatchResult) -> str:
 
     status = decision.get("status", "FAILED")
     reason = decision.get("reason", "No reason provided")
+    stash_pop_blocked = False  # Tracks STASH_POP_CONFLICT for readiness blocking
     notes = decision.get("notes", "")
 
     print(f"  Decision: {status} — {reason}")
@@ -1116,10 +1117,13 @@ def process_decision(dispatch_result: DispatchResult) -> str:
                     f"merge failed on {dispatch_result.branch}: {merge_err}"])
             if merge_err.startswith("STASH_POP_CONFLICT:"):
                 # Host working tree conflict — not retryable by agent.
+                # BLOCKED (not MERGE_FAILED) to prevent auto-retry loop.
                 # No MERGE_RETRY_CONTEXT: agent retries won't fix host's
                 # local edits. Only the host cleaning up resolves this.
-                status = "MERGE_FAILED"
+                status = "BLOCKED"
                 reason = f"Host working tree conflict (not retryable): {merge_err[:200]}"
+                stash_pop_blocked = True
+                dispatch_result.reason = f"STASH_POP_CONFLICT: {merge_err[:200]}"
             else:
                 # Store retry context for smart merge retry
                 retry_note = (
@@ -1134,6 +1138,13 @@ def process_decision(dispatch_result: DispatchResult) -> str:
 
     # Release the bead with appropriate state
     release_bead(bead_id, status, reason)
+
+    # Stash pop conflict: block readiness to prevent re-dispatch.
+    # Unlike agent BLOCKED (which reopens for retry), stash pop conflicts
+    # are host-side issues that won't resolve on retry.
+    if stash_pop_blocked:
+        run_bd(["set-state", bead_id, "readiness=blocked",
+                "--reason", "Stash pop conflict — host working tree needs cleanup"])
 
     # Clean up worktree (branch persists for review)
     cleanup_worktree(dispatch_result.worktree_path)
@@ -1537,6 +1548,10 @@ def _record_run(agent: RunningAgent, result: DispatchResult, *, effective_status
         fc: str | None = None
         if status == "TIMEOUT":
             fc = "timeout"
+        elif (status == "BLOCKED"
+              and "STASH_POP_CONFLICT" in (result.reason or "")):
+            # Stash pop conflict is a merge/host issue, not an agent failure
+            fc = "merge"
         elif status not in ("DONE", "MERGE_FAILED") and (
             result.exit_code != 0 or not result.decision
         ):
@@ -1713,7 +1728,15 @@ def _update_merge_failure_counter(effective_status: str, result: DispatchResult)
     """
     global _consecutive_merge_failures
 
-    if effective_status == "MERGE_FAILED":
+    # Count both MERGE_FAILED and stash-pop-conflict BLOCKED toward the
+    # cross-bead merge failure counter (working tree is blocking merges).
+    is_merge_failure = (
+        effective_status == "MERGE_FAILED"
+        or (effective_status == "BLOCKED"
+            and "STASH_POP_CONFLICT" in (result.reason or ""))
+    )
+
+    if is_merge_failure:
         _consecutive_merge_failures += 1
         merge_err = (result.decision or {}).get("reason", "")
         print(f"  Merge failure #{_consecutive_merge_failures} "
