@@ -3017,7 +3017,7 @@ def cmd_crosstalk(args):
     """Display recent CrossTalk messages."""
     from datetime import datetime
 
-    auth_db_path = Path(__file__).resolve().parents[1] / "data" / "auth.db"
+    auth_db_path = Path(__file__).resolve().parents[2] / "data" / "auth.db"
     if not auth_db_path.exists():
         print("auth.db not found", file=sys.stderr)
         return

@@ -242,6 +242,11 @@ ALWAYS pipe test output through `tee` — never run pytest without it:
 python3 -m pytest tools/dashboard/tests/ -q --tb=short 2>&1 | tee /tmp/test-results.txt
 ```
 
+NEVER add `| tail` after `tee` — it gets backgrounded on timeout and closes tee stdout.
+NEVER sleep to wait for test completion. Set `timeout: 300000` on the Bash tool call, or use `run_in_background` and read the file when notified.
+
+The full test suite takes ~3 minutes. The default 2-minute bash timeout will background it.
+
 This captures all output to a file while still showing live progress. If you need to inspect specific failures afterward:
 
 ```bash

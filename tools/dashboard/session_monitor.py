@@ -122,8 +122,12 @@ def count_tool_uses(jsonl_path: Path) -> int:
 
 
 def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
-    """Send a nag message to a session via CrossTalk envelope."""
-    from tools.dashboard.tmux_send import tmux_send_sync
+    """Send a nag message to a session via CrossTalk envelope.
+
+    Called from a worker thread (via asyncio.to_thread), so we use tmux
+    subprocess calls directly instead of the async tmux_send path.
+    """
+    from tools.dashboard.tmux_send import _tmux_paste, _tmux_enter
 
     iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     envelope = (
@@ -135,9 +139,13 @@ def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
         f'</crosstalk>'
     )
     try:
-        tmux_send_sync(tmux_name, envelope)
+        _tmux_paste(tmux_name, envelope)
+        time.sleep(0.3)
+        _tmux_enter(tmux_name)
+        time.sleep(0.5)
+        _tmux_enter(tmux_name)  # retry — harmless if already submitted
     except Exception:
-        logger.warning("nag delivery failed for %s", tmux_name, exc_info=True)
+        logger.warning("session_monitor: nag send failed for %s", tmux_name, exc_info=True)
 
 
 @dataclass
@@ -984,9 +992,12 @@ class SessionMonitor:
                     idle_secs = now - last_act
 
                     if idle_secs >= nag_interval and (now - nag_last_sent) >= nag_interval:
+                        logger.info("session_monitor: nag firing for %s (idle %ds)", tmux_name, int(idle_secs))
                         nag_msg = row.get("nag_message") or f"You've been idle for {int(idle_secs // 60)}m. Status update?"
                         await asyncio.to_thread(_send_nag_crosstalk, tmux_name, nag_msg)
                         update_nag_last_sent(tmux_name, now)
+                    else:
+                        logger.debug("session_monitor: nag skip %s (idle=%ds interval=%ds since_nag=%ds)", tmux_name, int(idle_secs), nag_interval, int(now - nag_last_sent))
 
             except Exception:
                 logger.exception("session_monitor: liveness error")
