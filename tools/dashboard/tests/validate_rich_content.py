@@ -127,6 +127,9 @@ def run(graph_id, base_url="https://localhost:8080"):
             r.body_scrollWidth = d.body.scrollWidth;
             r.body_clientWidth = d.body.clientWidth;
             r.content_wider = d.body.scrollWidth > iframe.clientWidth;
+            // Body must extend to match content for scrolling to work
+            // If body is narrower than scrollWidth, content is clipped (no usable scrollbar)
+            r.body_extends = d.body.clientWidth >= d.body.scrollWidth - 2;
             // Check that diagram container extends to match content (no clipped backgrounds)
             var diagram = d.querySelector('.diagram');
             if (diagram) {
@@ -157,6 +160,8 @@ def run(graph_id, base_url="https://localhost:8080"):
           f"Content not wider at 400px (scrollWidth={mobile.get('body_scrollWidth')}, iframeWidth={mobile.get('iframe_width')})")
     check("horizontal_scroll_enabled", mobile.get("scroll_enabled"),
           f"overflow-x is '{mobile.get('overflow_x')}', expected auto/scroll/visible")
+    check("body_extends_to_content", mobile.get("body_extends"),
+          f"Body ({mobile.get('body_clientWidth')}px) narrower than content ({mobile.get('body_scrollWidth')}px) — content clipped, no scrollbar")
     check("diagram_scrollable", mobile.get("scrollable"), "Cannot scroll horizontally at narrow viewport")
     if mobile.get("diagram_clientWidth") is not None:
         check("diagram_background_extends", mobile.get("diagram_covers_svg"),
