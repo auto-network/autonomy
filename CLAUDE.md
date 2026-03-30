@@ -158,6 +158,9 @@ graph attention --last 20                     # recent human input
 graph attention --search "keyword"            # find when user discussed something
 ```
 
+### Working with Design Studio
+graph://225a4af7-ee5 — full guide covering fixture states, responsive patterns, and the design-to-production workflow.
+
 ### Session self-management
 ```bash
 graph set-label "topic description"                        # working title
