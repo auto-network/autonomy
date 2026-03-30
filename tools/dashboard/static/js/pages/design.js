@@ -51,6 +51,13 @@
           this.revisionId = _revisionIdFromPath();
           this._load();
           var self = this;
+          // Browser back/forward: swap revision without full reload
+          this._popstateHandler = function () {
+            var rid = _revisionIdFromPath();
+            if (rid && rid !== self.revisionId) self._swapRevision(rid);
+          };
+          window.addEventListener('popstate', this._popstateHandler);
+
           this.$watch('chatOpen', function (open) {
             localStorage.setItem('design-chatOpen-' + self.designId, open ? 'true' : 'false');
             if (open && !self.chatConnected) self._loadChatSessions();
@@ -71,6 +78,10 @@
           if (window._designSeriesCleanup) {
             window._designSeriesCleanup();
             window._designSeriesCleanup = null;
+          }
+          if (this._popstateHandler) {
+            window.removeEventListener('popstate', this._popstateHandler);
+            this._popstateHandler = null;
           }
           this._tmuxSession = null;
           this.chatConnected = false;
@@ -209,24 +220,48 @@
           }
         },
 
-        // ── Iteration navigation ────────────────────────────────────────
+        // ── Iteration navigation (soft swap — no full page reload) ──────
+
+        _swapRevision: async function (newRevisionId) {
+          if (newRevisionId === this.revisionId) return;
+          try {
+            var resp = await fetch('/api/design/' + newRevisionId + '/full');
+            var data = await resp.json();
+            if (data.error) return;
+
+            this.revisionId = newRevisionId;
+            this.design = data;
+            var revisions = data.revisions || [];
+            this.iterCount = revisions.length || 1;
+            this.iterIndex = revisions.indexOf(newRevisionId);
+            if (this.iterIndex < 0) this.iterIndex = revisions.length - 1;
+
+            // Re-inject iframe with new content
+            this.$nextTick(function () { this._injectIframe(data); }.bind(this));
+
+            // Update URL without navigation
+            history.pushState({}, '', '/design/' + newRevisionId);
+          } catch (e) {
+            console.error('[designPage] revision swap failed', e);
+          }
+        },
 
         prevIteration: function () {
           var revisions = this.design && this.design.revisions;
           if (!revisions || this.iterIndex <= 0) return;
-          navigateTo('/design/' + revisions[this.iterIndex - 1]);
+          this._swapRevision(revisions[this.iterIndex - 1]);
         },
 
         nextIteration: function () {
           var revisions = this.design && this.design.revisions;
           if (!revisions || this.iterIndex >= revisions.length - 1) return;
-          navigateTo('/design/' + revisions[this.iterIndex + 1]);
+          this._swapRevision(revisions[this.iterIndex + 1]);
         },
 
         jumpToLatest: function () {
           var revisions = this.design && this.design.revisions;
           if (!revisions || revisions.length === 0) return;
-          navigateTo('/design/' + revisions[revisions.length - 1]);
+          this._swapRevision(revisions[revisions.length - 1]);
         },
 
         // ── Chat With session management ──────────────────────────────────
@@ -350,12 +385,9 @@
           var self = this;
           var designTopic = 'design:' + designId;
           var handler = function (data) {
-            var currentId = window.location.pathname.split('/design/')[1];
-            if (!currentId || data.revision_id === currentId) return;
-            if (!window.location.pathname.startsWith('/design/')) return;
-            // New iteration: update counter and navigate
-            self.iterCount = (data.revisions || []).length || self.iterCount + 1;
-            navigateTo('/design/' + data.revision_id);
+            if (!data.revision_id || data.revision_id === self.revisionId) return;
+            // New iteration: soft swap (no page reload)
+            self._swapRevision(data.revision_id);
           };
           registerHandler(designTopic, handler);
           window._designSeriesCleanup = function () { unregisterHandler(designTopic, handler); };
