@@ -761,8 +761,31 @@ def merge_branch(branch: str, bead_id: str, reason: str) -> tuple[bool, str]:
             cwd=str(REPO_ROOT),
         )
         if pop_result.returncode != 0:
-            print(f"  WARNING: stash pop failed: {pop_result.stderr.strip()}")
-            print(f"  Stashed changes preserved in git stash list")
+            if merge_ok:
+                # Stash pop conflicts with merged code — revert the merge to
+                # restore clean pre-merge state, then pop stash again
+                print(f"  Stash pop conflicts with merged code — reverting merge")
+                subprocess.run(
+                    ["git", "reset", "--hard", "HEAD~1"],
+                    capture_output=True, text=True, timeout=15,
+                    cwd=str(REPO_ROOT),
+                )
+                # Pop should succeed now (tree is back to pre-merge state)
+                pop2 = subprocess.run(
+                    ["git", "stash", "pop"],
+                    capture_output=True, text=True, timeout=15,
+                    cwd=str(REPO_ROOT),
+                )
+                if pop2.returncode != 0:
+                    print(f"  WARNING: second stash pop also failed: {pop2.stderr.strip()}")
+                    print(f"  Stashed changes preserved in git stash list")
+                return False, (
+                    f"STASH_POP_CONFLICT: host local edits conflict with merged "
+                    f"code from {bead_id}. {pop_result.stderr.strip()}"
+                )
+            else:
+                print(f"  WARNING: stash pop failed: {pop_result.stderr.strip()}")
+                print(f"  Stashed changes preserved in git stash list")
 
     if merge_ok:
         return True, ""
@@ -1091,16 +1114,23 @@ def process_decision(dispatch_result: DispatchResult) -> str:
             print(f"  Merge: FAILED — {merge_err}")
             run_bd(["update", bead_id, "--append-notes",
                     f"merge failed on {dispatch_result.branch}: {merge_err}"])
-            # Store retry context for smart merge retry
-            retry_note = (
-                f"MERGE_RETRY_CONTEXT\n"
-                f"branch: {dispatch_result.branch}\n"
-                f"commit: {dispatch_result.commit_hash}\n"
-                f"merge_error: {merge_err[:500]}"
-            )
-            run_bd(["update", bead_id, "--append-notes", retry_note])
-            status = "MERGE_FAILED"
-            reason = f"Merge conflict (will retry): {merge_err[:200]}"
+            if merge_err.startswith("STASH_POP_CONFLICT:"):
+                # Host working tree conflict — not retryable by agent.
+                # No MERGE_RETRY_CONTEXT: agent retries won't fix host's
+                # local edits. Only the host cleaning up resolves this.
+                status = "MERGE_FAILED"
+                reason = f"Host working tree conflict (not retryable): {merge_err[:200]}"
+            else:
+                # Store retry context for smart merge retry
+                retry_note = (
+                    f"MERGE_RETRY_CONTEXT\n"
+                    f"branch: {dispatch_result.branch}\n"
+                    f"commit: {dispatch_result.commit_hash}\n"
+                    f"merge_error: {merge_err[:500]}"
+                )
+                run_bd(["update", bead_id, "--append-notes", retry_note])
+                status = "MERGE_FAILED"
+                reason = f"Merge conflict (will retry): {merge_err[:200]}"
 
     # Release the bead with appropriate state
     release_bead(bead_id, status, reason)
