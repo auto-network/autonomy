@@ -148,6 +148,13 @@ SWEEP_SESSION_ENTRIES = {
     for s in SWEEP_SESSIONS
 }
 
+# Add a turn with literal graph:// text to one session (for graph:// rewrite scoping tests)
+SWEEP_SESSION_ENTRIES["auto-sweep-alpha"].append(
+    {"type": "assistant_text",
+     "content": "Use `![alt](graph://test-attachment-id)` to embed images.\n\nSee graph://test-attachment-id for the source.",
+     "timestamp": NOW - 3580}
+)
+
 # ── Beads (used by /beads, /bead/{id}, /dispatch, nav SSE) ───────────
 
 SWEEP_BEADS = [
@@ -167,6 +174,12 @@ SWEEP_BEADS = [
         "id": "auto-sweep-b3", "title": "Sweep gamma feature",
         "priority": 0, "status": "open", "issue_type": "feature",
         "labels": [], "created_by": "librarian",
+    },
+    {
+        "id": "auto-sweep-b4", "title": "Graph rewrite test bead",
+        "priority": 2, "status": "open", "issue_type": "task",
+        "labels": [], "created_by": "librarian",
+        "description": "Reference: graph://some-attachment-id for the diagram.\n\nAlso supports `![[embed-id]]` syntax.",
     },
 ]
 
@@ -2278,6 +2291,80 @@ class TestLegacyEmbedBackwardsCompat:
     def test_sees_image(self):
         """User sees an image from the legacy embed syntax."""
         assert self._checks.get("sees_image"), "Legacy image embed not visible"
+
+
+# ── graph:// rewrite scoping — only in .attachments mode ─────────────
+
+GRAPH_REWRITE_SESSION_CHECKS = """
+    // Session viewer should show graph:// literally, NOT rewritten to /api/attachment/
+    var content = document.getElementById('content');
+    var allText = content ? content.innerText : '';
+    r.has_graph_protocol = allText.indexOf('graph://') !== -1;
+    r.no_api_attachment_leak = allText.indexOf('/api/attachment/test-attachment-id') === -1;
+
+    // Check rendered HTML for the rewrite — img src should NOT point to /api/attachment/
+    var imgs = content ? content.querySelectorAll('img[src*="/api/attachment/test-attachment-id"]') : [];
+    r.no_rewritten_img = imgs.length === 0;
+"""
+
+GRAPH_REWRITE_BEAD_CHECKS = """
+    // Bead detail should show graph:// literally, NOT rewritten
+    var content = document.getElementById('content');
+    var allText = content ? content.innerText : '';
+    r.has_graph_protocol = allText.indexOf('graph://') !== -1;
+    r.no_api_attachment_leak = allText.indexOf('/api/attachment/some-attachment-id') === -1;
+"""
+
+
+class TestGraphRewriteScopingSession:
+    """Session viewer must NOT rewrite graph:// — it should render literally."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check(
+            "/session/autonomy/auto-sweep-alpha",
+            GRAPH_REWRITE_SESSION_CHECKS,
+            wait_ms=3000,
+        )
+        request.cls._checks = result
+
+    def test_graph_protocol_visible(self):
+        """User sees graph:// literally in session viewer text."""
+        assert self._checks.get("has_graph_protocol"), \
+            "graph:// text not visible — may have been rewritten to /api/attachment/"
+
+    def test_no_api_attachment_rewrite(self):
+        """Session viewer does NOT rewrite graph:// to /api/attachment/."""
+        assert self._checks.get("no_api_attachment_leak"), \
+            "graph:// was rewritten to /api/attachment/ in session viewer"
+
+    def test_no_rewritten_img(self):
+        """No <img> tag with /api/attachment/ src from graph:// rewrite."""
+        assert self._checks.get("no_rewritten_img"), \
+            "Found <img> with /api/attachment/ src — graph:// was rewritten in session viewer"
+
+
+class TestGraphRewriteScopingBead:
+    """Bead detail page must NOT rewrite graph:// — it should render literally."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check(
+            "/bead/auto-sweep-b4",
+            GRAPH_REWRITE_BEAD_CHECKS,
+            wait_ms=1500,
+        )
+        request.cls._checks = result
+
+    def test_graph_protocol_visible(self):
+        """User sees graph:// literally in bead description."""
+        assert self._checks.get("has_graph_protocol"), \
+            "graph:// text not visible in bead detail — may have been rewritten"
+
+    def test_no_api_attachment_rewrite(self):
+        """Bead detail does NOT rewrite graph:// to /api/attachment/."""
+        assert self._checks.get("no_api_attachment_leak"), \
+            "graph:// was rewritten to /api/attachment/ in bead detail page"
 
 
 # ── Rich content at narrow viewport — horizontal scroll ─────────────

@@ -229,19 +229,26 @@ async function _resolveEmbeds(el) {
 }
 
 document.addEventListener('alpine:init', () => {
-  Alpine.directive('markdown', (el, { expression }, { effect, evaluate }) => {
+  Alpine.directive('markdown', (el, { expression, modifiers }, { effect, evaluate }) => {
+    const hasAttachments = modifiers.includes('attachments');
     effect(() => {
       let text = evaluate(expression) || '';
       // Rewrite graph:// image refs BEFORE DOMPurify (which strips unknown protocols)
-      text = text.replace(/!\[([^\]]*)\]\(graph:\/\/([^)]+)\)/g, '![$1](/api/attachment/$2)');
+      // Only in .attachments mode — otherwise graph:// should render literally
+      if (hasAttachments) {
+        text = text.replace(/!\[([^\]]*)\]\(graph:\/\/([^)]+)\)/g, '![$1](/api/attachment/$2)');
+      }
 
       // Replace ![[id]] embeds with placeholder markers BEFORE markdown parsing
       // We use a unique HTML comment that survives marked.parse + DOMPurify
+      // Only in .attachments mode — otherwise ![[id]] should render literally
       const embedIds = [];
-      text = text.replace(EMBED_RE, (match, id) => {
-        embedIds.push(id);
-        return `<p data-embed-placeholder="${DOMPurify.sanitize(id)}"></p>`;
-      });
+      if (hasAttachments) {
+        text = text.replace(EMBED_RE, (match, id) => {
+          embedIds.push(id);
+          return `<p data-embed-placeholder="${DOMPurify.sanitize(id)}"></p>`;
+        });
+      }
 
       const embedConfig = embedIds.length > 0 ? {
         ...SECURE_CONFIG,
