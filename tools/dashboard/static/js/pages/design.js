@@ -224,9 +224,14 @@
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
             '<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"><\/script>' +
             '<style>' + parentCSS + '</style>' +
-            '<style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;}</style>' +
+            '<style>html,body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;overflow:auto !important;}</style>' +
             alpineHead +
-            '</head><body>' + safeHtml + pickerHtml + '</body></html>');
+            '</head><body>' + safeHtml + pickerHtml +
+            '<script>document.addEventListener("wheel",function(e){' +
+            'var el=document.scrollingElement||document.documentElement;' +
+            'el.scrollBy(0,e.deltaY);' +
+            '},{passive:true});<\/script>' +
+            '</body></html>');
           doc.close();
 
           // Auto-capture after render
