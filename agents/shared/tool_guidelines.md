@@ -15,6 +15,7 @@ graph search "query"              # Full-text search (use --or for OR mode)
 graph search "query" --or         # Match ANY term instead of all
 graph read <src_id>               # Read full source content
 graph read <src_id> --max-chars N # Read with character limit
+graph read <src_id> --save <path> # Export raw content to file for editing
 graph context <src_id> <turn>     # Show turns around a search hit
 graph sources                     # List sources (--project X --type Y)
 graph note "text" --tags x,y      # Drop a searchable trail marker
@@ -280,6 +281,19 @@ Fixture generators are in `tools/dashboard/tests/fixtures.py`.
 
 The server self-daemonizes (fork + setsid) so it survives after the bash tool returns — no SIGPIPE.
 See `agents/shared/dashboard/agent-browser-primer.md` for visual validation patterns.
+
+## Editing Notes
+
+Export a note to a file, edit it, then push changes back:
+
+```bash
+graph read abc123 --save /tmp/notes/abc123.md     # export for editing
+# ... use Edit tool on the file ...
+graph note update abc123 -c - < /tmp/notes/abc123.md   # push changes
+# ✓ Note updated — Local copy: /tmp/graph-notes/abc123.md
+```
+
+Note creation and update commands auto-save to `/tmp/graph-notes/{source_id}.md`.
 
 ## Working Style
 
