@@ -43,6 +43,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph search "query"` | Full-text search (use `--or` for OR mode) | `graph search "CVSS fuzzing" --project enterprise-ng` |
 | `graph search "query" --or` | Match ANY term instead of all | `graph search "auth login session" --or` |
 | `graph read <src_id>` | Read full source content | `graph read dc4c73ee --max-chars 2000` |
+| `graph read <src_id> --save <path>` | Export raw content to file for editing | `graph read abc123 --save /tmp/notes/abc123.md` |
 | `graph context <src_id> <turn>` | Show turns around a search hit | `graph context 8cdc1d85 286 --window 3` |
 | `graph context <src_id> last` | Show latest turns of a source | `graph context 8cdc1d85 last --window 5` |
 | `graph sources` | List sources | `graph sources --project jira --type docs` |
@@ -133,6 +134,15 @@ graph read <src_id> --all-comments           # current content + all comments
 # Write a clean new version synthesizing everything
 graph note update <src_id> -c - --integrate <cid1> --integrate <cid2> < /tmp/revised.txt
 ```
+
+### When making surgical edits to a note
+```bash
+graph read <src_id> --save /tmp/notes/<src_id>.md   # export raw content
+# ... use Edit tool on the file ...
+graph note update <src_id> -c - < /tmp/notes/<src_id>.md   # push changes back
+```
+
+Note: `graph note` and `graph note update` auto-save to `/tmp/graph-notes/{source_id}.md`.
 
 ### Bead polishing protocol
 Read the full protocol before polishing any bead:
