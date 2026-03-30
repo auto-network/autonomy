@@ -129,6 +129,7 @@ RUN_DEFAULTS: dict[str, Any] = {
     "failure_category": None,
     "discovered_beads_count": 0,
     "has_experience_report": False,
+    "librarian_type": None,
 }
 
 
