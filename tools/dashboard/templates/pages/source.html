@@ -204,7 +204,7 @@
           </template>
           <!-- Plain note: markdown -->
           <template x-if="!isRichContent">
-            <div :style="'font-size:' + mdSizes[zoom]" x-markdown="noteContent"></div>
+            <div :style="'font-size:' + mdSizes[zoom]" x-markdown.attachments="noteContent"></div>
           </template>
         </div>
       </template>
@@ -239,7 +239,7 @@
                    :class="highlightId && c.id.startsWith(highlightId) ? 'pl-4 border-l-2 border-indigo-700/50 ring-2 ring-indigo-500 bg-indigo-900/20 rounded' : 'pl-4 border-l-2 border-indigo-700/50'"
                    :data-comment-highlight="highlightId && c.id.startsWith(highlightId) ? '' : undefined">
                 <div class="text-xs text-gray-500 mb-1" x-text="c.actor + ' · ' + c.created_at.slice(0, 16)"></div>
-                <div class="text-sm text-gray-300" x-markdown="c.content"></div>
+                <div class="text-sm text-gray-300" x-markdown.attachments="c.content"></div>
               </div>
             </template>
           </div>
