@@ -3019,7 +3019,7 @@ def cmd_crosstalk(args):
 
     auth_db_path = Path(__file__).resolve().parents[2] / "data" / "auth.db"
     if not auth_db_path.exists():
-        print("auth.db not found", file=sys.stderr)
+        print("auth.db not found — command not supported from containerized agents", file=sys.stderr)
         return
 
     from tools.dashboard.dao import auth_db
