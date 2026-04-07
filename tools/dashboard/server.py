@@ -1628,6 +1628,111 @@ async def api_crosstalk_send(request):
     })
 
 
+_MAX_BROADCAST_IDLE_SECS = 21600  # 6 hours
+
+
+async def api_crosstalk_broadcast(request):
+    """POST /api/crosstalk/broadcast — send message to all recently-active peers.
+
+    Query params:
+        max_idle: int — max idle seconds (default 3600, capped at 21600)
+    Body JSON: {"message": "..."}
+    """
+    sender, err = _crosstalk_auth(request)
+    if err:
+        return err
+
+    # Parse max_idle from query params
+    try:
+        max_idle = int(request.query_params.get("max_idle", "3600"))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "max_idle must be an integer (seconds)"}, status_code=400)
+    if max_idle < 0:
+        return JSONResponse({"error": "max_idle must be non-negative"}, status_code=400)
+    if max_idle > _MAX_BROADCAST_IDLE_SECS:
+        return JSONResponse(
+            {"error": f"max_idle exceeds maximum of {_MAX_BROADCAST_IDLE_SECS}s (6h)"},
+            status_code=400,
+        )
+
+    # Parse body
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    message = body.get("message", "")
+    if not message or len(message) > 4000:
+        return JSONResponse({"error": "message must be 1-4000 characters"}, status_code=400)
+    if "<" in message or ">" in message:
+        return JSONResponse({"error": "message must not contain < or > characters"}, status_code=400)
+
+    # Get live sessions, filter by idle time
+    conn = dashboard_db.get_conn()
+    rows = conn.execute(
+        "SELECT tmux_name, last_activity, created_at FROM tmux_sessions WHERE is_live=1 AND tmux_name != ?",
+        (sender,),
+    ).fetchall()
+
+    now = time.time()
+    targets = []
+    skipped = 0
+    for r in rows:
+        la = r["last_activity"]
+        if la is None:
+            # Fall back to created_at (ISO string)
+            ca = r["created_at"]
+            if isinstance(ca, str):
+                try:
+                    la = datetime.fromisoformat(ca).replace(tzinfo=timezone.utc).timestamp()
+                except (ValueError, TypeError):
+                    la = None
+        if la is None or (now - la) >= max_idle:
+            skipped += 1
+            continue
+        targets.append(r["tmux_name"])
+
+    # Resolve sender metadata
+    sender_row = dashboard_db.get_session(sender)
+    sender_label = (sender_row or {}).get("label", "") or sender
+    sender_source_id = (sender_row or {}).get("graph_source_id", "") or ""
+    sender_entry_count = (sender_row or {}).get("entry_count", 0) or 0
+
+    # Build envelope
+    iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    envelope = (
+        f'<crosstalk from="{sender}"\n'
+        f'           label="{sender_label}"\n'
+        f'           source="{sender_source_id}" turn="{sender_entry_count}"\n'
+        f'           timestamp="{iso_now}">\n'
+        f'{message}\n'
+        f'</crosstalk>'
+    )
+
+    sent = 0
+    failed = 0
+    for target in targets:
+        try:
+            await tmux_send(target, envelope)
+            await asyncio.to_thread(
+                auth_db.insert_message,
+                sender, sender_label, target,
+                sender_source_id or None, sender_entry_count or None,
+                message, time.time(),
+            )
+            sent += 1
+        except Exception:
+            failed += 1
+
+    return JSONResponse({
+        "sent": sent,
+        "skipped_idle": skipped,
+        "failed": failed,
+        "total_live": len(rows),
+        "max_idle": max_idle,
+    })
+
+
 async def api_crosstalk_peers(request):
     """GET /api/crosstalk/peers — list live sessions excluding the caller."""
     sender, err = _crosstalk_auth(request)
@@ -5585,6 +5690,7 @@ routes = [
 
     # CrossTalk
     Route("/api/crosstalk/send", api_crosstalk_send, methods=["POST"]),
+    Route("/api/crosstalk/broadcast", api_crosstalk_broadcast, methods=["POST"]),
     Route("/api/crosstalk/peers", api_crosstalk_peers, methods=["GET"]),
 
     # Embed resolution + attachment serving
