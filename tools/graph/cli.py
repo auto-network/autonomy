@@ -3202,6 +3202,22 @@ def _parse_duration(s: str) -> float:
     return val * mult[unit]
 
 
+_MAX_BROADCAST_IDLE_SECS = 21600  # 6 hours — absolute cap
+
+
+def _parse_last_activity(la) -> float | None:
+    """Normalise last_activity to epoch float. Handles float and ISO string."""
+    if isinstance(la, (int, float)):
+        return float(la)
+    if isinstance(la, str):
+        from datetime import datetime as _dt, timezone as _tz
+        try:
+            return _dt.fromisoformat(la).replace(tzinfo=_tz.utc).timestamp()
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 def cmd_crosstalk_broadcast(args):
     """Send a CrossTalk message to all live peer sessions."""
     if getattr(args, 'content_stdin', None) == "-":
@@ -3214,6 +3230,17 @@ def cmd_crosstalk_broadcast(args):
 
     if not message:
         print("Error: empty message", file=sys.stderr)
+        sys.exit(1)
+
+    # Parse --idle threshold (default 1h)
+    idle_str = getattr(args, 'idle', None) or "1h"
+    try:
+        idle_secs = _parse_duration(idle_str)
+    except (ValueError, argparse.ArgumentTypeError):
+        print(f"Error: invalid --idle duration: {idle_str!r} (use e.g. 30m, 1h, 3h, 6h)", file=sys.stderr)
+        sys.exit(1)
+    if idle_secs > _MAX_BROADCAST_IDLE_SECS:
+        print(f"Error: --idle exceeds maximum of 6h ({_MAX_BROADCAST_IDLE_SECS}s)", file=sys.stderr)
         sys.exit(1)
 
     token = os.environ.get("CROSSTALK_TOKEN")
@@ -3240,10 +3267,24 @@ def cmd_crosstalk_broadcast(args):
         sys.exit(1)
 
     my_session = _get_session_name()
-    peers = [s["session_id"] for s in sessions if s.get("session_id") != my_session]
+    now = time.time()
+
+    # Filter peers: exclude self, then apply idle threshold
+    peers = []
+    skipped_idle = 0
+    for s in sessions:
+        if s.get("session_id") == my_session:
+            continue
+        la = _parse_last_activity(s.get("last_activity"))
+        if la is None or (now - la) >= idle_secs:
+            skipped_idle += 1
+            continue
+        peers.append(s["session_id"])
+
+    total_live = sum(1 for s in sessions if s.get("session_id") != my_session)
 
     if not peers:
-        print("  No peer sessions to broadcast to")
+        print(f"  No peer sessions to broadcast to ({skipped_idle} skipped: idle > {idle_str})")
         return
 
     tagged_message = f"(broadcast) {message}"
@@ -3264,7 +3305,10 @@ def cmd_crosstalk_broadcast(args):
         except Exception as e:
             print(f"  \u2717 Failed to send to {target}: {e}", file=sys.stderr)
 
-    print(f"  \u2713 Broadcast delivered to {sent}/{len(peers)} peers")
+    if skipped_idle:
+        print(f"  \u2713 Broadcast sent to {sent} of {total_live} live sessions ({skipped_idle} skipped: idle > {idle_str})")
+    else:
+        print(f"  \u2713 Broadcast sent to {sent} of {total_live} live sessions")
 
 
 def cmd_crosstalk(args):
@@ -3785,6 +3829,8 @@ def main():
     p_ct_broadcast.add_argument("message", nargs="*", help="Message text")
     p_ct_broadcast.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None,
                                 help="Read message from stdin")
+    p_ct_broadcast.add_argument("--idle", default="1h",
+                                help="Max idle time for recipients (default: 1h, max: 6h)")
     p_ct_broadcast.set_defaults(func=cmd_crosstalk_broadcast)
 
     p_ct_log = ct_sub.add_parser("log", help="View message log")
