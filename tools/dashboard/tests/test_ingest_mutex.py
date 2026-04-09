@@ -15,8 +15,11 @@ def app():
 
 @pytest.fixture
 def client(app):
-    with TestClient(app) as c:
-        yield c
+    # No-op dispatch_db.init_db which tries to open data/dispatch.db
+    # (may not exist in test/read-only environments)
+    with patch("agents.dispatch_db.init_db"):
+        with TestClient(app) as c:
+            yield c
 
 
 def test_single_call_succeeds(client):
