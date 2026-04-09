@@ -87,11 +87,12 @@ def store_test_client(store_test_db):
     from tools.dashboard import server
     importlib.reload(server)
 
-    # Patch tmux check so test sessions appear live
+    # Patch tmux check so test sessions appear live, and no-op dispatch_db.init_db
+    # which tries to open data/dispatch.db (may not exist in test/read-only envs)
     with patch(
         "tools.dashboard.session_monitor.SessionMonitor._check_tmux",
         staticmethod(lambda name: True),
-    ):
+    ), patch("agents.dispatch_db.init_db"):
         from starlette.testclient import TestClient
         with TestClient(server.app) as client:
             yield client
