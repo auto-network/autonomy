@@ -2310,7 +2310,14 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                 if isinstance(block, dict) and block.get("type") == "text":
                     result_content += block.get("text", "")
         if not result_content:
-            return None
+            return {
+                "type": "tool_result",
+                "role": "tool",
+                "tool_id": tool_id,
+                "content": "",
+                "is_error": raw.get("is_error", False),
+                "timestamp": timestamp,
+            }
         # Upconvert graph note/thought/comment results to semantic tiles
         sem = _upconvert_graph_result(result_content, timestamp)
         if sem:
