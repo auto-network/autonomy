@@ -612,15 +612,21 @@ class TestNoiseFiltering:
         result = _parse_jsonl_entry(_line(fixture))
         assert result is None
 
-    def test_empty_tool_result_skipped(self):
-        """tool_result with empty content → None."""
+    def test_empty_tool_result_preserved(self):
+        """tool_result with empty content → preserved (not dropped).
+
+        Empty results must populate resultMap so the viewer shows tool as completed.
+        """
         fixture = {
             "type": "tool_result", "toolUseId": "toolu_empty",
             "message": {"role": "user", "content": ""},
             "timestamp": TS,
         }
         result = _parse_jsonl_entry(_line(fixture))
-        assert result is None
+        assert result is not None
+        assert result["type"] == "tool_result"
+        assert result["tool_id"] == "toolu_empty"
+        assert result["content"] == ""
 
     def test_user_empty_content_skipped(self):
         """User with no text and no tool_results → None."""
@@ -782,14 +788,48 @@ class TestEdgeCases:
         assert result[1]["type"] == "tool_result"
 
     def test_tool_result_with_empty_list_content(self):
-        """tool_result where content is empty list → None."""
+        """tool_result where content is empty list → preserved with empty content."""
         fixture = {
             "type": "tool_result", "toolUseId": "toolu_empty2",
             "message": {"role": "user", "content": []},
             "timestamp": TS,
         }
         result = _parse_jsonl_entry(_line(fixture))
-        assert result is None
+        assert result is not None
+        assert result["type"] == "tool_result"
+        assert result["tool_id"] == "toolu_empty2"
+        assert result["content"] == ""
+
+    def test_tool_result_with_empty_string_content(self):
+        """tool_result with empty string content → preserved (not dropped).
+
+        Real case: Read tool on empty file, ToolSearch with no matches.
+        resultMap must be populated so the viewer doesn't show phantom running tools.
+        """
+        fixture = {
+            "type": "tool_result", "toolUseId": "toolu_empty_str",
+            "message": {"role": "user", "content": ""},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        assert result is not None
+        assert result["type"] == "tool_result"
+        assert result["tool_id"] == "toolu_empty_str"
+        assert result["content"] == ""
+        assert result["is_error"] is False
+
+    def test_tool_result_empty_content_preserves_is_error(self):
+        """Empty error result still has is_error=True."""
+        fixture = {
+            "type": "tool_result", "toolUseId": "toolu_empty_err",
+            "message": {"role": "user", "content": ""},
+            "is_error": True,
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        assert result is not None
+        assert result["type"] == "tool_result"
+        assert result["is_error"] is True
 
     def test_no_timestamp_defaults_to_empty(self):
         fixture = {"type": "user", "message": {"role": "user", "content": "hello"}}
