@@ -4,27 +4,25 @@ Mock-based fixtures for unified_viewer browser tests.
 Overrides the parent conftest's test_client with one backed by DASHBOARD_MOCK,
 so tests never touch real databases (no pymysql, no experiments.db).
 Follows the same pattern as session_picker/conftest.py.
+
+All tools.dashboard imports are deferred to fixture bodies to avoid importing
+server.py at collection time (which triggers dispatch_db and fails in containers).
 """
-import importlib
 import json
-import os
 
 import pytest
-
-from tools.dashboard.tests.fixtures import (
-    MOCK_SESSION_ENTRIES,
-    STANDARD_SESSIONS,
-    TEST_EXPERIMENT_ID,
-    make_experiment,
-    make_linked_session,
-    make_unresolved_session,
-    make_dead_session,
-)
 
 
 @pytest.fixture
 def mock_fixture(tmp_path):
     """Write a fixture file and set DASHBOARD_MOCK before server import."""
+    from tools.dashboard.tests.fixtures import (
+        MOCK_SESSION_ENTRIES,
+        STANDARD_SESSIONS,
+        TEST_EXPERIMENT_ID,
+        make_experiment,
+    )
+
     fixture = {
         "beads": [],
         "active_sessions": STANDARD_SESSIONS,
@@ -46,6 +44,9 @@ def test_client(mock_fixture, monkeypatch):
     so subsequent test files don't inherit mock-mode server state.
     """
     monkeypatch.setenv("DASHBOARD_MOCK", mock_fixture)
+
+    # ALL imports deferred to here — not at module level
+    import importlib
 
     # Reload mock DAO so it picks up the new DASHBOARD_MOCK path
     from tools.dashboard.dao import mock as mock_mod
