@@ -39,7 +39,6 @@ class _BufferEntry:
 
 class EventBus:
     _BUFFER_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
-    _BUFFER_MAX_AGE = 30.0               # seconds
 
     def __init__(self) -> None:
         # Global list of subscriber queues — every queue receives every topic.
