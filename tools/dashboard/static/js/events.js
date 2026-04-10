@@ -142,6 +142,10 @@
   }
 
   function _connect() {
+    // Clear topic tracking so _addTopicListener re-attaches to the new ES.
+    // Required for manual reconnect (_es.close() + _connect()) — the old
+    // EventSource's listeners don't transfer to the new object.
+    _topicListening = new Set();
     _es = new EventSource('/api/events');
 
     // Attach listeners for any topics already registered before _connect ran.
@@ -207,6 +211,14 @@
   window.connectEvents = connectEvents;
   window.registerHandler = registerHandler;
   window.unregisterHandler = unregisterHandler;
+  window._connect = _connect;
+  Object.defineProperty(window, '_lastSeq', {
+    get: function() { return _lastSeq; },
+    set: function(v) { _lastSeq = v; },
+  });
+  Object.defineProperty(window, '_es', {
+    get: function() { return _es; },
+  });
 
   // Register Alpine stores
   document.addEventListener('alpine:init', function() {
