@@ -93,11 +93,35 @@
       }
     },
 
+    /** Returns true if a tool_use entry has no corresponding result yet. */
+    isToolRunning(entry) {
+      return entry.type === 'tool_use' && !this._resultMap[entry.tool_id];
+    },
+
+    /** Elapsed seconds since entry.timestamp (for running tools). */
+    _elapsed(entry) {
+      if (!entry.timestamp) return null;
+      try {
+        var diff = (Date.now() - new Date(entry.timestamp).getTime()) / 1000;
+        return diff >= 0 ? diff : null;
+      } catch (_) { return null; }
+    },
+
     metaDisplay(entry) {
       if (entry.type !== 'tool_use') return [];
       const name = entry.tool_name || '';
       const result = this._resultMap[entry.tool_id];
       const badges = [];
+
+      // Running tool: show elapsed time + "Running" badge
+      // Touch _tick to force Alpine re-evaluation every second
+      if (!result) {
+        void this._tick;
+        const elapsed = this._elapsed(entry);
+        if (elapsed != null) badges.push({ text: this.fmtDuration(elapsed), cls: 'sc-meta-running' });
+        badges.push({ text: 'Running', cls: 'sc-meta-running' });
+        return badges;
+      }
 
       switch (name) {
         case 'Bash': {

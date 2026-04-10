@@ -299,6 +299,39 @@
   word-break: break-word;
 }
 
+/* ── Running tool indicator ───────────────────────────────── */
+.sc-meta-running { color: #facc15; }
+
+.sc-tool-running {
+  animation: sc-running-pulse 2s ease-in-out infinite;
+}
+
+@keyframes sc-running-pulse {
+  0%, 100% { background: transparent; }
+  50% { background: rgba(250, 204, 21, 0.04); }
+}
+
+.sc-interrupt-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  height: 18px;
+  border: 1px solid #854d0e;
+  border-radius: 3px;
+  background: rgba(250, 204, 21, 0.1);
+  color: #facc15;
+  font-size: 0.625rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.sc-interrupt-btn:hover {
+  background: rgba(250, 204, 21, 0.2);
+  border-color: #a16207;
+}
+
 /* ── Thinking indicator (pulsing dots) ────────────────────── */
 .sc-thinking {
   display: flex;
