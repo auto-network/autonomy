@@ -360,6 +360,21 @@
       } catch (_) { return null; }
     },
 
+    /** Returns true when the agent is generating a response (thinking).
+     *  True after user/crosstalk messages, tool_results, and pending tool_use.
+     *  False after assistant_text (waiting for user) or when session is not live.
+     */
+    isAgentWorking() {
+      if (!this.isLive) return false;
+      var entries = this.entries;
+      if (!entries || entries.length === 0) return false;
+      var last = entries[entries.length - 1];
+      if (last.type === 'user' || last.type === 'crosstalk') return true;
+      if (last.type === 'tool_result') return true;
+      if (last.type === 'tool_use' && !this._resultMap[last.tool_id]) return true;
+      return false;
+    },
+
     _countLines(str) {
       if (!str) return 0;
       // Count newlines + 1 (unless empty)
