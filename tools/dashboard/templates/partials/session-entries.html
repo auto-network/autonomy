@@ -236,6 +236,15 @@
       </div>
     </template>
 
+<!-- Thinking indicator — pulsing dots when agent is generating -->
+<template x-if="isAgentWorking()">
+  <div class="sc-thinking">
+    <span class="sc-thinking-dot"></span>
+    <span class="sc-thinking-dot"></span>
+    <span class="sc-thinking-dot"></span>
+  </div>
+</template>
+
 <!-- Resume auto-scroll button -->
 <button x-show="!autoScroll && entries.length > 0"
         @click="resumeScroll()"
