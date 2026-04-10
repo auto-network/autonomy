@@ -144,10 +144,19 @@ graph note update <src_id> -c - < /tmp/notes/<src_id>.md   # push changes back
 
 Note: `graph note` and `graph note update` auto-save to `/tmp/graph-notes/{source_id}.md`.
 
-### Bead polishing protocol
-Read the full protocol before polishing any bead:
-`graph://f6c6c43e-24a`  (resolves to: `graph read f6c6c43e-24a`)
-Note revision protocol: `graph://843a8137-3c7`
+### Key References
+
+Read these graph notes to orient — use `graph read <id>` to load any of them.
+
+| Note | ID | What it covers |
+|------|----|----------------|
+| Signpost Index | `38c10838-094` | Master index of all architectural notes — start here to find anything |
+| Host Operations Protocol | `098a5407-39d` | Verification protocol, service management, merge handling, CrossTalk |
+| Bead Polishing Protocol | `f6c6c43e-24a` | How to formulate and refine beads before dispatch |
+| Note Revision Protocol | `843a8137-3c7` | How to update graph notes (versioning, comment integration) |
+| Dispatch Lifecycle | `c706c9f3-5a8` | State machine, failure classification, recovery, merge flow |
+| Testing Architecture | `527150ad-743` | L1/L2 test tiers, validation patterns |
+| Design Studio Guide | `225a4af7-ee5` | Fixture states, responsive patterns, design-to-production workflow |
 
 ### Before working on a bead — get the full primer
 ```bash
@@ -167,9 +176,6 @@ graph read <src_id> --max-chars 3000          # read full sources
 graph attention --last 20                     # recent human input
 graph attention --search "keyword"            # find when user discussed something
 ```
-
-### Working with Design Studio
-graph://225a4af7-ee5 — full guide covering fixture states, responsive patterns, and the design-to-production workflow.
 
 ### Session self-management
 ```bash
