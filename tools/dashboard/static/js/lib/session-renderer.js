@@ -128,6 +128,7 @@
           const dur = this._duration(entry, result);
           if (dur != null) badges.push({ text: this.fmtDuration(dur), cls: 'sc-meta-gray' });
           if (result && result.is_error) badges.push({ text: '\u2717', cls: 'sc-meta-red' });
+          else if (result && !result.is_error) badges.push({ text: '\u2713', cls: 'sc-meta-green' });
           break;
         }
         case 'Read': {
