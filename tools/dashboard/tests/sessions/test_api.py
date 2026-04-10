@@ -139,20 +139,17 @@ class TestSessionsJSWiring:
         # _updateFromStore should read topics from the Alpine store
         assert "s.topics" in self.sessions_js
 
-    def test_fallback_sets_topics(self):
-        # _fetchActiveFallback must set store.topics from API response
+    def test_seed_sets_topics(self):
+        # Session store seed (moved from sessions.js) must set store.topics
         # This is the acceptance test for the topics bug fix
-        fn_start = self.sessions_js.index("async _fetchActiveFallback")
-        fn_body = self.sessions_js[fn_start:fn_start + 1500]
-        assert "store.topics" in fn_body, (
-            "_fetchActiveFallback does not set store.topics — topics bug not fixed"
+        assert "store.topics" in self.store_js, (
+            "session-store.js seed does not set store.topics — topics bug not fixed"
         )
 
-    def test_fallback_sets_nag_fields(self):
-        fn_start = self.sessions_js.index("async _fetchActiveFallback")
-        fn_body = self.sessions_js[fn_start:fn_start + 1500]
-        assert "store.nagEnabled" in fn_body, (
-            "_fetchActiveFallback does not set store.nagEnabled"
+    def test_seed_sets_nag_fields(self):
+        # Session store seed must set nagEnabled
+        assert "store.nagEnabled" in self.store_js, (
+            "session-store.js seed does not set store.nagEnabled"
         )
 
     def test_navigate_exists(self):
