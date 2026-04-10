@@ -49,6 +49,22 @@ Run `graph --help` for full reference.
 2. `graph wait <bead-id>` — block until dispatched bead completes
 3. `graph dispatch status` — check overall queue at any time
 
+**CrossTalk provisioning (host sessions only):**
+Container agents get `CROSSTALK_TOKEN` automatically via the session launcher.
+Host sessions must self-provision before using any `graph crosstalk` command:
+```bash
+# Get your tmux session name and provision a token in one step:
+export CROSSTALK_TOKEN=$(.venv/bin/python3 -c "
+import secrets, hashlib
+from tools.dashboard.dao import auth_db
+raw = secrets.token_urlsafe(32)
+auth_db.insert_token(hashlib.sha256(raw.encode()).hexdigest(),
+                     '$(tmux display-message -p \"#{session_name}\")')
+print(raw)
+")
+```
+Run this once per session. The token is stored in `data/auth.db` and revoked when the session ends.
+
 ### bd — Beads Issue Tracker
 Work tracking. Dolt-backed, read-write.
 
@@ -97,10 +113,6 @@ All localhost services reachable directly:
 ## Persistence
 - **graph** is the cross-agent memory: `graph note` for insights/pitfalls, `graph bead` for work items
 - `~/.claude/` is persistent on the host but is personal/local — not visible to container agents
-
-## Bead Polishing Protocol
-When formulating or refining beads, read the protocol directly:
-`graph://f6c6c43e-24a`  (resolves to: `graph read f6c6c43e-24a`)
 
 ## Working Style
 - In design discussions, your role is to formulate and polish beads — not to dispatch or implement while the design is ongoing. The user will signal when work is ready to dispatch.
