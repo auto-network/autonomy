@@ -18,6 +18,34 @@
  */
 document.addEventListener('alpine:init', function() {
   Alpine.store('sessions', {});
+
+  // Seed all session stores from HTTP on first page load (arch spec v9 §6e).
+  // Runs once on SPA boot regardless of which page the user lands on.
+  fetch('/api/dao/active_sessions')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!Array.isArray(data)) return;
+      for (var i = 0; i < data.length; i++) {
+        var s = data[i];
+        var store = window.getSessionStore(s.session_id);
+        store.project = s.project || '';
+        store.sessionType = s.type || '';
+        store.label = s.label || '';
+        if (s.role) store.role = s.role;
+        store.isLive = s.is_live !== false;
+        store.startedAt = s.started_at || 0;
+        if (s.last_activity) store.lastActivity = s.last_activity;
+        if (s.entry_count) store.entryCount = s.entry_count;
+        if (s.context_tokens) store.contextTokens = s.context_tokens;
+        if (s.last_message !== undefined) store.lastMessage = s.last_message;
+        if (s.topics) store.topics = s.topics;
+        if (s.nag_enabled !== undefined) store.nagEnabled = !!s.nag_enabled;
+        if (s.nag_interval) store.nagInterval = s.nag_interval;
+        if (s.nag_message !== undefined) store.nagMessage = s.nag_message;
+        if (s.resolved !== undefined) store.resolved = !!s.resolved;
+      }
+    })
+    .catch(function(e) { console.warn('[session-store] seed fetch error', e); });
 });
 
 window.getSessionStore = function(sessionId) {

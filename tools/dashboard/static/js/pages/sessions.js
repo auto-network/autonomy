@@ -136,9 +136,6 @@
         this._fetchRecent();
         this._recentTimer = setInterval(() => this._fetchRecent(), 30000);
 
-        // Seed stores from HTTP if SSE hasn't delivered registry yet
-        this._fetchActiveFallback();
-
         // Handle new terminal creation from the + button dropdown
         this._onCreateTerminal = (e) => {
           var cmd = e.detail.cmd;
@@ -209,36 +206,6 @@
           this.recent = Array.isArray(data) ? data : [];
         } catch (e) {
           console.warn('[sessionsPage] recent fetch error', e);
-        }
-      },
-
-      async _fetchActiveFallback() {
-        try {
-          const data = await fetch('/api/dao/active_sessions').then(r => r.json());
-          if (Array.isArray(data)) {
-            for (var i = 0; i < data.length; i++) {
-              var s = data[i];
-              var store = window.getSessionStore(s.session_id);
-              store.project = s.project || '';
-              store.sessionType = s.type || '';
-              // tmux_session removed in auto-h4gh; session_id is the store key
-              store.label = s.label || '';
-              if (s.role) store.role = s.role;
-              store.isLive = s.is_live !== false;
-              store.startedAt = s.started_at || 0;
-              if (s.last_activity) store.lastActivity = s.last_activity;
-              if (s.entry_count) store.entryCount = s.entry_count;
-              if (s.context_tokens) store.contextTokens = s.context_tokens;
-              if (s.last_message !== undefined) store.lastMessage = s.last_message;
-              if (s.topics) store.topics = s.topics;
-              if (s.nag_enabled !== undefined) store.nagEnabled = !!s.nag_enabled;
-              if (s.nag_interval) store.nagInterval = s.nag_interval;
-              if (s.nag_message !== undefined) store.nagMessage = s.nag_message;
-              if (s.resolved !== undefined) store.resolved = !!s.resolved;
-            }
-          }
-        } catch (e) {
-          console.warn('[sessionsPage] fallback fetch error', e);
         }
       },
 
