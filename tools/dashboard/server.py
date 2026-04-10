@@ -2858,6 +2858,33 @@ async def api_session_send(request):
     return JSONResponse({"ok": True, "tmux_session": tmux_session})
 
 
+async def api_session_interrupt(request):
+    """Send Escape key to a tmux session to interrupt a running tool.
+
+    POST /api/session/{tmux_name}/interrupt
+    Returns: {"ok": true}
+    """
+    tmux_name = request.path_params["tmux_name"]
+    try:
+        exists = _tmux_session_exists(tmux_name)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": "tmux is not available in this environment"},
+            status_code=503,
+        )
+    if not exists:
+        return JSONResponse(
+            {"error": f"tmux session '{tmux_name}' not found"},
+            status_code=404,
+        )
+    subprocess.run(
+        ["tmux", "send-keys", "-t", tmux_name, "Escape"],
+        capture_output=True,
+    )
+    logger.warning("[session-interrupt] tmux=%r", tmux_name)
+    return JSONResponse({"ok": True})
+
+
 async def api_terminal_unclaimed(request):
     """Return unclaimed host tmux sessions — those with no jsonl_path yet.
 
@@ -5670,6 +5697,7 @@ routes = [
     Route("/api/session/send-handshake", api_session_send_handshake, methods=["POST"]),
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
+    Route("/api/session/{tmux_name}/interrupt", api_session_interrupt, methods=["POST"]),
     Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
     Route("/api/session/{tmux_name}/topics", api_session_topics, methods=["PUT"]),
     Route("/api/session/{tmux_name}/role", api_session_role, methods=["PUT"]),
