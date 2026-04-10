@@ -670,20 +670,33 @@ class SessionMonitor:
     # ── IN_CREATE handling ───────────────────────────────────────
 
     async def _handle_in_create(self, event) -> None:
-        """Handle IN_CREATE on a watched directory — new file appeared."""
+        """Handle IN_CREATE on a watched directory — new file or subdirectory appeared."""
         filename = event.name
-        if not filename or not filename.endswith(".jsonl"):
+        if not filename:
+            return
+
+        dir_path = self._wd_to_dir_path.get(event.wd)
+        if not dir_path:
+            return
+        new_path = Path(dir_path) / filename
+
+        # Subdirectory created — extend watch into it for the same sessions.
+        # This handles the Claude Code layout where JSONL lands inside a
+        # project subdirectory (e.g. sessions/-workspace-repo/*.jsonl).
+        if new_path.is_dir() and "subagents" not in filename:
+            sessions = self._dir_wd_sessions.get(event.wd, set())
+            for tmux_name in list(sessions):
+                self._add_dir_watch(tmux_name, str(new_path))
+            return
+
+        if not filename.endswith(".jsonl"):
             return
         # Skip subagent paths (should not fire due to non-recursive watches,
         # but guard defensively)
         if "subagents" in filename:
             return
 
-        dir_path = self._wd_to_dir_path.get(event.wd)
-        if not dir_path:
-            return
-        new_file = Path(dir_path) / filename
-
+        new_file = new_path
         sessions = self._dir_wd_sessions.get(event.wd, set())
         if not sessions:
             return
