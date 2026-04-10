@@ -101,12 +101,15 @@
 
             <!-- ── Tool use: two-line chip card ────────────── -->
             <template x-if="resolveEntry(dEntry).type === 'tool_use'">
-              <div class="sc-tool-card" @click="toggleExpand(dIdx)">
-                <!-- Line 1: chip + meta + timestamp -->
+              <div class="sc-tool-card" :class="isToolRunning(resolveEntry(dEntry)) ? 'sc-tool-running' : ''" @click="toggleExpand(dIdx)">
+                <!-- Line 1: chip + meta + timestamp + interrupt button -->
                 <div class="sc-line1">
                   <span class="sc-chip" :class="chipClass(resolveEntry(dEntry).tool_name)" x-text="resolveEntry(dEntry).tool_name || '?'"></span>
                   <template x-for="badge in metaDisplay(resolveEntry(dEntry))" :key="badge.text">
                     <span class="sc-meta" :class="badge.cls" x-text="badge.text"></span>
+                  </template>
+                  <template x-if="isToolRunning(resolveEntry(dEntry))">
+                    <button class="sc-interrupt-btn" @click.stop="interrupt()" title="Send Escape to interrupt">Esc</button>
                   </template>
                   <span class="sc-timestamp" x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
                 </div>

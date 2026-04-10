@@ -115,6 +115,10 @@
       linkError: '',
       HANDSHAKE_STRING: '[dashboard] confirming terminal link \u2014 please reply with I SEE IT',
 
+      // Elapsed-time tick for running tools (incremented every 1s)
+      _tick: 0,
+      _tickInterval: null,
+
       // Screenshot injection indicator
       screenshotInjected: false,
       _screenshotTimer: null,
@@ -355,6 +359,10 @@
           clearTimeout(this._screenshotTimer);
           this._screenshotTimer = null;
         }
+        if (this._tickInterval) {
+          clearInterval(this._tickInterval);
+          this._tickInterval = null;
+        }
       },
 
       // ── Setup helpers ───────────────────────────────────────────
@@ -362,6 +370,13 @@
       _setupWatchers() {
         var self = this;
         var sid = this.sessionKey;
+
+        // Tick interval: bump _tick every second so running-tool elapsed times refresh
+        if (!this._tickInterval) {
+          this._tickInterval = setInterval(function() {
+            if (self.isAgentWorking()) self._tick++;
+          }, 1000);
+        }
 
         // Single watcher: incremental append + auto-scroll when entries change
         var lastLen = this.entries.length;
@@ -553,6 +568,20 @@
         }
       },
 
+      // ── Interrupt (Escape key) ────────────────────────────────────
+
+      async interrupt() {
+        var tmux = this._tmuxSession;
+        if (!tmux) return;
+        try {
+          await fetch('/api/session/' + encodeURIComponent(tmux) + '/interrupt', {
+            method: 'POST',
+          });
+        } catch (e) {
+          console.warn('[sessionViewer] interrupt failed:', e);
+        }
+      },
+
       // ── Link terminal ───────────────────────────────────────────
 
       async showLinkPicker() {
@@ -714,6 +743,10 @@
           clearInterval(this._pollInterval);
           this._pollInterval = null;
         }
+        if (this._tickInterval) {
+          clearInterval(this._tickInterval);
+          this._tickInterval = null;
+        }
         // Reset view state
         this.state = 'loading';
         this.sessionKey = '';
@@ -725,6 +758,7 @@
         this.autoScroll = true;
         this._runDir = '';
         this._tailUrl = '';
+        this._tick = 0;
       },
 
       // ── Overlay: header sync (imperative — outside Alpine scope) ──
