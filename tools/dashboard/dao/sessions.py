@@ -40,6 +40,19 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
     return sessions
 
 
+def _derive_session_type(meta: dict, file_path: str) -> str:
+    """Derive session type from metadata or file path heuristics."""
+    if meta.get("session_type"):
+        return meta["session_type"]
+    if meta.get("bead_id"):
+        return "dispatch"
+    if "agent-runs" in file_path:
+        return "dispatch"
+    if meta.get("role") == "librarian" or "librarian" in file_path:
+        return "librarian"
+    return "interactive"
+
+
 def get_recent_sessions(limit: int = 20) -> list[dict]:
     """Fetch recent session sources from graph.db.
 
@@ -70,6 +83,7 @@ def get_recent_sessions(limit: int = 20) -> list[dict]:
                     pass
             file_path = r["file_path"] or ""
             session_uuid = meta.get("session_uuid", "")
+            session_type = _derive_session_type(meta, file_path)
             results.append({
                 "id": r["id"],
                 "type": r["type"],
@@ -79,6 +93,10 @@ def get_recent_sessions(limit: int = 20) -> list[dict]:
                 "session_uuid": session_uuid,
                 "file_path": file_path,
                 "resumable": bool(file_path and Path(file_path).exists()),
+                "session_type": session_type,
+                "total_tokens": meta.get("total_tokens", 0),
+                "total_turns": meta.get("total_turns", 0),
+                "created_at": r["created_at"] or "",
             })
         return results
     except Exception:

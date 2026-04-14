@@ -132,11 +132,17 @@ SWEEP_SESSIONS = [
 
 SWEEP_RECENT_SESSIONS = [
     {"id": "src-sweep-aaa111", "type": "session", "date": "2026-03-25",
-     "title": "Alpha history session", "project": "autonomy"},
+     "title": "Alpha history session", "project": "autonomy",
+     "session_type": "interactive", "resumable": True,
+     "created_at": "2026-03-25T10:00:00Z"},
     {"id": "src-sweep-bbb222", "type": "session", "date": "2026-03-24",
-     "title": "Beta history session", "project": "autonomy"},
+     "title": "Beta history session", "project": "autonomy",
+     "session_type": "dispatch", "resumable": False,
+     "created_at": "2026-03-24T10:00:00Z"},
     {"id": "src-sweep-ccc333", "type": "session", "date": "2026-03-23",
-     "title": "Gamma history session", "project": "default"},
+     "title": "Gamma history session", "project": "default",
+     "session_type": "librarian", "resumable": False,
+     "created_at": "2026-03-23T10:00:00Z"},
 ]
 
 SWEEP_SESSION_ENTRIES = {
@@ -742,12 +748,13 @@ SESSIONS_PAGE_CHECKS = """
     r.roles = roles;
     r.roles_visible = roles.length > 0;
 
-    // Host card has distinct styling
-    var hostCards = document.querySelectorAll('.session-card-host');
+    // Host card has distinct styling (active section only)
+    var activeSection = document.querySelector('[data-testid="active-sessions-section"]');
+    var hostCards = activeSection ? activeSection.querySelectorAll('.session-card-host') : [];
     r.host_card_count = hostCards.length;
 
-    // Container cards
-    var containerCards = document.querySelectorAll('.session-card-container');
+    // Container cards (active section only)
+    var containerCards = activeSection ? activeSection.querySelectorAll('.session-card-container') : [];
     r.container_card_count = containerCards.length;
 
     // Turn counts visible (T3 stats)
@@ -790,14 +797,20 @@ SESSIONS_PAGE_CHECKS = """
     r.recent_count = recentRows.length;
     r.has_recent = recentRows.length > 0;
 
-    // Recent session titles
+    // Recent session titles (card-based: .sc-title divs; legacy: long spans)
     var recentTitles = [];
     recentRows.forEach(function(row) {
-        var spans = row.querySelectorAll('span');
-        spans.forEach(function(s) {
-            var text = s.textContent.trim();
-            if (text.length > 15) recentTitles.push(text);
-        });
+        var titleEl = row.querySelector('.sc-title');
+        if (titleEl) {
+            var text = titleEl.textContent.trim();
+            if (text) recentTitles.push(text);
+        } else {
+            var spans = row.querySelectorAll('span');
+            spans.forEach(function(s) {
+                var text = s.textContent.trim();
+                if (text.length > 15) recentTitles.push(text);
+            });
+        }
     });
     r.recent_titles = recentTitles;
 

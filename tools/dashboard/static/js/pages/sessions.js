@@ -118,6 +118,98 @@
       _creating: false,
       zoom: localStorage.getItem('sessionZoom') || 'normal',
 
+      // --- Recent Sessions: filter + resume state ---
+      recentFilter: localStorage.getItem('recentSessionFilter') || 'all',
+      filterOptions: [
+        {key: 'all', label: 'All'},
+        {key: 'interactive', label: 'Interactive'},
+        {key: 'dispatch', label: 'Dispatch'},
+        {key: 'librarian', label: 'Librarian'},
+      ],
+      resuming: {},
+      resumeError: {},
+      resumed: {},
+
+      setRecentFilter(f) {
+        this.recentFilter = f;
+        localStorage.setItem('recentSessionFilter', f);
+      },
+
+      get filtered() {
+        if (this.recentFilter === 'all') return this.recent;
+        var self = this;
+        return this.recent.filter(function(s) { return self._matchesFilter(s, self.recentFilter); });
+      },
+
+      _matchesFilter(s, f) {
+        var t = s.session_type || 'interactive';
+        if (f === 'dispatch') return t === 'dispatch';
+        if (f === 'librarian') return t === 'librarian';
+        return t === 'terminal' || t === 'host' || t === 'chatwith' || t === 'session' || t === 'interactive';
+      },
+
+      _recentRoleBadge(t) {
+        if (t === 'dispatch') return 'Dispatch';
+        if (t === 'librarian') return 'Librarian';
+        if (t === 'host') return 'Host';
+        if (t === 'chatwith') return 'Chat-with';
+        return '';
+      },
+
+      _recentRoleCls(t) {
+        if (t === 'host') return 'sc-role sc-role-host';
+        return 'sc-role';
+      },
+
+      _recentBorderCls(t) {
+        if (t === 'host') return 'session-card-host';
+        return 'session-card-container';
+      },
+
+      _recentTurnsStr(s) { return s.total_turns ? String(s.total_turns) : ''; },
+
+      _recentTokensStr(s) {
+        var t = s.total_tokens || 0;
+        if (t >= 1000000) return (t / 1000000).toFixed(1) + 'M';
+        if (t >= 1000) return Math.round(t / 1000) + 'K';
+        return t ? String(t) : '';
+      },
+
+      _agoStr(iso) {
+        if (!iso) return '';
+        var secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+        if (secs < 60) return secs + 's';
+        if (secs < 3600) return Math.round(secs / 60) + 'm';
+        if (secs < 86400) return Math.floor(secs / 3600) + 'h';
+        return Math.floor(secs / 86400) + 'd';
+      },
+
+      async resumeSession(s, $event) {
+        $event.preventDefault();
+        $event.stopPropagation();
+        if (this.resuming[s.id]) return;
+        this.resuming[s.id] = true;
+        this.resumeError[s.id] = '';
+        try {
+          var res = await fetch('/api/session/resume', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({source_id: s.id}),
+          });
+          if (!res.ok) {
+            var err = await res.json().catch(function() { return {}; });
+            throw new Error(err.error || 'Resume failed');
+          }
+          this.resuming[s.id] = false;
+          this.resumed[s.id] = true;
+        } catch (e) {
+          this.resuming[s.id] = false;
+          this.resumeError[s.id] = e.message || 'Failed';
+          var self = this;
+          setTimeout(function() { self.resumeError[s.id] = ''; }, 3000);
+        }
+      },
+
       setZoom(level) {
         this.zoom = level;
         localStorage.setItem('sessionZoom', level);
