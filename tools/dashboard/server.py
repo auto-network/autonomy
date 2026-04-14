@@ -3323,6 +3323,164 @@ async def api_session_create(request):
     return JSONResponse(resp, status_code=202)
 
 
+async def api_session_resume(request):
+    """Resume an existing Claude session.
+
+    POST /api/session/resume
+    Body: {"source_id": "abc123"} OR {"session_uuid": "uuid", "file_path": "/path/to.jsonl"}
+    Returns: {"tmux_name": str, "label": str, "type": str}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    source_id = body.get("source_id")
+    session_uuid = body.get("session_uuid")
+    file_path = body.get("file_path")
+    session_type = None  # "container" or "host"
+
+    # ── Resolve from graph source metadata if source_id provided ──
+    if source_id:
+        try:
+            from tools.graph.db import GraphDB
+            gdb = GraphDB()
+            src = gdb.resolve_source_strict(source_id)
+            gdb.close()
+        except Exception:
+            return JSONResponse({"error": "Failed to query graph.db"}, status_code=500)
+
+        if src is None:
+            return JSONResponse({"error": f"Source '{source_id}' not found"}, status_code=404)
+        if isinstance(src, list):
+            return JSONResponse(
+                {"error": f"Ambiguous source_id '{source_id}', {len(src)} candidates"},
+                status_code=400,
+            )
+        if src.get("type") != "session":
+            return JSONResponse(
+                {"error": f"Source '{source_id}' is type '{src.get('type')}', not a session"},
+                status_code=400,
+            )
+
+        file_path = src.get("file_path", "")
+        meta = {}
+        if src.get("metadata"):
+            try:
+                meta = json.loads(src["metadata"])
+            except Exception:
+                pass
+        session_uuid = meta.get("session_uuid", "")
+
+    # ── Validate required fields ──
+    if not session_uuid:
+        return JSONResponse({"error": "session_uuid is required (provide source_id or session_uuid)"}, status_code=400)
+    if not file_path:
+        return JSONResponse({"error": "file_path is required (provide source_id or file_path)"}, status_code=400)
+
+    # ── Verify JSONL file exists on disk ──
+    jsonl_path = Path(file_path)
+    if not jsonl_path.exists():
+        return JSONResponse(
+            {"error": f"JSONL file not found: {file_path}"},
+            status_code=404,
+        )
+
+    # ── Determine session type ──
+    agent_runs_dir = str(_REPO_ROOT / "data" / "agent-runs")
+    if session_type is None:
+        if file_path.startswith(agent_runs_dir) or "/agent-runs/" in file_path:
+            session_type = "container"
+        else:
+            session_type = "host"
+
+    # ── Generate tmux name ──
+    tmux_name = f"resume-{time.strftime('%m%d-%H%M%S')}"
+    if dashboard_db.session_exists(tmux_name):
+        import random
+        tmux_name = f"resume-{time.strftime('%m%d-%H%M%S')}-{random.randint(10, 99)}"
+
+    model = "claude-opus-4-6[1m]"
+
+    if session_type == "container":
+        # Derive output_dir from JSONL parent path
+        # JSONL is typically at data/agent-runs/<name>-<ts>/sessions/<uuid>/<file>.jsonl
+        # output_dir is the run directory (parent of sessions/)
+        output_dir = str(jsonl_path.parent.parent.parent)
+
+        docker_cmd = launch_session(
+            session_type="terminal",
+            name=tmux_name,
+            prompt=None,
+            detach=False,
+            image="autonomy-agent:dashboard",
+            metadata={"tmux_session": tmux_name},
+            output_dir=output_dir,
+            model=model,
+            resume_uuid=session_uuid,
+            global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
+        )
+        if not docker_cmd:
+            return JSONResponse({"error": "Failed to build resume command"}, status_code=500)
+
+        cmd_str = docker_cmd
+    else:
+        # Host session: bare claude command
+        cmd_str = (
+            f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
+            f"claude --dangerously-skip-permissions --model {model} --resume {session_uuid}"
+        )
+
+    # ── Launch in tmux ──
+    tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40"]
+    if session_type == "host":
+        tmux_cmd += ["-c", str(_REPO_ROOT)]
+    tmux_cmd.append(cmd_str)
+
+    result = subprocess.run(tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True)
+    if result.returncode != 0:
+        logger.error("api_session_resume: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
+                     tmux_name, result.returncode, result.stderr.decode().strip())
+        return JSONResponse(
+            {"error": f"tmux creation failed: {result.stderr.decode().strip()}"},
+            status_code=500,
+        )
+
+    # Enable OSC 52 + mouse + passthrough
+    subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"], capture_output=True)
+    subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"], capture_output=True)
+    subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"], capture_output=True)
+
+    # ── Register with session monitor ──
+    if session_type == "container":
+        agent_runs = _REPO_ROOT / "data" / "agent-runs"
+        run_dirs = sorted(
+            agent_runs.glob(f"{tmux_name}-*"),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        ) if agent_runs.exists() else []
+        sess_dir = run_dirs[0] / "sessions" if run_dirs else Path(output_dir) / "sessions"
+        await session_monitor.register(
+            tmux_name=tmux_name,
+            session_type="container",
+            project=sess_dir.name,
+            jsonl_path=sess_dir,
+            seed_message="Resuming...",
+        )
+    else:
+        project_folder = str(_REPO_ROOT).replace("/", "-")
+        await session_monitor.register(
+            tmux_name=tmux_name,
+            session_type="host",
+            project=project_folder,
+        )
+
+    return JSONResponse({
+        "tmux_name": tmux_name,
+        "label": f"Resumed: {session_uuid[:12]}",
+        "type": session_type,
+    })
+
+
 async def api_upload(request):
     """Upload a file to the workspace.
 
@@ -5694,6 +5852,7 @@ routes = [
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
     Route("/api/terminal/unclaimed", api_terminal_unclaimed),
     Route("/api/session/create", api_session_create, methods=["POST"]),
+    Route("/api/session/resume", api_session_resume, methods=["POST"]),
     Route("/api/session/send-handshake", api_session_send_handshake, methods=["POST"]),
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),

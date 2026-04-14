@@ -102,6 +102,9 @@ RECENT_SESSION_DEFAULTS: dict[str, Any] = {
     "date": "2026-01-01",
     "title": "",
     "project": "",
+    "session_uuid": "",
+    "file_path": "",
+    "resumable": False,
 }
 
 RUN_DEFAULTS: dict[str, Any] = {

@@ -118,6 +118,7 @@ def launch_session(
     output_dir: str | None = None,
     model: str = "claude-opus-4-6[1m]",
     global_claude_md: Path | str | None = None,
+    resume_uuid: str | None = None,
 ) -> str | None:
     """Launch a Claude agent container session.
 
@@ -144,6 +145,10 @@ def launch_session(
         global_claude_md: Host path to mount as the Claude global user-level
                     CLAUDE.md (~/.claude/CLAUDE.md) inside the container.
                     None (default) skips the mount.
+        resume_uuid: Claude session UUID to resume. When set, output_dir must
+                    be provided (reuses existing session directory), session
+                    meta creation is skipped, and --resume is appended to the
+                    entrypoint command.
 
     Returns:
         detach=True:  container_id string on success, None on failure.
@@ -159,6 +164,13 @@ def launch_session(
         return None
 
     # ── Session directory setup ────────────────────────────────
+    if resume_uuid and not output_dir:
+        print(
+            f"  ERROR: output_dir is required when resume_uuid is set for '{name}'",
+            file=sys.stderr,
+        )
+        return None
+
     if output_dir is not None:
         run_dir = Path(output_dir)
     else:
@@ -169,15 +181,16 @@ def launch_session(
     sessions_dir = run_dir / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Write .session_meta.json ───────────────────────────────
-    meta_doc: dict = {
-        "type": session_type,
-        "container_name": name,
-        "launched_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if metadata:
-        meta_doc.update(metadata)
-    (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
+    # ── Write .session_meta.json (skip for resumed sessions) ──
+    if not resume_uuid:
+        meta_doc: dict = {
+            "type": session_type,
+            "container_name": name,
+            "launched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if metadata:
+            meta_doc.update(metadata)
+        (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
 
     # ── Auth args (may copy creds file into run_dir) ───────────
     auth_args = _setup_auth_docker_args(creds, run_dir)
@@ -255,10 +268,13 @@ def launch_session(
     if prompt is not None:
         prompt_file = run_dir / ".prompt.md"
         prompt_file.write_text(prompt)
+        resume_flag = f" --resume {resume_uuid}" if resume_uuid else ""
         cmd += ["--entrypoint", "sh", image,
-                "-c", f"cat /workspace/output/.prompt.md | claude --dangerously-skip-permissions --model {model} -p"]
+                "-c", f"cat /workspace/output/.prompt.md | claude --dangerously-skip-permissions --model {model}{resume_flag} -p"]
     else:
         cmd += [image, "--dangerously-skip-permissions", "--model", model]
+        if resume_uuid:
+            cmd += ["--resume", resume_uuid]
 
     # ── Execute or return ──────────────────────────────────────
     if detach:

@@ -41,27 +41,45 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
 
 
 def get_recent_sessions(limit: int = 20) -> list[dict]:
-    """Fetch recent session sources from graph.db."""
+    """Fetch recent session sources from graph.db.
+
+    Returns enriched dicts with session_uuid, file_path, and resumable
+    (whether the JSONL file still exists on disk) so the frontend can
+    show/hide a Resume button.
+    """
     if not _GRAPH_DB.exists():
         return []
     try:
         conn = sqlite3.connect(str(_GRAPH_DB))
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, type, project, title, created_at FROM sources"
+            "SELECT id, type, project, title, created_at, file_path, metadata"
+            " FROM sources"
             " WHERE type = 'session' ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
         conn.close()
-        return [
-            {
+        import json as _json
+        results = []
+        for r in rows:
+            meta = {}
+            if r["metadata"]:
+                try:
+                    meta = _json.loads(r["metadata"])
+                except Exception:
+                    pass
+            file_path = r["file_path"] or ""
+            session_uuid = meta.get("session_uuid", "")
+            results.append({
                 "id": r["id"],
                 "type": r["type"],
                 "date": (r["created_at"] or "")[:10],
                 "title": r["title"] or "",
                 "project": f"[{r['project']}]" if r["project"] else "",
-            }
-            for r in rows
-        ]
+                "session_uuid": session_uuid,
+                "file_path": file_path,
+                "resumable": bool(file_path and Path(file_path).exists()),
+            })
+        return results
     except Exception:
         return []
