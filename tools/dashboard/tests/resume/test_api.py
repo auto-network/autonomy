@@ -5,6 +5,7 @@ Tests:
 - POST /api/session/resume with valid source_id → 200 + tmux_name
 - POST /api/session/resume with missing JSONL → 404
 - POST /api/session/resume with non-session source → 400
+- POST /api/session/resume with already-active session → 409
 - GET /api/dao/recent_sessions includes session_uuid and resumable fields
 - Session identity preservation: dead session → reuse original tmux_name + label
 - History backfill: resumed session passes JSONL path for full history
@@ -280,6 +281,77 @@ class TestReResumeAfterDeath:
         assert data["label"] == "Already resumed once"
         # revive_session resets file_offset for full re-backfill
         assert test_client._revived[0]["file_offset"] == 0
+
+
+class TestActiveSessionGuard:
+    """POST /api/session/resume rejects already-active sessions with 409."""
+
+    def test_active_session_by_uuid_returns_409(self, test_client, resume_env):
+        """Resuming a session whose session_uuid is live returns 409."""
+        test_client._live_sessions["abc123-def456"] = {
+            "tmux_name": "auto-t1",
+            "is_live": 1,
+            "jsonl_path": resume_env["jsonl_file"],
+            "session_uuid": "abc123-def456",
+            "type": "container",
+            "project": "autonomy",
+        }
+        resp = test_client.post(
+            "/api/session/resume",
+            json={"source_id": resume_env["container_source_id"]},
+        )
+        assert resp.status_code == 409
+        assert "already active" in resp.json()["error"].lower()
+        assert "auto-t1" in resp.json()["error"]
+
+    def test_active_session_by_direct_params_returns_409(self, test_client, resume_env):
+        """Resuming via session_uuid + file_path also triggers the guard."""
+        test_client._live_sessions["abc123-def456"] = {
+            "tmux_name": "auto-t1",
+            "is_live": 1,
+            "jsonl_path": resume_env["jsonl_file"],
+            "session_uuid": "abc123-def456",
+            "type": "container",
+            "project": "autonomy",
+        }
+        resp = test_client.post(
+            "/api/session/resume",
+            json={
+                "session_uuid": "abc123-def456",
+                "file_path": resume_env["jsonl_file"],
+            },
+        )
+        assert resp.status_code == 409
+        assert "auto-t1" in resp.json()["error"]
+
+    def test_active_session_by_file_path_returns_409(self, test_client, resume_env):
+        """Guard also matches by file_path when session_uuid differs."""
+        test_client._live_sessions["other-live-uuid"] = {
+            "tmux_name": "auto-running",
+            "is_live": 1,
+            "jsonl_path": resume_env["jsonl_file"],
+            "session_uuid": "other-live-uuid",
+            "type": "container",
+            "project": "autonomy",
+        }
+        resp = test_client.post(
+            "/api/session/resume",
+            json={
+                "session_uuid": "abc123-def456",
+                "file_path": resume_env["jsonl_file"],
+            },
+        )
+        assert resp.status_code == 409
+        assert "auto-running" in resp.json()["error"]
+
+    def test_dead_session_still_resumes_ok(self, test_client, resume_env):
+        """A dead session (not in _live_sessions) still resumes normally."""
+        # No live session set — should succeed
+        resp = test_client.post(
+            "/api/session/resume",
+            json={"source_id": resume_env["container_source_id"]},
+        )
+        assert resp.status_code == 200
 
 
 class TestRecentSessionsEnriched:
