@@ -58,66 +58,8 @@
     </template>
     <div class="sc-card-list" style="display:flex;flex-direction:column;gap:6px">
       <template x-for="s in interactive" :key="s.session_id">
-        <div class="session-card-wrap">
-          <div class="session-card"
-               :class="s.type === 'host' ? 'session-card-host' : 'session-card-container'"
-               @click="navigate(s)" data-testid="session-card"
-               :data-session-id="s.session_id">
-            <!-- Compact-only row: dot + bell + title -->
-            <div class="sc-compact-row">
-              <span class="sc-dot" :class="s.is_live ? 'sc-dot-live' : 'sc-dot-dead'"></span>
-              <span class="sc-nag" :class="s.nag_enabled ? '' : 'sc-nag-off'">🔔</span>
-              <span class="sc-title" x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></span>
-            </div>
-            <!-- Stats row: dot, bell, role, T3, actions -->
-            <div class="sc-stats">
-              <span class="sc-dot" :class="s.is_live ? 'sc-dot-live' : 'sc-dot-dead'"></span>
-              <span class="sc-nag" :class="s.nag_enabled ? '' : 'sc-nag-off'">🔔</span>
-              <span class="sc-role" :class="s._roleCls" x-text="s._roleBadge" x-show="s._roleBadge" data-testid="session-role"></span>
-              <span class="sc-t3">
-                <span class="sc-t3-val" :class="s._ctxWarn ? 'warn' : ''" x-text="s._turnsStr"></span>
-                <span class="sc-t3-sep">·</span>
-                <span class="sc-t3-val" :class="s._ctxWarn ? 'warn' : ''" x-text="s._ctxStr"></span>
-                <span class="sc-t3-sep">·</span>
-                <span class="sc-t3-val" :class="s._recencyColor" x-text="s._lastActiveStr"></span>
-              </span>
-              <button @click.stop="showSessionActions(s)" class="sc-actions"
-                      data-testid="session-actions-btn" aria-label="Session actions">⋮</button>
-            </div>
-            <!-- Title -->
-            <div class="sc-title" x-text="s.label || s.tmux_session || s.session_id.slice(0, 12)"></div>
-            <!-- Topics -->
-            <template x-if="s.topics && s.topics.length > 0">
-              <div class="sc-topics">
-                <template x-for="(topic, idx) in s.topics" :key="idx">
-                  <span class="sc-topic-item" x-text="topic"></span>
-                </template>
-              </div>
-            </template>
-            <!-- Last message -->
-            <template x-if="s._hasData">
-              <div class="sc-message" x-text="s.latest || '...'"></div>
-            </template>
-            <!-- Footer (expanded only) -->
-            <div class="sc-footer">
-              <div class="sc-footer-item">
-                <span class="sc-footer-label">turns</span>
-                <span class="sc-footer-value" x-text="s._turnsStr || '—'"></span>
-              </div>
-              <div class="sc-footer-item">
-                <span class="sc-footer-label">ctx</span>
-                <span class="sc-footer-value" x-text="s._ctxStr || '—'"></span>
-              </div>
-              <div class="sc-footer-item">
-                <span class="sc-footer-label">idle</span>
-                <span class="sc-footer-value" x-text="s._lastActiveStr || '—'"></span>
-              </div>
-              <div class="sc-footer-item">
-                <span class="sc-footer-label">tmux</span>
-                <span class="sc-footer-value" x-text="s.tmux_session"></span>
-              </div>
-            </div>
-          </div>
+        <div @click="navigate(s)" data-testid="session-card" :data-session-id="s.session_id">
+          {% include 'partials/session-card.html' %}
         </div>
       </template>
     </div>

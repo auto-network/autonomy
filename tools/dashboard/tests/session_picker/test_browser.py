@@ -142,12 +142,35 @@ class PickerTestHarness:
         time.sleep(1)
 
     def refresh(self):
+        # Re-seed Alpine store from the (potentially updated) fixture via API,
+        # then reload the picker from the store.
         ab_eval("""
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/api/dao/active_sessions', false);
+            xhr.send();
+            var data = JSON.parse(xhr.responseText);
+            var store = Alpine.store('sessions');
+            for (var k in store) { if (store.hasOwnProperty(k)) store[k].isLive = false; }
+            if (Array.isArray(data)) {
+                for (var i = 0; i < data.length; i++) {
+                    var s = data[i];
+                    var id = s.session_id || s.tmux_session;
+                    var ss = window.getSessionStore(id);
+                    ss.isLive = s.is_live !== false;
+                    ss.label = s.label || '';
+                    ss.sessionType = s.type || '';
+                    if (s.role) ss.role = s.role;
+                    ss.project = s.project || '';
+                    if (s.entry_count) ss.entryCount = s.entry_count;
+                    if (s.context_tokens) ss.contextTokens = s.context_tokens;
+                }
+            }
             var els = document.querySelectorAll('[x-data]');
-            for (var i=0; i<els.length; i++) {
+            for (var i = 0; i < els.length; i++) {
                 var d = els[i]._x_dataStack && els[i]._x_dataStack[0];
                 if (d && d._loadChatSessions) { d._loadChatSessions(); return 'ok'; }
             }
+            return 'no component';
         """)
         time.sleep(0.5)
 
