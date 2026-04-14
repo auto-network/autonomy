@@ -123,25 +123,89 @@
     </div>
   </section>
 
-  <!-- Recent Sessions -->
+  <!-- Recent Sessions — design: Resume Button + Type Filter (combined) -->
   <section aria-label="Recent Sessions" data-testid="recent-sessions-section">
-    <h2 class="text-lg font-semibold mb-3 text-gray-400">Recent Sessions</h2>
-    <template x-if="recent.length === 0">
-      <div class="text-gray-500 text-sm">No recent sessions</div>
-    </template>
-    <div class="space-y-2">
-      <template x-for="s in recent" :key="s.id">
-        <a :href="'/graph/' + s.id"
-           class="flex items-center gap-3 p-3 bg-gray-800 rounded-lg hover:bg-gray-750 border border-gray-700 no-underline"
-           data-testid="recent-session-row"
-           :data-session-id="s.id">
-          <span class="font-mono text-xs text-gray-500" x-text="s.id.slice(0, 12)"></span>
-          <span class="text-xs text-gray-400" x-text="s.date"></span>
-          <span class="flex-1 truncate text-sm text-gray-200" x-text="s.title || ''"></span>
-          <span class="text-xs text-indigo-400" x-text="s.project"></span>
+
+    <!-- Section heading + filter chips (left-aligned) -->
+    <div class="flex items-baseline gap-3 mb-3 flex-wrap">
+      <h2 class="text-lg font-semibold text-gray-400 leading-none">Recent Sessions</h2>
+      <div class="flex gap-1">
+        <template x-for="opt in filterOptions" :key="opt.key">
+          <button @click="setRecentFilter(opt.key)"
+                  :class="recentFilter === opt.key ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'"
+                  class="px-2.5 py-1 rounded-full text-xs font-medium transition-colors leading-none"
+                  x-text="opt.label">
+          </button>
+        </template>
+      </div>
+    </div>
+
+    <!-- Session cards — same structure as active session cards -->
+    <div class="sc-card-list" style="display:flex;flex-direction:column;gap:6px">
+      <template x-for="s in filtered" :key="s.id">
+        <a :href="'/graph/' + s.id" class="no-underline" data-testid="recent-session-row" :data-session-id="s.id">
+          <div class="session-card-wrap">
+            <div class="session-card" :class="_recentBorderCls(s.session_type)">
+
+              <!-- Stats row: dot, role, T3 (turns · tokens · age), resume/actions -->
+              <div class="sc-stats">
+                <span class="sc-dot sc-dot-dead"></span>
+                <span :class="_recentRoleCls(s.session_type)" x-text="_recentRoleBadge(s.session_type)" x-show="_recentRoleBadge(s.session_type)"></span>
+                <span class="sc-t3">
+                  <span class="sc-t3-val" x-text="_recentTurnsStr(s)"></span>
+                  <span class="sc-t3-sep" x-show="_recentTurnsStr(s) && _recentTokensStr(s)">·</span>
+                  <span class="sc-t3-val" x-text="_recentTokensStr(s)"></span>
+                  <span class="sc-t3-sep" x-show="_recentTokensStr(s) && _agoStr(s.created_at)">·</span>
+                  <span class="sc-t3-val" x-text="_agoStr(s.created_at)"></span>
+                </span>
+
+                <!-- Resume button (same position as sc-actions ⋮) -->
+                <template x-if="s.resumable && !resumed[s.id] && !resumeError[s.id]">
+                  <button @click.prevent.stop="resumeSession(s, $event)"
+                          :disabled="resuming[s.id]"
+                          class="sc-actions"
+                          style="width:auto; padding:0 6px; font-size:11px; font-weight:600; color:#4ade80; cursor:pointer;"
+                          :class="resuming[s.id] && 'animate-pulse'"
+                          data-testid="resume-btn">
+                    <span x-show="!resuming[s.id]">Resume</span>
+                    <span x-show="resuming[s.id]" x-cloak>…</span>
+                  </button>
+                </template>
+                <template x-if="resumed[s.id]">
+                  <span class="sc-actions" style="width:auto; font-size:11px; font-weight:600; color:#4ade80;">Live ●</span>
+                </template>
+                <template x-if="resumeError[s.id]">
+                  <span class="sc-actions" style="width:auto; font-size:11px; color:#f87171;" x-text="resumeError[s.id]"></span>
+                </template>
+                <template x-if="!s.resumable && !resumed[s.id]">
+                  <span class="sc-actions" style="width:auto;"></span>
+                </template>
+              </div>
+
+              <!-- Title -->
+              <div class="sc-title" x-text="s.title || s.id.slice(0, 12)"></div>
+
+              <!-- Project as topics line -->
+              <template x-if="s.project">
+                <div class="sc-topics" x-text="s.project"></div>
+              </template>
+
+            </div>
+          </div>
         </a>
       </template>
     </div>
+
+    <!-- Empty states -->
+    <template x-if="filtered.length === 0 && recent.length > 0">
+      <div class="text-gray-500 text-sm py-2"
+           x-text="'No ' + recentFilter + ' sessions'"
+           data-testid="empty-filter-msg"></div>
+    </template>
+    <template x-if="recent.length === 0">
+      <div class="text-gray-500 text-sm">No recent sessions</div>
+    </template>
+
   </section>
 
   <template x-if="interactive.length === 0 && recent.length === 0 && !loading">
