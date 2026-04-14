@@ -282,26 +282,9 @@
               <template x-if="chatSessions.length === 0">
                 <div style="text-align:center;padding:24px;color:#475569;font-size:13px">No live sessions found</div>
               </template>
-              <template x-for="sess in chatSessions" :key="sess.id">
-                <div class="picker-card-wrap">
-                  <button class="picker-card"
-                          :class="{ 'picker-card-host': sess.isHost }"
-                          @click="_connectSession(sess.id)">
-                    <!-- Row 1: dot + role + tmux -->
-                    <div class="picker-stats">
-                      <span class="picker-dot" :class="sess.isLive ? 'picker-dot-live' : 'picker-dot-dead'"></span>
-                      <template x-if="sess.role">
-                        <span class="picker-role" :class="sess.isHost && 'picker-role-host'" x-text="sess.role"></span>
-                      </template>
-                      <span class="picker-tmux" x-text="sess.id"></span>
-                    </div>
-                    <!-- Row 2: label -->
-                    <div class="picker-label" x-text="sess.label || sess.id"></div>
-                    <!-- Row 3: preview -->
-                    <template x-if="sess.preview">
-                      <div class="picker-preview" x-text="sess.preview"></div>
-                    </template>
-                  </button>
+              <template x-for="s in chatSessions" :key="s.id">
+                <div @click="_connectSession(s.id)" style="cursor:pointer">
+                  {% include 'partials/session-card.html' %}
                 </div>
               </template>
             </div>

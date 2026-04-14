@@ -1,49 +1,125 @@
-{# Recent/historical session card partial.
-   Expects Alpine scope with:
-     - s: session object {id, title, project, session_type, total_turns, total_tokens, created_at, resumable}
-     - _recentBorderCls(t), _recentRoleCls(t), _recentRoleBadge(t)
-     - _recentTurnsStr(s), _recentTokensStr(s), _agoStr(iso)
-     - resuming, resumed, resumeError (resume state objects)
-     - resumeSession(s, $event) method
+{# Unified session card partial.
+   Expects Alpine scope with helper methods:
+     - borderCls(t), typeBadge(t), typeCls(t)
+     - turnsStr(s), ctxStr(s), idleStr(s), ctxWarn(s), recencyColor(s)
+   Optional methods (for interactive features):
+     - showSessionActions(s) — live session actions menu
+     - resumeSession(s, $event) — resume dead session
+   Optional state objects:
+     - resuming, resumed, resumeError — resume UI state
+
+   Canonical fields on s:
+     id, label, session_type, is_live, project, topics, latest,
+     entry_count, context_tokens, last_activity, created_at,
+     tmux_session, nag_enabled, role, resumable, bead_id
 #}
 <div class="session-card-wrap">
-  <div class="session-card" :class="_recentBorderCls(s.session_type)">
+  <div class="session-card" :class="borderCls(s.session_type)">
 
-    <!-- Stats row: dot, role, T3 (turns · tokens · age), resume/actions -->
+    <!-- Compact-only row: dot + bell + type badge + role badge + actions/resume -->
+    <div class="sc-compact-row">
+      <span class="sc-dot" :class="s.is_live ? 'sc-dot-live' : 'sc-dot-dead'"></span>
+      <span class="sc-nag" :class="s.nag_enabled ? '' : 'sc-nag-off'" x-show="s.nag_enabled != null">🔔</span>
+      <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
+      <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
+      <template x-if="s.is_live && typeof showSessionActions === 'function'">
+        <button @click.stop="showSessionActions(s)" class="sc-actions"
+                data-testid="session-actions-btn" aria-label="Session actions">⋮</button>
+      </template>
+      <template x-if="!s.is_live && s.resumable && !(resumed && resumed[s.id]) && !(resumeError && resumeError[s.id])">
+        <button @click.prevent.stop="resumeSession(s, $event)"
+                :disabled="resuming && resuming[s.id]"
+                class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50 ml-auto flex-shrink-0"
+                :class="resuming && resuming[s.id] && 'animate-pulse'"
+                data-testid="resume-btn">
+          <span x-show="!(resuming && resuming[s.id])">Resume</span>
+          <span x-show="resuming && resuming[s.id]" x-cloak>&hellip;</span>
+        </button>
+      </template>
+      <span x-show="!s.is_live && resumed && resumed[s.id]" x-cloak
+            class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded ml-auto flex-shrink-0">Live &#9679;</span>
+      <span x-show="!s.is_live && resumeError && resumeError[s.id]" x-cloak
+            class="px-3 py-1 bg-red-900 text-red-300 text-sm rounded ml-auto flex-shrink-0" x-text="resumeError[s.id]"></span>
+    </div>
+
+    <!-- Stats row: dot + bell + type badge + role badge + T3 + actions/resume -->
     <div class="sc-stats">
-      <span class="sc-dot sc-dot-dead"></span>
-      <span :class="_recentRoleCls(s.session_type)" x-text="_recentRoleBadge(s.session_type)" x-show="_recentRoleBadge(s.session_type)"></span>
+      <span class="sc-dot" :class="s.is_live ? 'sc-dot-live' : 'sc-dot-dead'"></span>
+      <span class="sc-nag" :class="s.nag_enabled ? '' : 'sc-nag-off'" x-show="s.nag_enabled != null">🔔</span>
+      <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
+      <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
       <span class="sc-t3">
-        <span class="sc-t3-val" x-text="_recentTurnsStr(s)"></span>
-        <span class="sc-t3-sep" x-show="_recentTurnsStr(s) && _recentTokensStr(s)">·</span>
-        <span class="sc-t3-val" x-text="_recentTokensStr(s)"></span>
-        <span class="sc-t3-sep" x-show="_recentTokensStr(s) && _agoStr(s.created_at)">·</span>
-        <span class="sc-t3-val" x-text="_agoStr(s.created_at)"></span>
+        <span class="sc-t3-val" :class="ctxWarn(s) ? 'warn' : ''" x-text="turnsStr(s)"></span>
+        <span class="sc-t3-sep" x-show="turnsStr(s) && ctxStr(s)">·</span>
+        <span class="sc-t3-val" :class="ctxWarn(s) ? 'warn' : ''" x-text="ctxStr(s)"></span>
+        <span class="sc-t3-sep" x-show="ctxStr(s) && idleStr(s)">·</span>
+        <span class="sc-t3-val" :class="recencyColor(s)" x-text="idleStr(s)"></span>
       </span>
-
+      <template x-if="s.is_live && typeof showSessionActions === 'function'">
+        <button @click.stop="showSessionActions(s)" class="sc-actions"
+                data-testid="session-actions-btn" aria-label="Session actions">⋮</button>
+      </template>
       <!-- Resume button (x-show keeps handler bound; x-if destroys/recreates DOM) -->
-      <button x-show="s.resumable && !resumed[s.id] && !resumeError[s.id]"
+      <button x-show="!s.is_live && s.resumable && !(resumed && resumed[s.id]) && !(resumeError && resumeError[s.id])"
               @click.prevent.stop="resumeSession(s, $event)"
-              :disabled="resuming[s.id] === true"
+              :disabled="resuming && resuming[s.id]"
               class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50 ml-auto flex-shrink-0"
-              :class="resuming[s.id] === true && 'animate-pulse'"
+              :class="resuming && resuming[s.id] && 'animate-pulse'"
               data-testid="resume-btn">
-        <span x-show="resuming[s.id] !== true">Resume</span>
-        <span x-show="resuming[s.id] === true" x-cloak>…</span>
+        <span x-show="!(resuming && resuming[s.id])">Resume</span>
+        <span x-show="resuming && resuming[s.id]" x-cloak>&hellip;</span>
       </button>
-      <span x-show="resumed[s.id]" x-cloak
-            class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded ml-auto flex-shrink-0">Live ●</span>
-      <span x-show="resumeError[s.id]" x-cloak
+      <span x-show="!s.is_live && resumed && resumed[s.id]" x-cloak
+            class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded ml-auto flex-shrink-0">Live &#9679;</span>
+      <span x-show="!s.is_live && resumeError && resumeError[s.id]" x-cloak
             class="px-3 py-1 bg-red-900 text-red-300 text-sm rounded ml-auto flex-shrink-0" x-text="resumeError[s.id]"></span>
     </div>
 
     <!-- Title -->
-    <div class="sc-title" x-text="s.title || s.id.slice(0, 12)"></div>
+    <div class="sc-title" x-text="s.label || s.tmux_session || (s.id || '').slice(0, 12)"></div>
 
-    <!-- Project as topics line -->
-    <template x-if="s.project">
+    <!-- Topics -->
+    <template x-if="s.topics && s.topics.length > 0">
+      <div class="sc-topics">
+        <template x-for="(topic, idx) in s.topics" :key="idx">
+          <span class="sc-topic-item" x-text="topic"></span>
+        </template>
+      </div>
+    </template>
+    <template x-if="(!s.topics || s.topics.length === 0) && s.project">
       <div class="sc-topics" x-text="s.project"></div>
     </template>
+
+    <!-- Last message -->
+    <template x-if="s.latest">
+      <div class="sc-message" x-text="s.latest"></div>
+    </template>
+
+    <!-- Footer (normal + expanded only, hidden in compact via CSS) -->
+    <div class="sc-footer">
+      <div class="sc-footer-item">
+        <span class="sc-footer-label">turns</span>
+        <span class="sc-footer-value" x-text="turnsStr(s) || '—'"></span>
+      </div>
+      <div class="sc-footer-item">
+        <span class="sc-footer-label">ctx</span>
+        <span class="sc-footer-value" :class="ctxWarn(s) ? 'warn' : ''" x-text="ctxStr(s) || '—'"></span>
+      </div>
+      <div class="sc-footer-item">
+        <span class="sc-footer-label">idle</span>
+        <span class="sc-footer-value" :class="recencyColor(s)" x-text="idleStr(s) || '—'"></span>
+      </div>
+      <div class="sc-footer-item">
+        <span class="sc-footer-label">tmux</span>
+        <span class="sc-footer-value" x-text="s.tmux_session || '—'"></span>
+      </div>
+      <template x-if="s.project">
+        <div class="sc-footer-item">
+          <span class="sc-footer-label">project</span>
+          <span class="sc-footer-value" x-text="s.project"></span>
+        </div>
+      </template>
+    </div>
 
   </div>
 </div>
