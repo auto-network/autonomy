@@ -21,23 +21,20 @@
         <span class="sc-t3-val" x-text="_agoStr(s.created_at)"></span>
       </span>
 
-      <!-- Resume button -->
-      <template x-if="s.resumable && !resumed[s.id] && !resumeError[s.id]">
-        <button @click.prevent.stop="resumeSession(s, $event)"
-                :disabled="resuming[s.id]"
-                class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50 ml-auto flex-shrink-0"
-                :class="resuming[s.id] && 'animate-pulse'"
-                data-testid="resume-btn">
-          <span x-show="!resuming[s.id]">Resume</span>
-          <span x-show="resuming[s.id]" x-cloak>…</span>
-        </button>
-      </template>
-      <template x-if="resumed[s.id]">
-        <span class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded ml-auto flex-shrink-0">Live ●</span>
-      </template>
-      <template x-if="resumeError[s.id]">
-        <span class="px-3 py-1 bg-red-900 text-red-300 text-sm rounded ml-auto flex-shrink-0" x-text="resumeError[s.id]"></span>
-      </template>
+      <!-- Resume button (x-show keeps handler bound; x-if destroys/recreates DOM) -->
+      <button x-show="s.resumable && !resumed[s.id] && !resumeError[s.id]"
+              @click.prevent.stop="resumeSession(s, $event)"
+              :disabled="resuming[s.id] === true"
+              class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50 ml-auto flex-shrink-0"
+              :class="resuming[s.id] === true && 'animate-pulse'"
+              data-testid="resume-btn">
+        <span x-show="resuming[s.id] !== true">Resume</span>
+        <span x-show="resuming[s.id] === true" x-cloak>…</span>
+      </button>
+      <span x-show="resumed[s.id]" x-cloak
+            class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded ml-auto flex-shrink-0">Live ●</span>
+      <span x-show="resumeError[s.id]" x-cloak
+            class="px-3 py-1 bg-red-900 text-red-300 text-sm rounded ml-auto flex-shrink-0" x-text="resumeError[s.id]"></span>
     </div>
 
     <!-- Title -->
