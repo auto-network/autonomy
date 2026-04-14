@@ -105,6 +105,10 @@ RECENT_SESSION_DEFAULTS: dict[str, Any] = {
     "session_uuid": "",
     "file_path": "",
     "resumable": False,
+    "session_type": "interactive",
+    "total_tokens": 0,
+    "total_turns": 0,
+    "created_at": "2026-01-01T00:00:00Z",
 }
 
 RUN_DEFAULTS: dict[str, Any] = {
