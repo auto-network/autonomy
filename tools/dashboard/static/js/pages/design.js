@@ -366,68 +366,77 @@
           this._loadChatSessions();
         },
 
-        _loadChatSessions: async function () {
-          try {
-            var data = await fetch('/api/dao/active_sessions').then(function (r) { return r.json(); });
-            if (!Array.isArray(data)) data = [];
-            this.chatSessions = data
-              .filter(function (s) {
-                var id = s.session_id || s.tmux_session || '';
-                return !id.startsWith('chatwith-') && !id.startsWith('chat-');
-              })
-              .map(function (s) {
-                var label = s.label || '';
-                var lower = label.toLowerCase();
-                var role = s.role || '';
-                if (!role) {
-                  if (lower.indexOf('coordinator') !== -1) role = 'Coordinator';
-                  else if (lower.indexOf('reviewer') !== -1 || lower.indexOf('review') !== -1) role = 'Reviewer';
-                  else if (lower.indexOf('builder') !== -1 || lower.indexOf('build') !== -1) role = 'Builder';
-                  else if (lower.indexOf('designer') !== -1 || lower.indexOf('design') !== -1) role = 'Designer';
-                  else if (lower.indexOf('validator') !== -1 || lower.indexOf('validat') !== -1) role = 'Reviewer';
-                }
-                var isHost = s.type === 'host';
-                if (!role && isHost) role = 'Host';
-                return {
-                  id: s.session_id || s.tmux_session,
-                  label: label,
-                  role: role,
-                  project: s.project || 'default',
-                  isHost: isHost,
-                  isLive: s.is_live !== false,
-                  preview: (s.last_message || '').slice(0, 80).replace(/</g, '').replace(/>/g, ''),
-                };
-              })
-              .sort(function (a, b) {
-                if (a.label && !b.label) return -1;
-                if (!a.label && b.label) return 1;
-                return a.id.localeCompare(b.id);
-              });
-          } catch (_) { this.chatSessions = []; }
+        // --- Card helper methods (referenced by session-card.html partial) ---
+        borderCls: function(t) { return window.sessionCardHelpers.borderCls(t); },
+        typeBadge: function(t) { return window.sessionCardHelpers.typeBadge(t); },
+        typeCls: function(t) { return window.sessionCardHelpers.typeCls(t); },
+        turnsStr: function(s) { return window.sessionCardHelpers.turnsStr(s); },
+        ctxStr: function(s) { return window.sessionCardHelpers.ctxStr(s); },
+        idleStr: function(s) { return window.sessionCardHelpers.idleStr(s); },
+        ctxWarn: function(s) { return window.sessionCardHelpers.ctxWarn(s); },
+        recencyColor: function(s) { return window.sessionCardHelpers.recencyColor(s); },
+
+        _loadChatSessions: function () {
+          var allSessions = Alpine.store('sessions');
+          var results = [];
+          for (var id in allSessions) {
+            var s = allSessions[id];
+            if (!s.isLive) continue;
+            if (id.startsWith('chatwith-') || id.startsWith('chat-')) continue;
+            var label = s.label || '';
+            var lower = label.toLowerCase();
+            var role = s.role || '';
+            if (!role) {
+              if (lower.indexOf('coordinator') !== -1) role = 'coordinator';
+              else if (lower.indexOf('reviewer') !== -1 || lower.indexOf('review') !== -1) role = 'reviewer';
+              else if (lower.indexOf('builder') !== -1 || lower.indexOf('build') !== -1) role = 'builder';
+              else if (lower.indexOf('designer') !== -1 || lower.indexOf('design') !== -1) role = 'designer';
+              else if (lower.indexOf('validator') !== -1 || lower.indexOf('validat') !== -1) role = 'reviewer';
+            }
+            if (role) role = role.charAt(0).toUpperCase() + role.slice(1);
+            var storeType = s.sessionType || 'terminal';
+            var sessionType = storeType === 'host' ? 'host'
+              : storeType === 'chatwith' ? 'chatwith'
+              : (storeType === 'container' && s.beadId) ? 'dispatch'
+              : 'interactive';
+            results.push({
+              id: id,
+              label: label,
+              role: role,
+              project: s.project || 'default',
+              session_type: sessionType,
+              is_live: true,
+              entry_count: s.entryCount || s.entries.length,
+              context_tokens: s.contextTokens || 0,
+              last_activity: s.lastActivity || 0,
+              created_at: s.startedAt || 0,
+              tmux_session: id,
+              nag_enabled: false,
+              topics: [],
+              latest: '',
+              resumable: false,
+              bead_id: s.beadId || '',
+            });
+          }
+          this.chatSessions = results.sort(function (a, b) {
+            if (a.label && !b.label) return -1;
+            if (!a.label && b.label) return 1;
+            return a.id.localeCompare(b.id);
+          });
         },
 
         // ── Auto-reconnect Chat With ──────────────────────────────────────
 
-        _checkChatWith: async function () {
+        _checkChatWith: function () {
           var savedSession = localStorage.getItem('design-chat-' + this.designId);
           if (savedSession) {
-            // Verify saved session is still alive
-            try {
-              var data = await fetch('/api/dao/active_sessions').then(function (r) { return r.json(); });
-              if (!Array.isArray(data)) data = [];
-              var alive = false;
-              for (var i = 0; i < data.length; i++) {
-                var id = data[i].session_id || data[i].tmux_session;
-                if (id === savedSession && data[i].is_live !== false) {
-                  alive = true;
-                  break;
-                }
-              }
-              if (alive) {
-                this._connectSession(savedSession);
-                return;
-              }
-            } catch (_) {}
+            // Verify saved session is still alive via store
+            var allSessions = Alpine.store('sessions');
+            var s = allSessions[savedSession];
+            if (s && s.isLive) {
+              this._connectSession(savedSession);
+              return;
+            }
             // Saved session is dead — clear and fall through to picker
             localStorage.removeItem('design-chat-' + this.designId);
           }
