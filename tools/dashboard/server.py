@@ -3394,6 +3394,16 @@ async def api_session_resume(request):
         else:
             session_type = "host"
 
+    # ── Guard: reject if session is already active ──
+    live_session = dashboard_db.find_live_session(
+        session_uuid=session_uuid, file_path=file_path,
+    )
+    if live_session:
+        return JSONResponse(
+            {"error": f"Session is already active as '{live_session['tmux_name']}'"},
+            status_code=409,
+        )
+
     # ── Look up existing dead session in dashboard.db ──
     dead_session = dashboard_db.find_dead_session(
         session_uuid=session_uuid, file_path=file_path,

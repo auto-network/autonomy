@@ -225,6 +225,7 @@ def test_client(mock_fixture, resume_env, monkeypatch):
     from tools.dashboard.dao import dashboard_db as ddb
 
     _dead_sessions: dict = {}  # keyed by session_uuid
+    _live_sessions: dict = {}  # keyed by session_uuid
     _revived: list = []
 
     def fake_find_dead_session(session_uuid=None, file_path=None):
@@ -236,10 +237,20 @@ def test_client(mock_fixture, resume_env, monkeypatch):
                     return ds
         return None
 
+    def fake_find_live_session(session_uuid=None, file_path=None):
+        if session_uuid and session_uuid in _live_sessions:
+            return _live_sessions[session_uuid]
+        if file_path:
+            for ls in _live_sessions.values():
+                if ls.get("jsonl_path") == file_path:
+                    return ls
+        return None
+
     def fake_revive_session(tmux_name, *, file_offset=0):
         _revived.append({"tmux_name": tmux_name, "file_offset": file_offset})
 
     monkeypatch.setattr(ddb, "find_dead_session", fake_find_dead_session)
+    monkeypatch.setattr(ddb, "find_live_session", fake_find_live_session)
     monkeypatch.setattr(ddb, "revive_session", fake_revive_session)
 
     # Reload server
@@ -250,5 +261,6 @@ def test_client(mock_fixture, resume_env, monkeypatch):
     with TestClient(server.app) as client:
         client._monitor_calls = _monitor_calls
         client._dead_sessions = _dead_sessions
+        client._live_sessions = _live_sessions
         client._revived = _revived
         yield client

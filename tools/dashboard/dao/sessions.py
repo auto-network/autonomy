@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from tools.dashboard.dao.dashboard_db import get_live_sessions as _db_live_sessions
+from tools.dashboard.dao.dashboard_db import find_live_session as _db_find_live
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,19 @@ def get_recent_sessions(limit: int = 20) -> list[dict]:
         ).fetchall()
         conn.close()
         import json as _json
+
+        # Collect live session identifiers to filter out active sessions
+        live_uuids: set[str] = set()
+        live_paths: set[str] = set()
+        try:
+            for ls in _db_live_sessions():
+                if ls.get("session_uuid"):
+                    live_uuids.add(ls["session_uuid"])
+                if ls.get("jsonl_path"):
+                    live_paths.add(ls["jsonl_path"])
+        except Exception:
+            pass  # dashboard.db may not be initialised; skip filtering
+
         results = []
         for r in rows:
             meta = {}
@@ -83,6 +97,13 @@ def get_recent_sessions(limit: int = 20) -> list[dict]:
                     pass
             file_path = r["file_path"] or ""
             session_uuid = meta.get("session_uuid", "")
+
+            # Skip sessions that are currently active
+            if session_uuid and session_uuid in live_uuids:
+                continue
+            if file_path and file_path in live_paths:
+                continue
+
             session_type = _derive_session_type(meta, file_path)
             results.append({
                 "id": r["id"],
