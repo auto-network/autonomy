@@ -3339,7 +3339,6 @@ async def api_session_resume(request):
     session_uuid = body.get("session_uuid")
     file_path = body.get("file_path")
     session_type = None  # "container" or "host"
-    original_title = ""  # preserve the original session title
 
     # ── Resolve from graph source metadata if source_id provided ──
     if source_id:
@@ -3365,7 +3364,6 @@ async def api_session_resume(request):
             )
 
         file_path = src.get("file_path", "")
-        original_title = src.get("title", "")
         meta = {}
         if src.get("metadata"):
             try:
@@ -3396,11 +3394,35 @@ async def api_session_resume(request):
         else:
             session_type = "host"
 
-    # ── Generate tmux name ──
-    tmux_name = f"resume-{time.strftime('%m%d-%H%M%S')}"
-    if dashboard_db.session_exists(tmux_name):
-        import random
-        tmux_name = f"resume-{time.strftime('%m%d-%H%M%S')}-{random.randint(10, 99)}"
+    # ── Look up existing dead session in dashboard.db ──
+    dead_session = dashboard_db.find_dead_session(
+        session_uuid=session_uuid, file_path=file_path,
+    )
+
+    if dead_session and not dead_session.get("is_live"):
+        # Reuse the original session identity
+        tmux_name = dead_session["tmux_name"]
+        label = dead_session.get("label", "")
+    else:
+        # No dead session found — derive name from graph metadata or generate one
+        tmux_name = None
+        label = ""
+
+        # Try to get original container_name from graph source metadata
+        if source_id:
+            try:
+                meta_str = src.get("metadata", "")
+                meta_obj = json.loads(meta_str) if isinstance(meta_str, str) and meta_str else {}
+                tmux_name = meta_obj.get("container_name", "")
+            except Exception:
+                pass
+
+        if not tmux_name:
+            tmux_name = f"resume-{time.strftime('%m%d-%H%M%S')}"
+
+        if dashboard_db.session_exists(tmux_name):
+            import random
+            tmux_name = f"resume-{time.strftime('%m%d-%H%M%S')}-{random.randint(10, 99)}"
 
     model = "claude-opus-4-6[1m]"
 
@@ -3454,35 +3476,42 @@ async def api_session_resume(request):
     subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"], capture_output=True)
 
     # ── Register with session monitor ──
-    resume_label = original_title or f"Resumed: {session_uuid[:12]}"
-    if session_type == "container":
-        agent_runs = _REPO_ROOT / "data" / "agent-runs"
-        run_dirs = sorted(
-            agent_runs.glob(f"{tmux_name}-*"),
-            key=lambda p: p.stat().st_mtime, reverse=True,
-        ) if agent_runs.exists() else []
-        sess_dir = run_dirs[0] / "sessions" if run_dirs else Path(output_dir) / "sessions"
+    if dead_session:
+        # Revive the existing row: set is_live=1, reset file_offset for full backfill
+        dashboard_db.revive_session(tmux_name, file_offset=0)
+        # Re-register with session_monitor for tailing (uses existing DB row)
+        await session_monitor.register_revived(
+            tmux_name=tmux_name,
+            jsonl_path=Path(file_path),
+        )
+    elif session_type == "container":
+        # New registration with the JSONL file path for immediate backfill
         await session_monitor.register(
             tmux_name=tmux_name,
             session_type="container",
-            project=sess_dir.name,
-            jsonl_path=sess_dir,
-            seed_message="Resuming...",
+            project="autonomy",
+            jsonl_path=Path(file_path),
+            session_uuid=session_uuid,
         )
     else:
+        # Host session: register with JSONL path for backfill
         project_folder = str(_REPO_ROOT).replace("/", "-")
         await session_monitor.register(
             tmux_name=tmux_name,
             session_type="host",
             project=project_folder,
+            jsonl_path=Path(file_path),
+            session_uuid=session_uuid,
         )
 
-    # Set the label to the original session title so the card shows it
-    dashboard_db.update_label(tmux_name, resume_label)
+    if not label:
+        label = src.get("title", "") if source_id and src else ""
+    if not label:
+        label = f"Resumed: {session_uuid[:12]}"
 
     return JSONResponse({
         "tmux_name": tmux_name,
-        "label": resume_label,
+        "label": label,
         "type": session_type,
     })
 
