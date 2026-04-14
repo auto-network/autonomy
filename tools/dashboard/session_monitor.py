@@ -309,6 +309,45 @@ class SessionMonitor:
         )
         await self._broadcast_registry()
 
+    async def register_revived(
+        self,
+        tmux_name: str,
+        jsonl_path: Path | None = None,
+    ) -> None:
+        """Re-register a revived session for tailing.
+
+        The DB row already exists and has been set to is_live=1 by revive_session().
+        This just sets up the in-memory tail state and inotify watches so the
+        session monitor starts tailing the JSONL file again.
+        """
+        path_str: str | None = None
+        res_dir: Path | None = None
+        path_is_dir = False
+
+        if jsonl_path is not None:
+            if jsonl_path.is_dir():
+                path_is_dir = True
+                res_dir = jsonl_path
+            else:
+                path_str = str(jsonl_path)
+                res_dir = jsonl_path.parent
+
+        ts = _TailState(needs_resolution=path_is_dir, resolution_dir=res_dir)
+        self._tail_states[tmux_name] = ts
+
+        if self._use_inotify:
+            if path_str:
+                self._add_file_watch(tmux_name, path_str)
+            if res_dir:
+                self._add_dir_watch(tmux_name, str(res_dir))
+
+        logger.info(
+            "session_monitor: revived %s  jsonl=%s",
+            tmux_name,
+            "pending" if path_str is None else Path(path_str).name,
+        )
+        await self._broadcast_registry()
+
     async def deregister(self, tmux_name: str) -> None:
         """Mark a session as dead and remove from tail states."""
         self._remove_watches(tmux_name)

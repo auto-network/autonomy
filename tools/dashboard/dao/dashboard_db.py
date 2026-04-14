@@ -482,6 +482,42 @@ def count_live() -> int:
     return row[0] if row else 0
 
 
+def find_dead_session(session_uuid: str | None = None, file_path: str | None = None) -> dict | None:
+    """Find a dead (is_live=0) session by session_uuid or jsonl_path.
+
+    Checks session_uuid first, then falls back to jsonl_path.
+    Returns the full row as a dict, or None.
+    """
+    conn = get_conn()
+    if session_uuid:
+        row = conn.execute(
+            "SELECT * FROM tmux_sessions WHERE session_uuid=? AND is_live=0"
+            " ORDER BY created_at DESC LIMIT 1",
+            (session_uuid,),
+        ).fetchone()
+        if row:
+            return dict(row)
+    if file_path:
+        row = conn.execute(
+            "SELECT * FROM tmux_sessions WHERE jsonl_path=? AND is_live=0"
+            " ORDER BY created_at DESC LIMIT 1",
+            (file_path,),
+        ).fetchone()
+        if row:
+            return dict(row)
+    return None
+
+
+def revive_session(tmux_name: str, *, file_offset: int = 0) -> None:
+    """Re-activate a dead session: set is_live=1 and reset file_offset for backfill."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET is_live=1, file_offset=? WHERE tmux_name=?",
+        (file_offset, tmux_name),
+    )
+    conn.commit()
+
+
 def upsert_session(
     tmux_name: str,
     session_type: str,
