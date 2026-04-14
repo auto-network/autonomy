@@ -1,0 +1,52 @@
+{# Recent/historical session card partial.
+   Expects Alpine scope with:
+     - s: session object {id, title, project, session_type, total_turns, total_tokens, created_at, resumable}
+     - _recentBorderCls(t), _recentRoleCls(t), _recentRoleBadge(t)
+     - _recentTurnsStr(s), _recentTokensStr(s), _agoStr(iso)
+     - resuming, resumed, resumeError (resume state objects)
+     - resumeSession(s, $event) method
+#}
+<div class="session-card-wrap">
+  <div class="session-card" :class="_recentBorderCls(s.session_type)">
+
+    <!-- Stats row: dot, role, T3 (turns · tokens · age), resume/actions -->
+    <div class="sc-stats">
+      <span class="sc-dot sc-dot-dead"></span>
+      <span :class="_recentRoleCls(s.session_type)" x-text="_recentRoleBadge(s.session_type)" x-show="_recentRoleBadge(s.session_type)"></span>
+      <span class="sc-t3">
+        <span class="sc-t3-val" x-text="_recentTurnsStr(s)"></span>
+        <span class="sc-t3-sep" x-show="_recentTurnsStr(s) && _recentTokensStr(s)">·</span>
+        <span class="sc-t3-val" x-text="_recentTokensStr(s)"></span>
+        <span class="sc-t3-sep" x-show="_recentTokensStr(s) && _agoStr(s.created_at)">·</span>
+        <span class="sc-t3-val" x-text="_agoStr(s.created_at)"></span>
+      </span>
+
+      <!-- Resume button -->
+      <template x-if="s.resumable && !resumed[s.id] && !resumeError[s.id]">
+        <button @click.prevent.stop="resumeSession(s, $event)"
+                :disabled="resuming[s.id]"
+                class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50 ml-auto flex-shrink-0"
+                :class="resuming[s.id] && 'animate-pulse'"
+                data-testid="resume-btn">
+          <span x-show="!resuming[s.id]">Resume</span>
+          <span x-show="resuming[s.id]" x-cloak>…</span>
+        </button>
+      </template>
+      <template x-if="resumed[s.id]">
+        <span class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded ml-auto flex-shrink-0">Live ●</span>
+      </template>
+      <template x-if="resumeError[s.id]">
+        <span class="px-3 py-1 bg-red-900 text-red-300 text-sm rounded ml-auto flex-shrink-0" x-text="resumeError[s.id]"></span>
+      </template>
+    </div>
+
+    <!-- Title -->
+    <div class="sc-title" x-text="s.title || s.id.slice(0, 12)"></div>
+
+    <!-- Project as topics line -->
+    <template x-if="s.project">
+      <div class="sc-topics" x-text="s.project"></div>
+    </template>
+
+  </div>
+</div>

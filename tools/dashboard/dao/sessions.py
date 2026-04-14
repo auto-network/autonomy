@@ -94,7 +94,7 @@ def get_recent_sessions(limit: int = 20) -> list[dict]:
                 "file_path": file_path,
                 "resumable": bool(file_path and Path(file_path).exists()),
                 "session_type": session_type,
-                "total_tokens": meta.get("total_tokens", 0),
+                "total_tokens": meta.get("total_input_tokens", 0) + meta.get("total_output_tokens", 0),
                 "total_turns": meta.get("total_turns", 0),
                 "created_at": r["created_at"] or "",
             })

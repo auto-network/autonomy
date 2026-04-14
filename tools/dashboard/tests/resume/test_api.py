@@ -58,10 +58,23 @@ class TestResumeWithSourceId:
         )
         assert resp.status_code == 404
 
-    def test_resume_label_contains_uuid_prefix(self, test_client, resume_env):
+    def test_resume_label_uses_original_title(self, test_client, resume_env):
         resp = test_client.post(
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
+        )
+        data = resp.json()
+        # Label should be the original session title from graph.db
+        assert data["label"] == "Container session alpha"
+
+    def test_resume_label_falls_back_to_uuid(self, test_client, resume_env):
+        """When no source_id (direct params), label falls back to uuid prefix."""
+        resp = test_client.post(
+            "/api/session/resume",
+            json={
+                "session_uuid": "abc123-def456",
+                "file_path": resume_env["jsonl_file"],
+            },
         )
         data = resp.json()
         assert "abc123" in data["label"]
