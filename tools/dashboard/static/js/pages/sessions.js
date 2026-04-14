@@ -190,6 +190,26 @@
         if (this.resuming[s.id]) return;
         this.resuming[s.id] = true;
         this.resumeError[s.id] = '';
+
+        // ── Optimistic UI: move card from Recent → Active ──
+        var recentIdx = this.recent.indexOf(s);
+        if (recentIdx !== -1) this.recent.splice(recentIdx, 1);
+
+        // Placeholder key — will be replaced by real tmux_name from API
+        var placeholderKey = 'resume-' + s.id.slice(0, 8);
+        var store = window.getSessionStore(placeholderKey);
+        store.isLive = false;    // gray dot until monitor picks it up
+        store._resuming = true;  // bypass isLive filter in _updateFromStore
+        store.label = s.title || '';
+        // Map DAO session_type → store sessionType that appears in active grid
+        var typeMap = {dispatch: 'container', librarian: 'container', interactive: 'host'};
+        store.sessionType = typeMap[s.session_type] || 'container';
+        store.project = (s.project || '').replace(/^\[|\]$/g, '');
+        store.entries = [];
+        store.entryCount = 0;
+        store.contextTokens = 0;
+        store.startedAt = Date.now() / 1000;
+
         try {
           var res = await fetch('/api/session/resume', {
             method: 'POST',
@@ -200,11 +220,35 @@
             var err = await res.json().catch(function() { return {}; });
             throw new Error(err.error || 'Resume failed');
           }
+          var data = await res.json();
           this.resuming[s.id] = false;
           this.resumed[s.id] = true;
+
+          // API returns real tmux_name — migrate store if different from placeholder
+          var realKey = data.tmux_name || placeholderKey;
+          if (realKey !== placeholderKey) {
+            var realStore = window.getSessionStore(realKey);
+            realStore.isLive = false;
+            realStore._resuming = true;
+            realStore.label = data.label || s.title || '';
+            realStore.sessionType = store.sessionType;
+            realStore.project = store.project;
+            realStore.startedAt = store.startedAt;
+            // Remove placeholder
+            delete Alpine.store('sessions')[placeholderKey];
+          }
         } catch (e) {
           this.resuming[s.id] = false;
           this.resumeError[s.id] = e.message || 'Failed';
+
+          // ── Rollback: remove from store, re-insert into recent ──
+          delete Alpine.store('sessions')[placeholderKey];
+          if (recentIdx !== -1) {
+            this.recent.splice(recentIdx, 0, s);
+          } else {
+            this.recent.unshift(s);
+          }
+
           var self = this;
           setTimeout(function() { self.resumeError[s.id] = ''; }, 3000);
         }
@@ -255,7 +299,7 @@
         var all = [];
         for (var id in allSessions) {
           var s = allSessions[id];
-          if (!s.isLive) continue;
+          if (!s.isLive && !s._resuming) continue;
           var lastEntry = s.entries.length > 0 ? s.entries[s.entries.length - 1] : null;
           var sizeVal = s.sizeMB ? parseFloat(s.sizeMB) : 0;
           var hasData = s.entries.length > 0 || (s.sizeMB && sizeVal > 0) || s.entryCount > 0 || s.lastActivity > 0;

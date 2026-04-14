@@ -1590,6 +1590,7 @@ globalSearch.addEventListener('keydown', (e) => {
 
 // Client-side nav (no full page reload)
 document.addEventListener('click', (e) => {
+  if (e.defaultPrevented) return;        // another handler already handled this click
   const link = e.target.closest('a[href]');
   if (link && link.origin === window.location.origin && !link.pathname.startsWith('/api/') && !link.hasAttribute('download')) {
     e.preventDefault();
