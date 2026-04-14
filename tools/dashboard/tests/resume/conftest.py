@@ -207,11 +207,40 @@ def test_client(mock_fixture, resume_env, monkeypatch):
 
     monkeypatch.setattr(session_launcher, "launch_session", mock_launch_session)
 
-    # Patch session_monitor.register to be a no-op
+    # Patch session_monitor.register and register_revived to capture calls
     from tools.dashboard import session_monitor as sm_mod
+
+    _monitor_calls: dict = {"register": [], "register_revived": []}
+
     async def fake_register(**kwargs):
-        pass
+        _monitor_calls["register"].append(kwargs)
+
+    async def fake_register_revived(**kwargs):
+        _monitor_calls["register_revived"].append(kwargs)
+
     monkeypatch.setattr(sm_mod.session_monitor, "register", fake_register)
+    monkeypatch.setattr(sm_mod.session_monitor, "register_revived", fake_register_revived)
+
+    # Patch dashboard_db.find_dead_session and revive_session
+    from tools.dashboard.dao import dashboard_db as ddb
+
+    _dead_sessions: dict = {}  # keyed by session_uuid
+    _revived: list = []
+
+    def fake_find_dead_session(session_uuid=None, file_path=None):
+        if session_uuid and session_uuid in _dead_sessions:
+            return _dead_sessions[session_uuid]
+        if file_path:
+            for ds in _dead_sessions.values():
+                if ds.get("jsonl_path") == file_path:
+                    return ds
+        return None
+
+    def fake_revive_session(tmux_name, *, file_offset=0):
+        _revived.append({"tmux_name": tmux_name, "file_offset": file_offset})
+
+    monkeypatch.setattr(ddb, "find_dead_session", fake_find_dead_session)
+    monkeypatch.setattr(ddb, "revive_session", fake_revive_session)
 
     # Reload server
     from tools.dashboard import server
@@ -219,4 +248,7 @@ def test_client(mock_fixture, resume_env, monkeypatch):
 
     from starlette.testclient import TestClient
     with TestClient(server.app) as client:
+        client._monitor_calls = _monitor_calls
+        client._dead_sessions = _dead_sessions
+        client._revived = _revived
         yield client
