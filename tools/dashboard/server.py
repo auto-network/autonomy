@@ -3339,6 +3339,7 @@ async def api_session_resume(request):
     session_uuid = body.get("session_uuid")
     file_path = body.get("file_path")
     session_type = None  # "container" or "host"
+    original_title = ""  # preserve the original session title
 
     # ── Resolve from graph source metadata if source_id provided ──
     if source_id:
@@ -3364,6 +3365,7 @@ async def api_session_resume(request):
             )
 
         file_path = src.get("file_path", "")
+        original_title = src.get("title", "")
         meta = {}
         if src.get("metadata"):
             try:
@@ -3452,6 +3454,7 @@ async def api_session_resume(request):
     subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"], capture_output=True)
 
     # ── Register with session monitor ──
+    resume_label = original_title or f"Resumed: {session_uuid[:12]}"
     if session_type == "container":
         agent_runs = _REPO_ROOT / "data" / "agent-runs"
         run_dirs = sorted(
@@ -3474,9 +3477,12 @@ async def api_session_resume(request):
             project=project_folder,
         )
 
+    # Set the label to the original session title so the card shows it
+    dashboard_db.update_label(tmux_name, resume_label)
+
     return JSONResponse({
         "tmux_name": tmux_name,
-        "label": f"Resumed: {session_uuid[:12]}",
+        "label": resume_label,
         "type": session_type,
     })
 
