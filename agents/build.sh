@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Build the autonomy-agent container image.
+# Build the autonomy-agent container images (base + dashboard).
 # Stages tool binaries into a temp dir, then builds.
 #
-# Usage: ./agents/build.sh [--no-cache] [--dashboard]
+# Usage: ./agents/build.sh [--no-cache]
+#
+# Always builds both autonomy-agent:latest (base) and autonomy-agent:dashboard
+# (base + Python deps). Docker layer cache makes repeat builds near-instant
+# when nothing has changed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,11 +15,9 @@ BUILD_DIR="$SCRIPT_DIR/.build"
 
 # Parse flags
 NO_CACHE=""
-DASHBOARD=false
 for arg in "$@"; do
     case "$arg" in
-        --no-cache)  NO_CACHE="--no-cache" ;;
-        --dashboard) DASHBOARD=true ;;
+        --no-cache) NO_CACHE="--no-cache" ;;
         *) echo "Unknown flag: $arg"; exit 1 ;;
     esac
 done
@@ -68,18 +70,18 @@ cp graph/*.py context/graph/
 cp "$SCRIPT_DIR/Dockerfile" context/
 
 docker build $NO_CACHE -t autonomy-agent context/
-
-echo "==> Done. Image: autonomy-agent"
+echo "==> Done. Image: autonomy-agent:latest"
 docker images autonomy-agent:latest --format "  Size: {{.Size}}"
 
 # ── Dashboard variant (adds Python deps for API contract tests) ──
-if [[ "$DASHBOARD" == true ]]; then
-    echo ""
-    echo "==> Building dashboard variant (Python deps only — Chrome/agent-browser in base)..."
-    docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.dashboard" -t autonomy-agent:dashboard context/
-    echo "==> Done. Image: autonomy-agent:dashboard"
-    docker images autonomy-agent:dashboard --format "  Size: {{.Size}}"
-fi
+# Always built: api_session_create launches autonomy-agent:dashboard for
+# terminal-container sessions. When the base is unchanged, this is a cached
+# no-op; otherwise it's one thin pip-install layer on top of the base.
+echo ""
+echo "==> Building dashboard variant (Python deps layered on base)..."
+docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.dashboard" -t autonomy-agent:dashboard context/
+echo "==> Done. Image: autonomy-agent:dashboard"
+docker images autonomy-agent:dashboard --format "  Size: {{.Size}}"
 
 echo "==> Cleanup..."
 rm -rf "$BUILD_DIR"
