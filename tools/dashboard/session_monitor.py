@@ -659,7 +659,7 @@ class SessionMonitor:
             if entry.get("queued"):
                 ts.last_enqueue_content = entry.get("content", "").strip()
                 deduped.append(entry)
-            elif (entry.get("type") == "user"
+            elif (entry.get("type") in ("user", "crosstalk")
                   and ts.last_enqueue_content
                   and entry.get("content", "").strip() == ts.last_enqueue_content):
                 ts.last_enqueue_content = None
