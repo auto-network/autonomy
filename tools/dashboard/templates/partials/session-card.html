@@ -26,16 +26,15 @@
         <button @click.stop="showSessionActions(s)" class="sc-actions"
                 data-testid="session-actions-btn" aria-label="Session actions">⋮</button>
       </template>
-      <template x-if="!s.is_live && s.resumable && !(resumed && resumed[s.id]) && !(resumeError && resumeError[s.id])">
-        <button @click.prevent.stop="resumeSession(s, $event)"
-                :disabled="resuming && resuming[s.id]"
-                class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50 ml-auto flex-shrink-0"
-                :class="resuming && resuming[s.id] && 'animate-pulse'"
-                data-testid="resume-btn">
-          <span x-show="!(resuming && resuming[s.id])">Resume</span>
-          <span x-show="resuming && resuming[s.id]" x-cloak>&hellip;</span>
-        </button>
-      </template>
+      <button x-show="!s.is_live && s.resumable && !(resumed && resumed[s.id]) && !(resumeError && resumeError[s.id])"
+              @click.prevent.stop="resumeSession(s, $event)"
+              :disabled="resuming[s.id] === true"
+              class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50 ml-auto flex-shrink-0"
+              :class="resuming[s.id] === true && 'animate-pulse'"
+              data-testid="resume-btn">
+        <span x-show="resuming[s.id] !== true">Resume</span>
+        <span x-show="resuming[s.id] === true" x-cloak>&hellip;</span>
+      </button>
       <span x-show="!s.is_live && resumed && resumed[s.id]" x-cloak
             class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded ml-auto flex-shrink-0">Live &#9679;</span>
       <span x-show="!s.is_live && resumeError && resumeError[s.id]" x-cloak
@@ -62,12 +61,12 @@
       <!-- Resume button (x-show keeps handler bound; x-if destroys/recreates DOM) -->
       <button x-show="!s.is_live && s.resumable && !(resumed && resumed[s.id]) && !(resumeError && resumeError[s.id])"
               @click.prevent.stop="resumeSession(s, $event)"
-              :disabled="resuming && resuming[s.id]"
+              :disabled="resuming[s.id] === true"
               class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50 ml-auto flex-shrink-0"
-              :class="resuming && resuming[s.id] && 'animate-pulse'"
+              :class="resuming[s.id] === true && 'animate-pulse'"
               data-testid="resume-btn">
-        <span x-show="!(resuming && resuming[s.id])">Resume</span>
-        <span x-show="resuming && resuming[s.id]" x-cloak>&hellip;</span>
+        <span x-show="resuming[s.id] !== true">Resume</span>
+        <span x-show="resuming[s.id] === true" x-cloak>&hellip;</span>
       </button>
       <span x-show="!s.is_live && resumed && resumed[s.id]" x-cloak
             class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded ml-auto flex-shrink-0">Live &#9679;</span>
