@@ -2418,7 +2418,11 @@ def _dedup_queued_entries(entries: list[dict]) -> list[dict]:
               and entry.get("content", "").strip() == last_enqueue_content):
             last_enqueue_content = None  # consumed — skip duplicate
         else:
-            last_enqueue_content = None
+            # Don't reset the tracker on unrelated intervening entries
+            # (assistant turns, tool_result, etc.).  The duplicate user/
+            # crosstalk that mirrors the queued content typically arrives
+            # AFTER the agent's assistant turn, not immediately after the
+            # queue-operation.
             result.append(entry)
     return result
 
