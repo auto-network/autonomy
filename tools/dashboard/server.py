@@ -2100,9 +2100,11 @@ def _classify_system_message(text: str) -> dict | None:
         label = summary if summary else f"Task {status}" if status else "Task notification"
         return {"summary": label, "tag": "task-notification"}
 
-    # --- system-reminder: hide the verbose content -------------------------
+    # --- system-reminder: compact label, preserve body for expand ----------
     if "<system-reminder>" in stripped:
-        return {"summary": "System reminder", "tag": "system-reminder"}
+        m = re.search(r"<system-reminder>(.*?)</system-reminder>", stripped, re.DOTALL)
+        body = m.group(1).strip() if m else stripped
+        return {"summary": "System reminder", "tag": "system-reminder", "body": body}
 
     # --- local-command-stdout: summarise -----------------------------------
     if "<local-command-stdout>" in stripped:
@@ -2216,13 +2218,16 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                 })
             # Detect harness-injected system messages masquerading as user entries
             elif (sys_info := _classify_system_message(text)):
-                entries.append({
+                sys_entry = {
                     "type": "system",
                     "role": "system",
                     "content": sys_info["summary"],
                     "tag": sys_info["tag"],
                     "timestamp": timestamp,
-                })
+                }
+                if sys_info.get("body"):
+                    sys_entry["body"] = sys_info["body"]
+                entries.append(sys_entry)
             else:
                 entries.append({
                     "type": "user",
