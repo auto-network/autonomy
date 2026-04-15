@@ -947,6 +947,81 @@ def cmd_set_nag(args):
         print(f"  \u2713 Nag enabled (every {args.interval}m)")
 
 
+def _resolve_crosstalk_token() -> str:
+    """Resolve a CrossTalk auth token.
+
+    Lookup order:
+      1. $CROSSTALK_TOKEN env var — container agents' path, unchanged.
+      2. Tmux session-environment cache — survives across CLI invocations in the
+         same tmux session without writing to disk.
+      3. Auto-provision for host sessions — insert a token row in auth.db,
+         stash the raw value in the tmux session environment, return it.
+
+    Containers without $CROSSTALK_TOKEN are a launcher bug, not a fallback path;
+    we refuse rather than silently provisioning. Hosts outside tmux can't be
+    identified reliably, so they must set $CROSSTALK_TOKEN explicitly.
+    Server-side auth failures are NOT self-healed — a 401/403 is a real problem
+    (revocation, schema drift, wiped auth.db) that should surface loudly.
+    """
+    import subprocess
+
+    token = os.environ.get("CROSSTALK_TOKEN")
+    if token:
+        return token
+
+    if not os.environ.get("TMUX"):
+        print("Error: not inside tmux and $CROSSTALK_TOKEN not set.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        session_name = subprocess.run(
+            ["tmux", "display-message", "-p", "#S"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+    except Exception as e:
+        print(f"Error: cannot determine tmux session name: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not session_name:
+        print("Error: empty tmux session name", file=sys.stderr)
+        sys.exit(1)
+
+    show = subprocess.run(
+        ["tmux", "show-environment", "-t", session_name, "CROSSTALK_TOKEN"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if show.returncode == 0:
+        line = show.stdout.strip()
+        # tmux prints "NAME=value" when set, "-NAME" when explicitly unset
+        if line.startswith("CROSSTALK_TOKEN=") and not line.startswith("-"):
+            cached = line.removeprefix("CROSSTALK_TOKEN=")
+            if cached:
+                return cached
+
+    if os.path.exists("/.dockerenv"):
+        print(
+            "Error: container session without $CROSSTALK_TOKEN "
+            "(launcher should set this — not a CLI fallback path).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        import secrets, hashlib
+        from tools.dashboard.dao import auth_db
+        raw = secrets.token_urlsafe(32)
+        auth_db.insert_token(hashlib.sha256(raw.encode()).hexdigest(), session_name)
+        subprocess.run(
+            ["tmux", "set-environment", "-t", session_name, "CROSSTALK_TOKEN", raw],
+            check=True, timeout=5,
+            capture_output=True,
+        )
+        return raw
+    except Exception as e:
+        print(f"Error: CrossTalk auto-provisioning failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_crosstalk_send(args):
     """Send a CrossTalk message to a peer session."""
     if getattr(args, 'content_stdin', None) == "-":
@@ -961,10 +1036,7 @@ def cmd_crosstalk_send(args):
         print("Error: empty message", file=sys.stderr)
         sys.exit(1)
 
-    token = os.environ.get("CROSSTALK_TOKEN")
-    if not token:
-        print("Error: $CROSSTALK_TOKEN not set.", file=sys.stderr)
-        sys.exit(1)
+    token = _resolve_crosstalk_token()
 
     import ssl
     import urllib.parse
@@ -3243,10 +3315,7 @@ def cmd_crosstalk_broadcast(args):
         print(f"Error: --idle exceeds maximum of 6h ({_MAX_BROADCAST_IDLE_SECS}s)", file=sys.stderr)
         sys.exit(1)
 
-    token = os.environ.get("CROSSTALK_TOKEN")
-    if not token:
-        print("Error: $CROSSTALK_TOKEN not set.", file=sys.stderr)
-        sys.exit(1)
+    token = _resolve_crosstalk_token()
 
     import ssl
     import urllib.request
