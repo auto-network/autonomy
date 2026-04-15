@@ -170,12 +170,21 @@
       return badges;
     },
 
-    expandViewMode(idx) {
-      return this._expandView[idx] || 'output';
+    hasOutput(entry) {
+      if (!entry || entry.type !== 'tool_use') return false;
+      const result = this._resultMap[entry.tool_id];
+      return !!(result && result.content);
     },
 
-    toggleView(idx) {
-      const current = this._expandView[idx] || 'output';
+    expandViewMode(idx, entry) {
+      const stored = this._expandView[idx];
+      if (stored) return stored;
+      return this.hasOutput(entry) ? 'output' : 'input';
+    },
+
+    toggleView(idx, entry) {
+      if (!this.hasOutput(entry)) return; // no output → no toggle
+      const current = this.expandViewMode(idx, entry);
       this._expandView[idx] = current === 'output' ? 'input' : 'output';
       this._expandView = { ...this._expandView };
     },
@@ -183,12 +192,8 @@
     expandContent(entry, idx) {
       if (entry.type === 'tool_use') {
         const result = this._resultMap[entry.tool_id];
-        const mode = this._expandView[idx] || 'output';
-
-        if (mode === 'input') {
-          return this._inputSummary(entry);
-        }
-        // Output mode: show result content, fallback to input summary
+        const mode = this.expandViewMode(idx, entry);
+        if (mode === 'input') return this._inputSummary(entry);
         if (result && result.content) return result.content;
         return this._inputSummary(entry);
       }
@@ -331,18 +336,22 @@
       return this._groupExpanded[dIdx] === subIdx;
     },
 
-    groupItemViewMode(dIdx, subIdx) {
-      return this._groupExpandView[dIdx + '-' + subIdx] || 'output';
+    groupItemViewMode(dIdx, subIdx, item) {
+      const stored = this._groupExpandView[dIdx + '-' + subIdx];
+      if (stored) return stored;
+      return this.hasOutput(item) ? 'output' : 'input';
     },
 
-    toggleGroupItemView(dIdx, subIdx) {
+    toggleGroupItemView(dIdx, subIdx, item) {
+      if (!this.hasOutput(item)) return;
       const key = dIdx + '-' + subIdx;
-      this._groupExpandView[key] = (this._groupExpandView[key] || 'output') === 'output' ? 'input' : 'output';
+      const current = this.groupItemViewMode(dIdx, subIdx, item);
+      this._groupExpandView[key] = current === 'output' ? 'input' : 'output';
       this._groupExpandView = { ...this._groupExpandView };
     },
 
     groupItemExpandContent(item, dIdx, subIdx) {
-      const mode = this._groupExpandView[dIdx + '-' + subIdx] || 'output';
+      const mode = this.groupItemViewMode(dIdx, subIdx, item);
       if (mode === 'input') return this._inputSummary(item);
       const result = this._resultMap[item.tool_id];
       if (result && result.content) return result.content;

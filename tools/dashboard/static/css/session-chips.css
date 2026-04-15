@@ -198,6 +198,9 @@
   white-space: pre-wrap;
   word-break: break-all;
   line-height: 1.4;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
 }
 /* Bidirectional scroll for wide content */
 .sc-detail-wide {
