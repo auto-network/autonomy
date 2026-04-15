@@ -476,6 +476,112 @@ class TestHostWatcherToSSE:
             await _stop_monitor(mon, patcher)
 
 
+# ── TestConfirmLinkEndpointToSSE ───────────────────────────────────────
+
+
+class TestConfirmLinkEndpointToSSE:
+    """Drives /api/session/confirm-link end-to-end.
+
+    Earlier host-linking tests (TestHostWatcherToSSE) simulated the fix by
+    calling _add_file_watch from the test body. This class does NOT do that.
+    It POSTs to the real endpoint, then asserts that a subsequent JSONL write
+    produces an SSE broadcast — which requires the endpoint itself to install
+    the inotify watch.
+    """
+
+    @pytest.mark.asyncio
+    async def test_confirm_link_installs_tailing(self, setup_env, monkeypatch):
+        """Real endpoint → JSONL write → SSE broadcast. No simulation."""
+        tmp_path, db_path = setup_env
+
+        # Fake ~/.claude/projects layout
+        fake_home = tmp_path / "home"
+        projects = fake_home / ".claude" / "projects"
+        proj = projects / "-workspace-repo"
+        proj.mkdir(parents=True)
+
+        handshake = "PROBE-xyz-E2E"
+        jsonl = proj / "aabbccdd-1111-2222-3333-444455556666.jsonl"
+        jsonl.write_text(json.dumps({
+            "type": "user",
+            "message": {"role": "user",
+                        "content": [{"type": "text", "text": handshake}]},
+            "timestamp": "2026-04-15T00:00:00Z",
+        }) + "\n")
+
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        _insert_session(
+            db_path, "host-e2e", None,
+            session_type="host",
+            resolution_dir=None,
+        )
+
+        bus = MockEventBus()
+        mon, patcher = await _start_monitor(bus)
+
+        from tools.dashboard import server as server_mod
+        orig_bus = server_mod.event_bus
+        orig_mon = server_mod.session_monitor
+        server_mod.event_bus = bus
+        server_mod.session_monitor = mon
+
+        # Stub graph CLI shell-out inside link_and_enrich without bypassing
+        # link_and_enrich itself — we want the real DB update to happen.
+        from tools.dashboard.dao import dashboard_db as _ddb
+        link_patcher = patch.object(
+            _ddb, "update_graph_source", lambda tn, src: None,
+        )
+        import subprocess as _sub
+        run_patcher = patch.object(
+            _sub, "run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        )
+        link_patcher.start()
+        run_patcher.start()
+
+        try:
+            from starlette.testclient import TestClient
+            with TestClient(server_mod.app) as client:
+                resp = client.post("/api/session/confirm-link", json={
+                    "tmux_session": "host-e2e",
+                    "handshake": handshake,
+                })
+                assert resp.status_code == 200, resp.text
+                body = resp.json()
+                assert body["ok"] is True
+
+            await asyncio.sleep(0.1)
+            bus.events.clear()
+
+            # Now simulate Claude appending a new entry to the linked JSONL.
+            # If confirm-link did its job, the monitor has an IN_MODIFY watch
+            # on this file and will broadcast session:messages.
+            _write_jsonl_entry(jsonl, _make_assistant_entry("after-link msg"))
+
+            events = await bus.wait_for_event(
+                "session:messages", session_id="host-e2e", timeout=3.0,
+            )
+            assert len(events) >= 1, (
+                "confirm-link did not install tailing: JSONL write after "
+                "successful handshake produced no session:messages broadcast. "
+                "The endpoint must call session_monitor._add_file_watch() "
+                "after link_and_enrich()."
+            )
+            _, data = events[0]
+            assert data["session_id"] == "host-e2e"
+            assert any(
+                "after-link msg" in (e.get("content") or "")
+                for e in data["entries"]
+            )
+        finally:
+            run_patcher.stop()
+            link_patcher.stop()
+            server_mod.event_bus = orig_bus
+            server_mod.session_monitor = orig_mon
+            await _stop_monitor(mon, patcher)
+
+
 # ── TestRolloverToSSE ──────────────────────────────────────────────────
 
 
