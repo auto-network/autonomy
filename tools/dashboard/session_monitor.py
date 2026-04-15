@@ -420,6 +420,26 @@ class SessionMonitor:
         if count_live() > 0:
             await self._broadcast_registry()
 
+    async def stop(self) -> None:
+        """Cancel background tasks and reset state so start() can be called again."""
+        if not self._started:
+            return
+        tasks = [t for t in (self._tailer_task, self._liveness_task) if t and not t.done()]
+        for t in tasks:
+            try:
+                t.cancel()
+            except RuntimeError:
+                pass  # task belongs to a different event loop (e.g. TestClient teardown)
+        try:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except RuntimeError:
+            pass  # cross-loop gather — tasks will be GC'd with their loop
+        self._tailer_task = None
+        self._liveness_task = None
+        self._started = False
+        logger.info("session_monitor: background tasks stopped")
+
     def _recover_unresolved_sessions(self) -> None:
         """On startup, recreate TailState for live sessions with NULL jsonl_path.
 
