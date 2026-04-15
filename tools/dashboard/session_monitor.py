@@ -653,7 +653,9 @@ class SessionMonitor:
         """Dedup, enrich, and broadcast parsed entries from a session tail read."""
         if not new_entries:
             return
-        # Dedup queued messages
+        # Dedup queued messages — tracker persists across unrelated entries
+        # (assistant turns, tool_result) because the duplicate typically
+        # arrives AFTER the agent's assistant response, not immediately.
         deduped = []
         for entry in new_entries:
             if entry.get("queued"):
@@ -664,7 +666,6 @@ class SessionMonitor:
                   and entry.get("content", "").strip() == ts.last_enqueue_content):
                 ts.last_enqueue_content = None
             else:
-                ts.last_enqueue_content = None
                 deduped.append(entry)
         new_entries = deduped
 
