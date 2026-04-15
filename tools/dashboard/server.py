@@ -19,6 +19,7 @@ import subprocess
 import sys
 import termios
 import time
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 from datetime import datetime, timedelta, timezone
@@ -5970,7 +5971,12 @@ routes = [
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
 ]
 
+# Background task handles — captured during startup, cancelled during shutdown
+_dispatch_watcher_task: asyncio.Task | None = None
+_mock_event_watcher_task: asyncio.Task | None = None
+
 async def _on_startup():
+    global _dispatch_watcher_task, _mock_event_watcher_task
     if os.environ.get("DASHBOARD_MOCK"):
         # Mock mode: skip real database init and session monitor.
         # Broadcast initial SSE events from fixture data so SSE-dependent
@@ -5993,7 +5999,7 @@ async def _on_startup():
         })
         if os.environ.get("DASHBOARD_MOCK_EVENTS"):
             from tools.dashboard.dao.mock import mock_event_watcher
-            asyncio.create_task(mock_event_watcher())
+            _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
         return
 
     from agents.dispatch_db import init_db
@@ -6003,10 +6009,32 @@ async def _on_startup():
     # Seed from filesystem on first run (one-time), then start background tasks
     await session_monitor.seed_from_filesystem()
     await session_monitor.start(event_bus=event_bus, entry_parser=_parse_jsonl_entry)
-    asyncio.create_task(_dispatch_watcher())
+    _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
-        asyncio.create_task(mock_event_watcher())
+        _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
+
+async def _on_shutdown():
+    global _dispatch_watcher_task, _mock_event_watcher_task
+    tasks = [t for t in (_dispatch_watcher_task, _mock_event_watcher_task) if t and not t.done()]
+    for t in tasks:
+        t.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _dispatch_watcher_task = None
+    _mock_event_watcher_task = None
+    try:
+        await session_monitor.stop()
+    except Exception:
+        logger.exception("error during session_monitor.stop()")
+
+@asynccontextmanager
+async def _lifespan(app):
+    await _on_startup()
+    try:
+        yield
+    finally:
+        await _on_shutdown()
 
 class _CSPMiddleware(BaseHTTPMiddleware):
     """Phase 1 CSP: blocks dangerous injections while permitting existing inline scripts."""
@@ -6039,7 +6067,7 @@ class _CSPMiddleware(BaseHTTPMiddleware):
         return response
 
 
-app = Starlette(routes=routes, on_startup=[_on_startup])
+app = Starlette(routes=routes, lifespan=_lifespan)
 app.add_middleware(_CSPMiddleware)
 
 

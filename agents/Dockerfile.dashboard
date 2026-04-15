@@ -9,8 +9,15 @@ FROM autonomy-agent
 
 # ── Dashboard Python deps (Starlette TestClient / API contract tests) ──
 USER root
+# Versions pinned 2026-04-15 — update deliberately when host .venv changes
 RUN pip install --break-system-packages --no-cache-dir \
-        starlette httpx uvicorn jinja2 pymysql sse-starlette \
-        inotify_simple pytest-asyncio
+        "starlette>=1.0,<2" \
+        "httpx==0.28.1" \
+        "uvicorn==0.44.0" \
+        "jinja2==3.1.6" \
+        "pymysql==1.1.2" \
+        "sse-starlette==3.3.4" \
+        "inotify_simple==2.0.1" \
+        "pytest-asyncio==1.3.0"
 USER agent
 ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
