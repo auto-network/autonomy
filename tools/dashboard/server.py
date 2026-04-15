@@ -3002,6 +3002,19 @@ async def api_session_confirm_link(request):
                         jsonl_path=str(jf),
                         project=project,
                     )
+                    # Install inotify watches so the tailer starts broadcasting
+                    # session:messages as new entries arrive. Without this, the
+                    # link is persisted in the DB but no live SSE flows —
+                    # the viewer only sees new content on /tail?after=0 fetches
+                    # (nav or force refresh). See signpost d931649b-413 §2/§7c.
+                    from tools.dashboard.session_monitor import _TailState
+                    if tmux_session not in session_monitor._tail_states:
+                        session_monitor._tail_states[tmux_session] = _TailState(
+                            resolution_dir=jf.parent,
+                        )
+                    session_monitor._add_file_watch(tmux_session, str(jf))
+                    session_monitor._add_dir_watch(tmux_session, str(jf.parent))
+                    await session_monitor._broadcast_registry()
                     return JSONResponse({"ok": True, "project": project, "session_id": session_id})
         except Exception:
             continue
