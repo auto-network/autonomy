@@ -822,7 +822,59 @@ SESSIONS_PAGE_CHECKS = """
     // Active sessions section exists
     r.has_active_section = !!document.querySelector('[data-testid="active-sessions-section"]');
     r.has_recent_section = !!document.querySelector('[data-testid="recent-sessions-section"]');
+
+    // Resume button regression guard — failed 3 times, never again.
+    var resumeBtns = document.querySelectorAll('[data-testid="resume-btn"]');
+    r.resume_btn_count = resumeBtns.length;
+    var disabledResumeBtns = [];
+    resumeBtns.forEach(function(b) {
+        if (b.disabled || b.hasAttribute('disabled')) {
+            disabledResumeBtns.push(b.closest('[data-session-id]')?.getAttribute('data-session-id') || '?');
+        }
+    });
+    r.disabled_resume_btn_ids = disabledResumeBtns;
+    r.all_resume_btns_enabled = disabledResumeBtns.length === 0;
 """
+
+# ── Resume button state-transition async check ──────────────────────
+
+RESUME_STATE_TRANSITION_CHECKS = """(async () => {
+    try {
+        var r = {};
+        var tick = async () => { await Alpine.nextTick(); await new Promise(r => setTimeout(r, 150)); };
+
+        // Find the first resume button in the DOM (any card, visible or not).
+        var btn = document.querySelector('[data-testid="resume-btn"]');
+        var card = btn ? btn.closest('[data-session-id]') : null;
+        var targetId = card ? card.getAttribute('data-session-id') : null;
+        r.btn_found = !!btn;
+        r.target_id = targetId;
+
+        if (!btn || !targetId) {
+            r.disabled_during_resume = false;
+            r.enabled_after_clear = false;
+            return JSON.stringify(r);
+        }
+
+        // Get the Alpine component data for the sessions page (not base.html x-data).
+        var root = btn.closest('[x-data]');
+        var data = Alpine.$data(root);
+
+        // Simulate a resume in flight.
+        data.resuming[targetId] = true;
+        await tick();
+        r.disabled_during_resume = btn.disabled === true;
+
+        // Clear it.
+        data.resuming[targetId] = false;
+        await tick();
+        r.enabled_after_clear = btn.disabled === false;
+
+        return JSON.stringify(r);
+    } catch(e) {
+        return JSON.stringify({error: e.message, stack: e.stack});
+    }
+})()"""
 
 # ── Dispatch page JS check bundle ────────────────────────────────────
 
@@ -1276,6 +1328,58 @@ class TestSessionsPageBehavior:
         c = self._checks
         assert c.get("host_card_count", 0) == 1, f"Expected 1 host card, got {c.get('host_card_count')}"
         assert c.get("container_card_count", 0) == 4, f"Expected 4 container cards, got {c.get('container_card_count')}"
+
+    def test_resume_buttons_present(self):
+        """Every active session card renders a resume button (data-testid='resume-btn')."""
+        c = self._checks
+        # 5 active + 3 recent = 8 cards, each with a resume button (x-show keeps in DOM).
+        assert c.get("resume_btn_count", 0) >= 5, \
+            f"Expected >=5 resume buttons, got {c.get('resume_btn_count')}"
+
+    def test_resume_buttons_not_disabled_on_render(self):
+        """REGRESSION GUARD (auto-eefr, auto-6x6c): resume button must not be stuck disabled
+        on initial render. Fails if `resuming[s.id]` coerces truthy via Alpine's proxy."""
+        c = self._checks
+        assert c.get("all_resume_btns_enabled"), (
+            "Resume button rendered in disabled state on initial load — "
+            f"disabled for session ids: {c.get('disabled_resume_btn_ids')}. "
+            "Likely regression of the `:disabled='resuming[s.id] === true'` fix."
+        )
+
+
+class TestResumeButtonStateTransition:
+    """State-transition test: resume button disabled/enabled lifecycle.
+
+    Async eval simulates setting resuming[id] = true, verifies button becomes
+    disabled, then clears it and verifies button re-enables.
+    REGRESSION GUARD: auto-eefr, auto-6x6c.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        """Navigate to sessions page, run async state-transition check."""
+        result = _navigate_and_eval_async(
+            "/sessions",
+            RESUME_STATE_TRANSITION_CHECKS,
+            wait_ms=1500,
+        )
+        request.cls._checks = result
+
+    def test_disabled_during_resume(self):
+        """Button becomes disabled when resuming[id] = true."""
+        c = self._checks
+        assert c.get("disabled_during_resume") is True, (
+            "Resume button should be disabled while resuming[id] === true, "
+            f"got: {c.get('disabled_during_resume')}"
+        )
+
+    def test_enabled_after_clear(self):
+        """Button re-enables when resuming is cleared."""
+        c = self._checks
+        assert c.get("enabled_after_clear") is True, (
+            "Resume button should re-enable after resuming is cleared, "
+            f"got: {c.get('enabled_after_clear')}"
+        )
 
 
 class TestDispatchPageBehavior:
