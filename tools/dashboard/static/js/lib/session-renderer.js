@@ -93,9 +93,24 @@
       }
     },
 
-    /** Returns true if a tool_use entry has no corresponding result yet. */
+    /** Returns true if a tool_use entry has no corresponding result yet.
+     *  Uses server-provided pendingToolIds when the session is in tool_running
+     *  state. Dead sessions cannot have running tools. Falls back to local
+     *  _resultMap for history/replay and during initial load.
+     */
     isToolRunning(entry) {
-      return entry.type === 'tool_use' && !this._resultMap[entry.tool_id];
+      if (entry.type !== 'tool_use') return false;
+      var store = Alpine.store('sessions')[this.sessionKey];
+      if (store) {
+        // Dead sessions: no tool can be running (killed mid-flight)
+        if (store.activityState === 'dead') return false;
+        // Server says tools are running — check the server-provided set
+        if (store.activityState === 'tool_running') {
+          return !!store.pendingToolIds[entry.tool_id];
+        }
+      }
+      // Fallback to local resultMap (history, initial load, non-tool_running states)
+      return !this._resultMap[entry.tool_id];
     },
 
     /** Elapsed seconds since entry.timestamp (for running tools). */
@@ -112,6 +127,15 @@
       const name = entry.tool_name || '';
       const result = this._resultMap[entry.tool_id];
       const badges = [];
+
+      // Dead session: unmatched tools show "Killed" instead of "Running"
+      if (!result) {
+        var store = Alpine.store('sessions')[this.sessionKey];
+        if (store && store.activityState === 'dead') {
+          badges.push({ text: 'Killed', cls: 'sc-meta-error' });
+          return badges;
+        }
+      }
 
       // Running tool: show elapsed time + "Running" badge
       // Touch _tick to force Alpine re-evaluation every second
@@ -394,12 +418,19 @@
       } catch (_) { return null; }
     },
 
-    /** Returns true when the agent is generating a response (thinking).
-     *  True after user/crosstalk messages, tool_results, and pending tool_use.
-     *  False after assistant_text (waiting for user) or when session is not live.
+    /** Returns true when the agent is generating a response (thinking/tool_running).
+     *  Uses server-provided activityState when available. Falls back to local
+     *  entries scan for history pages where server state is unavailable.
      */
     isAgentWorking() {
       if (!this.isLive) return false;
+      // Server-provided activity state takes precedence
+      var store = Alpine.store('sessions')[this.sessionKey];
+      if (store && store.activityState) {
+        var st = store.activityState;
+        return st === 'thinking' || st === 'tool_running';
+      }
+      // Fallback to local entries scan
       var entries = this.entries;
       if (!entries || entries.length === 0) return false;
       var last = entries[entries.length - 1];

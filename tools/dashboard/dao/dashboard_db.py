@@ -165,6 +165,12 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN curr_jsonl_file TEXT")
         _conn.commit()
         _backfill_new_columns(_conn)
+    # Migrate: add activity_state column if missing
+    try:
+        _conn.execute("SELECT activity_state FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN activity_state TEXT DEFAULT 'idle'")
+        _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
 
@@ -415,7 +421,20 @@ def get_dispatch_nag_sessions() -> list[str]:
 def mark_dead(tmux_name: str) -> None:
     """CLOSE step: mark session as no longer live."""
     conn = get_conn()
-    conn.execute("UPDATE tmux_sessions SET is_live=0 WHERE tmux_name=?", (tmux_name,))
+    conn.execute(
+        "UPDATE tmux_sessions SET is_live=0, activity_state='dead' WHERE tmux_name=?",
+        (tmux_name,),
+    )
+    conn.commit()
+
+
+def update_activity_state(tmux_name: str, state: str) -> None:
+    """Update the activity_state for a session."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET activity_state=? WHERE tmux_name=?",
+        (state, tmux_name),
+    )
     conn.commit()
 
 

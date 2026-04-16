@@ -1784,7 +1784,17 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             if jsonl_file:
                 try:
                     stale_secs = time.time() - jsonl_file.stat().st_mtime
-                    stale = stale_secs > 300  # 5 minutes without JSONL writes
+                    # Use activity_state from dashboard DB for adaptive threshold:
+                    # tool_running gets 30min (long test suites), everything else 5min
+                    threshold = 300
+                    try:
+                        from tools.dashboard.dao import dashboard_db
+                        row = dashboard_db.get_session(agent.container_name)
+                        if row and row.get("activity_state") == "tool_running":
+                            threshold = 1800
+                    except Exception:
+                        pass
+                    stale = stale_secs > threshold
                 except OSError:
                     pass
             if stale and elapsed > BOOT_GRACE_PERIOD:
@@ -1896,7 +1906,16 @@ def poll_and_collect_librarians(running_librarians: list[RunningLibrarian]) -> N
             if jsonl_file:
                 try:
                     stale_secs = time.time() - jsonl_file.stat().st_mtime
-                    stale = stale_secs > 300
+                    # Use activity_state from dashboard DB for adaptive threshold
+                    threshold = 300
+                    try:
+                        from tools.dashboard.dao import dashboard_db
+                        row = dashboard_db.get_session(lib.container_name)
+                        if row and row.get("activity_state") == "tool_running":
+                            threshold = 1800
+                    except Exception:
+                        pass
+                    stale = stale_secs > threshold
                 except OSError:
                     pass
             if stale and elapsed > BOOT_GRACE_PERIOD:

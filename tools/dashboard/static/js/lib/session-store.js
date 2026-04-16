@@ -74,6 +74,8 @@ window.getSessionStore = function(sessionId) {
       resolved: false,
       toolMap: {},       // tool_id -> { tool_name }
       resultMap: {},     // tool_id -> tool_result entry
+      activityState: 'idle',       // server-derived: idle | thinking | tool_running | dead
+      pendingToolIds: {},          // server-derived: tool_id -> true (set-like object)
       loaded: false,
       _loading: false,   // true during initial fetch — buffers SSE
       _pendingSSE: [],
@@ -149,6 +151,16 @@ window.ensureSessionMessages = function() {
     if (data.size_bytes !== undefined) store.sizeMB = (data.size_bytes / 1048576).toFixed(1);
     store.lastActivity = Date.now() / 1000;
 
+    // Update server-derived activity state
+    if (data.activity_state !== undefined) store.activityState = data.activity_state;
+    if (data.pending_tool_ids !== undefined) {
+      var ptids = {};
+      for (var k = 0; k < data.pending_tool_ids.length; k++) {
+        ptids[data.pending_tool_ids[k]] = true;
+      }
+      store.pendingToolIds = ptids;
+    }
+
     if (data.is_live === false) {
       store.isLive = false;
     }
@@ -174,6 +186,7 @@ window.ensureSessionMessages = function() {
       store.startedAt = s.started_at || 0;
       if (s.last_activity) store.lastActivity = s.last_activity;
       if (s.last_message !== undefined) store.lastMessage = s.last_message;
+      if (s.activity_state !== undefined) store.activityState = s.activity_state;
       store.resolved = !!s.resolved;
     }
     // Mark removed sessions as dead
