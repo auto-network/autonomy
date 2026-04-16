@@ -679,7 +679,7 @@ class SessionMonitor:
             etype = entry.get("type", "")
             if etype == "tool_use" and entry.get("tool_id"):
                 ts.pending_tool_ids.add(entry["tool_id"])
-            elif etype == "tool_result" and entry.get("tool_id"):
+            elif etype in ("tool_result", "semantic_bash") and entry.get("tool_id"):
                 ts.pending_tool_ids.discard(entry["tool_id"])
             if etype:
                 ts.last_entry_type = etype
