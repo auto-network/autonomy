@@ -1956,24 +1956,23 @@ def _upconvert_graph_result(content: str, timestamp: str, tool_id: str = "") -> 
     base = {"type": "semantic_bash", "role": "tool", "timestamp": timestamp}
     if tool_id:
         base["tool_id"] = tool_id
-    # Match only actual graph CLI output — require the ✓ prefix to avoid
-    # false positives when Read/Grep returns source code containing these
-    # string literals (e.g. reading _upconvert_graph_result itself).
-    if "\u2713 Note saved (src:" in content:
-        m = re.search(r"src:([a-f0-9-]+)", content)
-        if m:
-            return {**base, "semantic_type": "note-created",
-                    "source_id": m.group(1), "content": content.strip()[:100]}
-    if "\u2713 Captured:" in content:
-        m = re.search(r"Captured:\s*([a-f0-9-]+)", content)
-        if m:
-            return {**base, "semantic_type": "thought-captured",
-                    "source_id": m.group(1), "content": content.strip()[:100]}
-    if "\u2713 Comment added" in content:
-        m = re.search(r"id:([a-f0-9-]+)", content)
-        if m:
-            return {**base, "semantic_type": "comment-added",
-                    "comment_id": m.group(1), "content": content.strip()[:100]}
+    # Match only actual graph CLI output.  Real output looks like:
+    #   "  ✓ Note saved (src:abc123-def) — 25 lines, 1234 chars"
+    # The ✓ must appear at the start of a line (after optional whitespace)
+    # to avoid false positives when Bash prints repr/test output that
+    # happens to contain ✓ embedded in a larger string.
+    m = re.search(r"^\s*\u2713 Note saved \(src:([a-f0-9-]+)\)", content, re.MULTILINE)
+    if m:
+        return {**base, "semantic_type": "note-created",
+                "source_id": m.group(1), "content": content.strip()[:100]}
+    m = re.search(r"^\s*\u2713 Captured:\s*([a-f0-9-]+)", content, re.MULTILINE)
+    if m:
+        return {**base, "semantic_type": "thought-captured",
+                "source_id": m.group(1), "content": content.strip()[:100]}
+    m = re.search(r"^\s*\u2713 Comment added.*?id:([a-f0-9-]+)", content, re.MULTILINE)
+    if m:
+        return {**base, "semantic_type": "comment-added",
+                "comment_id": m.group(1), "content": content.strip()[:100]}
     return None
 
 
