@@ -42,6 +42,7 @@ from tools.dashboard.dao.dashboard_db import (
     insert_session,
     mark_dead,
     delete_session,
+    update_activity_state,
     update_tail_state,
     update_nag_last_sent,
     count_live,
@@ -220,6 +221,9 @@ class _TailState:
     # inotify watch descriptors
     watch_descriptor: int | None = None       # IN_MODIFY on active JSONL
     dir_watch_descriptor: int | None = None   # IN_CREATE on session directory
+    # Activity state tracking — pending tool calls and last entry type
+    pending_tool_ids: set = field(default_factory=set)
+    last_entry_type: str = ""
 
 
 class SessionMonitor:
@@ -392,6 +396,7 @@ class SessionMonitor:
                 "nag_interval": s.get("nag_interval") or 15,
                 "nag_message": s.get("nag_message") or "",
                 "dispatch_nag": bool(s.get("dispatch_nag")),
+                "activity_state": s.get("activity_state", "idle"),
                 # jsonl_path is the legacy bridge; session_uuids is canonical after Phase 4
                 "resolved": bool(s.get("jsonl_path")) or (
                     bool(s.get("session_uuids")) and s["session_uuids"] != "[]"
@@ -669,6 +674,25 @@ class SessionMonitor:
                 deduped.append(entry)
         new_entries = deduped
 
+        # Track pending_tool_ids and last_entry_type for activity_state
+        for entry in new_entries:
+            etype = entry.get("type", "")
+            if etype == "tool_use" and entry.get("tool_id"):
+                ts.pending_tool_ids.add(entry["tool_id"])
+            elif etype == "tool_result" and entry.get("tool_id"):
+                ts.pending_tool_ids.discard(entry["tool_id"])
+            if etype:
+                ts.last_entry_type = etype
+
+        # Derive activity_state from pending_tool_ids and last_entry_type
+        if ts.pending_tool_ids:
+            activity_state = "tool_running"
+        elif ts.last_entry_type in ("user", "tool_result", "crosstalk"):
+            activity_state = "thinking"
+        else:
+            activity_state = "idle"
+        update_activity_state(tmux_name, activity_state)
+
         self._enrich_agent_entries(row, ts, new_entries)
         if new_entries and self._event_bus:
             ts.broadcast_seq += 1
@@ -682,6 +706,8 @@ class SessionMonitor:
                     "seq": ts.broadcast_seq,
                     "context_tokens": updated["context_tokens"] if updated else 0,
                     "size_bytes": Path(row["jsonl_path"]).stat().st_size if row.get("jsonl_path") else 0,
+                    "activity_state": activity_state,
+                    "pending_tool_ids": sorted(ts.pending_tool_ids),
                 },
                 dedup=False,
             )
@@ -1079,6 +1105,11 @@ class SessionMonitor:
                     alive = await asyncio.to_thread(self._check_tmux, tmux_name)
                     if not alive:
                         self._remove_watches(tmux_name)
+                        # Clear pending_tool_ids before marking dead —
+                        # dead sessions cannot have running tools
+                        ts = self._tail_states.get(tmux_name)
+                        if ts:
+                            ts.pending_tool_ids.clear()
                         mark_dead(tmux_name)
                         self._tail_states.pop(tmux_name, None)
                         changed = True
