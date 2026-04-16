@@ -1943,50 +1943,34 @@ def _parse_bd_setstate_cmd(command: str, timestamp: str) -> dict | None:
     }
 
 
-def _upconvert_graph_result(content: str, timestamp: str) -> dict | None:
+def _upconvert_graph_result(content: str, timestamp: str, tool_id: str = "") -> dict | None:
     """Upconvert graph CLI tool_result output to semantic tiles.
 
     Detects note creation, thought capture, and comment addition confirmations
     in tool_result text and returns a semantic_bash entry with extracted IDs.
+    Preserves tool_id so activity_state tracking can match tool_use → result.
     """
     if not isinstance(content, str):
         return None
     # Note saved (src:abc123-456)
+    base = {"type": "semantic_bash", "role": "tool", "timestamp": timestamp}
+    if tool_id:
+        base["tool_id"] = tool_id
     if "Note saved (src:" in content:
         m = re.search(r"src:([a-f0-9-]+)", content)
         if m:
-            return {
-                "type": "semantic_bash",
-                "semantic_type": "note-created",
-                "role": "tool",
-                "source_id": m.group(1),
-                "content": content.strip()[:100],
-                "timestamp": timestamp,
-            }
-    # Captured: abc123-456 (thought)
+            return {**base, "semantic_type": "note-created",
+                    "source_id": m.group(1), "content": content.strip()[:100]}
     if "\u2713 Captured:" in content:
         m = re.search(r"Captured:\s*([a-f0-9-]+)", content)
         if m:
-            return {
-                "type": "semantic_bash",
-                "semantic_type": "thought-captured",
-                "role": "tool",
-                "source_id": m.group(1),
-                "content": content.strip()[:100],
-                "timestamp": timestamp,
-            }
-    # Comment added (id:abc123-456)
+            return {**base, "semantic_type": "thought-captured",
+                    "source_id": m.group(1), "content": content.strip()[:100]}
     if "Comment added" in content:
         m = re.search(r"id:([a-f0-9-]+)", content)
         if m:
-            return {
-                "type": "semantic_bash",
-                "semantic_type": "comment-added",
-                "role": "tool",
-                "comment_id": m.group(1),
-                "content": content.strip()[:100],
-                "timestamp": timestamp,
-            }
+            return {**base, "semantic_type": "comment-added",
+                    "comment_id": m.group(1), "content": content.strip()[:100]}
     return None
 
 
@@ -2185,7 +2169,8 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                             if isinstance(b, dict) and b.get("type") == "text"
                         )
                     # Upconvert graph note/thought/comment results to semantic tiles
-                    sem = _upconvert_graph_result(result_content, timestamp)
+                    sem = _upconvert_graph_result(result_content, timestamp,
+                                                  tool_id=block.get("tool_use_id", ""))
                     if sem:
                         _enrich_semantic_tile(sem)
                         tool_results.append(sem)
@@ -2323,7 +2308,7 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                 "timestamp": timestamp,
             }
         # Upconvert graph note/thought/comment results to semantic tiles
-        sem = _upconvert_graph_result(result_content, timestamp)
+        sem = _upconvert_graph_result(result_content, timestamp, tool_id=tool_id)
         if sem:
             _enrich_semantic_tile(sem)
             return sem
