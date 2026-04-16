@@ -1956,7 +1956,10 @@ def _upconvert_graph_result(content: str, timestamp: str, tool_id: str = "") -> 
     base = {"type": "semantic_bash", "role": "tool", "timestamp": timestamp}
     if tool_id:
         base["tool_id"] = tool_id
-    if "Note saved (src:" in content:
+    # Match only actual graph CLI output — require the ✓ prefix to avoid
+    # false positives when Read/Grep returns source code containing these
+    # string literals (e.g. reading _upconvert_graph_result itself).
+    if "\u2713 Note saved (src:" in content:
         m = re.search(r"src:([a-f0-9-]+)", content)
         if m:
             return {**base, "semantic_type": "note-created",
@@ -1966,7 +1969,7 @@ def _upconvert_graph_result(content: str, timestamp: str, tool_id: str = "") -> 
         if m:
             return {**base, "semantic_type": "thought-captured",
                     "source_id": m.group(1), "content": content.strip()[:100]}
-    if "Comment added" in content:
+    if "\u2713 Comment added" in content:
         m = re.search(r"id:([a-f0-9-]+)", content)
         if m:
             return {**base, "semantic_type": "comment-added",
