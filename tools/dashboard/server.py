@@ -2190,8 +2190,6 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                         _enrich_semantic_tile(sem)
                         tool_results.append(sem)
                         continue
-                    if len(result_content) > 2000:
-                        result_content = result_content[:2000] + "\n... (truncated)"
                     tool_results.append({
                         "type": "tool_result",
                         "role": "tool",
@@ -2233,7 +2231,7 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                 entries.append({
                     "type": "user",
                     "role": "user",
-                    "content": text[:2000],
+                    "content": text,
                     "timestamp": timestamp,
                 })
 
@@ -2300,7 +2298,7 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                     blocks.append({
                         "type": "thinking",
                         "role": "assistant",
-                        "content": thinking[:1000],
+                        "content": thinking,
                         "timestamp": timestamp,
                     })
         return blocks if blocks else None
@@ -2329,8 +2327,6 @@ def _parse_jsonl_entry(line: str) -> dict | None:
         if sem:
             _enrich_semantic_tile(sem)
             return sem
-        if len(result_content) > 2000:
-            result_content = result_content[:2000] + "\n... (truncated)"
         return {
             "type": "tool_result",
             "role": "tool",

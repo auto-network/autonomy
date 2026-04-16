@@ -507,8 +507,8 @@ class TestContentExtraction:
         assert result["type"] == "tool_result"
         assert result["is_error"] is True
 
-    def test_content_truncation(self):
-        """Tool result content > 2000 chars → truncated with marker."""
+    def test_content_preserved_in_full(self):
+        """Tool result content > 2000 chars → preserved without truncation."""
         long_content = "x" * 3000
         fixture = {
             "type": "tool_result", "toolUseId": "toolu_long",
@@ -516,21 +516,20 @@ class TestContentExtraction:
             "timestamp": TS,
         }
         result = _parse_jsonl_entry(_line(fixture))
-        assert len(result["content"]) < 3000
-        assert result["content"].endswith("... (truncated)")
+        assert result["content"] == long_content
 
-    def test_user_content_truncation(self):
-        """User text content > 2000 chars → truncated to 2000."""
+    def test_user_content_preserved_in_full(self):
+        """User text content > 2000 chars → preserved without truncation."""
         long_text = "y" * 3000
         fixture = {
             "type": "user", "timestamp": TS,
             "message": {"role": "user", "content": long_text},
         }
         result = _parse_jsonl_entry(_line(fixture))
-        assert len(result["content"]) == 2000
+        assert result["content"] == long_text
 
-    def test_thinking_truncation(self):
-        """Thinking > 1000 chars → truncated to 1000."""
+    def test_thinking_preserved_in_full(self):
+        """Thinking > 1000 chars → preserved without truncation."""
         long_thinking = "z" * 2000
         fixture = {
             "type": "assistant", "timestamp": TS,
@@ -539,10 +538,10 @@ class TestContentExtraction:
             ]},
         }
         result = _parse_jsonl_entry(_line(fixture))
-        assert len(result[0]["content"]) == 1000
+        assert result[0]["content"] == long_thinking
 
-    def test_tool_result_content_truncation_in_user_block(self):
-        """tool_result inside user message also truncated at 2000."""
+    def test_tool_result_content_preserved_in_user_block(self):
+        """tool_result inside user message → preserved without truncation."""
         long_result = "r" * 3000
         fixture = {
             "type": "user", "timestamp": TS,
@@ -553,8 +552,7 @@ class TestContentExtraction:
         }
         result = _parse_jsonl_entry(_line(fixture))
         assert result["type"] == "tool_result"
-        assert result["content"].endswith("... (truncated)")
-        assert len(result["content"]) < 3000
+        assert result["content"] == long_result
 
     def test_timestamp_preserved(self):
         result = _parse_jsonl_entry(_line(FIXTURE_ASSISTANT_TEXT))
@@ -676,7 +674,7 @@ class TestCrosstalkParsing:
         result = _parse_jsonl_entry(_line(FIXTURE_CROSSTALK_ANGLE_BRACKET_BODY))
         # Should NOT be classified as crosstalk — injection prevention
         # The text still contains <crosstalk> tags, so _classify_system_message won't
-        # match either. It falls through to regular user text (truncated to 2000).
+        # match either. It falls through to regular user text.
         assert result["type"] == "user"
 
     def test_queued_crosstalk_detected(self):
