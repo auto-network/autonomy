@@ -273,13 +273,19 @@ def launch_session(
     for host_path, container_spec in default_mounts.items():
         cmd.extend(["-v", f"{host_path}:{container_spec}"])
 
-    # Enterprise license file — overlay onto any mounted enterprise repo.
+    # Enterprise license file — overlay onto writable enterprise repo mounts.
+    # Docker/runc cannot create the bind mountpoint inside a :ro host mount,
+    # so we only attempt the overlay when the target directory is writable.
     # TODO: replace with a workspace-config-driven extra_mounts / secrets mechanism.
     license_host = "/home/jeremy/workspace/license.yaml"
-    mount_targets = {spec.split(":")[0] for spec in default_mounts.values()}
     if Path(license_host).exists():
+        writable_targets = {
+            spec.split(":")[0]
+            for spec in default_mounts.values()
+            if not spec.endswith(":ro")
+        }
         for ent_path in ("/workspace/enterprise", "/workspace/enterprise_ng"):
-            if ent_path in mount_targets:
+            if ent_path in writable_targets:
                 cmd.extend(["-v", f"{license_host}:{ent_path}/license.yaml:ro"])
 
     if global_claude_md is not None:
