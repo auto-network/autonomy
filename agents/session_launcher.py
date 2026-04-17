@@ -120,6 +120,8 @@ def launch_session(
     model: str = DEFAULT_OPUS_MODEL,
     global_claude_md: Path | str | None = None,
     resume_uuid: str | None = None,
+    privileged: bool = False,
+    startup_script: str | Path | None = None,
 ) -> str | None:
     """Launch a Claude agent container session.
 
@@ -150,6 +152,14 @@ def launch_session(
                     be provided (reuses existing session directory), session
                     meta creation is skipped, and --resume is appended to the
                     entrypoint command.
+        privileged: If True, pass ``--privileged`` to docker run. Required for
+                    images that run a nested docker daemon (Dockerfile.dind
+                    and its descendants). Combine with ``startup_script``.
+        startup_script: Host path to a shell script to mount read-only at
+                    ``/startup.sh`` inside the container. The dind entrypoint
+                    wrapper picks it up and runs it in the background before
+                    exec'ing the main command. Exit status lands in
+                    ``/workspace/output/.setup-exit``; log in ``.setup.log``.
 
     Returns:
         detach=True:  container_id string on success, None on failure.
@@ -183,6 +193,9 @@ def launch_session(
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Write .session_meta.json (skip for resumed sessions) ──
+    # graph_project / graph_tags come in via `metadata` and are also exported
+    # as GRAPH_SCOPE / GRAPH_TAGS env vars below so the in-container graph CLI
+    # respects the project's hard boundary and soft tags.
     if not resume_uuid:
         meta_doc: dict = {
             "type": session_type,
@@ -244,17 +257,37 @@ def launch_session(
         *auth_args,
     ]
 
+    # Project scoping: GRAPH_SCOPE (hard project boundary) and GRAPH_TAGS
+    # (soft tags auto-applied to notes) are sourced from metadata when
+    # present. Callers pass these through project_config → metadata.
+    if metadata:
+        graph_project = metadata.get("graph_project")
+        if graph_project:
+            cmd.extend(["-e", f"GRAPH_SCOPE={graph_project}"])
+        graph_tags = metadata.get("graph_tags")
+        if graph_tags:
+            if isinstance(graph_tags, (list, tuple)):
+                graph_tags = ",".join(str(t) for t in graph_tags)
+            cmd.extend(["-e", f"GRAPH_TAGS={graph_tags}"])
+
     for host_path, container_spec in default_mounts.items():
         cmd.extend(["-v", f"{host_path}:{container_spec}"])
 
     if global_claude_md is not None:
         cmd.extend(["-v", f"{global_claude_md}:/home/agent/.claude/CLAUDE.md:ro"])
 
+    # Per-project startup script (used by the dind entrypoint wrapper).
+    if startup_script is not None:
+        cmd.extend(["-v", f"{startup_script}:/startup.sh:ro"])
+
     if extra_env:
         for k, v in extra_env.items():
             cmd.extend(["-e", f"{k}={v}"])
 
     cmd.extend(["-w", working_dir])
+
+    if privileged:
+        cmd.insert(2, "--privileged")
 
     # Mode flags: -d for detached, -it --rm for interactive
     if detach:
