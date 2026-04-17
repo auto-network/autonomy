@@ -3443,7 +3443,7 @@ async def api_session_resume(request):
             import random
             tmux_name = f"resume-{time.strftime('%m%d-%H%M%S')}-{random.randint(10, 99)}"
 
-    model = "claude-opus-4-6[1m]"
+    model = "claude-opus-4-7[1m]"
 
     if session_type == "container":
         # Derive output_dir from JSONL parent path
