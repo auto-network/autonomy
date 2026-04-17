@@ -129,12 +129,27 @@
 
   document.addEventListener('alpine:init', () => {
     Alpine.store('sessionZoom', _savedZoom);
+    // Tailwind class map for per-org dropdown headers. Full class strings
+    // live here (not assembled dynamically) so the Tailwind v4 scanner picks
+    // them up from the JS source.
+    const orgColors = {
+      autonomy: 'text-emerald-400',
+      anchore: 'text-blue-400',
+    };
+
     Alpine.data('sessionsPage', () => ({
       interactive: [],
       recent: [],
       loading: true,
       _creating: false,
       zoom: localStorage.getItem('sessionZoom') || 'normal',
+
+      // --- Workspace dropdown state (fetched from /api/projects) ---
+      projects: [],
+      orgGroups: [],
+      orgColorClass(org) {
+        return orgColors[(org || '').toLowerCase()] || 'text-gray-400';
+      },
 
       // --- Card helper methods (referenced by session-card.html partial) ---
       borderCls: _borderCls,
@@ -264,12 +279,23 @@
         this._fetchRecent();
         this._recentTimer = setInterval(() => this._fetchRecent(), 30000);
 
-        // Handle new terminal creation from the + button dropdown
+        // Fetch workspace registry for the launch dropdown
+        this._fetchProjects();
+
+        // Handle new terminal creation from the + button dropdown.
+        // detail.project → project-scoped container session via /ws/terminal?project=<id>
+        // detail.cmd     → legacy/host command via /ws/terminal?cmd=<cmd>
         this._onCreateTerminal = (e) => {
-          var cmd = e.detail.cmd;
+          var detail = e.detail || {};
           this._creating = true;
           var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-          var wsUrl = proto + '//' + location.host + '/ws/terminal?cmd=' + encodeURIComponent(cmd);
+          var qs;
+          if (detail.project) {
+            qs = 'project=' + encodeURIComponent(detail.project);
+          } else {
+            qs = 'cmd=' + encodeURIComponent(detail.cmd || '');
+          }
+          var wsUrl = proto + '//' + location.host + '/ws/terminal?' + qs;
           var ws = new WebSocket(wsUrl);
           var self = this;
           ws.onopen = function () {
@@ -283,6 +309,27 @@
           ws.onclose = function () { self._creating = false; };
         };
         window.addEventListener('create-terminal', this._onCreateTerminal);
+      },
+
+      async _fetchProjects() {
+        try {
+          const data = await fetch('/api/projects').then(r => r.json());
+          const projects = Array.isArray(data.projects) ? data.projects : [];
+          this.projects = projects;
+          // Group by graph_project, preserving first-seen order
+          const order = [];
+          const byOrg = {};
+          for (const p of projects) {
+            const org = p.graph_project || 'other';
+            if (!byOrg[org]) { byOrg[org] = []; order.push(org); }
+            byOrg[org].push(p);
+          }
+          this.orgGroups = order.map(org => ({org: org, projects: byOrg[org]}));
+        } catch (e) {
+          console.warn('[sessionsPage] projects fetch error', e);
+          this.projects = [];
+          this.orgGroups = [];
+        }
       },
 
       _updateFromStore() {
