@@ -8,6 +8,9 @@ __pycache__/
 data/repos/
 data/worktrees/
 
+# Project artifacts (licenses, secrets) — layered config-driven mounts
+data/artifacts/
+
 # Databases (derived, regenerable)
 data/graph.db
 data/graph.db-wal
