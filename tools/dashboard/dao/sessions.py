@@ -98,7 +98,7 @@ def get_recent_sessions(limit: int = 20) -> list[dict]:
         results.append({
             "session_id": tmux_name,
             "tmux_session": tmux_name,
-            "label": r.get("label") or (r.get("last_message") or "")[:80] or tmux_name,
+            "label": r.get("label") or "",
             "session_type": card_type,
             "type": session_type,
             "is_live": False,
