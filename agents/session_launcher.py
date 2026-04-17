@@ -296,17 +296,28 @@ def launch_session(
         cmd.insert(2, "--rm")
         cmd.insert(2, "-it")
 
-    # Entrypoint, image, and arguments
+    # Entrypoint, image, and arguments.
+    # Base images have ENTRYPOINT=["claude", "--dangerously-skip-permissions"];
+    # dind-based images have a shell wrapper that does `exec "$@"` so the
+    # caller must pass the full command starting with `claude`. `privileged`
+    # is the proxy for dind here.
     # Write prompt to file instead of passing on command line — avoids the
     # prompt text appearing in /proc/cmdline where pkill -f can match it.
     if prompt is not None:
         prompt_file = run_dir / ".prompt.md"
         prompt_file.write_text(prompt)
         resume_flag = f" --resume {resume_uuid}" if resume_uuid else ""
-        cmd += ["--entrypoint", "sh", image,
-                "-c", f"cat /workspace/output/.prompt.md | claude --dangerously-skip-permissions --model {model}{resume_flag} -p"]
+        shell_cmd = f"cat /workspace/output/.prompt.md | claude --dangerously-skip-permissions --model {model}{resume_flag} -p"
+        if privileged:
+            # Keep the dind wrapper entrypoint so /startup.sh still runs.
+            cmd += [image, "sh", "-c", shell_cmd]
+        else:
+            cmd += ["--entrypoint", "sh", image, "-c", shell_cmd]
     else:
-        cmd += [image, "--dangerously-skip-permissions", "--model", model]
+        if privileged:
+            cmd += [image, "claude", "--dangerously-skip-permissions", "--model", model]
+        else:
+            cmd += [image, "--dangerously-skip-permissions", "--model", model]
         if resume_uuid:
             cmd += ["--resume", resume_uuid]
 
