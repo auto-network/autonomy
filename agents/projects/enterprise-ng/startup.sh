@@ -35,6 +35,4 @@ if [ -f /workspace/enterprise_ng/pyproject.toml ]; then
     }
 fi
 
-export ANCHORE_CONFIG_PATH=/workspace/enterprise_ng/config/default_config.yaml
-
 echo "[startup] $(date -u +%FT%TZ) enterprise-ng startup complete"
