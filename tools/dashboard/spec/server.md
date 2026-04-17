@@ -41,7 +41,7 @@ GET /api/source/{id}     → graph read {id} --max-chars 50000
 GET /api/context/{id}/{turn}?window=3
                          → graph context {id} {turn} --window 3
 
-GET /api/projects        → graph projects
+GET /api/projects        → workspace registry (agents/projects.yaml)
 GET /api/stats           → graph stats
 ```
 
