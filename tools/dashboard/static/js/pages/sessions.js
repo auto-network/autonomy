@@ -283,30 +283,34 @@
         this._fetchProjects();
 
         // Handle new terminal creation from the + button dropdown.
-        // detail.project → project-scoped container session via /ws/terminal?project=<id>
-        // detail.cmd     → legacy/host command via /ws/terminal?cmd=<cmd>
-        this._onCreateTerminal = (e) => {
+        // Session creation goes through POST /api/session/create, which is the
+        // sole creation path. After the session exists, ws_terminal is used
+        // only for PTY bridging (attach).
+        //   detail.project   → workspace container
+        //   detail.type='host' → host session
+        //   (empty)          → default autonomy container
+        this._onCreateTerminal = async (e) => {
           var detail = e.detail || {};
           this._creating = true;
-          var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-          var qs;
-          if (detail.project) {
-            qs = 'project=' + encodeURIComponent(detail.project);
-          } else {
-            qs = 'cmd=' + encodeURIComponent(detail.cmd || '');
+          try {
+            var body = {};
+            if (detail.project) body.project = detail.project;
+            else if (detail.type === 'host') body.type = 'host';
+            var res = await fetch('/api/session/create', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(body),
+            });
+            if (!res.ok && res.status !== 202) {
+              var err = await res.json().catch(function () { return {}; });
+              throw new Error(err.error || 'Session create failed');
+            }
+            await res.json();
+          } catch (err) {
+            console.warn('[sessionsPage] create-terminal failed', err);
+          } finally {
+            this._creating = false;
           }
-          var wsUrl = proto + '//' + location.host + '/ws/terminal?' + qs;
-          var ws = new WebSocket(wsUrl);
-          var self = this;
-          ws.onopen = function () {
-            // Terminal created — close after 2s to let monitor register
-            setTimeout(function () {
-              ws.close();
-              self._creating = false;
-            }, 2000);
-          };
-          ws.onerror = function () { self._creating = false; };
-          ws.onclose = function () { self._creating = false; };
         };
         window.addEventListener('create-terminal', this._onCreateTerminal);
       },

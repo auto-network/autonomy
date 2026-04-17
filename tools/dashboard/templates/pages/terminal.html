@@ -8,12 +8,6 @@
     <button @click="launchClaudeContainer()"
             aria-label="Launch Claude in container"
             class="px-3 py-1 bg-purple-600 rounded text-sm hover:bg-purple-500">Claude (container)</button>
-    <button @click="launchBash()"
-            aria-label="Launch bash shell"
-            class="px-3 py-1 bg-gray-700 rounded text-sm hover:bg-gray-600">Bash</button>
-    <button @click="launchBashContainer()"
-            aria-label="Launch bash in container"
-            class="px-3 py-1 bg-gray-600 rounded text-sm hover:bg-gray-500">Bash (container)</button>
 
     <!-- Separator shown only when sessions exist -->
     <template x-if="sessions.length > 0">
