@@ -2170,21 +2170,23 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                             b.get("text", "") for b in result_content
                             if isinstance(b, dict) and b.get("type") == "text"
                         )
-                    # Upconvert graph note/thought/comment results to semantic tiles
-                    sem = _upconvert_graph_result(result_content, timestamp,
-                                                  tool_id=block.get("tool_use_id", ""))
-                    if sem:
-                        _enrich_semantic_tile(sem)
-                        tool_results.append(sem)
-                        continue
+                    tool_use_id = block.get("tool_use_id", "")
+                    # Always emit the tool_result for tracking (_resultMap,
+                    # pending_tool_ids).  Optionally ALSO emit a semantic
+                    # tile for display — augment, don't replace.
                     tool_results.append({
                         "type": "tool_result",
                         "role": "tool",
-                        "tool_id": block.get("tool_use_id", ""),
+                        "tool_id": tool_use_id,
                         "content": result_content,
                         "is_error": block.get("is_error", False),
                         "timestamp": timestamp,
                     })
+                    sem = _upconvert_graph_result(result_content, timestamp,
+                                                  tool_id=tool_use_id)
+                    if sem:
+                        _enrich_semantic_tile(sem)
+                        tool_results.append(sem)
 
         entries = []
 
@@ -2309,12 +2311,8 @@ def _parse_jsonl_entry(line: str) -> dict | None:
                 "is_error": raw.get("is_error", False),
                 "timestamp": timestamp,
             }
-        # Upconvert graph note/thought/comment results to semantic tiles
-        sem = _upconvert_graph_result(result_content, timestamp, tool_id=tool_id)
-        if sem:
-            _enrich_semantic_tile(sem)
-            return sem
-        return {
+        # Always emit tool_result for tracking; optionally also a semantic tile
+        base_result = {
             "type": "tool_result",
             "role": "tool",
             "tool_id": tool_id,
@@ -2322,6 +2320,11 @@ def _parse_jsonl_entry(line: str) -> dict | None:
             "is_error": raw.get("is_error", False),
             "timestamp": timestamp,
         }
+        sem = _upconvert_graph_result(result_content, timestamp, tool_id=tool_id)
+        if sem:
+            _enrich_semantic_tile(sem)
+            return [base_result, sem]
+        return base_result
 
     return None
 
