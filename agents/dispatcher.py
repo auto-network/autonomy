@@ -57,6 +57,8 @@ LABEL_IMAGE_MAP = {
     # "scraper": "autonomy-agent:scraper",
 }
 DEFAULT_IMAGE = "autonomy-agent"
+DEFAULT_OPUS_MODEL = "claude-opus-4-7[1m]"
+DEFAULT_SONNET_MODEL = "claude-sonnet-4-7"
 
 # Deferred restart flag — set by _maybe_restart_dispatcher(), executed at end of cycle
 _restart_scheduled = False
@@ -1654,7 +1656,7 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
         detach=True,
         image=_rig_image,
         output_dir=output_dir,
-        model="claude-sonnet-4-6",
+        model=DEFAULT_SONNET_MODEL,
     )
     if not container_id:
         return None
