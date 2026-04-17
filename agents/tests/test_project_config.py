@@ -24,12 +24,12 @@ def _write_config(tmp_path: Path, body: str) -> Path:
 
 # ── Parsing ──────────────────────────────────────────────────────
 
-def test_loads_container_project(tmp_path):
+def test_loads_full_project(tmp_path):
     path = _write_config(tmp_path, """
         projects:
           sample:
+            name: "Sample Project"
             description: Sample project
-            mode: container
             image: autonomy-agent:sample
             repos:
               - url: https://example.com/a.git
@@ -53,9 +53,9 @@ def test_loads_container_project(tmp_path):
 
     assert set(projects) == {"sample"}
     p = projects["sample"]
-    assert p.name == "sample"
+    assert p.id == "sample"
+    assert p.name == "Sample Project"
     assert p.description == "Sample project"
-    assert p.mode == "container"
     assert p.image == "autonomy-agent:sample"
     assert p.working_dir == "/workspace/a"
     assert p.claude_md == "CLAUDE.md"
@@ -72,37 +72,22 @@ def test_loads_container_project(tmp_path):
     assert p.repos[1].writable is False
 
 
-def test_loads_host_project(tmp_path):
-    path = _write_config(tmp_path, """
-        projects:
-          host-dev:
-            description: Host dev
-            mode: host
-            graph_project: autonomy
-            default_tags: []
-    """)
-    projects = pc.load_projects(path)
-    p = projects["host-dev"]
-    assert p.mode == "host"
-    assert p.image is None
-    assert p.repos == ()
-    assert p.working_dir is None
-    assert p.startup is None
-    assert p.dind is False
-    assert p.graph_project == "autonomy"
-
-
-def test_container_defaults(tmp_path):
+def test_minimal_project_uses_defaults(tmp_path):
     path = _write_config(tmp_path, """
         projects:
           minimal:
-            mode: container
             image: img:tag
             graph_project: autonomy
     """)
     p = pc.load_projects(path)["minimal"]
+    assert p.id == "minimal"
+    assert p.name == "minimal"             # falls back to id when name absent
+    assert p.description == ""
     assert p.repos == ()
     assert p.dind is False
+    assert p.working_dir is None
+    assert p.claude_md is None
+    assert p.startup is None
     assert p.default_tags == ()
     assert p.dispatch_labels == ()
     assert p.env == {}
@@ -114,17 +99,17 @@ def test_get_project_returns_single_entry(tmp_path):
     path = _write_config(tmp_path, """
         projects:
           a:
-            mode: host
+            image: img:tag
             graph_project: autonomy
     """)
-    assert pc.get_project("a", path=path).name == "a"
+    assert pc.get_project("a", path=path).id == "a"
 
 
 def test_get_project_unknown_raises(tmp_path):
     path = _write_config(tmp_path, """
         projects:
           a:
-            mode: host
+            image: img:tag
             graph_project: autonomy
     """)
     with pytest.raises(KeyError, match="unknown project"):
@@ -133,14 +118,13 @@ def test_get_project_unknown_raises(tmp_path):
 
 # ── Validation ───────────────────────────────────────────────────
 
-def test_container_without_image_errors(tmp_path):
+def test_missing_image_errors(tmp_path):
     path = _write_config(tmp_path, """
         projects:
           bad:
-            mode: container
             graph_project: autonomy
     """)
-    with pytest.raises(pc.ProjectConfigError, match="requires a non-empty 'image'"):
+    with pytest.raises(pc.ProjectConfigError, match="'image' is required"):
         pc.load_projects(path)
 
 
@@ -148,20 +132,9 @@ def test_missing_graph_project_errors(tmp_path):
     path = _write_config(tmp_path, """
         projects:
           bad:
-            mode: host
+            image: img:tag
     """)
-    with pytest.raises(pc.ProjectConfigError, match="graph_project is required"):
-        pc.load_projects(path)
-
-
-def test_invalid_mode_errors(tmp_path):
-    path = _write_config(tmp_path, """
-        projects:
-          bad:
-            mode: sidecar
-            graph_project: autonomy
-    """)
-    with pytest.raises(pc.ProjectConfigError, match="mode must be"):
+    with pytest.raises(pc.ProjectConfigError, match="'graph_project' is required"):
         pc.load_projects(path)
 
 
@@ -169,7 +142,6 @@ def test_repo_missing_mount_errors(tmp_path):
     path = _write_config(tmp_path, """
         projects:
           bad:
-            mode: container
             image: img:tag
             graph_project: autonomy
             repos:
@@ -204,7 +176,7 @@ def test_cache_hit_when_mtime_unchanged(tmp_path):
     path = _write_config(tmp_path, """
         projects:
           a:
-            mode: host
+            image: img:tag
             graph_project: autonomy
     """)
     first = pc.load_projects(path)
@@ -216,7 +188,7 @@ def test_cache_reloads_on_mtime_change(tmp_path):
     path = _write_config(tmp_path, """
         projects:
           a:
-            mode: host
+            image: img:tag
             graph_project: autonomy
     """)
     first = pc.load_projects(path)
@@ -225,7 +197,7 @@ def test_cache_reloads_on_mtime_change(tmp_path):
     path.write_text(dedent("""
         projects:
           b:
-            mode: host
+            image: img:tag
             graph_project: autonomy
     """).lstrip())
     newer = path.stat().st_mtime + 5
@@ -240,7 +212,7 @@ def test_force_bypasses_cache(tmp_path):
     path = _write_config(tmp_path, """
         projects:
           a:
-            mode: host
+            image: img:tag
             graph_project: autonomy
     """)
     first = pc.load_projects(path)
@@ -253,44 +225,52 @@ def test_force_bypasses_cache(tmp_path):
 
 def test_shipped_config_has_expected_projects():
     projects = pc.load_projects(pc.DEFAULT_CONFIG_PATH)
-    assert {"autonomy", "autonomy-host", "enterprise", "enterprise-ng"}.issubset(projects)
+    assert set(projects) == {"autonomy", "enterprise", "enterprise-ng"}
 
 
-def test_shipped_config_autonomy_is_read_only_container():
+def test_shipped_config_autonomy():
     p = pc.get_project("autonomy", path=pc.DEFAULT_CONFIG_PATH)
-    assert p.mode == "container"
-    assert p.graph_project == "autonomy"
-    assert p.dind is False
+    assert p.name == "Autonomy Network"
     assert p.image == "autonomy-agent:dashboard"
-    assert len(p.repos) == 1
-    assert p.repos[0].writable is False
-
-
-def test_shipped_config_autonomy_host_is_host_mode():
-    p = pc.get_project("autonomy-host", path=pc.DEFAULT_CONFIG_PATH)
-    assert p.mode == "host"
+    assert p.working_dir == "/workspace/repo"
+    assert p.claude_md == "agents/shared/terminal/CLAUDE.md"
     assert p.graph_project == "autonomy"
+    assert p.default_tags == ()
+    assert p.dispatch_labels == ()
+    assert p.dind is False
+    assert p.repos == ()
+    assert p.startup is None
 
 
-def test_shipped_config_enterprise_is_dind_writable():
+def test_shipped_config_enterprise():
     p = pc.get_project("enterprise", path=pc.DEFAULT_CONFIG_PATH)
-    assert p.mode == "container"
+    assert p.name == "Enterprise"
+    assert p.image == "autonomy-agent:enterprise"
+    assert p.working_dir == "/workspace/enterprise"
+    assert p.claude_md == "agents/projects/enterprise/CLAUDE.md"
+    assert p.startup == "agents/projects/enterprise/startup.sh"
     assert p.dind is True
     assert p.graph_project == "anchore"
     assert p.default_tags == ("enterprise",)
-    assert "enterprise" in p.dispatch_labels
-    assert len(p.repos) == 1
-    assert p.repos[0].writable is True
+    assert p.dispatch_labels == ("enterprise",)
+    mounts = {r.mount: r for r in p.repos}
+    assert mounts["/workspace/enterprise"].url == "git@github.com:anchore/enterprise.git"
+    assert mounts["/workspace/enterprise"].writable is True
+    assert mounts["/workspace/enterprise_ng"].url == "git@github.com:anchore/enterprise_ng.git"
+    assert mounts["/workspace/enterprise_ng"].writable is True
 
 
-def test_shipped_config_enterprise_ng_has_both_repos():
+def test_shipped_config_enterprise_ng():
     p = pc.get_project("enterprise-ng", path=pc.DEFAULT_CONFIG_PATH)
-    assert p.mode == "container"
+    assert p.name == "Enterprise NG"
+    assert p.image == "autonomy-agent:enterprise-ng"
+    assert p.working_dir == "/workspace/enterprise_ng"
+    assert p.claude_md == "agents/projects/enterprise-ng/CLAUDE.md"
+    assert p.startup == "agents/projects/enterprise-ng/startup.sh"
     assert p.dind is True
     assert p.graph_project == "anchore"
     assert p.default_tags == ("enterprise", "enterprise-ng")
+    assert p.dispatch_labels == ("enterprise-ng",)
     mounts = {r.mount: r for r in p.repos}
-    assert "/workspace/enterprise-ng" in mounts
-    assert mounts["/workspace/enterprise-ng"].writable is True
-    assert "/workspace/enterprise" in mounts
     assert mounts["/workspace/enterprise"].writable is False
+    assert mounts["/workspace/enterprise_ng"].writable is True
