@@ -92,6 +92,26 @@ projects:
     dispatch_labels: [enterprise-ng]
     env:
       ANCHORE_CONFIG_PATH: /workspace/enterprise_ng/config/default_config.yaml
+      ANCHORE_DB_USER: postgres
+      ANCHORE_DB_PASSWORD: postgres
+      ANCHORE_DB_HOST: localhost
+      ANCHORE_DB_PORT: "5433"
+      ANCHORE_DB_NAME: ng_test
+      ANCHORE_HOST_ID: localhost
+      ANCHORE_ENDPOINT_HOSTNAME: localhost
+      ANCHORE_COMPONENT_CATALOG_PORT: "8228"
+      ANCHORE_INTERNAL_SSL_VERIFY: "false"
+      ANCHORE_AUTH_SECRET: supersharedsecret
+      ANCHORE_OAUTH_TOKEN_EXPIRATION: "3600"
+      ANCHORE_LOG_LEVEL: INFO
+      ANCHORE_COMPONENT_CATALOG_LOG_LEVEL: INFO
+      ANCHORE_COLORED_LOGGING: "false"
+      ANCHORE_EXCEPTION_BACKTRACE_LOGGING: "true"
+      ANCHORE_EXCEPTION_DIAGNOSE_LOGGING: "true"
+      ANCHORE_COMPONENT_CATALOG_WORKERS: "1"
+      ANCHORE_GLOBAL_SERVER_REQUEST_TIMEOUT_SEC: "120"
+      ANCHORE_GLOBAL_CLIENT_CONNECT_TIMEOUT: "30"
+      ANCHORE_GLOBAL_CLIENT_READ_TIMEOUT: "60"
     artifacts:
       - name: license.yaml
         scope: personal-org
