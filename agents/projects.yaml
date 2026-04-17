@@ -78,3 +78,5 @@ projects:
     graph_project: anchore
     default_tags: [enterprise, widgets-ng]
     dispatch_labels: [widgets-ng]
+    env:
+      WIDGETS_CONFIG_PATH: /workspace/widgets_ng/config/default_config.yaml
