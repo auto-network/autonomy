@@ -66,8 +66,9 @@ cp bin/dolt context/bin/
 cp bin/claude context/bin/
 cp graph/*.py context/graph/
 
-# Copy Dockerfile
+# Copy Dockerfiles and any sibling files they COPY (e.g. dind-entrypoint.sh).
 cp "$SCRIPT_DIR/Dockerfile" context/
+cp "$SCRIPT_DIR/dind-entrypoint.sh" context/
 
 docker build $NO_CACHE -t autonomy-agent context/
 echo "==> Done. Image: autonomy-agent:latest"
@@ -82,6 +83,47 @@ echo "==> Building dashboard variant (Python deps layered on base)..."
 docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.dashboard" -t autonomy-agent:dashboard context/
 echo "==> Done. Image: autonomy-agent:dashboard"
 docker images autonomy-agent:dashboard --format "  Size: {{.Size}}"
+
+# ── DinD intermediate variant ─────────────────────────────────────
+# Adds Docker CE + the shared startup-wrapper entrypoint. Project images
+# that need Docker-in-Docker (enterprise, enterprise-ng) extend this.
+echo ""
+echo "==> Building dind variant (Docker CE + entrypoint wrapper)..."
+docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.dind" -t autonomy-agent:dind context/
+echo "==> Done. Image: autonomy-agent:dind"
+docker images autonomy-agent:dind --format "  Size: {{.Size}}"
+
+# ── Per-project images (auto-discovered) ──────────────────────────
+# Each agents/projects/<name>/Dockerfile becomes autonomy-agent:<name>.
+# Adding a new project image = drop a Dockerfile into agents/projects/<name>/
+# and re-run this script. Build context is the agents/ directory so
+# projects can reference files under agents/projects/<name>/ directly.
+echo ""
+echo "==> Building per-project images..."
+PROJECTS_DIR="$SCRIPT_DIR/projects"
+if [[ -d "$PROJECTS_DIR" ]]; then
+    # Make agents/projects/ visible inside the shared build context so
+    # per-project COPY lines and sibling files (startup.sh, CLAUDE.md)
+    # resolve from the same context root.
+    cp -r "$PROJECTS_DIR" context/projects
+    shopt -s nullglob
+    for dockerfile in "$PROJECTS_DIR"/*/Dockerfile; do
+        project_dir="$(dirname "$dockerfile")"
+        project_name="$(basename "$project_dir")"
+        image_tag="autonomy-agent:$project_name"
+        echo ""
+        echo "==> Building $image_tag (from $dockerfile)..."
+        docker build $NO_CACHE \
+            -f "context/projects/$project_name/Dockerfile" \
+            -t "$image_tag" \
+            context/
+        echo "==> Done. Image: $image_tag"
+        docker images "$image_tag" --format "  Size: {{.Size}}"
+    done
+    shopt -u nullglob
+else
+    echo "  (no agents/projects/ directory — skipping per-project builds)"
+fi
 
 echo "==> Cleanup..."
 rm -rf "$BUILD_DIR"
