@@ -31,7 +31,7 @@ done
 # Expose the Anchore Enterprise license (provided via /etc/autonomy/artifacts/)
 # at the path enterprise_ng tooling expects — the filesystem root.
 if [ -f /etc/autonomy/artifacts/license.yaml ]; then
-    ln -sf /etc/autonomy/artifacts/license.yaml /license.yaml
+    sudo ln -sf /etc/autonomy/artifacts/license.yaml /license.yaml
 fi
 
 # Stale config field that Pydantic now rejects — strip it from the environment
