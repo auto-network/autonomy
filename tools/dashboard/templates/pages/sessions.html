@@ -31,7 +31,7 @@
     <div class="flex items-center justify-between mb-3">
       <h2 class="text-lg font-semibold text-green-400">● Active Sessions</h2>
       {% include 'partials/zoom-toggle.html' %}
-      <div x-data="{ open: false }" class="relative">
+      <div x-data="{ open: false }" class="relative" data-testid="session-launch-dropdown">
         <button @click="open = !open"
                 :disabled="_creating"
                 class="w-8 h-8 flex items-center justify-center rounded-lg
@@ -39,17 +39,50 @@
                        transition-colors disabled:opacity-50 disabled:cursor-wait"
                 :class="_creating && 'animate-pulse'">+</button>
         <div x-show="open" @click.away="open = false" x-cloak
-             class="absolute right-0 mt-1 w-48 bg-gray-800 border border-gray-700
+             x-transition:enter="transition ease-out duration-100"
+             x-transition:enter-start="opacity-0 scale-95"
+             x-transition:enter-end="opacity-100 scale-100"
+             x-transition:leave="transition ease-in duration-75"
+             x-transition:leave-start="opacity-100 scale-100"
+             x-transition:leave-end="opacity-0 scale-95"
+             class="absolute right-0 mt-1 w-72 bg-gray-800 border border-gray-700
                     rounded-lg shadow-lg overflow-hidden z-30">
-          <button @click="$dispatch('create-terminal', {cmd: 'autonomy-agent-claude'}); open = false"
-                  class="w-full px-4 py-2.5 text-left text-sm text-gray-200 hover:bg-gray-700">
-            Container Terminal
-          </button>
-          <button @click="$dispatch('create-terminal', {cmd: 'claude --dangerously-skip-permissions'}); open = false"
-                  class="w-full px-4 py-2.5 text-left text-sm text-gray-200 hover:bg-gray-700
-                         border-t border-gray-700">
-            Host Terminal
-          </button>
+
+          <!-- Workspace groups (grouped by org) -->
+          <template x-for="group in orgGroups" :key="group.org">
+            <div class="py-1" :data-testid="'org-group-' + group.org">
+              <div class="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider"
+                   :class="orgColorClass(group.org)"
+                   x-text="group.org"
+                   data-testid="org-header"></div>
+              <template x-for="p in group.projects" :key="p.id">
+                <button @click="$dispatch('create-terminal', {project: p.id}); open = false"
+                        class="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors group"
+                        :data-testid="'workspace-' + p.id">
+                  <div class="flex items-center gap-2">
+                    <span class="text-sm font-semibold text-gray-200 group-hover:text-white"
+                          x-text="p.name"></span>
+                    <span x-show="p.dind"
+                          class="text-[9px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400 font-medium"
+                          data-testid="dind-badge">DinD</span>
+                  </div>
+                  <div class="text-xs text-gray-500 mt-0.5" x-text="p.description"></div>
+                </button>
+              </template>
+            </div>
+          </template>
+
+          <!-- Separator -->
+          <div class="border-t border-gray-700"></div>
+
+          <!-- Host Terminal (standalone, not a workspace) -->
+          <div class="py-1">
+            <button @click="$dispatch('create-terminal', {cmd: 'claude --dangerously-skip-permissions'}); open = false"
+                    class="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
+                    data-testid="host-terminal-option">
+              <div class="text-sm text-gray-400">Host Terminal</div>
+            </button>
+          </div>
         </div>
       </div>
     </div>
