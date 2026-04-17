@@ -1111,6 +1111,16 @@ class SessionMonitor:
                         if ts:
                             ts.pending_tool_ids.clear()
                         mark_dead(tmux_name)
+                        # Re-ingest completed session into graph (final state)
+                        jsonl_path = row.get("jsonl_path")
+                        if jsonl_path:
+                            try:
+                                subprocess.run(
+                                    ["graph", "ingest-session", jsonl_path],
+                                    capture_output=True, text=True, timeout=30,
+                                )
+                            except Exception:
+                                pass  # best-effort; cron catch-up covers failures
                         self._tail_states.pop(tmux_name, None)
                         changed = True
                         logger.info(
