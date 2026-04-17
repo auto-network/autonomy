@@ -45,6 +45,7 @@ from agents.dispatch_db import (
 )
 from agents.session_launcher import launch_session
 from agents import project_config
+from agents.primer_renderer import render_workspace_primer
 from agents.workspace_manager import WorkspaceError, prepare_session_mounts
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao.mock import (
@@ -3337,7 +3338,15 @@ async def api_session_create(request):
         if proj.default_tags:
             meta["graph_tags"] = list(proj.default_tags)
         extra_env = dict(proj.env) if proj.env else None
-        global_claude_md = (_REPO_ROOT / proj.claude_md) if proj.claude_md else None
+        # Render the runtime primer from the workspace config (layer 1 of
+        # the context stack). Writing it into the session's run_dir keeps
+        # it colocated with other session artifacts.
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        run_dir = _REPO_ROOT / "data" / "agent-runs" / f"{tmux_name}-{ts}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        primer_path = run_dir / ".claude_md"
+        primer_path.write_text(render_workspace_primer(proj))
+        global_claude_md = primer_path
         startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
         working_dir = proj.working_dir or "/workspace/repo"
         cmd_str = launch_session(
@@ -3349,6 +3358,7 @@ async def api_session_create(request):
             mounts=project_mounts or None,
             metadata=meta,
             extra_env=extra_env,
+            output_dir=str(run_dir),
             global_claude_md=global_claude_md,
             startup_script=startup_script,
             privileged=proj.dind,

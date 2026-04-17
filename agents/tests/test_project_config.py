@@ -233,7 +233,9 @@ def test_shipped_config_autonomy():
     assert p.name == "Autonomy Network"
     assert p.image == "autonomy-agent:dashboard"
     assert p.working_dir == "/workspace/repo"
-    assert p.claude_md == "agents/shared/terminal/CLAUDE.md"
+    # claude_md is now rendered from the template; shipped configs leave
+    # the optional override unset.
+    assert p.claude_md is None
     assert p.graph_project == "autonomy"
     assert p.default_tags == ()
     assert p.dispatch_labels == ()
@@ -247,7 +249,7 @@ def test_shipped_config_enterprise():
     assert p.name == "Enterprise"
     assert p.image == "autonomy-agent:enterprise"
     assert p.working_dir == "/workspace/widgets"
-    assert p.claude_md == "agents/projects/enterprise/CLAUDE.md"
+    assert p.claude_md is None
     assert p.startup == "agents/projects/enterprise/startup.sh"
     assert p.dind is True
     assert p.graph_project == "anchore"
@@ -265,7 +267,7 @@ def test_shipped_config_widgets_ng():
     assert p.name == "Widgets NG"
     assert p.image == "autonomy-agent:widgets-ng"
     assert p.working_dir == "/workspace/widgets_ng"
-    assert p.claude_md == "agents/projects/widgets-ng/CLAUDE.md"
+    assert p.claude_md is None
     assert p.startup == "agents/projects/widgets-ng/startup.sh"
     assert p.dind is True
     assert p.graph_project == "anchore"
