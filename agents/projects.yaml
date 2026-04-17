@@ -19,7 +19,10 @@
 #                       writable  true -> a worktree is created and mounted;
 #                                 false -> the managed clone is mounted read-only.
 #   working_dir       Container CWD (usually one of the repo mounts).
-#   claude_md         Project-specific CLAUDE.md path (relative to repo root).
+#   claude_md         Optional per-workspace CLAUDE.md override (relative to
+#                     repo root). Normally unused — the runtime primer is
+#                     rendered from this config by agents.primer_renderer.
+#                     Reserved for per-workspace overrides.
 #   startup           Per-project startup script path (relative to repo root).
 #   dind              true -> run with --privileged for Docker-in-Docker.
 #   graph_project     Hard graph boundary — passed as GRAPH_SCOPE env var.
@@ -48,7 +51,6 @@ projects:
     description: "Core platform — graph, dashboard, dispatcher"
     image: "autonomy-agent:dashboard"
     working_dir: "/workspace/repo"
-    claude_md: "agents/shared/terminal/CLAUDE.md"
     graph_project: autonomy
     default_tags: []
     dind: false
@@ -65,7 +67,6 @@ projects:
         mount: "/workspace/enterprise_ng"
         writable: true
     working_dir: "/workspace/enterprise"
-    claude_md: "agents/projects/enterprise/CLAUDE.md"
     startup: "agents/projects/enterprise/startup.sh"
     dind: true
     graph_project: anchore
@@ -84,7 +85,6 @@ projects:
         mount: "/workspace/enterprise_ng"
         writable: true
     working_dir: "/workspace/enterprise_ng"
-    claude_md: "agents/projects/enterprise-ng/CLAUDE.md"
     startup: "agents/projects/enterprise-ng/startup.sh"
     dind: true
     graph_project: anchore
