@@ -132,3 +132,22 @@ def test_no_graph_env_without_metadata(tmp_path, fake_creds, fake_crosstalk, cap
     cmd = captured_run[0]
     assert not any(s.startswith("GRAPH_SCOPE=") for s in cmd)
     assert not any(s.startswith("GRAPH_TAGS=") for s in cmd)
+
+
+# ── Hardcoded license overlay removed (replaced by artifacts mechanism) ──────
+
+def test_no_hardcoded_license_mount(tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch):
+    """The ad-hoc /home/jeremy/workspace/license.yaml overlay must be gone.
+
+    Artifact mounting is now driven by the ProjectConfig.artifacts layer and
+    lands at /etc/autonomy/artifacts/ inside the container. This test pretends
+    the old host license path exists and verifies launch_session does NOT
+    inject a license.yaml mount by itself.
+    """
+    monkeypatch.setattr(session_launcher.Path, "exists", lambda self: True)
+    _run(output_dir=str(tmp_path / "run"))
+    cmd = captured_run[0]
+    # No mount spec should embed an enterprise license overlay at the
+    # workspace repo root or /etc/autonomy/artifacts — launch_session must
+    # be agnostic to the artifact layer; callers inject mounts explicitly.
+    assert not any("license.yaml" in s for s in cmd)

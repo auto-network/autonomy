@@ -23,6 +23,15 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = REPO_ROOT / "agents" / "projects.yaml"
+DEFAULT_ARTIFACTS_ROOT = REPO_ROOT / "data" / "artifacts"
+ARTIFACTS_MOUNT_DIR = "/etc/autonomy/artifacts"
+
+VALID_ARTIFACT_SCOPES = (
+    "personal-org",
+    "shared-org",
+    "personal-workspace",
+    "shared-workspace",
+)
 
 
 class ProjectConfigError(ValueError):
@@ -37,6 +46,29 @@ class RepoMount:
     url: str
     mount: str
     writable: bool = False
+
+
+@dataclass(frozen=True)
+class ArtifactSpec:
+    """A file the project expects to find inside the container.
+
+    Resolved from a layered filesystem under ``data/artifacts/`` based on
+    ``scope``. The resolved file is bind-mounted read-only at
+    ``/etc/autonomy/artifacts/{name}`` inside the container.
+    """
+    name: str
+    scope: str                               # personal-org | shared-org | personal-workspace | shared-workspace
+    required: bool = False
+    description: str = ""
+    help: str = ""
+
+
+@dataclass(frozen=True)
+class MissingArtifact:
+    """A required artifact whose resolved host path does not exist on disk."""
+    artifact: ArtifactSpec
+    path: Path
+    project_id: str
 
 
 @dataclass(frozen=True)
@@ -55,6 +87,7 @@ class ProjectConfig:
     default_tags: tuple[str, ...] = ()       # GRAPH_TAGS
     dispatch_labels: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
+    artifacts: tuple[ArtifactSpec, ...] = ()
 
 
 _lock = threading.Lock()
@@ -88,6 +121,32 @@ def _opt_str(raw: dict[str, Any], key: str) -> str | None:
     return str(value)
 
 
+def _parse_artifact(raw: Any, project_id: str, idx: int) -> ArtifactSpec:
+    if not isinstance(raw, dict):
+        raise ProjectConfigError(
+            f"project {project_id!r}: artifacts[{idx}] must be a mapping, "
+            f"got {type(raw).__name__}"
+        )
+    for required in ("name", "scope"):
+        if required not in raw:
+            raise ProjectConfigError(
+                f"project {project_id!r}: artifacts[{idx}] missing required field {required!r}"
+            )
+    scope = str(raw["scope"])
+    if scope not in VALID_ARTIFACT_SCOPES:
+        raise ProjectConfigError(
+            f"project {project_id!r}: artifacts[{idx}] has invalid scope {scope!r}; "
+            f"must be one of {', '.join(VALID_ARTIFACT_SCOPES)}"
+        )
+    return ArtifactSpec(
+        name=str(raw["name"]),
+        scope=scope,
+        required=bool(raw.get("required", False)),
+        description=str(raw.get("description", "")),
+        help=str(raw.get("help", "")),
+    )
+
+
 def _parse_project(project_id: str, raw: Any) -> ProjectConfig:
     if not isinstance(raw, dict):
         raise ProjectConfigError(f"project {project_id!r} must be a mapping")
@@ -117,6 +176,13 @@ def _parse_project(project_id: str, raw: Any) -> ProjectConfig:
     default_tags = tuple(str(t) for t in (raw.get("default_tags") or ()))
     dispatch_labels = tuple(str(l) for l in (raw.get("dispatch_labels") or ()))
 
+    artifacts_raw = raw.get("artifacts") or []
+    if not isinstance(artifacts_raw, list):
+        raise ProjectConfigError(f"project {project_id!r}: 'artifacts' must be a list")
+    artifacts = tuple(
+        _parse_artifact(a, project_id, i) for i, a in enumerate(artifacts_raw)
+    )
+
     name = str(raw.get("name") or project_id)
     description = str(raw.get("description", "")).strip()
 
@@ -134,6 +200,7 @@ def _parse_project(project_id: str, raw: Any) -> ProjectConfig:
         default_tags=default_tags,
         dispatch_labels=dispatch_labels,
         env=env,
+        artifacts=artifacts,
     )
 
 
@@ -208,3 +275,85 @@ def clear_cache() -> None:
         _cache = None
         _cache_path = None
         _cache_mtime = 0.0
+
+
+# ── Artifact resolution ────────────────────────────────────────────────
+
+def artifact_host_path(
+    artifact: ArtifactSpec,
+    project: ProjectConfig,
+    *,
+    artifacts_root: Path | str = DEFAULT_ARTIFACTS_ROOT,
+) -> Path:
+    """Resolve an artifact's host filesystem path under ``artifacts_root``.
+
+    Layering maps ``scope`` to a path of the form::
+
+        {root}/{shared|personal}/{org}[/{workspace}]/{name}
+
+    where ``org`` is ``project.graph_project`` and ``workspace`` is
+    ``project.id`` (included only for ``-workspace`` scopes).
+    """
+    root = Path(artifacts_root)
+    share = "shared" if artifact.scope.startswith("shared-") else "personal"
+    base = root / share / project.graph_project
+    if artifact.scope.endswith("-workspace"):
+        base = base / project.id
+    return base / artifact.name
+
+
+def validate_artifacts(
+    project: ProjectConfig,
+    *,
+    artifacts_root: Path | str = DEFAULT_ARTIFACTS_ROOT,
+) -> list[MissingArtifact]:
+    """Return required artifacts that are missing on disk."""
+    missing: list[MissingArtifact] = []
+    for art in project.artifacts:
+        if not art.required:
+            continue
+        path = artifact_host_path(art, project, artifacts_root=artifacts_root)
+        if not path.exists():
+            missing.append(MissingArtifact(artifact=art, path=path, project_id=project.id))
+    return missing
+
+
+def artifact_mounts(
+    project: ProjectConfig,
+    *,
+    artifacts_root: Path | str = DEFAULT_ARTIFACTS_ROOT,
+) -> dict[str, str]:
+    """Return ``{host_path: container_spec}`` for every artifact that exists.
+
+    Each artifact resolves to a read-only bind mount at
+    ``/etc/autonomy/artifacts/{name}``. Missing optional artifacts are
+    silently skipped — call :func:`validate_artifacts` first to enforce
+    required ones.
+    """
+    mounts: dict[str, str] = {}
+    for art in project.artifacts:
+        host = artifact_host_path(art, project, artifacts_root=artifacts_root)
+        if host.exists():
+            mounts[str(host)] = f"{ARTIFACTS_MOUNT_DIR}/{art.name}:ro"
+    return mounts
+
+
+def format_missing_artifact_error(missing: MissingArtifact, project: ProjectConfig) -> str:
+    """Human-friendly error string for a missing required artifact.
+
+    Used by the WebSocket path (rendered as red ANSI) and as the ``error``
+    field in the REST API response. The ``path`` shown is relative to
+    ``REPO_ROOT`` when possible, otherwise the absolute host path.
+    """
+    try:
+        shown = missing.path.relative_to(REPO_ROOT)
+    except ValueError:
+        shown = missing.path
+    label = missing.artifact.description or missing.artifact.name
+    lines = [
+        f'Cannot launch {project.name}: missing required artifact "{label}"',
+        f"  Expected at: {shown}",
+    ]
+    if missing.artifact.help:
+        lines.append(f"  Help: {missing.artifact.help}")
+    return "\n".join(lines)

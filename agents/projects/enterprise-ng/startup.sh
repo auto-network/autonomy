@@ -28,6 +28,12 @@ for d in /workspace/enterprise /workspace/enterprise_ng; do
     [ -d "$d" ] && git config --global --add safe.directory "$d"
 done
 
+# Expose the Anchore Enterprise license (provided via /etc/autonomy/artifacts/)
+# at the path enterprise_ng tooling expects — its repo root.
+if [ -f /etc/autonomy/artifacts/license.yaml ]; then
+    ln -sf /etc/autonomy/artifacts/license.yaml /workspace/enterprise_ng/license.yaml
+fi
+
 if [ -f /workspace/enterprise_ng/pyproject.toml ]; then
     echo "[startup] poetry install (enterprise_ng)..."
     cd /workspace/enterprise_ng && poetry install --with=dev,python-tools,test --no-interaction || {

@@ -3295,6 +3295,29 @@ async def api_session_create(request):
             return JSONResponse(
                 {"error": f"Project config error: {e}"}, status_code=500,
             )
+        missing_artifacts = project_config.validate_artifacts(proj)
+        if missing_artifacts:
+            first = missing_artifacts[0]
+            message = project_config.format_missing_artifact_error(first, proj)
+            logger.warning(
+                "api_session_create: missing required artifact  project=%s  name=%s  path=%s",
+                proj.id, first.artifact.name, first.path,
+            )
+            return JSONResponse(
+                {
+                    "error": message,
+                    "missing_artifacts": [
+                        {
+                            "name": m.artifact.name,
+                            "description": m.artifact.description,
+                            "help": m.artifact.help,
+                            "expected_path": str(m.path),
+                        }
+                        for m in missing_artifacts
+                    ],
+                },
+                status_code=400,
+            )
         try:
             project_mounts = prepare_session_mounts(proj, tmux_name)
         except WorkspaceError as e:
@@ -3305,6 +3328,7 @@ async def api_session_create(request):
             return JSONResponse(
                 {"error": f"Workspace prep failed: {e}"}, status_code=500,
             )
+        project_mounts.update(project_config.artifact_mounts(proj))
         meta: dict = {
             "tmux_session": tmux_name,
             "project": proj.id,
@@ -3606,6 +3630,29 @@ async def api_session_resume(request):
                 proj_for_resume = None
 
         if proj_for_resume is not None:
+            missing_artifacts = project_config.validate_artifacts(proj_for_resume)
+            if missing_artifacts:
+                first = missing_artifacts[0]
+                message = project_config.format_missing_artifact_error(first, proj_for_resume)
+                logger.warning(
+                    "api_session_resume: missing required artifact  project=%s  name=%s  path=%s",
+                    proj_for_resume.id, first.artifact.name, first.path,
+                )
+                return JSONResponse(
+                    {
+                        "error": message,
+                        "missing_artifacts": [
+                            {
+                                "name": m.artifact.name,
+                                "description": m.artifact.description,
+                                "help": m.artifact.help,
+                                "expected_path": str(m.path),
+                            }
+                            for m in missing_artifacts
+                        ],
+                    },
+                    status_code=400,
+                )
             try:
                 resume_mounts = prepare_session_mounts(proj_for_resume, tmux_name)
             except WorkspaceError as e:
@@ -3616,6 +3663,7 @@ async def api_session_resume(request):
                 return JSONResponse(
                     {"error": f"Workspace prep failed: {e}"}, status_code=500,
                 )
+            resume_mounts.update(project_config.artifact_mounts(proj_for_resume))
             meta: dict = {
                 "tmux_session": tmux_name,
                 "project": proj_for_resume.id,
