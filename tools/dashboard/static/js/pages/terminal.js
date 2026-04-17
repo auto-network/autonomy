@@ -63,14 +63,6 @@
         renderTerminal('autonomy-agent-claude');
       },
 
-      launchBash() {
-        renderTerminal('/bin/bash');
-      },
-
-      launchBashContainer() {
-        renderTerminal('autonomy-agent-bash');
-      },
-
       pillClick(id) {
         clearTimeout(this._clickTimer);
         this._clickTimer = setTimeout(() => {
