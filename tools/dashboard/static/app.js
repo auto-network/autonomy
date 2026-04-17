@@ -518,18 +518,59 @@ async function renderTerminalFragment() {
   _terminalFragmentInit = true;
 }
 
+// Map legacy cmd strings to /api/session/create request bodies.
+// ws_terminal is attach-only — all creation goes through REST.
+function _createBodyForCmd(cmd) {
+  if (!cmd) return null;
+  if (cmd === 'autonomy-agent-claude') return {};
+  if (cmd.startsWith('claude')) return {type: 'host'};
+  return null;
+}
+
 async function renderTerminal(cmd, attach) {
   // Auto-reconnect to previously active session when navigating back
   if (!cmd && !attach && activeTerminalId) {
     attach = activeTerminalId;
   }
+
+  // When given a cmd, create the session via REST first, then attach.
+  if (cmd && !attach) {
+    const body = _createBodyForCmd(cmd);
+    if (!body) {
+      console.warn('[renderTerminal] unsupported cmd:', cmd);
+      return;
+    }
+    try {
+      const res = await fetch('/api/session/create', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      if (!res.ok && res.status !== 202) {
+        const err = await res.json().catch(() => ({}));
+        console.warn('[renderTerminal] create failed:', err);
+        return;
+      }
+      const data = await res.json();
+      if (!data.tmux_name) {
+        console.warn('[renderTerminal] create returned no tmux_name');
+        return;
+      }
+      attach = data.tmux_name;
+      cmd = null;
+    } catch (err) {
+      console.warn('[renderTerminal] create error:', err);
+      return;
+    }
+  }
+
   pageTitle.textContent = attach ? `Attached: ${attach}` : 'Terminal';
 
   // Ensure Alpine chrome is rendered (idempotent after first call)
   await renderTerminalFragment();
 
   // If we already have an active connection to the requested session, just re-fit
-  if (!cmd && attach && activeTerm && activeWs && activeWs.readyState === WebSocket.OPEN
+  if (attach && activeTerm && activeWs && activeWs.readyState === WebSocket.OPEN
       && activeTerminalId === attach) {
     if (_terminalFitAddon) _terminalFitAddon.fit();
     activeTerm.focus();
@@ -540,12 +581,9 @@ async function renderTerminal(cmd, attach) {
   if (attach) {
     activeTerminalId = attach;
     if (window._terminalPage) window._terminalPage.setActiveId(attach);
-  } else if (cmd) {
-    activeTerminalId = null;
-    if (window._terminalPage) window._terminalPage.setActiveId(null);
   }
 
-  if (!attach && !cmd) return;
+  if (!attach) return;
 
   // Need to create or switch session — destroy previous
   destroyTerminal();
@@ -579,13 +617,9 @@ async function renderTerminal(cmd, attach) {
   term.open(termContainer);
   fitAddon.fit();
 
-  // Build WebSocket URL
+  // Build WebSocket URL — attach-only, ws_terminal rejects other params
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  let wsUrl = `${proto}//${location.host}/ws/terminal`;
-  const params = new URLSearchParams();
-  if (attach) params.set('attach', attach);
-  else if (cmd) params.set('cmd', cmd);
-  if (params.toString()) wsUrl += '?' + params.toString();
+  const wsUrl = `${proto}//${location.host}/ws/terminal?attach=${encodeURIComponent(attach)}`;
 
   const ws = new WebSocket(wsUrl);
   activeWs = ws;
@@ -600,16 +634,7 @@ async function renderTerminal(cmd, attach) {
     if (dims) {
       ws.send(`\x1b[8;${dims.rows};${dims.cols}t`);
     }
-    // For new sessions, detect the newly created terminal
-    if (!activeTerminalId) {
-      const terms = await api('/api/terminals');
-      if (Array.isArray(terms) && terms.length > 0) {
-        const newest = terms.reduce((a, b) => (b.started || 0) > (a.started || 0) ? b : a);
-        activeTerminalId = newest.id;
-        if (window._terminalPage) window._terminalPage.setActiveId(newest.id);
-      }
-    }
-    // Refresh pill bar now that tmux session exists
+    // Refresh pill bar so the new session appears
     if (window._terminalPage) await window._terminalPage.refresh();
     term.focus();
   };
