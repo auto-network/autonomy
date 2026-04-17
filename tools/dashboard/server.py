@@ -44,6 +44,8 @@ from agents.dispatch_db import (
     clear_paused, is_paused, get_pause_reason,
 )
 from agents.session_launcher import launch_session
+from agents import project_config
+from agents.workspace_manager import WorkspaceError, prepare_session_mounts
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao.mock import (
         create_design, get_design, submit_results,
@@ -1405,10 +1407,28 @@ async def api_context(request):
     return JSONResponse({"content": stdout, "error": stderr if rc != 0 else None})
 
 async def api_projects(request):
-    if os.environ.get("DASHBOARD_MOCK"):
-        return JSONResponse({"results": "", "error": None})
-    stdout, stderr, rc = await run_cli(["graph", "projects"])
-    return JSONResponse({"results": stdout, "error": stderr if rc != 0 else None})
+    """Return the workspace registry — one entry per containerized project.
+
+    Each entry carries the fields the frontend needs for grouping, display,
+    and routing: ``id``, ``name``, ``description``, ``graph_project`` (the
+    org the workspace belongs to), and ``dind`` (whether Docker-in-Docker
+    is enabled — drives the UI badge).
+    """
+    try:
+        projects = project_config.load_projects()
+    except project_config.ProjectConfigError as e:
+        return JSONResponse({"projects": [], "error": str(e)}, status_code=500)
+    entries = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "graph_project": p.graph_project,
+            "dind": p.dind,
+        }
+        for p in projects.values()
+    ]
+    return JSONResponse({"projects": entries})
 
 async def api_stats(request):
     if os.environ.get("DASHBOARD_MOCK"):
@@ -3744,9 +3764,10 @@ async def ws_terminal(websocket: WebSocket):
     else:
         # Create a new tmux session
         cmd_str = params.get("cmd", "/bin/bash")
+        project_name = params.get("project")
         if not term_id:
             # Unique, type-prefixed naming — no reuse ever
-            is_container_cmd_hint = "autonomy-agent" in cmd_str
+            is_container_cmd_hint = "autonomy-agent" in cmd_str or project_name
             prefix = "auto" if is_container_cmd_hint else "host"
             term_id = f"{prefix}-{time.strftime('%m%d-%H%M%S')}"
             # Handle sub-second collisions
@@ -3755,8 +3776,68 @@ async def ws_terminal(websocket: WebSocket):
                 term_id = f"{prefix}-{time.strftime('%m%d-%H%M%S')}-{random.randint(10,99)}"
         tmux_name = term_id
 
-        # Resolve special container commands
-        if cmd_str == "autonomy-agent-claude":
+        # Project-scoped container session — takes precedence over the
+        # legacy autonomy-agent-claude path. Uses the project registry to
+        # pick image, mounts, startup script, graph scope, etc.
+        if project_name:
+            try:
+                proj = project_config.get_project(project_name)
+            except KeyError:
+                await websocket.send_text(
+                    f"\r\n\x1b[31mUnknown project '{project_name}'\x1b[0m\r\n"
+                )
+                await websocket.close()
+                return
+            except project_config.ProjectConfigError as e:
+                await websocket.send_text(
+                    f"\r\n\x1b[31mProject config error: {e}\x1b[0m\r\n"
+                )
+                await websocket.close()
+                return
+            try:
+                project_mounts = prepare_session_mounts(proj, tmux_name)
+            except WorkspaceError as e:
+                logger.error("ws_terminal: workspace prep failed  project=%s  err=%s", proj.id, e)
+                await websocket.send_text(
+                    f"\r\n\x1b[31mWorkspace prep failed: {e}\x1b[0m\r\n"
+                )
+                await websocket.close()
+                return
+            meta: dict = {
+                "tmux_session": tmux_name,
+                "project": proj.id,
+                "graph_project": proj.graph_project,
+            }
+            if proj.default_tags:
+                meta["graph_tags"] = list(proj.default_tags)
+            extra_env = dict(proj.env) if proj.env else None
+            global_claude_md = (_REPO_ROOT / proj.claude_md) if proj.claude_md else None
+            startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
+            working_dir = proj.working_dir or "/workspace/repo"
+            launched = launch_session(
+                session_type="terminal",
+                name=tmux_name,
+                prompt=None,
+                detach=False,
+                image=proj.image,
+                mounts=project_mounts or None,
+                metadata=meta,
+                extra_env=extra_env,
+                global_claude_md=global_claude_md,
+                startup_script=startup_script,
+                privileged=proj.dind,
+                working_dir=working_dir,
+            )
+            if launched:
+                cmd_str = launched
+            else:
+                await websocket.send_text(
+                    f"\r\n\x1b[31mlaunch_session failed for project '{proj.id}'\x1b[0m\r\n"
+                )
+                await websocket.close()
+                return
+        # Resolve special container commands (no-project backward compat)
+        elif cmd_str == "autonomy-agent-claude":
             # launch_session returns a shell-safe docker run -it --rm command string
             launched = launch_session(
                 session_type="terminal",

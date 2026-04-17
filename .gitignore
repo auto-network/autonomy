@@ -4,6 +4,10 @@ __pycache__/
 *.pyc
 *.egg-info/
 
+# Managed project clones + per-session worktrees (workspace_manager)
+data/repos/
+data/worktrees/
+
 # Databases (derived, regenerable)
 data/graph.db
 data/graph.db-wal
