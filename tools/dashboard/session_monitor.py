@@ -223,6 +223,7 @@ class _TailState:
     dir_watch_descriptor: int | None = None   # IN_CREATE on session directory
     # Activity state tracking — pending tool calls and last entry type
     pending_tool_ids: set = field(default_factory=set)
+    completed_tool_ids: set = field(default_factory=set)
     last_entry_type: str = ""
 
 
@@ -678,9 +679,13 @@ class SessionMonitor:
         for entry in new_entries:
             etype = entry.get("type", "")
             if etype == "tool_use" and entry.get("tool_id"):
-                ts.pending_tool_ids.add(entry["tool_id"])
+                tid = entry["tool_id"]
+                if tid not in ts.completed_tool_ids:
+                    ts.pending_tool_ids.add(tid)
             elif etype in ("tool_result", "semantic_bash") and entry.get("tool_id"):
-                ts.pending_tool_ids.discard(entry["tool_id"])
+                tid = entry["tool_id"]
+                ts.pending_tool_ids.discard(tid)
+                ts.completed_tool_ids.add(tid)
             if etype:
                 ts.last_entry_type = etype
 
