@@ -45,12 +45,4 @@ if [ -f /workspace/enterprise_ng/pyproject.toml ]; then
     }
 fi
 
-# Install the on-demand services launcher so the agent can boot test
-# deps + component_catalog with a single command.
-if [ -f /workspace/repo/agents/projects/enterprise-ng/start-ng-services.sh ]; then
-    sudo install -m 0755 -D \
-        /workspace/repo/agents/projects/enterprise-ng/start-ng-services.sh \
-        /etc/autonomy/bin/start-ng-services
-fi
-
 echo "[startup] $(date -u +%FT%TZ) enterprise-ng startup complete"
