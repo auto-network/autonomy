@@ -28,6 +28,18 @@
 #                     Auto-applied to notes; influences search ranking.
 #   dispatch_labels   Bead labels that route to this project's image.
 #   env               Extra environment variables passed into the container.
+#   artifacts         Files the project expects inside the container. Each entry:
+#                       name         File name (also the path under
+#                                    /etc/autonomy/artifacts/ inside the container).
+#                       scope        Layering scope — one of:
+#                                      personal-org       data/artifacts/personal/{org}/
+#                                      shared-org         data/artifacts/shared/{org}/
+#                                      personal-workspace data/artifacts/personal/{org}/{workspace}/
+#                                      shared-workspace   data/artifacts/shared/{org}/{workspace}/
+#                                    where {org} = graph_project, {workspace} = project id.
+#                       required     true -> launch fails if file is missing.
+#                       description  Human-readable label (shown in launch errors).
+#                       help         Instructions for obtaining the file.
 
 projects:
 
@@ -80,3 +92,9 @@ projects:
     dispatch_labels: [enterprise-ng]
     env:
       ANCHORE_CONFIG_PATH: /workspace/enterprise_ng/config/default_config.yaml
+    artifacts:
+      - name: license.yaml
+        scope: personal-org
+        required: true
+        description: Anchore Enterprise license
+        help: "Generate at https://license.anchore.io — save to data/artifacts/personal/anchore/license.yaml"

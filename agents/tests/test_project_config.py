@@ -274,3 +274,242 @@ def test_shipped_config_enterprise_ng():
     mounts = {r.mount: r for r in p.repos}
     assert mounts["/workspace/enterprise"].writable is False
     assert mounts["/workspace/enterprise_ng"].writable is True
+
+
+def test_shipped_config_enterprise_ng_has_license_artifact():
+    p = pc.get_project("enterprise-ng", path=pc.DEFAULT_CONFIG_PATH)
+    assert len(p.artifacts) == 1
+    art = p.artifacts[0]
+    assert art.name == "license.yaml"
+    assert art.scope == "personal-org"
+    assert art.required is True
+    assert "license" in art.description.lower()
+    assert "license.anchore.io" in art.help
+
+
+# ── Artifact parsing ──────────────────────────────────────────────
+
+def test_artifacts_parse_all_fields(tmp_path):
+    path = _write_config(tmp_path, """
+        projects:
+          p:
+            image: img:tag
+            graph_project: org
+            artifacts:
+              - name: token
+                scope: shared-workspace
+                required: true
+                description: API token
+                help: Get from vault
+    """)
+    p = pc.load_projects(path)["p"]
+    assert len(p.artifacts) == 1
+    a = p.artifacts[0]
+    assert a.name == "token"
+    assert a.scope == "shared-workspace"
+    assert a.required is True
+    assert a.description == "API token"
+    assert a.help == "Get from vault"
+
+
+def test_artifacts_defaults(tmp_path):
+    path = _write_config(tmp_path, """
+        projects:
+          p:
+            image: img:tag
+            graph_project: org
+            artifacts:
+              - name: config.yaml
+                scope: personal-org
+    """)
+    a = pc.load_projects(path)["p"].artifacts[0]
+    assert a.required is False
+    assert a.description == ""
+    assert a.help == ""
+
+
+def test_artifacts_absent_gives_empty_tuple(tmp_path):
+    path = _write_config(tmp_path, """
+        projects:
+          p:
+            image: img:tag
+            graph_project: org
+    """)
+    assert pc.load_projects(path)["p"].artifacts == ()
+
+
+def test_artifact_invalid_scope_errors(tmp_path):
+    path = _write_config(tmp_path, """
+        projects:
+          p:
+            image: img:tag
+            graph_project: org
+            artifacts:
+              - name: thing
+                scope: bogus
+    """)
+    with pytest.raises(pc.ProjectConfigError, match="invalid scope"):
+        pc.load_projects(path)
+
+
+def test_artifact_missing_name_errors(tmp_path):
+    path = _write_config(tmp_path, """
+        projects:
+          p:
+            image: img:tag
+            graph_project: org
+            artifacts:
+              - scope: shared-org
+    """)
+    with pytest.raises(pc.ProjectConfigError, match="missing required field 'name'"):
+        pc.load_projects(path)
+
+
+def test_artifacts_must_be_list(tmp_path):
+    path = _write_config(tmp_path, """
+        projects:
+          p:
+            image: img:tag
+            graph_project: org
+            artifacts:
+              name: token
+              scope: shared-org
+    """)
+    with pytest.raises(pc.ProjectConfigError, match="'artifacts' must be a list"):
+        pc.load_projects(path)
+
+
+# ── Artifact path resolution ──────────────────────────────────────
+
+def _proj(**overrides):
+    defaults = dict(
+        id="wks",
+        name="wks",
+        description="",
+        image="img",
+        graph_project="org",
+    )
+    defaults.update(overrides)
+    return pc.ProjectConfig(**defaults)
+
+
+def test_resolve_personal_org(tmp_path):
+    p = _proj()
+    art = pc.ArtifactSpec(name="license.yaml", scope="personal-org")
+    assert pc.artifact_host_path(art, p, artifacts_root=tmp_path) == tmp_path / "personal" / "org" / "license.yaml"
+
+
+def test_resolve_shared_org(tmp_path):
+    p = _proj()
+    art = pc.ArtifactSpec(name="ca.pem", scope="shared-org")
+    assert pc.artifact_host_path(art, p, artifacts_root=tmp_path) == tmp_path / "shared" / "org" / "ca.pem"
+
+
+def test_resolve_personal_workspace(tmp_path):
+    p = _proj()
+    art = pc.ArtifactSpec(name="token", scope="personal-workspace")
+    assert pc.artifact_host_path(art, p, artifacts_root=tmp_path) == tmp_path / "personal" / "org" / "wks" / "token"
+
+
+def test_resolve_shared_workspace(tmp_path):
+    p = _proj()
+    art = pc.ArtifactSpec(name="setup.yaml", scope="shared-workspace")
+    assert pc.artifact_host_path(art, p, artifacts_root=tmp_path) == tmp_path / "shared" / "org" / "wks" / "setup.yaml"
+
+
+# ── validate_artifacts ────────────────────────────────────────────
+
+def test_validate_empty_when_no_artifacts(tmp_path):
+    assert pc.validate_artifacts(_proj(), artifacts_root=tmp_path) == []
+
+
+def test_validate_returns_missing_required(tmp_path):
+    art = pc.ArtifactSpec(name="license.yaml", scope="personal-org", required=True, description="License", help="Get it")
+    p = _proj(artifacts=(art,))
+    missing = pc.validate_artifacts(p, artifacts_root=tmp_path)
+    assert len(missing) == 1
+    assert missing[0].artifact is art
+    assert missing[0].path == tmp_path / "personal" / "org" / "license.yaml"
+    assert missing[0].project_id == "wks"
+
+
+def test_validate_skips_optional_missing(tmp_path):
+    art = pc.ArtifactSpec(name="optional.yaml", scope="shared-org", required=False)
+    p = _proj(artifacts=(art,))
+    assert pc.validate_artifacts(p, artifacts_root=tmp_path) == []
+
+
+def test_validate_passes_when_present(tmp_path):
+    (tmp_path / "personal" / "org").mkdir(parents=True)
+    (tmp_path / "personal" / "org" / "license.yaml").write_text("x")
+    art = pc.ArtifactSpec(name="license.yaml", scope="personal-org", required=True)
+    p = _proj(artifacts=(art,))
+    assert pc.validate_artifacts(p, artifacts_root=tmp_path) == []
+
+
+# ── artifact_mounts ───────────────────────────────────────────────
+
+def test_mounts_skip_missing_optional(tmp_path):
+    art = pc.ArtifactSpec(name="optional", scope="shared-org", required=False)
+    p = _proj(artifacts=(art,))
+    assert pc.artifact_mounts(p, artifacts_root=tmp_path) == {}
+
+
+def test_mounts_include_present(tmp_path):
+    (tmp_path / "personal" / "org").mkdir(parents=True)
+    lic = tmp_path / "personal" / "org" / "license.yaml"
+    lic.write_text("key: value")
+    art = pc.ArtifactSpec(name="license.yaml", scope="personal-org", required=True)
+    p = _proj(artifacts=(art,))
+    mounts = pc.artifact_mounts(p, artifacts_root=tmp_path)
+    assert mounts == {str(lic): "/etc/autonomy/artifacts/license.yaml:ro"}
+
+
+def test_mounts_multiple_artifacts(tmp_path):
+    (tmp_path / "personal" / "org").mkdir(parents=True)
+    (tmp_path / "shared" / "org" / "wks").mkdir(parents=True)
+    lic = tmp_path / "personal" / "org" / "license.yaml"
+    lic.write_text("a")
+    setup = tmp_path / "shared" / "org" / "wks" / "setup.json"
+    setup.write_text("b")
+    p = _proj(artifacts=(
+        pc.ArtifactSpec(name="license.yaml", scope="personal-org", required=True),
+        pc.ArtifactSpec(name="setup.json", scope="shared-workspace"),
+    ))
+    mounts = pc.artifact_mounts(p, artifacts_root=tmp_path)
+    assert mounts == {
+        str(lic): "/etc/autonomy/artifacts/license.yaml:ro",
+        str(setup): "/etc/autonomy/artifacts/setup.json:ro",
+    }
+
+
+# ── error formatting ──────────────────────────────────────────────
+
+def test_format_missing_artifact_error_uses_description_and_help(tmp_path):
+    art = pc.ArtifactSpec(
+        name="license.yaml",
+        scope="personal-org",
+        required=True,
+        description="Anchore Enterprise license",
+        help="Generate at https://license.anchore.io",
+    )
+    p = _proj(id="enterprise-ng", name="Enterprise NG", artifacts=(art,))
+    missing = pc.MissingArtifact(
+        artifact=art,
+        path=tmp_path / "personal" / "org" / "license.yaml",
+        project_id="enterprise-ng",
+    )
+    msg = pc.format_missing_artifact_error(missing, p)
+    assert "Enterprise NG" in msg
+    assert '"Anchore Enterprise license"' in msg
+    assert "Expected at:" in msg
+    assert "Help: Generate at https://license.anchore.io" in msg
+
+
+def test_format_missing_artifact_error_falls_back_to_name(tmp_path):
+    art = pc.ArtifactSpec(name="token", scope="shared-org", required=True)
+    p = _proj(name="p", artifacts=(art,))
+    m = pc.MissingArtifact(artifact=art, path=tmp_path / "x", project_id="p")
+    msg = pc.format_missing_artifact_error(m, p)
+    assert '"token"' in msg
+    assert "Help:" not in msg
