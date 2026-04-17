@@ -78,3 +78,5 @@ projects:
     graph_project: anchore
     default_tags: [enterprise, enterprise-ng]
     dispatch_labels: [enterprise-ng]
+    env:
+      ANCHORE_CONFIG_PATH: /workspace/enterprise_ng/config/default_config.yaml
