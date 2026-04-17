@@ -55,70 +55,65 @@ def _derive_session_type(meta: dict, file_path: str) -> str:
 
 
 def get_recent_sessions(limit: int = 20) -> list[dict]:
-    """Fetch recent session sources from graph.db.
+    """Fetch recently-dead sessions from dashboard.db.
 
-    Returns enriched dicts with session_uuid, file_path, and resumable
-    (whether the JSONL file still exists on disk) so the frontend can
-    show/hide a Resume button.
+    Returns the same field shape as active session cards so the frontend
+    can render them with the same partial.  Falls back to graph.db only
+    for sessions that predate dashboard.db tracking.
     """
-    if not _GRAPH_DB.exists():
-        return []
+    import json as _json
+    from tools.dashboard.dao.dashboard_db import get_conn
+
     try:
-        conn = sqlite3.connect(str(_GRAPH_DB))
-        conn.row_factory = sqlite3.Row
+        conn = get_conn()
         rows = conn.execute(
-            "SELECT id, type, project, title, created_at, file_path, metadata"
-            " FROM sources"
-            " WHERE type = 'session' ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM tmux_sessions"
+            " WHERE is_live = 0"
+            " ORDER BY last_activity DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        conn.close()
-        import json as _json
-
-        # Collect live session identifiers to filter out active sessions
-        live_uuids: set[str] = set()
-        live_paths: set[str] = set()
-        try:
-            for ls in _db_live_sessions():
-                if ls.get("session_uuid"):
-                    live_uuids.add(ls["session_uuid"])
-                if ls.get("jsonl_path"):
-                    live_paths.add(ls["jsonl_path"])
-        except Exception:
-            pass  # dashboard.db may not be initialised; skip filtering
-
-        results = []
-        for r in rows:
-            meta = {}
-            if r["metadata"]:
-                try:
-                    meta = _json.loads(r["metadata"])
-                except Exception:
-                    pass
-            file_path = r["file_path"] or ""
-            session_uuid = meta.get("session_uuid", "")
-
-            # Skip sessions that are currently active
-            if session_uuid and session_uuid in live_uuids:
-                continue
-            if file_path and file_path in live_paths:
-                continue
-
-            session_type = _derive_session_type(meta, file_path)
-            results.append({
-                "id": r["id"],
-                "type": r["type"],
-                "date": (r["created_at"] or "")[:10],
-                "title": r["title"] or "",
-                "project": f"[{r['project']}]" if r["project"] else "",
-                "session_uuid": session_uuid,
-                "file_path": file_path,
-                "resumable": bool(file_path and Path(file_path).exists()),
-                "session_type": session_type,
-                "total_tokens": meta.get("total_input_tokens", 0) + meta.get("total_output_tokens", 0),
-                "total_turns": meta.get("total_turns", 0),
-                "created_at": r["created_at"] or "",
-            })
-        return results
     except Exception:
         return []
+
+    results = []
+    for row in rows:
+        r = dict(row)
+        tmux_name = r["tmux_name"]
+        jsonl_path = r.get("jsonl_path") or ""
+        session_type = r.get("type") or "container"
+        # Map dashboard type to the card's session_type vocabulary
+        if r.get("bead_id"):
+            card_type = "dispatch"
+        elif session_type == "host":
+            card_type = "interactive"
+        else:
+            card_type = "terminal"
+
+        topics = []
+        try:
+            topics = _json.loads(r.get("topics") or "[]")
+        except Exception:
+            pass
+
+        results.append({
+            "session_id": tmux_name,
+            "tmux_session": tmux_name,
+            "label": r.get("label") or (r.get("last_message") or "")[:80] or tmux_name,
+            "session_type": card_type,
+            "type": session_type,
+            "is_live": False,
+            "project": r.get("project") or "",
+            "topics": topics,
+            "role": r.get("role") or "",
+            "entry_count": r.get("entry_count") or 0,
+            "context_tokens": r.get("context_tokens") or 0,
+            "last_activity": r.get("last_activity") or r.get("created_at") or 0,
+            "created_at": r.get("created_at") or 0,
+            "bead_id": r.get("bead_id") or "",
+            "graph_source_id": r.get("graph_source_id") or "",
+            "session_uuid": r.get("session_uuid") or "",
+            "file_path": jsonl_path,
+            "resumable": bool(jsonl_path and Path(jsonl_path).exists()),
+            "activity_state": r.get("activity_state") or "dead",
+        })
+    return results

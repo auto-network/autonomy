@@ -336,24 +336,26 @@
           if (!Array.isArray(data)) { this.recent = []; return; }
           this.recent = data.map(function(r) {
             return {
-              id: r.id,
-              session_id: r.id,
-              label: r.title || '',
+              id: r.session_id || r.tmux_session,
+              session_id: r.session_id || r.tmux_session,
+              label: r.label || '',
               session_type: r.session_type || 'interactive',
               type: r.type || 'container',
               is_live: false,
               project: r.project || '',
-              topics: [],
+              topics: r.topics || [],
               latest: '',
-              entry_count: r.total_turns || 0,
-              context_tokens: r.total_tokens || 0,
-              last_activity: r.created_at ? Math.round(new Date(r.created_at).getTime() / 1000) : 0,
+              entry_count: r.entry_count || 0,
+              context_tokens: r.context_tokens || 0,
+              last_activity: r.last_activity || 0,
               created_at: r.created_at || '',
-              tmux_session: r.id,
+              tmux_session: r.tmux_session || r.session_id,
               nag_enabled: false,
-              role: '',
+              role: r.role || '',
               resumable: r.resumable || false,
-              bead_id: '',
+              bead_id: r.bead_id || '',
+              graph_source_id: r.graph_source_id || '',
+              activity_state: r.activity_state || 'dead',
             };
           });
         } catch (e) {
@@ -363,8 +365,10 @@
 
       navigate(s) {
         if (window.actionSheet.isOpen()) return;
-        var path = '/session/' + encodeURIComponent(s.project) + '/' + s.session_id
-          + '?tmux=' + encodeURIComponent(s.session_id);
+        var tmux = s.tmux_session || s.session_id;
+        var project = s.project || '';
+        var path = '/session/' + encodeURIComponent(project) + '/' + encodeURIComponent(tmux)
+          + '?tmux=' + encodeURIComponent(tmux);
         navigateTo(path);
       },
 
