@@ -3233,17 +3233,27 @@ async def _resolve_primer(primer: str) -> str | None:
 
 
 async def api_session_create(request):
-    """Create a new container session and block until ready.
+    """Create a new session (container, project, or host) and return its tmux name.
 
     POST /api/session/create
-    Body: {"type": "container", "primer": "graph://..."} (all optional)
+    Body: {
+        "project": "enterprise-ng",   # optional — launches workspace container
+        "type": "host" | "container", # optional — defaults to container
+        "primer": "graph://...",      # optional — graph URL whose content is
+                                      #            injected as first message
+    }
     Returns: {"tmux_name": str, "label": str, "type": str}
-    Blocks up to 30s for session to become live.
 
-    If primer is provided, the graph note content is injected as the first
-    message once the container is ready.  If primer is omitted or resolution
-    fails, a simple "Hello" is sent instead so Claude Code starts writing
-    JSONL immediately.
+    Semantics:
+      • `project` set → load workspace config, prepare mounts/worktrees,
+        launch image with DinD/graph scoping via project registry.
+      • `type == "host"` → start `claude --dangerously-skip-permissions` on
+        the host, then watch for its JSONL to appear.
+      • neither → default `autonomy-agent:dashboard` container session.
+
+    Container sessions block up to 30s for the monitor to mark them live with
+    a resolved JSONL path.  Host sessions return immediately — their JSONL is
+    discovered asynchronously by `_watch_for_host_session_jsonl`.
     """
     body = {}
     try:
@@ -3252,80 +3262,194 @@ async def api_session_create(request):
         pass
 
     session_type = body.get("type", "container")
-    if session_type not in ("container",):
-        return JSONResponse({"error": "Only container sessions supported"}, status_code=400)
+    project_name = body.get("project")
+    primer_url = body.get("primer")
 
-    primer_url = body.get("primer")  # optional graph:// URL
+    if session_type not in ("container", "host"):
+        return JSONResponse(
+            {"error": "type must be 'container' or 'host'"}, status_code=400,
+        )
+    if project_name and session_type == "host":
+        return JSONResponse(
+            {"error": "project cannot be combined with type='host'"},
+            status_code=400,
+        )
 
-    # Generate unique tmux name
-    tmux_name = f"auto-{time.strftime('%m%d-%H%M%S')}"
+    # ── Generate unique tmux name ───────────────────────────────
+    prefix = "host" if session_type == "host" else "auto"
+    tmux_name = f"{prefix}-{time.strftime('%m%d-%H%M%S')}"
     if dashboard_db.session_exists(tmux_name):
         import random
-        tmux_name = f"auto-{time.strftime('%m%d-%H%M%S')}-{random.randint(10, 99)}"
+        tmux_name = f"{prefix}-{time.strftime('%m%d-%H%M%S')}-{random.randint(10, 99)}"
 
-    # Build docker command via launch_session
-    docker_cmd = launch_session(
-        session_type="terminal",
-        name=tmux_name,
-        prompt=None,
-        detach=False,
-        image="autonomy-agent:dashboard",
-        metadata={"tmux_session": tmux_name},
-        global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
+    # ── Build the command to run inside tmux ───────────────────
+    proj = None
+    if project_name:
+        try:
+            proj = project_config.get_project(project_name)
+        except KeyError:
+            return JSONResponse(
+                {"error": f"Unknown project '{project_name}'"}, status_code=400,
+            )
+        except project_config.ProjectConfigError as e:
+            return JSONResponse(
+                {"error": f"Project config error: {e}"}, status_code=500,
+            )
+        try:
+            project_mounts = prepare_session_mounts(proj, tmux_name)
+        except WorkspaceError as e:
+            logger.error(
+                "api_session_create: workspace prep failed  project=%s  err=%s",
+                proj.id, e,
+            )
+            return JSONResponse(
+                {"error": f"Workspace prep failed: {e}"}, status_code=500,
+            )
+        meta: dict = {
+            "tmux_session": tmux_name,
+            "project": proj.id,
+            "graph_project": proj.graph_project,
+        }
+        if proj.default_tags:
+            meta["graph_tags"] = list(proj.default_tags)
+        extra_env = dict(proj.env) if proj.env else None
+        global_claude_md = (_REPO_ROOT / proj.claude_md) if proj.claude_md else None
+        startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
+        working_dir = proj.working_dir or "/workspace/repo"
+        cmd_str = launch_session(
+            session_type="terminal",
+            name=tmux_name,
+            prompt=None,
+            detach=False,
+            image=proj.image,
+            mounts=project_mounts or None,
+            metadata=meta,
+            extra_env=extra_env,
+            global_claude_md=global_claude_md,
+            startup_script=startup_script,
+            privileged=proj.dind,
+            working_dir=working_dir,
+        )
+        if not cmd_str:
+            return JSONResponse(
+                {"error": f"launch_session failed for project '{proj.id}'"},
+                status_code=500,
+            )
+        is_container = True
+    elif session_type == "host":
+        model = "claude-opus-4-7[1m]"
+        cmd_str = (
+            f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
+            f"claude --dangerously-skip-permissions --model {model}"
+        )
+        is_container = False
+    else:
+        cmd_str = launch_session(
+            session_type="terminal",
+            name=tmux_name,
+            prompt=None,
+            detach=False,
+            image="autonomy-agent:dashboard",
+            metadata={"tmux_session": tmux_name},
+            global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
+        )
+        if not cmd_str:
+            return JSONResponse({"error": "Failed to resolve credentials"}, status_code=500)
+        is_container = True
+
+    # ── Launch tmux ─────────────────────────────────────────────
+    tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40"]
+    if not is_container:
+        tmux_cmd += ["-c", str(_REPO_ROOT)]
+    tmux_cmd.append(cmd_str)
+    result = subprocess.run(
+        tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True,
     )
-    if not docker_cmd:
-        return JSONResponse({"error": "Failed to resolve credentials"}, status_code=500)
-
-    # Create detached tmux session running the container
-    tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40", docker_cmd]
-    result = subprocess.run(tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True)
     if result.returncode != 0:
-        logger.error("api_session_create: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
-                     tmux_name, result.returncode, result.stderr.decode().strip())
-        return JSONResponse({"error": f"tmux creation failed: {result.stderr.decode().strip()}"}, status_code=500)
+        logger.error(
+            "api_session_create: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
+            tmux_name, result.returncode, result.stderr.decode().strip(),
+        )
+        return JSONResponse(
+            {"error": f"tmux creation failed: {result.stderr.decode().strip()}"},
+            status_code=500,
+        )
 
-    # Enable OSC 52 + mouse + passthrough
+    # Enable OSC 52 + mouse + passthrough for all sessions
     subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"], capture_output=True)
     subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"], capture_output=True)
     subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"], capture_output=True)
 
-    # Register with session monitor so tailer can resolve JSONL
-    agent_runs = _REPO_ROOT / "data" / "agent-runs"
-    run_dirs = sorted(agent_runs.glob(f"{tmux_name}-*"), key=lambda p: p.stat().st_mtime, reverse=True) if agent_runs.exists() else []
-    sess_dir = run_dirs[0] / "sessions" if run_dirs else agent_runs
-    await session_monitor.register(
-        tmux_name=tmux_name,
-        session_type="container",
-        project=sess_dir.name,
-        jsonl_path=sess_dir,
-        seed_message="Starting...",
-    )
+    # ── Register with session monitor ───────────────────────────
+    if is_container:
+        agent_runs = _REPO_ROOT / "data" / "agent-runs"
+        run_dirs = sorted(
+            agent_runs.glob(f"{tmux_name}-*"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ) if agent_runs.exists() else []
+        sess_dir = run_dirs[0] / "sessions" if run_dirs else agent_runs
+        monitor_project = proj.id if proj else sess_dir.name
+        await session_monitor.register(
+            tmux_name=tmux_name,
+            session_type="container",
+            project=monitor_project,
+            jsonl_path=sess_dir,
+            seed_message="Starting..." if not primer_url else "",
+        )
+    else:
+        project_folder = str(_REPO_ROOT).replace("/", "-")
+        projects_dir = Path.home() / ".claude" / "projects" / project_folder
+        await session_monitor.register(
+            tmux_name=tmux_name,
+            session_type="host",
+            project=project_folder,
+        )
+        asyncio.create_task(
+            _watch_for_host_session_jsonl(projects_dir, tmux_name),
+        )
 
-    # Resolve primer content (best-effort) and schedule first-message injection
-    first_message = "Hello"
-    primer_error = None
-    if primer_url:
-        resolved = await _resolve_primer(primer_url)
-        if resolved:
-            first_message = resolved
-        else:
-            primer_error = f"Could not resolve primer {primer_url!r}, falling back to hello"
-            logger.warning("api_session_create: %s", primer_error)
+    # ── Resolve primer (container only) ─────────────────────────
+    first_message: str | None = None
+    primer_error: str | None = None
+    if is_container:
+        first_message = "Hello"
+        if primer_url:
+            resolved = await _resolve_primer(primer_url)
+            if resolved:
+                first_message = resolved
+            else:
+                primer_error = f"Could not resolve primer {primer_url!r}, falling back to hello"
+                logger.warning("api_session_create: %s", primer_error)
 
-    async def _inject_first_message():
-        """Wait for container boot then inject the first message."""
-        await asyncio.sleep(5)
-        try:
-            await tmux_send(tmux_name, first_message)
-            logger.info("api_session_create: injected first message into %s  len=%d  primer=%s",
-                        tmux_name, len(first_message), bool(primer_url and not primer_error))
-        except Exception:
-            logger.warning("api_session_create: failed to inject first message into %s",
-                           tmux_name, exc_info=True)
+    if first_message:
+        async def _inject_first_message():
+            await asyncio.sleep(5)
+            try:
+                await tmux_send(tmux_name, first_message)
+                logger.info(
+                    "api_session_create: injected first message into %s  len=%d  primer=%s",
+                    tmux_name, len(first_message), bool(primer_url and not primer_error),
+                )
+            except Exception:
+                logger.warning(
+                    "api_session_create: failed to inject first message into %s",
+                    tmux_name, exc_info=True,
+                )
 
-    asyncio.create_task(_inject_first_message())
+        asyncio.create_task(_inject_first_message())
 
-    # Poll dashboard.db until session is live with jsonl_path
+    response_type = "container" if is_container else "host"
+
+    # ── Host sessions: return immediately; watcher resolves JSONL ──
+    if not is_container:
+        return JSONResponse({
+            "tmux_name": tmux_name,
+            "label": "",
+            "type": response_type,
+        })
+
+    # ── Container sessions: poll for is_live + jsonl_path ──
     deadline = time.time() + 30
     while time.time() < deadline:
         row = dashboard_db.get_session(tmux_name)
@@ -3333,18 +3457,17 @@ async def api_session_create(request):
             resp = {
                 "tmux_name": tmux_name,
                 "label": row.get("label", ""),
-                "type": "container",
+                "type": response_type,
             }
             if primer_error:
                 resp["primer_warning"] = primer_error
             return JSONResponse(resp)
         await asyncio.sleep(1)
 
-    # Timeout — session created but not yet tracked
     resp = {
         "tmux_name": tmux_name,
         "label": "",
-        "type": "container",
+        "type": response_type,
         "warning": "Session created but not yet tracked by session monitor. It may appear shortly.",
     }
     if primer_error:
@@ -3471,18 +3594,75 @@ async def api_session_resume(request):
         # output_dir is the run directory (parent of sessions/)
         output_dir = str(jsonl_path.parent.parent.parent)
 
-        docker_cmd = launch_session(
-            session_type="terminal",
-            name=tmux_name,
-            prompt=None,
-            detach=False,
-            image="autonomy-agent:dashboard",
-            metadata={"tmux_session": tmux_name},
-            output_dir=output_dir,
-            model=model,
-            resume_uuid=session_uuid,
-            global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
-        )
+        # If this was a workspace (project-scoped) session, resume with the
+        # same image, mounts, and env.  dashboard.db.project stores the
+        # project id (e.g. "enterprise-ng") for workspace sessions.
+        proj_for_resume = None
+        dead_project = (dead_session or {}).get("project") if dead_session else None
+        if dead_project:
+            try:
+                proj_for_resume = project_config.get_project(dead_project)
+            except (KeyError, project_config.ProjectConfigError):
+                proj_for_resume = None
+
+        if proj_for_resume is not None:
+            try:
+                resume_mounts = prepare_session_mounts(proj_for_resume, tmux_name)
+            except WorkspaceError as e:
+                logger.error(
+                    "api_session_resume: workspace prep failed  project=%s  err=%s",
+                    proj_for_resume.id, e,
+                )
+                return JSONResponse(
+                    {"error": f"Workspace prep failed: {e}"}, status_code=500,
+                )
+            meta: dict = {
+                "tmux_session": tmux_name,
+                "project": proj_for_resume.id,
+                "graph_project": proj_for_resume.graph_project,
+            }
+            if proj_for_resume.default_tags:
+                meta["graph_tags"] = list(proj_for_resume.default_tags)
+            extra_env = dict(proj_for_resume.env) if proj_for_resume.env else None
+            global_claude_md = (
+                _REPO_ROOT / proj_for_resume.claude_md
+                if proj_for_resume.claude_md else None
+            )
+            startup_script = (
+                _REPO_ROOT / proj_for_resume.startup
+                if proj_for_resume.startup else None
+            )
+            working_dir = proj_for_resume.working_dir or "/workspace/repo"
+            docker_cmd = launch_session(
+                session_type="terminal",
+                name=tmux_name,
+                prompt=None,
+                detach=False,
+                image=proj_for_resume.image,
+                mounts=resume_mounts or None,
+                metadata=meta,
+                extra_env=extra_env,
+                global_claude_md=global_claude_md,
+                startup_script=startup_script,
+                privileged=proj_for_resume.dind,
+                working_dir=working_dir,
+                output_dir=output_dir,
+                model=model,
+                resume_uuid=session_uuid,
+            )
+        else:
+            docker_cmd = launch_session(
+                session_type="terminal",
+                name=tmux_name,
+                prompt=None,
+                detach=False,
+                image="autonomy-agent:dashboard",
+                metadata={"tmux_session": tmux_name},
+                output_dir=output_dir,
+                model=model,
+                resume_uuid=session_uuid,
+                global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
+            )
         if not docker_cmd:
             return JSONResponse({"error": "Failed to build resume command"}, status_code=500)
 
@@ -3728,198 +3908,50 @@ def _detect_terminal_type(tmux_name: str) -> dict:
 
 
 async def ws_terminal(websocket: WebSocket):
-    """WebSocket endpoint that bridges xterm.js to a tmux session.
+    """WebSocket endpoint that bridges xterm.js to an existing tmux session.
 
-    All terminals run inside tmux so they persist across page navigations.
-    The WebSocket just attaches/detaches — the process keeps running.
+    This endpoint is ATTACH-ONLY — session creation happens via
+    POST /api/session/create.  Requests without `?attach=` are rejected.
+
+    The WebSocket just bridges PTY I/O and forwards resize events; the tmux
+    session persists across attaches so users can disconnect and reconnect.
 
     Query params:
-      cmd     — command to run in a new tmux session (default: bash)
-      attach  — existing tmux session name to attach to
-      id      — terminal session ID (auto-generated if not provided)
+      attach — existing tmux session name to attach to (required)
     """
     await websocket.accept()
 
     params = websocket.query_params
     attach = params.get("attach")
-    term_id = params.get("id")
-    logger.info("ws_terminal: connect  attach=%s  cmd=%s  id=%s", attach, params.get("cmd"), term_id)
+    logger.info("ws_terminal: connect  attach=%s", attach)
 
-    if attach:
-        # Attach to existing tmux session
-        if not _tmux_session_exists(attach):
-            await websocket.send_text(f"\r\n\x1b[31mSession '{attach}' not found\x1b[0m\r\n")
-            await websocket.close()
-            return
-        tmux_name = attach
-        # Ensure tmux mouse mode is on for reattached sessions so scroll
-        # wheel triggers tmux copy-mode (scrollback lives in tmux, not xterm.js).
-        # Users hold Shift to select text at the browser level.
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
-                        capture_output=True)
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"],
-                        capture_output=True)
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"],
-                        capture_output=True)
-    else:
-        # Create a new tmux session
-        cmd_str = params.get("cmd", "/bin/bash")
-        project_name = params.get("project")
-        if not term_id:
-            # Unique, type-prefixed naming — no reuse ever
-            is_container_cmd_hint = "autonomy-agent" in cmd_str or project_name
-            prefix = "auto" if is_container_cmd_hint else "host"
-            term_id = f"{prefix}-{time.strftime('%m%d-%H%M%S')}"
-            # Handle sub-second collisions
-            if dashboard_db.session_exists(term_id):
-                import random
-                term_id = f"{prefix}-{time.strftime('%m%d-%H%M%S')}-{random.randint(10,99)}"
-        tmux_name = term_id
+    if not attach:
+        await websocket.send_text(
+            "\r\n\x1b[31mws_terminal requires ?attach=<tmux_name>; "
+            "use POST /api/session/create to start a new session\x1b[0m\r\n",
+        )
+        await websocket.close()
+        return
 
-        # Project-scoped container session — takes precedence over the
-        # legacy autonomy-agent-claude path. Uses the project registry to
-        # pick image, mounts, startup script, graph scope, etc.
-        if project_name:
-            try:
-                proj = project_config.get_project(project_name)
-            except KeyError:
-                await websocket.send_text(
-                    f"\r\n\x1b[31mUnknown project '{project_name}'\x1b[0m\r\n"
-                )
-                await websocket.close()
-                return
-            except project_config.ProjectConfigError as e:
-                await websocket.send_text(
-                    f"\r\n\x1b[31mProject config error: {e}\x1b[0m\r\n"
-                )
-                await websocket.close()
-                return
-            try:
-                project_mounts = prepare_session_mounts(proj, tmux_name)
-            except WorkspaceError as e:
-                logger.error("ws_terminal: workspace prep failed  project=%s  err=%s", proj.id, e)
-                await websocket.send_text(
-                    f"\r\n\x1b[31mWorkspace prep failed: {e}\x1b[0m\r\n"
-                )
-                await websocket.close()
-                return
-            meta: dict = {
-                "tmux_session": tmux_name,
-                "project": proj.id,
-                "graph_project": proj.graph_project,
-            }
-            if proj.default_tags:
-                meta["graph_tags"] = list(proj.default_tags)
-            extra_env = dict(proj.env) if proj.env else None
-            global_claude_md = (_REPO_ROOT / proj.claude_md) if proj.claude_md else None
-            startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
-            working_dir = proj.working_dir or "/workspace/repo"
-            launched = launch_session(
-                session_type="terminal",
-                name=tmux_name,
-                prompt=None,
-                detach=False,
-                image=proj.image,
-                mounts=project_mounts or None,
-                metadata=meta,
-                extra_env=extra_env,
-                global_claude_md=global_claude_md,
-                startup_script=startup_script,
-                privileged=proj.dind,
-                working_dir=working_dir,
-            )
-            if launched:
-                cmd_str = launched
-            else:
-                await websocket.send_text(
-                    f"\r\n\x1b[31mlaunch_session failed for project '{proj.id}'\x1b[0m\r\n"
-                )
-                await websocket.close()
-                return
-        # Resolve special container commands (no-project backward compat)
-        elif cmd_str == "autonomy-agent-claude":
-            # launch_session returns a shell-safe docker run -it --rm command string
-            launched = launch_session(
-                session_type="terminal",
-                name=tmux_name,
-                prompt=None,
-                detach=False,
-                image="autonomy-agent:dashboard",
-                metadata={"tmux_session": tmux_name},
-                global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
-            )
-            if launched:
-                cmd_str = launched
-        elif cmd_str == "autonomy-agent-bash":
-            repo_root = str(Path(__file__).parents[2])
-            cmd_str = (
-                f"docker run -it --rm --name {tmux_name}"
-                f" --network=host"
-                f" --entrypoint /bin/bash"
-                f" -v {repo_root}:/workspace/repo:ro"
-                f" -v {repo_root}/.beads:/data/.beads"
-                f" autonomy-agent"
-            )
+    if not _tmux_session_exists(attach):
+        await websocket.send_text(f"\r\n\x1b[31mSession '{attach}' not found\x1b[0m\r\n")
+        await websocket.close()
+        return
+    tmux_name = attach
 
-        # Create detached tmux session running the command
-        # Enable set-clipboard so OSC 52 passes through to xterm.js
-        is_container_cmd = cmd_str.startswith("docker run")
-        start_dir = None if is_container_cmd else str(_REPO_ROOT)
-        tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40"]
-        if start_dir:
-            tmux_cmd += ["-c", start_dir]
-        if not is_container_cmd:
-            cmd_str = f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} {cmd_str}"
-        tmux_cmd.append(cmd_str)
-        result = subprocess.run(tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True)
-        if result.returncode != 0:
-            logger.error("ws_terminal: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
-                         tmux_name, result.returncode, result.stderr.decode().strip())
-            await websocket.send_text(f"\r\n\x1b[31mFailed to create session '{tmux_name}'\x1b[0m\r\n")
-            await websocket.close()
-            return
-        logger.info("ws_terminal: created tmux session  tmux=%s  cmd=%s", tmux_name, "container" if is_container_cmd else "host")
-        # Enable OSC 52 clipboard passthrough in this session
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"],
-                        capture_output=True)
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"],
-                        capture_output=True)
-        # Enable tmux mouse mode so scroll wheel triggers tmux copy-mode
-        # (scrollback history lives in tmux, not xterm.js alternate buffer).
-        # Text selection: hold Shift to bypass tmux and select at browser level.
-        # Paste is handled at the xterm.js layer using the browser clipboard API.
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
-                        capture_output=True)
-        # For host Claude sessions, register with jsonl_path=None, then watch for JSONL
-        if not is_container_cmd and "claude" in cmd_str.lower():
-            logger.info("ws_terminal: starting host Claude session  tmux=%s", tmux_name)
-            project_folder = str(_REPO_ROOT).replace("/", "-")
-            projects_dir = Path.home() / ".claude" / "projects" / project_folder
-            # INSERT into DB with no jsonl_path — watcher will UPDATE it
-            await session_monitor.register(
-                tmux_name=tmux_name,
-                session_type="host",
-                project=project_folder,
-                # jsonl_path deliberately None — watcher is the ONLY code that sets it
-            )
-            asyncio.create_task(
-                _watch_for_host_session_jsonl(projects_dir, tmux_name)
-            )
-        elif is_container_cmd:
-            logger.info("ws_terminal: starting container session  tmux=%s", tmux_name)
-            # Register with monitor — JSONL path is a directory (resolved by tailer)
-            agent_runs = _REPO_ROOT / "data" / "agent-runs"
-            run_dirs = sorted(agent_runs.glob(f"{tmux_name}-*"), key=lambda p: p.stat().st_mtime, reverse=True) if agent_runs.exists() else []
-            sess_dir = run_dirs[0] / "sessions" if run_dirs else agent_runs
-            await session_monitor.register(
-                tmux_name=tmux_name,
-                session_type="container",
-                project=sess_dir.name,
-                jsonl_path=sess_dir,  # directory — monitor will resolve to actual JSONL
-            )
+    # Ensure tmux mouse mode is on for reattached sessions so scroll
+    # wheel triggers tmux copy-mode (scrollback lives in tmux, not xterm.js).
+    # Users hold Shift to select text at the browser level.
+    subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
+                    capture_output=True)
+    subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"],
+                    capture_output=True)
+    subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"],
+                    capture_output=True)
 
-    # Ensure session is in DB (attach to existing sessions not yet tracked)
-    if attach and not dashboard_db.session_exists(tmux_name):
+    # Ensure session is tracked in DB for sessions not yet registered
+    # (e.g. after a server restart where tmux outlived the monitor).
+    if not dashboard_db.session_exists(tmux_name):
         info = _detect_terminal_type(tmux_name)
         stype = "container" if info["env"] == "container" else "host"
         try:
