@@ -129,7 +129,7 @@
         <div class="tl-exp-detail" x-show="e._open && !e._isLibrarian" @click.stop style="display:none">
           <div class="tl-exp-row">
             <div class="tl-exp-links">
-              <a class="tl-exp-link" :href="'/dispatch/trace/' + e.bead_id">Trace &#8594;</a>
+              <a class="tl-exp-link" :href="'/dispatch/trace/' + e.run_id">Trace &#8594;</a>
               <a class="tl-exp-link" :href="'/bead/' + e.bead_id">Bead &#8594;</a>
             </div>
             <template x-if="e.scores">
