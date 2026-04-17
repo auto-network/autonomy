@@ -85,9 +85,9 @@
     <!-- Session cards — same structure as active session cards -->
     <div class="sc-card-list" style="display:flex;flex-direction:column;gap:6px">
       <template x-for="s in filtered" :key="s.id">
-        <div @click="navigate(s)" class="cursor-pointer" data-testid="recent-session-row" :data-session-id="s.session_id">
+        <a :href="'/graph/' + s.id" class="no-underline" data-testid="recent-session-row" :data-session-id="s.id">
           {% include 'partials/session-card.html' %}
-        </div>
+        </a>
       </template>
     </div>
 
