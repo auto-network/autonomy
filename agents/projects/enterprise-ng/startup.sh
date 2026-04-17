@@ -30,9 +30,11 @@ done
 
 if [ -f /workspace/enterprise_ng/pyproject.toml ]; then
     echo "[startup] poetry install (enterprise_ng)..."
-    cd /workspace/enterprise_ng && poetry install --no-interaction || {
+    cd /workspace/enterprise_ng && poetry install --with=dev,python-tools,test --no-interaction || {
         echo "[startup] poetry install failed"; exit 1;
     }
 fi
+
+export ANCHORE_CONFIG_PATH=/workspace/enterprise_ng/config/default_config.yaml
 
 echo "[startup] $(date -u +%FT%TZ) enterprise-ng startup complete"
