@@ -355,7 +355,7 @@ def run_tier2(base_url: str) -> dict:
         time.sleep(8)
         r = subprocess.run(
             ["agent-browser", "eval",
-             'JSON.stringify(Object.fromEntries(Array.from(document.querySelectorAll(".nav-badge")).map(el => [el.id, el.textContent])))'],
+             'Object.fromEntries(Array.from(document.querySelectorAll(".nav-badge")).map(el => [el.id, el.textContent]))'],
             capture_output=True, text=True, timeout=10,
         )
         badges = json.loads(r.stdout.strip())
