@@ -29,10 +29,14 @@ for d in /workspace/enterprise /workspace/enterprise_ng; do
 done
 
 # Expose the Anchore Enterprise license (provided via /etc/autonomy/artifacts/)
-# at the path enterprise_ng tooling expects — its repo root.
+# at the path enterprise_ng tooling expects — the filesystem root.
 if [ -f /etc/autonomy/artifacts/license.yaml ]; then
-    ln -sf /etc/autonomy/artifacts/license.yaml /workspace/enterprise_ng/license.yaml
+    ln -sf /etc/autonomy/artifacts/license.yaml /license.yaml
 fi
+
+# Stale config field that Pydantic now rejects — strip it from the environment
+# before anything reads config.
+unset ANCHORE_EXTERNAL_TLS
 
 if [ -f /workspace/enterprise_ng/pyproject.toml ]; then
     echo "[startup] poetry install (enterprise_ng)..."
