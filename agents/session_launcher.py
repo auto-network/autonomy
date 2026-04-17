@@ -29,6 +29,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_IMAGE = "autonomy-agent:dashboard"
+DEFAULT_OPUS_MODEL = "claude-opus-4-7[1m]"
 
 
 # ── Credential Resolution ─────────────────────────────────────────────────────
@@ -116,7 +117,7 @@ def launch_session(
     working_dir: str = "/workspace/repo",
     extra_env: dict | None = None,
     output_dir: str | None = None,
-    model: str = "claude-opus-4-6[1m]",
+    model: str = DEFAULT_OPUS_MODEL,
     global_claude_md: Path | str | None = None,
     resume_uuid: str | None = None,
 ) -> str | None:
@@ -141,7 +142,7 @@ def launch_session(
         extra_env: Additional environment variables {key: value}.
         output_dir: Pre-created output directory. If None, a new directory under
                     data/agent-runs/ is created using name + UTC timestamp.
-        model: Claude model to pass via --model flag. Defaults to claude-opus-4-6.
+        model: Claude model to pass via --model flag. Defaults to DEFAULT_OPUS_MODEL.
         global_claude_md: Host path to mount as the Claude global user-level
                     CLAUDE.md (~/.claude/CLAUDE.md) inside the container.
                     None (default) skips the mount.
