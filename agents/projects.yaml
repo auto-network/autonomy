@@ -1,0 +1,100 @@
+# Project registry — defines projects available to container sessions,
+# dispatcher routing, and graph scoping.
+#
+# Design refs:
+#   graph://e9448254-18f  Pluggable project-specific container sessions
+#   graph://9df4dd6d-b34  Hard project + soft tags scoping model
+#
+# Per-project fields:
+#   description       Human-readable summary.
+#   mode              "container" or "host". Container: Autonomy launches a
+#                     Docker container for the session. Host: agent runs on
+#                     the host with direct repo access.
+#   image             (container) Docker image name, e.g. autonomy-agent:dashboard.
+#   repos             (container) List of git repos to mount. Each entry:
+#                       url       Git remote URL (Autonomy manages the clone
+#                                 under data/repos/ — NOT a host path).
+#                       mount     Path inside the container.
+#                       writable  true -> writable worktree; false -> read-only mount.
+#   working_dir       (container) Container CWD (usually a repo mount).
+#   claude_md         (container) Project-specific CLAUDE.md path in-container.
+#   startup           (container) Path to per-project startup script.
+#   dind              (container) true -> run with --privileged + dockerd.
+#   graph_project     Hard graph boundary (GRAPH_SCOPE env). Replication/trust
+#                     scope. Required.
+#   default_tags      Soft graph scoping tags (GRAPH_TAGS env). Auto-applied to
+#                     notes, used to rank search results within the project.
+#   dispatch_labels   Bead labels that route to this project's image.
+#   env               Extra environment variables passed into the container.
+
+projects:
+
+  autonomy:
+    description: >
+      Autonomy platform development — read-only container for orchestration,
+      research, and bead dispatch.
+    mode: container
+    image: autonomy-agent:dashboard
+    repos:
+      - url: https://github.com/anthropics/autonomy.git
+        mount: /workspace/repo
+        writable: false
+    working_dir: /workspace/repo
+    claude_md: CLAUDE.md
+    startup: null
+    dind: false
+    graph_project: autonomy
+    default_tags: []
+    dispatch_labels: []
+    env: {}
+
+  autonomy-host:
+    description: >
+      Autonomy platform development on the host — direct access to live files,
+      no container isolation. Used for interactive Autonomy work.
+    mode: host
+    graph_project: autonomy
+    default_tags: []
+    dispatch_labels: []
+    env: {}
+
+  enterprise:
+    description: >
+      Anchore Enterprise development — writable container with DinD for running
+      the full-stack service compose.
+    mode: container
+    image: autonomy-agent:enterprise
+    repos:
+      - url: git@github.com:anchore/enterprise.git
+        mount: /workspace/enterprise
+        writable: true
+    working_dir: /workspace/enterprise
+    claude_md: agents/projects/enterprise/CLAUDE.md
+    startup: agents/projects/enterprise/startup.sh
+    dind: true
+    graph_project: anchore
+    default_tags: [enterprise]
+    dispatch_labels: [enterprise]
+    env: {}
+
+  enterprise-ng:
+    description: >
+      Anchore Enterprise NG development — writable container with DinD.
+      Mounts the Enterprise repo read-only alongside NG for full-stack compose.
+    mode: container
+    image: autonomy-agent:enterprise-ng
+    repos:
+      - url: git@github.com:anchore/enterprise-ng.git
+        mount: /workspace/enterprise-ng
+        writable: true
+      - url: git@github.com:anchore/enterprise.git
+        mount: /workspace/enterprise
+        writable: false
+    working_dir: /workspace/enterprise-ng
+    claude_md: agents/projects/enterprise-ng/CLAUDE.md
+    startup: agents/projects/enterprise-ng/startup.sh
+    dind: true
+    graph_project: anchore
+    default_tags: [enterprise, enterprise-ng]
+    dispatch_labels: [enterprise-ng]
+    env: {}
