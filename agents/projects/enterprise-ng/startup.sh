@@ -73,4 +73,12 @@ if [ -f /workspace/enterprise_ng/pyproject.toml ]; then
     }
 fi
 
+# Enterprise repo's Makefile activates .venv/bin/activate before calling
+# poetry, so `make build` needs .venv to already exist. Create an empty
+# venv here; poetry/make will populate it as needed.
+if [ -f /workspace/enterprise/pyproject.toml ] && [ ! -d /workspace/enterprise/.venv ]; then
+    echo "[startup] creating /workspace/enterprise/.venv..."
+    cd /workspace/enterprise && python3 -m venv .venv
+fi
+
 echo "[startup] $(date -u +%FT%TZ) enterprise-ng startup complete"
