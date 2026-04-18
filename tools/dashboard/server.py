@@ -32,7 +32,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
@@ -3363,6 +3363,7 @@ async def api_session_create(request):
             startup_script=startup_script,
             privileged=proj.dind,
             working_dir=working_dir,
+            network_host=proj.network_host,
         )
         if not cmd_str:
             return JSONResponse(
@@ -3707,6 +3708,7 @@ async def api_session_resume(request):
                 output_dir=output_dir,
                 model=model,
                 resume_uuid=session_uuid,
+                network_host=proj_for_resume.network_host,
             )
         else:
             docker_cmd = launch_session(
@@ -4137,6 +4139,71 @@ async def page_session_view(request):
 async def page_session_view_fragment(request):
     """Return the Session Viewer page as an HTML fragment for SPA injection."""
     return templates.TemplateResponse(request, "pages/session-view.html")
+
+
+async def page_test_input(request):
+    """Serve the mobile chat input prototype as a standalone full page.
+
+    Why: safe-area-inset-bottom and visualViewport behaviors cannot be verified
+    inside the Design Studio iframe — this route delivers the raw HTML with no
+    dashboard chrome so real iOS keyboard/safe-area behavior can be tested.
+    """
+    no_cache = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
+    try:
+        with open("/tmp/chat-input-proto/index.html") as f:
+            return HTMLResponse(f.read(), headers=no_cache)
+    except FileNotFoundError:
+        return PlainTextResponse(
+            "Prototype not found at /tmp/chat-input-proto/index.html",
+            status_code=404,
+            headers=no_cache,
+        )
+
+
+_TEST_NO_CACHE = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Access-Control-Allow-Origin": "*",
+}
+_test_debug: dict = {}
+_test_version = {"v": 1}
+
+
+async def api_test_debug_post(request):
+    global _test_debug
+    try:
+        _test_debug = await request.json()
+    except Exception:
+        _test_debug = {}
+    return Response(status_code=204, headers=_TEST_NO_CACHE)
+
+
+async def api_test_debug_get(request):
+    return JSONResponse(_test_debug, headers=_TEST_NO_CACHE)
+
+
+async def api_test_version_get(request):
+    return JSONResponse(_test_version, headers=_TEST_NO_CACHE)
+
+
+async def api_test_version_bump(request):
+    _test_version["v"] += 1
+    return JSONResponse(_test_version, headers=_TEST_NO_CACHE)
+
+
+_test_toast = {"msg": ""}
+
+
+async def api_test_toast_get(request):
+    return JSONResponse(_test_toast, headers=_TEST_NO_CACHE)
+
+
+async def api_test_toast_post(request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    _test_toast["msg"] = body.get("msg", "") if isinstance(body, dict) else ""
+    return Response(status_code=204, headers=_TEST_NO_CACHE)
 
 
 # ── Design Studio API ────────────────────────────────────────────
@@ -6013,6 +6080,13 @@ routes = [
     Route("/pages/design", page_design_fragment),
     Route("/session/{project}/{session_id}", page_session_view),
     Route("/pages/session-view", page_session_view_fragment),
+    Route("/test/input", page_test_input),
+    Route("/api/test/debug", api_test_debug_get),
+    Route("/api/test/debug", api_test_debug_post, methods=["POST"]),
+    Route("/api/test/version", api_test_version_get),
+    Route("/api/test/version", api_test_version_bump, methods=["POST"]),
+    Route("/api/test/toast", api_test_toast_get),
+    Route("/api/test/toast", api_test_toast_post, methods=["POST"]),
 
     # WebSocket
     WebSocketRoute("/ws/terminal", ws_terminal),
