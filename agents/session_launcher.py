@@ -122,6 +122,7 @@ def launch_session(
     resume_uuid: str | None = None,
     privileged: bool = False,
     startup_script: str | Path | None = None,
+    network_host: bool = True,
 ) -> str | None:
     """Launch a Claude agent container session.
 
@@ -160,6 +161,13 @@ def launch_session(
                     wrapper picks it up and runs it in the background before
                     exec'ing the main command. Exit status lands in
                     ``/workspace/output/.setup-exit``; log in ``.setup.log``.
+        network_host: True (default) runs the container with ``--network=host``
+                    so localhost:8080 reaches the host dashboard directly.
+                    Set False to use the default bridge network; the launcher
+                    then adds ``--add-host=host.docker.internal:host-gateway``
+                    and rewrites ``GRAPH_API`` to
+                    ``https://host.docker.internal:8080`` so the container
+                    can still reach the dashboard.
 
     Returns:
         detach=True:  container_id string on success, None on failure.
@@ -243,16 +251,27 @@ def launch_session(
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     auth_db.insert_token(token_hash, name)
 
+    # ── Networking ─────────────────────────────────────────────
+    # host-networked containers can just use localhost; bridge-networked
+    # ones need host.docker.internal + an --add-host entry so DNS resolves
+    # to the docker bridge gateway.
+    if network_host:
+        network_args = ["--network=host"]
+        graph_api = "https://localhost:8080"
+    else:
+        network_args = ["--add-host=host.docker.internal:host-gateway"]
+        graph_api = "https://host.docker.internal:8080"
+
     # ── Assemble docker command ────────────────────────────────
     cmd: list[str] = [
         "docker", "run",
         "--name", name,
-        "--network=host",
+        *network_args,
         "-e", f"BD_ACTOR={session_type}:{name}",
         "-e", f"AUTONOMY_SESSION={name}",
         "-e", "BD_READONLY=0",
         "-e", "GRAPH_DB=/home/agent/graph.db",
-        "-e", "GRAPH_API=https://localhost:8080",
+        "-e", f"GRAPH_API={graph_api}",
         "-e", f"CROSSTALK_TOKEN={raw_token}",
         *auth_args,
     ]

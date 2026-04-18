@@ -84,6 +84,7 @@ class ProjectConfig:
     claude_md: str | None = None
     startup: str | None = None
     dind: bool = False
+    network_host: bool = True                # --network=host or default bridge
     default_tags: tuple[str, ...] = ()       # GRAPH_TAGS
     dispatch_labels: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
@@ -197,6 +198,7 @@ def _parse_project(project_id: str, raw: Any) -> ProjectConfig:
         claude_md=_opt_str(raw, "claude_md"),
         startup=_opt_str(raw, "startup"),
         dind=bool(raw.get("dind", False)),
+        network_host=bool(raw.get("network_host", True)),
         default_tags=default_tags,
         dispatch_labels=dispatch_labels,
         env=env,
