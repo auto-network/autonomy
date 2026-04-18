@@ -28,10 +28,13 @@ for d in /workspace/enterprise /workspace/enterprise_ng; do
     [ -d "$d" ] && git config --global --add safe.directory "$d"
 done
 
-# Expose the Anchore Enterprise license (provided via /etc/autonomy/artifacts/)
-# at the path enterprise_ng tooling expects — the filesystem root.
+# Expose the Anchore Enterprise license where enterprise_ng tooling
+# looks for it — both at the filesystem root and inside the worktree
+# (the dev-compose stack mounts ../license.yaml relative to
+# dev-compose-files/, which resolves to /workspace/enterprise_ng/license.yaml).
 if [ -f /etc/autonomy/artifacts/license.yaml ]; then
     sudo ln -sf /etc/autonomy/artifacts/license.yaml /license.yaml
+    sudo ln -sf /etc/autonomy/artifacts/license.yaml /workspace/enterprise_ng/license.yaml
 fi
 
 # Stale config field that Pydantic now rejects — strip it from the environment
