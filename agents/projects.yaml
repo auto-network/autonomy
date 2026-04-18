@@ -112,9 +112,16 @@ projects:
       ANCHORE_GLOBAL_SERVER_REQUEST_TIMEOUT_SEC: "120"
       ANCHORE_GLOBAL_CLIENT_CONNECT_TIMEOUT: "30"
       ANCHORE_GLOBAL_CLIENT_READ_TIMEOUT: "60"
+      ANCHORE_SCANNER_WORKER_ENABLED: "false"
+      ANCHORE_SSH_PRIV_KEY_PATH: /etc/autonomy/artifacts/id_ed25519
     artifacts:
       - name: license.yaml
         scope: personal-org
         required: true
         description: Anchore Enterprise license
         help: "Generate at https://license.anchore.io — save to data/artifacts/personal/anchore/license.yaml"
+      - name: id_ed25519
+        scope: personal-org
+        required: true
+        description: SSH key for Anchore private repos
+        help: "Copy your GitHub-authorized SSH key to data/artifacts/personal/anchore/id_ed25519"
