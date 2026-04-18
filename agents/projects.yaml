@@ -98,6 +98,11 @@ projects:
       # spec.
       ANCHORE_CONFIG_PATH: /workspace/enterprise_ng/config/default_config.yaml
       ANCHORE_SSH_PRIV_KEY_PATH: /etc/autonomy/artifacts/id_ed25519
+      # Skip `poetry self update` in the enterprise repo's Makefile
+      # — it hits PEP 668 "externally-managed-environment" inside the
+      # container. The pinned poetry in autonomy-agent:dind is already
+      # current enough for make build.
+      CI: "true"
     env_from_host:
       - GITHUB_RELEASE_PULL_TOKEN
     artifacts:

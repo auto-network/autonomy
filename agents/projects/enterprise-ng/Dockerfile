@@ -11,7 +11,7 @@ FROM autonomy-agent:dind
 
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-client jq make \
+    && apt-get install -y --no-install-recommends openssh-client jq make python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://taskfile.dev/install.sh | sh -s -- -d -b /usr/local/bin \
     && task --version

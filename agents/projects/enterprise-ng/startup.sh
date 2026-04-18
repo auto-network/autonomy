@@ -34,6 +34,7 @@ done
 # dev-compose-files/, which resolves to /workspace/enterprise_ng/license.yaml).
 if [ -f /etc/autonomy/artifacts/license.yaml ]; then
     sudo ln -sf /etc/autonomy/artifacts/license.yaml /license.yaml
+    sudo ln -sf /etc/autonomy/artifacts/license.yaml /workspace/enterprise/license.yaml
     sudo ln -sf /etc/autonomy/artifacts/license.yaml /workspace/enterprise_ng/license.yaml
 fi
 
