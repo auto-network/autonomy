@@ -76,6 +76,17 @@ class EventBus:
         except ValueError:
             pass
 
+    def update_cache(self, topic: str, data: Any) -> None:
+        """Update the cached state for a topic without broadcasting.
+
+        New subscribers receive this via subscribe() replay. Existing
+        subscribers are not notified — use this when live updates are
+        already delivered through a different topic (e.g. session:messages
+        carries activity_state, so session:registry cache just needs to
+        stay fresh for new connections).
+        """
+        self._last[topic] = json.dumps(data, separators=(",", ":"), sort_keys=True)
+
     async def broadcast(self, topic: str, data: Any, dedup: bool = True) -> int:
         """Broadcast data to all subscribers tagged with topic name.
 

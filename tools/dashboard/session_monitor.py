@@ -698,6 +698,12 @@ class SessionMonitor:
             activity_state = "idle"
         update_activity_state(tmux_name, activity_state)
 
+        # Soft-update the registry cache so new SSE connections get fresh
+        # metadata. No broadcast — existing clients already have current
+        # data via session:messages.
+        if self._event_bus:
+            self._event_bus.update_cache("session:registry", self.get_registry())
+
         self._enrich_agent_entries(row, ts, new_entries)
         if new_entries and self._event_bus:
             ts.broadcast_seq += 1
