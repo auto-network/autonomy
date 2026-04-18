@@ -126,3 +126,8 @@ projects:
         required: true
         description: SSH key for Anchore private repos
         help: "Copy your GitHub-authorized SSH key to data/artifacts/personal/anchore/id_ed25519"
+      - name: docker-config.json
+        scope: personal-org
+        required: true
+        description: Docker CLI auth config for private registry pulls
+        help: "Copy your ~/.docker/config.json to data/artifacts/personal/anchore/docker-config.json"
