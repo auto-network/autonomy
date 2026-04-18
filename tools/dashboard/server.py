@@ -3337,7 +3337,12 @@ async def api_session_create(request):
         }
         if proj.default_tags:
             meta["graph_tags"] = list(proj.default_tags)
-        extra_env = dict(proj.env) if proj.env else None
+        extra_env: dict[str, str] = dict(proj.env) if proj.env else {}
+        for _var in proj.env_from_host:
+            _val = os.environ.get(_var)
+            if _val is not None:
+                extra_env[_var] = _val
+        extra_env = extra_env or None
         # Render the runtime primer from the workspace config (layer 1 of
         # the context stack). Writing it into the session's run_dir keeps
         # it colocated with other session artifacts.
@@ -3682,7 +3687,12 @@ async def api_session_resume(request):
             }
             if proj_for_resume.default_tags:
                 meta["graph_tags"] = list(proj_for_resume.default_tags)
-            extra_env = dict(proj_for_resume.env) if proj_for_resume.env else None
+            extra_env: dict[str, str] = dict(proj_for_resume.env) if proj_for_resume.env else {}
+            for _var in proj_for_resume.env_from_host:
+                _val = os.environ.get(_var)
+                if _val is not None:
+                    extra_env[_var] = _val
+            extra_env = extra_env or None
             global_claude_md = (
                 _REPO_ROOT / proj_for_resume.claude_md
                 if proj_for_resume.claude_md else None
