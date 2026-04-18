@@ -37,6 +37,14 @@ if [ -f /etc/autonomy/artifacts/license.yaml ]; then
     sudo ln -sf /etc/autonomy/artifacts/license.yaml /workspace/enterprise_ng/license.yaml
 fi
 
+# Docker CLI auth (private registry pulls) — copy rather than symlink
+# so `docker login` inside the container persists to the session's home
+# instead of attempting to write back to a read-only artifact mount.
+if [ -f /etc/autonomy/artifacts/docker-config.json ]; then
+    mkdir -p "$HOME/.docker"
+    install -m 0600 /etc/autonomy/artifacts/docker-config.json "$HOME/.docker/config.json"
+fi
+
 # Stale config field that Pydantic now rejects — strip it from the environment
 # before anything reads config.
 unset ANCHORE_EXTERNAL_TLS
