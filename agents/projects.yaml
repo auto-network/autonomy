@@ -80,7 +80,7 @@ projects:
     repos:
       - url: "git@github.com:anchore/widgets.git"
         mount: "/workspace/widgets"
-        writable: false
+        writable: true
       - url: "git@github.com:anchore/widgets_ng.git"
         mount: "/workspace/widgets_ng"
         writable: true
