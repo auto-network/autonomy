@@ -87,6 +87,7 @@ projects:
     working_dir: "/workspace/enterprise_ng"
     startup: "agents/projects/enterprise-ng/startup.sh"
     dind: true
+    network_host: false
     graph_project: anchore
     default_tags: [enterprise, enterprise-ng]
     dispatch_labels: [enterprise-ng]
