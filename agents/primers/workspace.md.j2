@@ -67,6 +67,31 @@ docker compose up -d         # start project services
 docker compose logs -f       # follow service logs
 ```
 {% endif %}
+{% if config.artifacts or config.env %}
+
+## Environment (pre-configured by Autonomy)
+
+{% if config.artifacts %}
+Host-supplied artifacts mounted read-only under `/etc/autonomy/artifacts/`:
+
+{% for artifact in config.artifacts %}
+- `/etc/autonomy/artifacts/{{ artifact.name }}`{{ ' — ' ~ artifact.description if artifact.description else '' }}
+{% endfor %}
+{% endif %}
+{% if config.env %}
+
+These environment variables are already exported — **do not create a
+`.env` file or copy `.env.example`**:
+
+{% for key, val in config.env.items() %}
+- `{{ key }}={{ val }}`
+{% endfor %}
+{% endif %}
+{% endif %}
+{% if workspace_primer %}
+
+{{ workspace_primer.rstrip() }}
+{% endif %}
 
 ## Capabilities
 
