@@ -38,9 +38,10 @@ fi
 # before anything reads config.
 unset ANCHORE_EXTERNAL_TLS
 
-# job_framework requires pg_cron; bake a postgres:15 + pg_cron image so
-# the repo's compose file (which pulls plain postgres:15) does not crash
-# job_framework when `task test-deps-up` runs.
+# job_framework requires pg_cron. The repo's compose file pulls plain
+# postgres:15, so build a pgcron-enabled image and retag it as
+# postgres:15 locally — compose finds the tag already present and skips
+# the Docker Hub pull.
 if ! docker image inspect postgres-pgcron:15 > /dev/null 2>&1; then
     echo "[startup] building postgres-pgcron:15..."
     cat > /tmp/Dockerfile.pgcron <<'PGEOF'
@@ -52,6 +53,7 @@ RUN apt-get update -qq \
 PGEOF
     docker build -t postgres-pgcron:15 -f /tmp/Dockerfile.pgcron /tmp
 fi
+docker tag postgres-pgcron:15 postgres:15
 
 if [ -f /workspace/enterprise_ng/pyproject.toml ]; then
     echo "[startup] poetry install (enterprise_ng)..."
