@@ -129,6 +129,8 @@ class RunningAgent:
     jsonl_offset: int = 0          # byte offset into the session JSONL file
     prev_cpu_usec: int = 0         # previous cpu.stat usage_usec reading
     prev_cpu_poll_time: float = 0.0  # wall time of previous CPU reading
+    # Latched once the JSONL tail shows a tool_use; extends stale threshold to 1800s.
+    _extended: bool = False
 
 
 @dataclass
@@ -143,6 +145,7 @@ class RunningLibrarian:
     jsonl_offset: int = 0
     prev_cpu_usec: int = 0
     prev_cpu_poll_time: float = 0.0
+    _extended: bool = False
 
 
 @dataclass
@@ -1286,6 +1289,40 @@ def _find_jsonl_file(output_dir: str) -> Path | None:
     return files[0] if files else None
 
 
+def _has_running_tool(jsonl_file: Path) -> bool:
+    """Return True if the last JSONL entry is an assistant turn with a tool_use block.
+
+    Reads the trailing 8KB of the file so a long-running tool call (pytest,
+    builds) isn't mistaken for a stalled agent. Any I/O or parse error returns
+    False so the caller falls back to the default 300s stale threshold.
+    """
+    try:
+        with open(jsonl_file, "rb") as f:
+            end = f.seek(0, 2)
+            f.seek(max(0, end - 8192))
+            data = f.read().decode("utf-8", errors="replace")
+        for line in reversed(data.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                return False
+            if entry.get("type") != "assistant":
+                return False
+            content = entry.get("message", {}).get("content", [])
+            if isinstance(content, list):
+                return any(
+                    isinstance(b, dict) and b.get("type") == "tool_use"
+                    for b in content
+                )
+            return False
+        return False
+    except Exception:
+        return False
+
+
 def _read_jsonl_incremental(
     jsonl_path: Path,
     offset: int,
@@ -1786,17 +1823,15 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             if jsonl_file:
                 try:
                     stale_secs = time.time() - jsonl_file.stat().st_mtime
-                    # Use activity_state from dashboard DB for adaptive threshold:
-                    # tool_running gets 30min (long test suites), everything else 5min
-                    threshold = 300
-                    try:
-                        from tools.dashboard.dao import dashboard_db
-                        row = dashboard_db.get_session(agent.container_name)
-                        if row and row.get("activity_state") == "tool_running":
-                            threshold = 1800
-                    except Exception:
-                        pass
-                    stale = stale_secs > threshold
+                    # Tail the JSONL for a running tool call. Latched once True
+                    # so subsequent ticks skip the file read.
+                    if stale_secs > 300:
+                        if not agent._extended and _has_running_tool(jsonl_file):
+                            agent._extended = True
+                        threshold = 1800 if agent._extended else 300
+                        stale = stale_secs > threshold
+                    else:
+                        stale = False
                 except OSError:
                     pass
             if stale and elapsed > BOOT_GRACE_PERIOD:
@@ -1908,16 +1943,13 @@ def poll_and_collect_librarians(running_librarians: list[RunningLibrarian]) -> N
             if jsonl_file:
                 try:
                     stale_secs = time.time() - jsonl_file.stat().st_mtime
-                    # Use activity_state from dashboard DB for adaptive threshold
-                    threshold = 300
-                    try:
-                        from tools.dashboard.dao import dashboard_db
-                        row = dashboard_db.get_session(lib.container_name)
-                        if row and row.get("activity_state") == "tool_running":
-                            threshold = 1800
-                    except Exception:
-                        pass
-                    stale = stale_secs > threshold
+                    if stale_secs > 300:
+                        if not lib._extended and _has_running_tool(jsonl_file):
+                            lib._extended = True
+                        threshold = 1800 if lib._extended else 300
+                        stale = stale_secs > threshold
+                    else:
+                        stale = False
                 except OSError:
                     pass
             if stale and elapsed > BOOT_GRACE_PERIOD:
