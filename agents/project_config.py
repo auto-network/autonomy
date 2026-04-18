@@ -14,22 +14,12 @@ Design refs:
 
 from __future__ import annotations
 
-import logging
-import os
-import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
-
-logger = logging.getLogger(__name__)
-
-# ${VAR} references in env values get expanded from os.environ at load time.
-# A reference to an unset var causes the key to be dropped (with a warning)
-# rather than leaving the literal "${VAR}" in the docker -e arg.
-_ENV_SUB_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = REPO_ROOT / "agents" / "projects.yaml"
@@ -98,6 +88,7 @@ class ProjectConfig:
     default_tags: tuple[str, ...] = ()       # GRAPH_TAGS
     dispatch_labels: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
+    env_from_host: tuple[str, ...] = ()      # forwarded from launcher's os.environ
     artifacts: tuple[ArtifactSpec, ...] = ()
 
 
@@ -158,35 +149,6 @@ def _parse_artifact(raw: Any, project_id: str, idx: int) -> ArtifactSpec:
     )
 
 
-def _expand_env_value(value: str, project_id: str, key: str) -> str | None:
-    """Expand ``${VAR}`` references in ``value`` against :data:`os.environ`.
-
-    Returns the expanded string, or ``None`` if any referenced variable is
-    unset — the caller then drops the key so the agent never sees a literal
-    ``${VAR}`` inside a ``docker -e`` arg.
-    """
-    missing: list[str] = []
-
-    def _repl(m: re.Match[str]) -> str:
-        name = m.group(1)
-        host_val = os.environ.get(name)
-        if host_val is None:
-            missing.append(name)
-            return ""
-        return host_val
-
-    expanded = _ENV_SUB_RE.sub(_repl, value)
-    if missing:
-        logger.warning(
-            "project %r: env[%r] references unset host env var(s) %s; dropping key",
-            project_id,
-            key,
-            missing,
-        )
-        return None
-    return expanded
-
-
 def _parse_project(project_id: str, raw: Any) -> ProjectConfig:
     if not isinstance(raw, dict):
         raise ProjectConfigError(f"project {project_id!r} must be a mapping")
@@ -211,12 +173,14 @@ def _parse_project(project_id: str, raw: Any) -> ProjectConfig:
     env_raw = raw.get("env") or {}
     if not isinstance(env_raw, dict):
         raise ProjectConfigError(f"project {project_id!r}: 'env' must be a mapping")
-    env: dict[str, str] = {}
-    for k, v in env_raw.items():
-        key = str(k)
-        expanded = _expand_env_value(str(v), project_id, key)
-        if expanded is not None:
-            env[key] = expanded
+    env = {str(k): str(v) for k, v in env_raw.items()}
+
+    env_from_host_raw = raw.get("env_from_host") or ()
+    if not isinstance(env_from_host_raw, (list, tuple)):
+        raise ProjectConfigError(
+            f"project {project_id!r}: 'env_from_host' must be a list of variable names"
+        )
+    env_from_host = tuple(str(v) for v in env_from_host_raw)
 
     default_tags = tuple(str(t) for t in (raw.get("default_tags") or ()))
     dispatch_labels = tuple(str(l) for l in (raw.get("dispatch_labels") or ()))
@@ -246,6 +210,7 @@ def _parse_project(project_id: str, raw: Any) -> ProjectConfig:
         default_tags=default_tags,
         dispatch_labels=dispatch_labels,
         env=env,
+        env_from_host=env_from_host,
         artifacts=artifacts,
     )
 

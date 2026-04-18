@@ -115,7 +115,8 @@ projects:
       ANCHORE_GLOBAL_CLIENT_READ_TIMEOUT: "60"
       ANCHORE_SCANNER_WORKER_ENABLED: "false"
       ANCHORE_SSH_PRIV_KEY_PATH: /etc/autonomy/artifacts/id_ed25519
-      GITHUB_RELEASE_PULL_TOKEN: ${GITHUB_RELEASE_PULL_TOKEN}
+    env_from_host:
+      - GITHUB_RELEASE_PULL_TOKEN
     artifacts:
       - name: license.yaml
         scope: personal-org
