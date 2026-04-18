@@ -80,7 +80,7 @@ projects:
     repos:
       - url: "git@github.com:anchore/enterprise.git"
         mount: "/workspace/enterprise"
-        writable: false
+        writable: true
       - url: "git@github.com:anchore/enterprise_ng.git"
         mount: "/workspace/enterprise_ng"
         writable: true
