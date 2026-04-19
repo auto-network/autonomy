@@ -10,6 +10,7 @@ counts and context tokens.
 """
 import importlib
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -19,6 +20,17 @@ from tools.dashboard.tests.fixtures import (
     make_experiment,
     make_session,
 )
+
+
+def _iso(minutes_ago: int) -> str:
+    """Produce an ISO-8601 UTC timestamp `minutes_ago` minutes before now.
+
+    Recent-session tests default to `since=1d`, so fixture timestamps must
+    be recent relative to wall clock to survive the filter.
+    """
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 # ── 5 test sessions covering all card features ──────────────────────
@@ -78,11 +90,17 @@ SESSIONS_PAGE_SESSIONS[2]["nag_message"] = "Check review status"
 
 RECENT_SESSIONS = [
     {"id": "src-aaa111222333", "type": "session", "date": "2026-03-25",
-     "title": "Session alpha history", "project": "autonomy"},
+     "title": "Session alpha history", "project": "autonomy",
+     "last_activity_at": _iso(10), "created_at": _iso(90),
+     "entry_count": 42, "context_tokens": 12000},
     {"id": "src-bbb444555666", "type": "session", "date": "2026-03-24",
-     "title": "Session beta history", "project": "autonomy"},
+     "title": "Session beta history", "project": "autonomy",
+     "last_activity_at": _iso(30), "created_at": _iso(120),
+     "entry_count": 17, "context_tokens": 4000},
     {"id": "src-ccc777888999", "type": "session", "date": "2026-03-23",
-     "title": "Session gamma history", "project": "default"},
+     "title": "Session gamma history", "project": "default",
+     "last_activity_at": _iso(120), "created_at": _iso(300),
+     "entry_count": 8, "context_tokens": 900},
 ]
 
 
