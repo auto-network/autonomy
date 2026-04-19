@@ -480,14 +480,19 @@
     .sv-loading { color: #6b7280; font-size: 0.875rem; }
     .sv-error   { color: #f87171; }
 
-    /* Live/activity indicator dot. Visible by inline :style; the --working
-       modifier drives the pulse animation. Classes originate from
-       session-view.html's header row. */
-    .indicator-dot { box-shadow: 0 0 4px rgba(74, 222, 128, 0.4); }
-    .indicator-dot--working { animation: sv-dot-pulse 1.2s ease-in-out infinite; }
-    @keyframes sv-dot-pulse {
+    /* Live/activity indicator dot. Canonical shape matches the input
+       prototype (data/test-fixtures/input-prototype.html) — uses
+       currentColor so class modifiers drive color without inline styles. */
+    .indicator-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: currentColor; flex-shrink: 0;
+    }
+    .indicator--green { color: #4ade80; }
+    .indicator--gray  { color: #6b7280; }
+    .indicator-dot--working { animation: sv-dot-flash 0.8s ease-in-out infinite; }
+    @keyframes sv-dot-flash {
       0%, 100% { opacity: 1; }
-      50%      { opacity: 0.35; }
+      50%      { opacity: 0.15; }
     }
 
     /* Row 1 — Header (normal flow grid child) */
