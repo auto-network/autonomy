@@ -116,6 +116,7 @@ RECENT_SESSION_DEFAULTS: dict[str, Any] = {
     "activity_state": "dead",
     "created_at": "2026-01-01T00:00:00Z",
     "last_activity_at": "2026-01-01T00:00:00Z",
+    "ended_at": "2026-01-01T00:00:00Z",
 }
 
 RUN_DEFAULTS: dict[str, Any] = {
