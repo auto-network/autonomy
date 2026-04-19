@@ -68,12 +68,12 @@
 .sc-org-img { width: 100%; height: 100%; object-fit: cover; }
 /* Grid place-items handles centering independent of font baseline, so
    no per-glyph offset hack. */
-/* Covers both the SVG glyphs (bindings render as inline SVG that self-centers
-   via viewBox + text-anchor/dominant-baseline) and the terminal >_ text span
-   in sessions.html that reuses this class. text-align + line-height keep the
-   text variant centered; they no-op on SVG. */
+/* SVG variant hard-codes its own 16x16 box on the tag so it renders
+   identically regardless of ancestor line-height/cell size. text-align +
+   line-height:16px remain as fallbacks for the terminal >_ text span in
+   sessions.html that reuses this class (no SVG there). */
 .sc-org-initial {
-  width: 100%; height: 100%; display: block;
+  display: block;
   text-align: center; line-height: 16px;
 }
 
