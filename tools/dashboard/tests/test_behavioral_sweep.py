@@ -1098,9 +1098,8 @@ COLLAB_PAGE_CHECKS = """
     r.tab_counts = countTexts;
     r.has_tab_counts = countTexts.length > 0;
 
-    // Thought capture input present (even though thoughts tab is not active)
-    // We check it exists in the DOM (it's rendered but hidden via x-show)
-    var thoughtInput = document.querySelector('.thought-input');
+    // Thought capture input present at page level (above tabs, always visible)
+    var thoughtInput = document.querySelector('.page-capture-input');
     r.has_thought_input = !!thoughtInput;
 
     // No template artifacts
@@ -1596,7 +1595,7 @@ class TestCollabPageBehavior:
         assert c.get("has_tab_counts"), f"No tab counts visible, got: {c.get('tab_counts')}"
 
     def test_thought_input(self):
-        """Thought capture input exists in DOM (rendered for Thoughts tab)."""
+        """Page-level thought capture input exists above tabs."""
         c = self._checks
         assert c.get("has_thought_input"), "No thought capture input found in DOM"
 

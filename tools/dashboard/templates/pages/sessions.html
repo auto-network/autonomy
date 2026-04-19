@@ -1,31 +1,5 @@
 <div x-data="sessionsPage()" class="pb-safe">
 
-  <!-- Quick thought capture -->
-  <div class="mb-4" x-data="{ thought: '', sending: false, sent: false }">
-    <div class="flex gap-2">
-      <input type="text" x-model="thought"
-             placeholder="Capture a thought..."
-             class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-             @keydown.enter="if (thought.trim() && !sending) {
-               sending = true;
-               fetch('/api/graph/thought', { method: 'POST', headers: {'Content-Type': 'application/json'},
-                 body: JSON.stringify({content: thought.trim(), actor: 'user'})
-               }).then(r => r.json()).then(() => { thought = ''; sending = false; sent = true; setTimeout(() => sent = false, 2000); });
-             }">
-      <button @click="if (thought.trim() && !sending) {
-                sending = true;
-                fetch('/api/graph/thought', { method: 'POST', headers: {'Content-Type': 'application/json'},
-                  body: JSON.stringify({content: thought.trim(), actor: 'user'})
-                }).then(r => r.json()).then(() => { thought = ''; sending = false; sent = true; setTimeout(() => sent = false, 2000); });
-              }"
-              class="px-3 py-2 rounded-lg text-sm font-medium transition-colors"
-              :class="sent ? 'bg-emerald-700 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'"
-              :disabled="sending || !thought.trim()"
-              x-text="sent ? '✓' : 'Capture'">
-      </button>
-    </div>
-  </div>
-
   <!-- Page-level toolbar: zoom (relocated from Active header) + create.
        Zoom is a global view preference and affects session cards across the page,
        so it lives above the sections rather than inside either section header. -->
