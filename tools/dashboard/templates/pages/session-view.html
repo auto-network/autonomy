@@ -46,7 +46,7 @@
             <template x-if="!isLive">
               <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
             </template>
-            <template x-if="_tmuxSession">
+            <template x-if="_tmuxSession && isLive">
               <button class="sv-term-toggle"
                       :class="{ 'active': showTerminal }"
                       @click.stop="toggleTerminal()"
