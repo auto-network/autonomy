@@ -19,10 +19,6 @@
 #                       writable  true -> a worktree is created and mounted;
 #                                 false -> the managed clone is mounted read-only.
 #   working_dir       Container CWD (usually one of the repo mounts).
-#   claude_md         Optional per-workspace CLAUDE.md override (relative to
-#                     repo root). Normally unused — the runtime primer is
-#                     rendered from this config by agents.primer_renderer.
-#                     Reserved for per-workspace overrides.
 #   startup           Per-project startup script path (relative to repo root).
 #   dind              true -> run with --privileged for Docker-in-Docker.
 #   graph_project     Hard graph boundary — passed as GRAPH_SCOPE env var.
