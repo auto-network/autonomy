@@ -479,18 +479,15 @@ async function killChatWithSession(designId) {
 
 // ── Terminal ─────────────────────────────────────────────────
 
-let activeTerm = null;
-let activeWs = null;
+let _activeTermInstance = null;  // result of window.mountTerminal(), or null
 let activeTerminalId = null;
-let _terminalFitAddon = null;
-let _terminalResizeObserver = null;
 let _terminalFragmentInit = false;
 
 function destroyTerminal() {
-  if (_terminalResizeObserver) { _terminalResizeObserver.disconnect(); _terminalResizeObserver = null; }
-  if (activeWs) { try { activeWs.close(); } catch(e) {} activeWs = null; }
-  if (activeTerm) { activeTerm.dispose(); activeTerm = null; }
-  _terminalFitAddon = null;
+  if (_activeTermInstance) {
+    try { _activeTermInstance.dispose(); } catch (e) {}
+    _activeTermInstance = null;
+  }
 }
 
 async function renderTerminalFragment() {
@@ -570,10 +567,11 @@ async function renderTerminal(cmd, attach) {
   await renderTerminalFragment();
 
   // If we already have an active connection to the requested session, just re-fit
-  if (attach && activeTerm && activeWs && activeWs.readyState === WebSocket.OPEN
+  if (attach && _activeTermInstance && _activeTermInstance.ws
+      && _activeTermInstance.ws.readyState === WebSocket.OPEN
       && activeTerminalId === attach) {
-    if (_terminalFitAddon) _terminalFitAddon.fit();
-    activeTerm.focus();
+    _activeTermInstance.fit();
+    try { _activeTermInstance.term.focus(); } catch (e) {}
     return;
   }
 
@@ -589,170 +587,27 @@ async function renderTerminal(cmd, attach) {
   destroyTerminal();
 
   const termContainer = document.getElementById('terminal-container');
-  termContainer.innerHTML = '';
-  if (window._terminalPage) {
-    window._terminalPage.setStatus('connecting...', 'text-xs text-yellow-400');
-  }
 
-  const term = new Terminal({
-    cursorBlink: true,
-    fontSize: 14,
-    scrollback: 10000,
-    fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-    theme: {
-      background: '#111827',
-      foreground: '#e5e7eb',
-      cursor: '#818cf8',
-      selectionBackground: '#4f46e580',
+  _activeTermInstance = window.mountTerminal(termContainer, attach, {
+    onStatus: function (state, _msg) {
+      if (!window._terminalPage) return;
+      if (state === 'connecting') {
+        window._terminalPage.setStatus('connecting...', 'text-xs text-yellow-400');
+      } else if (state === 'connected') {
+        window._terminalPage.setStatus('connected', 'text-xs text-green-400');
+      } else if (state === 'disconnected') {
+        window._terminalPage.setStatus('disconnected', 'text-xs text-red-400');
+      } else if (state === 'error') {
+        window._terminalPage.setStatus('error', 'text-xs text-red-400');
+      }
+    },
+    onOpen: function () {
+      // Refresh pill bar so the new session appears
+      if (window._terminalPage) {
+        try { window._terminalPage.refresh(); } catch (e) {}
+      }
     },
   });
-
-  const fitAddon = new FitAddon.FitAddon();
-  _terminalFitAddon = fitAddon;
-  term.loadAddon(fitAddon);
-  // ClipboardAddon handles OSC 52 sequences from tmux/vim for clipboard sync
-  if (typeof ClipboardAddon !== 'undefined') {
-    term.loadAddon(new ClipboardAddon.ClipboardAddon());
-  }
-  term.open(termContainer);
-  fitAddon.fit();
-
-  // Build WebSocket URL — attach-only, ws_terminal rejects other params
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${proto}//${location.host}/ws/terminal?attach=${encodeURIComponent(attach)}`;
-
-  const ws = new WebSocket(wsUrl);
-  activeWs = ws;
-  activeTerm = term;
-
-  ws.onopen = async () => {
-    if (window._terminalPage) {
-      window._terminalPage.setStatus('connected', 'text-xs text-green-400');
-    }
-    // Send initial size
-    const dims = fitAddon.proposeDimensions();
-    if (dims) {
-      ws.send(`\x1b[8;${dims.rows};${dims.cols}t`);
-    }
-    // Refresh pill bar so the new session appears
-    if (window._terminalPage) await window._terminalPage.refresh();
-    term.focus();
-  };
-
-  ws.onmessage = (e) => {
-    term.write(e.data);
-  };
-
-  ws.onclose = () => {
-    if (window._terminalPage) {
-      window._terminalPage.setStatus('disconnected', 'text-xs text-red-400');
-    }
-    term.write('\r\n\x1b[90m--- session ended ---\x1b[0m\r\n');
-  };
-
-  ws.onerror = () => {
-    if (window._terminalPage) {
-      window._terminalPage.setStatus('error', 'text-xs text-red-400');
-    }
-  };
-
-  term.onData((data) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(data);
-    }
-  });
-
-  // ── Clipboard Integration ──────────────────────────
-  // tmux mouse is ON so scroll wheel works (triggers tmux copy-mode).
-  // Hold Shift to select text at browser level (bypasses tmux mouse capture).
-  // ClipboardAddon handles OSC 52 from tmux/vim yank → browser clipboard.
-  // onSelectionChange copies Shift-selected text to clipboard automatically.
-
-  // Helper: copy text to clipboard with fallback for non-HTTPS
-  function copyToClipboard(text) {
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).catch(() => {});
-    } else {
-      // Fallback: hidden textarea + execCommand
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-    }
-  }
-
-  // 1. Selection → clipboard
-  term.onSelectionChange(() => {
-    const sel = term.getSelection();
-    if (sel) {
-      copyToClipboard(sel);
-    }
-  });
-
-  // OSC 52 clipboard sync is now handled by ClipboardAddon above.
-
-  // ── Paste Handling ──────────────────────────────────────
-  // Multiple paths to ensure paste works:
-  // 1. xterm.js onPaste (browser paste event — Ctrl+V, middle-click)
-  // 2. Ctrl+Shift+V keyboard shortcut
-  //
-  // Uses bracket paste mode (\e[200~ ... \e[201~) to prevent shells from
-  // executing multi-line pastes immediately.
-
-  function bracketPaste(text) {
-    if (text.includes('\n') || text.includes('\r')) {
-      return `\x1b[200~${text}\x1b[201~`;
-    }
-    return text;
-  }
-
-  async function pasteFromClipboard() {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text && ws.readyState === WebSocket.OPEN) {
-        ws.send(bracketPaste(text));
-      }
-    } catch(err) {
-      // Clipboard API may fail without HTTPS or user gesture — no fallback for read
-      console.warn('Clipboard read failed:', err.message);
-    }
-  }
-
-  // 1. xterm.js built-in paste: fires when browser delivers a paste event
-  //    to the terminal canvas (Ctrl+V, middle-click, OS paste).
-  //    We intercept here to send via WebSocket instead of xterm's default.
-  term.onPaste((text) => {
-    if (text && ws.readyState === WebSocket.OPEN) {
-      ws.send(bracketPaste(text));
-    }
-  });
-
-  // 2. Ctrl+Shift+V paste shortcut (explicit fallback)
-  term.attachCustomKeyEventHandler((e) => {
-    if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
-      e.preventDefault();
-      pasteFromClipboard();
-      return false;  // prevent xterm.js from processing this key
-    }
-    return true;
-  });
-
-  // Handle resize (guard against 0x0 when terminal page is hidden)
-  if (_terminalResizeObserver) _terminalResizeObserver.disconnect();
-  _terminalResizeObserver = new ResizeObserver((entries) => {
-    const entry = entries[0];
-    if (!entry || entry.contentRect.width === 0 || entry.contentRect.height === 0) return;
-    if (_terminalFitAddon) _terminalFitAddon.fit();
-    const dims = _terminalFitAddon ? _terminalFitAddon.proposeDimensions() : null;
-    if (dims && activeWs && activeWs.readyState === WebSocket.OPEN) {
-      activeWs.send(`\x1b[8;${dims.rows};${dims.cols}t`);
-    }
-  });
-  _terminalResizeObserver.observe(termContainer);
 }
 
 // ── Live Session Panel ───────────────────────────────────────
