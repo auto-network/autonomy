@@ -12,10 +12,17 @@ from pathlib import Path
 from tools.dashboard.dao.dashboard_db import get_live_sessions as _db_live_sessions
 from tools.dashboard.dao.dashboard_db import find_live_session as _db_find_live
 from tools.dashboard.dao.dashboard_db import get_all_sessions as _db_all_sessions
+from tools.graph.duration import parse_duration
 
 logger = logging.getLogger(__name__)
 
 _GRAPH_DB = Path(__file__).parents[3] / "data" / "graph.db"
+
+# Dropdown values → seconds. `all` disables the filter. Keys match the
+# `recent_sessions?since=` query param and the `graph sessions --status --since`
+# CLI (auto-0r86); see design acb2829b-4fc0 revision b39626f2.
+_SINCE_WINDOWS = {"6h": "6h", "1d": "1d", "1w": "1w"}
+_VALID_RECENT_SORTS = {"lastActivity", "created", "turns", "ctx"}
 
 
 def _iso_to_epoch(ts: str | None) -> float:
@@ -76,8 +83,21 @@ def _graph_sources_have_last_activity_column(conn: sqlite3.Connection) -> bool:
     return "last_activity_at" in cols
 
 
-def get_recent_sessions(limit: int = 20) -> list[dict]:
-    """Fetch recent session sources, ordered by last activity.
+def get_recent_sessions(
+    limit: int = 20,
+    sort: str = "lastActivity",
+    since: str = "1d",
+) -> list[dict]:
+    """Fetch recent session sources, ordered and filtered for the Recent list.
+
+    Args:
+      limit: cap rows returned after sorting.
+      sort:  one of ``lastActivity|created|turns|ctx`` (design acb2829b-4fc0).
+             Falls back to ``lastActivity`` on unknown values.
+      since: ``6h|1d|1w|all``. Parsed via ``tools.graph.duration.parse_duration``;
+             rows whose most-recent activity is older than ``now() - dur`` are
+             dropped. ``all`` (or unknown) disables the filter. Matches the
+             ``graph sessions --status --since`` CLI (auto-0r86).
 
     Strategy:
       1. Pull recent session rows from graph.db (the historical tail).
@@ -85,10 +105,23 @@ def get_recent_sessions(limit: int = 20) -> list[dict]:
          that registered with the session monitor, dashboard.db has richer
          metadata (label, entry_count, context_tokens, role) than graph.db.
       3. Filter out currently-live sessions (they belong on Active list).
-      4. Sort by last activity (descending), then return the top *limit*.
+      4. Apply the ``since`` window, then sort by the requested column, then
+         return the top *limit*.
     """
     if not _GRAPH_DB.exists():
         return []
+
+    if sort not in _VALID_RECENT_SORTS:
+        sort = "lastActivity"
+
+    # Compute the since cutoff once (epoch seconds). ``all`` / unknown → None.
+    since_cutoff: float | None = None
+    if since and since != "all":
+        dur_str = _SINCE_WINDOWS.get(since, since)
+        try:
+            since_cutoff = time.time() - parse_duration(dur_str)
+        except ValueError:
+            since_cutoff = None
 
     # ── Step 1: pull from graph.db ────────────────────────────────
     graph_rows: list[dict] = []
@@ -96,10 +129,11 @@ def get_recent_sessions(limit: int = 20) -> list[dict]:
         conn = sqlite3.connect(str(_GRAPH_DB))
         conn.row_factory = sqlite3.Row
         has_la = _graph_sources_have_last_activity_column(conn)
-        # Order by activity if available; oversample to 5x limit so the
-        # dashboard-overlay step can replace stale graph titles with rich
-        # dashboard data without truncating the candidate set.
-        sample_limit = max(limit * 5, 100)
+        # Order by activity if available; oversample so the dashboard-overlay
+        # step can replace stale graph titles with rich dashboard data
+        # without truncating the candidate set, and so non-activity sorts
+        # (turns / ctx) have enough rows to re-rank against.
+        sample_limit = max(limit * 10, 200) if sort in ("turns", "ctx") else max(limit * 5, 100)
         if has_la:
             sql = (
                 "SELECT id, type, project, title, created_at, last_activity_at,"
@@ -208,12 +242,32 @@ def get_recent_sessions(limit: int = 20) -> list[dict]:
 
         merged[row["id"]] = row
 
-    # ── Step 4: sort by activity, take top N ──────────────────────
-    out = sorted(
-        merged.values(),
-        key=lambda r: _iso_to_epoch(r.get("last_activity_at", "")),
-        reverse=True,
-    )[:limit]
+    # ── Step 4: apply `since` window, sort, take top N ────────────
+    rows = list(merged.values())
+    if since_cutoff is not None:
+        rows = [
+            r for r in rows
+            if _iso_to_epoch(r.get("last_activity_at") or r.get("created_at", "")) >= since_cutoff
+        ]
+
+    if sort == "created":
+        rows.sort(key=lambda r: _iso_to_epoch(r.get("created_at", "")), reverse=True)
+    elif sort == "turns":
+        rows.sort(
+            key=lambda r: r.get("entry_count") or r.get("total_turns") or 0,
+            reverse=True,
+        )
+    elif sort == "ctx":
+        rows.sort(
+            key=lambda r: r.get("context_tokens") or r.get("total_tokens") or 0,
+            reverse=True,
+        )
+    else:  # "lastActivity" (default)
+        rows.sort(
+            key=lambda r: _iso_to_epoch(r.get("last_activity_at", "")),
+            reverse=True,
+        )
+    out = rows[:limit]
 
     # Strip internal field
     for r in out:
