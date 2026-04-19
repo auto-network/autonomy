@@ -90,6 +90,7 @@
       // ── View-only state ─────────────────────────────────────────
       displayEntries: [],
       autoScroll: true,
+      headerOpen: false,
       _storeCleanups: [],
       _expanded: {},
       _expandView: {},
@@ -102,7 +103,8 @@
       totalMB: '0',
 
       // Input (Tier 3)
-      inputText: '',
+      hasContent: false,
+      _draftTimer: null,
       sending: false,
       uploading: false,
       attachments: [],
@@ -225,8 +227,6 @@
 
         var store = window.getSessionStore(sessionId);
 
-        this.inputText = store.draftText || '';
-
         if (store.loaded) {
           // Instant render from cache — zero network
           this._rebuildDisplay();
@@ -276,36 +276,58 @@
         // Set up reactive watchers
         this._setupWatchers();
 
-        // Persist draft text to store on every keystroke
+        // Restore persisted draft + wire paste handler on the contenteditable element
         var self = this;
-        this.$watch('inputText', function(val) {
-          var s = window.getSessionStore(self.sessionKey);
-          if (s) s.draftText = val;
-        });
-
-        // Clipboard paste support — attach pasted files
         this.$nextTick(function() {
-          var ta = self.$refs.messageInput;
-          if (ta) {
-            ta.addEventListener('paste', function(e) {
-              var items = e.clipboardData && e.clipboardData.items;
-              if (!items) return;
-              var files = [];
-              for (var i = 0; i < items.length; i++) {
-                if (items[i].kind === 'file') {
-                  var f = items[i].getAsFile();
-                  if (f) files.push(f);
-                }
-              }
-              if (files.length) { e.preventDefault(); self.addFiles(files); }
-            });
+          var el = self.$refs.messageInput;
+          if (!el) return;
+          if (store.draftText) {
+            el.innerText = store.draftText;
+            self.hasContent = el.innerText.trim().length > 0;
           }
+          el.addEventListener('paste', function(e) {
+            var items = e.clipboardData && e.clipboardData.items;
+            if (!items) return;
+            var files = [];
+            var hasFile = false;
+            for (var i = 0; i < items.length; i++) {
+              if (items[i].kind === 'file') {
+                var f = items[i].getAsFile();
+                if (f) { files.push(f); hasFile = true; }
+              }
+            }
+            if (hasFile) {
+              e.preventDefault();
+              self.addFiles(files);
+              return;
+            }
+            // Plain-text paste — strip formatting so the contenteditable stays clean
+            e.preventDefault();
+            var txt = (e.clipboardData || window.clipboardData).getData('text/plain');
+            document.execCommand('insertText', false, txt);
+          });
         });
       },
 
       // ── Lifecycle ───────────────────────────────────────────────
 
       init() {
+        // Keyboard padding toggle — when iOS keyboard opens, visualViewport shrinks
+        // below ~75% of screen.height; drop the safe-area padding so the input hugs
+        // the keyboard. Harmless on non-iOS, on overlay mode (no .sv-input), and
+        // on desktop (keyboard doesn't affect visualViewport).
+        if (window.visualViewport && !this._vvBound) {
+          this._vvBound = true;
+          var _vvHandler = function() {
+            var bar = document.querySelector('.sv-input');
+            if (!bar) return;
+            var kbOpen = window.visualViewport.height < window.screen.height * 0.75;
+            bar.style.paddingBottom = kbOpen ? '0px' : '';
+          };
+          window.visualViewport.addEventListener('resize', _vvHandler);
+          this._vvHandler = _vvHandler;
+        }
+
         if (this._mode === 'overlay') {
           // Overlay: expose globals, wait for configure() calls
           var self = this;
@@ -362,6 +384,15 @@
         if (this._tickInterval) {
           clearInterval(this._tickInterval);
           this._tickInterval = null;
+        }
+        if (this._draftTimer) {
+          clearTimeout(this._draftTimer);
+          this._draftTimer = null;
+        }
+        if (this._vvHandler && window.visualViewport) {
+          window.visualViewport.removeEventListener('resize', this._vvHandler);
+          this._vvHandler = null;
+          this._vvBound = false;
         }
       },
 
@@ -517,8 +548,21 @@
         }
       },
 
+      onInput(el) {
+        var text = el.innerText;
+        this.hasContent = text.trim().length > 0;
+        clearTimeout(this._draftTimer);
+        var self = this;
+        this._draftTimer = setTimeout(function() {
+          var s = window.getSessionStore(self.sessionKey);
+          if (s) s.draftText = text;
+        }, 300);
+      },
+
       async sendMessage() {
-        var text = this.inputText.trim();
+        var el = this.$refs.messageInput;
+        if (!el) return;
+        var text = el.innerText.trim();
         if ((this.attachments.length === 0 && !text) || this.sending) return;
         this.sending = true;
         var tmux = this._tmuxSession;
@@ -551,16 +595,12 @@
             }
           }
 
-          this.inputText = '';
+          el.innerText = '';
+          this.hasContent = false;
           var s = window.getSessionStore(this.sessionKey);
           if (s) s.draftText = '';
           this.clearAttachments();
-          var ta = this.$refs.messageInput;
-          if (ta) {
-            ta.style.height = '';
-            ta.style.overflowY = 'hidden';
-            ta.blur();
-          }
+          el.blur();
         } catch (e) {
           console.warn('[sessionViewer] send failed:', e);
         } finally {

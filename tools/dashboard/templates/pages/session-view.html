@@ -2,7 +2,7 @@
 
   <!-- Loading -->
   <template x-if="state === 'loading'">
-    <div class="text-gray-500 text-sm p-4">
+    <div class="sv-loading text-gray-500 text-sm">
       <template x-if="loadProgress > 0">
         <span>
           Loading session...
@@ -18,44 +18,71 @@
 
   <!-- Error -->
   <template x-if="state === 'error'">
-    <div class="text-red-400 p-4" x-text="errorMsg"></div>
+    <div class="sv-error text-red-400" x-text="errorMsg"></div>
   </template>
 
   <!-- Main viewer -->
   <template x-if="state === 'ready'">
     <div class="sv-ready">
 
-      <!-- ZONE 2: Session header — flex child, always visible at top -->
-      <div class="sv-header" data-testid="session-header">
-        <!-- Inline-editable label (live sessions) or static label -->
-        <template x-if="_tmuxSession && isLive">
-          <span class="text-sm font-medium text-gray-200 cursor-pointer hover:text-white border-b border-transparent hover:border-gray-500 min-w-[60px]"
-                data-testid="session-label-edit"
-                contenteditable="true"
-                @blur="saveLabel($event)"
-                @keydown.enter.prevent="$event.target.blur()"
-                @keydown.escape.prevent="$event.target.textContent = _label || _tmuxSession; $event.target.blur()"
-                x-text="_label || _tmuxSession"
-                title="Click to edit label"></span>
-        </template>
-        <template x-if="_tmuxSession && !isLive">
-          <span class="text-sm font-medium text-gray-200" x-text="_label || _tmuxSession"></span>
-        </template>
-        <template x-if="!_tmuxSession">
-          <span class="text-sm font-medium text-gray-400" x-text="sessionId.slice(0, 12)"></span>
-        </template>
-        <span class="flex items-center gap-1.5 ml-auto">
-          <template x-if="!isLive">
-            <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
-          </template>
-          <span class="text-xs text-gray-500" x-show="contextTokens > 0"
-                x-text="Math.round(contextTokens / 1000) + 'k'"></span>
-          <span class="w-2 h-2 rounded-full" :class="isLive ? 'bg-green-400' : 'bg-gray-500'"></span>
-        </span>
+      <!-- ROW 1: Header — 2-row structure + optional expanded panel -->
+      <div class="sv-header" :class="headerOpen ? 'open' : ''" data-testid="session-header">
+        <div class="sv-header-inner" @click="headerOpen = !headerOpen">
+          <!-- Row 1: status dot · role badge · (spacer) · terminal toggle · chevron -->
+          <div class="sv-header-row1">
+            <span class="w-2 h-2 rounded-full flex-shrink-0"
+                  :class="isLive ? 'bg-green-400' : 'bg-gray-500'"></span>
+            <template x-if="sessionType">
+              <span class="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-indigo-900/40 text-indigo-300 flex-shrink-0"
+                    x-text="sessionType"></span>
+            </template>
+            <div style="flex:1"></div>
+            <template x-if="!isLive">
+              <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
+            </template>
+            <svg class="sv-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </div>
+          <!-- Row 2: title (editable on live tmux) · tokens -->
+          <div class="sv-header-row2" @click.stop>
+            <template x-if="_tmuxSession && isLive">
+              <span class="text-sm font-medium text-gray-200 cursor-pointer hover:text-white border-b border-transparent hover:border-gray-500 min-w-[60px] flex-1 truncate"
+                    data-testid="session-label-edit"
+                    contenteditable="true"
+                    @blur="saveLabel($event)"
+                    @keydown.enter.prevent="$event.target.blur()"
+                    @keydown.escape.prevent="$event.target.textContent = _label || _tmuxSession; $event.target.blur()"
+                    x-text="_label || _tmuxSession"
+                    title="Click to edit label"></span>
+            </template>
+            <template x-if="_tmuxSession && !isLive">
+              <span class="text-sm font-medium text-gray-200 flex-1 truncate" x-text="_label || _tmuxSession"></span>
+            </template>
+            <template x-if="!_tmuxSession">
+              <span class="text-sm font-medium text-gray-400 flex-1 truncate" x-text="sessionId.slice(0, 12)"></span>
+            </template>
+            <span class="sv-tokens text-xs text-gray-500" x-show="contextTokens > 0"
+                  x-text="Math.round(contextTokens / 1000) + 'k'"></span>
+          </div>
+        </div>
+        <!-- Expanded panel -->
+        <div class="sv-header-expanded">
+          <div class="text-[10px] uppercase tracking-wider text-gray-500">Details</div>
+          <div class="flex gap-3 mt-1 text-[10px] text-gray-600 font-mono flex-wrap">
+            <span><span class="text-gray-500">entries</span> <span x-text="entries.length"></span></span>
+            <span x-show="contextTokens > 0"><span class="text-gray-500">ctx</span> <span x-text="Math.round(contextTokens / 1000) + 'k'"></span></span>
+            <span x-show="_tmuxSession"><span class="text-gray-500">tmux</span> <span x-text="_tmuxSession"></span></span>
+            <span x-show="project"><span class="text-gray-500">project</span> <span x-text="projectLabel || project"></span></span>
+          </div>
+        </div>
       </div>
 
-      <!-- ZONE 3: Scrollable entries — fills all remaining space -->
-      <div class="sv-entries" x-ref="entriesContainer" @scroll="onScroll()">
+      <!-- ROW 2: Scrollable entries (only this scrolls) -->
+      <div class="sv-entries" x-ref="entriesContainer"
+           @scroll="onScroll()"
+           onclick="var el = document.querySelector('.sv-editable'); if (el) el.blur()">
 
         <!-- Empty state for new sessions with no entries yet -->
         <template x-if="entries.length === 0">
@@ -70,7 +97,7 @@
         {% include "partials/session-entries.html" %}
       </div>
 
-      <!-- ZONE 4: Input bar — flex child at bottom (shown when linked to tmux) -->
+      <!-- ROW 3: Input bar — shown when linked to tmux -->
       <template x-if="isLive && _tmuxSession && (sessionType !== 'host' || _linked)">
         <div class="sv-input"
              @dragenter.prevent="$el.classList.add('drop-highlight')"
@@ -79,14 +106,14 @@
              @drop.prevent="$el.classList.remove('drop-highlight'); addFiles($event.dataTransfer.files)">
 
           <!-- Attachment preview strip -->
-          <div x-show="attachments.length > 0" class="flex" style="gap:6px; padding:6px 0.5rem 0; overflow:visible;">
+          <div class="sv-attach-strip" x-show="attachments.length > 0">
             <template x-for="att in attachments" :key="att.id">
-              <div class="thumb-wrap">
+              <div class="sv-thumb">
                 <template x-if="att.isImage && att.dataUrl">
                   <img :src="att.dataUrl">
                 </template>
                 <template x-if="!att.isImage || !att.dataUrl">
-                  <div class="thumb-file">
+                  <div class="sv-thumb-file">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                       <polyline points="14 2 14 8 20 8"/>
@@ -94,7 +121,7 @@
                     <span x-text="att.name"></span>
                   </div>
                 </template>
-                <button class="thumb-x" @click="removeAttachment(att.id)">&times;</button>
+                <button class="sv-thumb-x" @click="removeAttachment(att.id)">&times;</button>
               </div>
             </template>
           </div>
@@ -108,75 +135,63 @@
                    class="hidden"
                    @change="addFiles($event.target.files); $event.target.value=''">
 
-            <!-- Attach button (SVG paperclip) -->
-            <button @click="$refs.fileInput.click()"
+            <!-- Attach button -->
+            <button class="sv-attach-btn"
+                    @click="$refs.fileInput.click()"
                     :disabled="uploading"
-                    title="Attach file"
-                    class="flex-shrink-0 flex items-center justify-center
-                           bg-transparent hover:bg-gray-700 text-gray-400 hover:text-gray-200
-                           rounded-lg disabled:opacity-50 disabled:cursor-not-allowed
-                           transition-colors duration-150"
-                    style="width:36px; height:36px;">
+                    title="Attach file">
               <template x-if="!uploading">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
               </template>
               <template x-if="uploading">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="animate-spin"><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>
               </template>
             </button>
 
-            <!-- Message textarea -->
-            <textarea x-model="inputText"
-                      x-ref="messageInput"
-                      @keydown.ctrl.enter.prevent="sendMessage()"
-                      @keydown.meta.enter.prevent="sendMessage()"
-                      @input="$el.style.height='auto'; let c=Math.min($el.scrollHeight,160); $el.style.height=c+'px'; $el.style.overflowY=$el.scrollHeight>160?'auto':'hidden'"
-                      :placeholder="('ontouchstart' in window || window.innerWidth < 768) ? 'Message\u2026' : 'Message\u2026 (Ctrl+Enter to send)'"
-                      rows="1"
-                      autocomplete="off"
-                      autocorrect="off"
-                      autocapitalize="sentences"
-                      enterkeyhint="send"
-                      class="flex-1 bg-gray-700 text-gray-100 rounded-lg text-base leading-normal
-                             resize-none focus:outline-none border-2 border-transparent focus:border-indigo-500
-                             font-sans transition-colors duration-150"
-                      style="min-height: 36px; max-height: 160px; overflow-y: hidden; padding: 6px 12px;"></textarea>
-
-            <!-- Send button (SVG arrow + label) -->
-            <button @click="sendMessage()"
-                    :disabled="(attachments.length === 0 && !inputText.trim()) || sending"
-                    class="flex-shrink-0 px-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-semibold
-                           disabled:opacity-30 disabled:cursor-default
-                           whitespace-nowrap flex items-center justify-center gap-1.5
-                           transition-colors duration-150"
-                    style="height:36px;">
-              <template x-if="!sending">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-              </template>
-              <template x-if="sending">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="animate-spin"><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>
-              </template>
-              <span x-text="sending ? 'Sending' : 'Send'"></span>
-            </button>
+            <!-- Contenteditable bubble -->
+            <div class="sv-input-bubble">
+              <div class="sv-editable"
+                   x-ref="messageInput"
+                   contenteditable="true"
+                   data-placeholder="Message..."
+                   role="textbox"
+                   aria-multiline="true"
+                   oninput="Alpine.$data(this).onInput(this)"
+                   onkeydown="if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();Alpine.$data(this).sendMessage()}"></div>
+              <button class="sv-send" id="sendBtn"
+                      ontouchend="event.preventDefault(); Alpine.$data(this).sendMessage()"
+                      onclick="Alpine.$data(this).sendMessage()"
+                      onmousedown="event.preventDefault()"
+                      :disabled="(attachments.length === 0 && !hasContent) || sending">
+                <template x-if="!sending">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94l18.04-8.5a.75.75 0 000-1.38l-18.04-8.5z"/></svg>
+                </template>
+                <template x-if="sending">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="animate-spin"><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>
+                </template>
+              </button>
+            </div>
           </div>
         </div>
       </template>
 
-      <!-- ZONE 4 alt: Link Terminal — flex child at bottom -->
+      <!-- ROW 3 alt: Link Terminal — shown for unlinked host sessions -->
       <template x-if="isLive && !_linked && sessionType === 'host'">
         <div class="sv-input">
 
           <!-- Idle: show Link Terminal button -->
           <template x-if="linkState === 'idle'">
-            <button @click="showLinkPicker()"
-                    class="w-full min-h-[44px] bg-amber-700 hover:bg-amber-600 text-white rounded-lg text-sm font-medium">
-              Link Terminal
-            </button>
+            <div class="sv-input-row">
+              <button @click="showLinkPicker()"
+                      class="w-full min-h-[44px] bg-amber-700 hover:bg-amber-600 text-white rounded-lg text-sm font-medium">
+                Link Terminal
+              </button>
+            </div>
           </template>
 
           <!-- Picking: show candidate list -->
           <template x-if="linkState === 'picking'">
-            <div class="space-y-2">
+            <div class="space-y-2 p-2">
               <div class="text-xs text-gray-400 font-medium">Select a tmux session to link:</div>
 
               <template x-if="linkCandidates.length === 0">
@@ -219,7 +234,7 @@
 
           <!-- Failed: error + retry -->
           <template x-if="linkState === 'failed'">
-            <div class="space-y-2">
+            <div class="space-y-2 p-2">
               <div class="text-sm text-red-400" x-text="linkError"></div>
               <button @click="resetLink()"
                       class="w-full min-h-[44px] bg-amber-700 hover:bg-amber-600 text-white rounded-lg text-sm font-medium">
