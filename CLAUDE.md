@@ -65,7 +65,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph bead "title"` | Create bead with provenance link | `graph bead "Fix X" --source 8cdc1d85 --turns 286` |
 | `graph agent-runs` | Discover and ingest subagent traces | `graph agent-runs --list` |
 | `graph sessions --all` | Ingest latest session data (107ms) | Run before searching for recent content |
-| `graph sessions --status` | Compact live session status table | `graph sessions --status` |
+| `graph sessions --status` | Compact session status table (live-only; add `--since` to include recent dead sessions) | `graph sessions --status --since 12h` |
 | `graph wait <bead-id>` | Block until a dispatched bead completes | `graph wait auto-x7wr --timeout 900` |
 | `graph dispatch` | Show running/queued dispatch state | `graph dispatch runs --failed` |
 | `graph dispatch status <bead-id>` | Post-dispatch detail: decision, experience, session links | `graph dispatch status auto-yz29` |
@@ -189,6 +189,8 @@ graph set-nag --dispatch --off                             # disable dispatch na
 graph crosstalk send <session> "message"                   # send message
 graph crosstalk send <session> -c - < /tmp/msg.txt         # pipe long message
 graph crosstalk broadcast "message"                        # send to all live sessions
+graph sessions --status                                    # live-only status table
+graph sessions --since 12h --status                        # include dead sessions active in the last 12h (post-mortem)
 ```
 
 ## Environment
