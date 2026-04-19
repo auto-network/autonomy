@@ -37,6 +37,10 @@ _PALETTE: tuple[str, ...] = (
 
 UNKNOWN_SLUG = "unknown"
 
+# Neutral gray painted behind the "?" glyph when the org is unresolved
+# (legacy sessions with path-derived project junk, missing project field).
+UNRESOLVED_COLOR = "#4b5563"
+
 
 def _hash_color(slug: str) -> str:
     """Pick a stable palette colour from the slug's blake2b hash."""
@@ -46,9 +50,13 @@ def _hash_color(slug: str) -> str:
 
 
 def _initial(name_or_slug: str) -> str:
-    """First non-whitespace character, uppercased. Empty string is '?'."""
+    """First alphanumeric character, uppercased. Returns '?' if none found.
+
+    Skips non-alphanumeric characters so path-derived junk like
+    ``-workspace-repo`` yields ``"?"`` rather than ``"-"``.
+    """
     for ch in name_or_slug:
-        if not ch.isspace():
+        if ch.isalnum():
             return ch.upper()
     return "?"
 
@@ -87,12 +95,27 @@ def resolve_org_identity(slug: str | None) -> dict[str, Any]:
         favicon   — URL/path to a square icon, or ``None`` (renderer
                     paints ``initial`` on a circle of ``color`` instead)
         initial   — single uppercase character for the no-favicon case
+        resolved  — ``True`` when the slug is a real org (anything other
+                    than ``UNKNOWN_SLUG``); ``False`` for legacy / unknown
+                    sessions, in which case the renderer paints ``?`` on
+                    neutral gray.
 
     Per-field cascade — operator override → canonical → generated. An
     empty string in an override is treated as "no value" (falls through);
     use null/omit to be explicit.
     """
     slug = (slug or "").strip() or UNKNOWN_SLUG
+
+    if slug == UNKNOWN_SLUG:
+        return {
+            "slug": slug,
+            "name": slug,
+            "byline": "",
+            "color": UNRESOLVED_COLOR,
+            "favicon": None,
+            "initial": "?",
+            "resolved": False,
+        }
 
     overrides = project_config.load_org_overrides()
     override = overrides.get(slug)
@@ -121,6 +144,7 @@ def resolve_org_identity(slug: str | None) -> dict[str, Any]:
         "color": color,
         "favicon": favicon,
         "initial": _initial(name),
+        "resolved": True,
     }
 
 
@@ -144,6 +168,10 @@ def session_org_slug(session: dict) -> str:
     if isinstance(raw, str):
         raw = raw.strip().strip("[]").strip()
     if not raw:
+        return UNKNOWN_SLUG
+    # Path-derived ingest junk (e.g. "-workspace-repo") never identifies
+    # an org. Treat it as unresolved so the renderer paints "?".
+    if raw.startswith("-"):
         return UNKNOWN_SLUG
     try:
         workspace = project_config.get_project(raw)

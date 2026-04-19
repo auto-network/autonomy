@@ -133,13 +133,6 @@
 
   document.addEventListener('alpine:init', () => {
     Alpine.store('sessionZoom', _savedZoom);
-    // Tailwind class map for per-org dropdown headers. Full class strings
-    // live here (not assembled dynamically) so the Tailwind v4 scanner picks
-    // them up from the JS source.
-    const orgColors = {
-      autonomy: 'text-emerald-400',
-      anchore: 'text-blue-400',
-    };
 
     Alpine.data('sessionsPage', () => ({
       interactive: [],
@@ -149,11 +142,11 @@
       zoom: localStorage.getItem('sessionZoom') || 'normal',
 
       // --- Workspace dropdown state (fetched from /api/projects) ---
+      // orgGroups[i].org is a resolved identity object
+      // {slug,name,color,favicon,initial,resolved} — the header renders a
+      // glyph + name and inline-colors the text from org.color.
       projects: [],
       orgGroups: [],
-      orgColorClass(org) {
-        return orgColors[(org || '').toLowerCase()] || 'text-gray-400';
-      },
 
       // --- Card helper methods (referenced by session-card.html partial) ---
       borderCls: _borderCls,
@@ -400,15 +393,22 @@
           const data = await fetch('/api/projects').then(r => r.json());
           const projects = Array.isArray(data.projects) ? data.projects : [];
           this.projects = projects;
-          // Group by graph_project, preserving first-seen order
+          // Group by graph_project, preserving first-seen order. Each
+          // group's `org` is the resolved identity object returned by
+          // /api/projects, ready for the picker header to render.
           const order = [];
           const byOrg = {};
+          const orgObjs = {};
           for (const p of projects) {
-            const org = p.graph_project || 'other';
-            if (!byOrg[org]) { byOrg[org] = []; order.push(org); }
-            byOrg[org].push(p);
+            const slug = (p.org && p.org.slug) || p.graph_project || 'other';
+            if (!byOrg[slug]) {
+              byOrg[slug] = [];
+              order.push(slug);
+              orgObjs[slug] = p.org || {slug, name: slug, color: '#4b5563', favicon: null, initial: '?', resolved: false};
+            }
+            byOrg[slug].push(p);
           }
-          this.orgGroups = order.map(org => ({org: org, projects: byOrg[org]}));
+          this.orgGroups = order.map(slug => ({org: orgObjs[slug], projects: byOrg[slug]}));
         } catch (e) {
           console.warn('[sessionsPage] projects fetch error', e);
           this.projects = [];
