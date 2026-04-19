@@ -130,14 +130,15 @@
               <!-- Row 1: stats plate -->
               <div class="flex items-center gap-1.5" style="font-size:10px; font-family:ui-monospace,monospace; color:#64748b">
                 <span style="font-size:11px; font-weight:500; color:#64748b" x-text="srcType"></span>
-                <template x-if="noteVersion">
-                  <span style="color:#94a3b8; background:#0f1623; padding:1px 5px; border-radius:3px" x-text="'v' + noteVersion"></span>
-                </template>
                 <template x-if="src.project">
                   <span style="background:#1e1b4b; color:#a5b4fc; padding:0 5px; border-radius:3px; font-size:9px; font-weight:700; height:18px; display:inline-flex; align-items:center" x-text="src.project"></span>
                 </template>
-                <button class="ml-auto" style="color:#3d4f63; background:#0f1623; padding:1px 5px; border-radius:3px; cursor:pointer; border:none; font-family:inherit; font-size:10px"
-                        @click="copyGraphLink()" x-text="(src.id || '').slice(0, 12)"></button>
+                <span class="ml-auto" style="white-space:nowrap">
+                  <span style="color:#3d4f63; cursor:pointer" @click="copyGraphLink()" x-text="(src.id || '').slice(0, 12)"></span>
+                  <template x-if="noteVersion">
+                    <span style="color:#94a3b8; background:rgba(255,255,255,0.04); padding:1px 0; border-radius:3px" x-text="'@v' + noteVersion"></span>
+                  </template>
+                </span>
                 <span style="color:#4b5e73; flex-shrink:0" x-text="date"></span>
               </div>
 
