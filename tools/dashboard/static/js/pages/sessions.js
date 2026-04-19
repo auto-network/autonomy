@@ -407,9 +407,14 @@
           const data = await fetch('/api/dao/recent_sessions?limit=20').then(r => r.json());
           if (!Array.isArray(data)) { this.recent = []; return; }
           this.recent = data.map(function(r) {
+            // Use session_uuid for click-through (the session viewer keys
+            // off it). Fall back to tmux_session (live in dashboard.db) and
+            // finally to the graph source id (legacy / non-monitored sessions).
+            var sessionId = r.session_uuid || r.tmux_session || r.id;
+            var lastTs = r.last_activity_at || r.created_at || '';
             return {
               id: r.id,
-              session_id: r.id,
+              session_id: sessionId,
               label: r.title || '',
               session_type: r.session_type || 'interactive',
               type: r.type || 'container',
@@ -417,15 +422,16 @@
               project: r.project || '',
               topics: [],
               latest: '',
-              entry_count: r.total_turns || 0,
-              context_tokens: r.total_tokens || 0,
-              last_activity: r.created_at ? Math.round(new Date(r.created_at).getTime() / 1000) : 0,
+              entry_count: r.entry_count || r.total_turns || 0,
+              context_tokens: r.context_tokens || r.total_tokens || 0,
+              last_activity: lastTs ? Math.round(new Date(lastTs).getTime() / 1000) : 0,
               created_at: r.created_at || '',
-              tmux_session: r.id,
+              last_activity_at: r.last_activity_at || '',
+              tmux_session: r.tmux_session || sessionId,
               nag_enabled: false,
-              role: '',
+              role: r.role || '',
               resumable: r.resumable || false,
-              bead_id: '',
+              bead_id: r.bead_id || '',
             };
           });
         } catch (e) {
