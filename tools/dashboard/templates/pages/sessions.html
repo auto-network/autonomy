@@ -112,7 +112,8 @@
     <!-- Session cards — same structure as active session cards -->
     <div class="sc-card-list" style="display:flex;flex-direction:column;gap:6px">
       <template x-for="s in filtered" :key="s.id">
-        <a :href="'/graph/' + s.id" class="no-underline" data-testid="recent-session-row" :data-session-id="s.id">
+        <a :href="'/session/' + encodeURIComponent(s.project.replace(/^\[|\]$/g, '') || 'session') + '/' + encodeURIComponent(s.session_id)"
+           class="no-underline" data-testid="recent-session-row" :data-session-id="s.session_id">
           {% include 'partials/session-card.html' %}
         </a>
       </template>

@@ -26,6 +26,7 @@ class Source:
     metadata: dict = field(default_factory=dict)
     created_at: str = field(default_factory=now_iso)
     ingested_at: str = field(default_factory=now_iso)
+    last_activity_at: str | None = None
 
 
 @dataclass

@@ -544,6 +544,129 @@ def _load_session_meta(file_path: Path) -> dict:
     return {}
 
 
+# Patterns for low-signal first-turn content that should NOT become a title.
+_HANDSHAKE_RE = re.compile(r"\[dashboard\] confirming terminal link", re.IGNORECASE)
+_IMAGE_PLACEHOLDER_RE = re.compile(r"^\s*\[Image #\d+\]\s*$", re.IGNORECASE)
+_TASK_HEADER_RE = re.compile(r"^\s*#\s+Task:\s*", re.IGNORECASE)
+
+
+def _is_low_signal_title(text: str) -> bool:
+    """True if a candidate title is a placeholder/handshake we should skip."""
+    if not text:
+        return True
+    if _IMAGE_PLACEHOLDER_RE.match(text):
+        return True
+    if _HANDSHAKE_RE.search(text):
+        return True
+    return False
+
+
+def _lookup_dashboard_label(file_path: Path, session_uuid: str | None) -> str | None:
+    """Return the user-set label from dashboard.db for a session, if any.
+
+    Looks the session up by session_uuid first, then by jsonl_path. Tries
+    both live and dead session tables. Best-effort: returns None on any
+    error (DB missing, dashboard.db not initialised, etc.).
+    """
+    abs_path = str(file_path.resolve())
+    try:
+        from tools.dashboard.dao.dashboard_db import find_live_session, find_dead_session
+        for finder in (find_live_session, find_dead_session):
+            row = finder(session_uuid=session_uuid, file_path=abs_path)
+            if row and (row.get("label") or "").strip():
+                return row["label"].strip()
+        return None
+    except Exception:
+        return None
+
+
+def _lookup_bead_title(bead_id: str) -> str | None:
+    """Best-effort lookup of a bead title from the beads (Dolt) DB.
+
+    Returns None if Dolt is unreachable or the bead does not exist.
+    Cached per-call only — callers ingest one session at a time.
+    """
+    if not bead_id:
+        return None
+    try:
+        from tools.dashboard.dao.beads import get_bead_title_priority
+        info = get_bead_title_priority([bead_id]).get(bead_id)
+        if info and info.get("title"):
+            return info["title"].strip()
+    except Exception:
+        pass
+    return None
+
+
+def _derive_session_title(meta: dict, file_path: Path, session_meta: dict,
+                          turns: list[dict]) -> str | None:
+    """Pick the best human-readable title for a session source.
+
+    Preference order:
+    1. dashboard.db.tmux_sessions.label (the working title the user set)
+    2. For dispatch/librarian: bead_id + bead title (joined from beads DB)
+    3. tmux_name / container_name (matches what active cards show)
+    4. First text turn that isn't an image placeholder or handshake
+    """
+    session_uuid = file_path.stem
+    label = _lookup_dashboard_label(file_path, session_uuid)
+    if label:
+        return label
+
+    bead_id = session_meta.get("bead_id")
+    if bead_id:
+        bead_title = _lookup_bead_title(bead_id)
+        if bead_title:
+            return f"{bead_id}: {bead_title}"
+        return bead_id
+
+    container_name = session_meta.get("container_name")
+    if container_name:
+        return container_name
+
+    for t in turns:
+        if t.get("role") != "user":
+            continue
+        content = (t.get("content") or "").strip()
+        if not content or _is_low_signal_title(content):
+            continue
+        title = content[:80].replace("\n", " ").strip()
+        if len(content) > 80:
+            title += "…"
+        return title
+
+    return None
+
+
+def _build_summary_meta(existing_meta: dict, parsed_meta: dict, file_path: Path,
+                       session_meta: dict, current_size: int) -> dict:
+    """Compose the metadata blob written on every (re)ingest.
+
+    Preserves existing fields (so user-curated keys like `tags` survive),
+    overwrites the summary fields the ingester owns.
+    """
+    out = dict(existing_meta) if existing_meta else {}
+    out.update({
+        "session_id": parsed_meta.get("session_id") or out.get("session_id") or file_path.stem,
+        "session_uuid": file_path.stem,
+        "model": parsed_meta.get("model") or out.get("model"),
+        "total_input_tokens": parsed_meta.get("total_input_tokens", 0),
+        "total_output_tokens": parsed_meta.get("total_output_tokens", 0),
+        "total_turns": parsed_meta.get("total_turns", 0),
+        "started_at": parsed_meta.get("started_at") or out.get("started_at"),
+        "ended_at": parsed_meta.get("ended_at"),
+        "file_size": current_size,
+    })
+    # Overlay session_meta fields (session_type, bead_id, etc.) — these are
+    # immutable across the session lifetime, so write them every time in case
+    # .session_meta.json appeared after first ingest.
+    for key in ("type", "bead_id", "job_id", "job_type", "context_id",
+                "container_name", "launched_at"):
+        if key in session_meta:
+            out[f"session_{key}" if key == "type" else key] = session_meta[key]
+    return out
+
+
 def _extract_project_name(file_path: Path) -> str | None:
     """Extract normalized project name from a Claude Code session file path.
 
@@ -597,89 +720,92 @@ def ingest_claude_code_session(
         db.delete_source(existing["id"])
         existing = None
 
+    session_meta = _load_session_meta(file_path)
+
     if existing:
         # Incremental: only ingest turns beyond what we already have
         max_turn = db.get_max_turn(existing["id"])
         new_turns = [t for t in turns if t["turn_number"] > max_turn]
-        if not new_turns:
-            return {"status": "skipped", "source_id": existing["id"], "reason": "already up to date"}
 
-        # Append new turns to existing source
         source_id = existing["id"]
         thoughts = []
         derivations = []
         all_entities = {}
 
-        # Find the last thought from existing data to link new derivations
-        last_thought_row = db.conn.execute(
-            "SELECT id FROM thoughts WHERE source_id = ? ORDER BY turn_number DESC LIMIT 1",
-            (source_id,)
-        ).fetchone()
-        last_thought_id = last_thought_row["id"] if last_thought_row else None
+        if new_turns:
+            # Find the last thought from existing data to link new derivations
+            last_thought_row = db.conn.execute(
+                "SELECT id FROM thoughts WHERE source_id = ? ORDER BY turn_number DESC LIMIT 1",
+                (source_id,)
+            ).fetchone()
+            last_thought_id = last_thought_row["id"] if last_thought_row else None
 
-        for turn in new_turns:
-            ents = extract_entities(turn["content"])
-            for name, etype in ents:
-                key = name.lower()
-                if key not in all_entities:
-                    all_entities[key] = (name, etype)
-
-            if turn["role"] == "user":
-                t = Thought(
-                    source_id=source_id,
-                    content=turn["content"],
-                    turn_number=turn["turn_number"],
-                    message_id=turn.get("message_id"),
-                    metadata={"timestamp": turn.get("timestamp", "")},
-                    created_at=turn.get("timestamp") or now_iso(),
-                )
-                db.insert_thought(t)
-                thoughts.append(t)
-                last_thought_id = t.id
-
+            for turn in new_turns:
+                ents = extract_entities(turn["content"])
                 for name, etype in ents:
-                    eid = db.upsert_entity(name, etype)
-                    db.add_mention(eid, t.id, "thought")
+                    key = name.lower()
+                    if key not in all_entities:
+                        all_entities[key] = (name, etype)
 
-            elif turn["role"] == "assistant":
-                d = Derivation(
-                    source_id=source_id,
-                    thought_id=last_thought_id,
-                    content=turn["content"],
-                    model=meta.get("model", "claude-code"),
-                    turn_number=turn["turn_number"],
-                    message_id=turn.get("message_id"),
-                    metadata={"timestamp": turn.get("timestamp", "")},
-                    created_at=turn.get("timestamp") or now_iso(),
-                )
-                db.insert_derivation(d)
-                derivations.append(d)
+                if turn["role"] == "user":
+                    t = Thought(
+                        source_id=source_id,
+                        content=turn["content"],
+                        turn_number=turn["turn_number"],
+                        message_id=turn.get("message_id"),
+                        metadata={"timestamp": turn.get("timestamp", "")},
+                        created_at=turn.get("timestamp") or now_iso(),
+                    )
+                    db.insert_thought(t)
+                    thoughts.append(t)
+                    last_thought_id = t.id
 
-                for name, etype in ents:
-                    eid = db.upsert_entity(name, etype)
-                    db.add_mention(eid, d.id, "derivation")
+                    for name, etype in ents:
+                        eid = db.upsert_entity(name, etype)
+                        db.add_mention(eid, t.id, "thought")
 
-                if last_thought_id:
-                    db.insert_edge(Edge(
-                        source_id=d.id, source_type="derivation",
-                        target_id=last_thought_id, target_type="thought",
-                        relation="responds_to",
-                    ))
+                elif turn["role"] == "assistant":
+                    d = Derivation(
+                        source_id=source_id,
+                        thought_id=last_thought_id,
+                        content=turn["content"],
+                        model=meta.get("model", "claude-code"),
+                        turn_number=turn["turn_number"],
+                        message_id=turn.get("message_id"),
+                        metadata={"timestamp": turn.get("timestamp", "")},
+                        created_at=turn.get("timestamp") or now_iso(),
+                    )
+                    db.insert_derivation(d)
+                    derivations.append(d)
 
-        # Update source metadata with latest stats
+                    for name, etype in ents:
+                        eid = db.upsert_entity(name, etype)
+                        db.add_mention(eid, d.id, "derivation")
+
+                    if last_thought_id:
+                        db.insert_edge(Edge(
+                            source_id=d.id, source_type="derivation",
+                            target_id=last_thought_id, target_type="thought",
+                            relation="responds_to",
+                        ))
+
+        # Refresh summary fields on every incremental pass — even when no new
+        # content turns landed (file may have grown via tool_use/tool_result
+        # entries that bump file_size and ended_at without producing new turns).
         existing_meta = json.loads(existing["metadata"]) if existing["metadata"] else {}
-        existing_meta.update({
-            "model": meta.get("model"),
-            "total_input_tokens": meta.get("total_input_tokens", 0),
-            "total_output_tokens": meta.get("total_output_tokens", 0),
-            "ended_at": meta.get("ended_at"),
-            "file_size": current_size,
-        })
-        # Backfill session_uuid if missing
-        if "session_uuid" not in existing_meta:
-            existing_meta["session_uuid"] = file_path.stem
-        db.update_source_metadata(source_id, existing_meta)
+        new_meta = _build_summary_meta(existing_meta, meta, file_path, session_meta, current_size)
+        # Re-derive title in case set-label fired or bead linkage appeared after first ingest.
+        new_title = _derive_session_title(meta, file_path, session_meta, turns) or existing.get("title")
+        db.update_source_summary(
+            source_id,
+            title=new_title,
+            metadata=new_meta,
+            last_activity_at=meta.get("ended_at") or existing.get("last_activity_at"),
+        )
         db.commit()
+
+        if not new_turns:
+            return {"status": "refreshed", "source_id": source_id, "reason": "summary refreshed"}
 
         return {
             "status": "updated",
@@ -693,42 +819,8 @@ def ingest_claude_code_session(
         }
 
     # Fresh ingestion
-    first_user = next((t for t in turns if t["role"] == "user"), None)
-    title = None
-    if first_user:
-        title = first_user["content"][:80].replace("\n", " ").strip()
-        if len(first_user["content"]) > 80:
-            title += "…"
-
-    # Check dashboard DB for a user-set label (overrides first-message title)
-    session_meta = _load_session_meta(file_path)
-    container_name = session_meta.get("container_name", "")
-    if container_name:
-        try:
-            from tools.dashboard.dao.dashboard_db import get_session
-            db_row = get_session(container_name)
-            if db_row and db_row.get("label"):
-                title = db_row["label"]
-        except Exception:
-            pass  # dashboard DB not available (e.g. offline ingest)
-
-    # Merge .session_meta.json fields if present alongside this JSONL
-
-    source_meta = {
-        "session_id": meta["session_id"],
-        "session_uuid": file_path.stem,
-        "model": meta.get("model"),
-        "total_input_tokens": meta.get("total_input_tokens", 0),
-        "total_output_tokens": meta.get("total_output_tokens", 0),
-        "started_at": meta.get("started_at"),
-        "ended_at": meta.get("ended_at"),
-        "file_size": current_size,
-    }
-    # Overlay session_meta fields (session_type, bead_id, job_id, etc.)
-    for key in ("type", "bead_id", "job_id", "job_type", "context_id",
-                "container_name", "launched_at"):
-        if key in session_meta:
-            source_meta[f"session_{key}" if key == "type" else key] = session_meta[key]
+    title = _derive_session_title(meta, file_path, session_meta, turns)
+    source_meta = _build_summary_meta({}, meta, file_path, session_meta, current_size)
 
     source = Source(
         type="session",
@@ -738,6 +830,7 @@ def ingest_claude_code_session(
         file_path=abs_path,
         metadata=source_meta,
         created_at=meta.get("started_at", now_iso()),
+        last_activity_at=meta.get("ended_at") or meta.get("started_at") or now_iso(),
     )
     db.insert_source(source)
 
