@@ -42,6 +42,10 @@ def main() -> int:
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Docker image")
     parser.add_argument("--model", default="claude-opus-4-6[1m]", help="Claude model to use")
     parser.add_argument("--detach", action="store_true", help="Run container in background")
+    parser.add_argument("--graph-project", default="",
+                        help="Graph scope (GRAPH_SCOPE env + .session_meta.json field)")
+    parser.add_argument("--graph-tags", default="",
+                        help="Comma-separated graph tags (GRAPH_TAGS env + .session_meta.json field)")
     args = parser.parse_args()
 
     # Read prompt from file if provided
@@ -65,6 +69,12 @@ def main() -> int:
     metadata: dict = {}
     if args.bead_id:
         metadata["bead_id"] = args.bead_id
+    if args.graph_project:
+        metadata["graph_project"] = args.graph_project
+    if args.graph_tags:
+        # Stored as a list so .session_meta.json round-trips cleanly; the
+        # session_launcher converts back to comma-separated for GRAPH_TAGS.
+        metadata["graph_tags"] = [t for t in args.graph_tags.split(",") if t]
 
     output_dir = args.output_dir if args.output_dir else None
 
@@ -155,6 +165,10 @@ def main() -> int:
             "-e", "GRAPH_DB=/home/agent/graph.db",
             *auth_args,
         ]
+        if args.graph_project:
+            cmd.extend(["-e", f"GRAPH_SCOPE={args.graph_project}"])
+        if args.graph_tags:
+            cmd.extend(["-e", f"GRAPH_TAGS={args.graph_tags}"])
         for host_path, container_spec in mounts.items():
             cmd.extend(["-v", f"{host_path}:{container_spec}"])
         cmd.extend(["-w", "/workspace/repo"])

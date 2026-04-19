@@ -22,15 +22,19 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 IMAGE="autonomy-agent"
 
 # ── Args ──────────────────────────────────────────────
-BEAD_ID="${1:?Usage: launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach]}"
+BEAD_ID="${1:?Usage: launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach] [--graph-project=NAME] [--graph-tags=a,b,c]}"
 shift
 DRY_RUN=false
 DETACH=false
+GRAPH_PROJECT=""
+GRAPH_TAGS=""
 for arg in "$@"; do
     case $arg in
         --dry-run) DRY_RUN=true ;;
         --detach) DETACH=true ;;
         --image=*) IMAGE="${arg#*=}" ;;
+        --graph-project=*) GRAPH_PROJECT="${arg#*=}" ;;
+        --graph-tags=*) GRAPH_TAGS="${arg#*=}" ;;
     esac
 done
 
@@ -132,6 +136,14 @@ echo "    Image: $IMAGE"
 echo "    Branch: $BRANCH"
 echo "    Output: $OUTPUT_DIR"
 
+SCOPE_ARGS=()
+if [[ -n "$GRAPH_PROJECT" ]]; then
+    SCOPE_ARGS+=("--graph-project" "$GRAPH_PROJECT")
+fi
+if [[ -n "$GRAPH_TAGS" ]]; then
+    SCOPE_ARGS+=("--graph-tags" "$GRAPH_TAGS")
+fi
+
 if $DETACH; then
     # ── Detached mode: delegate to Python launch_session_cli ──
     LAUNCH_OUTPUT=$("$REPO_ROOT/.venv/bin/python" -m agents.launch_session_cli \
@@ -143,6 +155,7 @@ if $DETACH; then
         --git-dir "$GIT_DIR" \
         --output-dir "$OUTPUT_DIR" \
         --image "$IMAGE" \
+        ${SCOPE_ARGS[@]+"${SCOPE_ARGS[@]}"} \
         --detach)
 
     if [[ $? -ne 0 ]]; then
@@ -177,7 +190,8 @@ fi
     --worktree "$WORKTREE_DIR" \
     --git-dir "$GIT_DIR" \
     --output-dir "$OUTPUT_DIR" \
-    --image "$IMAGE"
+    --image "$IMAGE" \
+    ${SCOPE_ARGS[@]+"${SCOPE_ARGS[@]}"}
 
 EXIT_CODE=$?
 

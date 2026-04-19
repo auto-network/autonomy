@@ -510,20 +510,6 @@ def parse_claude_code_session(file_path: Path) -> tuple[dict, list[dict]]:
     return meta, turns
 
 
-PROJECT_NAME_MAP = {
-    "-home-jeremy": "home",
-    "-home-jeremy-ClaudeTest": "claudetest",
-    "-home-jeremy-auto": "auto",
-    "-home-jeremy-infra": "infra",
-    "-home-jeremy-jira": "jira",
-    "-home-jeremy-workspace-autonomy": "autonomy",
-    "-home-jeremy-workspace-enterprise-m4-arch": "enterprise-m4",
-    "-home-jeremy-workspace-enterprise-ng": "enterprise-ng",
-    "-mnt-c-Source-DB-v3-2-1": "db-v3",
-    "-repo": "autonomy",
-    "-workspace-repo": "autonomy",
-}
-
 # Repo root for scanning agent-run session directories
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -661,26 +647,10 @@ def _build_summary_meta(existing_meta: dict, parsed_meta: dict, file_path: Path,
     # immutable across the session lifetime, so write them every time in case
     # .session_meta.json appeared after first ingest.
     for key in ("type", "bead_id", "job_id", "job_type", "context_id",
-                "container_name", "launched_at"):
+                "container_name", "launched_at", "graph_project", "graph_tags"):
         if key in session_meta:
             out[f"session_{key}" if key == "type" else key] = session_meta[key]
     return out
-
-
-def _extract_project_name(file_path: Path) -> str | None:
-    """Extract normalized project name from a Claude Code session file path.
-
-    e.g. ~/.claude/projects/-home-jeremy-workspace-autonomy/abc.jsonl -> 'autonomy'
-    """
-    parts = file_path.resolve().parts
-    try:
-        idx = parts.index("projects")
-        if idx + 1 < len(parts):
-            raw = parts[idx + 1]
-            return PROJECT_NAME_MAP.get(raw, raw)
-    except ValueError:
-        pass
-    return None
 
 
 def ingest_claude_code_session(
@@ -698,8 +668,13 @@ def ingest_claude_code_session(
     abs_path = abs_path.replace("/home/agent/", "/home/jeremy/")
     abs_path = abs_path.replace("/workspace/repo/", "/home/jeremy/workspace/autonomy/")
 
+    # Project + tags are sourced from .session_meta.json. Sessions launched via
+    # session_launcher.launch_session() always write graph_project (and
+    # graph_tags) into the meta file. Legacy sessions without meta are left
+    # with whatever project the existing source row already carries.
+    session_meta = _load_session_meta(file_path)
     if project is None:
-        project = _extract_project_name(file_path)
+        project = session_meta.get("graph_project")
 
     existing = db.get_source_by_path(abs_path)
 
@@ -719,8 +694,6 @@ def ingest_claude_code_session(
     if existing and force:
         db.delete_source(existing["id"])
         existing = None
-
-    session_meta = _load_session_meta(file_path)
 
     if existing:
         # Incremental: only ingest turns beyond what we already have
@@ -924,6 +897,11 @@ def ingest_all_claude_code(db: GraphDB, force: bool = False) -> list[dict]:
     Scans two locations:
     1. ~/.claude/projects/ — user sessions, chatwith, terminal containers
     2. data/agent-runs/*/sessions/ — dispatch and librarian agent sessions
+
+    Project scoping comes from each session's ``.session_meta.json``
+    (``graph_project`` field). Sessions launched via the autonomy
+    infrastructure always carry meta; legacy sessions retain whatever
+    project they were first ingested with.
     """
     results = []
 
@@ -933,11 +911,9 @@ def ingest_all_claude_code(db: GraphDB, force: bool = False) -> list[dict]:
         for project_dir in sorted(projects_dir.iterdir()):
             if not project_dir.is_dir():
                 continue
-            project_name = project_dir.name
             for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-                result = ingest_claude_code_session(db, jsonl_file, force, project=project_name)
+                result = ingest_claude_code_session(db, jsonl_file, force)
                 result["file"] = str(jsonl_file)
-                result["project"] = project_name
                 results.append(result)
 
     # ── Location 2: data/agent-runs/*/sessions/ ───────────────
@@ -952,12 +928,9 @@ def ingest_all_claude_code(db: GraphDB, force: bool = False) -> list[dict]:
             for project_dir in sorted(sessions_dir.iterdir()):
                 if not project_dir.is_dir():
                     continue
-                project_name = PROJECT_NAME_MAP.get(project_dir.name, project_dir.name)
                 for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-                    result = ingest_claude_code_session(db, jsonl_file, force,
-                                                        project=project_name)
+                    result = ingest_claude_code_session(db, jsonl_file, force)
                     result["file"] = str(jsonl_file)
-                    result["project"] = project_name
                     results.append(result)
 
     return results
