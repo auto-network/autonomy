@@ -486,16 +486,24 @@ def run_tier2(base_url: str) -> dict:
             # Let mount complete (or fail)
             time.sleep(1)
 
-            # Harvest invariants
+            # Harvest invariants. Also probe .xterm-viewport for the mobile
+            # touch-scroll CSS (auto-bvob2): overflow-y must resolve to
+            # auto/scroll so iOS can native-scroll the scrollback.
             r3 = subprocess.run(
                 ["agent-browser", "eval",
                  "(function(){"
                  " var v = document.querySelector('.session-viewer');"
                  " var cmp = v && typeof Alpine !== 'undefined' ? Alpine.$data(v) : null;"
                  " var xterm = document.querySelector('.sv-terminal .xterm');"
+                 " var vp = document.querySelector('.sv-terminal .xterm .xterm-viewport');"
+                 " var vpCs = vp ? getComputedStyle(vp) : null;"
                  " return JSON.stringify({"
                  "   termInst: (cmp && cmp._termInstance) ? 'set' : 'null',"
                  "   xtermH: xterm ? xterm.offsetHeight : 0,"
+                 "   vpOverflowY: vpCs ? vpCs.overflowY : null,"
+                 "   vpTouchAction: vpCs ? vpCs.touchAction : null,"
+                 "   vpScrollH: vp ? vp.scrollHeight : 0,"
+                 "   vpClientH: vp ? vp.clientHeight : 0,"
                  "   err: window.__smokeErr"
                  " });"
                  " })()"],
@@ -513,6 +521,15 @@ def run_tier2(base_url: str) -> dict:
                 return "D.1 failed: _termInstance null after toggle click (mountTerminal threw before assigning)"
             if state.get("xtermH", 0) <= 100:
                 return f"E.1 failed: xterm offsetHeight={state.get('xtermH')} (expected >100)"
+            # Mobile touch-scroll CSS — overflow-y:auto is the direct regression
+            # catcher. scrollHeight > clientHeight is a sanity check that the
+            # viewport has scrollable content (only fails if the attached
+            # session has no scrollback yet — tolerated, not fatal).
+            if state.get("vpOverflowY") not in ("auto", "scroll"):
+                return (
+                    f"touch-scroll failed: .xterm-viewport overflow-y="
+                    f"{state.get('vpOverflowY')!r} (expected 'auto' or 'scroll')"
+                )
             return True
         finally:
             subprocess.run(
