@@ -422,6 +422,102 @@ def run_tier2(base_url: str) -> dict:
     print("  Checking sessions page...", file=sys.stderr)
     page_results.append({"page": "/sessions", **_check("sessions_page_cards_visible", check_sessions_page_cards)})
 
+    # Session viewer terminal toggle — opens /session/{project}/{tmux}, clicks the
+    # .sv-term-toggle, then asserts three invariants:
+    #   D.1 semantic: Alpine._termInstance is non-null (mountTerminal returned)
+    #   E.1 visual:   .sv-terminal .xterm offsetHeight > 100 (xterm rendered)
+    #   B.1 error:    no uncaught JS error fired during the click
+    # This catches the auto-dkhyx class of failure where term.onPaste throws
+    # mid-mount — the existing tier2 sweep never loads /session/{id} so the bug
+    # passed smoke while being user-visibly broken.
+    def check_session_viewer_terminal_toggle():
+        api_sess = requests.Session()
+        api_sess.verify = False
+        r = api_sess.get(f"{base_url}/api/dao/active_sessions", timeout=10)
+        if r.status_code != 200:
+            return f"API returned HTTP {r.status_code}"
+        sessions = r.json() if isinstance(r.json(), list) else []
+        # Find a session with both project and tmux_session (both required in URL)
+        target = next((s for s in sessions if s.get("project") and s.get("tmux_session")), None)
+        if not target:
+            return True  # no eligible session; nothing to exercise
+        project = target["project"]
+        tmux = target["tmux_session"]
+        url = f"{base_url}/session/{project}/{tmux}"
+
+        try:
+            r1 = subprocess.run(
+                ["agent-browser", "open", url, "--ignore-https-errors"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r1.returncode != 0:
+                return f"open failed: {r1.stderr.strip()}"
+            subprocess.run(
+                ["agent-browser", "wait", "--load", "networkidle"],
+                capture_output=True, text=True, timeout=30,
+            )
+            # Give Alpine time to bootstrap + SSE to populate the session store
+            time.sleep(3)
+
+            # Arm error listeners
+            subprocess.run(
+                ["agent-browser", "eval",
+                 "window.__smokeErr = null;"
+                 " window.addEventListener('error', function(e){ window.__smokeErr = e.message || String(e); });"
+                 " window.addEventListener('unhandledrejection', function(e){ window.__smokeErr = String(e.reason); });"
+                 " 'armed'"],
+                capture_output=True, text=True, timeout=10,
+            )
+
+            # Click the toggle (if present)
+            r2 = subprocess.run(
+                ["agent-browser", "eval",
+                 "(function(){ var b = document.querySelector('.sv-term-toggle');"
+                 " if (!b) return 'no_toggle'; b.click(); return 'clicked'; })()"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "no_toggle" in r2.stdout:
+                return True  # terminal toggle not rendered (non-tmux session)
+            # Let mount complete (or fail)
+            time.sleep(1)
+
+            # Harvest invariants
+            r3 = subprocess.run(
+                ["agent-browser", "eval",
+                 "(function(){"
+                 " var v = document.querySelector('.session-viewer');"
+                 " var cmp = v && typeof Alpine !== 'undefined' ? Alpine.$data(v) : null;"
+                 " var xterm = document.querySelector('.sv-terminal .xterm');"
+                 " return JSON.stringify({"
+                 "   termInst: (cmp && cmp._termInstance) ? 'set' : 'null',"
+                 "   xtermH: xterm ? xterm.offsetHeight : 0,"
+                 "   err: window.__smokeErr"
+                 " });"
+                 " })()"],
+                capture_output=True, text=True, timeout=10,
+            )
+            raw = r3.stdout.strip()
+            # agent-browser wraps eval results in double-quoted JSON-string form
+            if raw.startswith('"') and raw.endswith('"'):
+                raw = json.loads(raw)
+            state = json.loads(raw)
+
+            if state.get("err"):
+                return f"JS error during toggle: {state['err']}"
+            if state.get("termInst") != "set":
+                return "D.1 failed: _termInstance null after toggle click (mountTerminal threw before assigning)"
+            if state.get("xtermH", 0) <= 100:
+                return f"E.1 failed: xterm offsetHeight={state.get('xtermH')} (expected >100)"
+            return True
+        finally:
+            subprocess.run(
+                ["agent-browser", "close"],
+                capture_output=True, text=True, timeout=10,
+            )
+
+    print("  Checking session viewer terminal toggle...", file=sys.stderr)
+    page_results.append({"page": "/session/{id}", **_check("session_viewer_terminal_toggle", check_session_viewer_terminal_toggle)})
+
     passed = all(p["pass"] for p in page_results)
     return {"pass": passed, "skipped": False, "pages": page_results}
 
