@@ -366,6 +366,7 @@
             nag_enabled: s.nagEnabled || false,
             nag_interval: s.nagInterval || 15,
             nag_message: s.nagMessage || '',
+            activity_state: s.activityState || 'idle',
             resumable: false,
             _hasData: !!hasData,
           });
