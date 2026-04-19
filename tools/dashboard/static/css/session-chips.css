@@ -45,11 +45,12 @@
 .sc-border-default { border-left-color: #4b5563; }
 
 /* Role-specific borders */
-.sc-border-user      { border-left-color: #f59e0b; }
-.sc-border-assistant { border-left-color: #6366f1; }
-.sc-border-thinking  { border-left-color: #374151; }
-.sc-border-system    { border-left-color: #4b5563; }
-.sc-border-crosstalk { border-left-color: #10b981; }
+.sc-border-user            { border-left-color: #f59e0b; }
+.sc-border-assistant       { border-left-color: #6366f1; }
+.sc-border-thinking        { border-left-color: #374151; }
+.sc-border-system          { border-left-color: #4b5563; }
+.sc-border-compact-summary { border-left-color: #d97706; }
+.sc-border-crosstalk       { border-left-color: #10b981; }
 
 .sc-entry-crosstalk {
   background: rgba(16, 185, 129, 0.04);
@@ -129,6 +130,39 @@
 .sc-entry-system .sc-sys-label {
   color: #9ca3af;
   font-size: 0.75rem;
+}
+
+/* Context-compaction boundary marker — amber palette matches
+   sc-type-dispatch in session-cards.css. Collapsed to 3 lines by
+   default; tap to expand (toggleExpand via sc-cs-card click). */
+.sc-entry-compact-summary {
+  background: #451a03;
+  border-radius: 2px;
+}
+.sc-cs-card {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.sc-entry-compact-summary .sc-cs-label {
+  color: #fbbf24;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.sc-entry-compact-summary .sc-cs-content {
+  color: #fbbf24;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+.sc-entry-compact-summary .sc-cs-content-collapsed {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* ── Tool card: two-line layout ─────────────────────────────── */

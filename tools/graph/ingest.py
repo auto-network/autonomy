@@ -394,6 +394,7 @@ def parse_claude_code_session(file_path: Path) -> tuple[dict, list[dict]]:
     model = None
     total_input_tokens = 0
     total_output_tokens = 0
+    pending_compact_meta: dict | None = None
 
     with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -414,12 +415,48 @@ def parse_claude_code_session(file_path: Path) -> tuple[dict, list[dict]]:
                     first_ts = ts
                 last_ts = ts
 
+            # Context-compaction boundary: Claude writes a `type=system` entry with
+            # `compactMetadata`, followed by a user-role entry with `isCompactSummary`
+            # carrying the multi-thousand-char summary of the prior session. Capture
+            # the metadata so it can ride along with the summary turn.
+            if etype == "system" and entry.get("compactMetadata"):
+                pending_compact_meta = entry["compactMetadata"]
+                continue
+
             # Skip non-conversation entries (but keep queue-operation = human mid-work input)
             if etype not in ("user", "assistant", "queue-operation"):
                 continue
 
             # Skip sidechain (subagent) entries
             if entry.get("isSidechain"):
+                continue
+
+            # Compact-summary turns: Claude's continuation boilerplate. Ingest with a
+            # distinct role so role='user' filters (attention, title probe) skip them,
+            # while keeping the content indexed in FTS.
+            if entry.get("isCompactSummary") or entry.get("isVisibleInTranscriptOnly"):
+                msg = entry.get("message", {})
+                content_raw = msg.get("content", "")
+                if isinstance(content_raw, list):
+                    content_raw = "\n".join(
+                        c.get("text", "") for c in content_raw
+                        if isinstance(c, dict) and c.get("type") == "text"
+                    )
+                if not isinstance(content_raw, str) or len(content_raw) < 5:
+                    continue
+                turn_number += 1
+                turn_entry = {
+                    "turn_number": turn_number,
+                    "role": "compact_summary",
+                    "content": content_raw,
+                    "message_id": entry.get("uuid"),
+                    "parent_uuid": entry.get("parentUuid"),
+                    "timestamp": ts,
+                }
+                if pending_compact_meta is not None:
+                    turn_entry["compact_metadata"] = pending_compact_meta
+                    pending_compact_meta = None
+                turns.append(turn_entry)
                 continue
 
             # Skip isMeta system entries
@@ -714,6 +751,26 @@ def ingest_claude_code_session(
             last_thought_id = last_thought_row["id"] if last_thought_row else None
 
             for turn in new_turns:
+                if turn["role"] == "compact_summary":
+                    # Compaction boundary summary: index content for FTS but
+                    # skip entity extraction and don't update last_thought_id —
+                    # subsequent assistant responses shouldn't responds_to it.
+                    t_meta = {"timestamp": turn.get("timestamp", "")}
+                    if turn.get("compact_metadata"):
+                        t_meta["compact_metadata"] = turn["compact_metadata"]
+                    t = Thought(
+                        source_id=source_id,
+                        content=turn["content"],
+                        role="compact_summary",
+                        turn_number=turn["turn_number"],
+                        message_id=turn.get("message_id"),
+                        metadata=t_meta,
+                        created_at=turn.get("timestamp") or now_iso(),
+                    )
+                    db.insert_thought(t)
+                    thoughts.append(t)
+                    continue
+
                 ents = extract_entities(turn["content"])
                 for name, etype in ents:
                     key = name.lower()
@@ -813,6 +870,23 @@ def ingest_claude_code_session(
     last_thought_id = None
 
     for turn in turns:
+        if turn["role"] == "compact_summary":
+            t_meta = {"timestamp": turn.get("timestamp", "")}
+            if turn.get("compact_metadata"):
+                t_meta["compact_metadata"] = turn["compact_metadata"]
+            t = Thought(
+                source_id=source.id,
+                content=turn["content"],
+                role="compact_summary",
+                turn_number=turn["turn_number"],
+                message_id=turn.get("message_id"),
+                metadata=t_meta,
+                created_at=turn.get("timestamp") or now_iso(),
+            )
+            db.insert_thought(t)
+            thoughts.append(t)
+            continue
+
         ents = extract_entities(turn["content"])
         for name, etype in ents:
             key = name.lower()
