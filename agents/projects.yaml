@@ -53,6 +53,7 @@ projects:
     working_dir: "/workspace/repo"
     graph_project: autonomy
     default_tags: []
+    dispatch_labels: [dashboard]
     dind: false
 
   enterprise:

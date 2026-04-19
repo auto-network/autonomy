@@ -57,7 +57,8 @@ The dispatcher queries `status=open AND label=readiness:approved` — a single c
 - Mounted read-write into container at `/workspace/repo`
 - `.git` directory mounted at same absolute path so worktree references resolve
 
-**Image Selection:** Dispatcher reads bead labels and routes to the right container image via `LABEL_IMAGE_MAP`:
+**Image Selection:** Dispatcher reads bead labels and routes to the container image declared by the matching project in `agents/projects.yaml` (`dispatch_labels` → `image`). Beads with no matching project label fall through to the rig default from `.beads/config.yaml`. The same lookup also supplies `graph_project` and `default_tags`, which become `GRAPH_SCOPE` / `GRAPH_TAGS` in the agent container and are written into `.session_meta.json`.
+
 - `autonomy-agent` — base image for research/refinement
 - `autonomy-agent:dashboard` — adds starlette, uvicorn for dashboard work
 - More project images as needed
