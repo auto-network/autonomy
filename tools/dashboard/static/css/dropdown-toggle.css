@@ -1,0 +1,66 @@
+/* Dropdown toggle — shared dropdown component.
+   Used by partials/dropdown-toggle.html. Originates from design
+   acb2829b-4fc0-46fd-b1ff-060a2359dd3d (revision b39626f2). */
+
+.sort-wrap { position: relative; display: inline-block; }
+
+.sort-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #cbd5e1;
+  cursor: pointer;
+  font-weight: 500;
+  line-height: 1;
+}
+.sort-toggle:hover { background: #334155; }
+.sort-toggle-label { color: #64748b; font-weight: 400; }
+.sort-toggle-value { color: #7dd3fc; }
+.sort-toggle-icon { opacity: 0.6; font-size: 9px; }
+
+.sort-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  min-width: 160px;
+  padding: 4px;
+  z-index: 50;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+.sort-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.2;
+}
+.sort-option:hover { background: #334155; }
+.sort-option.selected { color: #7dd3fc; }
+.sort-option-check { opacity: 0; font-size: 11px; }
+.sort-option.selected .sort-option-check { opacity: 1; }
+
+/* Mobile (≤767px): the trigger sits left-of-center in section headers,
+   so right:0 would push the menu past the left edge of the viewport.
+   Anchor to the left instead and cap width to keep the menu on-screen. */
+@media (max-width: 767px) {
+  .sort-toggle { padding: 6px 12px; font-size: 12px; }
+  .sort-menu {
+    left: 0;
+    right: auto;
+    max-width: calc(100vw - 24px);
+    width: max-content;
+  }
+}
