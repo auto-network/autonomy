@@ -12,6 +12,7 @@ from pathlib import Path
 from tools.dashboard.dao.dashboard_db import get_live_sessions as _db_live_sessions
 from tools.dashboard.dao.dashboard_db import find_live_session as _db_find_live
 from tools.dashboard.dao.dashboard_db import get_all_sessions as _db_all_sessions
+from tools.dashboard.org_identity import resolve_session_org
 from tools.graph.duration import parse_duration
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
     sessions = []
     for row in db_rows:
         age = now - (row.get("last_activity") or row["created_at"])
-        sessions.append({
+        entry = {
             "session_id": row.get("session_uuid") or row["tmux_name"],
             "project": row["project"],
             "size_bytes": 0,  # not tracked per-row cheaply; SSE has live data
@@ -59,7 +60,9 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
             "tmux_session": row["tmux_name"],
             "bead_id": row.get("bead_id"),
             "activity_state": row.get("activity_state", "idle"),
-        })
+        }
+        entry["org"] = resolve_session_org(entry)
+        sessions.append(entry)
     sessions.sort(key=lambda s: s["age_seconds"])
     return sessions
 
@@ -240,6 +243,8 @@ def get_recent_sessions(
         row["resumable"] = bool(row["file_path"] and Path(row["file_path"]).exists())
         # date for backwards compat
         row["date"] = (row["last_activity_at"] or row["created_at"] or "")[:10]
+        # Resolve org identity from the bare project slug BEFORE bracket-wrap
+        row["org"] = resolve_session_org({"project": row["project"]})
         # Wrap project in brackets for backwards-compat with the existing UI
         row["project"] = f"[{row['project']}]" if row["project"] else ""
 

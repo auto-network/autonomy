@@ -16,7 +16,7 @@
 <div class="session-card-wrap">
   <div class="session-card" :class="borderCls(s.session_type)">
 
-    <!-- Compact-only row: dot + bell + type badge + role badge + actions/resume -->
+    <!-- Compact-only row: dot + bell + org + type badge + role badge + actions/resume -->
     <div class="sc-compact-row">
       <span class="sc-dot"
             :class="{
@@ -32,6 +32,19 @@
               'sc-nag-both':       s.nag_enabled &&  s.dispatch_nag_enabled
             }"
             x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
+      <template x-if="s.org">
+        <span class="sc-org"
+              :style="`background:${s.org.color}`"
+              :title="s.org.name"
+              data-testid="session-org">
+          <template x-if="s.org.favicon">
+            <img class="sc-org-img" :src="s.org.favicon" :alt="s.org.name">
+          </template>
+          <template x-if="!s.org.favicon">
+            <span class="sc-org-initial" x-text="s.org.initial"></span>
+          </template>
+        </span>
+      </template>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
       <template x-if="s.is_live && typeof showSessionActions === 'function'">
@@ -53,7 +66,7 @@
             class="px-3 py-1 bg-red-900 text-red-300 text-sm rounded ml-auto flex-shrink-0" x-text="resumeError[s.id]"></span>
     </div>
 
-    <!-- Stats row: dot + bell + type badge + role badge + T3 + actions/resume -->
+    <!-- Stats row: dot + bell + org + type badge + role badge + T3 + actions/resume -->
     <div class="sc-stats">
       <span class="sc-dot"
             :class="{
@@ -69,6 +82,19 @@
               'sc-nag-both':       s.nag_enabled &&  s.dispatch_nag_enabled
             }"
             x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
+      <template x-if="s.org">
+        <span class="sc-org"
+              :style="`background:${s.org.color}`"
+              :title="s.org.name"
+              data-testid="session-org">
+          <template x-if="s.org.favicon">
+            <img class="sc-org-img" :src="s.org.favicon" :alt="s.org.name">
+          </template>
+          <template x-if="!s.org.favicon">
+            <span class="sc-org-initial" x-text="s.org.initial"></span>
+          </template>
+        </span>
+      </template>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
       <span class="sc-t3">
