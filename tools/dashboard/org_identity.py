@@ -178,7 +178,7 @@ def session_org_slug(session: dict) -> str:
     # Their payloads often carry an empty project field, so this must come
     # before the empty-raw guard or it never fires for the target case.
     # Operator contract (attention 20:02): only host sessions should lack an org.
-    session_type = session.get("type") or session.get("session_type")
+    session_type = session.get("session_type") or session.get("type")
     if session_type in ("dispatch", "librarian"):
         return "autonomy"
     raw = session.get("project") or ""
