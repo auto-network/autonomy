@@ -42,7 +42,7 @@
                   data-testid="session-type"></span>
             <span class="sc-role"
                   x-show="role"
-                  x-text="role"
+                  x-text="role ? role.charAt(0).toUpperCase() + role.slice(1) : ''"
                   data-testid="session-role"></span>
             <div style="flex:1"></div>
             <template x-if="!isLive">
