@@ -26,12 +26,10 @@
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
   <script>
     // iOS standalone detection — 100vh is unreliable in PWA mode (fluctuates 787/812/874).
-    // Seed --app-height from visualViewport when available (covers the case where the
-    // keyboard is already up on load); session-viewer.js syncs it on resize from there.
+    // Use screen.height as a stable reference via --app-height.
     if (window.navigator.standalone === true) {
       document.documentElement.classList.add('ios-standalone');
-      var _h = window.visualViewport ? window.visualViewport.height : window.screen.height;
-      document.documentElement.style.setProperty('--app-height', _h + 'px');
+      document.documentElement.style.setProperty('--app-height', window.screen.height + 'px');
     }
   </script>
   <style>
