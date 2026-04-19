@@ -1521,6 +1521,7 @@ function route() {
   _checkVersion();
   const path = window.location.pathname;
   const isTerminalPage = path === '/terminal' || path.startsWith('/terminal/');
+  const isSessionViewPage = /^\/session\/[^/]+\/.+$/.test(path);
 
   // Toggle between #content and persistent #terminal-page
   const termPage = document.getElementById('terminal-page');
@@ -1545,6 +1546,9 @@ function route() {
   }
   // Remove content padding for full-bleed design
   content.style.padding = isDesignPage ? '0' : '';
+
+  // Fullscreen page mode: session viewer owns the viewport (hides sidebar + header)
+  document.body.classList.toggle('fullscreen-page', isSessionViewPage);
 
   // Clear header action buttons from previous page
   const headerActions = document.getElementById('header-actions');
