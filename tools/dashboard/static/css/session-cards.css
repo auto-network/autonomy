@@ -56,7 +56,7 @@
    resolved color (graph://497cdc20-d43); when favicon is absent the
    first letter is rendered. Sized to match the role badge height. */
 .sc-org {
-  display: inline-flex; align-items: center; justify-content: center;
+  display: inline-grid; place-items: center;
   width: 16px; height: 16px;
   border-radius: 50%;
   font-size: 10px; font-weight: 700;
@@ -66,11 +66,9 @@
   user-select: none;
 }
 .sc-org-img { width: 100%; height: 100%; object-fit: cover; }
-/* "?" has asymmetric vertical bearings and optically sits low when
-   flex-centered at line-height:1 (letters like A/N sit correctly).
-   Shift the glyph up a hair so ? reads centered without offsetting
-   the letter glyphs visibly at 16px production / 22px design-mock. */
-.sc-org-initial { line-height: 1; transform: translateY(-0.5px); }
+/* Grid place-items handles centering independent of font baseline, so
+   no per-glyph offset hack. */
+.sc-org-initial { line-height: 1; }
 
 /* Role badge — neutral pill */
 .sc-role {
