@@ -666,7 +666,11 @@
       transition: color 0.15s, background 0.15s;
       padding: 0;
     }
-    .sv-term-toggle:hover { color: #d1d5db; background: rgba(55, 65, 81, 0.4); }
+    /* Hover scoped to capable pointers — iOS sticks :hover after tap,
+       leaving the button dimmer than default on touch devices. */
+    @media (hover: hover) and (pointer: fine) {
+      .sv-term-toggle:hover { color: #d1d5db; background: rgba(55, 65, 81, 0.4); }
+    }
     .sv-term-toggle.active { color: #a5b4fc; background: rgba(99, 102, 241, 0.15); }
     .sv-term-glyph {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
