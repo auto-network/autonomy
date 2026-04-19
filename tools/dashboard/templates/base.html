@@ -576,12 +576,20 @@
     }
     .sv-attach:disabled { opacity: 0.5; cursor: not-allowed; }
     .sv-send {
-      width: 30px; height: 30px; min-width: 30px;
-      border-radius: 50%;
+      width: 32px; height: 30px; min-width: 32px;
+      /* half of height — oval/pill, not a full circle */
+      border-radius: 15px;
       background: #6366f1; border: none; color: white; cursor: pointer;
       display: flex; align-items: center; justify-content: center;
       margin: 3px; flex-shrink: 0;
       transition: opacity 0.15s, transform 0.1s;
+      position: relative;
+    }
+    /* Invisible 2px overlay extends the tap target without affecting layout. */
+    .sv-send::before {
+      content: '';
+      position: absolute;
+      inset: -2px;
     }
     .sv-send:disabled {
       opacity: 0.3;
