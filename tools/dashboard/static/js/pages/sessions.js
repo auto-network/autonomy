@@ -476,10 +476,14 @@
           const data = await fetch(url).then(r => r.json());
           if (!Array.isArray(data)) { this.recent = []; return; }
           this.recent = data.map(function(r) {
-            // Use session_uuid for click-through (the session viewer keys
-            // off it). Fall back to tmux_session (live in dashboard.db) and
-            // finally to the graph source id (legacy / non-monitored sessions).
-            var sessionId = r.session_uuid || r.tmux_session || r.id;
+            // tmux_session is the viewer's keying field — the tail endpoint
+            // resolves by tmux_name. session_uuid is a fallback for legacy
+            // sessions that lack a tmux name; graph source id is last resort.
+            // Passing session_uuid when tmux_session exists yields a broken
+            // viewer (tail can't find the JSONL) AND a phantom Active card,
+            // because session-viewer.js init() creates a default-isLive store
+            // entry keyed off the unknown uuid.
+            var sessionId = r.tmux_session || r.session_uuid || r.id;
             var lastTs = r.last_activity_at || r.created_at || '';
             return {
               id: r.id,
