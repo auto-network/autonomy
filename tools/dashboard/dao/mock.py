@@ -333,42 +333,34 @@ def get_session_entries(session_id: str) -> list[dict] | None:
 
 
 def get_recent_sessions(
-    limit: int = 20,
+    limit: int | None = None,
     sort: str = "lastActivity",
     since: str = "1d",
+    type_group: str = "all",
 ) -> list[dict]:
     """Mirror of ``dao.sessions.get_recent_sessions`` for DASHBOARD_MOCK fixtures.
 
-    The real DAO applies ``sort`` + ``since`` at the SQL layer; this mock
-    reproduces the same behavior in Python over ``recent_sessions`` fixtures
-    so behavioral sweep tests exercise both.
+    The real DAO applies ``sort`` + ``since`` + per-type quotas inside a
+    SQL-backed pipeline; this mock reproduces the same behavior in Python
+    over ``recent_sessions`` fixtures so behavioral sweep tests exercise both.
     """
     import time as _time
     from datetime import datetime as _dt
 
+    from tools.dashboard.dao.sessions import (
+        _DEFAULT_TYPE_QUOTAS,
+        _group_for_session_type,
+    )
     from tools.graph.duration import parse_duration
 
     data = _load()
     rows = [_fill(s, RECENT_SESSION_DEFAULTS) for s in data.get("recent_sessions", [])]
 
-    # ── since filter ──
-    if since and since != "all":
-        try:
-            cutoff = _time.time() - parse_duration(since)
-        except ValueError:
-            cutoff = None
-        if cutoff is not None:
-            def _epoch(r):
-                ts = r.get("last_activity_at") or r.get("created_at") or ""
-                if not ts:
-                    return 0.0
-                try:
-                    return _dt.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
-                except (ValueError, TypeError):
-                    return 0.0
-            rows = [r for r in rows if _epoch(r) >= cutoff]
+    if type_group not in _DEFAULT_TYPE_QUOTAS:
+        type_group = "all"
+    quotas = _DEFAULT_TYPE_QUOTAS[type_group]
 
-    # ── sort ──
+    # ── since filter ──
     def _epoch(ts):
         if not ts:
             return 0.0
@@ -376,16 +368,48 @@ def get_recent_sessions(
             return _dt.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
         except (ValueError, TypeError):
             return 0.0
-    if sort == "created":
-        rows.sort(key=lambda r: _epoch(r.get("created_at", "")), reverse=True)
-    elif sort == "turns":
-        rows.sort(key=lambda r: r.get("entry_count") or r.get("total_turns") or 0, reverse=True)
-    elif sort == "ctx":
-        rows.sort(key=lambda r: r.get("context_tokens") or r.get("total_tokens") or 0, reverse=True)
-    else:  # lastActivity (default)
-        rows.sort(key=lambda r: _epoch(r.get("last_activity_at", "")), reverse=True)
 
-    return _attach_org(rows[:limit])
+    if since and since != "all":
+        try:
+            cutoff = _time.time() - parse_duration(since)
+        except ValueError:
+            cutoff = None
+        if cutoff is not None:
+            rows = [
+                r for r in rows
+                if _epoch(r.get("last_activity_at") or r.get("created_at") or "") >= cutoff
+            ]
+
+    # ── sort key matching the requested column ──
+    if sort == "created":
+        def _sort_key(r):
+            return _epoch(r.get("created_at", ""))
+    elif sort == "turns":
+        def _sort_key(r):
+            return float(r.get("entry_count") or r.get("total_turns") or 0)
+    elif sort == "ctx":
+        def _sort_key(r):
+            return float(r.get("context_tokens") or r.get("total_tokens") or 0)
+    else:  # lastActivity (default)
+        def _sort_key(r):
+            return _epoch(r.get("last_activity_at", ""))
+
+    # ── bucket by type group and trim to quota ──
+    buckets: dict[str, list[dict]] = {"interactive": [], "dispatch": [], "librarian": []}
+    for row in rows:
+        buckets[_group_for_session_type(row.get("session_type"))].append(row)
+
+    trimmed: list[dict] = []
+    for group, bucket in buckets.items():
+        q = quotas.get(group, 0)
+        if q <= 0:
+            continue
+        bucket.sort(key=_sort_key, reverse=True)
+        trimmed.extend(bucket[:q])
+
+    trimmed.sort(key=_sort_key, reverse=True)
+    out = trimmed if limit is None else trimmed[:limit]
+    return _attach_org(out)
 
 
 # ── dispatch DAO interface ───────────────────────────────────────────
