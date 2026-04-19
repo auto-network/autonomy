@@ -174,6 +174,13 @@ def session_org_slug(session: dict) -> str:
     via ``project_config``. Unknown values pass through as the slug
     itself so the generated fallback still gives a stable colour.
     """
+    # Dispatch + librarian run ON the Autonomy platform; they ARE Autonomy.
+    # Their payloads often carry an empty project field, so this must come
+    # before the empty-raw guard or it never fires for the target case.
+    # Operator contract (attention 20:02): only host sessions should lack an org.
+    session_type = session.get("type") or session.get("session_type")
+    if session_type in ("dispatch", "librarian"):
+        return "autonomy"
     raw = session.get("project") or ""
     if isinstance(raw, str):
         raw = raw.strip().strip("[]").strip()
