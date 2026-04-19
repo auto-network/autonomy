@@ -142,7 +142,14 @@
                   <span class="sc-org"
                         :style="src.org.favicon ? '' : `background:${src.org.color}`"
                         :title="src.org.resolved ? src.org.name : ('legacy: ' + (src.project || 'unknown'))">
-                    <span class="sc-org-initial" x-text="src.org.initial" x-show="!src.org.favicon"></span>
+                    <template x-if="!src.org.favicon">
+                      <svg class="sc-org-initial" viewBox="0 0 16 16" preserveAspectRatio="xMidYMid meet">
+                        <text x="8" y="8" text-anchor="middle" dominant-baseline="central"
+                              font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+                              font-size="11" font-weight="700" fill="#ffffff"
+                              x-text="src.org.initial"></text>
+                      </svg>
+                    </template>
                     <img class="sc-org-img" :src="src.org.favicon" x-show="src.org.favicon" :alt="src.org.name">
                   </span>
                 </template>
