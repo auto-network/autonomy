@@ -117,11 +117,9 @@
         console.warn('Clipboard read failed:', err && err.message);
       });
     }
-    term.onPaste(function (text) {
-      if (text && ws.readyState === WebSocket.OPEN) {
-        ws.send(bracketPaste(text));
-      }
-    });
+    // term.onPaste is not part of xterm's public API on this version; the
+    // Ctrl+Shift+V keybind + pasteFromClipboard() above handles paste via
+    // the browser clipboard path instead.
     term.attachCustomKeyEventHandler(function (e) {
       if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
         e.preventDefault();
