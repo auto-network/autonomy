@@ -195,3 +195,62 @@ class TestPayloadShape:
         for row in results:
             assert "resumable" in row
             assert isinstance(row["resumable"], bool)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# TestSortMode — `sort` query param selects the ordering column
+# ══════════════════════════════════════════════════════════════════════
+
+
+class TestSortMode:
+    """The DAO accepts sort=lastActivity|created|turns|ctx (auto-d0mt)."""
+
+    def test_sort_turns_puts_high_turn_row_first(self, isolated_dao):
+        """Sort=turns orders by entry_count/total_turns DESC."""
+        results = isolated_dao.get_recent_sessions(limit=10, sort="turns", since="all")
+        # src-with-label has 240 entries (dashboard.db overlay),
+        # src-fresh-stale has 5 turns from graph.db metadata.
+        ids = [r["id"] for r in results]
+        assert ids[0] == "src-with-label", f"Expected highest-turn row first; got {ids}"
+
+    def test_sort_created_orders_by_created_at(self, isolated_dao):
+        """Sort=created orders by graph.db created_at DESC."""
+        results = isolated_dao.get_recent_sessions(limit=10, sort="created", since="all")
+        ids = [r["id"] for r in results]
+        # src-fresh-stale has the most recent created_at (2026-04-17)
+        assert ids[0] == "src-fresh-stale", f"Expected newest created_at first; got {ids}"
+
+    def test_unknown_sort_falls_back_to_last_activity(self, isolated_dao):
+        """An unknown sort value must not raise — it falls back to default."""
+        results = isolated_dao.get_recent_sessions(limit=10, sort="garbage", since="all")
+        # Matches the default behaviour (lastActivity DESC)
+        default = isolated_dao.get_recent_sessions(limit=10, since="all")
+        assert [r["id"] for r in results] == [r["id"] for r in default]
+
+
+# ══════════════════════════════════════════════════════════════════════
+# TestSinceWindow — `since` query param filters rows by activity window
+# ══════════════════════════════════════════════════════════════════════
+
+
+class TestSinceWindow:
+    """The DAO accepts since=6h|1d|1w|all (auto-d0mt, auto-0r86 parity)."""
+
+    def test_since_all_returns_everything(self, isolated_dao):
+        results = isolated_dao.get_recent_sessions(limit=10, since="all")
+        # Both rows survive (live session already filtered elsewhere)
+        ids = {r["id"] for r in results}
+        assert "src-fresh-stale" in ids
+        assert "src-with-label" in ids
+
+    def test_since_1d_includes_recent_rows(self, isolated_dao):
+        """src-with-label's activity is 10 minutes ago — within 1d."""
+        results = isolated_dao.get_recent_sessions(limit=10, since="1d")
+        ids = {r["id"] for r in results}
+        assert "src-with-label" in ids
+
+    def test_unknown_since_does_not_filter(self, isolated_dao):
+        """An unparseable since value disables the filter (no crash)."""
+        results = isolated_dao.get_recent_sessions(limit=10, since="zzz")
+        default = isolated_dao.get_recent_sessions(limit=10, since="all")
+        assert len(results) == len(default)

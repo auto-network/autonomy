@@ -89,8 +89,8 @@
   <!-- Recent Sessions — design: Resume Button + Type Filter (combined) -->
   <section aria-label="Recent Sessions" data-testid="recent-sessions-section">
 
-    <!-- Section heading + filter chips (left-aligned) -->
-    <div class="flex items-baseline gap-3 mb-3 flex-wrap">
+    <!-- Section heading + filter chips + sort/since dropdowns -->
+    <div class="flex items-center gap-3 mb-3 flex-wrap">
       <h2 class="text-lg font-semibold text-gray-400 leading-none">Recent Sessions</h2>
       <div class="flex gap-1">
         <template x-for="opt in filterOptions" :key="opt.key">
@@ -101,6 +101,18 @@
           </button>
         </template>
       </div>
+      {% with testid='recent-sort-toggle',
+              label='Sort:',
+              value_expr='recentSort',
+              options_expr='recentSortOptions' %}
+        {% include 'partials/dropdown-toggle.html' %}
+      {% endwith %}
+      {% with testid='recent-since-toggle',
+              label='Since:',
+              value_expr='recentSince',
+              options_expr='recentSinceOptions' %}
+        {% include 'partials/dropdown-toggle.html' %}
+      {% endwith %}
     </div>
 
     <!-- Session cards — same structure as active session cards -->
