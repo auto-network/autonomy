@@ -54,7 +54,7 @@ DISPATCH_STATE_PATH = REPO_ROOT / "data" / "dispatch.state"
 
 DEFAULT_IMAGE = "autonomy-agent"
 DEFAULT_OPUS_MODEL = "claude-opus-4-7[1m]"
-DEFAULT_SONNET_MODEL = "claude-sonnet-4-7"
+DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
 
 # Deferred restart flag — set by _maybe_restart_dispatcher(), executed at end of cycle
 _restart_scheduled = False
