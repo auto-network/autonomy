@@ -63,3 +63,20 @@ def test_existing_terminal_page_still_works(test_client):
     assert resp.status_code == 200
     assert 'terminalPage' in resp.text
     assert 'terminal-container' in resp.text
+
+
+def test_xterm_viewport_touch_scroll_css_present(test_client):
+    """base.html must set overflow-y:auto + touch-action:pan-y on
+    .sv-terminal .xterm-viewport so iPhone finger-drag reaches scrollback
+    (auto-bvob2). Without these hints xterm's viewport renders non-scrollable
+    on iOS even though wheel events work on desktop.
+    """
+    resp = test_client.get("/")
+    assert resp.status_code == 200
+    html = resp.text
+    assert '.sv-terminal .xterm .xterm-viewport' in html, \
+        "selector targeting .xterm-viewport missing from base.html"
+    # Grep the declared properties — keep the assertion loose so reordering
+    # inside the rule doesn't break it.
+    assert 'overflow-y: auto' in html
+    assert 'touch-action: pan-y' in html
