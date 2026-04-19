@@ -35,7 +35,10 @@ def _mock_search_results():
             "source_id": "src-002",
             "source_title": "Legacy session",
             "result_type": "session",
-            "project": "-workspace-repo",  # path-derived junk
+            # Truly unknown path-derived junk — any dash-prefixed value
+            # that isn't a recognised autonomy path pattern resolves to
+            # ``unknown`` so the renderer paints "?".
+            "project": "-some-unknown-legacy-junk",
             "content": "...",
             "created_at": "2026-04-01T08:15:42Z",
         },

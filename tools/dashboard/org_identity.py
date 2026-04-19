@@ -41,6 +41,16 @@ UNKNOWN_SLUG = "unknown"
 # (legacy sessions with path-derived project junk, missing project field).
 UNRESOLVED_COLOR = "#4b5563"
 
+# Known path-derived patterns that should resolve to the autonomy org.
+# Path-derived because the session ingester hasn't written a
+# .session_meta.json for every session (dashboard-container mounts,
+# host sessions running inside the autonomy repo dir), so `project`
+# falls back to the parent directory name with separators rewritten.
+_AUTONOMY_PATH_PATTERNS: tuple[str, ...] = (
+    "-workspace-repo",                  # dashboard container mount
+    "-home-jeremy-workspace-autonomy",  # host session in autonomy repo
+)
+
 
 def _hash_color(slug: str) -> str:
     """Pick a stable palette colour from the slug's blake2b hash."""
@@ -169,8 +179,14 @@ def session_org_slug(session: dict) -> str:
         raw = raw.strip().strip("[]").strip()
     if not raw:
         return UNKNOWN_SLUG
-    # Path-derived ingest junk (e.g. "-workspace-repo") never identifies
-    # an org. Treat it as unresolved so the renderer paints "?".
+    # Known autonomy path patterns map to the autonomy org. Covers the
+    # dashboard container ("-workspace-repo") and host sessions living
+    # in /home/jeremy/workspace/autonomy — both produce path-derived
+    # project values that should identify as autonomy.
+    if raw in _AUTONOMY_PATH_PATTERNS or raw.endswith("-workspace-autonomy"):
+        return "autonomy"
+    # Other path-derived ingest junk never identifies an org. Treat it
+    # as unresolved so the renderer paints "?".
     if raw.startswith("-"):
         return UNKNOWN_SLUG
     try:
