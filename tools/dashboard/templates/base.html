@@ -462,6 +462,9 @@
       height: 100%;
       display: grid;
       grid-template-rows: auto minmax(0, 1fr) auto;
+      /* min width 0 on the column so a long title (or any unbreakable child)
+         cannot push the grid wider than its container. */
+      grid-template-columns: minmax(0, 1fr);
     }
 
     /* Loading / error — single centered message, no grid needed */
