@@ -125,25 +125,29 @@
       <section aria-label="Source Header" class="mb-0">
         <div class="rounded-xl overflow-hidden bg-gray-800/80 mb-0">
           <div class="pl-2.5" :style="'border-left: 4px solid ' + borderColor">
-            <div style="padding: 8px 10px 10px 8px; display:flex; flex-direction:column; gap:2px;">
+            <!-- Inner left-padding dropped (was 8px) so content aligns with
+                 search.html's 14px left offset (4px border + 10px outer pad). -->
+            <div style="padding: 8px 10px 10px 0; display:flex; flex-direction:column; gap:2px;">
 
-              <!-- Row 1: stats plate -->
+              <!-- Row 1: stats plate — NOTE · date · id@v (no project pill; glyph moves to row 2). -->
               <div class="flex items-center gap-1.5" style="font-size:10px; font-family:ui-monospace,monospace; color:#64748b">
                 <span style="font-size:11px; font-weight:500; color:#64748b" x-text="srcType"></span>
-                <template x-if="src.project">
-                  <span style="background:#1e1b4b; color:#a5b4fc; padding:0 5px; border-radius:3px; font-size:9px; font-weight:700; height:18px; display:inline-flex; align-items:center" x-text="src.project"></span>
-                </template>
-                <span class="ml-auto" style="white-space:nowrap">
-                  <span style="color:#3d4f63; cursor:pointer" @click="copyGraphLink()" x-text="(src.id || '').slice(0, 12)"></span>
-                  <template x-if="noteVersion">
-                    <span style="color:#94a3b8; background:rgba(255,255,255,0.04); padding:1px 0; border-radius:3px" x-text="'@v' + noteVersion"></span>
-                  </template>
-                </span>
                 <span style="color:#4b5e73; flex-shrink:0" x-text="date"></span>
+                <span class="ml-auto" style="white-space:nowrap"><span style="color:#3d4f63; cursor:pointer" @click="copyGraphLink()" x-text="(src.id || '').slice(0, 12)"></span><template x-if="noteVersion"><span style="color:#94a3b8; background:rgba(255,255,255,0.04); padding:1px 0; border-radius:3px" x-text="'@v' + noteVersion"></span></template></span>
               </div>
 
-              <!-- Row 2: title -->
-              <div style="font-size:14px; font-weight:600; color:#f1f5f9; line-height:1.3; margin-top:1px; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical" x-text="displayTitle"></div>
+              <!-- Row 2: org glyph + title -->
+              <div style="display:flex; align-items:center; gap:6px; margin-top:1px">
+                <template x-if="src.org">
+                  <span class="sc-org"
+                        :style="src.org.favicon ? '' : `background:${src.org.color}`"
+                        :title="src.org.resolved ? src.org.name : ('legacy: ' + (src.project || 'unknown'))">
+                    <span class="sc-org-initial" x-text="src.org.initial" x-show="!src.org.favicon"></span>
+                    <img class="sc-org-img" :src="src.org.favicon" x-show="src.org.favicon" :alt="src.org.name">
+                  </span>
+                </template>
+                <div style="font-size:14px; font-weight:600; color:#f1f5f9; line-height:1.3; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical" x-text="displayTitle"></div>
+              </div>
 
               <!-- Row 3: metadata (conditional) -->
               <template x-if="authorOrMeta">

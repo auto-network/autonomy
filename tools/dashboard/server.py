@@ -1350,6 +1350,7 @@ async def api_search(request):
         limit = int(request.query_params.get("limit", "20"))
         project = request.query_params.get("project")
         results = dao_beads.search(q, limit=limit, project=project)
+        _enrich_search_results(results)
         return JSONResponse(results)
     cmd = ["graph", "search", q, "--json", "--limit", request.query_params.get("limit", "20")]
     project = request.query_params.get("project")
@@ -1370,7 +1371,44 @@ async def api_search(request):
             else:
                 grouped[sid]["match_count"] = grouped[sid].get("match_count", 0) + 1
         results = sorted(grouped.values(), key=lambda x: x.get("rank", 0))
+    _enrich_search_results(results)
     return JSONResponse(results)
+
+
+def _enrich_search_results(results: list) -> None:
+    """Attach resolved ``org`` and 24hr ``date`` to each search result in-place."""
+    from tools.dashboard.org_identity import resolve_org_identity, session_org_slug
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        if "org" not in r:
+            r["org"] = resolve_org_identity(session_org_slug({"project": r.get("project")}))
+        # Normalize date to "YYYY-MM-DD HH:MM" (24hr). Source may supply
+        # created_at / date / last_activity_at in various forms.
+        if "date" not in r or not r.get("date"):
+            r["date"] = _format_search_date(
+                r.get("created_at") or r.get("date") or r.get("last_activity_at") or ""
+            )
+        else:
+            r["date"] = _format_search_date(r["date"])
+
+
+def _format_search_date(raw: str) -> str:
+    """Normalize a timestamp string to ``YYYY-MM-DD HH:MM`` (24hr)."""
+    if not raw:
+        return ""
+    # Strip trailing Z / fractional seconds, support ISO or space-delimited.
+    s = raw.replace("T", " ").replace("Z", "")
+    # Drop microseconds / timezone offset if present.
+    if "+" in s:
+        s = s.split("+", 1)[0]
+    if "." in s:
+        s = s.split(".", 1)[0]
+    s = s.strip()
+    # Accept "YYYY-MM-DD" alone; otherwise keep to minute resolution.
+    if len(s) >= 16:
+        return s[:16]
+    return s[:10]
 
 async def api_sources(request):
     if os.environ.get("DASHBOARD_MOCK"):
@@ -1392,11 +1430,30 @@ async def api_source_read(request):
         source = dao_beads.get_source(source_id)
         if not source:
             return JSONResponse({"error": "source not found"}, status_code=404)
+        _attach_source_org(source)
         return JSONResponse(source)
     max_chars = request.query_params.get("max_chars", "50000")
-    return JSONResponse(await run_cli_json(
+    result = await run_cli_json(
         ["graph", "read", source_id, "--json", "--max-chars", max_chars, "--first"]
-    ))
+    )
+    _attach_source_org(result)
+    return JSONResponse(result)
+
+
+def _attach_source_org(result: dict | None) -> None:
+    """Attach resolved ``org`` to the nested ``source`` of a graph-read response.
+
+    ``graph read --json --first`` returns ``{source: {...}, entries: [...], ...}``.
+    The mock DAO returns the source dict directly. Handle both shapes.
+    """
+    if not isinstance(result, dict):
+        return
+    from tools.dashboard.org_identity import resolve_org_identity, session_org_slug
+    src = result.get("source") if isinstance(result.get("source"), dict) else result
+    if not isinstance(src, dict):
+        return
+    if "org" not in src:
+        src["org"] = resolve_org_identity(session_org_slug({"project": src.get("project")}))
 
 async def api_context(request):
     if os.environ.get("DASHBOARD_MOCK"):
@@ -1419,16 +1476,21 @@ async def api_projects(request):
         projects = project_config.load_projects()
     except project_config.ProjectConfigError as e:
         return JSONResponse({"projects": [], "error": str(e)}, status_code=500)
-    entries = [
-        {
+    from tools.dashboard.org_identity import resolve_org_identity
+    entries = []
+    org_cache: dict[str, dict] = {}
+    for p in projects.values():
+        slug = p.graph_project
+        if slug not in org_cache:
+            org_cache[slug] = resolve_org_identity(slug)
+        entries.append({
             "id": p.id,
             "name": p.name,
             "description": p.description,
-            "graph_project": p.graph_project,
+            "graph_project": slug,
+            "org": org_cache[slug],
             "dind": p.dind,
-        }
-        for p in projects.values()
-    ]
+        })
     return JSONResponse({"projects": entries})
 
 async def api_stats(request):
@@ -3077,6 +3139,7 @@ async def api_session_get(request):
     session = dashboard_db.get_session(tmux_name)
     if not session:
         return JSONResponse({"error": "not found"}, status_code=404)
+    from tools.dashboard.org_identity import resolve_session_org
     return JSONResponse({
         "session_id": session["tmux_name"],
         "session_uuid": session.get("session_uuid"),
@@ -3085,6 +3148,7 @@ async def api_session_get(request):
         "role": session.get("role", ""),
         "activity_state": session.get("activity_state", "idle"),
         "project": session.get("project"),
+        "org": resolve_session_org({"project": session.get("project")}),
         "is_live": bool(session.get("is_live")),
         "dispatch_nag_enabled": bool(session.get("dispatch_nag")),
         "nag_enabled": bool(session.get("nag_enabled")),
@@ -5313,6 +5377,7 @@ async def api_graph_resolve(request):
         from tools.dashboard.dao import mock as mock_dao
         result = mock_dao.resolve_source_for_api(id)
         if result:
+            _attach_source_org(result)
             return JSONResponse(result)
         att = mock_dao.get_attachment(id)
         if att:
@@ -5334,9 +5399,11 @@ async def api_graph_resolve(request):
     try:
         source = db.get_source(id)
         if source:
-            return JSONResponse(await run_cli_json(
+            result = await run_cli_json(
                 ["graph", "read", source["id"], "--json", "--max-chars", "50000", "--first"]
-            ))
+            )
+            _attach_source_org(result)
+            return JSONResponse(result)
         att = db.get_attachment(id)
         if att:
             return JSONResponse({
