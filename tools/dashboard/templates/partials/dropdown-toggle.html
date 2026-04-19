@@ -1,0 +1,50 @@
+{#
+  Shared dropdown toggle — a button that opens a menu of selectable options.
+
+  Contract (see graph://38613c2c-5e9):
+    - Jinja parameters (via {% with %}):
+        testid        (required) — data-testid value for the trigger button
+        label         (required) — prefix label text (e.g. "Sort:", "Since:")
+        value_expr    (required) — Alpine expression for the selected key
+                                    (e.g. "activeSort"); the partial writes to it
+        options_expr  (required) — Alpine expression evaluating to [{k, l}, ...]
+    - Required consumer state: the Alpine component that includes this partial
+      must expose the bindings referenced by `value_expr` and `options_expr`.
+      The partial owns its own `open: bool` via a local x-data wrapper.
+    - Side effects: selecting an option writes the new key to `value_expr` and
+      closes the menu. Persistence (e.g. localStorage) is the consumer's concern.
+
+  Usage:
+    {% with testid='active-sort-toggle',
+            label='Sort:',
+            value_expr='activeSort',
+            options_expr='activeSortOptions' %}
+      {% include 'partials/dropdown-toggle.html' %}
+    {% endwith %}
+#}
+<div class="sort-wrap" x-data="{ open: false }">
+  <button type="button"
+          class="sort-toggle"
+          @click="open = !open"
+          data-testid="{{ testid }}">
+    <span class="sort-toggle-label">{{ label }}</span>
+    <span class="sort-toggle-value"
+          x-text="(({{ options_expr }}).find(o => o.k === {{ value_expr }}) || {}).l"></span>
+    <span class="sort-toggle-icon">▾</span>
+  </button>
+  <div class="sort-menu"
+       x-show="open"
+       x-cloak
+       @click.away="open = false"
+       :data-testid="'{{ testid }}-menu'">
+    <template x-for="opt in ({{ options_expr }})" :key="opt.k">
+      <div class="sort-option"
+           :class="{{ value_expr }} === opt.k ? 'selected' : ''"
+           @click="{{ value_expr }} = opt.k; open = false"
+           :data-testid="'{{ testid }}-option-' + opt.k">
+        <span x-text="opt.l"></span>
+        <span class="sort-option-check">✓</span>
+      </div>
+    </template>
+  </div>
+</div>
