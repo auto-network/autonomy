@@ -1,4 +1,6 @@
-<div x-data="sessionViewerPage()" class="session-viewer">
+<div x-data="sessionViewerPage()"
+     class="session-viewer"
+     x-effect="if (!isLive && showTerminal) { showTerminal = false; _disposeTerminal(); }">
 
   <!-- Loading -->
   <template x-if="state === 'loading'">
@@ -45,6 +47,15 @@
             <div style="flex:1"></div>
             <template x-if="!isLive">
               <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
+            </template>
+            <template x-if="_tmuxSession">
+              <button class="sv-term-toggle"
+                      :class="{ 'active': showTerminal }"
+                      @click.stop="toggleTerminal()"
+                      aria-label="Toggle terminal view"
+                      title="Toggle terminal">
+                <span class="sv-term-glyph">&gt;_</span>
+              </button>
             </template>
             <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
                  style="transition:transform 0.25s ease;color:#6b7280;flex-shrink:0;"
@@ -149,7 +160,7 @@
       </div>
 
       <!-- Row 2: Scrollable entries (tap to dismiss keyboard) -->
-      <div class="sv-entries" x-ref="entriesContainer"
+      <div class="sv-entries" x-show="!showTerminal" x-ref="entriesContainer"
            @scroll="onScroll()"
            onclick="var el = document.querySelector('.sv-editable'); if (el) el.blur()">
 
@@ -166,8 +177,11 @@
         {% include "partials/session-entries.html" %}
       </div>
 
+      <!-- Terminal region — full-screen xterm.js view; swaps the chat body when showTerminal is true -->
+      <div class="sv-terminal" x-show="showTerminal" x-ref="termContainer"></div>
+
       <!-- Row 3: Input bar (contenteditable, shown when linked to tmux) -->
-      <template x-if="isLive && _tmuxSession && (sessionType !== 'host' || _linked)">
+      <template x-if="!showTerminal && isLive && _tmuxSession && (sessionType !== 'host' || _linked)">
         <div class="sv-input"
              @dragenter.prevent="$el.classList.add('drop-highlight')"
              @dragover.prevent="$el.classList.add('drop-highlight')"
@@ -247,7 +261,7 @@
       </template>
 
       <!-- Row 3 alt: Link Terminal (when host session not yet linked) -->
-      <template x-if="isLive && !_linked && sessionType === 'host'">
+      <template x-if="!showTerminal && isLive && !_linked && sessionType === 'host'">
         <div class="sv-input">
           <div class="sv-input-row" style="padding:10px 0.5rem;">
 
