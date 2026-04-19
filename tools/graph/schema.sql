@@ -8,17 +8,20 @@ PRAGMA foreign_keys = ON;
 -- SOURCES — origin records (conversations, files, URLs)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS sources (
-    id          TEXT PRIMARY KEY,
-    type        TEXT NOT NULL,          -- 'conversation', 'musing', 'document', 'url', 'session'
-    platform    TEXT,                   -- 'chatgpt', 'claude', 'claude-code', 'local', etc.
-    project     TEXT,                   -- project identifier (e.g. '-home-jeremy-workspace-autonomy')
-    title       TEXT,
-    url         TEXT,
-    file_path   TEXT UNIQUE,            -- local file path (for dedup on re-ingest)
-    metadata    TEXT DEFAULT '{}',      -- JSON blob for extra fields
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    id               TEXT PRIMARY KEY,
+    type             TEXT NOT NULL,          -- 'conversation', 'musing', 'document', 'url', 'session'
+    platform         TEXT,                   -- 'chatgpt', 'claude', 'claude-code', 'local', etc.
+    project          TEXT,                   -- project identifier (e.g. '-home-jeremy-workspace-autonomy')
+    title            TEXT,
+    url              TEXT,
+    file_path        TEXT UNIQUE,            -- local file path (for dedup on re-ingest)
+    metadata         TEXT DEFAULT '{}',      -- JSON blob for extra fields
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    ingested_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    last_activity_at TEXT                    -- timestamp of latest ingested turn (for activity-based ordering)
 );
+-- idx_sources_last_activity is created via _migrate_sources_last_activity
+-- (so legacy DBs that pre-date the column don't fail on CREATE INDEX).
 
 -- ============================================================
 -- THOUGHTS — user assertions, questions, intents (sovereign)

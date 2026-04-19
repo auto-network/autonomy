@@ -81,6 +81,7 @@ class GraphDB:
         schema = SCHEMA_PATH.read_text()
         self.conn.executescript(schema)
         self._migrate_attachments_alt_text()
+        self._migrate_sources_last_activity()
         self._seed_tags()
 
     def _migrate_attachments_alt_text(self):
@@ -89,6 +90,28 @@ class GraphDB:
         if "alt_text" not in cols:
             self.conn.execute("ALTER TABLE attachments ADD COLUMN alt_text TEXT")
             self.conn.commit()
+
+    def _migrate_sources_last_activity(self):
+        """Add last_activity_at column + index to sources table if missing (idempotent).
+
+        Backfills from metadata.ended_at (or created_at) so existing rows sort
+        sensibly until the next ingest refreshes them.
+        """
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(sources)").fetchall()}
+        if "last_activity_at" not in cols:
+            self.conn.execute("ALTER TABLE sources ADD COLUMN last_activity_at TEXT")
+            self.conn.execute(
+                "UPDATE sources SET last_activity_at = "
+                "COALESCE(json_extract(metadata, '$.ended_at'), created_at) "
+                "WHERE last_activity_at IS NULL"
+            )
+            self.conn.commit()
+        # Create the index regardless — safe to call repeatedly thanks to IF NOT EXISTS.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sources_last_activity "
+            "ON sources(last_activity_at)"
+        )
+        self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -108,10 +131,11 @@ class GraphDB:
 
     def insert_source(self, src: Source) -> Source:
         self.conn.execute(
-            """INSERT INTO sources (id, type, platform, project, title, url, file_path, metadata, created_at, ingested_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO sources (id, type, platform, project, title, url, file_path, metadata, created_at, ingested_at, last_activity_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (src.id, src.type, src.platform, src.project, src.title, src.url,
-             src.file_path, json.dumps(src.metadata), src.created_at, src.ingested_at),
+             src.file_path, json.dumps(src.metadata), src.created_at, src.ingested_at,
+             src.last_activity_at),
         )
         self.conn.commit()
         return src
@@ -127,6 +151,32 @@ class GraphDB:
         self.conn.execute(
             "UPDATE sources SET metadata = ?, ingested_at = ? WHERE id = ?",
             (json.dumps(metadata), self.conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')").fetchone()[0], source_id),
+        )
+        self.conn.commit()
+
+    def update_source_summary(self, source_id: str, *, title: str | None = None,
+                              metadata: dict | None = None, last_activity_at: str | None = None):
+        """Refresh title / metadata / last_activity_at on incremental re-ingest.
+
+        Any field passed as None is left untouched. Bumps ingested_at.
+        """
+        sets = []
+        vals: list = []
+        if title is not None:
+            sets.append("title = ?")
+            vals.append(title)
+        if metadata is not None:
+            sets.append("metadata = ?")
+            vals.append(json.dumps(metadata))
+        if last_activity_at is not None:
+            sets.append("last_activity_at = ?")
+            vals.append(last_activity_at)
+        if not sets:
+            return
+        sets.append("ingested_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')")
+        vals.append(source_id)
+        self.conn.execute(
+            f"UPDATE sources SET {', '.join(sets)} WHERE id = ?", vals
         )
         self.conn.commit()
 

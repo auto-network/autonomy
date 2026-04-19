@@ -108,7 +108,14 @@ RECENT_SESSION_DEFAULTS: dict[str, Any] = {
     "session_type": "interactive",
     "total_tokens": 0,
     "total_turns": 0,
+    "entry_count": 0,
+    "context_tokens": 0,
+    "role": "",
+    "bead_id": "",
+    "tmux_session": "",
+    "activity_state": "dead",
     "created_at": "2026-01-01T00:00:00Z",
+    "last_activity_at": "2026-01-01T00:00:00Z",
 }
 
 RUN_DEFAULTS: dict[str, Any] = {
