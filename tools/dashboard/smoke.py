@@ -437,12 +437,17 @@ def run_tier2(base_url: str) -> dict:
         if r.status_code != 200:
             return f"API returned HTTP {r.status_code}"
         sessions = r.json() if isinstance(r.json(), list) else []
-        # Find a session with both project and tmux_session (both required in URL)
-        target = next((s for s in sessions if s.get("project") and s.get("tmux_session")), None)
+        # URL is /session/{project}/{tmux_name}. The DAO exposes tmux_name
+        # as session_id (and sometimes also as tmux_session); accept either.
+        target = next(
+            (s for s in sessions
+             if s.get("project") and (s.get("tmux_session") or s.get("session_id"))),
+            None,
+        )
         if not target:
             return True  # no eligible session; nothing to exercise
         project = target["project"]
-        tmux = target["tmux_session"]
+        tmux = target.get("tmux_session") or target["session_id"]
         url = f"{base_url}/session/{project}/{tmux}"
 
         try:
