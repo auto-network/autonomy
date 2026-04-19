@@ -39,6 +39,41 @@
 #                       required     true -> launch fails if file is missing.
 #                       description  Human-readable label (shown in launch errors).
 #                       help         Instructions for obtaining the file.
+#
+# Top-level `orgs:` (operator-local overrides — graph://497cdc20-d43)
+#   Identity primitives the dashboard shows for an org. Each value is a
+#   per-field OVERRIDE of the canonical identity an org publishes for
+#   itself. In Stage 1 (today) operator-local overrides are the only
+#   source; once the federation read-layer (auto-hoi4) lands, missing
+#   fields fall back to the org's own published identity, then to a
+#   deterministic generated fallback (hash-of-slug colour + initial).
+#   Per-field cascade: setting only `color` keeps generated `name` and
+#   `favicon`. Schema is forward-compatible with auto-rruc, which adds
+#   inheritance fields (artifacts, env_from_host, default_tags) under
+#   the same `orgs:<slug>:` keys.
+#
+#   Fields:
+#     name      Display name.
+#     byline    Short tagline rendered under the name in long-form views.
+#     color     Hex colour for the org indicator (background of the
+#               circular favicon/initial). Use a value that reads on
+#               #0f172a (the dashboard background).
+#     favicon   Optional. Path (repo-relative) or URL to a square icon.
+#               When omitted, the renderer paints the first letter of
+#               `name` on a circle of `color`.
+
+orgs:
+  autonomy:
+    name: "Autonomy Network"
+    byline: "AGI platform"
+    color: "#6C63FF"
+  anchore:
+    name: "Anchore"
+    byline: "Security platform"
+    color: "#2D7DD2"
+  personal:
+    name: "Personal"
+    color: "#A0A0A0"
 
 projects:
 
