@@ -30,8 +30,11 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 
 from agents.project_config import ProjectConfig
 
@@ -169,3 +172,242 @@ def prepare_session_mounts(
             _update_readonly_clone(clone)
             mounts[str(clone)] = f"{repo.mount}:ro"
     return mounts
+
+
+# ── Session teardown ──────────────────────────────────────────────
+
+# Branch name prefix used by ``create_worktree`` in ``prepare_session_mounts``.
+SESSION_BRANCH_PREFIX = "session/"
+
+
+@dataclass
+class CleanupResult:
+    """Outcome of a session-worktree cleanup pass."""
+
+    removed: list[str] = field(default_factory=list)
+    preserved: list[tuple[str, str]] = field(default_factory=list)
+    errors: list[tuple[str, str]] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.removed or self.preserved or self.errors)
+
+
+def _git_output(args: list[str], cwd: Path, *, timeout: int = 15) -> tuple[int, str, str]:
+    """Run git and return (rc, stdout, stderr); never raises on non-zero exit."""
+    try:
+        r = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timeout after {timeout}s"
+    except FileNotFoundError as e:
+        return 127, "", str(e)
+    return r.returncode, r.stdout, r.stderr
+
+
+def _find_managed_clone_for_worktree(worktree: Path) -> Path | None:
+    """Read ``.git`` in a worktree to find its managed clone.
+
+    A worktree's ``.git`` is a file containing ``gitdir: <path>/worktrees/<name>``.
+    The managed clone is two directories up from that ``worktrees/<name>`` leaf.
+    """
+    dotgit = worktree / ".git"
+    if not dotgit.exists():
+        return None
+    try:
+        content = dotgit.read_text().strip()
+    except OSError:
+        return None
+    if not content.startswith("gitdir:"):
+        return None
+    gitdir = Path(content.split(":", 1)[1].strip())
+    # e.g. <clone>/worktrees/<name>  →  <clone>
+    parts = gitdir.parts
+    if len(parts) >= 2 and parts[-2] == "worktrees":
+        return gitdir.parent.parent
+    return None
+
+
+def _worktree_has_uncommitted_changes(worktree: Path) -> bool:
+    rc, out, _ = _git_output(["status", "--porcelain"], worktree, timeout=15)
+    if rc != 0:
+        # If status fails, treat as "dirty" — err on the side of preserving.
+        return True
+    return bool(out.strip())
+
+
+def _worktree_has_unpushed_commits(worktree: Path) -> bool:
+    """Return True if HEAD has commits not reachable from ``origin/HEAD``.
+
+    If the comparison can't be made (missing upstream), returns True so
+    we preserve by default.
+    """
+    rc, out, _ = _git_output(
+        ["rev-list", "--count", "origin/HEAD..HEAD"],
+        worktree,
+        timeout=15,
+    )
+    if rc != 0:
+        return True
+    try:
+        return int(out.strip() or "0") > 0
+    except ValueError:
+        return True
+
+
+def _delete_branch(clone: Path, branch: str) -> None:
+    """Delete ``branch`` from ``clone``; best-effort, logged on failure."""
+    rc, _, err = _git_output(["branch", "-D", branch], clone, timeout=15)
+    if rc != 0 and "not found" not in err.lower():
+        logger.warning(
+            "workspace cleanup: failed to delete branch %s in %s: %s",
+            branch, clone, err.strip(),
+        )
+
+
+def _worktree_remove(clone: Path, worktree: Path) -> tuple[bool, str]:
+    """``git worktree remove --force`` from the managed clone. Returns (ok, err)."""
+    rc, _, err = _git_output(
+        ["worktree", "remove", str(worktree), "--force"],
+        clone,
+        timeout=30,
+    )
+    return rc == 0, err.strip()
+
+
+def _worktree_prune(clone: Path) -> None:
+    """Prune stale worktree metadata in the managed clone."""
+    _git_output(["worktree", "prune"], clone, timeout=15)
+
+
+def cleanup_session_worktrees(
+    session_name: str,
+    *,
+    force: bool = False,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> CleanupResult:
+    """Remove worktrees and branch for ``session_name``.
+
+    Walks ``data/worktrees/{session_name}/`` and, for each repo subdirectory:
+
+    - If the worktree has uncommitted changes or unpushed commits on its
+      ``session/{session_name}`` branch, preserve it (unless ``force=True``)
+      and record the reason.
+    - Otherwise run ``git worktree remove --force`` against the managed
+      clone, delete the session branch, and prune the clone's worktree
+      metadata.
+
+    The containing ``{session_name}`` directory is removed once empty.
+    Returns a :class:`CleanupResult` summarizing what was done.
+    """
+    result = CleanupResult()
+    session_dir = worktrees_dir / session_name
+    if not session_dir.exists():
+        return result
+    if not session_dir.is_dir():
+        result.errors.append((str(session_dir), "not a directory"))
+        return result
+
+    branch = f"{SESSION_BRANCH_PREFIX}{session_name}"
+    clones_touched: set[Path] = set()
+
+    for entry in sorted(session_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        clone = _find_managed_clone_for_worktree(entry)
+
+        if not force:
+            reasons: list[str] = []
+            if _worktree_has_uncommitted_changes(entry):
+                reasons.append("uncommitted changes")
+            elif _worktree_has_unpushed_commits(entry):
+                # Only check commits when the tree is clean — avoids
+                # treating a mid-edit worktree as "unpushed".
+                reasons.append("unpushed commits")
+            if reasons:
+                result.preserved.append((str(entry), ", ".join(reasons)))
+                logger.warning(
+                    "workspace cleanup: preserving %s (%s)",
+                    entry, ", ".join(reasons),
+                )
+                continue
+
+        if clone is None:
+            # Stale worktree with no resolvable clone — remove the directory.
+            try:
+                shutil.rmtree(entry)
+                result.removed.append(str(entry))
+            except OSError as e:
+                result.errors.append((str(entry), f"rmtree: {e}"))
+            continue
+
+        ok, err = _worktree_remove(clone, entry)
+        if not ok:
+            # ``git worktree remove`` can fail if the clone's metadata is
+            # out of sync with the filesystem; fall back to rmtree + prune.
+            if entry.exists():
+                try:
+                    shutil.rmtree(entry)
+                except OSError as e:
+                    result.errors.append((str(entry), f"remove failed: {err}; rmtree: {e}"))
+                    continue
+            logger.info(
+                "workspace cleanup: 'worktree remove' failed for %s (%s); "
+                "fell back to rmtree",
+                entry, err,
+            )
+
+        result.removed.append(str(entry))
+        clones_touched.add(clone)
+
+    # Drop the now-empty session directory (may still hold files if errors)
+    if session_dir.exists():
+        try:
+            remaining = [p for p in session_dir.iterdir()]
+        except OSError:
+            remaining = []
+        if not remaining:
+            try:
+                session_dir.rmdir()
+            except OSError as e:
+                result.errors.append((str(session_dir), f"rmdir: {e}"))
+
+    # Delete the session branch and prune stale worktree metadata in each
+    # managed clone we touched. Both are best-effort — a failure here does
+    # not roll back the removed worktrees.
+    for clone in clones_touched:
+        _delete_branch(clone, branch)
+        _worktree_prune(clone)
+
+    return result
+
+
+def prune_orphan_worktrees(
+    live_session_names: Iterable[str],
+    *,
+    force: bool = False,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> dict[str, CleanupResult]:
+    """Clean worktrees for sessions no longer in ``live_session_names``.
+
+    Scans ``worktrees_dir`` and calls :func:`cleanup_session_worktrees` for
+    each subdirectory whose name is not in ``live_session_names``.
+    Returns a mapping of ``session_name → CleanupResult``.
+    """
+    if not worktrees_dir.exists():
+        return {}
+    live = set(live_session_names)
+    results: dict[str, CleanupResult] = {}
+    for entry in sorted(worktrees_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name in live:
+            continue
+        results[entry.name] = cleanup_session_worktrees(
+            entry.name, force=force, worktrees_dir=worktrees_dir,
+        )
+    return results
