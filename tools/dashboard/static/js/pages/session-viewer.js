@@ -490,6 +490,23 @@
             function() { self._updateHeader(); }
           ));
         }
+
+        // Dispose terminal only on an isLive true -> false transition.
+        // A blanket x-effect on the root reacts to any dep change, which
+        // caused a race with toggleTerminal's $nextTick mount on dead
+        // sessions (open -> effect-dispose -> nextTick-remount -> stuck).
+        this._storeCleanups.push(this.$watch(
+          function() {
+            var s = Alpine.store('sessions')[sid];
+            return s ? s.isLive : true;
+          },
+          function(val) {
+            if (val === false && self._termInstance) {
+              self._disposeTerminal();
+              self.showTerminal = false;
+            }
+          }
+        ));
       },
 
       // ── Scroll helpers ──────────────────────────────────────────
@@ -658,6 +675,11 @@
         if (this.showTerminal) {
           var self = this;
           this.$nextTick(function () {
+            // State may have flipped back to false between the toggle call
+            // and $nextTick (e.g. the isLive-transition watch disposed us
+            // after the user tapped a dead session's toggle). Bail cleanly
+            // instead of mounting into a hidden/disposed container.
+            if (!self.showTerminal) return;
             var container = self.$refs.termContainer;
             if (!container || typeof window.mountTerminal !== 'function') return;
             self._termInstance = window.mountTerminal(container, self._tmuxSession);
