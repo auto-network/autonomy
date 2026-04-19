@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from .db import GraphDB, DEFAULT_DB
-from .ingest import ingest_claude_code_session, _extract_project_name
+from .ingest import _load_session_meta, ingest_claude_code_session
 
 
 def watch_sessions(
@@ -63,8 +63,8 @@ def watch_sessions(
                 prev_size = file_sizes.get(path_str, 0)
 
                 if current_size > prev_size:
-                    # File has grown
-                    project = _extract_project_name(jsonl_file)
+                    # File has grown — pull project scope from .session_meta.json
+                    project = _load_session_meta(jsonl_file).get("graph_project")
                     if project_filter and project_filter not in (project or ""):
                         file_sizes[path_str] = current_size
                         continue

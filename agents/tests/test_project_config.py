@@ -238,7 +238,7 @@ def test_shipped_config_autonomy():
     assert p.claude_md is None
     assert p.graph_project == "autonomy"
     assert p.default_tags == ()
-    assert p.dispatch_labels == ()
+    assert p.dispatch_labels == ("dashboard",)
     assert p.dind is False
     assert p.repos == ()
     assert p.startup is None

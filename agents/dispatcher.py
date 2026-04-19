@@ -9,8 +9,10 @@ dispatcher restarts, and responsive polling between agent runs.
 
 Dispatches all readiness:approved beads by priority, routing each to the
 container image configured in .beads/config.yaml (the rig default). Per-bead
-label overrides via LABEL_IMAGE_MAP are available but rarely needed. The
---queue flag optionally narrows to a specific label.
+label routing comes from agents/projects.yaml — each project's
+``dispatch_labels`` list maps a bead label to that project's image plus its
+graph scoping (graph_project + default_tags). The --queue flag optionally
+narrows to a specific label.
 
 Usage:
     python -m agents.dispatcher                  # Dispatch all approved beads
@@ -43,19 +45,13 @@ from agents.dispatch_db import (
     set_dispatcher_paused, is_paused as db_is_paused, get_pause_reason,
 )
 from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
+from agents.project_config import ProjectConfig, load_projects
 from agents.session_launcher import launch_session
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
 DISPATCH_STATE_PATH = REPO_ROOT / "data" / "dispatch.state"
 
-# Map labels to container images. Beads with these labels get dispatched
-# to specialized images with the right dependencies baked in.
-LABEL_IMAGE_MAP = {
-    "dashboard": "autonomy-agent:dashboard",
-    # Add more as project images are created:
-    # "scraper": "autonomy-agent:scraper",
-}
 DEFAULT_IMAGE = "autonomy-agent"
 DEFAULT_OPUS_MODEL = "claude-opus-4-7[1m]"
 DEFAULT_SONNET_MODEL = "claude-sonnet-4-7"
@@ -468,19 +464,52 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
 # ── Image routing ────────────────────────────────────────────────
 
 
+def _build_label_image_map() -> dict[str, str]:
+    """Map bead label → container image, sourced from agents/projects.yaml.
+
+    Each project's ``dispatch_labels`` list contributes one entry per label.
+    Adding dispatch routing for a new project is a config change only.
+    """
+    mapping: dict[str, str] = {}
+    for cfg in load_projects().values():
+        for label in cfg.dispatch_labels:
+            mapping[label] = cfg.image
+    return mapping
+
+
+def project_for_bead(bead: dict) -> ProjectConfig | None:
+    """Return the ProjectConfig whose ``dispatch_labels`` match any bead label.
+
+    Projects are scanned in registry order; first match wins. Returns None
+    when no project claims the bead — caller falls back to the rig default.
+    """
+    labels = set(bead.get("labels") or ())
+    if not labels:
+        return None
+    for cfg in load_projects().values():
+        if labels.intersection(cfg.dispatch_labels):
+            return cfg
+    return None
+
+
 def image_for_bead(bead: dict) -> str:
     """Select container image. Rig default, with per-bead label override."""
-    labels = bead.get("labels") or []
-    for label in labels:
-        if label in LABEL_IMAGE_MAP:
-            return LABEL_IMAGE_MAP[label]
+    project = project_for_bead(bead)
+    if project is not None:
+        return project.image
     return _rig_image
 
 
 # ── Non-blocking agent lifecycle ─────────────────────────────────
 
 
-def start_agent(bead_id: str, image: str = DEFAULT_IMAGE) -> RunningAgent | None:
+def start_agent(
+    bead_id: str,
+    image: str = DEFAULT_IMAGE,
+    *,
+    graph_project: str | None = None,
+    graph_tags: tuple[str, ...] = (),
+) -> RunningAgent | None:
     """Launch an agent container in detached mode. Returns immediately.
 
     Calls launch.sh --detach which:
@@ -488,13 +517,23 @@ def start_agent(bead_id: str, image: str = DEFAULT_IMAGE) -> RunningAgent | None
     2. Starts container with docker run -d
     3. Returns container metadata as key=value pairs
 
+    ``graph_project`` and ``graph_tags`` flow through to the container as
+    ``GRAPH_SCOPE`` / ``GRAPH_TAGS`` env vars and are written into
+    ``.session_meta.json`` so ingest can scope the resulting session source.
+
     Returns RunningAgent on success, None on failure.
     """
     print(f"  Starting agent for {bead_id} (image: {image})...")
 
+    cmd = [str(LAUNCH_SCRIPT), bead_id, f"--image={image}", "--detach"]
+    if graph_project:
+        cmd.append(f"--graph-project={graph_project}")
+    if graph_tags:
+        cmd.append(f"--graph-tags={','.join(graph_tags)}")
+
     try:
         result = subprocess.run(
-            [str(LAUNCH_SCRIPT), bead_id, f"--image={image}", "--detach"],
+            cmd,
             capture_output=True, text=True,
             timeout=120,  # Prep phase only — worktree + prompt gen
             cwd=str(REPO_ROOT),
@@ -2149,7 +2188,8 @@ def dispatch_cycle(
         bead_id = bead["id"]
         title = bead.get("title", "?")
         bead_labels = bead.get("labels") or []
-        image = image_for_bead(bead)
+        project = project_for_bead(bead)
+        image = project.image if project is not None else _rig_image
         print(f"  Selected: {bead_id} — {title} (P{bead.get('priority', '?')}) [{image}]")
 
         if dashboard_paused and "dashboard" in bead_labels:
@@ -2178,7 +2218,12 @@ def dispatch_cycle(
             continue
 
         # Launch agent container (blocks until container starts)
-        agent = start_agent(bead_id, image=image)
+        agent = start_agent(
+            bead_id,
+            image=image,
+            graph_project=project.graph_project if project is not None else None,
+            graph_tags=project.default_tags if project is not None else (),
+        )
         if agent:
             agent.labels = bead.get("labels") or []
             _record_launch(agent)
