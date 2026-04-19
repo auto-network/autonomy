@@ -243,8 +243,8 @@ def get_recent_sessions(
         row["resumable"] = bool(row["file_path"] and Path(row["file_path"]).exists())
         # date for backwards compat
         row["date"] = (row["last_activity_at"] or row["created_at"] or "")[:10]
-        # Resolve org identity from the bare project slug BEFORE bracket-wrap
-        row["org"] = resolve_session_org({"project": row["project"]})
+        # Resolve org identity from the full row (carries session_type) BEFORE bracket-wrap
+        row["org"] = resolve_session_org(row)
         # Wrap project in brackets for backwards-compat with the existing UI
         row["project"] = f"[{row['project']}]" if row["project"] else ""
 

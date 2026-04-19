@@ -1382,7 +1382,7 @@ def _enrich_search_results(results: list) -> None:
         if not isinstance(r, dict):
             continue
         if "org" not in r:
-            r["org"] = resolve_org_identity(session_org_slug({"project": r.get("project")}))
+            r["org"] = resolve_org_identity(session_org_slug(r))
         # Normalize date to "YYYY-MM-DD HH:MM" (24hr). Source may supply
         # created_at / date / last_activity_at in various forms.
         if "date" not in r or not r.get("date"):
@@ -1453,7 +1453,7 @@ def _attach_source_org(result: dict | None) -> None:
     if not isinstance(src, dict):
         return
     if "org" not in src:
-        src["org"] = resolve_org_identity(session_org_slug({"project": src.get("project")}))
+        src["org"] = resolve_org_identity(session_org_slug(src))
 
 async def api_context(request):
     if os.environ.get("DASHBOARD_MOCK"):
@@ -3148,7 +3148,7 @@ async def api_session_get(request):
         "role": session.get("role", ""),
         "activity_state": session.get("activity_state", "idle"),
         "project": session.get("project"),
-        "org": resolve_session_org({"project": session.get("project")}),
+        "org": resolve_session_org(session),
         "is_live": bool(session.get("is_live")),
         "dispatch_nag_enabled": bool(session.get("dispatch_nag")),
         "nag_enabled": bool(session.get("nag_enabled")),
