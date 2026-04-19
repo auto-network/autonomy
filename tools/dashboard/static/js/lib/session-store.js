@@ -42,6 +42,7 @@ document.addEventListener('alpine:init', function() {
         if (s.nag_enabled !== undefined) store.nagEnabled = !!s.nag_enabled;
         if (s.nag_interval) store.nagInterval = s.nag_interval;
         if (s.nag_message !== undefined) store.nagMessage = s.nag_message;
+        if (s.dispatch_nag_enabled !== undefined) store.dispatchNagEnabled = !!s.dispatch_nag_enabled;
         if (s.resolved !== undefined) store.resolved = !!s.resolved;
       }
     })
@@ -67,6 +68,7 @@ window.getSessionStore = function(sessionId) {
       nagEnabled: false,
       nagInterval: 15,
       nagMessage: '',
+      dispatchNagEnabled: false,
       sizeMB: '0',
       lastActivity: 0,
       lastMessage: '',
@@ -182,6 +184,7 @@ window.ensureSessionMessages = function() {
       store.nagEnabled = !!s.nag_enabled;
       store.nagInterval = s.nag_interval || 15;
       store.nagMessage = s.nag_message || '';
+      store.dispatchNagEnabled = !!s.dispatch_nag_enabled;
       store.isLive = s.is_live;
       store.startedAt = s.started_at || 0;
       if (s.last_activity) store.lastActivity = s.last_activity;

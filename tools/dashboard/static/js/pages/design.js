@@ -412,6 +412,7 @@
               created_at: s.startedAt || 0,
               tmux_session: id,
               nag_enabled: false,
+              dispatch_nag_enabled: false,
               topics: [],
               latest: '',
               resumable: false,

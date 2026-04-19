@@ -3063,7 +3063,7 @@ async def api_session_get(request):
         "activity_state": session.get("activity_state", "idle"),
         "project": session.get("project"),
         "is_live": bool(session.get("is_live")),
-        "dispatch_nag": bool(session.get("dispatch_nag")),
+        "dispatch_nag_enabled": bool(session.get("dispatch_nag")),
         "nag_enabled": bool(session.get("nag_enabled")),
         "nag_interval": session.get("nag_interval"),
         "nag_message": session.get("nag_message"),

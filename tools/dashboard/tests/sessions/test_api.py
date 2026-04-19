@@ -72,6 +72,16 @@ class TestActiveSessionsAPI:
         assert gamma["nag_interval"] == 10
         assert gamma["nag_message"] == "Check review status"
 
+    def test_dispatch_nag_enabled_present(self, test_client):
+        """Every session row carries dispatch_nag_enabled: bool, defaulting to False."""
+        data = test_client.get("/api/dao/active_sessions").json()
+        assert len(data) >= 1
+        for s in data:
+            assert "dispatch_nag_enabled" in s, f"missing field on {s['session_id']}"
+            assert isinstance(s["dispatch_nag_enabled"], bool)
+        # Fixture has no session opted in → all default to False
+        assert all(s["dispatch_nag_enabled"] is False for s in data)
+
 
 # ── Recent Sessions API ─────────────────────────────────────────────
 
