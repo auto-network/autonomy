@@ -36,7 +36,11 @@
                   :class="{ 'indicator--green': isLive, 'indicator--gray': !isLive, 'indicator-dot--working': isLive }"
                   style="width:7px;height:7px;border-radius:50%;flex-shrink:0;"
                   :style="isLive ? 'background:#4ade80' : 'background:#6b7280'"></span>
-            <span class="role-badge" x-show="false" style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;padding:2px 6px;border-radius:4px;background:rgba(99,102,241,0.2);color:#a5b4fc;flex-shrink:0;"></span>
+            <span class="role-badge"
+                  x-show="sessionType"
+                  x-text="sessionType ? sessionType.toUpperCase() : ''"
+                  data-testid="session-role"
+                  style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;padding:2px 6px;border-radius:4px;background:rgba(99,102,241,0.2);color:#a5b4fc;flex-shrink:0;"></span>
             <div style="flex:1"></div>
             <template x-if="!isLive">
               <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
