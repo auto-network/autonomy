@@ -69,6 +69,7 @@ from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_stats, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
+from .worktree_cmd import cmd_worktree_default, cmd_worktree_list, cmd_worktree_prune
 from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_journal_write, api_sessions, api_set_label, api_set_topics, api_set_role, api_set_nag, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action, api_tag_add, api_tag_remove, api_tag_merge
 
 
@@ -3756,6 +3757,35 @@ def main():
     p_stats.add_argument("--since", help="Duration filter, e.g. 7d, 30d")
     p_stats.add_argument("--json", action="store_true", help="JSON output")
     p_stats.set_defaults(func=cmd_dispatch_stats)
+
+    # worktree — manage session worktrees under data/worktrees/
+    p_wt = sub.add_parser("worktree", help="Manage session worktrees (list, prune)")
+    p_wt.add_argument("--worktrees-dir", help="Override data/worktrees/ path (debugging)")
+    p_wt.set_defaults(func=cmd_worktree_default)
+    wt_sub = p_wt.add_subparsers(dest="worktree_subcmd")
+
+    p_wt_list = wt_sub.add_parser("list", help="List session worktree directories")
+    p_wt_list.add_argument("--worktrees-dir", help="Override data/worktrees/ path")
+    p_wt_list.set_defaults(func=cmd_worktree_list)
+
+    p_wt_prune = wt_sub.add_parser(
+        "prune",
+        help="Remove worktrees for sessions that are no longer live",
+    )
+    p_wt_prune.add_argument(
+        "--session",
+        help="Clean only this session (bypasses the live-session check)",
+    )
+    p_wt_prune.add_argument(
+        "--force", action="store_true",
+        help="Also remove worktrees with uncommitted changes or unpushed commits",
+    )
+    p_wt_prune.add_argument(
+        "--force-all", action="store_true",
+        help="Prune without consulting dashboard.db (use only when it is known-stale)",
+    )
+    p_wt_prune.add_argument("--worktrees-dir", help="Override data/worktrees/ path")
+    p_wt_prune.set_defaults(func=cmd_worktree_prune)
 
     # attach
     p = sub.add_parser("attach", help="Attach a file to the graph with hash-based dedup")
