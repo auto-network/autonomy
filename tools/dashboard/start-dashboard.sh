@@ -126,6 +126,7 @@ echo "Starting dashboard: host=$HOST, port=$PORT (hot-reload enabled, tailwind -
 # process group.  setsid creates a new session so the child bash becomes the
 # group leader; its PID == PGID of both children.  One kill -- -$PGID stops all.
 setsid bash -c "
+  cd \"$REPO_ROOT\"
   \"$TAILWIND_BIN\" \
     --cwd \"$SCRIPT_DIR\" \
     -i tailwind.input.css \
