@@ -426,9 +426,10 @@
 
     /* Fullscreen page mode: hide dashboard chrome so the viewer owns the viewport.
        Applied via body.fullscreen-page on /session/ routes. */
-    body.fullscreen-page { display: block; margin: 0; }
+    body.fullscreen-page { display: block; margin: 0; overflow: hidden; }
     body.fullscreen-page > nav#sidebar { display: none; }
     body.fullscreen-page > .flex-1 { display: block; height: 100%; }
+    body.fullscreen-page > .flex-1.flex.flex-col { overflow: hidden; }
     body.fullscreen-page > .flex-1 > header { display: none; }
     body.fullscreen-page main#content { padding: 0 !important; margin: 0 !important; overflow: visible; height: 100%; }
 
