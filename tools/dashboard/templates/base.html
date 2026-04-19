@@ -507,37 +507,6 @@
       padding: max(0px, calc(var(--sat) - 5px)) 0.75rem 6px;
     }
 
-    /* Expanded header — revealed by chevron toggle (x-show on headerOpen).
-       Contains topics, T3 stats (turns · ctx · idle), and label-edit affordance. */
-    .sv-header-expanded { padding-top: 8px; }
-    .sv-exp-topics {
-      display: flex; flex-direction: column; gap: 2px;
-      margin-bottom: 6px; font-size: 11px; color: #9ca3af;
-    }
-    .sv-exp-stats {
-      display: flex; align-items: center; gap: 6px;
-      font-size: 11px; color: #9ca3af;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-    .sv-exp-stat-label { color: #6b7280; font-size: 10px; text-transform: uppercase; margin-right: 2px; }
-    .sv-exp-stat-val.warn { color: #f59e0b; }
-    .sv-exp-stat-val.recent-green { color: #4ade80; }
-    .sv-exp-stat-val.recent-amber { color: #facc15; }
-    .sv-exp-stat-val.recent-red   { color: #f87171; }
-    .sv-exp-stat-val.recent-gray  { color: #6b7280; }
-    .sv-exp-sep { color: #4b5563; }
-    .sv-exp-label-row {
-      display: flex; align-items: center; gap: 8px;
-      margin-top: 6px; font-size: 11px;
-    }
-    .sv-exp-label-key { color: #6b7280; font-size: 10px; text-transform: uppercase; }
-    .sv-exp-label-edit {
-      color: #e5e7eb; border-bottom: 1px solid transparent;
-      padding: 0 2px; min-width: 40px; cursor: pointer;
-    }
-    .sv-exp-label-edit:hover { border-bottom-color: #6b7280; }
-    .sv-exp-label-edit:focus { outline: none; border-bottom-color: #818cf8; }
-
     /* Row 2 — Entries (only this scrolls) */
     .sv-entries {
       min-height: 0;
@@ -1136,7 +1105,6 @@
   <script src="/static/js/lib/session-store.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-display.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-renderer.js?v=__STATIC_VERSION__"></script>
-  <script src="/static/js/lib/session-stats.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/screenshot.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/toolbar-state.js?v=__STATIC_VERSION__"></script>
   <script src="/static/app.js?v=__STATIC_VERSION__"></script>

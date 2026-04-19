@@ -97,18 +97,6 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.contextTokens : 0;
       },
-      get topics() {
-        var s = Alpine.store('sessions')[this.sessionKey];
-        return (s && s.topics) || [];
-      },
-      get entryCount() {
-        var s = Alpine.store('sessions')[this.sessionKey];
-        return (s && s.entryCount) || this.entries.length;
-      },
-      get lastActivity() {
-        var s = Alpine.store('sessions')[this.sessionKey];
-        return (s && s.lastActivity) || 0;
-      },
 
       // ── View-only state ─────────────────────────────────────────
       displayEntries: [],
