@@ -141,26 +141,35 @@ def _iso_minutes_ago(minutes: int) -> str:
 SWEEP_RECENT_SESSIONS = [
     # Most turns (627) — placed active 10 minutes ago so sort=lastActivity
     # puts it second-most-recent. Under sort=turns it must float to the top.
+    # Interactive (dead): footer shows ended + tmux.
     {"id": "src-sweep-aaa111", "type": "session", "date": "2026-03-25",
      "title": "Alpha history session", "project": "autonomy",
      "session_type": "interactive", "resumable": True,
+     "tmux_session": "auto-0418-223100",
      "created_at": _iso_minutes_ago(90), "last_activity_at": _iso_minutes_ago(10),
+     "ended_at": _iso_minutes_ago(10),
      "entry_count": 627, "context_tokens": 120000,
      "total_turns": 627, "total_tokens": 120000},
     # 0 turns / 0 ctx — most-recent activity; with sort=lastActivity it's
     # first, with sort=turns or sort=ctx it should fall to the bottom.
+    # Dispatch (dead): footer shows ended only — tmux column hidden.
     {"id": "src-sweep-bbb222", "type": "session", "date": "2026-03-24",
      "title": "<crosstalk echo>", "project": "autonomy",
      "session_type": "dispatch", "resumable": False,
+     "tmux_session": "agent-auto-bbb222-12345",
      "created_at": _iso_minutes_ago(5), "last_activity_at": _iso_minutes_ago(5),
+     "ended_at": _iso_minutes_ago(5),
      "entry_count": 0, "context_tokens": 0,
      "total_turns": 0, "total_tokens": 0},
     # Medium turns — oldest within the 1d window. Excluded when since=6h if
     # we push its timestamp beyond 6h; left inside for the default case.
+    # Librarian (dead): footer shows ended only — tmux column hidden.
     {"id": "src-sweep-ccc333", "type": "session", "date": "2026-03-23",
      "title": "Gamma history session", "project": "default",
      "session_type": "librarian", "resumable": False,
+     "tmux_session": "librarian-auto-ccc333-67890",
      "created_at": _iso_minutes_ago(300), "last_activity_at": _iso_minutes_ago(120),
+     "ended_at": _iso_minutes_ago(120),
      "entry_count": 84, "context_tokens": 55000,
      "total_turns": 84, "total_tokens": 55000},
 ]
@@ -897,6 +906,23 @@ SESSIONS_PAGE_CHECKS = """
     });
     r.disabled_resume_btn_ids = disabledResumeBtns;
     r.all_resume_btns_enabled = disabledResumeBtns.length === 0;
+
+    // Recent card footer matrix (auto-wa3d): dead sessions show 'ended' +
+    // absolute datetime; tmux column hidden for dispatch/librarian.
+    var recentFooters = [];
+    recentRows.forEach(function(row) {
+        var labels = Array.from(row.querySelectorAll('.sc-footer-label'))
+            .map(function(e) { return e.textContent.trim(); });
+        var values = Array.from(row.querySelectorAll('.sc-footer-value'))
+            .map(function(e) { return e.textContent.trim(); });
+        recentFooters.push({
+            type: row.dataset.sessionType || '',
+            sid: row.dataset.sessionId || '',
+            labels: labels,
+            values: values,
+        });
+    });
+    r.recent_footers = recentFooters;
 """
 
 # ── Resume button state-transition async check ──────────────────────
@@ -1482,6 +1508,68 @@ class TestSessionsPageBehavior:
             f"disabled for session ids: {c.get('disabled_resume_btn_ids')}. "
             "Likely regression of the `:disabled='resuming[s.id] === true'` fix."
         )
+
+    # ── Recent card footer matrix (auto-wa3d) ────────────────────────
+    # Dead sessions show 'ended' + absolute datetime in col 3. Tmux column
+    # in col 4 is omitted entirely for dispatch/librarian (synthetic value).
+
+    def _footer_for(self, session_type: str) -> dict:
+        c = self._checks
+        footers = c.get("recent_footers", [])
+        for f in footers:
+            if f.get("type") == session_type:
+                return f
+        raise AssertionError(
+            f"No recent-row footer with session_type={session_type!r}; "
+            f"available: {[f.get('type') for f in footers]}"
+        )
+
+    @staticmethod
+    def _core_labels(labels):
+        # Strip the optional trailing 'project' column — orthogonal to this bead.
+        return [l for l in labels if l != "project"]
+
+    def test_recent_interactive_footer_labels(self):
+        """Dead interactive: footer = ['turns', 'ctx', 'ended', 'tmux']."""
+        f = self._footer_for("interactive")
+        assert self._core_labels(f["labels"]) == ["turns", "ctx", "ended", "tmux"], \
+            f"interactive footer labels mismatch: {f['labels']}"
+
+    def test_recent_dispatch_footer_labels(self):
+        """Dead dispatch: footer = ['turns', 'ctx', 'ended'] (tmux hidden)."""
+        f = self._footer_for("dispatch")
+        assert self._core_labels(f["labels"]) == ["turns", "ctx", "ended"], \
+            f"dispatch footer labels mismatch (tmux must be absent): {f['labels']}"
+
+    def test_recent_librarian_footer_labels(self):
+        """Dead librarian: footer = ['turns', 'ctx', 'ended'] (tmux hidden)."""
+        f = self._footer_for("librarian")
+        assert self._core_labels(f["labels"]) == ["turns", "ctx", "ended"], \
+            f"librarian footer labels mismatch (tmux must be absent): {f['labels']}"
+
+    def test_recent_ended_value_is_absolute_datetime(self):
+        """The 'ended' value matches YYYY-MM-DD HH:MM (24h, operator-local, no tz suffix)."""
+        import re
+        pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        for f in self._checks.get("recent_footers", []):
+            labels = f["labels"]
+            values = f["values"]
+            assert "ended" in labels, f"row missing 'ended' label: {f}"
+            ended_idx = labels.index("ended")
+            ended_val = values[ended_idx]
+            assert pattern.match(ended_val), \
+                f"ended value {ended_val!r} on {f['type']!r} row " \
+                f"does not match YYYY-MM-DD HH:MM"
+
+    def test_recent_dispatch_librarian_have_no_tmux_column(self):
+        """For dispatch + librarian, the synthetic tmux value must not leak into the footer."""
+        for stype in ("dispatch", "librarian"):
+            f = self._footer_for(stype)
+            assert "tmux" not in f["labels"], \
+                f"{stype} footer must not render a tmux column; got labels={f['labels']}"
+            joined = " ".join(f["values"])
+            assert "agent-auto-" not in joined and "librarian-auto-" not in joined, \
+                f"synthetic tmux value leaked into {stype} footer: {f['values']}"
 
 
 class TestResumeButtonStateTransition:

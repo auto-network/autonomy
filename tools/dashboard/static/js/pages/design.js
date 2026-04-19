@@ -375,6 +375,9 @@
         idleStr: function(s) { return window.sessionCardHelpers.idleStr(s); },
         ctxWarn: function(s) { return window.sessionCardHelpers.ctxWarn(s); },
         recencyColor: function(s) { return window.sessionCardHelpers.recencyColor(s); },
+        endedOrIdleLabel: function(s) { return window.sessionCardHelpers.endedOrIdleLabel(s); },
+        endedOrIdleValue: function(s) { return window.sessionCardHelpers.endedOrIdleValue(s); },
+        showTmuxColumn: function(s) { return window.sessionCardHelpers.showTmuxColumn(s); },
 
         _loadChatSessions: function () {
           var allSessions = Alpine.store('sessions');
