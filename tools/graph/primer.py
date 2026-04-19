@@ -34,16 +34,15 @@ def _run_bd(args: list[str], timeout: int = 15) -> str:
 
 
 def _get_bead(bead_id: str) -> dict | None:
-    """Get bead details from bd show --json."""
-    out = _run_bd(["show", bead_id, "--json"])
-    if not out:
-        return None
+    """Return bead details including comments via dashboard DAO.
+
+    Bypasses the `bd` CLI because `bd show --json` omits comments and
+    `bd comments --json` has a UUID/int64 scan bug.
+    """
+    from tools.dashboard.dao import beads as dao_beads
     try:
-        data = json.loads(out)
-        if isinstance(data, list) and data:
-            return data[0]
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
+        return dao_beads.get_bead(bead_id)
+    except Exception:
         return None
 
 
