@@ -161,30 +161,19 @@
       ctxWarn: _ctxWarn,
       recencyColor: _recencyColor,
 
-      // --- Active Sessions: client-side sort mode (cycled by toggle) ---
+      // --- Active Sessions: client-side sort mode ---
+      // Options match the dropdown-toggle partial contract: [{k, l}, ...]
+      activeSortOptions: [
+        {k: 'lastActivity', l: 'Recent Activity'},
+        {k: 'idle',         l: 'Longest Idle'},
+        {k: 'turns',        l: 'Most Turns'},
+        {k: 'ctx',          l: 'Most Context'},
+      ],
       activeSort: (function() {
         var saved = localStorage.getItem('sessionsActiveSort');
         var allowed = ['lastActivity', 'idle', 'turns', 'ctx'];
         return allowed.indexOf(saved) !== -1 ? saved : 'lastActivity';
       })(),
-      activeSortOptions: ['lastActivity', 'idle', 'turns', 'ctx'],
-      activeSortLabels: {
-        lastActivity: 'Activity',
-        idle: 'Idle time',
-        turns: 'Turns',
-        ctx: 'Context',
-      },
-
-      get activeSortLabel() {
-        return this.activeSortLabels[this.activeSort] || 'Activity';
-      },
-
-      cycleActiveSort() {
-        var i = this.activeSortOptions.indexOf(this.activeSort);
-        var next = this.activeSortOptions[(i + 1) % this.activeSortOptions.length];
-        this.activeSort = next;
-        localStorage.setItem('sessionsActiveSort', next);
-      },
 
       get sortedInteractive() {
         var arr = this.interactive.slice();
@@ -319,6 +308,8 @@
         document.body.classList.add('zoom-' + level);
       },
       init() {
+        this.$watch('activeSort', (v) => localStorage.setItem('sessionsActiveSort', v));
+
         // Ensure global SSE handlers are registered
         window.ensureSessionMessages();
 
