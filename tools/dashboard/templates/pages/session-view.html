@@ -80,54 +80,54 @@
 
         </div>
 
-        <!-- Expanded header: topics, T3 stats, label-edit affordance.
+        <!-- Expanded header: topics section + stats grid.
              Sibling of .sv-header-inner so safe-area padding is not doubled.
-             Visibility driven by CSS (.sv-header.open max-height animation),
-             not x-show — prevents display:none fighting the keyframe. -->
+             Visibility driven by CSS (.sv-header.open max-height animation). -->
         <div class="sv-header-expanded" @click.stop>
 
           <template x-if="topics && topics.length > 0">
-            <div class="sv-exp-topics">
-              <template x-for="(topic, idx) in topics" :key="idx">
-                <span class="sv-exp-topic-item" x-text="topic"></span>
+            <div class="sv-exp-section">
+              <div class="sv-exp-heading">TOPICS</div>
+              <div class="sv-exp-topics">
+                <template x-for="(topic, idx) in topics" :key="idx">
+                  <span class="sv-exp-topic-item" x-text="topic"></span>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <div class="sv-exp-section">
+            <div class="sv-exp-stats-grid">
+              <div class="sv-exp-stat-cell">
+                <div class="sv-exp-stat-key">TURNS</div>
+                <div class="sv-exp-stat-val" x-text="window.SessionStats.turnsStr({entryCount: entryCount}) || '—'"></div>
+              </div>
+              <div class="sv-exp-stat-cell">
+                <div class="sv-exp-stat-key">CTX</div>
+                <div class="sv-exp-stat-val"
+                     :class="window.SessionStats.ctxWarn({contextTokens: contextTokens}) ? 'warn' : ''"
+                     x-text="window.SessionStats.ctxStr({contextTokens: contextTokens}) || '—'"></div>
+              </div>
+              <div class="sv-exp-stat-cell">
+                <div class="sv-exp-stat-key">IDLE</div>
+                <div class="sv-exp-stat-val"
+                     :class="'recent-' + window.SessionStats.recencyColor({lastActivity: lastActivity})"
+                     x-text="window.SessionStats.idleStr({lastActivity: lastActivity}) || '—'"></div>
+              </div>
+              <template x-if="_tmuxSession">
+                <div class="sv-exp-stat-cell sv-exp-stat-wide">
+                  <div class="sv-exp-stat-key">TMUX</div>
+                  <div class="sv-exp-stat-val" x-text="_tmuxSession"></div>
+                </div>
+              </template>
+              <template x-if="project">
+                <div class="sv-exp-stat-cell">
+                  <div class="sv-exp-stat-key">PROJECT</div>
+                  <div class="sv-exp-stat-val" x-text="project"></div>
+                </div>
               </template>
             </div>
-          </template>
-
-          <div class="sv-exp-stats">
-            <span class="sv-exp-stat">
-              <span class="sv-exp-stat-label">turns</span>
-              <span class="sv-exp-stat-val" x-text="window.SessionStats.turnsStr({entryCount: entryCount}) || '—'"></span>
-            </span>
-            <span class="sv-exp-sep">·</span>
-            <span class="sv-exp-stat">
-              <span class="sv-exp-stat-label">ctx</span>
-              <span class="sv-exp-stat-val"
-                    :class="window.SessionStats.ctxWarn({contextTokens: contextTokens}) ? 'warn' : ''"
-                    x-text="window.SessionStats.ctxStr({contextTokens: contextTokens}) || '—'"></span>
-            </span>
-            <span class="sv-exp-sep">·</span>
-            <span class="sv-exp-stat">
-              <span class="sv-exp-stat-label">idle</span>
-              <span class="sv-exp-stat-val"
-                    :class="'recent-' + window.SessionStats.recencyColor({lastActivity: lastActivity})"
-                    x-text="window.SessionStats.idleStr({lastActivity: lastActivity}) || '—'"></span>
-            </span>
           </div>
-
-          <template x-if="isLive && _tmuxSession">
-            <div class="sv-exp-label-row">
-              <span class="sv-exp-label-key">label</span>
-              <span class="sv-exp-label-edit"
-                    data-testid="session-label-edit"
-                    contenteditable="true"
-                    @blur="saveLabel($event)"
-                    @keydown.enter.prevent="$event.target.blur()"
-                    @keydown.escape.prevent="$event.target.textContent = _label || _tmuxSession; $event.target.blur()"
-                    x-text="_label || _tmuxSession"
-                    title="Click to edit label"></span>
-            </div>
-          </template>
 
         </div>
 
