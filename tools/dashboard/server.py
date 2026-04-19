@@ -4158,13 +4158,15 @@ async def page_test_input(request):
     inside the Design Studio iframe — this route delivers the raw HTML with no
     dashboard chrome so real iOS keyboard/safe-area behavior can be tested.
     """
+    from pathlib import Path
     no_cache = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
+    # Baked reference prototype (graph attachment 976c334a-97e)
+    path = Path(__file__).resolve().parent.parent.parent / "data/test-fixtures/input-prototype.html"
     try:
-        with open("/tmp/chat-input-proto/index.html") as f:
-            return HTMLResponse(f.read(), headers=no_cache)
+        return HTMLResponse(path.read_text(), headers=no_cache)
     except FileNotFoundError:
         return PlainTextResponse(
-            "Prototype not found at /tmp/chat-input-proto/index.html",
+            f"Prototype not found at {path}",
             status_code=404,
             headers=no_cache,
         )

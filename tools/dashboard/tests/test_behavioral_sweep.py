@@ -1851,10 +1851,9 @@ HOST_SESSION_CHECKS = """
     r.entry_count = entries.length;
     r.has_entries = entries.length > 0;
 
-    // Textarea / input bar exists (for sending messages to live session)
-    // x-ref is not a DOM attribute; query by element type + parent class
-    var textarea = content ? content.querySelector('.sv-input textarea') : null;
-    r.has_textarea = !!textarea;
+    // Editable input exists (contenteditable div, not textarea) for sending messages.
+    var editable = content ? content.querySelector('.sv-input .sv-editable') : null;
+    r.has_editable = !!editable;
 
     // Input bar container
     var inputBar = content ? content.querySelector('.sv-input') : null;
@@ -1880,7 +1879,7 @@ class TestHostSessionInputBehavior:
     input bar.
 
     In mock mode, the tail endpoint hardcodes is_live: true and omits the
-    `type` field, so the textarea may appear (masking the production bug).
+    `type` field, so the input may appear (masking the production bug).
     The L2.A contract test below catches the missing `type` field.
     """
 
@@ -1907,16 +1906,16 @@ class TestHostSessionInputBehavior:
             f"No session entries visible (count={c.get('entry_count', 0)})"
 
     def test_input_bar_for_live_host(self):
-        """Live host session should show an input bar (Link Terminal or textarea).
+        """Live host session should show an input bar (Link Terminal or editable input).
 
         Host sessions show a 'Link Terminal' button until linked to a tmux session,
-        then show a textarea. Either way, the .sv-input bar should be present.
+        then show a contenteditable input. Either way, the .sv-input bar should be present.
         """
         c = self._checks
         assert c.get("has_input_bar"), \
             ("No input bar visible for live host session. "
              "User cannot interact with this session. "
-             "Expected .sv-input element (Link Terminal button or textarea).")
+             "Expected .sv-input element (Link Terminal button or .sv-editable input).")
 
     def test_no_template_artifacts(self):
         """No raw Jinja template syntax visible on session viewer page."""
@@ -1950,7 +1949,7 @@ class TestHostSessionTailContract:
         """Tail response must include `type` field for host sessions.
 
         The session viewer needs `type: 'host'` to show the correct UI
-        (Link Terminal flow instead of direct textarea).
+        (Link Terminal flow instead of direct editable input).
         """
         t = self._tail
         assert "type" in t, \

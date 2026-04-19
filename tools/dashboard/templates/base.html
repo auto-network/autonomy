@@ -24,6 +24,14 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js" defer></script>
   <script src="/static/js/markdown.js?v=__STATIC_VERSION__" defer></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+  <script>
+    // iOS standalone detection — 100vh is unreliable in PWA mode (fluctuates 787/812/874).
+    // Use screen.height as a stable reference via --app-height.
+    if (window.navigator.standalone === true) {
+      document.documentElement.classList.add('ios-standalone');
+      document.documentElement.style.setProperty('--app-height', window.screen.height + 'px');
+    }
+  </script>
   <style>
     .markdown-body h1 { font-size: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; }
     .markdown-body h2 { font-size: 1.25rem; font-weight: 600; margin: 1rem 0 0.5rem; border-bottom: 1px solid #374151; padding-bottom: 0.25rem; }
@@ -396,12 +404,7 @@
         font-size: 16px !important;
       }
     }
-    @media (pointer: coarse) {
-      .sv-input-row textarea:focus {
-        border-color: #374151; /* gray-700 — subtle instead of indigo-500 */
-      }
-    }
-    /* SSE interruption banner — fixed above session viewer */
+    /* SSE interruption banner — fixed, overlays the grid header */
     .sse-banner {
       position: fixed;
       z-index: 20;
@@ -415,88 +418,156 @@
         left: 14rem;
       }
     }
-    /* Shift session viewer down when banner is visible */
-    body.sse-banner-visible .session-viewer {
-      top: calc(env(safe-area-inset-top, 0px) + 3rem + 2.5rem);
+    /* ── Session viewer: grid shell (page mode) ──────────── */
+    :root {
+      --sat: env(safe-area-inset-top, 0px);
+      --sab: env(safe-area-inset-bottom, 0px);
     }
-    @media (min-width: 768px) {
-      body.sse-banner-visible .session-viewer {
-        top: 2.5rem;
-      }
-    }
-    /* Session viewer layout — four fixed zones */
-    .session-viewer {
-      position: fixed;
-      top: calc(env(safe-area-inset-top, 0px) + 3.5rem); /* below nav toggle on mobile */
-      left: 0;
-      right: 0;
-      bottom: 0;
-      padding-bottom: 0;
-      display: flex;
-      flex-direction: column;
-      background: #1f2937; /* match input bar — no gap visible at bottom */
-      z-index: 15;
-      overflow: hidden;
-      overscroll-behavior: none;
-    }
-    /* On desktop, inset the viewer to sit within the content area (after sidebar + header) */
-    @media (min-width: 768px) {
-      .session-viewer {
-        left: 14rem; /* w-56 = 14rem sidebar */
-        top: 0;
-      }
-    }
-    /* Inner ready container fills the viewer as a flex column */
-    .sv-ready {
-      display: flex;
-      flex-direction: column;
-      flex: 1;
-      min-height: 0;
-    }
-    /* Zone 2: Session header — viewer top already accounts for safe area + nav */
-    .sv-header {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-      padding: 0.5rem 0.75rem;
-      background: #1f2937;
-      border-bottom: 1px solid #374151;
-      flex-shrink: 0;
-      z-index: 10;
-    }
-    /* Zone 3: Scrollable entries */
-    .sv-entries {
-      flex: 1;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-      padding: 0.75rem;
-      min-height: 0;
-      background: #111827; /* dark for message area */
-    }
-    .sv-entries > .live-entry + .live-entry { margin-top: 0.75rem; }
-    /* Zone 4: Input bar */
-    .sv-input {
-      flex-shrink: 0;
-      display: flex;
-      flex-direction: column;
-      background: #1f2937;
-      border-top: 1px solid #374151;
-    }
-    .sv-input .sv-input-row {
-      display: flex;
-      align-items: flex-end;
-      gap: 0.5rem;
-      padding: 6px 0.5rem;
-    }
-    .sv-header { touch-action: none; }
-    .sv-input { touch-action: none; }
-    .sv-entries { overscroll-behavior: none; }
-    /* Hide main#content overflow when session viewer is active */
+
+    /* Fullscreen page mode: hide dashboard chrome so the viewer owns the viewport.
+       Applied via body.fullscreen-page on /session/ routes. */
+    body.fullscreen-page { display: block; margin: 0; }
+    body.fullscreen-page > nav#sidebar { display: none; }
+    body.fullscreen-page > .flex-1 { display: block; height: 100%; }
+    body.fullscreen-page > .flex-1 > header { display: none; }
+    body.fullscreen-page main#content { padding: 0 !important; margin: 0 !important; overflow: visible; height: 100%; }
+
+    /* When session viewer is active, main#content lets the viewer fill it */
     main#content:has(.session-viewer) {
-      overflow: hidden;
+      overflow: visible;
       padding: 0 !important;
     }
+
+    /* Session viewer outer container — fills the available vertical space */
+    .session-viewer {
+      height: 100dvh;
+      background: #111827;
+      overscroll-behavior: none;
+    }
+    html.ios-standalone .session-viewer {
+      height: var(--app-height, 100vh);
+    }
+
+    /* Ready state — the grid shell */
+    .sv-ready {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+
+    /* Loading / error — single centered message, no grid needed */
+    .session-viewer > .sv-loading,
+    .session-viewer > .sv-error {
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .sv-loading { color: #6b7280; font-size: 0.875rem; }
+    .sv-error   { color: #f87171; }
+
+    /* Row 1 — Header (normal flow grid child) */
+    .sv-header {
+      background: rgba(17, 24, 39, 0.82);
+      -webkit-backdrop-filter: blur(12px);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid #374151;
+      z-index: 10;
+    }
+    .sv-header-inner {
+      padding: max(0px, calc(var(--sat) - 5px)) 0.75rem 6px;
+    }
+
+    /* Row 2 — Entries (only this scrolls) */
+    .sv-entries {
+      min-height: 0;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+      padding: 0.75rem;
+      background: #111827;
+    }
+    .sv-entries > .live-entry + .live-entry { margin-top: 0.75rem; }
+
+    /* Row 3 — Input bar (normal flow, NOT fixed) */
+    .sv-input {
+      background: rgba(17, 24, 39, 0.82);
+      -webkit-backdrop-filter: blur(16px);
+      backdrop-filter: blur(16px);
+      border-top: 1px solid #374151;
+      z-index: 10;
+      padding: 0 12px max(0px, calc(var(--sab) - 8px)) 10px;
+    }
+    .sv-input-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 0.5rem;
+    }
+
+    /* Contenteditable input + placeholder */
+    .sv-editable {
+      flex: 1;
+      padding: 7px 0 7px 14px;
+      font-size: 16px;
+      line-height: 1.4;
+      color: #e5e7eb;
+      outline: none;
+      overflow-y: auto;
+      max-height: 120px;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+    .sv-editable:empty::before {
+      content: attr(data-placeholder);
+      color: #6b7280;
+      pointer-events: none;
+    }
+
+    /* Input bubble wrapping editable — matches prototype */
+    .sv-input-bubble {
+      flex: 1;
+      display: flex;
+      align-items: flex-end;
+      background: rgba(55, 65, 81, 0.6);
+      border-radius: 20px;
+      border: 1.5px solid transparent;
+      min-height: 36px;
+      max-height: 120px;
+      overflow: hidden;
+    }
+    .sv-input-bubble:focus-within { border-color: rgba(99, 102, 241, 0.5); }
+
+    /* Attach + send buttons */
+    .sv-attach {
+      width: 32px; height: 32px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 50%; background: transparent; border: none;
+      color: #6b7280; cursor: pointer; flex-shrink: 0;
+    }
+    .sv-attach:disabled { opacity: 0.5; cursor: not-allowed; }
+    .sv-send {
+      width: 30px; height: 30px; min-width: 30px;
+      border-radius: 50%;
+      background: #6366f1; border: none; color: white; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      margin: 3px; flex-shrink: 0;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .sv-send:disabled {
+      opacity: 0.3;
+      transform: scale(0.85);
+      pointer-events: none;
+    }
+
+    /* Attachment strip — matches current production sizing */
+    .sv-attach-strip {
+      display: flex; gap: 6px;
+      padding: 6px 0.5rem 0;
+      overflow: visible;
+    }
+    .sv-attach-strip:empty { display: none; }
 
     /* ── Print stylesheet ─────────────────────────────────── */
     @media print {
