@@ -127,7 +127,14 @@
                     <span class="sc-org"
                           :style="org.favicon ? '' : `background:${org.color}`"
                           :title="org.resolved ? org.name : ('legacy: ' + (project || 'unknown'))">
-                      <span class="sc-org-initial" x-text="org.initial" x-show="!org.favicon"></span>
+                      <template x-if="!org.favicon">
+                        <svg class="sc-org-initial" viewBox="0 0 16 16" preserveAspectRatio="xMidYMid meet">
+                          <text x="8" y="8" text-anchor="middle" dominant-baseline="central"
+                                font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+                                font-size="11" font-weight="700" fill="#ffffff"
+                                x-text="org.initial"></text>
+                        </svg>
+                      </template>
                       <img class="sc-org-img" :src="org.favicon" x-show="org.favicon" :alt="org.name">
                     </span>
                     <span x-text="org.resolved ? org.name : '?'"></span>

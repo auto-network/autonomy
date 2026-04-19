@@ -68,7 +68,14 @@
 .sc-org-img { width: 100%; height: 100%; object-fit: cover; }
 /* Grid place-items handles centering independent of font baseline, so
    no per-glyph offset hack. */
-.sc-org-initial { line-height: 1; width: 100%; text-align: center; }
+/* Covers both the SVG glyphs (bindings render as inline SVG that self-centers
+   via viewBox + text-anchor/dominant-baseline) and the terminal >_ text span
+   in sessions.html that reuses this class. text-align + line-height keep the
+   text variant centered; they no-op on SVG. */
+.sc-org-initial {
+  width: 100%; height: 100%; display: block;
+  text-align: center; line-height: 16px;
+}
 
 /* Role badge — neutral pill */
 .sc-role {

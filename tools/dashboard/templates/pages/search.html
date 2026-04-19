@@ -43,7 +43,14 @@
                 <span class="sc-org"
                       :style="r.org.favicon ? '' : `background:${r.org.color}`"
                       :title="r.org.resolved ? r.org.name : ('legacy: ' + (r.project || 'unknown'))">
-                  <span class="sc-org-initial" x-text="r.org.initial" x-show="!r.org.favicon"></span>
+                  <template x-if="!r.org.favicon">
+                    <svg class="sc-org-initial" viewBox="0 0 16 16" preserveAspectRatio="xMidYMid meet">
+                      <text x="8" y="8" text-anchor="middle" dominant-baseline="central"
+                            font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+                            font-size="11" font-weight="700" fill="#ffffff"
+                            x-text="r.org.initial"></text>
+                    </svg>
+                  </template>
                   <img class="sc-org-img" :src="r.org.favicon" x-show="r.org.favicon" :alt="r.org.name">
                 </span>
               </template>
