@@ -48,6 +48,13 @@ from tools.dashboard.dao.dashboard_db import (
     count_live,
 )
 
+from agents.workspace_manager import (
+    CleanupResult,
+    WORKTREES_DIR,
+    cleanup_session_worktrees,
+    prune_orphan_worktrees,
+)
+
 logger = logging.getLogger(__name__)
 
 # inotify — optional, falls back to polling if unavailable
@@ -121,6 +128,54 @@ def count_tool_uses(jsonl_path: Path) -> int:
     except OSError:
         pass
     return count
+
+
+def _log_worktree_cleanup(tmux_name: str, result: CleanupResult) -> None:
+    """Log the outcome of a worktree cleanup pass (removed/preserved/errors)."""
+    if result.removed:
+        logger.info(
+            "session_monitor: worktree cleanup %s: removed %d (%s)",
+            tmux_name, len(result.removed), ", ".join(result.removed),
+        )
+    for path, reason in result.preserved:
+        logger.warning(
+            "session_monitor: worktree preserved %s: %s (%s)",
+            tmux_name, path, reason,
+        )
+    for path, err in result.errors:
+        logger.warning(
+            "session_monitor: worktree cleanup error %s: %s (%s)",
+            tmux_name, path, err,
+        )
+
+
+def _cleanup_worktrees_for_dead_session(tmux_name: str) -> None:
+    """Thread-safe wrapper around cleanup_session_worktrees — never raises."""
+    try:
+        result = cleanup_session_worktrees(tmux_name)
+    except Exception:
+        logger.exception("session_monitor: worktree cleanup raised for %s", tmux_name)
+        return
+    _log_worktree_cleanup(tmux_name, result)
+
+
+def _prune_orphan_worktrees_safely(live_session_names: list[str]) -> None:
+    """Thread-safe wrapper around prune_orphan_worktrees — never raises."""
+    try:
+        results = prune_orphan_worktrees(live_session_names)
+    except Exception:
+        logger.exception("session_monitor: orphan worktree prune raised")
+        return
+    total = sum(len(r.removed) for r in results.values())
+    preserved = sum(len(r.preserved) for r in results.values())
+    if total or preserved:
+        logger.info(
+            "session_monitor: orphan worktree prune — "
+            "%d removed, %d preserved, %d sessions scanned",
+            total, preserved, len(results),
+        )
+    for name, result in results.items():
+        _log_worktree_cleanup(name, result)
 
 
 def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
@@ -239,6 +294,7 @@ class SessionMonitor:
         self._entry_enricher = None
         self._started = False
         self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
+        self._last_orphan_prune: float = 0.0    # timestamp of last worktree orphan prune
         # inotify state — populated by _init_inotify()
         self._inotify: Any = None                        # INotify instance
         self._use_inotify: bool = False
@@ -1105,6 +1161,7 @@ class SessionMonitor:
     # ── Liveness Checker ──────────────────────────────────────────
 
     _COOLDOWN_SECONDS = 30.0
+    _ORPHAN_PRUNE_INTERVAL = 600.0  # seconds between orphan worktree prunes
 
     async def _liveness_loop(self) -> None:
         """Check tmux liveness for all sessions every 10s."""
@@ -1136,6 +1193,12 @@ class SessionMonitor:
                             except Exception:
                                 pass  # best-effort; cron catch-up covers failures
                         self._tail_states.pop(tmux_name, None)
+                        # Clean up the session's workspace worktrees (no-op
+                        # if the session had none). Uncommitted changes or
+                        # unpushed commits are preserved with a warning.
+                        await asyncio.to_thread(
+                            _cleanup_worktrees_for_dead_session, tmux_name,
+                        )
                         changed = True
                         logger.info(
                             "session_monitor: tmux dead  %s (type=%s)",
@@ -1185,6 +1248,17 @@ class SessionMonitor:
 
                 # Dispatch pause nag — alert dispatch_nag subscribers when queue is stuck
                 await self._check_dispatch_pause_nag(now)
+
+                # Periodic worktree orphan prune — every 10 minutes scan
+                # data/worktrees/ and clean up anything that doesn't match
+                # a live session. Picks up worktrees orphaned by crashes
+                # or missed death signals.
+                if (now - self._last_orphan_prune) >= self._ORPHAN_PRUNE_INTERVAL:
+                    live_names = [r["tmux_name"] for r in get_live_sessions()]
+                    await asyncio.to_thread(
+                        _prune_orphan_worktrees_safely, live_names,
+                    )
+                    self._last_orphan_prune = now
 
             except Exception:
                 logger.exception("session_monitor: liveness error")
