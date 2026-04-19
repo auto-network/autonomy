@@ -24,15 +24,6 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js" defer></script>
   <script src="/static/js/markdown.js?v=__STATIC_VERSION__" defer></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
-  <script>
-    // iOS PWA standalone detection — enables --app-height override on html.ios-standalone.
-    // 100vh/100dvh on iOS PWA fluctuates between loads (787/812/874 observed on the same
-    // device). screen.height is stable. See graph note cbb8cc49-4a9 for root cause.
-    if (window.navigator.standalone === true) {
-      document.documentElement.classList.add('ios-standalone');
-      document.documentElement.style.setProperty('--app-height', window.screen.height + 'px');
-    }
-  </script>
   <style>
     .markdown-body h1 { font-size: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; }
     .markdown-body h2 { font-size: 1.25rem; font-weight: 600; margin: 1rem 0 0.5rem; border-bottom: 1px solid #374151; padding-bottom: 0.25rem; }
@@ -405,7 +396,12 @@
         font-size: 16px !important;
       }
     }
-    /* SSE interruption banner — overlays header in grid shell */
+    @media (pointer: coarse) {
+      .sv-input-row textarea:focus {
+        border-color: #374151; /* gray-700 — subtle instead of indigo-500 */
+      }
+    }
+    /* SSE interruption banner — fixed above session viewer */
     .sse-banner {
       position: fixed;
       z-index: 20;
@@ -419,175 +415,87 @@
         left: 14rem;
       }
     }
-    /* ── Session viewer: CSS grid shell ──
-       Replaces the old position: fixed layout. Fixes iOS PWA bottom gutter
-       (WebKit #237961 — fixed elements stop at 812, not screen.height of 874).
-       Grid shell with header + scroll-entries + input in normal flow fills
-       the full screen. */
-    :root {
-      --sat: env(safe-area-inset-top, 0px);
-      --sab: env(safe-area-inset-bottom, 0px);
+    /* Shift session viewer down when banner is visible */
+    body.sse-banner-visible .session-viewer {
+      top: calc(env(safe-area-inset-top, 0px) + 3rem + 2.5rem);
     }
-    /* When session viewer is active, main#content lets it fill with no padding */
-    main#content:has(.session-viewer) {
-      overflow: visible;
-      padding: 0 !important;
+    @media (min-width: 768px) {
+      body.sse-banner-visible .session-viewer {
+        top: 2.5rem;
+      }
     }
-    /* Session viewer outer container — fills main#content's available space.
-       100% of main#content (which is flex-1 inside body.h-dvh) avoids overflowing
-       the dashboard chrome. On iOS PWA, the ios-standalone override locks the
-       viewer to the stable screen.height (100dvh fluctuates 787/812/874 on the
-       same device — see graph note cbb8cc49-4a9). */
+    /* Session viewer layout — four fixed zones */
     .session-viewer {
-      height: 100%;
-      background: #111827;
+      position: fixed;
+      top: calc(env(safe-area-inset-top, 0px) + 3.5rem); /* below nav toggle on mobile */
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding-bottom: 0;
+      display: flex;
+      flex-direction: column;
+      background: #1f2937; /* match input bar — no gap visible at bottom */
+      z-index: 15;
+      overflow: hidden;
+      overscroll-behavior: none;
     }
-    html.ios-standalone .session-viewer {
-      height: var(--app-height, 100vh);
+    /* On desktop, inset the viewer to sit within the content area (after sidebar + header) */
+    @media (min-width: 768px) {
+      .session-viewer {
+        left: 14rem; /* w-56 = 14rem sidebar */
+        top: 0;
+      }
     }
-    /* Ready state — the grid shell */
+    /* Inner ready container fills the viewer as a flex column */
     .sv-ready {
-      height: 100%;
-      display: grid;
-      grid-template-rows: auto minmax(0, 1fr) auto;
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
     }
-    /* Loading / error states — single centered message, no grid needed */
-    .session-viewer > .sv-loading,
-    .session-viewer > .sv-error {
-      height: 100%;
+    /* Zone 2: Session header — viewer top already accounts for safe area + nav */
+    .sv-header {
       display: flex;
       align-items: center;
-      justify-content: center;
-      padding: 1rem;
-    }
-    /* Row 1: Header (normal flow grid child) */
-    .sv-header {
-      background: rgba(17, 24, 39, 0.82);
-      -webkit-backdrop-filter: blur(12px);
-      backdrop-filter: blur(12px);
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      padding: 0.5rem 0.75rem;
+      background: #1f2937;
       border-bottom: 1px solid #374151;
+      flex-shrink: 0;
       z-index: 10;
     }
-    .sv-header-inner {
-      padding: max(0px, calc(var(--sat) - 5px)) 0.75rem 6px;
-    }
-    .sv-header-row1 {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .sv-header-row2 {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding-top: 2px;
-    }
-    .sv-header-expanded {
-      max-height: 0;
-      overflow: hidden;
-      transition: max-height 0.25s ease, padding 0.25s ease;
-      border-top: 1px solid transparent;
-    }
-    .sv-header.open .sv-header-expanded {
-      max-height: 200px;
-      padding: 10px 12px;
-      border-top-color: rgba(55, 65, 81, 0.6);
-    }
-    .sv-chevron {
-      transition: transform 0.25s ease;
-      color: #6b7280;
-      flex-shrink: 0;
-    }
-    .sv-header.open .sv-chevron { transform: rotate(180deg); }
-    .sv-header.open .sv-header-row2 .sv-tokens { display: none; }
-    /* Row 2: Entries (only this scrolls) */
+    /* Zone 3: Scrollable entries */
     .sv-entries {
-      min-height: 0;
+      flex: 1;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
-      overscroll-behavior: contain;
       padding: 0.75rem;
-      background: #111827;
+      min-height: 0;
+      background: #111827; /* dark for message area */
     }
     .sv-entries > .live-entry + .live-entry { margin-top: 0.75rem; }
-    /* Row 3: Input bar (normal flow, NOT fixed) */
+    /* Zone 4: Input bar */
     .sv-input {
-      background: rgba(17, 24, 39, 0.82);
-      -webkit-backdrop-filter: blur(16px);
-      backdrop-filter: blur(16px);
-      border-top: 1px solid #374151;
-      z-index: 10;
-      padding: 0 12px max(0px, calc(var(--sab) - 8px)) 10px;
-    }
-    .sv-input-row {
+      flex-shrink: 0;
       display: flex;
-      align-items: center;
-      gap: 7px;
+      flex-direction: column;
+      background: #1f2937;
+      border-top: 1px solid #374151;
+    }
+    .sv-input .sv-input-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 0.5rem;
       padding: 6px 0.5rem;
     }
-    /* Attachment strip (matches prototype sizing) */
-    .sv-attach-strip {
-      display: flex;
-      gap: 6px;
-      padding: 6px 0.5rem 0;
-      overflow: visible;
-    }
-    .sv-attach-strip:empty { display: none; }
-    /* Thumbnails inside attach strip */
-    .sv-thumb { position: relative; width: 56px; height: 56px; flex-shrink: 0; }
-    .sv-thumb img {
-      width: 56px; height: 56px; object-fit: cover;
-      border-radius: 8px; border: 1px solid #4b5563; display: block;
-    }
-    .sv-thumb-file {
-      width: 56px; height: 56px; border-radius: 8px; border: 1px solid #4b5563;
-      background: #374151; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 2px;
-    }
-    .sv-thumb-file svg { color: #9ca3af; }
-    .sv-thumb-file span {
-      font-size: 9px; color: #9ca3af; max-width: 48px; overflow: hidden;
-      text-overflow: ellipsis; white-space: nowrap; text-align: center;
-    }
-    .sv-thumb-x {
-      position: absolute; top: -4px; right: -4px;
-      width: 18px; height: 18px; border-radius: 50%;
-      background: rgba(0,0,0,0.7); color: white;
-      border: none; font-size: 12px; line-height: 18px; text-align: center;
-      cursor: pointer; padding: 0;
-    }
-    /* Contenteditable input bubble + editable + send button */
-    .sv-input-bubble {
-      flex: 1; display: flex; align-items: flex-end;
-      background: rgba(55, 65, 81, 0.6); border-radius: 20px;
-      border: 1.5px solid transparent; min-height: 36px; max-height: 120px; overflow: hidden;
-    }
-    .sv-input-bubble:focus-within { border-color: rgba(99, 102, 241, 0.5); }
-    .sv-editable {
-      flex: 1; padding: 7px 0 7px 14px; font-size: 16px; line-height: 1.4;
-      color: #e5e7eb; outline: none; overflow-y: auto; max-height: 120px;
-      word-break: break-word; white-space: pre-wrap;
-    }
-    .sv-editable:empty::before {
-      content: attr(data-placeholder);
-      color: #6b7280;
-      pointer-events: none;
-    }
-    .sv-attach-btn {
-      width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
-      border-radius: 50%; background: transparent; border: none;
-      color: #6b7280; cursor: pointer; flex-shrink: 0;
-    }
-    .sv-attach-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .sv-send {
-      width: 30px; height: 30px; min-width: 30px; border-radius: 50%;
-      background: #6366f1; border: none; color: white; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      margin: 3px; flex-shrink: 0; transition: opacity 0.15s, transform 0.1s;
-      padding: 0;
-    }
-    .sv-send:disabled {
-      opacity: 0.3; transform: scale(0.85); pointer-events: none;
+    .sv-header { touch-action: none; }
+    .sv-input { touch-action: none; }
+    .sv-entries { overscroll-behavior: none; }
+    /* Hide main#content overflow when session viewer is active */
+    main#content:has(.session-viewer) {
+      overflow: hidden;
+      padding: 0 !important;
     }
 
     /* ── Print stylesheet ─────────────────────────────────── */
