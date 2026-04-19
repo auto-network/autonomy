@@ -39,7 +39,6 @@ def test_loads_full_project(tmp_path):
                 mount: /workspace/b
                 writable: false
             working_dir: /workspace/a
-            claude_md: CLAUDE.md
             startup: startup.sh
             dind: true
             graph_project: sample
@@ -58,7 +57,6 @@ def test_loads_full_project(tmp_path):
     assert p.description == "Sample project"
     assert p.image == "autonomy-agent:sample"
     assert p.working_dir == "/workspace/a"
-    assert p.claude_md == "CLAUDE.md"
     assert p.startup == "startup.sh"
     assert p.dind is True
     assert p.graph_project == "sample"
@@ -86,7 +84,6 @@ def test_minimal_project_uses_defaults(tmp_path):
     assert p.repos == ()
     assert p.dind is False
     assert p.working_dir is None
-    assert p.claude_md is None
     assert p.startup is None
     assert p.default_tags == ()
     assert p.dispatch_labels == ()
@@ -233,9 +230,6 @@ def test_shipped_config_autonomy():
     assert p.name == "Autonomy Network"
     assert p.image == "autonomy-agent:dashboard"
     assert p.working_dir == "/workspace/repo"
-    # claude_md is now rendered from the template; shipped configs leave
-    # the optional override unset.
-    assert p.claude_md is None
     assert p.graph_project == "autonomy"
     assert p.default_tags == ()
     assert p.dispatch_labels == ("dashboard",)
@@ -249,7 +243,6 @@ def test_shipped_config_enterprise():
     assert p.name == "Enterprise"
     assert p.image == "autonomy-agent:enterprise"
     assert p.working_dir == "/workspace/enterprise"
-    assert p.claude_md is None
     assert p.startup == "agents/projects/enterprise/startup.sh"
     assert p.dind is True
     assert p.graph_project == "anchore"
@@ -267,7 +260,6 @@ def test_shipped_config_enterprise_ng():
     assert p.name == "Enterprise NG"
     assert p.image == "autonomy-agent:enterprise-ng"
     assert p.working_dir == "/workspace/enterprise_ng"
-    assert p.claude_md is None
     assert p.startup == "agents/projects/enterprise-ng/startup.sh"
     assert p.dind is True
     assert p.graph_project == "anchore"

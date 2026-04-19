@@ -30,7 +30,6 @@ def _cfg(**overrides) -> ProjectConfig:
         graph_project="sample-org",
         repos=(),
         working_dir="/workspace/repo",
-        claude_md=None,
         startup=None,
         dind=False,
         default_tags=(),
