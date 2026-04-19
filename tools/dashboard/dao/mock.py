@@ -88,6 +88,7 @@ SESSION_DEFAULTS: dict[str, Any] = {
     "nag_enabled": False,
     "nag_interval": None,
     "nag_message": None,
+    "dispatch_nag_enabled": False,
     "linked": False,
     # Legacy fields for backward compat
     "size_bytes": 1024000,

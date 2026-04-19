@@ -11,7 +11,7 @@
    Canonical fields on s:
      id, label, session_type, is_live, project, topics, latest,
      entry_count, context_tokens, last_activity, created_at,
-     tmux_session, nag_enabled, role, resumable, bead_id
+     tmux_session, nag_enabled, dispatch_nag_enabled, role, resumable, bead_id
 #}
 <div class="session-card-wrap">
   <div class="session-card" :class="borderCls(s.session_type)">
@@ -24,7 +24,14 @@
               'sc-dot-dead': !s.is_live,
               'sc-dot--working': s.is_live && s.activity_state && s.activity_state !== 'idle'
             }"></span>
-      <span class="sc-nag" :class="s.nag_enabled ? '' : 'sc-nag-off'" x-show="s.nag_enabled != null">🔔</span>
+      <span class="sc-nag"
+            :class="{
+              'sc-nag-off':       !s.nag_enabled && !s.dispatch_nag_enabled,
+              'sc-nag-idle':       s.nag_enabled && !s.dispatch_nag_enabled,
+              'sc-nag-dispatch':  !s.nag_enabled &&  s.dispatch_nag_enabled,
+              'sc-nag-both':       s.nag_enabled &&  s.dispatch_nag_enabled
+            }"
+            x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
       <template x-if="s.is_live && typeof showSessionActions === 'function'">
@@ -54,7 +61,14 @@
               'sc-dot-dead': !s.is_live,
               'sc-dot--working': s.is_live && s.activity_state && s.activity_state !== 'idle'
             }"></span>
-      <span class="sc-nag" :class="s.nag_enabled ? '' : 'sc-nag-off'" x-show="s.nag_enabled != null">🔔</span>
+      <span class="sc-nag"
+            :class="{
+              'sc-nag-off':       !s.nag_enabled && !s.dispatch_nag_enabled,
+              'sc-nag-idle':       s.nag_enabled && !s.dispatch_nag_enabled,
+              'sc-nag-dispatch':  !s.nag_enabled &&  s.dispatch_nag_enabled,
+              'sc-nag-both':       s.nag_enabled &&  s.dispatch_nag_enabled
+            }"
+            x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
       <span class="sc-t3">
