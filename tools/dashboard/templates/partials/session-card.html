@@ -44,7 +44,14 @@
                 :disabled="!s.is_live"
                 @click.stop="s.is_live && typeof showSessionActions === 'function' && showSessionActions(s)"
                 data-testid="session-actions-btn">
-          <span class="sc-org-initial" x-text="s.org.initial" x-show="!s.org.favicon"></span>
+          <template x-if="!s.org.favicon">
+            <svg class="sc-org-initial" viewBox="0 0 16 16" preserveAspectRatio="xMidYMid meet">
+              <text x="8" y="8" text-anchor="middle" dominant-baseline="central"
+                    font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+                    font-size="11" font-weight="700" fill="#ffffff"
+                    x-text="s.org.initial"></text>
+            </svg>
+          </template>
           <img class="sc-org-img" :src="s.org.favicon" x-show="s.org.favicon" :alt="s.org.name">
         </button>
       </template>
@@ -96,7 +103,14 @@
                 :disabled="!s.is_live"
                 @click.stop="s.is_live && typeof showSessionActions === 'function' && showSessionActions(s)"
                 data-testid="session-actions-btn">
-          <span class="sc-org-initial" x-text="s.org.initial" x-show="!s.org.favicon"></span>
+          <template x-if="!s.org.favicon">
+            <svg class="sc-org-initial" viewBox="0 0 16 16" preserveAspectRatio="xMidYMid meet">
+              <text x="8" y="8" text-anchor="middle" dominant-baseline="central"
+                    font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+                    font-size="11" font-weight="700" fill="#ffffff"
+                    x-text="s.org.initial"></text>
+            </svg>
+          </template>
           <img class="sc-org-img" :src="s.org.favicon" x-show="s.org.favicon" :alt="s.org.name">
         </button>
       </template>
