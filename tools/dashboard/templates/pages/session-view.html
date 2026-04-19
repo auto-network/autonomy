@@ -33,7 +33,7 @@
           <!-- Header row 1: status dot, role badge, indicator rail, terminal toggle, chevron -->
           <div class="sv-header-row1" style="display:flex;align-items:center;gap:12px;">
             <span class="indicator-dot"
-                  :class="{ 'indicator--green': isLive, 'indicator--gray': !isLive, 'indicator-dot--working': isLive }"></span>
+                  :class="{ 'indicator--green': isLive, 'indicator--gray': !isLive, 'indicator-dot--working': isWorking }"></span>
             <span class="sc-role sc-type-host"
                   x-show="sessionType === 'host'"
                   x-text="'HOST'"

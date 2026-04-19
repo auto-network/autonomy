@@ -2792,8 +2792,11 @@ async def api_session_tail(request):
     seq = 0  # broadcast_seq is now on ephemeral _TailState, not in DB row
 
     role = db_row.get("role", "") if db_row else ""
+    activity_state = db_row.get("activity_state", "idle") if db_row else "idle"
     base_resp = {"entries": [], "offset": file_size, "is_live": is_live,
-                 "type": session_type, "role": role, "seq": seq, "resolved": resolved}
+                 "type": session_type, "role": role,
+                 "activity_state": activity_state,
+                 "seq": seq, "resolved": resolved}
     if tmux_name:
         base_resp["tmux_session"] = tmux_name
     if after >= file_size:
@@ -2820,7 +2823,9 @@ async def api_session_tail(request):
     entries = _dedup_queued_entries(entries)
     _enrich_entries(entries, session_dir=session_file.parent / session_file.stem)
     resp = {"entries": entries, "offset": new_offset, "is_live": is_live,
-            "type": session_type, "role": role, "seq": seq, "resolved": resolved}
+            "type": session_type, "role": role,
+            "activity_state": activity_state,
+            "seq": seq, "resolved": resolved}
     if tmux_name:
         resp["tmux_session"] = tmux_name
     return JSONResponse(resp)
@@ -3055,6 +3060,7 @@ async def api_session_get(request):
         "graph_source_id": session.get("graph_source_id"),
         "type": session.get("type"),
         "role": session.get("role", ""),
+        "activity_state": session.get("activity_state", "idle"),
         "project": session.get("project"),
         "is_live": bool(session.get("is_live")),
         "dispatch_nag": bool(session.get("dispatch_nag")),
