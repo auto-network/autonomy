@@ -97,6 +97,10 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.contextTokens : 0;
       },
+      get project() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return (s && s.project) || '';
+      },
       get topics() {
         var s = Alpine.store('sessions')[this.sessionKey];
         return (s && s.topics) || [];

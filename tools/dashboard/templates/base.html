@@ -508,44 +508,56 @@
       padding: max(0px, calc(var(--sat) - 5px)) 0.75rem 6px;
     }
 
-    /* Expanded header — revealed when .sv-header has .open class (toggled
-       by headerOpen). CSS-only max-height animation; no x-show fighting it. */
+    /* Expanded header — revealed when .sv-header has .open class. Pure CSS
+       max-height animation; no x-show fighting the transition. Sections
+       separated by top borders per the mockup spec. */
     .sv-header-expanded {
-      max-height: 0; overflow: hidden; padding-top: 0;
-      transition: max-height 0.25s ease, padding-top 0.25s ease;
+      max-height: 0; overflow: hidden;
+      transition: max-height 0.25s ease;
     }
-    .sv-header.open .sv-header-expanded {
-      max-height: 260px; padding-top: 8px;
+    .sv-header.open .sv-header-expanded { max-height: 320px; }
+    .sv-exp-section {
+      padding: 12px 16px;
+      border-top: 1px solid rgba(55, 65, 81, 0.4);
     }
-    .sv-exp-topics {
-      display: flex; flex-direction: column; gap: 2px;
-      margin-bottom: 6px; font-size: 11px; color: #9ca3af;
+    .sv-exp-heading {
+      font-size: 10px; color: #6b7280;
+      text-transform: uppercase; letter-spacing: 0.05em;
+      margin-bottom: 6px;
     }
-    .sv-exp-topic-item { display: block; line-height: 1.4; }
-    .sv-exp-stats {
-      display: flex; align-items: center; gap: 6px;
-      font-size: 11px; color: #9ca3af;
+    .sv-exp-topics { display: flex; flex-direction: column; gap: 4px; }
+    .sv-exp-topic-item {
+      display: block; color: #b0b6bf;
+      font-size: 14px; line-height: 1.4;
+    }
+    .sv-exp-stats-grid {
+      display: flex; align-items: flex-start;
+      gap: 24px; flex-wrap: wrap;
+    }
+    .sv-exp-stat-cell { display: flex; flex-direction: column; gap: 2px; }
+    .sv-exp-stat-wide { flex: 1 1 auto; min-width: 0; }
+    .sv-exp-stat-key {
+      font-size: 10px; color: #6b7280;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .sv-exp-stat-val {
+      font-size: 14px; color: #b0b6bf;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .sv-exp-stat { display: inline-flex; align-items: baseline; gap: 3px; }
-    .sv-exp-stat-label { color: #6b7280; font-size: 10px; text-transform: uppercase; margin-right: 2px; }
     .sv-exp-stat-val.warn { color: #f59e0b; }
     .sv-exp-stat-val.recent-green { color: #4ade80; }
     .sv-exp-stat-val.recent-amber { color: #facc15; }
     .sv-exp-stat-val.recent-red   { color: #f87171; }
     .sv-exp-stat-val.recent-gray  { color: #6b7280; }
-    .sv-exp-sep { color: #4b5563; }
-    .sv-exp-label-row {
-      display: flex; align-items: center; gap: 8px;
-      margin-top: 6px; font-size: 11px;
+    /* Patch 8: when expanded, hide token badge and let title wrap instead
+       of ellipsing. !important needed to beat the inline white-space:nowrap. */
+    .sv-header.open .session-title {
+      white-space: normal !important;
+      overflow: visible !important;
+      text-overflow: initial !important;
     }
-    .sv-exp-label-key { color: #6b7280; font-size: 10px; text-transform: uppercase; }
-    .sv-exp-label-edit {
-      color: #e5e7eb; border-bottom: 1px solid transparent;
-      padding: 0 2px; min-width: 40px; cursor: pointer;
-    }
-    .sv-exp-label-edit:hover { border-bottom-color: #6b7280; }
-    .sv-exp-label-edit:focus { outline: none; border-bottom-color: #818cf8; }
+    .sv-header.open .sv-header-row2 .tokens { display: none; }
 
     /* Row 2 — Entries (only this scrolls) */
     .sv-entries {
