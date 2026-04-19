@@ -44,6 +44,7 @@ document.addEventListener('alpine:init', function() {
         if (s.nag_message !== undefined) store.nagMessage = s.nag_message;
         if (s.dispatch_nag_enabled !== undefined) store.dispatchNagEnabled = !!s.dispatch_nag_enabled;
         if (s.resolved !== undefined) store.resolved = !!s.resolved;
+        if (s.org) store.org = s.org;
       }
     })
     .catch(function(e) { console.warn('[session-store] seed fetch error', e); });
@@ -190,6 +191,7 @@ window.ensureSessionMessages = function() {
       if (s.last_activity) store.lastActivity = s.last_activity;
       if (s.last_message !== undefined) store.lastMessage = s.last_message;
       if (s.activity_state !== undefined) store.activityState = s.activity_state;
+      if (s.org) store.org = s.org;
       store.resolved = !!s.resolved;
     }
     // Mark removed sessions as dead

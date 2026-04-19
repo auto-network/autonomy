@@ -310,9 +310,19 @@ def dismiss_design(rev_id):
 
 # ── sessions DAO interface ───────────────────────────────────────────
 
+def _attach_org(rows: list[dict]) -> list[dict]:
+    """Resolve and attach the org identity object for each row."""
+    from tools.dashboard.org_identity import resolve_session_org
+    for row in rows:
+        if "org" not in row:
+            row["org"] = resolve_session_org(row)
+    return rows
+
+
 def get_active_sessions(threshold: int = 600) -> list[dict]:
     data = _load()
-    return [_fill(s, SESSION_DEFAULTS) for s in data.get("active_sessions", [])]
+    rows = [_fill(s, SESSION_DEFAULTS) for s in data.get("active_sessions", [])]
+    return _attach_org(rows)
 
 
 def get_session_entries(session_id: str) -> list[dict] | None:
@@ -375,7 +385,7 @@ def get_recent_sessions(
     else:  # lastActivity (default)
         rows.sort(key=lambda r: _epoch(r.get("last_activity_at", "")), reverse=True)
 
-    return rows[:limit]
+    return _attach_org(rows[:limit])
 
 
 # ── dispatch DAO interface ───────────────────────────────────────────

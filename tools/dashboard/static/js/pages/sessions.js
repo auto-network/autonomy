@@ -448,6 +448,7 @@
             nag_message: s.nagMessage || '',
             dispatch_nag_enabled: s.dispatchNagEnabled || false,
             activity_state: s.activityState || 'idle',
+            org: s.org || null,
             resumable: false,
             _hasData: !!hasData,
           });
@@ -498,6 +499,7 @@
               role: r.role || '',
               resumable: r.resumable || false,
               bead_id: r.bead_id || '',
+              org: r.org || null,
             };
           });
         } catch (e) {
