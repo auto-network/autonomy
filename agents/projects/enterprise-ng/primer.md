@@ -8,4 +8,4 @@ This container is NOT the same as working on the host. Key differences:
 - **`ANCHORE_EXTERNAL_TLS`**: pre-unset by startup. Do NOT set it — the config field was removed and Pydantic rejects it.
 - **Auth**: use basic auth `-u admin:foobar` against `localhost:8228`. JWT token generation is not needed.
 - **Legacy tables**: standalone mode (without v5 Enterprise) requires seeding legacy `anchore`, `accounts`, `services` tables before component_catalog fully bootstraps. The service will start and respond to health checks without them, but will log "Legacy schema not ready" warnings.
-- **Enterprise repo**: mounted read-only at `/workspace/enterprise`. You cannot edit v5 code — dispatch a bead for that.
+- **Enterprise repo**: mounted writable at `/workspace/enterprise` on the same per-session `agent/<bead>` worktree. Edit and commit cross-repo when a change genuinely spans both repos; prefer a dedicated `enterprise` bead for pure v5 work so it lands on the right branch and reviewer.
