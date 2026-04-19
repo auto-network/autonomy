@@ -382,7 +382,7 @@ def test_update_live_stats_basic():
     db.update_live_stats(
         run_id=run_id,
         last_snippet="Hello from the agent",
-        token_delta=150,
+        context_tokens=150,
         cpu_pct=12.5,
         cpu_usec=500000,
         mem_mb=64,
@@ -400,8 +400,10 @@ def test_update_live_stats_basic():
     assert row["jsonl_offset"] == 1024
 
 
-def test_update_live_stats_accumulates_tokens():
-    """Calling update_live_stats multiple times accumulates token_count."""
+def test_update_live_stats_replaces_token_count():
+    """Calling update_live_stats with context_tokens replaces token_count
+    with the latest value (it tracks current context window size, not a
+    cumulative delta)."""
     _use_temp_db()
     run_id = "auto-tok-20260317-160000"
     db.insert_launch_run(
@@ -409,12 +411,12 @@ def test_update_live_stats_accumulates_tokens():
         branch="", branch_base="", image="", container_name="", output_dir="",
     )
 
-    db.update_live_stats(run_id=run_id, token_delta=100)
-    db.update_live_stats(run_id=run_id, token_delta=250)
-    db.update_live_stats(run_id=run_id, token_delta=50)
+    db.update_live_stats(run_id=run_id, context_tokens=100)
+    db.update_live_stats(run_id=run_id, context_tokens=250)
+    db.update_live_stats(run_id=run_id, context_tokens=50)
 
     row = db.get_run(run_id)
-    assert row["token_count"] == 400
+    assert row["token_count"] == 50
 
 
 def test_update_live_stats_no_op_on_defaults():
@@ -449,7 +451,7 @@ def test_update_live_stats_snippet_updates():
 
 
 def test_read_jsonl_incremental(tmp_path):
-    """_read_jsonl_incremental parses snippet and tokens from JSONL."""
+    """_read_jsonl_incremental parses snippet and context window size from JSONL."""
     from agents.dispatcher import _read_jsonl_incremental
 
     jsonl = tmp_path / "session.jsonl"
@@ -459,15 +461,21 @@ def test_read_jsonl_incremental(tmp_path):
         {"type": "assistant", "message": {
             "role": "assistant",
             "content": [{"type": "text", "text": "Hi there, I will help."}],
-            "usage": {"input_tokens": 10, "output_tokens": 20},
+            "usage": {
+                "input_tokens": 10,
+                "cache_creation_input_tokens": 5,
+                "cache_read_input_tokens": 15,
+                "output_tokens": 20,
+            },
         }, "timestamp": "2026-03-17T10:00:01Z"},
     ]
     jsonl.write_text("\n".join(json.dumps(l) for l in lines) + "\n")
 
-    snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(jsonl, 0)
+    snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(jsonl, 0)
 
     assert snippet == "Hi there, I will help."
-    assert token_delta == 30
+    # context_tokens = input + cache_creation + cache_read (output is not part of context)
+    assert context_tokens == 30
     assert new_offset == jsonl.stat().st_size
     assert last_activity == "2026-03-17T10:00:01Z"
 
@@ -483,18 +491,24 @@ def test_read_jsonl_incremental_offset(tmp_path):
     }, "timestamp": "2026-03-17T10:00:00Z"}) + "\n"
     second_line = json.dumps({"type": "assistant", "message": {
         "content": [{"type": "text", "text": "new message"}],
-        "usage": {"input_tokens": 3, "output_tokens": 7},
+        "usage": {
+            "input_tokens": 3,
+            "cache_creation_input_tokens": 2,
+            "cache_read_input_tokens": 5,
+            "output_tokens": 7,
+        },
     }, "timestamp": "2026-03-17T10:01:00Z"}) + "\n"
 
     jsonl.write_text(first_line + second_line)
     offset = len(first_line.encode())
 
-    snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
+    snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
         jsonl, offset
     )
 
     assert snippet == "new message"
-    assert token_delta == 10  # Only from second line
+    # context_tokens = input + cache_creation + cache_read from the latest assistant turn
+    assert context_tokens == 10
     assert new_offset == jsonl.stat().st_size
     assert last_activity == "2026-03-17T10:01:00Z"
 
@@ -507,12 +521,12 @@ def test_read_jsonl_incremental_no_new_data(tmp_path):
     jsonl.write_text(json.dumps({"type": "assistant", "message": {}}) + "\n")
     file_size = jsonl.stat().st_size
 
-    snippet, token_delta, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
+    snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
         jsonl, file_size
     )
 
     assert snippet is None
-    assert token_delta == 0
+    assert context_tokens == 0
     assert new_offset == file_size
     assert last_activity is None
 

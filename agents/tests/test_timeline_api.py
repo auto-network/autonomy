@@ -82,8 +82,9 @@ def test_parse_range_invalid():
 
 
 def test_build_where_no_filters():
+    """Timeline always excludes RUNNING rows (completed work only)."""
     where, params = _build_timeline_where(None, None, None)
-    assert where == "1=1"
+    assert where == "status != 'RUNNING'"
     assert params == []
 
 
