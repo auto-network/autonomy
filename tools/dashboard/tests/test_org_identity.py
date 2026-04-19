@@ -259,16 +259,72 @@ class TestInitial:
 class TestPathDerivedProjectMapsToUnknown:
     def test_dash_prefixed_raw_maps_to_unknown(self, isolated_orgs):
         # Ingested-from-path sessions store ``project`` like
-        # "-workspace-repo" (the parent dir name with path separators
-        # rewritten to dashes). These never identify a real org; the
-        # resolver must return UNKNOWN_SLUG so the renderer paints "?".
+        # "-some-unknown-legacy" (the parent dir name with path
+        # separators rewritten to dashes). These never identify a real
+        # org; the resolver returns UNKNOWN_SLUG so the renderer paints
+        # "?". Known autonomy path patterns are covered separately —
+        # see TestAutonomyPathPatternsMapToAutonomy.
         isolated_orgs({})
         from tools.dashboard.org_identity import session_org_slug, UNKNOWN_SLUG
 
-        assert session_org_slug({"project": "-workspace-repo"}) == UNKNOWN_SLUG
+        assert session_org_slug({"project": "-some-unknown-legacy-junk"}) == UNKNOWN_SLUG
         assert session_org_slug({"project": "  -enterprise  "}) == UNKNOWN_SLUG
         # Bracket-wrapped path-derived junk also maps to unknown.
-        assert session_org_slug({"project": "[-workspace-repo]"}) == UNKNOWN_SLUG
+        assert session_org_slug({"project": "[-some-other-repo]"}) == UNKNOWN_SLUG
+
+
+# ── session_org_slug — autonomy path patterns map to autonomy ────────
+
+
+class TestAutonomyPathPatternsMapToAutonomy:
+    """Live sessions don't always have a ``.session_meta.json`` written,
+    so the ingester falls back to the parent-directory name (with
+    separators rewritten to dashes). Those path-derived values for
+    sessions living inside the autonomy repo must resolve to the
+    ``autonomy`` org, not be dropped as unknown.
+    """
+
+    def test_workspace_repo_maps_to_autonomy(self, isolated_orgs):
+        # Dashboard-container mount: /workspace/repo → "-workspace-repo".
+        isolated_orgs({})
+        from tools.dashboard.org_identity import session_org_slug
+
+        assert session_org_slug({"project": "-workspace-repo"}) == "autonomy"
+
+    def test_home_jeremy_workspace_autonomy_maps_to_autonomy(self, isolated_orgs):
+        # Host session running in /home/jeremy/workspace/autonomy.
+        isolated_orgs({})
+        from tools.dashboard.org_identity import session_org_slug
+
+        assert (
+            session_org_slug({"project": "-home-jeremy-workspace-autonomy"})
+            == "autonomy"
+        )
+
+    def test_any_workspace_autonomy_suffix_maps_to_autonomy(self, isolated_orgs):
+        # Any operator's path ending in "/workspace/autonomy".
+        isolated_orgs({})
+        from tools.dashboard.org_identity import session_org_slug
+
+        assert (
+            session_org_slug({"project": "-home-alice-src-workspace-autonomy"})
+            == "autonomy"
+        )
+
+    def test_bracket_wrapped_autonomy_path_maps_to_autonomy(self, isolated_orgs):
+        # Recent-sessions DAO wraps the project in brackets.
+        isolated_orgs({})
+        from tools.dashboard.org_identity import session_org_slug
+
+        assert session_org_slug({"project": "[-workspace-repo]"}) == "autonomy"
+
+    def test_workspace_lookup_still_works(self, isolated_orgs):
+        # Non-path-derived workspace ids still go through the config
+        # lookup (enterprise-ng → anchore).
+        isolated_orgs({})
+        from tools.dashboard.org_identity import session_org_slug
+
+        assert session_org_slug({"project": "enterprise-ng"}) == "anchore"
 
 
 # ── resolved flag — identifies unresolved orgs for ? rendering ───────
@@ -301,10 +357,13 @@ class TestResolvedFlag:
         assert identity["color"] == UNRESOLVED_COLOR
 
     def test_legacy_session_resolves_to_unresolved(self, isolated_orgs):
-        # Path-derived project values should flow through to unresolved.
+        # Path-derived project values that DON'T match a known autonomy
+        # pattern flow through to unresolved. (Known autonomy patterns
+        # like "-workspace-repo" map to the autonomy org — see
+        # TestAutonomyPathPatternsMapToAutonomy.)
         isolated_orgs({})
         from tools.dashboard.org_identity import resolve_session_org
 
-        org = resolve_session_org({"project": "-workspace-repo"})
+        org = resolve_session_org({"project": "-some-unknown-legacy-junk"})
         assert org["resolved"] is False
         assert org["initial"] == "?"
