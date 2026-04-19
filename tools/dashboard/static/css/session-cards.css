@@ -51,6 +51,23 @@
 /* Stats row */
 .sc-stats { display: flex; align-items: center; gap: 3px; }
 
+/* Org indicator — circular favicon/initial.
+   Painted to the left of the role badge. Background is the org's
+   resolved color (graph://497cdc20-d43); when favicon is absent the
+   first letter is rendered. Sized to match the role badge height. */
+.sc-org {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  font-size: 10px; font-weight: 700;
+  color: #ffffff;
+  flex-shrink: 0;
+  overflow: hidden;
+  user-select: none;
+}
+.sc-org-img { width: 100%; height: 100%; object-fit: cover; }
+.sc-org-initial { line-height: 1; }
+
 /* Role badge — neutral pill */
 .sc-role {
   display: inline-flex; align-items: center;

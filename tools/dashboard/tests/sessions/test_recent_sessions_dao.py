@@ -203,6 +203,23 @@ class TestPayloadShape:
             assert "ended_at" in row, f"missing ended_at on {row['id']}"
             assert row["ended_at"], f"empty ended_at on {row['id']}"
 
+    def test_includes_resolved_org(self, isolated_dao):
+        """org identity (slug, name, color, initial) flows through (auto-jl9dc).
+
+        Resolution must run on the bare project slug, not the bracketed
+        legacy display value — `[autonomy]` would otherwise be hashed as
+        a fresh unknown slug, drifting the colour for every consumer.
+        """
+        results = isolated_dao.get_recent_sessions(limit=10)
+        for row in results:
+            assert "org" in row, f"missing org on {row['id']}"
+            org = row["org"]
+            assert isinstance(org, dict)
+            assert org["slug"] == "autonomy", \
+                f"expected 'autonomy' slug, got {org['slug']!r} (project={row['project']!r})"
+            assert org["color"].startswith("#")
+            assert isinstance(org["initial"], str) and len(org["initial"]) == 1
+
     def test_ended_at_uses_metadata_when_present(self, isolated_dao):
         """When metadata.ended_at is present, the row's ended_at reflects it.
 

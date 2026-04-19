@@ -377,9 +377,11 @@ class SessionMonitor:
 
     def get_registry(self) -> list[dict]:
         """Return registry of active sessions (lightweight roster for SSE)."""
+        from tools.dashboard.org_identity import resolve_session_org
         sessions = get_live_sessions()
-        return [
-            {
+        out = []
+        for s in sessions:
+            entry = {
                 "session_id": s["tmux_name"],
                 "project": s["project"],
                 "type": s["type"],
@@ -403,8 +405,9 @@ class SessionMonitor:
                     bool(s.get("session_uuids")) and s["session_uuids"] != "[]"
                 ),
             }
-            for s in sessions
-        ]
+            entry["org"] = resolve_session_org(entry)
+            out.append(entry)
+        return out
 
     # ── Background tasks ──────────────────────────────────────────
 
