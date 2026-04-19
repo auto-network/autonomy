@@ -26,7 +26,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from agents.session_launcher import launch_session, DEFAULT_IMAGE, REPO_ROOT
+from agents.session_launcher import launch_session, DEFAULT_IMAGE, DEFAULT_OPUS_MODEL, REPO_ROOT
 
 
 def main() -> int:
@@ -40,7 +40,7 @@ def main() -> int:
     parser.add_argument("--git-dir", default="", help="Git dir path (absolute, same on host+container)")
     parser.add_argument("--output-dir", default="", help="Pre-created output directory")
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Docker image")
-    parser.add_argument("--model", default="claude-opus-4-6[1m]", help="Claude model to use")
+    parser.add_argument("--model", default=DEFAULT_OPUS_MODEL, help="Claude model to use")
     parser.add_argument("--detach", action="store_true", help="Run container in background")
     parser.add_argument("--graph-project", default="",
                         help="Graph scope (GRAPH_SCOPE env + .session_meta.json field)")
