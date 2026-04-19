@@ -109,6 +109,10 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return (s && s.lastActivity) || 0;
       },
+      get org() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return (s && s.org) || null;
+      },
 
       // ── View-only state ─────────────────────────────────────────
       displayEntries: [],
@@ -253,6 +257,14 @@
         this._tailUrl = '/api/session/' + encodeURIComponent(project) + '/' + encodeURIComponent(sessionId) + '/tail';
 
         var store = window.getSessionStore(sessionId);
+
+        // Backfill org for dead sessions not seeded by /api/dao/active_sessions.
+        if (!store.org) {
+          fetch('/api/session/' + encodeURIComponent(sessionId))
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(data) { if (data && data.org) store.org = data.org; })
+            .catch(function() {});
+        }
 
         if (store.loaded) {
           // Instant render from cache — zero network
