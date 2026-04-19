@@ -16,7 +16,7 @@
 <div class="session-card-wrap">
   <div class="session-card" :class="borderCls(s.session_type)">
 
-    <!-- Compact-only row: dot + bell + org + type badge + role badge + actions/resume -->
+    <!-- Compact-only row: dot + bell + type badge + role badge + merged org/actions + resume -->
     <div class="sc-compact-row">
       <span class="sc-dot"
             :class="{
@@ -32,24 +32,21 @@
               'sc-nag-both':       s.nag_enabled &&  s.dispatch_nag_enabled
             }"
             x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
-      <template x-if="s.org">
-        <span class="sc-org"
-              :style="`background:${s.org.color}`"
-              :title="s.org.name"
-              data-testid="session-org">
-          <template x-if="s.org.favicon">
-            <img class="sc-org-img" :src="s.org.favicon" :alt="s.org.name">
-          </template>
-          <template x-if="!s.org.favicon">
-            <span class="sc-org-initial" x-text="s.org.initial"></span>
-          </template>
-        </span>
-      </template>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
-      <template x-if="s.is_live && typeof showSessionActions === 'function'">
-        <button @click.stop="showSessionActions(s)" class="sc-actions"
-                data-testid="session-actions-btn" aria-label="Session actions">⋮</button>
+      <!-- Merged org-glyph + actions button: paints org.color only when favicon is null,
+           opens actions menu on live sessions, disabled (ornament) on dead. -->
+      <template x-if="s.org">
+        <button class="sc-org sc-actions"
+                :style="s.org.favicon ? '' : `background:${s.org.color}`"
+                :title="s.org.resolved ? s.org.name : ('legacy: ' + (s.project || 'unknown'))"
+                :aria-label="s.is_live ? 'Session actions' : ('Org: ' + s.org.name)"
+                :disabled="!s.is_live"
+                @click.stop="s.is_live && typeof showSessionActions === 'function' && showSessionActions(s)"
+                data-testid="session-actions-btn">
+          <span class="sc-org-initial" x-text="s.org.initial" x-show="!s.org.favicon"></span>
+          <img class="sc-org-img" :src="s.org.favicon" x-show="s.org.favicon" :alt="s.org.name">
+        </button>
       </template>
       <button x-show="!s.is_live && s.resumable && !(resumed && resumed[s.id]) && !(resumeError && resumeError[s.id])"
               @click.prevent.stop="resumeSession(s, $event)"
@@ -66,7 +63,7 @@
             class="px-3 py-1 bg-red-900 text-red-300 text-sm rounded ml-auto flex-shrink-0" x-text="resumeError[s.id]"></span>
     </div>
 
-    <!-- Stats row: dot + bell + org + type badge + role badge + T3 + actions/resume -->
+    <!-- Stats row: dot + bell + type badge + role badge + T3 + merged org/actions + resume -->
     <div class="sc-stats">
       <span class="sc-dot"
             :class="{
@@ -82,19 +79,6 @@
               'sc-nag-both':       s.nag_enabled &&  s.dispatch_nag_enabled
             }"
             x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
-      <template x-if="s.org">
-        <span class="sc-org"
-              :style="`background:${s.org.color}`"
-              :title="s.org.name"
-              data-testid="session-org">
-          <template x-if="s.org.favicon">
-            <img class="sc-org-img" :src="s.org.favicon" :alt="s.org.name">
-          </template>
-          <template x-if="!s.org.favicon">
-            <span class="sc-org-initial" x-text="s.org.initial"></span>
-          </template>
-        </span>
-      </template>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
       <span class="sc-t3">
@@ -104,9 +88,17 @@
         <span class="sc-t3-sep" x-show="ctxStr(s) && idleStr(s)">·</span>
         <span class="sc-t3-val" :class="recencyColor(s)" x-text="idleStr(s)"></span>
       </span>
-      <template x-if="s.is_live && typeof showSessionActions === 'function'">
-        <button @click.stop="showSessionActions(s)" class="sc-actions"
-                data-testid="session-actions-btn" aria-label="Session actions">⋮</button>
+      <template x-if="s.org">
+        <button class="sc-org sc-actions"
+                :style="s.org.favicon ? '' : `background:${s.org.color}`"
+                :title="s.org.resolved ? s.org.name : ('legacy: ' + (s.project || 'unknown'))"
+                :aria-label="s.is_live ? 'Session actions' : ('Org: ' + s.org.name)"
+                :disabled="!s.is_live"
+                @click.stop="s.is_live && typeof showSessionActions === 'function' && showSessionActions(s)"
+                data-testid="session-actions-btn">
+          <span class="sc-org-initial" x-text="s.org.initial" x-show="!s.org.favicon"></span>
+          <img class="sc-org-img" :src="s.org.favicon" x-show="s.org.favicon" :alt="s.org.name">
+        </button>
       </template>
       <!-- Resume button (x-show keeps handler bound; x-if destroys/recreates DOM) -->
       <button x-show="!s.is_live && s.resumable && !(resumed && resumed[s.id]) && !(resumeError && resumeError[s.id])"
@@ -135,10 +127,6 @@
         </template>
       </div>
     </template>
-    <template x-if="(!s.topics || s.topics.length === 0) && s.project">
-      <div class="sc-topics" x-text="s.project"></div>
-    </template>
-
     <!-- Last message -->
     <template x-if="s.latest">
       <div class="sc-message" x-text="s.latest"></div>
@@ -164,10 +152,10 @@
           <span class="sc-footer-value" x-text="s.tmux_session || '—'"></span>
         </div>
       </template>
-      <template x-if="s.project">
+      <template x-if="s.org">
         <div class="sc-footer-item">
-          <span class="sc-footer-label">project</span>
-          <span class="sc-footer-value" x-text="s.project"></span>
+          <span class="sc-footer-label">org</span>
+          <span class="sc-footer-value" x-text="s.org.resolved ? s.org.name : '?'"></span>
         </div>
       </template>
     </div>

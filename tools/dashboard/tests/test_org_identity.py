@@ -221,3 +221,90 @@ class TestResolveSessionOrg:
         assert org["name"] == "Anchore"
         assert org["color"] == "#2D7DD2"
         assert org["initial"] == "A"
+
+
+# ── _initial — skip non-alphanumeric, '?' fallback ───────────────────
+
+
+class TestInitial:
+    def test_skips_leading_non_alphanumeric(self, isolated_orgs):
+        # Names like "A-b-c" should yield the first ALPHANUMERIC char.
+        from tools.dashboard.org_identity import _initial
+
+        assert _initial("A-b-c") == "A"
+
+    def test_returns_question_mark_when_only_punctuation(self, isolated_orgs):
+        # Path-derived junk like "-workspace-repo" starts with "-".
+        # Under the old rule, `_initial` would return "-" as the first
+        # non-whitespace char. Skipping non-alphanumeric avoids that.
+        from tools.dashboard.org_identity import _initial
+
+        assert _initial("-workspace-repo") == "W"
+
+    def test_empty_string_is_question_mark(self, isolated_orgs):
+        from tools.dashboard.org_identity import _initial
+
+        assert _initial("") == "?"
+
+    def test_pure_punctuation_is_question_mark(self, isolated_orgs):
+        from tools.dashboard.org_identity import _initial
+
+        assert _initial("---") == "?"
+        assert _initial("!!!") == "?"
+
+
+# ── session_org_slug — path-derived junk maps to UNKNOWN_SLUG ────────
+
+
+class TestPathDerivedProjectMapsToUnknown:
+    def test_dash_prefixed_raw_maps_to_unknown(self, isolated_orgs):
+        # Ingested-from-path sessions store ``project`` like
+        # "-workspace-repo" (the parent dir name with path separators
+        # rewritten to dashes). These never identify a real org; the
+        # resolver must return UNKNOWN_SLUG so the renderer paints "?".
+        isolated_orgs({})
+        from tools.dashboard.org_identity import session_org_slug, UNKNOWN_SLUG
+
+        assert session_org_slug({"project": "-workspace-repo"}) == UNKNOWN_SLUG
+        assert session_org_slug({"project": "  -enterprise  "}) == UNKNOWN_SLUG
+        # Bracket-wrapped path-derived junk also maps to unknown.
+        assert session_org_slug({"project": "[-workspace-repo]"}) == UNKNOWN_SLUG
+
+
+# ── resolved flag — identifies unresolved orgs for ? rendering ───────
+
+
+class TestResolvedFlag:
+    def test_known_org_is_resolved(self, isolated_orgs):
+        isolated_orgs({"autonomy": {"name": "Autonomy"}})
+        from tools.dashboard.org_identity import resolve_org_identity
+
+        identity = resolve_org_identity("autonomy")
+        assert identity["resolved"] is True
+
+    def test_arbitrary_slug_is_resolved(self, isolated_orgs):
+        # A slug we haven't seen but that isn't UNKNOWN_SLUG still counts as
+        # resolved — the cascade renders generated color + initial.
+        isolated_orgs({})
+        from tools.dashboard.org_identity import resolve_org_identity
+
+        assert resolve_org_identity("newco")["resolved"] is True
+
+    def test_unknown_slug_is_not_resolved(self, isolated_orgs):
+        isolated_orgs({})
+        from tools.dashboard.org_identity import resolve_org_identity, UNRESOLVED_COLOR
+
+        identity = resolve_org_identity(None)
+        assert identity["resolved"] is False
+        # Per acceptance: "?" on neutral gray.
+        assert identity["initial"] == "?"
+        assert identity["color"] == UNRESOLVED_COLOR
+
+    def test_legacy_session_resolves_to_unresolved(self, isolated_orgs):
+        # Path-derived project values should flow through to unresolved.
+        isolated_orgs({})
+        from tools.dashboard.org_identity import resolve_session_org
+
+        org = resolve_session_org({"project": "-workspace-repo"})
+        assert org["resolved"] is False
+        assert org["initial"] == "?"
