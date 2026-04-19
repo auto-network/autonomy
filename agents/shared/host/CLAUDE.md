@@ -94,6 +94,20 @@ agents/launch.sh <bead-id> --detach   # launch in background (dispatcher manages
 agents/build.sh                       # rebuild the autonomy-agent image
 ```
 
+### File handoff with container sessions
+Bidirectional: the directory `$REPO_ROOT/data/agent-runs/<session-name>[-TIMESTAMP]/`
+on the host maps to `/workspace/output/` inside the matching container session.
+Foreground-launched sessions use the `-TIMESTAMP` suffix; detached sessions use
+the bare session name (`agents/launch_session_cli.py:86` vs `:111`).
+
+- **Container → host**: container writes to `/workspace/output/X` → you read
+  `data/agent-runs/<session>/X` on host. Use when a container session asks you
+  to pick something up.
+- **Host → container**: you write to `data/agent-runs/<session>/Y` on host →
+  the container sees it at `/workspace/output/Y`. Use when handing a file INTO
+  a running container session (e.g. supplying a downloaded artifact for a
+  skill to ingest).
+
 ### Service Management
 Dashboard hot-reloads Python changes automatically. Full restart only needed for config/env changes:
 ```bash
