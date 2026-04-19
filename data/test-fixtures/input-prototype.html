@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Session Viewer — Input Prototype</title>
+<style>
+  :root {
+    --sat: env(safe-area-inset-top, 0px);
+    --sab: env(safe-area-inset-bottom, 0px);
+    --bg: #0f172a;
+    --chrome: rgba(17, 24, 39, 0.82);
+    --surface-border: rgba(55, 65, 81, 0.6);
+    --text-primary: #e5e7eb;
+    --text-secondary: #9ca3af;
+    --text-dim: #6b7280;
+    --accent: #6366f1;
+    --green: #4ade80;
+    --amber: #fbbf24;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+    overflow: hidden;
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  /* ── 3-row shell — NOT fixed, just a full-height grid ── */
+  .app {
+    height: 100dvh;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    background: var(--bg);
+  }
+  /* iOS standalone PWA workaround — 100vh unreliable, use screen.height via JS */
+  html.ios-standalone .app {
+    height: var(--app-height, 100vh);
+  }
+
+  /* ── Row 1: Header — normal flow, not fixed ──────────── */
+  .header {
+    background: var(--chrome);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--surface-border);
+    z-index: 20;
+  }
+  .header-inner {
+    padding: max(0px, calc(var(--sat) - 5px)) 12px 6px;
+  }
+  .header-row1 {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .header-row2 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-top: 2px;
+  }
+  .header-expanded {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.25s ease, padding 0.25s ease;
+    border-top: 1px solid transparent;
+  }
+  .header.open .header-expanded {
+    max-height: 200px;
+    padding: 10px 12px;
+    border-top-color: var(--surface-border);
+  }
+  .chevron {
+    transition: transform 0.25s ease;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .header.open .chevron { transform: rotate(180deg); }
+
+  /* Role badge */
+  .role-badge {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.05em; padding: 2px 6px; border-radius: 4px;
+    background: rgba(99, 102, 241, 0.2); color: #a5b4fc; flex-shrink: 0;
+  }
+  .session-title {
+    font-size: 14px; font-weight: 500; color: var(--text-primary);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    min-width: 0; flex: 1;
+  }
+  .tokens { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+  .indicator-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .indicator--green { color: var(--green); }
+  @keyframes dot-flash { 0%,100%{opacity:1} 50%{opacity:0.15} }
+  .indicator-dot--working { animation: dot-flash 0.8s ease-in-out infinite; }
+  .sharing-avatar {
+    width: 18px; height: 18px; border-radius: 50%;
+    background: linear-gradient(135deg, #f472b6, #a78bfa);
+    font-size: 9px; font-weight: 700; color: white;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .terminal-toggle {
+    width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+    border-radius: 6px; background: transparent; border: none;
+    color: var(--text-dim); cursor: pointer; flex-shrink: 0;
+  }
+  .topics-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 4px; }
+  .topics { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+  .expanded-footer {
+    display: flex; gap: 14px; margin-top: 8px; padding-top: 6px;
+    border-top: 1px solid #1e293b; font-size: 10px;
+  }
+  .expanded-footer-item { display: flex; flex-direction: column; gap: 1px; }
+  .expanded-footer-label { color: #334155; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .expanded-footer-value { color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .header.open .header-row2 .tokens { display: none; }
+
+  /* ── Row 2: Chat — only this scrolls ─────────────────── */
+  .chat-content {
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    padding: 12px;
+    background: var(--bg);
+  }
+
+  /* Messages */
+  .message { margin-bottom: 16px; }
+  .msg-role { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 3px; }
+  .msg-role--user { color: #f87171; }
+  .msg-role--assistant { color: #4ade80; }
+  .msg-time { font-size: 10px; color: var(--text-dim); float: right; margin-top: 2px; }
+  .msg-body { font-size: 14px; line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; }
+  .msg-body p { margin-bottom: 8px; }
+  .msg-body p:last-child { margin-bottom: 0; }
+  .msg-body strong { font-weight: 600; }
+  .msg-body code { font-family: 'SF Mono', Menlo, monospace; font-size: 12px; background: rgba(255,255,255,0.06); padding: 2px 5px; border-radius: 3px; }
+  .tool-chip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px;
+    background: rgba(255,255,255,0.04); border-left: 3px solid #60a5fa;
+    border-radius: 0 6px 6px 0; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;
+  }
+  .tool-chip .tool-name { font-family: 'SF Mono', Menlo, monospace; font-weight: 500; color: #93c5fd; }
+  .tool-chip .tool-meta { color: var(--text-dim); }
+  @keyframes sv-think { 0%,80%,100%{opacity:0.3;transform:scale(0.8)} 40%{opacity:1;transform:scale(1)} }
+  .thinking { display: flex; gap: 4px; padding: 8px 0; }
+  .thinking-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); animation: sv-think 1.4s ease-in-out infinite; }
+  .thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+  .thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+
+  /* ── Row 3: Input bar — normal flow, NOT fixed ───────── */
+  .input-bar {
+    background: var(--chrome);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+    border-top: 1px solid var(--surface-border);
+    z-index: 20;
+    padding: 0 12px max(0px, calc(var(--sab) - 8px)) 10px;
+  }
+  .att-strip { display: flex; gap: 6px; padding: 6px 0.5rem 0; overflow: visible; }
+  .att-strip:empty { display: none; }
+  .att-strip::-webkit-scrollbar { display: none; }
+  .att-thumb {
+    position: relative; width: 56px; height: 56px; flex-shrink: 0;
+  }
+  .att-thumb img { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; border: 1px solid #4b5563; display: block; }
+  .att-remove {
+    position: absolute; top: -4px; right: -4px; width: 18px; height: 18px;
+    border-radius: 50%; background: rgba(0,0,0,0.7); color: white;
+    border: none; font-size: 12px; line-height: 18px; text-align: center; cursor: pointer;
+  }
+  .input-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 0.5rem;
+  }
+  .attach-btn {
+    width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; background: transparent; border: none;
+    color: var(--text-dim); cursor: pointer; flex-shrink: 0;
+  }
+  .input-bubble {
+    flex: 1; display: flex; align-items: flex-end;
+    background: rgba(55, 65, 81, 0.6); border-radius: 20px;
+    border: 1.5px solid transparent; min-height: 36px; max-height: 120px; overflow: hidden;
+  }
+  .input-bubble:focus-within { border-color: rgba(99, 102, 241, 0.5); }
+  .input-editable {
+    flex: 1; padding: 7px 0 7px 14px; font-size: 16px; line-height: 1.4;
+    color: var(--text-primary); outline: none; overflow-y: auto; max-height: 120px;
+    word-break: break-word; white-space: pre-wrap;
+  }
+  .input-editable:empty::before { content: attr(data-placeholder); color: var(--text-dim); pointer-events: none; }
+  .send-btn {
+    width: 30px; height: 30px; min-width: 30px; border-radius: 50%;
+    background: var(--accent); border: none; color: white; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    margin: 3px; flex-shrink: 0; transition: opacity 0.15s, transform 0.1s;
+    opacity: 0.3; transform: scale(0.85); pointer-events: none;
+  }
+  .send-btn.active { opacity: 1; transform: scale(1); pointer-events: auto; }
+
+  .hidden { display: none !important; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin-path { animation: spin 1s linear infinite; transform-origin: center; }
+</style>
+</head>
+<body>
+
+<script>
+// iOS standalone detection
+if (window.navigator.standalone === true) {
+  document.documentElement.classList.add('ios-standalone');
+  // 100vh is unreliable on iOS PWA — use screen.height directly
+  document.documentElement.style.setProperty('--app-height', window.screen.height + 'px');
+}
+</script>
+
+<div class="app">
+
+  <!-- ROW 1: Header -->
+  <div class="header" id="header" onclick="toggleHeader(event)">
+    <div class="header-inner">
+      <div class="header-row1">
+        <span class="indicator-dot indicator-dot--working indicator--green" id="liveDot"></span>
+        <span class="role-badge">researcher</span>
+        <div class="indicator" title="Jeremy is viewing">
+          <span class="sharing-avatar">J</span>
+        </div>
+        <div class="indicator indicator--amber hidden" id="ind-task" title="Compacting...">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round" class="spin-path"/></svg>
+        </div>
+        <div style="flex:1"></div>
+        <button class="terminal-toggle" onclick="event.stopPropagation()" title="Terminal">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        </button>
+        <div style="width:8px"></div>
+        <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="header-row2">
+        <span class="session-title">Mobile input redesign (v60)</span>
+        <span class="tokens">356k</span>
+      </div>
+    </div>
+    <div class="header-expanded">
+      <div class="topics-label">Topics</div>
+      <div class="topics">Prototyping iMessage-style input control<br>Testing visualViewport on iPhone</div>
+      <div class="expanded-footer">
+        <div class="expanded-footer-item"><span class="expanded-footer-label">turns</span><span class="expanded-footer-value">42</span></div>
+        <div class="expanded-footer-item"><span class="expanded-footer-label">ctx</span><span class="expanded-footer-value">356k</span></div>
+        <div class="expanded-footer-item"><span class="expanded-footer-label">idle</span><span class="expanded-footer-value">25s</span></div>
+        <div class="expanded-footer-item"><span class="expanded-footer-label">tmux</span><span class="expanded-footer-value">auto-0416-223035</span></div>
+        <div class="expanded-footer-item"><span class="expanded-footer-label">project</span><span class="expanded-footer-value">autonomy</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 2: Chat (only this scrolls) -->
+  <main class="chat-content" id="chat" onclick="document.getElementById('inputField').blur()">
+    <div class="message">
+      <div class="msg-role msg-role--user">User <span class="msg-time">10:30 PM</span></div>
+      <div class="msg-body"><p>What do you see in this screenshot? I want to know how the mobile layout looks.</p></div>
+    </div>
+    <div class="message">
+      <div class="msg-role msg-role--assistant">Assistant <span class="msg-time">10:30 PM</span></div>
+      <div class="msg-body">
+        <p>I see the <strong>mobile session viewer</strong> page. The header has a hamburger menu, search bar, and session ID with a green dot.</p>
+        <p><strong>Main content:</strong> "Session started / Send a message to begin" placeholder.</p>
+        <p><strong>Input bar:</strong> Paperclip icon, text input field, and a Send button.</p>
+      </div>
+    </div>
+    <div class="message"><div class="tool-chip"><span class="tool-name">Read</span><span class="tool-meta">session-view.html &middot; 238 lines</span></div></div>
+    <div class="message"><div class="tool-chip"><span class="tool-name">Grep</span><span class="tool-meta">3 matches in 2 files</span></div></div>
+    <div class="message">
+      <div class="msg-role msg-role--assistant">Assistant <span class="msg-time">10:31 PM</span></div>
+      <div class="msg-body">
+        <p>The current layout uses <code>position: fixed</code> with a flex column. iOS doesn't reliably reposition fixed elements when the keyboard opens.</p>
+        <p>The <code>visualViewport</code> API solves this by tracking the actual viewport height.</p>
+      </div>
+    </div>
+    <div class="message">
+      <div class="msg-role msg-role--user">User <span class="msg-time">10:32 PM</span></div>
+      <div class="msg-body"><p>Compare to iMessage. Input should be flush to bottom, slim and translucent.</p></div>
+    </div>
+    <div class="message">
+      <div class="msg-role msg-role--assistant">Assistant <span class="msg-time">10:33 PM</span></div>
+      <div class="msg-body">
+        <p><strong>iMessage:</strong> Single rounded bubble, send embedded inside, translucent overlays.</p>
+        <p><strong>Dashboard:</strong> Three separate elements, opaque stacked layout.</p>
+        <p>The <code>ios-chat</code> reference solves this with <code>top: var(--vvh); transform: translateY(-100%)</code>.</p>
+      </div>
+    </div>
+    <div class="message">
+      <div class="msg-role msg-role--user">User <span class="msg-time">10:34 PM</span></div>
+      <div class="msg-body"><p>Prototype it. Contenteditable, translucent bars, new header with dynamic indicators.</p></div>
+    </div>
+    <div class="message">
+      <div class="msg-role msg-role--assistant">Assistant <span class="msg-time">10:34 PM</span></div>
+      <div class="msg-body"><p>Building now. Using <code>visualViewport</code> API, <code>contenteditable</code>, and <code>backdrop-filter: blur()</code>.</p></div>
+    </div>
+    <div class="thinking" id="thinking">
+      <div class="thinking-dot"></div><div class="thinking-dot"></div><div class="thinking-dot"></div>
+    </div>
+  </main>
+
+  <!-- ROW 3: Input bar (normal flow, NOT fixed) -->
+  <div class="input-bar" id="inputBar">
+    <div class="att-strip" id="attachStrip"></div>
+    <div class="input-row">
+      <button class="attach-btn" onclick="pickFiles()" title="Attach">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <div class="input-bubble">
+        <div class="input-editable" id="inputField" contenteditable="true"
+             data-placeholder="Message..." role="textbox" aria-multiline="true"
+             oninput="document.getElementById('sendBtn').className = this.innerText.trim() ? 'send-btn active' : 'send-btn'"
+             onkeydown="if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();sendMessage()}"
+></div>
+        <button class="send-btn" id="sendBtn" ontouchend="event.preventDefault(); sendMessage()" onclick="sendMessage()" onmousedown="event.preventDefault()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94l18.04-8.5a.75.75 0 000-1.38l-18.04-8.5z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ── Header expand/collapse ───────────────────────────
+function toggleHeader(e) { document.getElementById('header').classList.toggle('open'); }
+
+// ── Input handling ───────────────────────────────────
+function getInput() { return document.getElementById('inputField'); }
+function getSend() { return document.getElementById('sendBtn'); }
+
+function sendMessage() {
+  var f = getInput(), s = getSend();
+  if (!f) return;
+  var text = f.innerText.trim();
+  if (!text) return;
+  try { fetch('/api/test/debug', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({userMessage:text, ts:Date.now()}) }); } catch(e) {}
+  var chat = document.getElementById('chat');
+  var thinking = document.getElementById('thinking');
+  var msgDiv = document.createElement('div');
+  msgDiv.className = 'message';
+  msgDiv.innerHTML = '<div class="msg-role msg-role--user">User <span class="msg-time">' + new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) + '</span></div><div class="msg-body"><p>' + escapeHtml(text) + '</p></div>';
+  chat.insertBefore(msgDiv, thinking);
+  f.textContent = '';
+  if (s) s.className = 'send-btn';
+  requestAnimationFrame(function() { chat.scrollTop = chat.scrollHeight; });
+  f.blur();
+}
+
+function escapeHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function pickFiles() {
+  var inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*,*/*'; inp.multiple = true;
+  inp.onchange = function() { addFiles(inp.files); };
+  inp.click();
+}
+
+function addFiles(files) {
+  var strip = document.getElementById('attachStrip');
+  if (!strip) return;
+  Array.from(files).forEach(function(f) {
+    var wrap = document.createElement('div');
+    wrap.className = 'att-thumb';
+    if (f.type.startsWith('image/')) {
+      var img = document.createElement('img');
+      var reader = new FileReader();
+      reader.onload = function(e) { img.src = e.target.result; };
+      reader.readAsDataURL(f);
+      wrap.appendChild(img);
+    } else {
+      wrap.innerHTML = '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:#1e293b;color:#6b7280;font-size:10px;text-align:center;padding:4px;overflow:hidden">' + escapeHtml(f.name.slice(0,12)) + '</div>';
+    }
+    var x = document.createElement('button');
+    x.className = 'att-remove';
+    x.textContent = '\u00d7';
+    x.onclick = function(e) { e.stopPropagation(); wrap.remove(); updateSendState(); };
+    wrap.appendChild(x);
+    strip.appendChild(wrap);
+  });
+  updateSendState();
+}
+
+function updateSendState() {
+  var f = document.getElementById('inputField');
+  var s = document.getElementById('sendBtn');
+  var strip = document.getElementById('attachStrip');
+  if (f && s) {
+    var hasContent = f.innerText.trim().length > 0 || (strip && strip.children.length > 0);
+    s.className = hasContent ? 'send-btn active' : 'send-btn';
+  }
+}
+
+// ── Live debug — sends data to server ────────────────
+function collectDebug() {
+  var vv = window.visualViewport;
+  var inputBar = document.getElementById('inputBar');
+  var inputRect = inputBar ? inputBar.getBoundingClientRect() : {};
+  return {
+    ts: Date.now(),
+    screen: { height: screen.height },
+    innerHeight: window.innerHeight,
+    vv: vv ? { height: vv.height, offsetTop: vv.offsetTop } : null,
+    inputBar: { rect: { top: inputRect.top, bottom: inputRect.bottom, height: inputRect.height } },
+    app: (function(){ var a = document.querySelector('.app'); return a ? { height: a.offsetHeight, className: a.className } : {}; })(),
+    iosStandalone: window.navigator.standalone,
+    inputText: (document.getElementById('inputField') || {}).innerText || ''
+  };
+}
+
+function sendDebug() {
+  try { fetch('/api/test/debug', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(collectDebug()) }); } catch(e) {}
+}
+
+// Keyboard padding via visualViewport
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', function() {
+    var bar = document.getElementById('inputBar');
+    if (bar) {
+      var kbOpen = window.visualViewport.height < window.screen.height * 0.75;
+      bar.style.paddingBottom = kbOpen ? '0px' : '';
+    }
+  });
+}
+
+// Version polling for auto-reload
+var _lastVersion = null;
+function checkVersion() {
+  fetch('/api/test/version').then(function(r){ return r.json(); }).then(function(d) {
+    if (_lastVersion === null) { _lastVersion = d.v; return; }
+    if (d.v !== _lastVersion) { window.location.reload(); }
+  }).catch(function(){});
+}
+
+setInterval(sendDebug, 1000);
+setInterval(checkToast, 2000);
+setInterval(checkVersion, 2000);
+sendDebug();
+
+// Scroll to bottom
+setTimeout(function() { var c = document.getElementById('chat'); if (c) c.scrollTop = c.scrollHeight; }, 100);
+
+// Show task indicator after 5s
+setTimeout(function() { document.getElementById('ind-task').classList.remove('hidden'); }, 5000);
+
+// Placeholder
+var field = document.getElementById('inputField');
+if (field) field.setAttribute('data-placeholder', window.innerWidth >= 768 ? 'Message\u2026 (Ctrl+Enter to send)' : 'Message\u2026');
+
+// Keyboard detection handled by inline onfocus/onblur on inputField
+
+// Paste handler
+document.getElementById('inputField').onpaste = function(e) {
+  e.preventDefault();
+  document.execCommand('insertText', false, (e.clipboardData || window.clipboardData).getData('text/plain'));
+};
+</script>
+</body>
+</html>
