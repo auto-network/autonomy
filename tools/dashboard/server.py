@@ -4570,12 +4570,22 @@ async def api_dao_active_sessions(request):
         sessions = session_monitor.get_registry()
     return JSONResponse(sessions)
 
+_recent_sessions_limit_deprecated_logged = False
+
+
 async def api_dao_recent_sessions(request):
-    limit = int(request.query_params.get("limit", "20"))
+    global _recent_sessions_limit_deprecated_logged
+    if "limit" in request.query_params and not _recent_sessions_limit_deprecated_logged:
+        logger.warning(
+            "/api/dao/recent_sessions: 'limit' query param is deprecated and ignored; "
+            "row count is now controlled by server-side per-type quotas"
+        )
+        _recent_sessions_limit_deprecated_logged = True
     sort = request.query_params.get("sort", "lastActivity")
     since = request.query_params.get("since", "1d")
+    type_group = request.query_params.get("type", "all")
     sessions = await asyncio.to_thread(
-        dao_sessions.get_recent_sessions, limit, sort, since
+        dao_sessions.get_recent_sessions, None, sort, since, type_group
     )
     return JSONResponse(sessions)
 
