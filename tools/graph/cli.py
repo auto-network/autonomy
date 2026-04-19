@@ -871,6 +871,7 @@ def cmd_sessions(args):
 
     ingested = [r for r in results if r["status"] == "ingested"]
     updated = [r for r in results if r["status"] == "updated"]
+    refreshed = [r for r in results if r["status"] == "refreshed"]
     skipped = [r for r in results if r["status"] == "skipped"]
 
     for r in ingested:
@@ -887,10 +888,13 @@ def cmd_sessions(args):
               f"+{r.get('new_thoughts', 0)} thoughts, +{r.get('new_derivations', 0)} derivations "
               f"(turns {r.get('from_turn', '?')}-{r.get('to_turn', '?')})")
 
+    if refreshed:
+        print(f"  ({len(refreshed)} sessions refreshed summary only)")
     if skipped:
         print(f"  ({len(skipped)} sessions already up to date)")
 
-    print(f"\nTotal: {len(ingested)} new, {len(updated)} updated, {len(skipped)} skipped")
+    print(f"\nTotal: {len(ingested)} new, {len(updated)} updated, "
+          f"{len(refreshed)} refreshed, {len(skipped)} skipped")
     db.close()
 
 
