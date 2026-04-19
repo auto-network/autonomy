@@ -30,12 +30,23 @@
 .sc-dot-dead { background: #374151; }
 .sc-dot--working { animation: sv-dot-flash 0.8s ease-in-out infinite; }
 
-/* Nag bell (inline) */
+/* Nag bell (inline). Four visual states encode idle-nag × dispatch-nag. */
 .sc-nag {
   font-size: 9px; line-height: 1;
   vertical-align: 0px; margin-right: 3px;
 }
-.sc-nag-off { opacity: 0.2; filter: grayscale(1); }
+.sc-nag-off      { opacity: 0.2; filter: grayscale(1); }
+.sc-nag-idle     { /* default emoji rendering — amber bell */ }
+.sc-nag-dispatch { filter: hue-rotate(180deg) saturate(1.1); }
+.sc-nag-both {
+  filter: hue-rotate(180deg) saturate(1.1);
+  text-shadow: 0 0 4px #d97706;
+  animation: sc-nag-both-pulse 2.4s ease-in-out infinite;
+}
+@keyframes sc-nag-both-pulse {
+  0%, 100% { text-shadow: 0 0 3px #d97706; }
+  50%      { text-shadow: 0 0 6px #d97706; }
+}
 
 /* Stats row */
 .sc-stats { display: flex; align-items: center; gap: 3px; }
