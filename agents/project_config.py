@@ -72,6 +72,21 @@ class MissingArtifact:
 
 
 @dataclass(frozen=True)
+class OrgOverride:
+    """Operator-local override of an org's published canonical identity.
+
+    Per-field — any field left ``None`` falls through to the canonical
+    identity (when the federation read layer ships, ``auto-hoi4``) and
+    then to a deterministic generated fallback. See ``graph://497cdc20-d43``.
+    """
+    slug: str
+    name: str | None = None
+    byline: str | None = None
+    color: str | None = None
+    favicon: str | None = None
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     """Parsed configuration for one containerized project."""
     id: str                                  # registry key (e.g. "enterprise-ng")
@@ -96,6 +111,7 @@ _lock = threading.Lock()
 _cache: dict[str, ProjectConfig] | None = None
 _cache_path: Path | None = None
 _cache_mtime: float = 0.0
+_orgs_cache: dict[str, OrgOverride] | None = None
 
 
 def _parse_repo(raw: Any, project_id: str, idx: int) -> RepoMount:
@@ -215,7 +231,21 @@ def _parse_project(project_id: str, raw: Any) -> ProjectConfig:
     )
 
 
-def _load(path: Path) -> dict[str, ProjectConfig]:
+def _parse_org(slug: str, raw: Any) -> OrgOverride:
+    if raw is None:
+        return OrgOverride(slug=slug)
+    if not isinstance(raw, dict):
+        raise ProjectConfigError(f"orgs[{slug!r}] must be a mapping")
+    return OrgOverride(
+        slug=slug,
+        name=_opt_str(raw, "name"),
+        byline=_opt_str(raw, "byline"),
+        color=_opt_str(raw, "color"),
+        favicon=_opt_str(raw, "favicon"),
+    )
+
+
+def _load(path: Path) -> tuple[dict[str, ProjectConfig], dict[str, OrgOverride]]:
     try:
         text = path.read_text()
     except OSError as e:
@@ -233,7 +263,13 @@ def _load(path: Path) -> dict[str, ProjectConfig]:
     if not isinstance(projects_raw, dict):
         raise ProjectConfigError(f"{path}: must contain a 'projects' mapping")
 
-    return {str(pid): _parse_project(str(pid), raw) for pid, raw in projects_raw.items()}
+    orgs_raw = data.get("orgs") or {}
+    if not isinstance(orgs_raw, dict):
+        raise ProjectConfigError(f"{path}: 'orgs' must be a mapping")
+
+    projects = {str(pid): _parse_project(str(pid), raw) for pid, raw in projects_raw.items()}
+    orgs = {str(slug): _parse_org(str(slug), raw) for slug, raw in orgs_raw.items()}
+    return projects, orgs
 
 
 def load_projects(
@@ -246,7 +282,7 @@ def load_projects(
     The parsed result is cached; reload is triggered when the config file's
     mtime changes. Pass ``force=True`` to bypass the cache (useful in tests).
     """
-    global _cache, _cache_path, _cache_mtime
+    global _cache, _cache_path, _cache_mtime, _orgs_cache
 
     config_path = Path(path) if path is not None else DEFAULT_CONFIG_PATH
     config_path = config_path.resolve()
@@ -265,10 +301,27 @@ def load_projects(
         ):
             return _cache
 
-        _cache = _load(config_path)
+        projects, orgs = _load(config_path)
+        _cache = projects
+        _orgs_cache = orgs
         _cache_path = config_path
         _cache_mtime = mtime
         return _cache
+
+
+def load_org_overrides(
+    path: str | Path | None = None,
+    *,
+    force: bool = False,
+) -> dict[str, OrgOverride]:
+    """Return operator-local org overrides keyed by slug.
+
+    Stage 1 source for org identity per ``graph://497cdc20-d43`` —
+    operator overrides take priority over canonical-from-federation
+    (``auto-hoi4``, not yet shipped) and over generated fallback.
+    """
+    load_projects(path=path, force=force)  # populates _orgs_cache
+    return _orgs_cache or {}
 
 
 def get_project(name: str, *, path: str | Path | None = None) -> ProjectConfig:
@@ -281,11 +334,12 @@ def get_project(name: str, *, path: str | Path | None = None) -> ProjectConfig:
 
 def clear_cache() -> None:
     """Reset the loader cache. Primarily for tests."""
-    global _cache, _cache_path, _cache_mtime
+    global _cache, _cache_path, _cache_mtime, _orgs_cache
     with _lock:
         _cache = None
         _cache_path = None
         _cache_mtime = 0.0
+        _orgs_cache = None
 
 
 # ── Artifact resolution ────────────────────────────────────────────────
