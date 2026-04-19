@@ -307,25 +307,16 @@
       // ── Lifecycle ───────────────────────────────────────────────
 
       init() {
-        // Track visible viewport for --app-height. When the keyboard opens, iOS shrinks
-        // visualViewport.height; the grid shell follows and the input row sits at the
-        // new bottom. Also drops the bottom safe-area padding while the keyboard covers
-        // the home indicator.
+        // Keyboard padding toggle — applies to whichever .sv-input is present in the DOM.
+        // Harmless when no .sv-input exists (e.g. overlay mode, pre-ready state).
         if (window.visualViewport && !window._svKeyboardListener) {
           window._svKeyboardListener = true;
-          var _svSyncHeight = function() {
-            document.documentElement.style.setProperty(
-              '--app-height',
-              window.visualViewport.height + 'px'
-            );
+          window.visualViewport.addEventListener('resize', function() {
             var bar = document.querySelector('.sv-input');
-            if (bar) {
-              var kbOpen = window.visualViewport.height < window.screen.height * 0.75;
-              bar.style.paddingBottom = kbOpen ? '0px' : '';
-            }
-          };
-          _svSyncHeight();
-          window.visualViewport.addEventListener('resize', _svSyncHeight);
+            if (!bar) return;
+            var kbOpen = window.visualViewport.height < window.screen.height * 0.75;
+            bar.style.paddingBottom = kbOpen ? '0px' : '';
+          });
         }
 
         if (this._mode === 'overlay') {
