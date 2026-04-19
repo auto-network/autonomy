@@ -139,6 +139,10 @@
       // Header expand/collapse
       headerOpen: false,
 
+      // Terminal toggle (full-screen xterm.js swaps the chat body)
+      showTerminal: false,
+      _termInstance: null,   // result of window.mountTerminal(), or null
+
       // Link terminal (Tier 3)
       linkState: 'idle',
       linkCandidates: [],
@@ -356,6 +360,21 @@
           });
         }
 
+        // Re-fit the active terminal on viewport resize (keyboard open/close,
+        // orientation change). Only one session viewer is mounted at a time in
+        // page mode, so we refit whichever component has a live terminal.
+        if (window.visualViewport && !window._svTermFitListener) {
+          window._svTermFitListener = true;
+          window.visualViewport.addEventListener('resize', function () {
+            document.querySelectorAll('.session-viewer').forEach(function (el) {
+              var cmp = window.Alpine && Alpine.$data(el);
+              if (cmp && cmp._termInstance) {
+                try { cmp._termInstance.fit(); } catch (e) {}
+              }
+            });
+          });
+        }
+
         if (this._mode === 'overlay') {
           // Overlay: expose globals, wait for configure() calls
           var self = this;
@@ -413,6 +432,9 @@
           clearInterval(this._tickInterval);
           this._tickInterval = null;
         }
+        // Dispose terminal WS + xterm if the toggle was active. Leaking these
+        // holds a server-side tmux attach and exhausts WebSocket slots.
+        this._disposeTerminal();
       },
 
       // ── Setup helpers ───────────────────────────────────────────
@@ -628,6 +650,38 @@
         }
       },
 
+      // ── Terminal toggle ──────────────────────────────────────────
+
+      toggleTerminal() {
+        if (!this._tmuxSession) return;  // guard: nothing to attach to
+        this.showTerminal = !this.showTerminal;
+        if (this.showTerminal) {
+          var self = this;
+          this.$nextTick(function () {
+            var container = self.$refs.termContainer;
+            if (!container || typeof window.mountTerminal !== 'function') return;
+            self._termInstance = window.mountTerminal(container, self._tmuxSession);
+            // Fit after mount — the grid row is now sized and the terminal can measure
+            setTimeout(function () {
+              if (self._termInstance) self._termInstance.fit();
+            }, 50);
+          });
+        } else {
+          if (this._termInstance) {
+            try { this._termInstance.dispose(); } catch (e) {}
+            this._termInstance = null;
+          }
+        }
+      },
+
+      _disposeTerminal() {
+        if (this._termInstance) {
+          try { this._termInstance.dispose(); } catch (e) {}
+          this._termInstance = null;
+        }
+        this.showTerminal = false;
+      },
+
       // ── Interrupt (Escape key) ────────────────────────────────────
 
       async interrupt() {
@@ -809,6 +863,7 @@
           clearInterval(this._tickInterval);
           this._tickInterval = null;
         }
+        this._disposeTerminal();
         // Reset view state
         this.state = 'loading';
         this.sessionKey = '';
