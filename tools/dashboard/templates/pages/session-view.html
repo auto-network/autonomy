@@ -120,10 +120,18 @@
                   <div class="sv-exp-stat-val" x-text="_tmuxSession"></div>
                 </div>
               </template>
-              <template x-if="project">
+              <template x-if="org">
                 <div class="sv-exp-stat-cell">
-                  <div class="sv-exp-stat-key">PROJECT</div>
-                  <div class="sv-exp-stat-val" x-text="project"></div>
+                  <div class="sv-exp-stat-key">ORG</div>
+                  <div class="sv-exp-stat-val" style="display:flex; align-items:center; gap:6px;">
+                    <span class="sc-org"
+                          :style="org.favicon ? '' : `background:${org.color}`"
+                          :title="org.resolved ? org.name : ('legacy: ' + (project || 'unknown'))">
+                      <span class="sc-org-initial" x-text="org.initial" x-show="!org.favicon"></span>
+                      <img class="sc-org-img" :src="org.favicon" x-show="org.favicon" :alt="org.name">
+                    </span>
+                    <span x-text="org.resolved ? org.name : '?'"></span>
+                  </div>
                 </div>
               </template>
             </div>
