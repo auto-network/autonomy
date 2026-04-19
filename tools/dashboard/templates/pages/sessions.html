@@ -24,13 +24,20 @@
            class="absolute right-0 mt-1 w-72 bg-gray-800 border border-gray-700
                   rounded-lg shadow-lg overflow-hidden z-30">
 
-        <!-- Workspace groups (grouped by org) -->
-        <template x-for="group in orgGroups" :key="group.org">
-          <div class="py-1" :data-testid="'org-group-' + group.org">
-            <div class="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider"
-                 :class="orgColorClass(group.org)"
-                 x-text="group.org"
-                 data-testid="org-header"></div>
+        <!-- Workspace groups (grouped by org; group.org is a resolved identity object) -->
+        <template x-for="group in orgGroups" :key="group.org.slug">
+          <div class="py-1" :data-testid="'org-group-' + group.org.slug">
+            <div class="px-3 py-1.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider"
+                 :style="`color:${group.org.color}`"
+                 data-testid="org-header">
+              <span class="sc-org"
+                    :style="group.org.favicon ? '' : `background:${group.org.color}`"
+                    :title="group.org.resolved ? group.org.name : 'legacy / unresolved'">
+                <span class="sc-org-initial" x-text="group.org.initial" x-show="!group.org.favicon"></span>
+                <img class="sc-org-img" :src="group.org.favicon" x-show="group.org.favicon" :alt="group.org.name">
+              </span>
+              <span x-text="group.org.resolved ? group.org.name : '?'"></span>
+            </div>
             <template x-for="p in group.projects" :key="p.id">
               <button @click="$dispatch('create-terminal', {project: p.id}); open = false"
                       class="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors group"
@@ -51,12 +58,18 @@
         <!-- Separator -->
         <div class="border-t border-gray-700"></div>
 
-        <!-- Host Terminal (standalone, not a workspace) -->
+        <!-- Host Terminal (standalone, not a workspace). Prompt glyph styled as sc-org
+             so the picker column aligns with the workspace entries above. -->
         <div class="py-1">
           <button @click="$dispatch('create-terminal', {type: 'host'}); open = false"
                   class="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
                   data-testid="host-terminal-option">
-            <div class="text-sm text-gray-400">Host Terminal</div>
+            <div class="flex items-center gap-2 text-sm text-gray-400">
+              <span class="sc-org" style="background:#1f2937; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:#e2e8f0">
+                <span class="sc-org-initial" style="letter-spacing:-1px">&gt;_</span>
+              </span>
+              <span>Host Terminal</span>
+            </div>
           </button>
         </div>
       </div>

@@ -260,7 +260,8 @@
           this.isNote = this.srcType === 'note';
           this.isChat = CHAT_TYPES.has(this.srcType);
           this.isDoc = !this.isNote && !this.isChat;
-          this.date = (this.src.created_at || '').slice(0, 10);
+          // 24-hour date+time: strip T/Z, keep to-minute resolution.
+          this.date = ((this.src.created_at || '').replace('T', ' ').replace('Z', '')).slice(0, 16);
           this.noteContent = this.isNote ? (this.allEntries[0]?.content || '') : '';
           // Strip first heading from note body (it's shown in the header now)
           if (this.isNote && this.noteContent) {
