@@ -197,6 +197,7 @@ graph crosstalk broadcast "message"                        # send to all live se
 - Go tools in `~/go/bin/` (`bd`, `dolt`)
 - WSL2 on Windows, browser visible via WSLg (`DISPLAY=:0`)
 - Key packages: `scrapling[all]`, `markdownify`, `beautifulsoup4`
+- File handoffs between container and host sessions go through `/workspace/output/` (container) → `data/agent-runs/<session-name>/` (host). See the "File handoff to host-side tools" block in `agents/shared/terminal/CLAUDE.md` for details.
 
 ## Testing convention
 
