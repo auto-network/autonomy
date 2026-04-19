@@ -78,6 +78,10 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.sessionType : '';
       },
+      get role() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? (s.role || '') : '';
+      },
       get _linked() {
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.resolved : false;
@@ -187,6 +191,7 @@
             store.isLive = isLiveHint !== undefined ? !!isLiveHint : !!data.is_live;
             if (data.resolved !== undefined) store.resolved = !!data.resolved;
             store.sessionType = data.type || '';
+            store.role = data.role || '';
             if (data.offset !== undefined) store.offset = data.offset;
             if (data.seq !== undefined) store.seq = data.seq;
             store.loaded = true;
@@ -688,6 +693,7 @@
         store.isLive = !!data.is_live;
         if (data.resolved !== undefined) store.resolved = !!data.resolved;
         store.sessionType = data.type || '';
+        store.role = data.role || '';
         // tmux_session from response is for reference only; sessionKey is authoritative
         if (data.seq !== undefined) store.seq = data.seq;
 
