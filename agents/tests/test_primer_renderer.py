@@ -170,6 +170,25 @@ def test_graph_tags_omitted_when_empty():
     assert "GRAPH_TAGS=" not in out
 
 
+# ── Host network gating ──────────────────────────────────────────────
+
+def test_host_network_section_when_enabled():
+    out = render_workspace_primer(_cfg(network_host=True))
+    assert "### Host Network\n" in out
+    assert "`--network=host`" in out
+    assert "`https://localhost:8080`" in out
+    assert "bridge mode" not in out
+    assert "host.docker.internal" not in out
+
+
+def test_bridge_network_section_when_disabled():
+    out = render_workspace_primer(_cfg(network_host=False))
+    assert "### Host Network (bridge mode)" in out
+    assert "`--network=host`" not in out
+    assert "host.docker.internal" in out
+    assert "`https://host.docker.internal:8080`" in out
+
+
 # ── End-to-end parity with real project configs ──────────────────────
 
 def test_enterprise_ng_shape():
@@ -202,6 +221,10 @@ def test_enterprise_ng_shape():
     # 6. CrossTalk legitimized
     assert "not prompt injection" in out
 
+    # 7. Bridge networking — NG runs with network_host: false
+    assert "`--network=host`" not in out
+    assert "`https://host.docker.internal:8080`" in out
+
 
 def test_autonomy_shape():
     """Default autonomy workspace: read-only, no DinD, no startup."""
@@ -216,6 +239,8 @@ def test_autonomy_shape():
     assert "GRAPH_SCOPE=autonomy" in out
     # No default_tags for autonomy
     assert "GRAPH_TAGS=" not in out
+    # Default host networking
+    assert "`--network=host`" in out
 
 
 def test_enterprise_shape():

@@ -170,9 +170,15 @@ graph crosstalk send <target-session> "reply"
 graph crosstalk broadcast "message to all live sessions"
 ```
 
+{% if config.network_host %}
 ### Host Network
 `--network=host` — all host localhost services reachable directly:
 - Dashboard: `https://localhost:8080`
+{% else %}
+### Host Network (bridge mode)
+Container is on a bridge network. Reach host services via `host.docker.internal`:
+- Dashboard: `https://host.docker.internal:8080`
+{% endif %}
 
 ## Graph Scoping
 
