@@ -266,19 +266,19 @@ def test_shipped_config_widgets_ng():
     assert p.default_tags == ("enterprise", "widgets-ng")
     assert p.dispatch_labels == ("widgets-ng",)
     mounts = {r.mount: r for r in p.repos}
-    assert mounts["/workspace/widgets"].writable is False
+    assert mounts["/workspace/widgets"].writable is True
     assert mounts["/workspace/widgets_ng"].writable is True
 
 
 def test_shipped_config_widgets_ng_has_license_artifact():
     p = pc.get_project("widgets-ng", path=pc.DEFAULT_CONFIG_PATH)
-    assert len(p.artifacts) == 1
-    art = p.artifacts[0]
-    assert art.name == "license.yaml"
-    assert art.scope == "personal-org"
-    assert art.required is True
-    assert "license" in art.description.lower()
-    assert "license.example.com" in art.help
+    artifacts = {a.name: a for a in p.artifacts}
+    assert set(artifacts) == {"license.yaml", "id_ed25519", "docker-config.json"}
+    license_art = artifacts["license.yaml"]
+    assert license_art.scope == "personal-org"
+    assert license_art.required is True
+    assert "license" in license_art.description.lower()
+    assert "license.example.com" in license_art.help
 
 
 # ── Artifact parsing ──────────────────────────────────────────────
