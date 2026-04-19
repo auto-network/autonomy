@@ -315,3 +315,126 @@ class TestIncrementalRefresh:
             "SELECT title FROM sources WHERE id = ?", (r1["source_id"],)
         ).fetchone()["title"]
         assert new_title == "Session viewer redesign"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# TestCompactSummaryIngest — context-compaction boundary turns
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _compact_summary_entry(body: str, ts: str = "2026-04-19T12:30:00Z") -> dict:
+    return {
+        "type": "user",
+        "uuid": "cs-uuid-1",
+        "isCompactSummary": True,
+        "isVisibleInTranscriptOnly": True,
+        "message": {"role": "user", "content": body},
+        "timestamp": ts,
+    }
+
+
+def _compact_meta_system_entry(ts: str = "2026-04-19T12:29:59Z") -> dict:
+    return {
+        "type": "system",
+        "uuid": "cs-meta-1",
+        "compactMetadata": {"turnsCompacted": 240, "preCompactionTokens": 198000},
+        "timestamp": ts,
+    }
+
+
+SUMMARY_BODY = (
+    "This session is being continued from a previous conversation that ran out "
+    "of context. The prior session: built a dashboard, wired the store, "
+    "deployed it to staging. Pending: add tests, write docs."
+)
+
+
+class TestCompactSummaryIngest:
+    """Compact-summary turns get role='compact_summary', not role='user'."""
+
+    def test_compact_summary_ingested_with_distinct_role(self, graph_db, jsonl_path):
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_jsonl(jsonl_path, [
+            _user_entry("First real question", ts="2026-04-19T10:00:00Z"),
+            _assistant_entry("Sure, here's an answer", ts="2026-04-19T10:00:05Z"),
+            _compact_meta_system_entry(ts="2026-04-19T12:29:59Z"),
+            _compact_summary_entry(SUMMARY_BODY, ts="2026-04-19T12:30:00Z"),
+            _user_entry("Keep going please", ts="2026-04-19T12:31:00Z"),
+        ])
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            result = ingest_claude_code_session(graph_db, jsonl_path)
+
+        assert result["status"] == "ingested"
+        source_id = result["source_id"]
+
+        rows = graph_db.conn.execute(
+            "SELECT content, role, turn_number, metadata FROM thoughts "
+            "WHERE source_id = ? ORDER BY turn_number",
+            (source_id,),
+        ).fetchall()
+
+        roles_by_content = {r["content"][:30]: r["role"] for r in rows}
+        assert roles_by_content["First real question"] == "user"
+        assert roles_by_content["Keep going please"] == "user"
+        # Compact summary is indexed but tagged compact_summary
+        cs_rows = [r for r in rows if r["role"] == "compact_summary"]
+        assert len(cs_rows) == 1
+        assert cs_rows[0]["content"] == SUMMARY_BODY
+        # compactMetadata folded into the summary thought's metadata
+        meta = json.loads(cs_rows[0]["metadata"])
+        assert meta.get("compact_metadata", {}).get("turnsCompacted") == 240
+
+    def test_compact_summary_skipped_by_title_probe(self, graph_db, jsonl_path):
+        """Session title derivation must not pick up the compact-summary body."""
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_jsonl(jsonl_path, [
+            _compact_summary_entry(SUMMARY_BODY, ts="2026-04-19T10:00:00Z"),
+            _user_entry("My real first question", ts="2026-04-19T10:00:05Z"),
+        ])
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            result = ingest_claude_code_session(graph_db, jsonl_path)
+
+        title = graph_db.conn.execute(
+            "SELECT title FROM sources WHERE id = ?", (result["source_id"],)
+        ).fetchone()["title"]
+        assert title == "My real first question"
+
+    def test_compact_summary_findable_via_fts(self, graph_db, jsonl_path):
+        """FTS still surfaces the summary content after role re-tag."""
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_jsonl(jsonl_path, [
+            _compact_summary_entry(SUMMARY_BODY, ts="2026-04-19T10:00:00Z"),
+        ])
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            ingest_claude_code_session(graph_db, jsonl_path)
+
+        rows = graph_db.conn.execute(
+            "SELECT t.role FROM thoughts_fts fts "
+            "JOIN thoughts t ON t.rowid = fts.rowid "
+            "WHERE thoughts_fts MATCH ?",
+            ("dashboard",),
+        ).fetchall()
+        assert any(r["role"] == "compact_summary" for r in rows)
+
+    def test_compact_summary_visible_in_transcript_only_alt_flag(self, graph_db, jsonl_path):
+        """isVisibleInTranscriptOnly alone (no isCompactSummary) still triggers."""
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        raw = {
+            "type": "user",
+            "uuid": "vto-1",
+            "isVisibleInTranscriptOnly": True,
+            "message": {"role": "user", "content": SUMMARY_BODY},
+            "timestamp": "2026-04-19T10:00:00Z",
+        }
+        _write_jsonl(jsonl_path, [
+            _user_entry("intro question", ts="2026-04-19T09:59:00Z"),
+            raw,
+        ])
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            result = ingest_claude_code_session(graph_db, jsonl_path)
+
+        cs_rows = graph_db.conn.execute(
+            "SELECT role FROM thoughts WHERE source_id = ? AND role = 'compact_summary'",
+            (result["source_id"],),
+        ).fetchall()
+        assert len(cs_rows) == 1

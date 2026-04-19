@@ -2138,6 +2138,29 @@ def _parse_jsonl_entry(line: str) -> dict | None:
     timestamp = raw.get("timestamp", "")
     is_sidechain = raw.get("isSidechain", False)
 
+    # Compact-summary turns: Claude's continuation boilerplate written after a
+    # context compaction. Emit a distinct entry kind (not a user bubble) so the
+    # viewer can render it as a boundary marker.
+    if raw.get("isCompactSummary") or raw.get("isVisibleInTranscriptOnly"):
+        message = raw.get("message", {})
+        content_raw = message.get("content", "")
+        text = ""
+        if isinstance(content_raw, str):
+            text = content_raw
+        elif isinstance(content_raw, list):
+            text = "".join(
+                b.get("text", "") for b in content_raw
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        if not text:
+            return None
+        return {
+            "type": "compact_summary",
+            "role": "compact_summary",
+            "content": text,
+            "timestamp": timestamp,
+        }
+
     # Queued user messages: sent while agent was working, logged as queue-operation
     # instead of user. Render enqueue entries with content as user messages.
     # Track content so we can dedup if the same text also appears as a user entry.
