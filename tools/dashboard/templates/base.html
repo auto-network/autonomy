@@ -480,6 +480,16 @@
     .sv-loading { color: #6b7280; font-size: 0.875rem; }
     .sv-error   { color: #f87171; }
 
+    /* Live/activity indicator dot. Visible by inline :style; the --working
+       modifier drives the pulse animation. Classes originate from
+       session-view.html's header row. */
+    .indicator-dot { box-shadow: 0 0 4px rgba(74, 222, 128, 0.4); }
+    .indicator-dot--working { animation: sv-dot-pulse 1.2s ease-in-out infinite; }
+    @keyframes sv-dot-pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.35; }
+    }
+
     /* Row 1 — Header (normal flow grid child) */
     .sv-header {
       background: rgba(17, 24, 39, 0.82);
