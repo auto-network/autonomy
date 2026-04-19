@@ -447,6 +447,14 @@
     html.ios-standalone .session-viewer {
       height: var(--app-height, 100vh);
     }
+    /* iOS PWA: propagate --app-height up the wrapper chain so body / main
+       don't clamp to the stale WebKit 100dvh value (787 vs screen 844),
+       which pushed .sv-input below the visible viewport. */
+    html.ios-standalone body.fullscreen-page,
+    html.ios-standalone body.fullscreen-page > .flex-1.flex.flex-col,
+    html.ios-standalone body.fullscreen-page main#content {
+      height: var(--app-height, 100dvh);
+    }
 
     /* Ready state — the grid shell */
     .sv-ready {
@@ -693,6 +701,7 @@
       <a href="/collab" class="nav-link" data-page="collab" onclick="closeSidebar()">Collab <span id="badge-collab" data-testid="badge-collab" class="nav-badge nav-badge-purple"></span></a>
       <a href="/streams" class="nav-link" data-page="streams" onclick="closeSidebar()">Streams <span id="badge-streams" data-testid="badge-streams" class="nav-badge nav-badge-green"></span></a>
       <a href="/search" class="nav-link" data-page="search" onclick="closeSidebar()">Search <span id="badge-search" data-testid="badge-search" class="nav-badge nav-badge-gray"></span></a>
+      <a href="/test/input?v=99" class="nav-link" onclick="event.preventDefault(); closeSidebar(); window.location.href='/test/input?v=99';">Test Input</a>
     </div>
     <div class="mt-auto">
       <div id="sidebar-designs" class="mb-2 space-y-1"></div>
