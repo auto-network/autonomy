@@ -161,6 +161,57 @@
       ctxWarn: _ctxWarn,
       recencyColor: _recencyColor,
 
+      // --- Active Sessions: client-side sort mode (cycled by toggle) ---
+      activeSort: (function() {
+        var saved = localStorage.getItem('sessionsActiveSort');
+        var allowed = ['lastActivity', 'idle', 'turns', 'ctx'];
+        return allowed.indexOf(saved) !== -1 ? saved : 'lastActivity';
+      })(),
+      activeSortOptions: ['lastActivity', 'idle', 'turns', 'ctx'],
+      activeSortLabels: {
+        lastActivity: 'Activity',
+        idle: 'Idle time',
+        turns: 'Turns',
+        ctx: 'Context',
+      },
+
+      get activeSortLabel() {
+        return this.activeSortLabels[this.activeSort] || 'Activity';
+      },
+
+      cycleActiveSort() {
+        var i = this.activeSortOptions.indexOf(this.activeSort);
+        var next = this.activeSortOptions[(i + 1) % this.activeSortOptions.length];
+        this.activeSort = next;
+        localStorage.setItem('sessionsActiveSort', next);
+      },
+
+      get sortedInteractive() {
+        var arr = this.interactive.slice();
+        var mode = this.activeSort;
+        var now = Date.now() / 1000;
+        arr.sort(function(a, b) {
+          switch (mode) {
+            case 'idle': {
+              var ai = a.last_activity ? now - a.last_activity : -Infinity;
+              var bi = b.last_activity ? now - b.last_activity : -Infinity;
+              return bi - ai;
+            }
+            case 'turns':
+              return (b.entry_count || 0) - (a.entry_count || 0);
+            case 'ctx':
+              return (b.context_tokens || 0) - (a.context_tokens || 0);
+            case 'lastActivity':
+            default: {
+              var av = a.last_activity || -Infinity;
+              var bv = b.last_activity || -Infinity;
+              return bv - av;
+            }
+          }
+        });
+        return arr;
+      },
+
       // --- Recent Sessions: filter + resume state ---
       recentFilter: localStorage.getItem('recentSessionFilter') || 'all',
       filterOptions: [
