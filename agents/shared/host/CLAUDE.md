@@ -29,6 +29,7 @@ graph dispatch runs                   # running/queued agent activity
 graph wait <bead-id>                 # block until bead completes (background it in your shell)
 graph context <src_id> last             # latest turns (no turn number needed)
 graph sessions --status                  # live session table from dashboard
+graph sessions --since 12h --status      # post-mortem: include dead sessions active in the last 12h
 graph notes --since 1h                   # recent notes by time
 graph crosstalk --since 1h               # recent CrossTalk messages
 graph crosstalk send <s> "msg"           # send CrossTalk message (-c - for stdin)

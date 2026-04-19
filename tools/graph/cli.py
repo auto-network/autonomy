@@ -65,6 +65,7 @@ from .ingest import (
     ingest_doc_file, ingest_docs_dir,
 )
 from .watch import watch_sessions
+from .duration import parse_duration as _shared_parse_duration
 from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
@@ -810,10 +811,14 @@ def cmd_seed(args):
     db.close()
 
 
-def _print_session_status():
-    """Print compact status table of live sessions from dashboard.db."""
+def _print_session_status(since: str | None = None):
+    """Print compact status table of sessions from dashboard.db.
+
+    Without ``since``: only live sessions (is_live=1), preserving existing behavior.
+    With ``since``: all sessions (live or dead) whose last_activity is within the window.
+    """
     import sqlite3
-    import time as _time
+    from datetime import datetime
 
     db_path = Path(__file__).parents[2] / "data" / "dashboard.db"
     if not db_path.exists():
@@ -821,41 +826,52 @@ def _print_session_status():
         return
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT * FROM tmux_sessions WHERE is_live=1 ORDER BY last_activity DESC"
-    ).fetchall()
+
+    if since is not None:
+        try:
+            secs = _shared_parse_duration(since)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        cutoff = datetime.now().timestamp() - secs
+        rows = conn.execute(
+            "SELECT * FROM tmux_sessions WHERE last_activity > ? ORDER BY last_activity DESC",
+            (cutoff,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM tmux_sessions WHERE is_live=1 ORDER BY last_activity DESC"
+        ).fetchall()
     conn.close()
     if not rows:
-        print("No live sessions")
+        print("No sessions found" if since is not None else "No live sessions")
         return
 
-    now = _time.time()
-    print(f"{'TMUX':<28} {'LABEL':<24} {'IDLE':>6} {'TURNS':>6} {'CTX':>6} {'LAST MESSAGE'}")
+    print(f"{'TMUX':<28} {'STATE':<8} {'LAST':<14} {'TOKENS':>7} {'LABEL'}")
     print("\u2500" * 100)
     for r in rows:
-        tmux = (r["tmux_name"] or "")[:27]
-        label = (r["label"] or "")[:23]
-        last_act = r["last_activity"] or r["created_at"]
-        idle_s = int(now - last_act) if last_act else 0
-        if idle_s < 60:
-            idle = f"{idle_s}s"
-        elif idle_s < 3600:
-            idle = f"{idle_s // 60}m"
-        elif idle_s < 86400:
-            idle = f"{idle_s // 3600}h"
+        row = dict(r)
+        tmux = (row.get("tmux_name") or "")[:27]
+        if row.get("is_live") == 0:
+            state = "dead"
         else:
-            idle = f"{idle_s // 86400}d"
-        turns = str(r["entry_count"] or 0)
-        ctx = r["context_tokens"] or 0
+            state = row.get("activity_state") or "idle"
+        state = state[:7]
+        last_act = row.get("last_activity") or row.get("created_at")
+        if last_act:
+            last = datetime.fromtimestamp(last_act).strftime("%m-%d %H:%M:%S")
+        else:
+            last = ""
+        ctx = row.get("context_tokens") or 0
         ctx_str = f"{ctx // 1000}K" if ctx >= 1000 else str(ctx)
-        msg = (r["last_message"] or "")[:40].replace("\n", " ")
-        print(f"{tmux:<28} {label:<24} {idle:>6} {turns:>6} {ctx_str:>6} {msg}")
+        label = (row.get("label") or "")[:40].replace("\n", " ")
+        print(f"{tmux:<28} {state:<8} {last:<14} {ctx_str:>7} {label}")
 
 
 def cmd_sessions(args):
     """Ingest Claude Code sessions."""
     if args.status:
-        _print_session_status()
+        _print_session_status(since=getattr(args, "since", None))
         return
     if is_api_mode():
         api_sessions(args)
@@ -3532,7 +3548,8 @@ def main():
     p.add_argument("--all", action="store_true", help="Ingest all projects, not just current")
     p.add_argument("--project", help="Specific project path")
     p.add_argument("--force", action="store_true", help="Re-ingest existing sessions")
-    p.add_argument("--status", action="store_true", help="Show live session status table from dashboard.db")
+    p.add_argument("--status", action="store_true", help="Show session status table from dashboard.db (live-only unless --since)")
+    p.add_argument("--since", help="With --status: include dead+live sessions active in the last duration (e.g. 10m, 2h, 12h, 3d)")
     p.set_defaults(func=cmd_sessions)
 
     # ingest-session
