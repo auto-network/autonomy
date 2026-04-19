@@ -4484,7 +4484,11 @@ async def api_dao_active_sessions(request):
 
 async def api_dao_recent_sessions(request):
     limit = int(request.query_params.get("limit", "20"))
-    sessions = await asyncio.to_thread(dao_sessions.get_recent_sessions, limit)
+    sort = request.query_params.get("sort", "lastActivity")
+    since = request.query_params.get("since", "1d")
+    sessions = await asyncio.to_thread(
+        dao_sessions.get_recent_sessions, limit, sort, since
+    )
     return JSONResponse(sessions)
 
 async def page_search(request):

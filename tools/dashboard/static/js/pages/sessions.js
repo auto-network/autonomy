@@ -187,6 +187,29 @@
         {key: 'dispatch', label: 'Dispatch'},
         {key: 'librarian', label: 'Librarian'},
       ],
+      // --- Recent Sessions: sort + since (per design acb2829b-4fc0 rev b39626f2) ---
+      recentSortOptions: [
+        {k: 'lastActivity', l: 'End time'},
+        {k: 'created',      l: 'Start time'},
+        {k: 'turns',        l: 'Most Turns'},
+        {k: 'ctx',          l: 'Most Context'},
+      ],
+      recentSinceOptions: [
+        {k: '6h',  l: '6 hours'},
+        {k: '1d',  l: '1 day'},
+        {k: '1w',  l: '1 week'},
+        {k: 'all', l: 'All time'},
+      ],
+      recentSort: (function() {
+        var saved = localStorage.getItem('recentSort');
+        var allowed = ['lastActivity', 'created', 'turns', 'ctx'];
+        return allowed.indexOf(saved) !== -1 ? saved : 'lastActivity';
+      })(),
+      recentSince: (function() {
+        var saved = localStorage.getItem('recentSince');
+        var allowed = ['6h', '1d', '1w', 'all'];
+        return allowed.indexOf(saved) !== -1 ? saved : '1d';
+      })(),
       resuming: {},
       resumeError: {},
       resumed: {},
@@ -287,6 +310,14 @@
       },
       init() {
         this.$watch('activeSort', (v) => localStorage.setItem('sessionsActiveSort', v));
+        this.$watch('recentSort', (v) => {
+          localStorage.setItem('recentSort', v);
+          this._fetchRecent();
+        });
+        this.$watch('recentSince', (v) => {
+          localStorage.setItem('recentSince', v);
+          this._fetchRecent();
+        });
 
         // Ensure global SSE handlers are registered
         window.ensureSessionMessages();
@@ -404,7 +435,10 @@
 
       async _fetchRecent() {
         try {
-          const data = await fetch('/api/dao/recent_sessions?limit=20').then(r => r.json());
+          const url = '/api/dao/recent_sessions?limit=20'
+            + '&sort=' + encodeURIComponent(this.recentSort)
+            + '&since=' + encodeURIComponent(this.recentSince);
+          const data = await fetch(url).then(r => r.json());
           if (!Array.isArray(data)) { this.recent = []; return; }
           this.recent = data.map(function(r) {
             // Use session_uuid for click-through (the session viewer keys
