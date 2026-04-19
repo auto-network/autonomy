@@ -18,7 +18,12 @@
 
     <!-- Compact-only row: dot + bell + type badge + role badge + actions/resume -->
     <div class="sc-compact-row">
-      <span class="sc-dot" :class="s.is_live ? 'sc-dot-live' : 'sc-dot-dead'"></span>
+      <span class="sc-dot"
+            :class="{
+              'sc-dot-live': s.is_live,
+              'sc-dot-dead': !s.is_live,
+              'sc-dot--working': s.is_live && s.activity_state && s.activity_state !== 'idle'
+            }"></span>
       <span class="sc-nag" :class="s.nag_enabled ? '' : 'sc-nag-off'" x-show="s.nag_enabled != null">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
@@ -43,7 +48,12 @@
 
     <!-- Stats row: dot + bell + type badge + role badge + T3 + actions/resume -->
     <div class="sc-stats">
-      <span class="sc-dot" :class="s.is_live ? 'sc-dot-live' : 'sc-dot-dead'"></span>
+      <span class="sc-dot"
+            :class="{
+              'sc-dot-live': s.is_live,
+              'sc-dot-dead': !s.is_live,
+              'sc-dot--working': s.is_live && s.activity_state && s.activity_state !== 'idle'
+            }"></span>
       <span class="sc-nag" :class="s.nag_enabled ? '' : 'sc-nag-off'" x-show="s.nag_enabled != null">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>

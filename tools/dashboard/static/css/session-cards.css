@@ -28,6 +28,7 @@
 }
 .sc-dot-live { background: #22c55e; box-shadow: 0 0 4px rgba(34,197,94,0.4); }
 .sc-dot-dead { background: #374151; }
+.sc-dot--working { animation: sv-dot-flash 0.8s ease-in-out infinite; }
 
 /* Nag bell (inline) */
 .sc-nag {
