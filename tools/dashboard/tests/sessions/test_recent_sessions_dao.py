@@ -196,6 +196,37 @@ class TestPayloadShape:
             assert "resumable" in row
             assert isinstance(row["resumable"], bool)
 
+    def test_includes_ended_at(self, isolated_dao):
+        """ended_at must flow through for the recent card 'Ended' field (auto-wa3d)."""
+        results = isolated_dao.get_recent_sessions(limit=10)
+        for row in results:
+            assert "ended_at" in row, f"missing ended_at on {row['id']}"
+            assert row["ended_at"], f"empty ended_at on {row['id']}"
+
+    def test_ended_at_uses_metadata_when_present(self, isolated_dao):
+        """When metadata.ended_at is present, the row's ended_at reflects it.
+
+        src-fresh-stale has no dashboard.db overlay, so meta.ended_at flows
+        through unchanged.
+        """
+        results = isolated_dao.get_recent_sessions(limit=10, since="all")
+        fresh = next(r for r in results if r["id"] == "src-fresh-stale")
+        assert fresh["ended_at"] == "2026-04-17T23:00:00Z"
+
+    def test_ended_at_tracks_dashboard_overlay(self, isolated_dao):
+        """Dashboard.db's last_activity wins for merged rows — ended_at follows.
+
+        src-with-label has graph.db ended_at older than dashboard.db's
+        last_activity (10 min ago); the merged row's ended_at must reflect
+        the newer dashboard timestamp, not the stale graph metadata.
+        """
+        results = isolated_dao.get_recent_sessions(limit=10)
+        with_label = next(r for r in results if r["id"] == "src-with-label")
+        # Ended_at should equal last_activity_at after the dashboard overlay.
+        assert with_label["ended_at"] == with_label["last_activity_at"], \
+            f"ended_at ({with_label['ended_at']}) drifted from " \
+            f"last_activity_at ({with_label['last_activity_at']})"
+
 
 # ══════════════════════════════════════════════════════════════════════
 # TestSortMode — `sort` query param selects the ordering column

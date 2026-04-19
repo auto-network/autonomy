@@ -171,6 +171,7 @@ def get_recent_sessions(
                 "total_turns": meta.get("total_turns", 0),
                 "created_at": r["created_at"] or "",
                 "last_activity_at": last_activity,
+                "ended_at": meta.get("ended_at") or last_activity,
                 "bead_id": meta.get("bead_id", ""),
                 "_source": "graph",
             })
@@ -231,6 +232,8 @@ def get_recent_sessions(
                 row["last_activity_at"] = datetime.fromtimestamp(
                     db_la, tz=timezone.utc
                 ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                # Dead session's last activity IS its end time — keep ended_at in sync
+                row["ended_at"] = row["last_activity_at"]
             row["_source"] = "merged"
 
         # Resumable: JSONL still exists on disk

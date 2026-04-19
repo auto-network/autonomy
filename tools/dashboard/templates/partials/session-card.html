@@ -115,13 +115,15 @@
         <span class="sc-footer-value" :class="ctxWarn(s) ? 'warn' : ''" x-text="ctxStr(s) || '—'"></span>
       </div>
       <div class="sc-footer-item">
-        <span class="sc-footer-label">idle</span>
-        <span class="sc-footer-value" :class="recencyColor(s)" x-text="idleStr(s) || '—'"></span>
+        <span class="sc-footer-label" x-text="endedOrIdleLabel(s)"></span>
+        <span class="sc-footer-value" :class="s.is_live ? recencyColor(s) : ''" x-text="endedOrIdleValue(s)"></span>
       </div>
-      <div class="sc-footer-item">
-        <span class="sc-footer-label">tmux</span>
-        <span class="sc-footer-value" x-text="s.tmux_session || '—'"></span>
-      </div>
+      <template x-if="showTmuxColumn(s)">
+        <div class="sc-footer-item">
+          <span class="sc-footer-label">tmux</span>
+          <span class="sc-footer-value" x-text="s.tmux_session || '—'"></span>
+        </div>
+      </template>
       <template x-if="s.project">
         <div class="sc-footer-item">
           <span class="sc-footer-label">project</span>
