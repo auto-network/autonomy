@@ -67,7 +67,7 @@ orgs:
     name: "Autonomy Network"
     byline: "AGI platform"
     color: "#6C63FF"
-    favicon: /static/icon.svg
+    favicon: /static/icon-192.png
   anchore:
     name: "Anchore"
     byline: "Security platform"
