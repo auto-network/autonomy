@@ -266,19 +266,19 @@ def test_shipped_config_enterprise_ng():
     assert p.default_tags == ("enterprise", "enterprise-ng")
     assert p.dispatch_labels == ("enterprise-ng",)
     mounts = {r.mount: r for r in p.repos}
-    assert mounts["/workspace/enterprise"].writable is False
+    assert mounts["/workspace/enterprise"].writable is True
     assert mounts["/workspace/enterprise_ng"].writable is True
 
 
 def test_shipped_config_enterprise_ng_has_license_artifact():
     p = pc.get_project("enterprise-ng", path=pc.DEFAULT_CONFIG_PATH)
-    assert len(p.artifacts) == 1
-    art = p.artifacts[0]
-    assert art.name == "license.yaml"
-    assert art.scope == "personal-org"
-    assert art.required is True
-    assert "license" in art.description.lower()
-    assert "license.anchore.io" in art.help
+    artifacts = {a.name: a for a in p.artifacts}
+    assert set(artifacts) == {"license.yaml", "id_ed25519", "docker-config.json"}
+    license_art = artifacts["license.yaml"]
+    assert license_art.scope == "personal-org"
+    assert license_art.required is True
+    assert "license" in license_art.description.lower()
+    assert "license.anchore.io" in license_art.help
 
 
 # ── Artifact parsing ──────────────────────────────────────────────
