@@ -33,7 +33,7 @@
 /* Nag bell (inline). Four visual states encode idle-nag × dispatch-nag. */
 .sc-nag {
   font-size: 9px; line-height: 1;
-  vertical-align: 0px; margin-right: 3px;
+  vertical-align: -1px; margin-right: 3px;
 }
 .sc-nag-off      { opacity: 0.2; filter: grayscale(1); }
 .sc-nag-idle     { /* default emoji rendering — amber bell */ }
