@@ -114,22 +114,30 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 
-  /* Thought input */
-  .thought-input-bar {
-    display: flex; gap: 6px; margin-bottom: 8px;
+  /* Page-level capture (above tabs) */
+  .page-capture {
+    display: flex; gap: 8px; margin-bottom: 14px;
   }
-  .thought-input {
+  .page-capture-input {
     flex: 1; background: #0f1623; border: 1px solid #334155;
-    border-radius: 6px; padding: 8px 10px; font-size: 13px;
+    border-radius: 8px; padding: 10px 12px; font-size: 13px;
     color: #e5e7eb; outline: none;
+    transition: border-color 120ms;
   }
-  .thought-input:focus { border-color: #a855f7; }
-  .thought-send {
-    padding: 8px 14px; border-radius: 6px;
+  .page-capture-input:focus { border-color: #a855f7; }
+  .page-capture-input::placeholder { color: #475569; }
+  .page-capture-btn {
+    padding: 10px 16px; border-radius: 8px;
     background: #3b0764; color: #d8b4fe; border: none;
     font-size: 13px; font-weight: 500; cursor: pointer;
+    transition: background 120ms;
   }
-  .thought-send:disabled { opacity: 0.4; cursor: default; }
+  .page-capture-btn:hover:not(:disabled) { background: #581c87; }
+  .page-capture-btn:disabled { opacity: 0.4; cursor: default; }
+  @media (max-width: 767px) {
+    .page-capture-input { font-size: 14px; padding: 11px 12px; }
+    .page-capture-btn { padding: 11px 14px; }
+  }
 
   /* Loading state */
   .collab-loading {
@@ -138,6 +146,16 @@
 </style>
 
 <div x-data="collabPage()" class="pb-safe" style="padding: 0 6px;">
+
+  <!-- Page-level thought capture (above tabs) -->
+  <div class="page-capture" data-testid="page-capture">
+    <input class="page-capture-input" placeholder="Capture a thought..."
+           x-model="thoughtInput" @keydown.enter="captureThought()"
+           data-testid="page-capture-input">
+    <button class="page-capture-btn" @click="captureThought()"
+            :disabled="!thoughtInput.trim()"
+            data-testid="page-capture-btn">Capture</button>
+  </div>
 
   <!-- Tab strip -->
   <div class="collab-tabs">
@@ -186,12 +204,6 @@
 
   <!-- THOUGHTS TAB -->
   <div x-show="tab === 'thoughts' && !loading">
-    <div class="thought-input-bar">
-      <input class="thought-input" placeholder="Capture a thought..."
-             x-model="thoughtInput" @keydown.enter="captureThought()">
-      <button class="thought-send" @click="captureThought()"
-              :disabled="!thoughtInput.trim()">Capture</button>
-    </div>
     <div class="collab-list">
       <template x-for="t in thoughts" :key="t.id">
         <div class="thought-card-wrap">
