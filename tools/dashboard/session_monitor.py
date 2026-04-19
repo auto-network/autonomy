@@ -75,6 +75,9 @@ def _extract_message_text(entry: dict) -> str:
     """Extract meaningful text from a JSONL entry (user or assistant)."""
     if entry.get("isSidechain"):
         return ""
+    # Compact-summary turns carry 14K-char boilerplate — not a real "last message".
+    if entry.get("isCompactSummary") or entry.get("isVisibleInTranscriptOnly"):
+        return ""
     etype = entry.get("type")
     if etype not in ("user", "assistant"):
         return ""

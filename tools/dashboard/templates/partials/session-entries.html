@@ -75,6 +75,7 @@
              resolveEntry(dEntry).type === 'assistant_text' ? 'sc-entry-assistant' : '',
              resolveEntry(dEntry).type === 'thinking' ? 'sc-entry-thinking' : '',
              resolveEntry(dEntry).type === 'system' ? 'sc-entry-system' : '',
+             resolveEntry(dEntry).type === 'compact_summary' ? 'sc-entry-compact-summary' : '',
              resolveEntry(dEntry).type === 'crosstalk' ? 'sc-entry-crosstalk' : '',
              resolveEntry(dEntry).type === 'crosstalk' && resolveEntry(dEntry).direction === 'sent' ? 'sc-entry-crosstalk-sent' : '',
            ]">
@@ -87,6 +88,19 @@
                   <span class="sc-timestamp" x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
                 </div>
                 <div class="sc-user-content" x-text="resolveEntry(dEntry).content || ''"></div>
+              </div>
+            </template>
+
+            <!-- ── Compact summary: context-compaction boundary marker ─── -->
+            <template x-if="resolveEntry(dEntry).type === 'compact_summary'">
+              <div class="sc-cs-card" @click="toggleExpand(dIdx)">
+                <div class="flex items-center gap-2 mb-1">
+                  <span class="sc-cs-label">CONTEXT COMPACTION</span>
+                  <span class="sc-timestamp" x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
+                </div>
+                <div class="sc-cs-content"
+                     :class="isExpanded(dIdx) ? '' : 'sc-cs-content-collapsed'"
+                     x-text="resolveEntry(dEntry).content || ''"></div>
               </div>
             </template>
 

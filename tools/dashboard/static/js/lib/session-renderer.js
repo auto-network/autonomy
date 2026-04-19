@@ -60,6 +60,7 @@
       if (entry.type === 'assistant_text') return 'sc-border-assistant';
       if (entry.type === 'thinking') return 'sc-border-thinking';
       if (entry.type === 'system') return 'sc-border-system';
+      if (entry.type === 'compact_summary') return 'sc-border-compact-summary';
       if (entry.type === 'crosstalk') return 'sc-border-crosstalk';
       if (entry.type === 'semantic_bash') return 'sc-border-default';
       return 'sc-border-default';

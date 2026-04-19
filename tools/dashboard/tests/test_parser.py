@@ -339,6 +339,38 @@ class TestEntryClassification:
         result = _parse_jsonl_entry(_line(FIXTURE_SYSTEM))
         assert result is None
 
+    def test_compact_summary_flagged(self):
+        """isCompactSummary=true → compact_summary entry, not user bubble."""
+        summary_body = (
+            "This session is being continued from a previous conversation "
+            "that ran out of context. The prior session did X, Y, Z."
+        )
+        raw = {
+            "parentUuid": "cs1", "isSidechain": False, "type": "user",
+            "isCompactSummary": True, "isVisibleInTranscriptOnly": True,
+            "message": {"role": "user", "content": summary_body},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(raw))
+        assert result["type"] == "compact_summary"
+        assert result["role"] == "compact_summary"
+        assert result["content"] == summary_body
+        assert result["timestamp"] == TS
+
+    def test_compact_summary_list_content(self):
+        """isCompactSummary with list-of-text-blocks content also classified."""
+        raw = {
+            "parentUuid": "cs2", "isSidechain": False, "type": "user",
+            "isCompactSummary": True,
+            "message": {"role": "user", "content": [
+                {"type": "text", "text": "This session is being continued..."}
+            ]},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(raw))
+        assert result["type"] == "compact_summary"
+        assert "continued" in result["content"]
+
     def test_sidechain_discarded(self):
         result = _parse_jsonl_entry(_line(FIXTURE_SIDECHAIN))
         assert result is None
