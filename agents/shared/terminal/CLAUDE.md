@@ -9,6 +9,27 @@ There is no bead, no task directive, and no `decision.json` to write.
 - No Docker socket — you cannot launch containers
 - **Do not use local `~/.claude/` for memory** — it is container-local and wiped on exit. Persistent knowledge goes in the graph (see below).
 
+### File handoff to host-side tools
+Files written under `/workspace/output/` appear on the host at
+`$REPO_ROOT/data/agent-runs/$AUTONOMY_SESSION[-TIMESTAMP]/`. Host-side
+tools (scraper on :8765, git operating outside the container, external
+services reached via the host) can read from this path — use it for
+inter-process handoffs rather than `/tmp` or stdout.
+
+The exact host path is emitted as `OUTPUT_DIR=...` by `launch_session_cli.py`
+when the session starts, and is derivable from `$AUTONOMY_SESSION` at runtime.
+The suffix `-TIMESTAMP` applies to foreground-launched sessions; detached
+sessions use the bare session name (`agents/launch_session_cli.py:86` vs
+`:111`).
+
+**Gotcha — pass the host path when invoking host-side tools.** Tools like
+the scraper REPL run on the host and resolve filesystem paths on the host
+side. Calling `page.set_input_files('/workspace/output/foo.pdf')` will
+silently fail because `/workspace/output/` doesn't exist on the host.
+Always translate to the host path before handing it off. A handoff
+to the scraper's `attach` verb needs the full
+`$REPO_ROOT/data/agent-runs/$AUTONOMY_SESSION/foo.pdf` form.
+
 ## Capabilities
 
 ### graph — Knowledge Graph
