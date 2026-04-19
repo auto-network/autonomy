@@ -3704,10 +3704,11 @@ async def api_session_resume(request):
                 if _val is not None:
                     extra_env[_var] = _val
             extra_env = extra_env or None
-            global_claude_md = (
-                _REPO_ROOT / proj_for_resume.claude_md
-                if proj_for_resume.claude_md else None
-            )
+            run_dir = Path(output_dir)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            primer_path = run_dir / ".claude_md"
+            primer_path.write_text(render_workspace_primer(proj_for_resume))
+            global_claude_md = primer_path
             startup_script = (
                 _REPO_ROOT / proj_for_resume.startup
                 if proj_for_resume.startup else None

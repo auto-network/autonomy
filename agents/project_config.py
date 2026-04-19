@@ -81,7 +81,6 @@ class ProjectConfig:
     graph_project: str                       # required — GRAPH_SCOPE
     repos: tuple[RepoMount, ...] = ()
     working_dir: str | None = None
-    claude_md: str | None = None
     startup: str | None = None
     dind: bool = False
     network_host: bool = True                # --network=host or default bridge
@@ -203,7 +202,6 @@ def _parse_project(project_id: str, raw: Any) -> ProjectConfig:
         graph_project=graph_project,
         repos=repos,
         working_dir=_opt_str(raw, "working_dir"),
-        claude_md=_opt_str(raw, "claude_md"),
         startup=_opt_str(raw, "startup"),
         dind=bool(raw.get("dind", False)),
         network_host=bool(raw.get("network_host", True)),

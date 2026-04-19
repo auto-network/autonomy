@@ -10,7 +10,10 @@ Tests:
 - Session identity preservation: dead session → reuse original tmux_name + label
 - History backfill: resumed session passes JSONL path for full history
 - Re-resume: a session that died after resume can be resumed again
+- Workspace primer is rendered into the run_dir on resume
 """
+from pathlib import Path
+
 import pytest
 
 
@@ -352,6 +355,34 @@ class TestActiveSessionGuard:
             json={"source_id": resume_env["container_source_id"]},
         )
         assert resp.status_code == 200
+
+
+class TestWorkspacePrimerRendering:
+    """Resumed workspace sessions render the primer into the run_dir."""
+
+    def test_workspace_resume_writes_primer_to_run_dir(self, test_client, resume_env):
+        """Resume of a workspace session should regenerate .claude_md from the
+        current workspace config, identical to the create path."""
+        test_client._dead_sessions["abc123-def456"] = {
+            "tmux_name": "auto-0326-142603",
+            "is_live": 0,
+            "label": "Workspace session",
+            "jsonl_path": resume_env["jsonl_file"],
+            "session_uuid": "abc123-def456",
+            "type": "container",
+            "project": "autonomy",
+        }
+        resp = test_client.post(
+            "/api/session/resume",
+            json={"source_id": resume_env["container_source_id"]},
+        )
+        assert resp.status_code == 200
+        run_dir = Path(resume_env["jsonl_file"]).parent.parent.parent
+        primer_path = run_dir / ".claude_md"
+        assert primer_path.exists(), f"primer not rendered at {primer_path}"
+        content = primer_path.read_text()
+        assert "Workspace Environment" in content
+        assert "autonomy-agent:dashboard" in content
 
 
 class TestRecentSessionsEnriched:
