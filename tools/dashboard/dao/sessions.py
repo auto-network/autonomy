@@ -36,6 +36,7 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
             "type": row["type"],
             "tmux_session": row["tmux_name"],
             "bead_id": row.get("bead_id"),
+            "activity_state": row.get("activity_state", "idle"),
         })
     sessions.sort(key=lambda s: s["age_seconds"])
     return sessions
