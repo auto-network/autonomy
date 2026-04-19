@@ -21,6 +21,7 @@ import importlib
 import json
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -302,3 +303,178 @@ class TestSinceWindow:
         results = isolated_dao.get_recent_sessions(limit=10, since="zzz")
         default = isolated_dao.get_recent_sessions(limit=10, since="all")
         assert len(results) == len(default)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# TestTypeQuotas — per-type bucket quotas keep interactive alive when
+# dispatch / librarian volume spikes (auto-wyo79).
+# ══════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def quota_dao(tmp_path, monkeypatch):
+    """graph.db seeded with many dispatch + librarian rows + a few interactive."""
+    graph_db_path = tmp_path / "graph.db"
+    dashboard_db_path = tmp_path / "dashboard.db"
+
+    from tools.graph.db import GraphDB
+    g = GraphDB(graph_db_path)
+
+    now = time.time()
+
+    def _iso(delta_sec: float) -> str:
+        return datetime.fromtimestamp(now - delta_sec, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+    # Seed 50 dispatch rows (all within 1d), 3 interactive rows, 5 librarian rows
+    for i in range(50):
+        g.conn.execute(
+            """INSERT INTO sources
+            (id, type, platform, project, title, file_path, metadata, created_at,
+             ingested_at, last_activity_at)
+            VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+            (
+                f"src-dispatch-{i:03d}",
+                f"Dispatch run {i}",
+                f"/home/jeremy/sessions/dispatch-{i}.jsonl",
+                json.dumps({
+                    "session_uuid": f"uuid-dispatch-{i}",
+                    "session_type": "dispatch",
+                    "bead_id": f"auto-d{i:03d}",
+                    "total_turns": 10 + i,
+                }),
+                _iso(7200 + i * 60),
+                _iso(7200 + i * 60),
+                # Stagger within 1d: 1 minute apart, so all within 1 day
+                _iso(60 + i * 30),
+            ),
+        )
+    for i in range(5):
+        g.conn.execute(
+            """INSERT INTO sources
+            (id, type, platform, project, title, file_path, metadata, created_at,
+             ingested_at, last_activity_at)
+            VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+            (
+                f"src-librarian-{i:03d}",
+                f"Librarian task {i}",
+                f"/home/jeremy/sessions/librarian-{i}.jsonl",
+                json.dumps({
+                    "session_uuid": f"uuid-librarian-{i}",
+                    "session_type": "librarian",
+                    "total_turns": 5,
+                }),
+                _iso(3600 + i * 60),
+                _iso(3600 + i * 60),
+                _iso(300 + i * 30),
+            ),
+        )
+    for i in range(3):
+        g.conn.execute(
+            """INSERT INTO sources
+            (id, type, platform, project, title, file_path, metadata, created_at,
+             ingested_at, last_activity_at)
+            VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+            (
+                f"src-interactive-{i:03d}",
+                f"Interactive session {i}",
+                f"/home/jeremy/sessions/interactive-{i}.jsonl",
+                json.dumps({
+                    "session_uuid": f"uuid-interactive-{i}",
+                    "session_type": "interactive",
+                    "total_turns": 20 + i,
+                }),
+                _iso(1800 + i * 60),
+                _iso(1800 + i * 60),
+                _iso(120 + i * 30),
+            ),
+        )
+    g.commit()
+    g.close()
+
+    # Stub out dashboard.db
+    monkeypatch.setenv("DASHBOARD_DB", str(dashboard_db_path))
+    from tools.dashboard.dao import dashboard_db as ddb
+    importlib.reload(ddb)
+    ddb.init_db(dashboard_db_path)
+
+    from tools.dashboard.dao import sessions as sessions_dao
+    monkeypatch.setattr(sessions_dao, "_GRAPH_DB", graph_db_path)
+    yield sessions_dao
+
+
+class TestTypeQuotas:
+    """Per-type quotas preserve interactive sessions under dispatch pressure."""
+
+    def test_quotas_preserve_interactive_under_dispatch_pressure(self, quota_dao):
+        """50 dispatch + 5 librarian + 3 interactive — defaults cap each group.
+
+        Default quota: 20 interactive + 10 dispatch + 10 librarian.
+        Expected: all 3 interactive + 10 dispatch + 5 librarian = 18 rows.
+        """
+        from datetime import datetime, timezone
+        results = quota_dao.get_recent_sessions(since="1d", type_group="all")
+        groups = {"interactive": [], "dispatch": [], "librarian": []}
+        for r in results:
+            groups[r["session_type"]].append(r)
+        assert len(groups["interactive"]) == 3, \
+            f"expected all 3 interactive rows; got {len(groups['interactive'])}"
+        assert len(groups["dispatch"]) == 10, \
+            f"expected 10 dispatch rows (quota cap); got {len(groups['dispatch'])}"
+        assert len(groups["librarian"]) == 5, \
+            f"expected 5 librarian rows (all of them); got {len(groups['librarian'])}"
+        assert len(results) == 18
+
+    def test_type_chip_routes_entire_budget(self, quota_dao):
+        """type_group='interactive' returns only interactive rows, up to 50."""
+        results = quota_dao.get_recent_sessions(since="1d", type_group="interactive")
+        assert all(r["session_type"] == "interactive" for r in results), \
+            f"non-interactive leaked: {[r['session_type'] for r in results]}"
+        assert len(results) == 3
+
+    def test_type_chip_dispatch_routes_budget(self, quota_dao):
+        """type_group='dispatch' funnels all 50 budget into dispatch (50 rows available)."""
+        results = quota_dao.get_recent_sessions(since="1d", type_group="dispatch")
+        assert all(r["session_type"] == "dispatch" for r in results)
+        assert len(results) == 50
+
+    def test_sort_applies_across_union(self, quota_dao):
+        """sort=turns sorts the merged union, not per-group."""
+        results = quota_dao.get_recent_sessions(
+            since="1d", type_group="all", sort="turns"
+        )
+        turn_counts = [(r.get("entry_count") or r.get("total_turns") or 0) for r in results]
+        assert turn_counts == sorted(turn_counts, reverse=True), \
+            f"turns not monotonically decreasing: {turn_counts}"
+
+    def test_quotas_respect_since_window(self, quota_dao):
+        """Rows outside the since window don't count toward quotas."""
+        # The fixture staggers dispatch rows at 60 + i*30 seconds (up to 1590s).
+        # A tight since=30m window should keep only the first few dispatches.
+        results = quota_dao.get_recent_sessions(since="30m", type_group="dispatch")
+        # Dispatch rows within the 30m window: all with last_activity_at <= 1800s
+        # Those are at delta 60, 90, ..., 1590 → 50 rows all fit in 30m.
+        # Retry with a tighter window:
+        results = quota_dao.get_recent_sessions(since="5m", type_group="dispatch")
+        # Within 5m (300s), deltas 60, 90, 120, 150, 180, 210, 240, 270 → 8 rows
+        assert len(results) == 8, \
+            f"since=5m should admit only dispatch rows within 5m, got {len(results)}"
+
+    def test_unknown_type_group_falls_back_to_all(self, quota_dao):
+        """Invalid type_group values route to the 'all' quota table."""
+        default = quota_dao.get_recent_sessions(since="1d", type_group="all")
+        bogus = quota_dao.get_recent_sessions(since="1d", type_group="garbage")
+        assert [r["id"] for r in default] == [r["id"] for r in bogus]
+
+    def test_empty_group_consumes_no_quota(self, quota_dao):
+        """If a group has zero rows in the window, its quota is simply unused.
+
+        type_group='librarian' with a tight since window that excludes all
+        librarian rows returns an empty list (not padded from other groups).
+        """
+        results = quota_dao.get_recent_sessions(
+            since="30s", type_group="librarian"
+        )
+        assert results == [], \
+            f"expected no padding from other groups; got {[r['session_type'] for r in results]}"
