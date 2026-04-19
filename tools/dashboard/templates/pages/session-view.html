@@ -1,6 +1,4 @@
-<div x-data="sessionViewerPage()"
-     class="session-viewer"
-     x-effect="if (!isLive && showTerminal) { showTerminal = false; _disposeTerminal(); }">
+<div x-data="sessionViewerPage()" class="session-viewer">
 
   <!-- Loading -->
   <template x-if="state === 'loading'">
