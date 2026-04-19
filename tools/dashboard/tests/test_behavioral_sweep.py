@@ -130,19 +130,39 @@ SWEEP_SESSIONS = [
     },
 ]
 
+# Timestamps are wall-clock-relative so the default `since=1d` filter
+# keeps all three rows. Spread of turns/ctx values lets `Most Turns` and
+# `Most Context` reorderings be asserted.
+def _iso_minutes_ago(minutes: int) -> str:
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    return (_dt.now(_tz.utc) - _td(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 SWEEP_RECENT_SESSIONS = [
+    # Most turns (627) — placed active 10 minutes ago so sort=lastActivity
+    # puts it second-most-recent. Under sort=turns it must float to the top.
     {"id": "src-sweep-aaa111", "type": "session", "date": "2026-03-25",
      "title": "Alpha history session", "project": "autonomy",
      "session_type": "interactive", "resumable": True,
-     "created_at": "2026-03-25T10:00:00Z"},
+     "created_at": _iso_minutes_ago(90), "last_activity_at": _iso_minutes_ago(10),
+     "entry_count": 627, "context_tokens": 120000,
+     "total_turns": 627, "total_tokens": 120000},
+    # 0 turns / 0 ctx — most-recent activity; with sort=lastActivity it's
+    # first, with sort=turns or sort=ctx it should fall to the bottom.
     {"id": "src-sweep-bbb222", "type": "session", "date": "2026-03-24",
-     "title": "Beta history session", "project": "autonomy",
+     "title": "<crosstalk echo>", "project": "autonomy",
      "session_type": "dispatch", "resumable": False,
-     "created_at": "2026-03-24T10:00:00Z"},
+     "created_at": _iso_minutes_ago(5), "last_activity_at": _iso_minutes_ago(5),
+     "entry_count": 0, "context_tokens": 0,
+     "total_turns": 0, "total_tokens": 0},
+    # Medium turns — oldest within the 1d window. Excluded when since=6h if
+    # we push its timestamp beyond 6h; left inside for the default case.
     {"id": "src-sweep-ccc333", "type": "session", "date": "2026-03-23",
      "title": "Gamma history session", "project": "default",
      "session_type": "librarian", "resumable": False,
-     "created_at": "2026-03-23T10:00:00Z"},
+     "created_at": _iso_minutes_ago(300), "last_activity_at": _iso_minutes_ago(120),
+     "entry_count": 84, "context_tokens": 55000,
+     "total_turns": 84, "total_tokens": 55000},
 ]
 
 SWEEP_SESSION_ENTRIES = {
@@ -823,6 +843,49 @@ SESSIONS_PAGE_CHECKS = """
     r.has_active_section = !!document.querySelector('[data-testid="active-sessions-section"]');
     r.has_recent_section = !!document.querySelector('[data-testid="recent-sessions-section"]');
 
+    // Recent Sessions sort + since dropdowns (design acb2829b-4fc0 rev b39626f2)
+    var recentSortTrigger = document.querySelector('[data-testid="recent-sort-toggle"]');
+    var recentSinceTrigger = document.querySelector('[data-testid="recent-since-toggle"]');
+    r.has_recent_sort_toggle = !!recentSortTrigger;
+    r.has_recent_since_toggle = !!recentSinceTrigger;
+    r.recent_sort_value = recentSortTrigger
+        ? (recentSortTrigger.querySelector('.sort-toggle-value') || {}).textContent || ''
+        : '';
+    r.recent_since_value = recentSinceTrigger
+        ? (recentSinceTrigger.querySelector('.sort-toggle-value') || {}).textContent || ''
+        : '';
+    r.recent_sort_value = r.recent_sort_value.trim();
+    r.recent_since_value = r.recent_since_value.trim();
+
+    // Open the Sort menu and inspect its options (then close via a synthetic
+    // click.away). Options must match design labels exactly.
+    var recentSortOptions = [];
+    var recentSinceOptions = [];
+    var recentSortMenu = document.querySelector('[data-testid="recent-sort-toggle-menu"]');
+    var recentSinceMenu = document.querySelector('[data-testid="recent-since-toggle-menu"]');
+    if (recentSortMenu) {
+        recentSortMenu.querySelectorAll('.sort-option > span:first-child').forEach(function(el) {
+            var t = el.textContent.trim();
+            if (t) recentSortOptions.push(t);
+        });
+    }
+    if (recentSinceMenu) {
+        recentSinceMenu.querySelectorAll('.sort-option > span:first-child').forEach(function(el) {
+            var t = el.textContent.trim();
+            if (t) recentSinceOptions.push(t);
+        });
+    }
+    r.recent_sort_options = recentSortOptions;
+    r.recent_since_options = recentSinceOptions;
+
+    // Recent row ordering under default sort (most-recent-activity first)
+    var recentOrderIds = [];
+    recentRows.forEach(function(row) {
+        var sid = row.getAttribute('data-session-id');
+        if (sid) recentOrderIds.push(sid);
+    });
+    r.recent_order_ids = recentOrderIds;
+
     // Resume button regression guard — failed 3 times, never again.
     var resumeBtns = document.querySelectorAll('[data-testid="resume-btn"]');
     r.resume_btn_count = resumeBtns.length;
@@ -837,6 +900,53 @@ SESSIONS_PAGE_CHECKS = """
 """
 
 # ── Resume button state-transition async check ──────────────────────
+
+RECENT_SORT_SINCE_BEHAVIOR_CHECKS = """(async () => {
+    try {
+        var r = {};
+        var tick = async () => {
+            await Alpine.nextTick();
+            await new Promise(r => setTimeout(r, 400));
+        };
+
+        var root = document.querySelector('[x-data="sessionsPage()"]');
+        if (!root) return JSON.stringify({error: 'sessionsPage not found'});
+        var data = Alpine.$data(root);
+
+        // Baseline: sort=lastActivity, since=1d — most-recent row first.
+        data.recentSort = 'lastActivity';
+        data.recentSince = 'all';
+        await tick();
+        r.initial_ids = data.recent.map(function(s) { return s.id; });
+
+        // Sort by Most Turns — 627-turn session must float to the top.
+        data.recentSort = 'turns';
+        await tick();
+        r.turns_ids = data.recent.map(function(s) { return s.id; });
+        r.turns_first = r.turns_ids[0] || '';
+
+        // Filter by Since=6h — 2h-old row still included, 2d-old excluded.
+        data.recentSort = 'lastActivity';
+        data.recentSince = '6h';
+        await tick();
+        r.since_6h_ids = data.recent.map(function(s) { return s.id; });
+
+        // Persistence — changing these writes to localStorage.
+        r.sort_in_storage = localStorage.getItem('recentSort');
+        r.since_in_storage = localStorage.getItem('recentSince');
+
+        // Reset to defaults so other tests aren't perturbed.
+        data.recentSort = 'lastActivity';
+        data.recentSince = '1d';
+        await tick();
+
+        return JSON.stringify(r);
+    } catch(e) {
+        return JSON.stringify({error: e.message, stack: e.stack});
+    }
+})();
+"""
+
 
 RESUME_STATE_TRANSITION_CHECKS = """(async () => {
     try {
@@ -1302,6 +1412,34 @@ class TestSessionsPageBehavior:
         assert c.get("has_recent"), f"No recent sessions visible (count={c.get('recent_count')})"
         assert c["recent_count"] == 3, f"Expected 3 recent sessions, got {c['recent_count']}"
 
+    def test_recent_sort_and_since_dropdowns_present(self):
+        """Recent Sessions header has a Sort dropdown and a Since dropdown."""
+        c = self._checks
+        assert c.get("has_recent_sort_toggle"), "Missing [data-testid='recent-sort-toggle']"
+        assert c.get("has_recent_since_toggle"), "Missing [data-testid='recent-since-toggle']"
+
+    def test_recent_sort_defaults(self):
+        """Default Sort label is 'End time' and default Since label is '1 day'."""
+        c = self._checks
+        assert c.get("recent_sort_value") == "End time", \
+            f"Expected default Sort 'End time', got {c.get('recent_sort_value')!r}"
+        assert c.get("recent_since_value") == "1 day", \
+            f"Expected default Since '1 day', got {c.get('recent_since_value')!r}"
+
+    def test_recent_sort_options_match_design(self):
+        """Sort menu has exactly the 4 design-specified option labels."""
+        c = self._checks
+        assert c.get("recent_sort_options") == [
+            "End time", "Start time", "Most Turns", "Most Context"
+        ], f"Sort options mismatch: {c.get('recent_sort_options')}"
+
+    def test_recent_since_options_match_design(self):
+        """Since menu has exactly the 4 design-specified option labels."""
+        c = self._checks
+        assert c.get("recent_since_options") == [
+            "6 hours", "1 day", "1 week", "All time"
+        ], f"Since options mismatch: {c.get('recent_since_options')}"
+
     def test_no_template_artifacts(self):
         """No raw Jinja or Alpine template syntax visible to the user."""
         c = self._checks
@@ -1378,6 +1516,52 @@ class TestResumeButtonStateTransition:
         assert c.get("enabled_after_clear") is True, (
             "Resume button should re-enable after resuming is cleared, "
             f"got: {c.get('enabled_after_clear')}"
+        )
+
+
+class TestRecentSortAndSinceBehavior:
+    """Recent Sessions sort + since — reordering and filter behaviors.
+
+    Drives the Alpine component directly (no menu clicks) to check:
+      * `Most Turns` promotes the 627-turn session above 0-turn rows.
+      * `Since: 6 hours` excludes rows older than 6h.
+      * Selections persist to localStorage (the watchers wire to it).
+    REGRESSION GUARD: auto-d0mt acceptance.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            "/sessions",
+            RECENT_SORT_SINCE_BEHAVIOR_CHECKS,
+            wait_ms=1500,
+        )
+        request.cls._checks = result
+
+    def test_most_turns_promotes_high_turn_session(self):
+        """Sort=turns places the 627-turn row above the 0-turn row."""
+        c = self._checks
+        assert c.get("turns_first") == "src-sweep-aaa111", (
+            f"Most Turns should place the 627-turn session first; got "
+            f"{c.get('turns_first')!r}, full order {c.get('turns_ids')}"
+        )
+
+    def test_since_6h_excludes_ancient_rows(self):
+        """Since=6h still includes the 2h-old row (src-sweep-ccc333 @120m)."""
+        c = self._checks
+        ids = c.get("since_6h_ids") or []
+        assert "src-sweep-ccc333" in ids, (
+            f"Since=6h should include row at 120min; got {ids}"
+        )
+        assert "src-sweep-aaa111" in ids, (
+            f"Since=6h should include row at 10min; got {ids}"
+        )
+
+    def test_selections_persist_to_localstorage(self):
+        """Changing recentSort/recentSince writes through to localStorage."""
+        c = self._checks
+        assert c.get("since_in_storage") in ("6h", "1d"), (
+            f"Expected '6h' or '1d' in localStorage, got {c.get('since_in_storage')!r}"
         )
 
 
