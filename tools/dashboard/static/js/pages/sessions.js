@@ -237,8 +237,12 @@
       resumed: {},
 
       setRecentFilter(f) {
+        if (this.recentFilter === f) return;
         this.recentFilter = f;
         localStorage.setItem('recentSessionFilter', f);
+        // Server applies per-type quotas based on ?type=, so a chip change
+        // needs a refetch to rebalance the budget toward the selected group.
+        this._fetchRecent();
       },
 
       get filtered() {
@@ -466,7 +470,7 @@
 
       async _fetchRecent() {
         try {
-          const url = '/api/dao/recent_sessions?limit=20'
+          const url = '/api/dao/recent_sessions?type=' + encodeURIComponent(this.recentFilter || 'all')
             + '&sort=' + encodeURIComponent(this.recentSort)
             + '&since=' + encodeURIComponent(this.recentSince);
           const data = await fetch(url).then(r => r.json());

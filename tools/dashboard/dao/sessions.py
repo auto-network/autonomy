@@ -25,6 +25,39 @@ _GRAPH_DB = Path(__file__).parents[3] / "data" / "graph.db"
 _SINCE_WINDOWS = {"6h": "6h", "1d": "1d", "1w": "1w"}
 _VALID_RECENT_SORTS = {"lastActivity", "created", "turns", "ctx"}
 
+# Session-type → group mapping. The DAO emits 'interactive', 'dispatch',
+# or 'librarian' from _derive_session_type, but extra values are routed
+# defensively so legacy metadata doesn't fall on the floor.
+_SESSION_TYPE_GROUPS: dict[str, str] = {
+    "interactive": "interactive",
+    "host": "interactive",
+    "terminal": "interactive",
+    "chatwith": "interactive",
+    "session": "interactive",
+    "dispatch": "dispatch",
+    "librarian": "librarian",
+}
+
+# Per-type quotas. When the UI's filter chip is "all", each group gets its
+# own bucket so a busy dispatch/librarian queue can't starve interactive
+# sessions out of the top-N. When a specific chip is selected the whole
+# budget funnels into that one group.
+_DEFAULT_TYPE_QUOTAS: dict[str, dict[str, int]] = {
+    "all": {"interactive": 20, "dispatch": 10, "librarian": 10},
+    "interactive": {"interactive": 50, "dispatch": 0, "librarian": 0},
+    "dispatch": {"interactive": 0, "dispatch": 50, "librarian": 0},
+    "librarian": {"interactive": 0, "dispatch": 0, "librarian": 50},
+}
+
+
+def _group_for_session_type(session_type: str | None) -> str:
+    """Map a DAO session_type to one of the three quota groups.
+
+    Unknown / missing values default to 'interactive' — the safest bucket,
+    since human-attended sessions are the ones we most need to preserve.
+    """
+    return _SESSION_TYPE_GROUPS.get((session_type or "").strip(), "interactive")
+
 
 def _iso_to_epoch(ts: str | None) -> float:
     """Parse ISO 8601 timestamp to a unix epoch float; returns 0.0 on failure."""
@@ -87,20 +120,29 @@ def _graph_sources_have_last_activity_column(conn: sqlite3.Connection) -> bool:
 
 
 def get_recent_sessions(
-    limit: int = 20,
+    limit: int | None = None,
     sort: str = "lastActivity",
     since: str = "1d",
+    type_group: str = "all",
 ) -> list[dict]:
     """Fetch recent session sources, ordered and filtered for the Recent list.
 
     Args:
-      limit: cap rows returned after sorting.
+      limit: legacy row cap — retained for call-site compatibility. Quotas
+             are the primary budget; if ``limit`` is provided it acts only
+             as a final cap on the merged result.
       sort:  one of ``lastActivity|created|turns|ctx`` (design acb2829b-4fc0).
              Falls back to ``lastActivity`` on unknown values.
       since: ``6h|1d|1w|all``. Parsed via ``tools.graph.duration.parse_duration``;
              rows whose most-recent activity is older than ``now() - dur`` are
              dropped. ``all`` (or unknown) disables the filter. Matches the
              ``graph sessions --status --since`` CLI (auto-0r86).
+      type_group: ``all|interactive|dispatch|librarian`` — picks the per-type
+             quota table (see ``_DEFAULT_TYPE_QUOTAS``). ``all`` mixes 20
+             interactive + 10 dispatch + 10 librarian so a busy dispatch or
+             librarian queue can't starve interactive sessions out of the
+             window. Selecting a specific chip funnels the whole budget into
+             that one group.
 
     Strategy:
       1. Pull recent session rows from graph.db (the historical tail).
@@ -108,14 +150,21 @@ def get_recent_sessions(
          that registered with the session monitor, dashboard.db has richer
          metadata (label, entry_count, context_tokens, role) than graph.db.
       3. Filter out currently-live sessions (they belong on Active list).
-      4. Apply the ``since`` window, then sort by the requested column, then
-         return the top *limit*.
+      4. Apply the ``since`` window.
+      5. Bucket rows by session-type group and trim each bucket to its
+         quota using the requested sort column.
+      6. Merge the buckets and sort the union by the same column.
     """
     if not _GRAPH_DB.exists():
         return []
 
     if sort not in _VALID_RECENT_SORTS:
         sort = "lastActivity"
+
+    if type_group not in _DEFAULT_TYPE_QUOTAS:
+        type_group = "all"
+    quotas = _DEFAULT_TYPE_QUOTAS[type_group]
+    total_quota = sum(quotas.values())
 
     # Compute the since cutoff once (epoch seconds). ``all`` / unknown → None.
     since_cutoff: float | None = None
@@ -132,11 +181,11 @@ def get_recent_sessions(
         conn = sqlite3.connect(str(_GRAPH_DB))
         conn.row_factory = sqlite3.Row
         has_la = _graph_sources_have_last_activity_column(conn)
-        # Order by activity if available; oversample so the dashboard-overlay
-        # step can replace stale graph titles with rich dashboard data
-        # without truncating the candidate set, and so non-activity sorts
-        # (turns / ctx) have enough rows to re-rank against.
-        sample_limit = max(limit * 10, 200) if sort in ("turns", "ctx") else max(limit * 5, 100)
+        # Oversample aggressively so each type bucket has enough candidates
+        # to fill its quota even when one group dominates the window. The
+        # total quota is ~40–50, so sampling several hundred rows covers
+        # realistic volumes without making the SQL expensive.
+        sample_limit = max(total_quota * 25, 1000) if sort in ("turns", "ctx") else max(total_quota * 15, 600)
         if has_la:
             sql = (
                 "SELECT id, type, project, title, created_at, last_activity_at,"
@@ -250,7 +299,7 @@ def get_recent_sessions(
 
         merged[row["id"]] = row
 
-    # ── Step 4: apply `since` window, sort, take top N ────────────
+    # ── Step 4: apply `since` window ──────────────────────────────
     rows = list(merged.values())
     if since_cutoff is not None:
         rows = [
@@ -258,24 +307,38 @@ def get_recent_sessions(
             if _iso_to_epoch(r.get("last_activity_at") or r.get("created_at", "")) >= since_cutoff
         ]
 
+    # Sort key matching the requested column. Used once per-bucket (to pick
+    # the top rows that fit the quota) and once on the merged union.
     if sort == "created":
-        rows.sort(key=lambda r: _iso_to_epoch(r.get("created_at", "")), reverse=True)
+        def _sort_key(r: dict) -> float:
+            return _iso_to_epoch(r.get("created_at", ""))
     elif sort == "turns":
-        rows.sort(
-            key=lambda r: r.get("entry_count") or r.get("total_turns") or 0,
-            reverse=True,
-        )
+        def _sort_key(r: dict) -> float:
+            return float(r.get("entry_count") or r.get("total_turns") or 0)
     elif sort == "ctx":
-        rows.sort(
-            key=lambda r: r.get("context_tokens") or r.get("total_tokens") or 0,
-            reverse=True,
-        )
+        def _sort_key(r: dict) -> float:
+            return float(r.get("context_tokens") or r.get("total_tokens") or 0)
     else:  # "lastActivity" (default)
-        rows.sort(
-            key=lambda r: _iso_to_epoch(r.get("last_activity_at", "")),
-            reverse=True,
-        )
-    out = rows[:limit]
+        def _sort_key(r: dict) -> float:
+            return _iso_to_epoch(r.get("last_activity_at", ""))
+
+    # ── Step 5: bucket by type group and trim to quota ────────────
+    buckets: dict[str, list[dict]] = {"interactive": [], "dispatch": [], "librarian": []}
+    for row in rows:
+        group = _group_for_session_type(row.get("session_type"))
+        buckets[group].append(row)
+
+    trimmed: list[dict] = []
+    for group, bucket in buckets.items():
+        q = quotas.get(group, 0)
+        if q <= 0:
+            continue
+        bucket.sort(key=_sort_key, reverse=True)
+        trimmed.extend(bucket[:q])
+
+    # ── Step 6: sort the merged union by the requested column ─────
+    trimmed.sort(key=_sort_key, reverse=True)
+    out = trimmed if limit is None else trimmed[:limit]
 
     # Strip internal field
     for r in out:

@@ -101,9 +101,16 @@ class TestRecentSessionsAPI:
         for field in ("id", "type", "date", "title"):
             assert field in session, f"missing field: {field}"
 
-    def test_limit_param(self, test_client):
-        data = test_client.get("/api/dao/recent_sessions?limit=2").json()
-        assert len(data) <= 2
+    def test_limit_param_is_deprecated(self, test_client):
+        """`limit` is retired in favour of server-side per-type quotas (auto-wyo79).
+
+        Passing it must not raise, and must not shrink the payload below the
+        per-type quota budget.
+        """
+        no_limit = test_client.get("/api/dao/recent_sessions").json()
+        with_limit = test_client.get("/api/dao/recent_sessions?limit=2").json()
+        assert len(no_limit) == len(with_limit), \
+            f"limit=2 changed row count ({len(no_limit)} vs {len(with_limit)})"
 
 
 # ── Sessions Page HTML ──────────────────────────────────────────────
