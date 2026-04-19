@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import pytest
 
-from agents.primer_renderer import render_workspace_primer
+from agents.primer_renderer import (
+    PrimerOverlayDriftError,
+    _find_overlay_writability_drift,
+    render_workspace_primer,
+)
 from agents.project_config import ProjectConfig, RepoMount
 
 
@@ -251,3 +255,106 @@ def test_output_is_non_trivial_markdown():
     out = render_workspace_primer(_cfg())
     assert len(out) > 2000
     assert out.startswith("# ")
+
+
+# ── Overlay / config drift detection (bead auto-yj7o) ───────────────
+
+def test_drift_helper_flags_readonly_claim_on_writable_repo():
+    cfg = _cfg(repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),))
+    drift = _find_overlay_writability_drift(
+        cfg, "Foo repo mounted read-only at `/workspace/foo`. Do not edit.\n"
+    )
+    assert drift
+    assert "/workspace/foo" in drift[0]
+    assert "writable=true" in drift[0]
+
+
+def test_drift_helper_flags_writable_claim_on_readonly_repo():
+    cfg = _cfg(repos=(RepoMount(url="u", mount="/workspace/foo", writable=False),))
+    drift = _find_overlay_writability_drift(
+        cfg, "Foo repo is writable at `/workspace/foo` — edit freely.\n"
+    )
+    assert drift
+    assert "/workspace/foo" in drift[0]
+    assert "writable=false" in drift[0]
+
+
+def test_drift_helper_passes_when_overlay_agrees():
+    cfg = _cfg(repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),))
+    drift = _find_overlay_writability_drift(
+        cfg, "Foo repo mounted writable at `/workspace/foo` — edit freely.\n"
+    )
+    assert drift == []
+
+
+def test_drift_helper_skips_ambiguous_window():
+    """If both words appear near the mount (e.g. contextual commentary),
+    the overlay is not asserting a single claim — don't flag."""
+    cfg = _cfg(repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),))
+    drift = _find_overlay_writability_drift(
+        cfg,
+        "`/workspace/foo` is writable; dispatch a read-only bead for other repos.\n",
+    )
+    assert drift == []
+
+
+def test_drift_helper_ignores_mount_prefix_collision():
+    """`/workspace/enterprise` must not match a substring of
+    `/workspace/enterprise_ng` when the latter is the only path mentioned."""
+    cfg = _cfg(repos=(
+        RepoMount(url="u", mount="/workspace/enterprise", writable=True),
+    ))
+    drift = _find_overlay_writability_drift(
+        cfg, "NG repo mounted read-only at `/workspace/enterprise_ng`.\n"
+    )
+    assert drift == []
+
+
+def test_drift_helper_ignores_overlay_with_no_mount_mentioned():
+    cfg = _cfg(repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),))
+    drift = _find_overlay_writability_drift(
+        cfg, "General notes about the project with no mount paths.\n"
+    )
+    assert drift == []
+
+
+def test_render_raises_when_overlay_contradicts_config(tmp_path, monkeypatch):
+    """Intentionally-wrong overlay: config says writable=true, overlay says
+    read-only. Render must fail rather than ship contradictory guidance."""
+    monkeypatch.setattr("agents.primer_renderer.PROJECTS_DIR", tmp_path)
+    (tmp_path / "sample").mkdir()
+    (tmp_path / "sample" / "primer.md").write_text(
+        "- **Foo repo**: mounted read-only at `/workspace/foo`. Do not edit.\n"
+    )
+    cfg = _cfg(
+        id="sample",
+        repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),),
+    )
+    with pytest.raises(PrimerOverlayDriftError) as exc:
+        render_workspace_primer(cfg)
+    assert "/workspace/foo" in str(exc.value)
+    assert "sample" in str(exc.value)
+
+
+def test_render_succeeds_when_overlay_agrees_with_config(tmp_path, monkeypatch):
+    monkeypatch.setattr("agents.primer_renderer.PROJECTS_DIR", tmp_path)
+    (tmp_path / "sample").mkdir()
+    (tmp_path / "sample" / "primer.md").write_text(
+        "- **Foo repo**: mounted writable at `/workspace/foo`. Edit freely.\n"
+    )
+    cfg = _cfg(
+        id="sample",
+        repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),),
+    )
+    out = render_workspace_primer(cfg)
+    assert "mounted writable at `/workspace/foo`" in out
+
+
+def test_real_enterprise_ng_overlay_has_no_drift():
+    """Acceptance criterion for bead auto-yj7o: the real NG overlay must
+    agree with projects.yaml after the fix."""
+    from agents.project_config import clear_cache, get_project
+    clear_cache()
+    # No exception = overlay no longer claims the enterprise repo is
+    # read-only while projects.yaml sets writable=true.
+    render_workspace_primer(get_project("enterprise-ng"))
