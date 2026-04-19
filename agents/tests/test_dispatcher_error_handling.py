@@ -12,7 +12,6 @@ from agents.dispatcher import (
     run_cmd,
     _retry_bd,
     release_bead,
-    claim_bead,
     REPO_ROOT,
 )
 
@@ -228,11 +227,3 @@ class TestReleaseBead:
         )
 
 
-# ── claim_bead ──────────────────────────────────────────────────
-
-
-class TestClaimBead:
-    def test_returns_true(self):
-        """claim_bead always returns True; RUNNING row is written by _record_launch."""
-        result = claim_bead("auto-1")
-        assert result is True
