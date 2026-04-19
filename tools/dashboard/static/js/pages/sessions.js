@@ -44,6 +44,29 @@
   function _ctxWarn(s) { return window.SessionStats.ctxWarn(s); }
   function _recencyColor(s) { return window.SessionStats.recencyColor(s); }
 
+  // Format ISO timestamp → "YYYY-MM-DD HH:MM" in operator-local timezone.
+  function _fmtEndedAt(s) {
+    var ts = s.ended_at || s.last_activity_at;
+    if (!ts) return '—';
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return '—';
+    var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+      + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  // Footer column 3: 'idle' (relative duration) for live, 'ended' (absolute) for dead.
+  function _endedOrIdleLabel(s) { return s.is_live ? 'idle' : 'ended'; }
+  function _endedOrIdleValue(s) {
+    return s.is_live ? (_idleStr(s) || '—') : _fmtEndedAt(s);
+  }
+  // Footer column 4: tmux is meaningful for interactive sessions but synthetic
+  // for dispatch/librarian — hide entirely on dead dispatch/librarian rows.
+  function _showTmuxColumn(s) {
+    if (s.is_live) return true;
+    return s.session_type !== 'dispatch' && s.session_type !== 'librarian';
+  }
+
   // Expose helpers globally for session-card.html partial (used by sessionsPage and designPage)
   window.sessionCardHelpers = {
     borderCls: _borderCls,
@@ -54,6 +77,9 @@
     idleStr: _idleStr,
     ctxWarn: _ctxWarn,
     recencyColor: _recencyColor,
+    endedOrIdleLabel: _endedOrIdleLabel,
+    endedOrIdleValue: _endedOrIdleValue,
+    showTmuxColumn: _showTmuxColumn,
   };
 
   // ── Private utilities ───────────────────────────────────────────────────
@@ -138,6 +164,9 @@
       idleStr: _idleStr,
       ctxWarn: _ctxWarn,
       recencyColor: _recencyColor,
+      endedOrIdleLabel: _endedOrIdleLabel,
+      endedOrIdleValue: _endedOrIdleValue,
+      showTmuxColumn: _showTmuxColumn,
 
       // --- Active Sessions: client-side sort mode ---
       // Options match the dropdown-toggle partial contract: [{k, l}, ...]
@@ -453,7 +482,7 @@
               label: r.title || '',
               session_type: r.session_type || 'interactive',
               type: r.type || 'container',
-              is_live: false,
+              is_live: !!r.is_live,
               project: r.project || '',
               topics: [],
               latest: '',
@@ -462,6 +491,7 @@
               last_activity: lastTs ? Math.round(new Date(lastTs).getTime() / 1000) : 0,
               created_at: r.created_at || '',
               last_activity_at: r.last_activity_at || '',
+              ended_at: r.ended_at || r.last_activity_at || '',
               tmux_session: r.tmux_session || sessionId,
               nag_enabled: false,
               dispatch_nag_enabled: false,
