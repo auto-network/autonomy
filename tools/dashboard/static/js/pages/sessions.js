@@ -35,14 +35,36 @@
     return '';
   }
 
-  // Stat formatters live in /static/js/lib/session-stats.js (window.SessionStats)
-  // so the session-viewer can reuse them. Thin aliases keep Alpine-scoped callsites
-  // identical.
-  function _turnsStr(s) { return window.SessionStats.turnsStr(s); }
-  function _ctxStr(s) { return window.SessionStats.ctxStr(s); }
-  function _idleStr(s) { return window.SessionStats.idleStr(s); }
-  function _ctxWarn(s) { return window.SessionStats.ctxWarn(s); }
-  function _recencyColor(s) { return window.SessionStats.recencyColor(s); }
+  function _turnsStr(s) { return s.entry_count ? String(s.entry_count) : ''; }
+
+  function _ctxStr(s) {
+    var t = s.context_tokens || 0;
+    if (t >= 1000000) return (t / 1000000).toFixed(1) + 'M';
+    if (t >= 1000) return Math.round(t / 1000) + 'K';
+    return t ? String(t) : '';
+  }
+
+  function _idleStr(s) {
+    var epoch = s.last_activity;
+    if (!epoch) return '';
+    var secs = Math.round(Date.now() / 1000 - epoch);
+    if (secs < 0) secs = 0;
+    if (secs < 60) return secs + 's';
+    if (secs < 3600) return Math.round(secs / 60) + 'm';
+    if (secs < 86400) return Math.floor(secs / 3600) + 'h';
+    return Math.floor(secs / 86400) + 'd';
+  }
+
+  function _ctxWarn(s) { return (s.context_tokens || 0) > 700000; }
+
+  function _recencyColor(s) {
+    var epoch = s.last_activity;
+    if (!epoch) return 'gray';
+    var secs = Math.round(Date.now() / 1000 - epoch);
+    if (secs < 120) return 'green';
+    if (secs < 600) return 'amber';
+    return 'red';
+  }
 
   // Expose helpers globally for session-card.html partial (used by sessionsPage and designPage)
   window.sessionCardHelpers = {
