@@ -263,6 +263,125 @@ def _format_pause_duration(paused_at: str | None) -> str:
 
 
 @dataclass
+class _TaskInfo:
+    """Per-task state tracked by TaskStateTracker."""
+    task_id: str
+    subject: str = ""
+    status: str = "pending"
+    description: str = ""
+    activeForm: str = ""
+
+
+class TaskStateTracker:
+    """Walks Task* tool_use entries in order, maintaining taskId→state per session.
+
+    TaskCreate seeds new state; TaskUpdate applies deltas (may rename subject).
+    Each Task* entry is mutated in place with a ``todo_annotation`` dict so the
+    renderer can display subject, status, and description without replaying the
+    log client-side. JSONL is the sole durable source of truth; tracker state
+    is ephemeral and rebuilt by replaying entries from offset 0 when needed.
+    """
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, _SessionTaskState] = {}
+
+    def reset(self, tmux_name: str) -> None:
+        """Drop tracked state for a session (used before a full-history replay)."""
+        self._sessions.pop(tmux_name, None)
+
+    def enrich(self, tmux_name: str, entries: list[dict]) -> None:
+        """Annotate Task* tool_use entries in ``entries`` in place.
+
+        Safe to call with non-Task entries; only TaskCreate/TaskUpdate are touched.
+        Entries with no tmux_name (e.g. HTTP-replay) use a stable key — callers
+        scope isolation by creating a dedicated tracker instance.
+        """
+        state = self._sessions.setdefault(tmux_name, _SessionTaskState())
+        for entry in entries:
+            if entry.get("type") != "tool_use":
+                continue
+            name = entry.get("tool_name", "")
+            if name == "TaskCreate":
+                entry["todo_annotation"] = state.on_create(entry.get("input") or {})
+            elif name == "TaskUpdate":
+                entry["todo_annotation"] = state.on_update(entry.get("input") or {})
+
+
+class _SessionTaskState:
+    """Per-session map of taskId → _TaskInfo with a sequential id counter.
+
+    Claude Code's TaskCreate payload carries no taskId; ids are assigned by
+    observation order starting at "1". TaskUpdate always carries taskId and
+    may mutate any field (status, subject, description, activeForm).
+    """
+
+    def __init__(self) -> None:
+        self.tasks: dict[str, _TaskInfo] = {}
+        self._next_id: int = 1
+
+    def on_create(self, inp: dict) -> dict:
+        raw_id = inp.get("taskId")
+        if raw_id is not None and str(raw_id) != "":
+            task_id = str(raw_id)
+            # Keep the counter past any explicitly provided numeric id
+            try:
+                n = int(task_id)
+                if n >= self._next_id:
+                    self._next_id = n + 1
+            except ValueError:
+                pass
+        else:
+            task_id = str(self._next_id)
+            self._next_id += 1
+
+        info = _TaskInfo(
+            task_id=task_id,
+            subject=inp.get("subject", "") or "",
+            status=inp.get("status", "") or "pending",
+            description=inp.get("description", "") or "",
+            activeForm=inp.get("activeForm", "") or "",
+        )
+        self.tasks[task_id] = info
+        return {
+            "action": "create",
+            "task_id": task_id,
+            "subject": info.subject,
+            "status": info.status,
+            "description": info.description,
+            "activeForm": info.activeForm,
+        }
+
+    def on_update(self, inp: dict) -> dict:
+        task_id = str(inp.get("taskId") or "")
+        info = self.tasks.get(task_id)
+        prev_status = info.status if info else ""
+        prev_subject = info.subject if info else ""
+        if info is None:
+            info = _TaskInfo(task_id=task_id)
+            self.tasks[task_id] = info
+
+        if (v := inp.get("subject")) is not None:
+            info.subject = v or ""
+        if (v := inp.get("status")) is not None:
+            info.status = v or ""
+        if (v := inp.get("description")) is not None:
+            info.description = v or ""
+        if (v := inp.get("activeForm")) is not None:
+            info.activeForm = v or ""
+
+        return {
+            "action": "update",
+            "task_id": task_id,
+            "subject": info.subject,
+            "status": info.status,
+            "description": info.description,
+            "activeForm": info.activeForm,
+            "prev_status": prev_status,
+            "prev_subject": prev_subject if prev_subject != info.subject else "",
+        }
+
+
+@dataclass
 class _TailState:
     """Ephemeral per-session state for the tailer (not persisted in DB)."""
     # Agent subagent tracking for tool_calls enrichment
@@ -283,6 +402,8 @@ class _TailState:
     pending_tool_ids: set = field(default_factory=set)
     completed_tool_ids: set = field(default_factory=set)
     last_entry_type: str = ""
+    # True once the tracker has been warmed from historical entries on this run
+    task_tracker_warmed: bool = False
 
 
 class SessionMonitor:
@@ -767,6 +888,12 @@ class SessionMonitor:
             self._event_bus.update_cache("session:registry", self.get_registry())
 
         self._enrich_agent_entries(row, ts, new_entries)
+        if self._entry_enricher:
+            try:
+                self._warm_task_tracker_if_needed(tmux_name, row, ts)
+                self._entry_enricher(tmux_name, new_entries)
+            except Exception:
+                logger.exception("session_monitor: entry_enricher failed for %s", tmux_name)
         if new_entries and self._event_bus:
             ts.broadcast_seq += 1
             updated = get_session(tmux_name)
@@ -1025,6 +1152,52 @@ class SessionMonitor:
             (f"%{uuid}%",),
         ).fetchone()
         return row["tmux_name"] if row else None
+
+    def _warm_task_tracker_if_needed(
+        self, tmux_name: str, row: dict, ts: _TailState,
+    ) -> None:
+        """Replay prior JSONL entries through the enricher once per session.
+
+        Guarantees post-restart Task* tiles resolve against a complete
+        taskId→subject map. No broadcast; state only.
+        """
+        if ts.task_tracker_warmed:
+            return
+        ts.task_tracker_warmed = True  # set first — retry loops would double-warm
+        if self._entry_enricher is None or self._entry_parser is None:
+            return
+        jsonl_path_str = row.get("jsonl_path")
+        if not jsonl_path_str:
+            return
+        try:
+            jsonl_path = Path(jsonl_path_str)
+            if not jsonl_path.exists():
+                return
+            # Current file_offset marks the boundary; everything before it is history.
+            file_offset = row.get("file_offset", 0) or 0
+            if file_offset <= 0:
+                return
+            with open(jsonl_path, "rb") as fh:
+                data = fh.read(file_offset)
+        except OSError:
+            return
+        prior: list = []
+        for raw_line in data.splitlines():
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            parsed = self._entry_parser(line)
+            if parsed is None:
+                continue
+            if isinstance(parsed, list):
+                prior.extend(parsed)
+            else:
+                prior.append(parsed)
+        if prior:
+            try:
+                self._entry_enricher(tmux_name, prior)
+            except Exception:
+                logger.exception("session_monitor: task tracker warm-up failed for %s", tmux_name)
 
     @staticmethod
     def _enrich_agent_entries(row: dict, ts: _TailState, entries: list) -> None:

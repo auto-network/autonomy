@@ -192,6 +192,39 @@ SWEEP_SESSION_ENTRIES["auto-sweep-alpha"].append(
      "timestamp": NOW - 3580}
 )
 
+# Task* tool_use tile state matrix — exercised by TestSessionViewerTodoTiles.
+# Entries are already in parsed shape; the mock tail endpoint runs the
+# TaskStateTracker enricher across the list before returning.
+SWEEP_SESSION_ENTRIES["auto-sweep-alpha"].extend([
+    {"type": "tool_use", "tool_name": "TaskCreate", "tool_id": "tu-tc-1",
+     "input": {
+         "subject": "Inspect TaskCreate payload shape",
+         "description": "Read the raw JSONL and note the shape of the input.",
+         "activeForm": "Inspecting TaskCreate payload shape",
+     },
+     "timestamp": NOW - 3575},
+    {"type": "tool_use", "tool_name": "TaskCreate", "tool_id": "tu-tc-2",
+     "input": {
+         "subject": "Wire TaskStateTracker into tailer",
+         "description": "Hook the tracker into entry_enricher and broadcast annotations.",
+         "activeForm": "Wiring TaskStateTracker into tailer",
+     },
+     "timestamp": NOW - 3570},
+    {"type": "tool_use", "tool_name": "TaskUpdate", "tool_id": "tu-tu-1",
+     "input": {"taskId": "1", "status": "in_progress"},
+     "timestamp": NOW - 3565},
+    {"type": "tool_use", "tool_name": "TaskUpdate", "tool_id": "tu-tu-2",
+     "input": {"taskId": "1", "status": "completed"},
+     "timestamp": NOW - 3560},
+    # Subject rename on task 2 → later update should report the renamed subject
+    {"type": "tool_use", "tool_name": "TaskUpdate", "tool_id": "tu-tu-3",
+     "input": {"taskId": "2", "subject": "Wire TaskStateTracker (renamed)"},
+     "timestamp": NOW - 3555},
+    {"type": "tool_use", "tool_name": "TaskUpdate", "tool_id": "tu-tu-4",
+     "input": {"taskId": "2", "status": "in_progress"},
+     "timestamp": NOW - 3550},
+])
+
 # ── Beads (used by /beads, /bead/{id}, /dispatch, nav SSE) ───────────
 
 SWEEP_BEADS = [
@@ -2192,6 +2225,115 @@ class TestHostSessionInputBehavior:
         """No raw Jinja template syntax visible on session viewer page."""
         c = self._checks
         assert c.get("no_jinja"), "Raw Jinja template syntax visible on session viewer page"
+
+
+TODO_TILE_CHECKS = """
+    var content = document.getElementById('content');
+    var cards = content ? content.querySelectorAll('.sc-tool-card') : [];
+
+    // Locate the four Task* tiles in display order
+    var tcTiles = [], tuTiles = [];
+    for (var i = 0; i < cards.length; i++) {
+      var card = cards[i];
+      var chipText = (card.querySelector('.sc-chip') || {}).textContent || '';
+      var hasStatus = !!card.querySelector('.todo-status');
+      if (chipText === 'TaskCreate') tcTiles.push(card);
+      else if (hasStatus) tuTiles.push(card);
+    }
+    r.create_tile_count = tcTiles.length;
+    r.update_tile_count = tuTiles.length;
+
+    // TaskCreate collapsed: chip shows "TaskCreate", line2 shows subject text.
+    if (tcTiles.length >= 1) {
+      var first = tcTiles[0];
+      var line2 = (first.querySelector('.sc-line2') || {}).textContent || '';
+      r.create_line2 = line2.trim();
+    }
+
+    // TaskUpdate collapsed: NO "TaskUpdate" chip; .todo-status is the leading marker
+    // and line2 resolves the subject from the earlier TaskCreate.
+    if (tuTiles.length >= 1) {
+      var first = tuTiles[0];
+      var chipText = (first.querySelector('.sc-chip') || {}).textContent || '';
+      r.update_no_chip_label = (chipText !== 'TaskUpdate' && chipText !== 'Update Task');
+      var line2 = (first.querySelector('.sc-line2') || {}).textContent || '';
+      r.update_first_line2 = line2.trim();
+      var statusEl = first.querySelector('.todo-status');
+      r.update_status_classes = statusEl ? statusEl.className : '';
+    }
+
+    // Completion checkmark on the second TaskUpdate (status=completed, taskId=1)
+    if (tuTiles.length >= 2) {
+      var completed = tuTiles[1];
+      var statusEl = completed.querySelector('.todo-status');
+      r.completed_classes = statusEl ? statusEl.className : '';
+      r.completed_text = statusEl ? (statusEl.textContent || '').trim() : '';
+    }
+
+    // Subject-rename resolution: the rename (tu-3) AND the later tu-4 both display
+    // the renamed subject.
+    if (tuTiles.length >= 4) {
+      var renamedFollowUp = tuTiles[3];
+      var line2 = (renamedFollowUp.querySelector('.sc-line2') || {}).textContent || '';
+      r.rename_propagates = line2.indexOf('renamed') !== -1;
+    }
+"""
+
+
+class TestSessionViewerTodoTiles:
+    """Behavioral sweep: TaskCreate / TaskUpdate tile state matrix.
+
+    Fixture entries in SWEEP_SESSION_ENTRIES["auto-sweep-alpha"] cover:
+    - Two TaskCreates (sequential ids, subject rendered as headline)
+    - TaskUpdate pending→in_progress→completed (checkmark on completed tile)
+    - TaskUpdate subject rename + follow-up (rename propagates to later tiles)
+
+    All annotations come from the server-side TaskStateTracker — the renderer
+    is pure presentation.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check(
+            "/session/autonomy/auto-sweep-alpha",
+            TODO_TILE_CHECKS,
+            wait_ms=3000,
+        )
+        request.cls._checks = result
+
+    def test_task_create_tiles_rendered(self):
+        c = self._checks
+        assert c.get("create_tile_count", 0) >= 2, \
+            f"Expected 2 TaskCreate tiles, found {c.get('create_tile_count')}"
+
+    def test_task_create_shows_subject(self):
+        c = self._checks
+        assert "payload shape" in (c.get("create_line2") or ""), \
+            f"TaskCreate tile headline missing subject: {c.get('create_line2')!r}"
+
+    def test_task_update_no_tool_label_chip(self):
+        c = self._checks
+        assert c.get("update_no_chip_label"), \
+            "TaskUpdate tile must not render a chip labeled 'TaskUpdate' or 'Update Task'"
+
+    def test_task_update_resolves_subject(self):
+        c = self._checks
+        assert "payload shape" in (c.get("update_first_line2") or ""), \
+            (f"TaskUpdate tile did not resolve taskId→subject: "
+             f"{c.get('update_first_line2')!r}")
+
+    def test_completed_status_icon_rendered(self):
+        c = self._checks
+        assert "todo-status--completed" in (c.get("completed_classes") or ""), \
+            f"Completed TaskUpdate missing .todo-status--completed: {c.get('completed_classes')!r}"
+        # Checkmark glyph (U+2713) centered in the green circle
+        assert c.get("completed_text") == "\u2713", \
+            f"Completed indicator glyph wrong: {c.get('completed_text')!r}"
+
+    def test_subject_rename_propagates(self):
+        c = self._checks
+        assert c.get("rename_propagates"), \
+            "Later TaskUpdate tile should display the renamed subject"
 
 
 class TestHostSessionTailContract:
