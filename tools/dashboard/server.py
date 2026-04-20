@@ -2962,12 +2962,11 @@ async def api_session_tail(request):
     if os.environ.get("DASHBOARD_MOCK"):
         entries = dao_sessions.get_session_entries(session_id)
         if entries is not None:
-            # Look up session metadata from mock DAO for is_live and type
-            mock_session = next(
-                (s for s in dao_sessions.get_active_sessions()
-                 if s.get("session_id") == session_id),
-                {},
-            )
+            # Look up session metadata from mock DAO for is_live and type.
+            # Use get_session_by_id so dispatch/librarian rows (filtered out
+            # of get_active_sessions) still resolve — otherwise is_live
+            # defaults to True and dead-dispatch viewers render as live.
+            mock_session = dao_sessions.get_session_by_id(session_id) or {}
             TaskStateTracker().enrich(session_id, entries)
             resp = {
                 "entries": entries, "offset": len(entries),
