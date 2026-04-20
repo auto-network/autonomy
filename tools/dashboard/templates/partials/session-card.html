@@ -34,15 +34,17 @@
             x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
-      <!-- Merged org-glyph + actions button: paints org.color only when favicon is null,
-           opens actions menu on live sessions, disabled (ornament) on dead. -->
+      <!-- Merged org-glyph + actions button: paints org.color only when favicon is null.
+           Enabled when showSessionActions is available and the session is either live or
+           on a recent-card surface (indicated by the presence of resumable). Resume
+           itself is now a menu entry under this button, not a separate green button. -->
       <template x-if="s.org">
         <button class="sc-org sc-actions"
                 :style="s.org.favicon ? '' : `background:${s.org.color}`"
                 :title="s.org.resolved ? s.org.name : ('legacy: ' + (s.project || 'unknown'))"
-                :aria-label="s.is_live ? 'Session actions' : ('Org: ' + s.org.name)"
-                :disabled="!s.is_live"
-                @click.stop="s.is_live && typeof showSessionActions === 'function' && showSessionActions(s)"
+                :aria-label="(typeof showSessionActions === 'function') ? 'Session actions' : ('Org: ' + s.org.name)"
+                :disabled="typeof showSessionActions !== 'function'"
+                @click.prevent.stop="typeof showSessionActions === 'function' && showSessionActions(s)"
                 data-testid="session-actions-btn">
           <template x-if="!s.org.favicon">
             <svg class="sc-org-initial" width="16" height="16" viewBox="0 0 16 16" preserveAspectRatio="xMidYMid meet">
@@ -55,22 +57,13 @@
           <img class="sc-org-img" :src="s.org.favicon" x-show="s.org.favicon" :alt="s.org.name">
         </button>
       </template>
-      <button x-show="!s.is_live && s.resumable && !(resumed && resumed[s.id]) && !(resumeError && resumeError[s.id])"
-              @click.prevent.stop="resumeSession(s, $event)"
-              :disabled="resuming[s.id] === true"
-              class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50 ml-auto flex-shrink-0"
-              :class="resuming[s.id] === true && 'animate-pulse'"
-              data-testid="resume-btn">
-        <span x-show="resuming[s.id] !== true">Resume</span>
-        <span x-show="resuming[s.id] === true" x-cloak>&hellip;</span>
-      </button>
       <span x-show="!s.is_live && resumed && resumed[s.id]" x-cloak
             class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded ml-auto flex-shrink-0">Live &#9679;</span>
       <span x-show="!s.is_live && resumeError && resumeError[s.id]" x-cloak
             class="px-3 py-1 bg-red-900 text-red-300 text-sm rounded ml-auto flex-shrink-0" x-text="resumeError[s.id]"></span>
     </div>
 
-    <!-- Stats row: dot + bell + type badge + role badge + T3 + merged org/actions + resume -->
+    <!-- Stats row: dot + bell + type badge + role badge + T3 + merged org/actions -->
     <div class="sc-stats">
       <span class="sc-dot"
             :class="{
@@ -99,9 +92,9 @@
         <button class="sc-org sc-actions"
                 :style="s.org.favicon ? '' : `background:${s.org.color}`"
                 :title="s.org.resolved ? s.org.name : ('legacy: ' + (s.project || 'unknown'))"
-                :aria-label="s.is_live ? 'Session actions' : ('Org: ' + s.org.name)"
-                :disabled="!s.is_live"
-                @click.stop="s.is_live && typeof showSessionActions === 'function' && showSessionActions(s)"
+                :aria-label="(typeof showSessionActions === 'function') ? 'Session actions' : ('Org: ' + s.org.name)"
+                :disabled="typeof showSessionActions !== 'function'"
+                @click.prevent.stop="typeof showSessionActions === 'function' && showSessionActions(s)"
                 data-testid="session-actions-btn">
           <template x-if="!s.org.favicon">
             <svg class="sc-org-initial" width="16" height="16" viewBox="0 0 16 16" preserveAspectRatio="xMidYMid meet">
@@ -114,24 +107,23 @@
           <img class="sc-org-img" :src="s.org.favicon" x-show="s.org.favicon" :alt="s.org.name">
         </button>
       </template>
-      <!-- Resume button (x-show keeps handler bound; x-if destroys/recreates DOM) -->
-      <button x-show="!s.is_live && s.resumable && !(resumed && resumed[s.id]) && !(resumeError && resumeError[s.id])"
-              @click.prevent.stop="resumeSession(s, $event)"
-              :disabled="resuming[s.id] === true"
-              class="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded disabled:opacity-50 ml-auto flex-shrink-0"
-              :class="resuming[s.id] === true && 'animate-pulse'"
-              data-testid="resume-btn">
-        <span x-show="resuming[s.id] !== true">Resume</span>
-        <span x-show="resuming[s.id] === true" x-cloak>&hellip;</span>
-      </button>
       <span x-show="!s.is_live && resumed && resumed[s.id]" x-cloak
             class="px-3 py-1 bg-green-900 text-green-300 text-sm rounded ml-auto flex-shrink-0">Live &#9679;</span>
       <span x-show="!s.is_live && resumeError && resumeError[s.id]" x-cloak
             class="px-3 py-1 bg-red-900 text-red-300 text-sm rounded ml-auto flex-shrink-0" x-text="resumeError[s.id]"></span>
     </div>
 
-    <!-- Title -->
-    <div class="sc-title" x-text="s.label || s.tmux_session || (s.id || '').slice(0, 12)"></div>
+    <!-- Title. Librarian rows get an optional target-bead title suffix in
+         muted color (e.g. "review_report · auto-dkhyx — Fix X"); all other
+         session types stick with the bare label. -->
+    <div class="sc-title">
+      <span x-text="s.label || s.tmux_session || (s.id || '').slice(0, 12)"></span>
+      <template x-if="s.session_type === 'librarian' && s.librarian_target_bead_title">
+        <span class="text-gray-500 font-normal"
+              x-text="' — ' + s.librarian_target_bead_title"
+              data-testid="librarian-bead-title"></span>
+      </template>
+    </div>
 
     <!-- Topics -->
     <template x-if="s.topics && s.topics.length > 0">
