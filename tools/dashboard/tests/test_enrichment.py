@@ -98,11 +98,27 @@ def _line(obj: dict) -> str:
     return json.dumps(obj)
 
 
+def _semantic(result):
+    """Extract the semantic_bash entry when the parser upconverts.
+
+    `_parse_jsonl_entry` augments (not replaces) when upconversion fires —
+    it returns a list `[tool_result, semantic_bash]`. Tests that reach for
+    `result["type"] == "semantic_bash"` need the semantic half, so pick it.
+    Leaves non-list results (no upconversion path) untouched.
+    """
+    if isinstance(result, list):
+        for e in result:
+            if isinstance(e, dict) and e.get("type") == "semantic_bash":
+                return e
+        return result[0] if result else None
+    return result
+
+
 def _make_tool_result_note_saved(source_id: str) -> dict:
     """JSONL entry for a tool_result containing 'Note saved (src:...)'."""
     return {
         "type": "tool_result", "toolUseId": "toolu_note",
-        "message": {"role": "user", "content": f"Note saved (src:{source_id})\nTags: architecture, session-viewer"},
+        "message": {"role": "user", "content": f"\u2713 Note saved (src:{source_id})\nTags: architecture, session-viewer"},
         "timestamp": TS,
     }
 
@@ -120,7 +136,7 @@ def _make_tool_result_comment_added(comment_id: str, parent_source_id: str) -> d
     """JSONL entry for a tool_result containing 'Comment added (id:...)'."""
     return {
         "type": "tool_result", "toolUseId": "toolu_comment",
-        "message": {"role": "user", "content": f"Comment added (id:{comment_id}) on {parent_source_id}"},
+        "message": {"role": "user", "content": f"\u2713 Comment added (id:{comment_id}) on {parent_source_id}"},
         "timestamp": TS,
     }
 
@@ -140,7 +156,7 @@ def _make_user_list_with_note_saved(source_id: str) -> dict:
         "parentUuid": "uuu", "isSidechain": False, "type": "user",
         "message": {"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": "toolu_note_inner",
-             "content": f"Note saved (src:{source_id})\nTags: architecture"},
+             "content": f"\u2713 Note saved (src:{source_id})\nTags: architecture"},
         ]},
         "timestamp": TS,
     }
@@ -166,7 +182,7 @@ class TestEnrichmentPopulatesFields:
         Expected: FAIL (no enrichment function exists).
         """
         monkeypatch.setenv("GRAPH_DB", test_graph_db)
-        result = _parse_jsonl_entry(_line(_make_tool_result_note_saved("a1b2c3d4-0001")))
+        result = _semantic(_parse_jsonl_entry(_line(_make_tool_result_note_saved("a1b2c3d4-0001"))))
         assert result is not None
         assert result["type"] == "semantic_bash"
         assert result["semantic_type"] == "note-created"
@@ -185,7 +201,7 @@ class TestEnrichmentPopulatesFields:
         Expected: FAIL (no enrichment function exists).
         """
         monkeypatch.setenv("GRAPH_DB", test_graph_db)
-        result = _parse_jsonl_entry(_line(_make_tool_result_note_saved("a1b2c3d4-0001")))
+        result = _semantic(_parse_jsonl_entry(_line(_make_tool_result_note_saved("a1b2c3d4-0001"))))
         assert result is not None
         assert "preview" in result, (
             "Enriched note-created entry should have 'preview' field"
@@ -202,7 +218,7 @@ class TestEnrichmentPopulatesFields:
         Expected: FAIL (no enrichment function exists).
         """
         monkeypatch.setenv("GRAPH_DB", test_graph_db)
-        result = _parse_jsonl_entry(_line(_make_tool_result_note_saved("a1b2c3d4-0001")))
+        result = _semantic(_parse_jsonl_entry(_line(_make_tool_result_note_saved("a1b2c3d4-0001"))))
         assert result is not None
         assert "tags" in result, (
             "Enriched note-created entry should have 'tags' field"
@@ -217,7 +233,7 @@ class TestEnrichmentPopulatesFields:
         Expected: FAIL (no enrichment function exists).
         """
         monkeypatch.setenv("GRAPH_DB", test_graph_db)
-        result = _parse_jsonl_entry(_line(_make_tool_result_thought_captured("b2c3d4e5-0002")))
+        result = _semantic(_parse_jsonl_entry(_line(_make_tool_result_thought_captured("b2c3d4e5-0002"))))
         assert result is not None
         assert result["type"] == "semantic_bash"
         assert result["semantic_type"] == "thought-captured"
@@ -234,9 +250,9 @@ class TestEnrichmentPopulatesFields:
         Expected: FAIL (no enrichment function exists).
         """
         monkeypatch.setenv("GRAPH_DB", test_graph_db)
-        result = _parse_jsonl_entry(_line(
+        result = _semantic(_parse_jsonl_entry(_line(
             _make_tool_result_comment_added("d4e5f6a7-0004", "c3d4e5f6-0003")
-        ))
+        )))
         assert result is not None
         assert result["type"] == "semantic_bash"
         assert result["semantic_type"] == "comment-added"
@@ -265,7 +281,7 @@ class TestEnrichmentFallback:
         Expected: PASS — current code doesn't read graph.db during parsing.
         """
         monkeypatch.setenv("GRAPH_DB", str(tmp_path / "nonexistent.db"))
-        result = _parse_jsonl_entry(_line(_make_tool_result_note_saved("a1b2c3d4-0001")))
+        result = _semantic(_parse_jsonl_entry(_line(_make_tool_result_note_saved("a1b2c3d4-0001"))))
         assert result is not None
         assert result["type"] == "semantic_bash"
         assert result["semantic_type"] == "note-created"
@@ -279,9 +295,9 @@ class TestEnrichmentFallback:
         Expected: PASS — current code doesn't try to look up the source.
         """
         monkeypatch.setenv("GRAPH_DB", test_graph_db)
-        result = _parse_jsonl_entry(_line(
+        result = _semantic(_parse_jsonl_entry(_line(
             _make_tool_result_note_saved("0000dead-beef-0000")
-        ))
+        )))
         assert result is not None
         assert result["type"] == "semantic_bash"
         # Entry should still be valid with raw content
@@ -329,8 +345,8 @@ class TestEnrichmentCodePath:
         line = _line(_make_tool_result_note_saved("a1b2c3d4-0001"))
 
         # Parse the same line twice (simulating live vs backfill)
-        result1 = _parse_jsonl_entry(line)
-        result2 = _parse_jsonl_entry(line)
+        result1 = _semantic(_parse_jsonl_entry(line))
+        result2 = _semantic(_parse_jsonl_entry(line))
 
         assert result1 is not None
         assert result2 is not None
@@ -356,7 +372,7 @@ class TestEnrichmentCodePath:
         """
         monkeypatch.setenv("GRAPH_DB", test_graph_db)
         line = _line(_make_user_list_with_note_saved("a1b2c3d4-0001"))
-        result = _parse_jsonl_entry(line)
+        result = _semantic(_parse_jsonl_entry(line))
 
         assert result is not None
         assert result["type"] == "semantic_bash"
