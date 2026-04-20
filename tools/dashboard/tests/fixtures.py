@@ -254,18 +254,18 @@ def write_fixture(fixture_dict, path):
 # session-store.js (line 47).
 
 def make_unresolved_session(session_id, **kwargs):
-    """Host session with linked=false (no jsonl_path) for testing Unresolved state."""
-    return {**make_session(session_id, type="host", **kwargs), "linked": False}
+    """Host session with resolved=false (no jsonl_path) for testing Unresolved state."""
+    return {**make_session(session_id, type="host", **kwargs), "resolved": False}
 
 
 def make_dead_session(session_id, **kwargs):
     """Dead session for testing Complete state."""
-    return {**make_session(session_id, is_live=False, **kwargs), "linked": True}
+    return {**make_session(session_id, is_live=False, **kwargs), "resolved": True}
 
 
 def make_linked_session(session_id, **kwargs):
     """Linked live session for testing Live state."""
-    return {**make_session(session_id, is_live=True, **kwargs), "linked": True}
+    return {**make_session(session_id, is_live=True, **kwargs), "resolved": True}
 
 
 # ── Timeline fixture generators ──────────────────────────────────────
