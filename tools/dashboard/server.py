@@ -2827,39 +2827,69 @@ async def api_session_tail(request):
             }
             return JSONResponse(resp)
 
-    # First, try resolving via DB (session_id may be a tmux_name)
+    # First, try resolving via DB (session_id may be a tmux_name,
+    # a dispatch session_uuid, a UUID in session_uuids, or a run_dir id)
     session_file = None
     db_row = session_monitor.get_one(session_id)
+    if db_row is None:
+        owner = session_monitor._find_session_by_uuid(session_id)
+        if owner is None:
+            # Also try the dead/historical rows where session_uuid matches
+            from tools.dashboard.dao.dashboard_db import get_conn as _get_conn
+            try:
+                conn = _get_conn()
+                row = conn.execute(
+                    "SELECT tmux_name FROM tmux_sessions"
+                    " WHERE session_uuid=? OR session_uuids LIKE ?"
+                    " ORDER BY created_at DESC LIMIT 1",
+                    (session_id, f"%{session_id}%"),
+                ).fetchone()
+                if row:
+                    owner = row[0] if not hasattr(row, "keys") else row["tmux_name"]
+            except Exception:
+                owner = None
+        if owner:
+            db_row = session_monitor.get_one(owner)
+
     if db_row and db_row.get("jsonl_path"):
         candidate = Path(db_row["jsonl_path"])
         if candidate.exists():
             session_file = candidate
 
+    # Last-resort: scan data/agent-runs/ for a JSONL matching the id
+    if session_file is None:
+        fallback = session_monitor.resolve_session_file(session_id)
+        if fallback is not None:
+            session_file = fallback
+
     if session_file is None:
         # Session file not resolved — check if it's a newly created session
         # registered in the monitor but with no JSONL yet
-        monitor_state = db_row
-        if monitor_state and monitor_state.get("is_live"):
+        if db_row and db_row.get("is_live"):
             return JSONResponse({
                 "entries": [], "offset": 0, "is_live": True,
-                "type": monitor_state.get("type", ""),
-                "role": monitor_state.get("role", ""),
-                "tmux_session": monitor_state.get("tmux_name", ""),
+                "type": db_row.get("type", ""),
+                "role": db_row.get("role", ""),
+                "tmux_session": db_row.get("tmux_name", ""),
                 "seq": 0, "resolved": False,
             })
-        return JSONResponse({"error": "Invalid project or session_id"}, status_code=400)
+        return JSONResponse(
+            {"error": "Session not found", "session_id": session_id},
+            status_code=404,
+        )
     if not session_file.exists():
-        # JSONL doesn't exist yet — check monitor for starting sessions
-        monitor_state = session_monitor.get_one(session_id)
-        if monitor_state and monitor_state.get("is_live"):
+        if db_row and db_row.get("is_live"):
             return JSONResponse({
                 "entries": [], "offset": 0, "is_live": True,
-                "type": monitor_state.get("type", ""),
-                "role": monitor_state.get("role", ""),
-                "tmux_session": monitor_state.get("tmux_name", ""),
+                "type": db_row.get("type", ""),
+                "role": db_row.get("role", ""),
+                "tmux_session": db_row.get("tmux_name", ""),
                 "seq": 0, "resolved": False,
             })
-        return JSONResponse({"error": "Session not found"}, status_code=404)
+        return JSONResponse(
+            {"error": "Session not found", "session_id": session_id},
+            status_code=404,
+        )
 
     file_size = session_file.stat().st_size
     # Determine session type from resolved path
