@@ -325,6 +325,68 @@ async def api_dispatch_resume(request):
     return JSONResponse({"ok": True, "was_paused": was_paused, "cleared_reason": reason})
 
 
+async def api_dispatch_resume_bead(request):
+    """POST /api/dispatch/resume/{bead_id} — revive a dead dispatch interactively.
+
+    Finds the most recent dead dispatch row for ``bead_id`` and registers a
+    NEW interactive container session with the monitor that points at the
+    original JSONL. The dead row stays dead (history intact); the new row
+    shows up on the Active list because its type is ``container``.
+    """
+    bead_id = request.path_params["bead_id"]
+    from tools.dashboard.dao.dashboard_db import get_conn as _get_conn
+    import uuid as _uuid
+    import time as _time
+
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM tmux_sessions"
+        " WHERE bead_id=? AND type='dispatch' AND is_live=0"
+        " ORDER BY created_at DESC LIMIT 1",
+        (bead_id,),
+    ).fetchone()
+    if row is None:
+        return JSONResponse(
+            {"error": "No dead dispatch session found for bead",
+             "bead_id": bead_id},
+            status_code=404,
+        )
+
+    orig_tmux = row["tmux_name"]
+    new_tmux = f"{bead_id}-resume-{int(_time.time())}"
+    new_uuid = str(_uuid.uuid4())
+    project = row["project"]
+    jsonl_path = row["jsonl_path"]
+    resolution_dir = row["resolution_dir"] or (
+        str(Path(jsonl_path).parent) if jsonl_path else None
+    )
+
+    await session_monitor.register_session(
+        tmux_name=new_tmux,
+        type="container",
+        jsonl_path=Path(jsonl_path) if jsonl_path else None,
+        run_dir=Path(resolution_dir).parent if resolution_dir else None,
+        bead_id=bead_id,
+        project=project,
+    )
+    # register() inserts the session with the UUID derived from jsonl_path.
+    # For resume, we want a NEW session_uuid so the Active card does not
+    # collide with the dead row's identity.
+    conn.execute(
+        "UPDATE tmux_sessions SET session_uuid=? WHERE tmux_name=?",
+        (new_uuid, new_tmux),
+    )
+    conn.commit()
+
+    return JSONResponse({
+        "ok": True,
+        "resumed_from": orig_tmux,
+        "tmux_session": new_tmux,
+        "session_uuid": new_uuid,
+        "bead_id": bead_id,
+    }, status_code=201)
+
+
 async def api_dispatch_pause_state(request):
     """GET /api/dispatch/pause-state — return dispatcher pause state from SQLite."""
     if os.environ.get("DASHBOARD_MOCK"):
@@ -4614,6 +4676,11 @@ async def api_dao_active_sessions(request):
     else:
         # Read directly from session monitor — zero filesystem access
         sessions = session_monitor.get_registry()
+    # Active list surfaces interactive sessions only. Dispatch + librarian
+    # rows are first-class in the monitor registry for SSE and tail, but
+    # filtered out here (auto-ylj6r Phase 5).
+    from tools.dashboard.dao.sessions import _ACTIVE_SESSION_TYPES
+    sessions = [s for s in sessions if s.get("type") in _ACTIVE_SESSION_TYPES]
     return JSONResponse(sessions)
 
 _recent_sessions_limit_deprecated_logged = False
@@ -6281,6 +6348,7 @@ routes = [
     Route("/api/dispatch/pause", api_dispatch_pause_get),
     Route("/api/dispatch/pause", api_dispatch_pause_post, methods=["POST"]),
     Route("/api/dispatch/resume", api_dispatch_resume, methods=["POST"]),
+    Route("/api/dispatch/resume/{bead_id}", api_dispatch_resume_bead, methods=["POST"]),
     Route("/api/dispatch/pause-state", api_dispatch_pause_state),
     Route("/api/dispatch/status", api_dispatch_status),
     Route("/api/dispatch/approved", api_dispatch_approved),
