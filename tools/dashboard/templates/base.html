@@ -133,9 +133,8 @@
       padding: 0.375rem 1rem; background: #1e1b4b; cursor: pointer;
       min-height: 2.5rem; flex-shrink: 0;
     }
-    #live-panel-body {
-      max-height: 50vh; padding: 0;
-    }
+    /* #live-panel-body is the .session-viewer[data-mode="overlay"] mount —
+       its height/padding/background rules live below under that selector. */
     #live-panel.collapsed #live-panel-body { display: none; }
     .lp-viewer { display: flex; flex-direction: column; max-height: 50vh; }
     .lp-entries {
@@ -439,7 +438,7 @@
     }
     @media (min-width: 768px) {
       body.fullscreen-page main#content { padding: 0 !important; overflow: hidden; }
-      body.fullscreen-page .session-viewer { height: 100%; }
+      body.fullscreen-page .session-viewer[data-mode="page"] { height: 100%; }
     }
 
     /* When session viewer is active, main#content lets the viewer fill it */
@@ -448,14 +447,24 @@
       padding: 0 !important;
     }
 
-    /* Session viewer outer container — fills the available vertical space */
+    /* Session viewer outer container — fills the available vertical space.
+       Overlay mode (bottom-docked) overrides these via [data-mode="overlay"]. */
     .session-viewer {
-      height: 100dvh;
       background: #111827;
       overscroll-behavior: none;
     }
-    html.ios-standalone .session-viewer {
+    .session-viewer[data-mode="page"] {
+      height: 100dvh;
+    }
+    html.ios-standalone .session-viewer[data-mode="page"] {
       height: var(--app-height, 100vh);
+    }
+    /* Overlay mode: bottom-docked inside #live-panel, parent supplies
+       chrome + background, body stays transparent and height-clamped. */
+    .session-viewer[data-mode="overlay"] {
+      max-height: 50vh;
+      padding: 0;
+      background: transparent;
     }
     /* iOS PWA: propagate --app-height up the wrapper chain so body / main
        don't clamp to the stale WebKit 100dvh value (787 vs screen 844),
