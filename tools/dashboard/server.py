@@ -2694,6 +2694,29 @@ async def api_dispatch_tail(request):
     run_name = request.path_params["run"]
     after = int(request.query_params.get("after", "0"))
 
+    # Mock mode: resolve by run_dir against the fixture, mirroring
+    # api_session_tail's DASHBOARD_MOCK branch.
+    if os.environ.get("DASHBOARD_MOCK"):
+        sess = dao_sessions.get_session_by_run_dir(run_name)
+        if sess:
+            sid = sess.get("session_id") or sess.get("tmux_session") or run_name
+            entries = dao_sessions.get_session_entries(sid) or []
+            TaskStateTracker().enrich(sid, entries)
+            return JSONResponse({
+                "entries": entries,
+                "offset": len(entries),
+                "is_live": bool(sess.get("is_live", True)),
+                "session_id": sid,
+                "tmux_session": sess.get("tmux_session") or sid,
+                "tmux_name": sess.get("tmux_session") or sid,
+                "project": sess.get("project") or "autonomy",
+                "type": sess.get("type") or "dispatch",
+                "role": sess.get("role") or "",
+                "resolved": True,
+                "seq": len(entries),
+            })
+        # fall through to filesystem scan
+
     session_files = _find_session_files(run_name)
     if not session_files:
         # Try docker exec fallback for running containers
