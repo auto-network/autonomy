@@ -182,11 +182,15 @@ class TestStoreShape:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# TestSeqDedup — seq-based dedup in appendSessionEntries (Boundary E)
+# TestSeqDedup — entry-identity dedup in appendSessionEntries (Boundary E)
 #
-# Expected: PASS on current code (seq dedup already works).
 # These tests exercise the JS logic via a Python simulation that mirrors
 # the exact semantics of session-store.js appendSessionEntries().
+#
+# auto-bv343 swapped per-session seq dedup for entry-identity dedup so that
+# SSE gap-replay payloads whose seq is "behind" store.seq still land. The
+# tests below cover both the dedup contract and that store.seq still
+# advances for clients that rely on it.
 # ══════════════════════════════════════════════════════════════════════
 
 def _make_store():
@@ -202,21 +206,44 @@ def _make_store():
     }
 
 
+def _entry_identity(entry):
+    """Mirror of _entryIdentity() in session-store.js."""
+    if not entry:
+        return None
+    if entry.get("type") == "tool_use" and entry.get("tool_id"):
+        return "tu:" + entry["tool_id"]
+    if entry.get("type") == "tool_result" and entry.get("tool_id"):
+        return "tr:" + entry["tool_id"]
+    t = entry.get("type") or "?"
+    ts = entry.get("timestamp") or ""
+    raw = entry.get("content")
+    if isinstance(raw, str):
+        c = raw[:200]
+    elif raw is None:
+        c = ""
+    else:
+        try:
+            c = json.dumps(raw)[:200]
+        except (TypeError, ValueError):
+            c = ""
+    return f"{t}:{ts}:{c}"
+
+
 def _append_session_entries(store, data):
     """Python mirror of window.appendSessionEntries() from session-store.js.
 
-    Exactly replicates the seq dedup logic with seq regression detection.
+    Entry-identity dedup: store.seq still advances (with server-restart
+    detection) but does NOT gate appending. Entries are deduped on a stable
+    per-entry identity key so gap-replay payloads whose seq is "behind"
+    store.seq still land if their entries are new.
     """
-    # Seq dedup — skip if already seen
-    # Detect seq regression (server restart resets seq to 0)
-    if data.get("seq") is not None and data["seq"] <= store["seq"]:
-        # If seq dropped to less than half the old value, it's a server restart
-        if store["seq"] > 1 and data["seq"] * 2 < store["seq"]:
-            store["seq"] = data["seq"]
-        else:
-            return 0
     if data.get("seq") is not None:
-        store["seq"] = data["seq"]
+        if data["seq"] > store["seq"]:
+            store["seq"] = data["seq"]
+        elif store["seq"] > 1 and data["seq"] * 2 < store["seq"]:
+            # Significant seq regression → server restart; reset.
+            store["seq"] = data["seq"]
+        # Otherwise leave store.seq alone; fall through to entry dedup.
 
     if data.get("is_live") is not None:
         store["isLive"] = data["is_live"]
@@ -224,50 +251,82 @@ def _append_session_entries(store, data):
     if not data.get("entries") or len(data["entries"]) == 0:
         return 0
 
-    # Track tool IDs and results
+    seen = store.setdefault("_seenIdentities", None)
+    if seen is None:
+        seen = {}
+        for existing in store["entries"]:
+            key = _entry_identity(existing)
+            if key:
+                seen[key] = True
+        store["_seenIdentities"] = seen
+
+    added = 0
     for entry in data["entries"]:
+        key = _entry_identity(entry)
+        if key and key in seen:
+            continue
+        if key:
+            seen[key] = True
         if entry.get("type") == "tool_use" and entry.get("tool_id"):
             store["toolMap"][entry["tool_id"]] = {"tool_name": entry.get("tool_name", "?")}
         if entry.get("type") == "tool_result" and entry.get("tool_id"):
             store["resultMap"][entry["tool_id"]] = entry
-
-    for entry in data["entries"]:
         store["entries"].append(entry)
-    return len(data["entries"])
+        added += 1
+    return added
 
 
 class TestSeqDedup:
-    """Seq-based dedup prevents duplicate entries.
+    """Entry-identity dedup prevents duplicate entries; store.seq still tracks."""
 
-    Expected: PASS on current code.
-    """
-
-    def test_duplicate_seq_rejected(self):
-        """appendSessionEntries with seq <= store.seq → entries not added."""
+    def test_identical_entry_rejected(self):
+        """Re-feeding the same entry (same type/timestamp/content) is a no-op."""
         store = _make_store()
-        # First append: seq=5
-        added = _append_session_entries(store, {
-            "seq": 5,
-            "entries": [{"type": "user", "content": "first"}],
-        })
+        entry = {"type": "user", "timestamp": "2026-04-20T11:51:00Z", "content": "first"}
+        added = _append_session_entries(store, {"seq": 5, "entries": [entry]})
         assert added == 1
         assert len(store["entries"]) == 1
 
-        # Duplicate: seq=5 again → rejected
-        added = _append_session_entries(store, {
-            "seq": 5,
-            "entries": [{"type": "user", "content": "duplicate"}],
-        })
+        # Same payload again — entry identity already in store, rejected.
+        added = _append_session_entries(store, {"seq": 5, "entries": [entry]})
         assert added == 0
         assert len(store["entries"]) == 1
 
-        # Lower: seq=3 → also rejected
-        added = _append_session_entries(store, {
-            "seq": 3,
-            "entries": [{"type": "user", "content": "old"}],
-        })
+        # Same identity at a lower seq (replay) — still rejected.
+        added = _append_session_entries(store, {"seq": 3, "entries": [entry]})
         assert added == 0
         assert len(store["entries"]) == 1
+
+    def test_distinct_entry_with_lower_seq_accepted(self):
+        """Replay payload whose seq is behind store.seq still lands new entries.
+
+        This is the gap-replay regression that auto-bv343 fixes: when SSE gap
+        replay or a Last-Event-ID native reconnect re-delivers entries with
+        seqs lower than store.seq, the entries themselves are new and must be
+        appended. The pre-fix seq-based guard silently dropped them.
+        """
+        store = _make_store()
+        e1 = {"type": "user", "timestamp": "t1", "content": "first"}
+        e2 = {"type": "user", "timestamp": "t2", "content": "behind"}
+        _append_session_entries(store, {"seq": 5, "entries": [e1]})
+        added = _append_session_entries(store, {"seq": 3, "entries": [e2]})
+        assert added == 1
+        assert len(store["entries"]) == 2
+
+    def test_tool_id_dedup(self):
+        """tool_use / tool_result are deduped by tool_id, regardless of seq."""
+        store = _make_store()
+        tu = {"type": "tool_use", "tool_id": "T1", "tool_name": "Bash"}
+        _append_session_entries(store, {"seq": 5, "entries": [tu]})
+        # Re-deliver same tool_use at a different seq — rejected.
+        added = _append_session_entries(store, {"seq": 7, "entries": [dict(tu)]})
+        assert added == 0
+        assert len(store["entries"]) == 1
+        # tool_use vs tool_result with the same tool_id are distinct identities.
+        tr = {"type": "tool_result", "tool_id": "T1", "content": "ok"}
+        added = _append_session_entries(store, {"seq": 8, "entries": [tr]})
+        assert added == 1
+        assert len(store["entries"]) == 2
 
     def test_higher_seq_accepted(self):
         """appendSessionEntries with seq > store.seq → entries added."""
