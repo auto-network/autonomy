@@ -24,9 +24,10 @@ from pathlib import Path
 import pytest
 
 from tools.dashboard.tests import fixtures
+from tools.dashboard.tests._xdist import worker_test_port
 
 
-TEST_PORT = 8083
+TEST_PORT = worker_test_port(8083)
 
 
 def ab(*args, stdin_text=None, timeout=10):

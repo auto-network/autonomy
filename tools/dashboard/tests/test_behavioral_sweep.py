@@ -33,6 +33,8 @@ from pathlib import Path
 
 import pytest
 
+from tools.dashboard.tests._xdist import worker_test_port
+
 # ── Fixture data ──────────────────────────────────────────────────────
 
 NOW = int(time.time())
@@ -609,7 +611,7 @@ def sweep_server(tmp_path_factory):
     events_path = tmpdir / "events.jsonl"
     events_path.write_text("")  # empty — SSE events written after browser connects
 
-    port = 8091
+    port = worker_test_port(8094)
     env = {
         **os.environ,
         "DASHBOARD_MOCK": str(fixture_path),

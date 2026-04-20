@@ -38,7 +38,9 @@ pytestmark = [
 
 # ── Constants ────────────────────────────────────────────────────────
 
-TEST_PORT = 8086
+from tools.dashboard.tests._xdist import worker_test_port
+
+TEST_PORT = worker_test_port(8086)
 TEST_SESSION_ID = "auto-gap-browser"
 TEST_PROJECT = "test"
 
