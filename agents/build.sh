@@ -24,7 +24,7 @@ done
 
 echo "==> Staging binaries..."
 rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR/bin" "$BUILD_DIR/graph"
+mkdir -p "$BUILD_DIR/bin"
 
 # bd — Go binary
 BD_BIN="$HOME/go/bin/bd"
@@ -51,20 +51,17 @@ if [[ ! -f "$CLAUDE_BIN" ]]; then
 fi
 cp "$CLAUDE_BIN" "$BUILD_DIR/bin/claude"
 
-# graph — Python module (just the tools/graph/ directory)
-cp -r "$REPO_ROOT/tools/graph/"*.py "$BUILD_DIR/graph/"
-# Create __init__.py for tools package
-mkdir -p "$BUILD_DIR/tools_pkg"
+# graph — no longer baked into the image; it resolves at runtime from the
+# /workspace/repo bind mount (see agents/Dockerfile and graph://af0deb88-d86).
 
 echo "==> Building docker image..."
 cd "$BUILD_DIR"
 
 # Create build context with flat structure
-mkdir -p context/bin context/graph
+mkdir -p context/bin
 cp bin/bd context/bin/
 cp bin/dolt context/bin/
 cp bin/claude context/bin/
-cp graph/*.py context/graph/
 
 # Copy Dockerfiles and any sibling files they COPY (e.g. dind-entrypoint.sh).
 cp "$SCRIPT_DIR/Dockerfile" context/
