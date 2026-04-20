@@ -15,6 +15,7 @@ Covers:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
@@ -253,7 +254,7 @@ class TestWarmupPopulatesDb:
         # Warm-up for the session — simulates the first post-restart read.
         ts = _TailState()
         row = fresh_db.get_session("auto-warm")
-        monitor._warm_task_tracker_if_needed("auto-warm", dict(row), ts)
+        asyncio.run(monitor._warm_task_tracker_if_needed("auto-warm", dict(row), ts))
 
         # DB now has the reconstructed snapshot — no fresh TaskUpdate fired.
         stored = json.loads(fresh_db.get_session("auto-warm")["todos"])
@@ -296,7 +297,7 @@ class TestWarmupPopulatesDb:
 
         ts = _TailState()
         row = fresh_db.get_session("auto-cold")
-        monitor._warm_task_tracker_if_needed("auto-cold", dict(row), ts)
+        asyncio.run(monitor._warm_task_tracker_if_needed("auto-cold", dict(row), ts))
 
         # Registry payload is what /api/dao/active_sessions returns.
         registry = monitor.get_registry()
@@ -327,7 +328,7 @@ class TestLiveUpdateDebounce:
 
         # First enrichment: seeds two tasks; persistence writes the snapshot.
         tracker.enrich("live", [_create("A"), _create("B")])
-        monitor._persist_todos_if_changed("live", ts)
+        asyncio.run(monitor._persist_todos_if_changed("live", ts))
         first = json.loads(fresh_db.get_session("live")["todos"])
         assert [t["subject"] for t in first] == ["A", "B"]
 
@@ -341,7 +342,7 @@ class TestLiveUpdateDebounce:
         # Apply an update that DOES change the snapshot → DB should be
         # overwritten from the sentinel.
         tracker.enrich("live", [_update("1", status="in_progress")])
-        monitor._persist_todos_if_changed("live", ts)
+        asyncio.run(monitor._persist_todos_if_changed("live", ts))
         after = json.loads(fresh_db.get_session("live")["todos"])
         assert [t["status"] for t in after] == ["in_progress", "pending"]
 
@@ -352,7 +353,7 @@ class TestLiveUpdateDebounce:
         conn.commit()
         # TaskUpdate with same status — snapshot unchanged (debounce hit).
         tracker.enrich("live", [_update("1", status="in_progress")])
-        monitor._persist_todos_if_changed("live", ts)
+        asyncio.run(monitor._persist_todos_if_changed("live", ts))
         sentinel_check = json.loads(fresh_db.get_session("live")["todos"])
         assert sentinel_check == [{"sentinel": True}], \
             "debounce should have prevented a redundant update_todos() write"
