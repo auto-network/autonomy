@@ -530,6 +530,69 @@
       display: block; color: #b0b6bf;
       font-size: 14px; line-height: 1.4;
     }
+    /* Drawer tab strip — only present when the session has a todo list.
+       Replaces the static TOPICS heading with a two-tab Topics/Todos switch. */
+    .sv-drawer-tabs {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 16px 0;
+    }
+    .sv-drawer-tab {
+      background: transparent;
+      border: none;
+      padding: 2px 0;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #6b7280;
+      cursor: pointer;
+      position: relative;
+      font-family: inherit;
+    }
+    .sv-drawer-tab:hover { color: #9ca3af; }
+    .sv-drawer-tab--active { color: #e5e7eb; }
+    .sv-drawer-tab--active::after {
+      content: '';
+      position: absolute;
+      left: 0; right: 0; bottom: -1px;
+      height: 1.5px;
+      background: #6366f1;
+      border-radius: 1px;
+    }
+    /* When the tab strip is present, its own top padding supplies the
+       section gap — collapse the panel's border-top so the tabs sit flush
+       above the content. */
+    .sv-drawer-tabs + .sv-exp-section { border-top: 0; padding-top: 6px; }
+    /* Todo list inside the drawer — reuses the .todo-status icon classes
+       from session-chips.css so status color/shape stay in a single place. */
+    .sv-todo-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .sv-todo-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 13px;
+      line-height: 1.45;
+      color: #b0b6bf;
+    }
+    .sv-todo-item .todo-status { margin-top: 2px; }
+    .sv-todo-item--completed .sv-todo-label {
+      color: #6b7280;
+      text-decoration: line-through;
+      text-decoration-color: rgba(156, 163, 175, 0.3);
+    }
+    .sv-todo-item--in_progress .sv-todo-label { color: #e5e7eb; }
+    .sv-todo-label { min-width: 0; word-break: break-word; }
     .sv-exp-stats-grid {
       display: flex; align-items: flex-start;
       gap: 24px; flex-wrap: wrap;

@@ -85,6 +85,7 @@ SESSION_DEFAULTS: dict[str, Any] = {
     "last_activity": None,
     "last_message": "",
     "topics": "[]",
+    "todos": [],
     "nag_enabled": False,
     "nag_interval": None,
     "nag_message": None,
