@@ -426,14 +426,21 @@
     }
 
     /* Fullscreen page mode: hide dashboard chrome so the viewer owns the viewport.
-       Applied via body.fullscreen-page on /session/ routes. */
-    body.fullscreen-page { display: block; margin: 0; overflow: hidden; }
-    body.fullscreen-page > nav#sidebar { display: none; }
-    body.fullscreen-page > .flex-1 { display: block; height: 100%; }
-    body.fullscreen-page > .flex-1.flex.flex-col { overflow: hidden; }
-    body.fullscreen-page > .flex-1 > header { display: none; }
-    body.fullscreen-page #pinned-beads-strip { display: none !important; }
-    body.fullscreen-page main#content { padding: 0 !important; margin: 0 !important; overflow: visible; height: 100%; }
+       Applied via body.fullscreen-page on /session/ routes. Mobile-only —
+       desktop keeps the navbar visible. */
+    @media (max-width: 767px) {
+      body.fullscreen-page { display: block; margin: 0; overflow: hidden; }
+      body.fullscreen-page > nav#sidebar { display: none; }
+      body.fullscreen-page > .flex-1 { display: block; height: 100%; }
+      body.fullscreen-page > .flex-1.flex.flex-col { overflow: hidden; }
+      body.fullscreen-page > .flex-1 > header { display: none; }
+      body.fullscreen-page #pinned-beads-strip { display: none !important; }
+      body.fullscreen-page main#content { padding: 0 !important; margin: 0 !important; overflow: visible; height: 100%; }
+    }
+    @media (min-width: 768px) {
+      body.fullscreen-page main#content { padding: 0 !important; overflow: hidden; }
+      body.fullscreen-page .session-viewer { height: 100%; }
+    }
 
     /* When session viewer is active, main#content lets the viewer fill it */
     main#content:has(.session-viewer) {
