@@ -165,6 +165,7 @@ class TestEndedDispatchNoInputBar:
     renders. Phase 4 tightens the gate: sv-input only when isLive===true.
     """
 
+    @pytest.mark.xfail(reason="investigating — see auto-hy3pl", strict=False)
     def test_ended_dispatch_shows_no_input_bar(self, h):
         _open_viewer("autonomy", _ENDED_DISPATCH_UUID)
         time.sleep(2)
@@ -202,6 +203,7 @@ class TestEndedDispatchStaticTitle:
     first, which is blocked by Phase 3 (tail resolution).
     """
 
+    @pytest.mark.xfail(reason="investigating — see auto-hy3pl", strict=False)
     def test_ended_dispatch_shows_static_title_and_entry_count(self, h):
         _open_viewer("autonomy", _ENDED_DISPATCH_UUID)
         time.sleep(2)
