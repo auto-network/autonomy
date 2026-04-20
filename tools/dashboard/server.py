@@ -5083,7 +5083,7 @@ def _count_streams() -> int:
     db = GraphDB(**db_args)
     try:
         row = db.conn.execute(
-            "SELECT COUNT(DISTINCT value) AS cnt FROM sources, json_each(json_extract(metadata, '$.tags')) WHERE type = 'note'"
+            "SELECT COUNT(DISTINCT value) AS cnt FROM sources, json_each(json_extract(sources.metadata, '$.tags')) WHERE sources.type = 'note'"
         ).fetchone()
         return row["cnt"] if row else 0
     finally:
