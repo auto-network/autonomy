@@ -88,39 +88,82 @@ window.getSessionStore = function(sessionId) {
 };
 
 /**
- * Append entries to store with seq-based dedup.
- * Returns number of entries actually added (0 if all duped).
+ * Compute a stable identity key for an entry. Used to dedup entries when SSE
+ * gap-replay re-delivers payloads whose per-session seq is "behind" store.seq
+ * (e.g. iOS native EventSource Last-Event-ID reconnect, or _fetchBacklog
+ * re-running on page re-init during app-resume).
+ *
+ *   tool_use   → "tu:<tool_id>"
+ *   tool_result → "tr:<tool_id>"
+ *   anything else → "<type>:<timestamp>:<content-slice>"
+ */
+function _entryIdentity(entry) {
+  if (!entry) return null;
+  if (entry.type === 'tool_use' && entry.tool_id) return 'tu:' + entry.tool_id;
+  if (entry.type === 'tool_result' && entry.tool_id) return 'tr:' + entry.tool_id;
+  var t = entry.type || '?';
+  var ts = entry.timestamp || '';
+  var c = '';
+  if (typeof entry.content === 'string') {
+    c = entry.content.length > 200 ? entry.content.slice(0, 200) : entry.content;
+  } else if (entry.content !== undefined && entry.content !== null) {
+    try { c = JSON.stringify(entry.content).slice(0, 200); } catch (_) { c = ''; }
+  }
+  return t + ':' + ts + ':' + c;
+}
+
+/**
+ * Append entries to store with entry-identity dedup.
+ *
+ * store.seq is still advanced from data.seq, but it does NOT gate appending —
+ * gap-replay payloads whose seq is below store.seq must still land if their
+ * entries are new. Server-restart detection (seq halved) still resets store.seq.
+ *
+ * Returns number of entries actually added (0 if all are duplicates).
  */
 window.appendSessionEntries = function(store, data) {
-  // Seq dedup — skip if already seen
-  // Detect seq regression (server restart resets seq to 0)
-  if (data.seq !== undefined && data.seq <= store.seq) {
-    // If seq dropped to less than half the old value, it's a server restart
-    if (store.seq > 1 && data.seq * 2 < store.seq) {
+  // Advance store.seq, with server-restart detection.
+  if (data.seq !== undefined) {
+    if (data.seq > store.seq) {
       store.seq = data.seq;
-    } else {
-      return 0;
+    } else if (store.seq > 1 && data.seq * 2 < store.seq) {
+      // Seq regression — significantly lower → server restart.
+      store.seq = data.seq;
     }
+    // Otherwise data.seq <= store.seq (replay/duplicate): leave store.seq alone
+    // and fall through to entry-identity dedup.
   }
-  if (data.seq !== undefined) store.seq = data.seq;
 
   if (data.is_live !== undefined) store.isLive = data.is_live;
 
   if (!data.entries || data.entries.length === 0) return 0;
 
-  // Track tool IDs and results
+  // Lazily build the identity index from existing entries on first use.
+  if (!store._seenIdentities) {
+    store._seenIdentities = {};
+    for (var k = 0; k < store.entries.length; k++) {
+      var seedKey = _entryIdentity(store.entries[k]);
+      if (seedKey) store._seenIdentities[seedKey] = true;
+    }
+  }
+
+  var added = 0;
   for (var i = 0; i < data.entries.length; i++) {
     var entry = data.entries[i];
+    var key = _entryIdentity(entry);
+    if (key && store._seenIdentities[key]) continue;
+    if (key) store._seenIdentities[key] = true;
+
     if (entry.type === 'tool_use' && entry.tool_id) {
       store.toolMap[entry.tool_id] = { tool_name: entry.tool_name || '?' };
     }
     if (entry.type === 'tool_result' && entry.tool_id) {
       store.resultMap[entry.tool_id] = entry;
     }
+    store.entries.push(entry);
+    added++;
   }
-
-  for (var j = 0; j < data.entries.length; j++) store.entries.push(data.entries[j]);
-  return data.entries.length;
+  return added;
 };
 
 /**
