@@ -195,15 +195,23 @@ class TestDedupQueuedEntries:
         result = self._dedup(entries)
         assert len(result) == 2
 
-    def test_intervening_entry_resets_tracker(self):
-        """An assistant entry between queued and user resets the tracker."""
+    def test_intervening_assistant_does_not_reset_tracker(self):
+        """An assistant entry between queued and user does NOT reset the tracker.
+
+        In real Claude Code JSONL, the duplicate user entry typically arrives
+        AFTER the agent's assistant turn, not immediately after the
+        queue-operation. The tracker survives intervening assistant/tool_result
+        entries so the dup-user is still identified and deduped. See
+        _dedup_queued_entries in server.py.
+        """
         entries = [
             {"type": "user", "content": "queued msg", "queued": True},
             {"type": "assistant_text", "content": "reply"},
             {"type": "user", "content": "queued msg"},
         ]
         result = self._dedup(entries)
-        assert len(result) == 3
+        # Assistant reply is preserved; the duplicate user is deduped.
+        assert len(result) == 2
 
     def test_empty_input(self):
         assert self._dedup([]) == []
