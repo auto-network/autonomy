@@ -89,9 +89,15 @@ if [ -n "$existing" ]; then
     echo "    Removing stale worktree: $existing"
     git -C "$REPO_ROOT" worktree remove "$existing" --force 2>/dev/null || true
 fi
-# Delete stale branch and recreate from current HEAD
-git -C "$REPO_ROOT" branch -D "$BRANCH" 2>/dev/null || true
-git -C "$REPO_ROOT" branch "$BRANCH"
+# Create branch from current HEAD only if it does not already exist.
+# Preserves any pre-existing branch content — TDD-style pre-committed
+# failing tests on agent/BEAD_ID (e.g. auto-bv343), or commits from a
+# prior dispatch that failed after committing. The previous implementation
+# did `git branch -D` + `git branch`, which silently orphaned any commit
+# on the branch that was not already on master.
+if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null 2>&1; then
+    git -C "$REPO_ROOT" branch "$BRANCH"
+fi
 mkdir -p "$(dirname "$WORKTREE_DIR")"
 git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH" 2>&1
 echo "    Worktree: $WORKTREE_DIR"
