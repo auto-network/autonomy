@@ -1396,51 +1396,63 @@ def _read_cgroup_cpu_usec(container_id: str) -> int | None:
     return None
 
 
-def _upsert_monitor_row(
-    tmux_name: str,
-    *,
-    session_type: str,
-    jsonl_file: Path,
-    bead_id: str | None = None,
-) -> None:
-    """Insert or update a tmux_sessions row so the monitor picks up the JSONL.
+def _dashboard_base_url() -> str:
+    return os.environ.get("GRAPH_API") or "https://localhost:8080"
 
-    The monitor (in the dashboard process) tails JSONLs for every row that
-    has ``is_live=1`` and a ``jsonl_path``. Dispatcher and dashboard share
-    ``dashboard.db`` as IPC; by inserting here the monitor automatically
-    sees the dispatch + librarian sessions on its next liveness sweep.
-    """
+
+def _monitor_bearer_token() -> str | None:
+    # Dispatcher and the graph CLI share CROSSTALK_TOKEN for dashboard auth.
+    # DASHBOARD_TEST_TOKEN is a test-only override (unit tests patch urlopen
+    # so the real request never goes out — the token is only used to
+    # build the header for assertion-shape parity with production).
+    return os.environ.get("CROSSTALK_TOKEN") or os.environ.get("DASHBOARD_TEST_TOKEN")
+
+
+def _monitor_post(path: str, body: dict, *, tmux_name: str) -> None:
+    """POST to a dashboard /api/monitor/* endpoint. Best-effort — if the
+    dashboard is unreachable, log a warning and continue. Direct DB writes
+    are NOT an acceptable fallback: they bypass session_monitor's in-process
+    state (inotify watches + SSE broadcasts). See graph://f4b1bb26-a1."""
+    import json as _json
+    import ssl
+    import urllib.request
+
+    url = _dashboard_base_url().rstrip("/") + path
+    data = _json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    token = _monitor_bearer_token()
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    ctx = ssl.create_default_context()
+    if url.startswith(("https://localhost", "https://127.0.0.1")):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     try:
-        from tools.dashboard.dao import dashboard_db as _dbmod
-    except Exception:
-        return
-    try:
-        project = jsonl_file.parent.name if jsonl_file.is_file() else "autonomy"
-        session_uuid = jsonl_file.stem if jsonl_file.is_file() else None
-        _dbmod.upsert_session(
-            tmux_name=tmux_name,
-            session_type=session_type,
-            project=project,
-            bead_id=bead_id,
-            jsonl_path=str(jsonl_file),
-            session_uuid=session_uuid,
-            resolution_dir=str(jsonl_file.parent),
-            is_live=True,
-        )
+        with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+            resp.read()
     except Exception as e:
-        print(f"  WARNING: monitor upsert for {tmux_name} failed: {e}",
+        print(f"  WARNING: monitor {path} for {tmux_name} failed: {e}",
               file=sys.stderr)
 
 
 def _register_dispatch_session(agent: "RunningAgent", jsonl_file: Path) -> None:
     """Register a dispatch session with the monitor (idempotent, best-effort)."""
     tmux_name = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
-    _upsert_monitor_row(
-        tmux_name,
-        session_type="dispatch",
-        jsonl_file=jsonl_file,
-        bead_id=agent.bead_id,
-    )
+    project = jsonl_file.parent.name if jsonl_file.is_file() else "autonomy"
+    body = {
+        "tmux_name": tmux_name,
+        "type": "dispatch",
+        "jsonl_path": str(jsonl_file),
+        "bead_id": agent.bead_id,
+        "project": project,
+        "run_dir": str(agent.output_dir) if agent.output_dir else None,
+    }
+    _monitor_post("/api/monitor/register", body, tmux_name=tmux_name)
 
 
 def _register_librarian_session(
@@ -1448,24 +1460,23 @@ def _register_librarian_session(
 ) -> None:
     """Register a librarian session with the monitor (idempotent, best-effort)."""
     tmux_name = Path(lib.output_dir).name if lib.output_dir else lib.job_id
-    _upsert_monitor_row(
-        tmux_name,
-        session_type="librarian",
-        jsonl_file=jsonl_file,
-    )
+    project = jsonl_file.parent.name if jsonl_file.is_file() else "autonomy"
+    body = {
+        "tmux_name": tmux_name,
+        "type": "librarian",
+        "jsonl_path": str(jsonl_file),
+        "project": project,
+        "run_dir": str(lib.output_dir) if lib.output_dir else None,
+    }
+    _monitor_post("/api/monitor/register", body, tmux_name=tmux_name)
 
 
 def _deregister_session_with_monitor(tmux_name: str) -> None:
-    """Mark a session dead in dashboard.db so the monitor stops tailing it."""
-    try:
-        from tools.dashboard.dao import dashboard_db as _dbmod
-    except Exception:
-        return
-    try:
-        _dbmod.mark_dead(tmux_name)
-    except Exception as e:
-        print(f"  WARNING: monitor deregister for {tmux_name} failed: {e}",
-              file=sys.stderr)
+    """Tell the monitor to mark a session dead. Best-effort over HTTP so the
+    dispatch process doesn't crash when the dashboard is down."""
+    _monitor_post(
+        "/api/monitor/deregister", {"tmux_name": tmux_name}, tmux_name=tmux_name,
+    )
 
 
 def _read_stats_via_monitor(
