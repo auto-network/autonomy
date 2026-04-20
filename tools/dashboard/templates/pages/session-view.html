@@ -129,7 +129,8 @@
                     <li class="sv-todo-item"
                         :class="'sv-todo-item--' + (todo.status || 'pending')">
                       <span class="todo-status"
-                            :class="'todo-status--' + (todo.status || 'pending')"></span>
+                            :class="'todo-status--' + (todo.status || 'pending')"
+                            x-text="todo.status === 'completed' ? '\u2713' : ''"></span>
                       <span class="sv-todo-label" x-text="todo.subject"></span>
                     </li>
                   </template>
