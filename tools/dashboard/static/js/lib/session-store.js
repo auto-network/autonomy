@@ -39,6 +39,7 @@ document.addEventListener('alpine:init', function() {
         if (s.context_tokens) store.contextTokens = s.context_tokens;
         if (s.last_message !== undefined) store.lastMessage = s.last_message;
         if (s.topics) store.topics = s.topics;
+        if (Array.isArray(s.todos)) store.todos = s.todos;
         if (s.nag_enabled !== undefined) store.nagEnabled = !!s.nag_enabled;
         if (s.nag_interval) store.nagInterval = s.nag_interval;
         if (s.nag_message !== undefined) store.nagMessage = s.nag_message;
@@ -66,6 +67,7 @@ window.getSessionStore = function(sessionId) {
       entryCount: 0,
       contextTokens: 0,
       topics: [],
+      todos: [],
       nagEnabled: false,
       nagInterval: 15,
       nagMessage: '',
@@ -225,6 +227,7 @@ window.ensureSessionMessages = function() {
       store.entryCount = s.entry_count || 0;
       if (s.context_tokens) store.contextTokens = s.context_tokens;
       if (s.topics) store.topics = s.topics;
+      if (Array.isArray(s.todos)) store.todos = s.todos;
       store.nagEnabled = !!s.nag_enabled;
       store.nagInterval = s.nag_interval || 15;
       store.nagMessage = s.nag_message || '';
