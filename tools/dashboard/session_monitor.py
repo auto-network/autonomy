@@ -45,6 +45,7 @@ from tools.dashboard.dao.dashboard_db import (
     update_activity_state,
     update_tail_state,
     update_nag_last_sent,
+    update_todos,
     count_live,
 )
 
@@ -306,6 +307,35 @@ class TaskStateTracker:
             elif name == "TaskUpdate":
                 entry["todo_annotation"] = state.on_update(entry.get("input") or {})
 
+    def snapshot(self, tmux_name: str) -> list[dict]:
+        """Return the current per-task state for a session, ordered by taskId.
+
+        Each entry is a fresh dict (caller may mutate freely). Returns ``[]``
+        for unknown sessions. Ordering follows the ``_next_id`` counter so the
+        UI renders tasks in insertion order even when taskIds are reused.
+        """
+        state = self._sessions.get(tmux_name)
+        if state is None or not state.tasks:
+            return []
+
+        def _key(task_id: str) -> tuple[int, str]:
+            try:
+                return (int(task_id), task_id)
+            except ValueError:
+                return (2**31, task_id)
+
+        out: list[dict] = []
+        for tid in sorted(state.tasks.keys(), key=_key):
+            info = state.tasks[tid]
+            out.append({
+                "task_id": info.task_id,
+                "subject": info.subject,
+                "status": info.status,
+                "description": info.description,
+                "activeForm": info.activeForm,
+            })
+        return out
+
 
 class _SessionTaskState:
     """Per-session map of taskId → _TaskInfo with a sequential id counter.
@@ -404,6 +434,11 @@ class _TailState:
     last_entry_type: str = ""
     # True once the tracker has been warmed from historical entries on this run
     task_tracker_warmed: bool = False
+    # Last JSON-serialized todos snapshot persisted to DB — used to debounce
+    # update_todos() writes so a no-op TaskUpdate doesn't churn the row.
+    # None sentinel means "never written on this process run" (forces one write
+    # after warm-up so restarts repopulate the DB even without new events).
+    last_todos_json: str | None = None
 
 
 class SessionMonitor:
@@ -416,6 +451,7 @@ class SessionMonitor:
         self._event_bus = None
         self._entry_parser = None
         self._entry_enricher = None
+        self._todo_snapshot = None
         self._started = False
         self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
         self._last_orphan_prune: float = 0.0    # timestamp of last worktree orphan prune
@@ -699,6 +735,7 @@ class SessionMonitor:
                 "last_activity": s.get("last_activity") or s["created_at"],
                 "last_message": s.get("last_message", ""),
                 "topics": json.loads(s.get("topics") or "[]"),
+                "todos": json.loads(s.get("todos") or "[]"),
                 "nag_enabled": bool(s.get("nag_enabled")),
                 "nag_interval": s.get("nag_interval") or 15,
                 "nag_message": s.get("nag_message") or "",
@@ -715,14 +752,24 @@ class SessionMonitor:
 
     # ── Background tasks ──────────────────────────────────────────
 
-    async def start(self, event_bus=None, entry_parser=None, entry_enricher=None) -> None:
-        """Start background tailer and liveness tasks."""
+    async def start(
+        self, event_bus=None, entry_parser=None, entry_enricher=None,
+        todo_snapshot=None,
+    ) -> None:
+        """Start background tailer and liveness tasks.
+
+        ``todo_snapshot`` is an optional ``(tmux_name) -> list[dict]`` callable
+        used to persist the tracker's current per-session todo list after each
+        enrichment pass and after warm-up. Wired via the same tracker instance
+        that provides ``entry_enricher``.
+        """
         if self._started:
             return
         self._started = True
         self._event_bus = event_bus
         self._entry_parser = entry_parser
         self._entry_enricher = entry_enricher
+        self._todo_snapshot = todo_snapshot
         self._init_inotify()
         self._tailer_task = asyncio.create_task(self._inotify_tailer_loop())
         self._liveness_task = asyncio.create_task(self._liveness_loop())
@@ -1016,6 +1063,7 @@ class SessionMonitor:
             try:
                 self._warm_task_tracker_if_needed(tmux_name, row, ts)
                 self._entry_enricher(tmux_name, new_entries)
+                self._persist_todos_if_changed(tmux_name, ts)
             except Exception:
                 logger.exception("session_monitor: entry_enricher failed for %s", tmux_name)
         if new_entries and self._event_bus:
@@ -1322,6 +1370,41 @@ class SessionMonitor:
                 self._entry_enricher(tmux_name, prior)
             except Exception:
                 logger.exception("session_monitor: task tracker warm-up failed for %s", tmux_name)
+        # Persist the post-warm-up snapshot so restarts repopulate the DB even
+        # when no fresh TaskUpdate arrives. Runs even when `prior` is empty:
+        # the tracker's snapshot may legitimately be empty, but we still want
+        # to flush the sentinel to the DB on first read after a restart.
+        self._persist_todos_if_changed(tmux_name, ts)
+
+    def _persist_todos_if_changed(self, tmux_name: str, ts: _TailState) -> None:
+        """Diff the tracker's snapshot against the last persisted value and
+        write to ``tmux_sessions.todos`` only when it actually changed.
+
+        Called at two points:
+          - after live enrichment in the tailer loop
+          - after warm-up replay (so a cold dashboard repopulates the DB
+            without needing a new TaskUpdate event)
+
+        The per-session ``last_todos_json`` cache on ``_TailState`` means we
+        skip the DB write for no-op updates (e.g. repeated status transitions
+        with no net change) but still flush the first post-warm-up snapshot.
+        """
+        if self._todo_snapshot is None:
+            return
+        try:
+            snapshot = self._todo_snapshot(tmux_name)
+        except Exception:
+            logger.exception("session_monitor: todo snapshot failed for %s", tmux_name)
+            return
+        encoded = json.dumps(snapshot)
+        if encoded == ts.last_todos_json:
+            return
+        try:
+            update_todos(tmux_name, snapshot)
+        except Exception:
+            logger.exception("session_monitor: update_todos failed for %s", tmux_name)
+            return
+        ts.last_todos_json = encoded
 
     @staticmethod
     def _enrich_agent_entries(row: dict, ts: _TailState, entries: list) -> None:

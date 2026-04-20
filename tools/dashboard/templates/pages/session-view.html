@@ -94,14 +94,47 @@
              Visibility driven by CSS (.sv-header.open max-height animation). -->
         <div class="sv-header-expanded" @click.stop>
 
-          <template x-if="topics && topics.length > 0">
+          <!-- Tab strip — only renders when the session has a todo list.
+               When hidden, the Topics section reverts to its static heading.
+               `selectedDrawerTab` auto-resets to 'topics' on empty transition
+               via x-effect below, so there is no stuck-tab state. -->
+          <template x-if="hasTodos">
+            <div class="sv-drawer-tabs" data-testid="drawer-tabs">
+              <button class="sv-drawer-tab"
+                      :class="{ 'sv-drawer-tab--active': selectedDrawerTab === 'topics' }"
+                      @click.stop="selectedDrawerTab = 'topics'"
+                      data-testid="drawer-tab-topics">Topics</button>
+              <button class="sv-drawer-tab"
+                      :class="{ 'sv-drawer-tab--active': selectedDrawerTab === 'todos' }"
+                      @click.stop="selectedDrawerTab = 'todos'"
+                      data-testid="drawer-tab-todos">Todos</button>
+            </div>
+          </template>
+
+          <template x-if="(topics && topics.length > 0) || hasTodos">
             <div class="sv-exp-section">
-              <div class="sv-exp-heading">TOPICS</div>
-              <div class="sv-exp-topics">
-                <template x-for="(topic, idx) in topics" :key="idx">
-                  <span class="sv-exp-topic-item" x-text="topic"></span>
-                </template>
-              </div>
+              <template x-if="!hasTodos">
+                <div class="sv-exp-heading">TOPICS</div>
+              </template>
+              <template x-if="selectedDrawerTab === 'topics'">
+                <div class="sv-exp-topics" data-testid="drawer-panel-topics">
+                  <template x-for="(topic, idx) in topics" :key="idx">
+                    <span class="sv-exp-topic-item" x-text="topic"></span>
+                  </template>
+                </div>
+              </template>
+              <template x-if="hasTodos && selectedDrawerTab === 'todos'">
+                <ul class="sv-todo-list" data-testid="drawer-panel-todos">
+                  <template x-for="todo in todos" :key="todo.task_id">
+                    <li class="sv-todo-item"
+                        :class="'sv-todo-item--' + (todo.status || 'pending')">
+                      <span class="todo-status"
+                            :class="'todo-status--' + (todo.status || 'pending')"></span>
+                      <span class="sv-todo-label" x-text="todo.subject"></span>
+                    </li>
+                  </template>
+                </ul>
+              </template>
             </div>
           </template>
 

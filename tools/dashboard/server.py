@@ -6517,6 +6517,7 @@ async def _on_startup():
         event_bus=event_bus,
         entry_parser=_parse_jsonl_entry,
         entry_enricher=_task_state_tracker.enrich,
+        todo_snapshot=_task_state_tracker.snapshot,
     )
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):

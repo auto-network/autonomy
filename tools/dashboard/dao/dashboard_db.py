@@ -171,6 +171,12 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN activity_state TEXT DEFAULT 'idle'")
         _conn.commit()
+    # Migrate: add todos column if missing (Phase 2 — drawer Todos tab)
+    try:
+        _conn.execute("SELECT todos FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN todos TEXT DEFAULT '[]'")
+        _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
 
@@ -340,6 +346,21 @@ def update_topics(tmux_name: str, topics: list[str]) -> None:
     conn = get_conn()
     conn.execute("UPDATE tmux_sessions SET topics=? WHERE tmux_name=?",
                  (json.dumps(topics), tmux_name))
+    conn.commit()
+
+
+def update_todos(tmux_name: str, todos: list[dict]) -> None:
+    """Persist the current todo-list snapshot for a session.
+
+    ``todos`` is a list of dicts produced by ``TaskStateTracker.snapshot()`` —
+    each dict has keys: task_id, subject, status, description, activeForm.
+    Writes replace any prior snapshot (no append). An empty list persists as
+    ``"[]"``, NOT NULL, so consumers can unconditionally json.loads.
+    """
+    import json
+    conn = get_conn()
+    conn.execute("UPDATE tmux_sessions SET todos=? WHERE tmux_name=?",
+                 (json.dumps(todos), tmux_name))
     conn.commit()
 
 
