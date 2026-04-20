@@ -140,17 +140,3 @@ def ipc_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict]:
     }
 
 
-# ── Crosstalk-token fixture — endpoints use _crosstalk_auth ──────────
-
-
-@pytest.fixture
-def auth_headers() -> dict:
-    """Bearer token for endpoints guarded by _crosstalk_auth.
-
-    The server exposes a test hook — DASHBOARD_TEST_TOKEN env var. If the
-    implementation under test does not honour that hook, endpoints will
-    still 401 and test setup/skipping is obvious from the failure.
-    """
-    token = os.environ.get("DASHBOARD_TEST_TOKEN", "test-token-auto-opbyh")
-    os.environ["DASHBOARD_TEST_TOKEN"] = token
-    return {"Authorization": f"Bearer {token}"}

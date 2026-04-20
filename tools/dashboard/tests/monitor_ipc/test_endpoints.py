@@ -29,8 +29,7 @@ class TestRegisterEndpoint:
     """#1 + #2 — POST /api/monitor/register must create DB row + install watch."""
 
     async def test_register_endpoint_creates_row_and_watch(
-        self, ipc_env, auth_headers
-    ):
+        self, ipc_env    ):
         srv = ipc_env["server"]
         smmod = ipc_env["session_monitor"]
         tmp_path = ipc_env["tmp_path"]
@@ -63,7 +62,6 @@ class TestRegisterEndpoint:
                     "project": "autonomy",
                     "run_dir": str(sess_dir.parent),
                 },
-                headers=auth_headers,
             )
 
             assert resp.status_code == 200, (
@@ -109,7 +107,7 @@ class TestRegisterEndpoint:
             assert body.get("ok") is True, f"response body: {body!r}"
             assert body.get("tmux_name") == "auto-test-001", body
 
-    async def test_register_endpoint_idempotent(self, ipc_env, auth_headers):
+    async def test_register_endpoint_idempotent(self, ipc_env):
         srv = ipc_env["server"]
         tmp_path = ipc_env["tmp_path"]
         db_path = ipc_env["db_path"]
@@ -129,10 +127,10 @@ class TestRegisterEndpoint:
                 "bead_id": "auto-test",
                 "project": "autonomy",
             }
-            r1 = client.post("/api/monitor/register", json=body, headers=auth_headers)
+            r1 = client.post("/api/monitor/register", json=body)
             assert r1.status_code == 200, f"first POST: {r1.status_code} {r1.text[:200]}"
 
-            r2 = client.post("/api/monitor/register", json=body, headers=auth_headers)
+            r2 = client.post("/api/monitor/register", json=body)
             assert r2.status_code == 200, (
                 f"second POST (idempotent re-register) returned {r2.status_code} "
                 f"body={r2.text[:200]!r}. Handler must accept re-registration "
@@ -158,8 +156,7 @@ class TestDeregisterEndpoint:
     """#3 — POST /api/monitor/deregister marks is_live=0, preserves row + jsonl_path."""
 
     async def test_deregister_endpoint_marks_dead_preserves_row(
-        self, ipc_env, auth_headers
-    ):
+        self, ipc_env    ):
         srv = ipc_env["server"]
         tmp_path = ipc_env["tmp_path"]
         db_path = ipc_env["db_path"]
@@ -183,7 +180,6 @@ class TestDeregisterEndpoint:
                     "bead_id": "auto-test",
                     "project": "autonomy",
                 },
-                headers=auth_headers,
             )
             assert r1.status_code == 200, f"register precondition failed: {r1.text[:200]}"
 
@@ -191,7 +187,6 @@ class TestDeregisterEndpoint:
             r2 = client.post(
                 "/api/monitor/deregister",
                 json={"tmux_name": "auto-test-003"},
-                headers=auth_headers,
             )
             assert r2.status_code == 200, (
                 f"POST /api/monitor/deregister returned {r2.status_code} "
