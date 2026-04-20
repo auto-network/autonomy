@@ -1711,6 +1711,123 @@ def _crosstalk_auth(request) -> tuple[str | None, JSONResponse | None]:
     return sender, None
 
 
+def _monitor_auth(request) -> JSONResponse | None:
+    """Auth for /api/monitor/* endpoints.
+
+    Accepts the same bearer tokens as CrossTalk, plus a test-only env
+    override (DASHBOARD_TEST_TOKEN) so unit tests can exercise the endpoint
+    without seeding auth_db. Returns None on success, or a JSONResponse on
+    failure.
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        return JSONResponse({"error": "missing or invalid Authorization header"}, status_code=401)
+    raw_token = auth[7:]
+    test_token = os.environ.get("DASHBOARD_TEST_TOKEN")
+    if test_token and raw_token == test_token:
+        return None
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    if auth_db.resolve_token(token_hash) is None:
+        return JSONResponse({"error": "invalid or revoked token"}, status_code=401)
+    return None
+
+
+async def api_monitor_register(request):
+    """POST /api/monitor/register — register a session with the in-process monitor.
+
+    Body: {tmux_name, type, jsonl_path, bead_id, project, run_dir?}
+
+    Calls session_monitor.register_session() in-process so that the DB row
+    AND the inotify watch AND the SSE registry broadcast all happen. This is
+    the IPC bridge between the dispatcher (separate process) and the
+    dashboard — a direct dashboard_db.upsert_session() from the dispatcher
+    would bypass watch setup and the SSE broadcast, leaving the overlay
+    frozen (the auto-ylj6r gap, pitfall graph://f4b1bb26-a1).
+
+    Idempotent on re-register: existing rows are left in place and the
+    in-process watch is refreshed.
+    """
+    err = _monitor_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    tmux_name = body.get("tmux_name")
+    session_type = body.get("type")
+    jsonl_path = body.get("jsonl_path")
+    if not tmux_name or not session_type:
+        return JSONResponse(
+            {"error": "tmux_name and type are required"}, status_code=400,
+        )
+
+    bead_id = body.get("bead_id")
+    project = body.get("project")
+    run_dir = body.get("run_dir")
+
+    existing = dashboard_db.get_session(tmux_name)
+    if existing is not None:
+        # Idempotent re-register: refresh the in-process watch without a
+        # duplicate INSERT. register_session() would swallow the
+        # IntegrityError silently and leave the watch un-refreshed.
+        if jsonl_path and session_monitor._use_inotify:
+            try:
+                session_monitor._add_file_watch(tmux_name, jsonl_path)
+            except Exception:
+                logger.exception(
+                    "api_monitor_register: watch refresh failed for %s",
+                    tmux_name,
+                )
+        return JSONResponse({"ok": True, "tmux_name": tmux_name})
+
+    try:
+        await session_monitor.register_session(
+            tmux_name=tmux_name,
+            type=session_type,
+            jsonl_path=jsonl_path,
+            run_dir=run_dir,
+            bead_id=bead_id,
+            project=project,
+        )
+    except Exception as exc:
+        logger.exception("api_monitor_register failed for %s", tmux_name)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"ok": True, "tmux_name": tmux_name})
+
+
+async def api_monitor_deregister(request):
+    """POST /api/monitor/deregister — mark a session dead in the monitor.
+
+    Body: {tmux_name}
+
+    Calls session_monitor.deregister_session() in-process so the inotify
+    watch is removed, the DB row is flipped to is_live=0, and the registry
+    SSE broadcast fires. Idempotent — missing sessions return 200.
+    """
+    err = _monitor_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    tmux_name = body.get("tmux_name")
+    if not tmux_name:
+        return JSONResponse({"error": "tmux_name is required"}, status_code=400)
+
+    try:
+        await session_monitor.deregister_session(tmux_name)
+    except Exception as exc:
+        logger.exception("api_monitor_deregister failed for %s", tmux_name)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"ok": True})
+
+
 async def api_crosstalk_send(request):
     """POST /api/crosstalk/send — deliver a plain-text message to a peer session."""
     sender, err = _crosstalk_auth(request)
@@ -6450,6 +6567,11 @@ routes = [
     Route("/api/crosstalk/send", api_crosstalk_send, methods=["POST"]),
     Route("/api/crosstalk/broadcast", api_crosstalk_broadcast, methods=["POST"]),
     Route("/api/crosstalk/peers", api_crosstalk_peers, methods=["GET"]),
+
+    # Monitor IPC — dispatcher registers dispatch/librarian sessions here so
+    # inotify watches + SSE broadcasts are wired up in-process.
+    Route("/api/monitor/register", api_monitor_register, methods=["POST"]),
+    Route("/api/monitor/deregister", api_monitor_deregister, methods=["POST"]),
 
     # Embed resolution + attachment serving
     Route("/api/resolve/{id}", api_resolve_embed),
