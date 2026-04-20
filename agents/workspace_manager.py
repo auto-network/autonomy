@@ -11,8 +11,11 @@ Given a ProjectConfig and a session name, this module:
 
 Mount layout for a writable repo:
     - worktree → container mount path (rw)
-    - managed clone → its own absolute host path (ro) so the worktree's
+    - managed clone → its own absolute host path (rw) so the worktree's
       ``.git`` file (which uses absolute paths) resolves inside the container.
+      The clone must be rw because ``git add``/``commit`` in the worktree
+      writes into ``<clone>/.git/worktrees/<name>/`` (index, HEAD, refs) and
+      into the clone's shared object store.
 
 Read-only repos are checked out to ``origin/HEAD`` in the managed clone itself
 and mounted directly at the container mount path.
@@ -165,9 +168,11 @@ def prepare_session_mounts(
             create_worktree(clone, worktree, f"session/{session_name}")
             mounts[str(worktree)] = repo.mount
             # Worktree's .git file points at an absolute host path inside the
-            # managed clone — mount the clone at that same path (ro) so the
-            # container can resolve it.
-            mounts[str(clone)] = f"{clone}:ro"
+            # managed clone — mount the clone at that same path (rw) so the
+            # container can resolve it and so ``git add``/``commit`` can
+            # write the worktree's per-worktree git state (index, refs) that
+            # lives at ``<clone>/.git/worktrees/<name>/``.
+            mounts[str(clone)] = str(clone)
         else:
             _update_readonly_clone(clone)
             mounts[str(clone)] = f"{repo.mount}:ro"

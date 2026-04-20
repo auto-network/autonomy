@@ -104,7 +104,10 @@ def test_prepare_session_mounts_writable_and_readonly(tmp_path, monkeypatch):
     worktree = worktrees_dir / "sess-w" / "upstream"
     clone = repos_dir / "local" / "upstream.git"
     assert mounts_w[str(worktree)] == "/workspace/upstream"
-    assert mounts_w[str(clone)] == f"{clone}:ro"
+    # Clone must be mounted rw (no ``:ro`` suffix) so ``git add``/``commit``
+    # in the worktree can write to ``<clone>/.git/worktrees/<name>/``.
+    assert mounts_w[str(clone)] == str(clone)
+    assert ":ro" not in mounts_w[str(clone)]
     assert worktree.exists()
     # Worktree should be on a fresh session branch.
     branch = subprocess.run(
@@ -123,6 +126,77 @@ def test_prepare_session_mounts_writable_and_readonly(tmp_path, monkeypatch):
     # Read-only path: only the clone itself is mounted, at the container path, ro.
     assert mounts_ro[str(clone)] == "/workspace/ro:ro"
     assert len(mounts_ro) == 1
+
+
+def test_git_add_and_commit_succeed_in_session_worktree(tmp_path, monkeypatch):
+    """Regression: ``git add``/``commit`` must succeed in a session worktree.
+
+    The worktree's ``.git`` file points inside the managed clone, so every
+    ``git`` write (index, refs, objects) hits the clone directory. If the
+    clone is ever made read-only — as it once was via a ``:ro`` mount spec —
+    ``git add`` fails with EROFS on ``.git/worktrees/<name>/index.lock``.
+    This test exercises the full flow end-to-end and asserts the session
+    branch advances past ``origin/HEAD``.
+    """
+    upstream = _make_upstream(tmp_path)
+    url = str(upstream)
+    repos_dir = tmp_path / "repos"
+    worktrees_dir = tmp_path / "worktrees"
+    session = "sess-commit"
+
+    monkeypatch.setattr(
+        wm, "managed_clone_path",
+        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
+    )
+    monkeypatch.setattr(wm, "_worktree_basename", lambda u: "upstream")
+
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    wm.prepare_session_mounts(
+        proj, session, repos_dir=repos_dir, worktrees_dir=worktrees_dir,
+    )
+    worktree = worktrees_dir / session / "upstream"
+    clone = repos_dir / "local" / "upstream.git"
+    branch = f"session/{session}"
+
+    # Record origin/HEAD before the commit so we can prove HEAD advanced.
+    head_before = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # Configure identity and run the exact sequence that failed in NG sessions.
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
+    (worktree / "hello.txt").write_text("hello\n")
+    add = subprocess.run(
+        ["git", "-C", str(worktree), "add", "hello.txt"],
+        capture_output=True, text=True,
+    )
+    assert add.returncode == 0, (
+        f"git add failed in session worktree: {add.stderr!r}. "
+        "Check that the managed clone mount is not read-only."
+    )
+    commit = subprocess.run(
+        ["git", "-C", str(worktree), "commit", "-q", "-m", "smoke"],
+        capture_output=True, text=True,
+    )
+    assert commit.returncode == 0, f"git commit failed: {commit.stderr!r}"
+
+    head_after = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head_after != head_before, "HEAD should advance after commit"
+
+    # The session branch ref in the managed clone must point at the new HEAD.
+    clone_branch_sha = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", branch],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert clone_branch_sha == head_after
 
 
 def test_prepare_session_mounts_empty_for_repoless_project(tmp_path):
