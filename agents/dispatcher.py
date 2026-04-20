@@ -2299,6 +2299,303 @@ def dispatch_cycle(
 # ── Recovery ────────────────────────────────────────────────────
 
 
+def _running_agent_containers() -> set[str]:
+    """Return the set of currently-running agent-* container names.
+
+    Used by reconcile to distinguish dead-agent rows from live ones without
+    requiring a `docker inspect` per row.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--filter", "name=agent-",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return set()
+        return {ln.strip() for ln in result.stdout.splitlines() if ln.strip()}
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return set()
+
+
+def _collect_completed_run(row: dict) -> None:
+    """Collection rescue path for a RUNNING dispatch_runs row whose container
+    is gone but whose decision.json says the agent finished. Idempotent —
+    short-circuits if the row is no longer RUNNING (a concurrent collector
+    beat us via the dispatch_db status flip).
+    """
+    run_id = row.get("id") or ""
+    bead_id = row.get("bead_id") or ""
+    output_dir = row.get("output_dir") or ""
+    branch = row.get("branch") or (f"agent/{bead_id}" if bead_id else "")
+    image = row.get("image") or ""
+    container_name = row.get("container_name") or (
+        f"agent-{bead_id}" if bead_id else ""
+    )
+
+    branch_base = ""
+    if output_dir:
+        base_file = Path(output_dir) / ".branch_base"
+        if base_file.exists():
+            try:
+                branch_base = base_file.read_text().strip()
+            except OSError:
+                pass
+    worktree_path = ""
+    if output_dir:
+        wt_file = Path(output_dir) / ".worktree_path"
+        if wt_file.exists():
+            try:
+                worktree_path = wt_file.read_text().strip()
+            except OSError:
+                pass
+
+    # Per-run claim: flip RUNNING → COLLECTING atomically. If the UPDATE
+    # affects 0 rows, another collector is already on it — bail.
+    from agents.dispatch_db import _get_conn
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE dispatch_runs SET status='COLLECTING' "
+            "WHERE id=? AND status='RUNNING'",
+            (run_id,),
+        )
+        conn.commit()
+        claimed = cur.rowcount > 0
+    finally:
+        conn.close()
+    if not claimed:
+        print(f"  reconcile rescue: {run_id} already claimed — skipping")
+        return
+
+    started_at = row.get("started_at")
+    if isinstance(started_at, (int, float)):
+        started_ts = float(started_at)
+    elif isinstance(started_at, str) and started_at:
+        try:
+            started_ts = datetime.fromisoformat(
+                started_at.rstrip("Z")
+            ).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            started_ts = time.time()
+    else:
+        started_ts = time.time()
+
+    agent = RunningAgent(
+        bead_id=bead_id,
+        container_name=container_name,
+        container_id="",
+        output_dir=output_dir,
+        worktree_path=worktree_path,
+        branch=branch,
+        branch_base=branch_base,
+        image=image,
+        started_at=started_ts,
+    )
+
+    print(f"  reconcile rescue: collecting {run_id} (decision.json present)")
+    try:
+        result = collect_results(agent, 0)
+        effective_status = process_decision(result)
+        _record_run(agent, result, effective_status=effective_status)
+        _ingest_session(result)
+        if effective_status == "DONE":
+            try:
+                report_path = str(Path(agent.output_dir) / "experience_report.md") if agent.output_dir else ""
+                decision_path = str(Path(agent.output_dir) / "decision.json") if agent.output_dir else ""
+                payload = json.dumps({
+                    "bead_id": agent.bead_id,
+                    "report_path": report_path,
+                    "decision_path": decision_path,
+                    "run_id": run_id,
+                })
+                enqueue_job("review_report", payload=payload)
+            except Exception as eq_err:
+                print(
+                    f"  WARNING: enqueue review_report failed for {run_id}: {eq_err}",
+                    file=sys.stderr,
+                )
+    except Exception as e:
+        # Restore RUNNING so a later pass can retry — don't strand the row.
+        restore = _get_conn()
+        try:
+            restore.execute(
+                "UPDATE dispatch_runs SET status='RUNNING' "
+                "WHERE id=? AND status='COLLECTING'",
+                (run_id,),
+            )
+            restore.commit()
+        finally:
+            restore.close()
+        print(
+            f"  ERROR rescue collect for {run_id}: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+
+
+def reconcile_orphaned_runs() -> None:
+    """Reconcile RUNNING dispatch_runs against live containers + decision.json.
+
+    For every RUNNING row whose container is no longer in `docker ps`:
+      - decision.json status=DONE → run the collection pipeline (rescue)
+      - decision.json status=FAILED → record the agent's reason (real failure)
+      - no decision.json → mark FAILED 'orphaned: no container at startup'
+
+    Idempotent. Rows with status != 'RUNNING' are skipped — a prior pass that
+    already flipped the row to COLLECTING/DONE/FAILED is the authoritative one.
+    """
+    try:
+        running_rows = get_currently_running()
+    except Exception as e:
+        print(
+            f"  WARNING: reconcile_orphaned_runs read failed: {e}",
+            file=sys.stderr,
+        )
+        return
+    if not running_rows:
+        print("  reconcile_orphaned_runs: no RUNNING rows")
+        return
+
+    live_containers = _running_agent_containers()
+    from agents.dispatch_db import _get_conn
+
+    for row in running_rows:
+        run_id = row.get("id") or ""
+        container_name = row.get("container_name") or ""
+        output_dir = row.get("output_dir") or ""
+
+        # Live container — leave it alone for poll_and_collect to handle.
+        if container_name and container_name in live_containers:
+            continue
+        # Idempotency guard — only operate on RUNNING rows.
+        if (row.get("status") or "").upper() != "RUNNING":
+            continue
+
+        decision = None
+        if output_dir:
+            decision_path = Path(output_dir) / "decision.json"
+            if decision_path.exists():
+                try:
+                    decision = json.loads(decision_path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    decision = None
+
+        decision_status = (
+            (decision.get("status") or "").upper() if isinstance(decision, dict) else ""
+        )
+
+        if decision_status == "DONE":
+            try:
+                _collect_completed_run(row)
+            except Exception as e:
+                print(
+                    f"  WARNING: rescue collect for {run_id} raised: {e}",
+                    file=sys.stderr,
+                )
+            continue
+
+        if decision_status == "FAILED":
+            agent_reason = (
+                (decision.get("reason") if isinstance(decision, dict) else None)
+                or "Agent reported FAILED with no reason"
+            )
+            conn = _get_conn()
+            try:
+                conn.execute(
+                    "UPDATE dispatch_runs SET status='FAILED', reason=? "
+                    "WHERE id=? AND status='RUNNING'",
+                    (agent_reason[:500], run_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            print(
+                f"  reconcile: marked {run_id} FAILED from decision.json: "
+                f"{agent_reason[:120]}"
+            )
+            continue
+
+        # No decision.json + no container → legitimate orphan
+        conn = _get_conn()
+        try:
+            conn.execute(
+                "UPDATE dispatch_runs SET status='FAILED', "
+                "reason='orphaned: no container at startup' "
+                "WHERE id=? AND status='RUNNING'",
+                (run_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        print(f"  reconcile: marked {run_id} FAILED (orphaned, no decision.json)")
+
+
+def reconcile_stale_monitor_rows() -> None:
+    """Sweep stale is_live=1 dispatch/librarian rows in tmux_sessions.
+
+    When a dispatch container exits but the dispatcher's deregister POST
+    failed (or the dispatcher was mid-restart), tmux_sessions retains
+    is_live=1 with no matching RUNNING dispatch_runs entry. The session
+    monitor's liveness loop (correctly) does not sweep dispatch/librarian
+    rows — their lifecycle is dispatcher-owned. This pass closes the gap.
+
+    Idempotent. POSTs /api/monitor/deregister via the existing helper
+    (auth-free post commit 8066651 — do not re-add Authorization headers).
+    """
+    import sqlite3 as _sq
+
+    db_path = os.environ.get("DASHBOARD_DB", str(REPO_ROOT / "data" / "dashboard.db"))
+    try:
+        conn = _sq.connect(db_path)
+        conn.row_factory = _sq.Row
+        try:
+            candidates = conn.execute(
+                "SELECT tmux_name FROM tmux_sessions "
+                "WHERE type IN ('dispatch','librarian') AND is_live=1"
+            ).fetchall()
+        finally:
+            conn.close()
+    except _sq.OperationalError as e:
+        print(
+            f"  WARNING: reconcile_stale_monitor_rows read failed: {e}",
+            file=sys.stderr,
+        )
+        return
+
+    if not candidates:
+        print("  reconcile_stale_monitor_rows: no live dispatch/librarian rows")
+        return
+
+    try:
+        from agents.dispatch_db import _get_conn as _disp_conn
+        dconn = _disp_conn()
+        try:
+            running_run_ids = {
+                r[0] for r in dconn.execute(
+                    "SELECT id FROM dispatch_runs WHERE status='RUNNING'"
+                ).fetchall()
+            }
+        finally:
+            dconn.close()
+    except Exception as e:
+        print(
+            f"  WARNING: reconcile_stale_monitor_rows dispatch read failed: {e}",
+            file=sys.stderr,
+        )
+        return
+
+    for row in candidates:
+        tmux_name = row["tmux_name"]
+        if tmux_name in running_run_ids:
+            continue  # legitimately live — RUNNING run matches
+        _monitor_post(
+            "/api/monitor/deregister",
+            {"tmux_name": tmux_name},
+            tmux_name=tmux_name,
+        )
+        print(f"  reconcile: deregistered stale monitor row {tmux_name}")
+
+
 def reconcile_state(running: list[RunningAgent]) -> None:
     """Reconcile all state locations at startup after recover_running_agents().
 
@@ -2601,6 +2898,14 @@ def main():
     # Librarians are not recovered across restarts (stateless job queue handles re-run)
     running_librarians: list[RunningLibrarian] = []
 
+    # Pre-pass: rescue completed runs from decision.json and record real
+    # agent failures BEFORE the broad orphan sweep. Without this, a
+    # dispatcher restart between agent-completion and collection would lose
+    # the agent's verdict and mark it 'orphaned'.
+    reconcile_orphaned_runs()
+    # Pre-pass: deregister stale is_live=1 dispatch/librarian rows whose
+    # dispatch_runs entry is no longer RUNNING.
+    reconcile_stale_monitor_rows()
     # Reconcile all state locations — clean up orphaned rows, beads, and worktrees
     reconcile_state(running)
 
