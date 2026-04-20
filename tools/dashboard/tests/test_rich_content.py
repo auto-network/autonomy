@@ -33,11 +33,14 @@ def _clean_env():
 
 
 def _ensure_read_gate_marker():
-    """Create the read-gate marker file for the note revision protocol."""
+    """Create read-gate marker files so the CLI's _require_read() check
+    passes for both protocols that rich-content note create/update gate on:
+    843a8137 (Note Revision Protocol) and c62b0142 (Rich-Content Creation
+    Guide)."""
     marker_dir = Path.home() / ".graph" / "reads"
     marker_dir.mkdir(parents=True, exist_ok=True)
-    # Create markers matching the prefix 843a8137 (Note Revision Protocol)
     (marker_dir / "843a8137-test-gate-bypass").touch()
+    (marker_dir / "c62b0142-test-gate-bypass").touch()
 
 
 def _graph_cmd(*args, stdin_text=None, db_path=None, bypass_read_gate=False):
@@ -158,6 +161,7 @@ class TestRichContentCreation:
         rc, out, err = _graph_cmd(
             "note", "-c", "-", "--html", str(html_file), "--tags", "test",
             db_path=graph_db, stdin_text=md_text,
+            bypass_read_gate=True,
         )
         assert rc == 0, f"Failed: {err}"
         assert "rich-content" in out
@@ -204,6 +208,7 @@ class TestRichContentUpdate:
         rc, out, err = _graph_cmd(
             "note", "-c", "-", "--html", str(html_file), "--tags", "test",
             db_path=graph_db, stdin_text=md_text,
+            bypass_read_gate=True,
         )
         assert rc == 0, f"Create failed: {err}"
         return _extract_src_id(out)
