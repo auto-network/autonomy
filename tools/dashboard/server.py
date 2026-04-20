@@ -1711,27 +1711,6 @@ def _crosstalk_auth(request) -> tuple[str | None, JSONResponse | None]:
     return sender, None
 
 
-def _monitor_auth(request) -> JSONResponse | None:
-    """Auth for /api/monitor/* endpoints.
-
-    Accepts the same bearer tokens as CrossTalk, plus a test-only env
-    override (DASHBOARD_TEST_TOKEN) so unit tests can exercise the endpoint
-    without seeding auth_db. Returns None on success, or a JSONResponse on
-    failure.
-    """
-    auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer "):
-        return JSONResponse({"error": "missing or invalid Authorization header"}, status_code=401)
-    raw_token = auth[7:]
-    test_token = os.environ.get("DASHBOARD_TEST_TOKEN")
-    if test_token and raw_token == test_token:
-        return None
-    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
-    if auth_db.resolve_token(token_hash) is None:
-        return JSONResponse({"error": "invalid or revoked token"}, status_code=401)
-    return None
-
-
 async def api_monitor_register(request):
     """POST /api/monitor/register — register a session with the in-process monitor.
 
@@ -1747,9 +1726,6 @@ async def api_monitor_register(request):
     Idempotent on re-register: existing rows are left in place and the
     in-process watch is refreshed.
     """
-    err = _monitor_auth(request)
-    if err:
-        return err
     try:
         body = await request.json()
     except Exception:
@@ -1807,9 +1783,6 @@ async def api_monitor_deregister(request):
     watch is removed, the DB row is flipped to is_live=0, and the registry
     SSE broadcast fires. Idempotent — missing sessions return 200.
     """
-    err = _monitor_auth(request)
-    if err:
-        return err
     try:
         body = await request.json()
     except Exception:

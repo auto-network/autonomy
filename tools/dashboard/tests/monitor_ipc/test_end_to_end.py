@@ -34,7 +34,7 @@ class TestRegisterFiresBroadcast:
     """#5 — Real path: register, write JSONL, session:messages arrives."""
 
     async def test_register_then_jsonl_write_fires_sse_broadcast(
-        self, ipc_env, auth_headers
+        self, ipc_env
     ):
         srv = ipc_env["server"]
         tmp_path = ipc_env["tmp_path"]
@@ -67,7 +67,6 @@ class TestRegisterFiresBroadcast:
                     "project": "autonomy",
                     "run_dir": str(sess_dir.parent),
                 },
-                headers=auth_headers,
             )
             assert resp.status_code == 200, (
                 f"register POST failed: {resp.status_code} body={resp.text[:200]!r}"
