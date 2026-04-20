@@ -1400,14 +1400,6 @@ def _dashboard_base_url() -> str:
     return os.environ.get("GRAPH_API") or "https://localhost:8080"
 
 
-def _monitor_bearer_token() -> str | None:
-    # Dispatcher and the graph CLI share CROSSTALK_TOKEN for dashboard auth.
-    # DASHBOARD_TEST_TOKEN is a test-only override (unit tests patch urlopen
-    # so the real request never goes out — the token is only used to
-    # build the header for assertion-shape parity with production).
-    return os.environ.get("CROSSTALK_TOKEN") or os.environ.get("DASHBOARD_TEST_TOKEN")
-
-
 def _monitor_post(path: str, body: dict, *, tmux_name: str) -> None:
     """POST to a dashboard /api/monitor/* endpoint. Best-effort — if the
     dashboard is unreachable, log a warning and continue. Direct DB writes
@@ -1425,9 +1417,6 @@ def _monitor_post(path: str, body: dict, *, tmux_name: str) -> None:
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    token = _monitor_bearer_token()
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
     ctx = ssl.create_default_context()
     if url.startswith(("https://localhost", "https://127.0.0.1")):
         ctx.check_hostname = False
