@@ -325,6 +325,8 @@ def _attach_org(rows: list[dict]) -> list[dict]:
 def get_active_sessions(threshold: int = 600) -> list[dict]:
     data = _load()
     rows = [_fill(s, SESSION_DEFAULTS) for s in data.get("active_sessions", [])]
+    from tools.dashboard.dao.sessions import _ACTIVE_SESSION_TYPES
+    rows = [r for r in rows if r.get("type") in _ACTIVE_SESSION_TYPES]
     return _attach_org(rows)
 
 
