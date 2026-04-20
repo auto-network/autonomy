@@ -85,6 +85,17 @@
           return inp.pattern || '';
         case 'Agent':
           return inp.description || inp.prompt?.slice(0, 60) || '';
+        case 'TaskCreate': {
+          // Server-annotated subject resolves the rename history deterministically.
+          const ann = entry.todo_annotation || {};
+          return ann.subject || inp.subject || '';
+        }
+        case 'TaskUpdate': {
+          const ann = entry.todo_annotation || {};
+          // Fallback to taskId only when the server-side tracker couldn't resolve
+          // the subject (e.g. partial-history HTTP poll for a stale client).
+          return ann.subject || (inp.taskId ? 'Task #' + inp.taskId : '');
+        }
         default:
           // Generic: show first string value from input
           for (const v of Object.values(inp)) {
@@ -92,6 +103,29 @@
           }
           return name;
       }
+    },
+
+    /** Task* tiles: status icon + class for the leading indicator. */
+    todoStatusIcon(entry) {
+      const status = (entry.todo_annotation && entry.todo_annotation.status) || '';
+      if (status === 'completed') return '\u2713';
+      if (status === 'in_progress') return '';  // spinner via CSS ::before
+      return '';  // pending — hollow circle via CSS
+    },
+
+    todoStatusClass(entry) {
+      const status = (entry.todo_annotation && entry.todo_annotation.status) || 'pending';
+      return 'todo-status todo-status--' + status.replace(/[^a-z_]/g, '');
+    },
+
+    /** Flowing-body text shown when a Task* tile is expanded. */
+    todoBodyText(entry) {
+      const ann = entry.todo_annotation || {};
+      return ann.description || ann.activeForm || ann.subject || '';
+    },
+
+    hasTodoAnnotation(entry) {
+      return !!(entry && entry.todo_annotation);
     },
 
     /** Returns true if a tool_use entry has no corresponding result yet.
@@ -191,6 +225,22 @@
           }
           break;
         }
+        case 'TaskCreate':
+          // Leading chip is the tool label; a status badge is redundant at creation.
+          break;
+        case 'TaskUpdate': {
+          // Leading chip is hidden by the template (see session-entries.html);
+          // the status icon rendered by todoStatusIcon() serves as the indicator.
+          const ann = entry.todo_annotation || entry.input || {};
+          const status = ann.status || '';
+          if (status && status !== 'pending') {
+            badges.push({
+              text: status.replace('_', ' '),
+              cls: status === 'completed' ? 'sc-meta-green' : 'sc-meta-running',
+            });
+          }
+          break;
+        }
       }
       return badges;
     },
@@ -249,6 +299,11 @@
           return (inp.pattern || '') + (inp.path ? '\nin ' + inp.path : '');
         case 'Agent':
           return inp.prompt || '';
+        case 'TaskCreate':
+        case 'TaskUpdate': {
+          const ann = entry.todo_annotation || {};
+          return ann.description || ann.subject || inp.description || inp.subject || '';
+        }
         default: {
           const parts = [];
           for (const [k, v] of Object.entries(inp)) {

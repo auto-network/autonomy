@@ -118,9 +118,16 @@
             <!-- ── Tool use: two-line chip card ────────────── -->
             <template x-if="resolveEntry(dEntry).type === 'tool_use'">
               <div class="sc-tool-card" :class="isToolRunning(resolveEntry(dEntry)) ? 'sc-tool-running' : ''" @click="toggleExpand(dIdx)">
-                <!-- Line 1: chip + meta + timestamp + interrupt button -->
+                <!-- Line 1: chip or todo-status icon + meta + timestamp + interrupt button -->
                 <div class="sc-line1">
-                  <span class="sc-chip" :class="chipClass(resolveEntry(dEntry).tool_name)" x-text="resolveEntry(dEntry).tool_name || '?'"></span>
+                  <!-- TaskUpdate: status icon takes the chip slot (no "Update Task" label per design) -->
+                  <template x-if="resolveEntry(dEntry).tool_name === 'TaskUpdate'">
+                    <span :class="todoStatusClass(resolveEntry(dEntry))"
+                          x-text="todoStatusIcon(resolveEntry(dEntry))"></span>
+                  </template>
+                  <template x-if="resolveEntry(dEntry).tool_name !== 'TaskUpdate'">
+                    <span class="sc-chip" :class="chipClass(resolveEntry(dEntry).tool_name)" x-text="resolveEntry(dEntry).tool_name || '?'"></span>
+                  </template>
                   <template x-for="badge in metaDisplay(resolveEntry(dEntry))" :key="badge.text">
                     <span class="sc-meta" :class="badge.cls" x-text="badge.text"></span>
                   </template>
@@ -136,17 +143,26 @@
                 <!-- Detail panel (expanded) -->
                 <template x-if="isExpanded(dIdx)">
                   <div @click.stop>
-                    <div class="sc-detail-tabs" @click="toggleView(dIdx, resolveEntry(dEntry))">
-                      <template x-if="hasOutput(resolveEntry(dEntry))">
-                        <span class="sc-detail-tab"
-                              :class="expandViewMode(dIdx, resolveEntry(dEntry)) === 'output' ? 'sc-detail-tab-active' : ''"
-                              >Output</span>
-                      </template>
-                      <span class="sc-detail-tab"
-                            :class="expandViewMode(dIdx, resolveEntry(dEntry)) === 'input' ? 'sc-detail-tab-active' : ''"
-                            >Input</span>
-                    </div>
-                    <pre class="sc-detail" x-text="expandContent(resolveEntry(dEntry), dIdx)"></pre>
+                    <!-- Task* tiles: flowing body text, no Input/Output tabs -->
+                    <template x-if="hasTodoAnnotation(resolveEntry(dEntry))">
+                      <div class="tool-tile-body-text"
+                           x-text="todoBodyText(resolveEntry(dEntry))"></div>
+                    </template>
+                    <template x-if="!hasTodoAnnotation(resolveEntry(dEntry))">
+                      <div>
+                        <div class="sc-detail-tabs" @click="toggleView(dIdx, resolveEntry(dEntry))">
+                          <template x-if="hasOutput(resolveEntry(dEntry))">
+                            <span class="sc-detail-tab"
+                                  :class="expandViewMode(dIdx, resolveEntry(dEntry)) === 'output' ? 'sc-detail-tab-active' : ''"
+                                  >Output</span>
+                          </template>
+                          <span class="sc-detail-tab"
+                                :class="expandViewMode(dIdx, resolveEntry(dEntry)) === 'input' ? 'sc-detail-tab-active' : ''"
+                                >Input</span>
+                        </div>
+                        <pre class="sc-detail" x-text="expandContent(resolveEntry(dEntry), dIdx)"></pre>
+                      </div>
+                    </template>
                   </div>
                 </template>
               </div>
