@@ -73,16 +73,24 @@ def _iso_to_epoch(ts: str | None) -> float:
         return 0.0
 
 
-def get_active_sessions(threshold: int = 600) -> list[dict]:
-    """Return active sessions from dashboard.db.
+_ACTIVE_SESSION_TYPES = {"container", "host", "terminal", "chatwith"}
 
-    Replaces the old filesystem-scanning approach. Returns live sessions
-    from the DB with the same dict shape that the old function produced.
+
+def get_active_sessions(threshold: int = 600) -> list[dict]:
+    """Return interactive sessions (container/host/terminal/chatwith).
+
+    Dispatch and librarian sessions are first-class in the monitor registry
+    (so their tail endpoints and SSE broadcasts work) but MUST NOT surface
+    on the Active list (auto-ylj6r Phase 5). Filtering here keeps the UI
+    clean while preserving monitor bookkeeping.
     """
     now = time.time()
     db_rows = _db_live_sessions()
     sessions = []
     for row in db_rows:
+        stype = row.get("type", "")
+        if stype not in _ACTIVE_SESSION_TYPES:
+            continue
         age = now - (row.get("last_activity") or row["created_at"])
         entry = {
             "session_id": row.get("session_uuid") or row["tmux_name"],
@@ -93,6 +101,7 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
             "latest": row.get("last_message", ""),
             "type": row["type"],
             "tmux_session": row["tmux_name"],
+            "session_uuid": row.get("session_uuid"),
             "bead_id": row.get("bead_id"),
             "activity_state": row.get("activity_state", "idle"),
         }
