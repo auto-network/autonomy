@@ -137,6 +137,11 @@ def mock_fixture(tmp_path, resume_env):
             "session_uuid": "abc123-def456",
             "file_path": resume_env["jsonl_file"],
             "resumable": True,
+            # Timestamps inside the endpoint's default since=1d window —
+            # the mock defaults to 2026-01-01 which the filter drops.
+            "created_at": "2026-04-19T20:00:00Z",
+            "last_activity_at": "2026-04-19T22:00:00Z",
+            "ended_at": "2026-04-19T22:00:00Z",
         },
         {
             "id": "src-missing-jsonl",
@@ -147,6 +152,9 @@ def mock_fixture(tmp_path, resume_env):
             "session_uuid": "missing-uuid-000",
             "file_path": "/tmp/nonexistent/gone.jsonl",
             "resumable": False,
+            "created_at": "2026-04-19T20:00:00Z",
+            "last_activity_at": "2026-04-19T22:00:00Z",
+            "ended_at": "2026-04-19T22:00:00Z",
         },
     ]
     fixture = {
