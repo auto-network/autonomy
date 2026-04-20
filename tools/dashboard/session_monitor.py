@@ -1061,9 +1061,9 @@ class SessionMonitor:
         self._enrich_agent_entries(row, ts, new_entries)
         if self._entry_enricher:
             try:
-                self._warm_task_tracker_if_needed(tmux_name, row, ts)
+                await self._warm_task_tracker_if_needed(tmux_name, row, ts)
                 self._entry_enricher(tmux_name, new_entries)
-                self._persist_todos_if_changed(tmux_name, ts)
+                await self._persist_todos_if_changed(tmux_name, ts)
             except Exception:
                 logger.exception("session_monitor: entry_enricher failed for %s", tmux_name)
         if new_entries and self._event_bus:
@@ -1325,7 +1325,7 @@ class SessionMonitor:
         ).fetchone()
         return row["tmux_name"] if row else None
 
-    def _warm_task_tracker_if_needed(
+    async def _warm_task_tracker_if_needed(
         self, tmux_name: str, row: dict, ts: _TailState,
     ) -> None:
         """Replay prior JSONL entries through the enricher once per session.
@@ -1374,9 +1374,9 @@ class SessionMonitor:
         # when no fresh TaskUpdate arrives. Runs even when `prior` is empty:
         # the tracker's snapshot may legitimately be empty, but we still want
         # to flush the sentinel to the DB on first read after a restart.
-        self._persist_todos_if_changed(tmux_name, ts)
+        await self._persist_todos_if_changed(tmux_name, ts)
 
-    def _persist_todos_if_changed(self, tmux_name: str, ts: _TailState) -> None:
+    async def _persist_todos_if_changed(self, tmux_name: str, ts: _TailState) -> None:
         """Diff the tracker's snapshot against the last persisted value and
         write to ``tmux_sessions.todos`` only when it actually changed.
 
@@ -1405,6 +1405,8 @@ class SessionMonitor:
             logger.exception("session_monitor: update_todos failed for %s", tmux_name)
             return
         ts.last_todos_json = encoded
+        if self._event_bus:
+            await self._broadcast_registry()
 
     @staticmethod
     def _enrich_agent_entries(row: dict, ts: _TailState, entries: list) -> None:
