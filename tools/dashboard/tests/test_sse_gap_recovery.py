@@ -42,7 +42,9 @@ pytestmark = [
 
 # ── Constants ────────────────────────────────────────────────────────
 
-TEST_PORT = 8083  # distinct from other test suites
+from tools.dashboard.tests._xdist import worker_test_port
+
+TEST_PORT = worker_test_port(8083)  # distinct base; offset per xdist worker
 TEST_SESSION_ID = "auto-gap-test"
 TEST_PROJECT = "test"
 

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from tools.dashboard.tests import fixtures
+from tools.dashboard.tests._xdist import worker_test_port
 from datetime import datetime, timedelta, timezone
 
 from tools.dashboard.tests.sessions.conftest import (
@@ -32,7 +33,7 @@ def _iso_inline(minutes_ago: int = 0) -> str:
     )
 
 
-TEST_PORT = 8082
+TEST_PORT = worker_test_port(8082)
 
 
 # ── Agent Browser Helpers ─────────────────────────────────────────────
