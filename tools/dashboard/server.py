@@ -4044,10 +4044,20 @@ _DASHBOARD_PREFIXES = ("auto-", "host-", "chat-", "chatwith-")
 
 
 def _list_dashboard_tmux() -> list[str]:
-    """List all tmux sessions created by the dashboard."""
+    """List all tmux sessions created by the dashboard.
+
+    Returns [] on subprocess failure (tmux unreachable, socket missing, etc.)
+    and logs a warning. Callers that drive mark_dead off this value (notably
+    api_terminals) MUST treat [] as ambiguous, not authoritative — a silent
+    tmux failure was the mass-session-deactivation root cause on 2026-04-20.
+    """
     result = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
                             capture_output=True, text=True)
     if result.returncode != 0:
+        logger.warning(
+            "_list_dashboard_tmux: tmux list-sessions failed  rc=%d  stderr=%r",
+            result.returncode, (result.stderr or "").strip()[:200],
+        )
         return []
     return [s for s in result.stdout.strip().split("\n")
             if any(s.startswith(p) for p in _DASHBOARD_PREFIXES)]
