@@ -83,6 +83,9 @@ class SessionsTestHarness:
     def __init__(self, tmp_path):
         self.tmp = tmp_path
         self.fixture_path = tmp_path / "fixtures.json"
+        self.events_file = tmp_path / "events.jsonl"
+        # Touch so the mock watcher's .exists() poll finds it immediately
+        self.events_file.touch()
         self.proc = None
 
     def set_fixture(self, fixture_dict):
@@ -99,6 +102,7 @@ class SessionsTestHarness:
 
         env = os.environ.copy()
         env["DASHBOARD_MOCK"] = str(self.fixture_path)
+        env["DASHBOARD_MOCK_EVENTS"] = str(self.events_file)
         repo_root = str(Path(__file__).resolve().parents[4])
         env["PYTHONPATH"] = repo_root
         self.proc = subprocess.Popen(
