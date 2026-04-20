@@ -346,6 +346,18 @@ def get_session_by_id(session_id: str) -> dict | None:
     return None
 
 
+def get_session_by_run_dir(run_dir: str) -> dict | None:
+    """Return any active-session row by run_dir without the type filter.
+
+    Mirrors get_session_by_id for the dispatch-tail path the overlay uses.
+    """
+    data = _load()
+    for s in data.get("active_sessions", []):
+        if s.get("run_dir") == run_dir:
+            return _attach_org([_fill(s, SESSION_DEFAULTS)])[0]
+    return None
+
+
 def get_session_entries(session_id: str) -> list[dict] | None:
     """Return mock session entries for tail endpoint, or None if not found."""
     data = _load()

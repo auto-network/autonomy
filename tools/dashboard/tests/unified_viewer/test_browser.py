@@ -331,10 +331,12 @@ def h(tmp_path_factory):
         {**fixtures.make_session(_OVERLAY_LIVE_TMUX, label="Overlay — running dispatch",
                                   role="dispatch", last_message="dispatch working"),
          "type": "dispatch", "session_uuid": _OVERLAY_LIVE_UUID,
+         "run_dir": _OVERLAY_LIVE_RUN_DIR,
          "is_live": True, "linked": True},
         {**fixtures.make_session(_OVERLAY_DEAD_TMUX, label="Overlay — ended dispatch",
                                   role="dispatch", last_message="dispatch done"),
          "type": "dispatch", "session_uuid": _OVERLAY_DEAD_UUID,
+         "run_dir": _OVERLAY_DEAD_RUN_DIR,
          "is_live": False, "linked": True},
     ]
     entries_map = {s["session_id"]: fixtures.MOCK_SESSION_ENTRIES for s in sessions}
