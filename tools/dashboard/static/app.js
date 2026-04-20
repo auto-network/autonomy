@@ -646,6 +646,8 @@ function _showPanel(runDir, isLive) {
   panel.style.display = 'flex';
   panel.classList.remove('collapsed');
   document.getElementById('content').style.paddingBottom = '20rem';
+  const viewer = panel.querySelector('.session-viewer[data-mode="overlay"]');
+  if (viewer) viewer.style.display = '';
 
   // Delegate to Alpine component
   if (window._livePanelLoad) {
@@ -666,6 +668,10 @@ function hideLivePanel() {
   panel.style.display = 'none';
   panel.classList.add('collapsed');
   document.getElementById('content').style.paddingBottom = '';
+  // Also hide the .session-viewer[data-mode="overlay"] mount so external
+  // selectors (getComputedStyle(.session-viewer)) treat it as gone.
+  const viewer = panel.querySelector('.session-viewer[data-mode="overlay"]');
+  if (viewer) viewer.style.display = 'none';
   if (window._livePanelReset) window._livePanelReset();
 }
 

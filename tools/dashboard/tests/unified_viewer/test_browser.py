@@ -481,7 +481,6 @@ class TestOverlayPanel:
                "--ignore-https-errors")
         time.sleep(3)
 
-    @pytest.mark.xfail(reason="investigating — see auto-hy3pl", strict=False)
     def test_overlay_opens_from_dispatch(self, h):
         """Click Live Trace → unified-viewer overlay appears with entries.
 
@@ -519,7 +518,6 @@ class TestOverlayPanel:
             "must add runDir/UUID resolution through dashboard.db."
         )
 
-    @pytest.mark.xfail(reason="investigating — see auto-hy3pl", strict=False)
     def test_overlay_shows_completed_trace(self, h):
         """Completed dispatch → unified-viewer overlay with historical entries.
 
@@ -550,7 +548,6 @@ class TestOverlayPanel:
             "Unified tail cannot resolve completed dispatch runs yet."
         )
 
-    @pytest.mark.xfail(reason="investigating — see auto-hy3pl", strict=False)
     def test_overlay_close_removes_panel(self, h):
         """Close hook hides the overlay and frees Alpine store state.
 

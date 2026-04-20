@@ -1,4 +1,5 @@
-<div x-data="sessionViewerPage()" class="session-viewer">
+<div x-data="sessionViewerPage()" class="session-viewer" data-mode="page"
+     x-effect="$el.setAttribute('data-mode', _mode)">
 
   <!-- Loading -->
   <template x-if="state === 'loading'">
