@@ -424,3 +424,17 @@ def full_fixture():
             "src-001": {"id": "src-001", "title": "Auth design doc", "type": "note", "content": "Full auth design document content"},
         },
     }
+
+
+def append_mock_event(events_path, topic: str, data: dict) -> None:
+    """Append one SSE event for the mock watcher to broadcast.
+
+    The server's mock event watcher (tools/dashboard/dao/mock.py::
+    mock_event_watcher) polls the DASHBOARD_MOCK_EVENTS file every 0.5s
+    and broadcasts each new line as an SSE event. Tests that need to
+    drive live updates (session:messages, session:registry, etc.) call
+    this helper between fixture setup and assertion.
+    """
+    import json
+    with open(str(events_path), "a") as f:
+        f.write(json.dumps({"topic": topic, "data": data}) + "\n")
