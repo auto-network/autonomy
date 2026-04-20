@@ -631,16 +631,18 @@
         }
       },
 
-      // Contenteditable input handler — debounced draft persistence.
+      // Contenteditable input handler — synchronous draft persistence.
+      // The previous 300ms debounce raced with sendMessage: the pending timer
+      // could fire after send cleared s.draftText, writing the sent text back
+      // and resurfacing it as a "ghost" in the input on navigate-back. The
+      // store write is a plain in-memory Alpine assignment; no I/O, so the
+      // debounce wasn't buying anything. _draftTimer is now unused but left
+      // in place to avoid churning the data-fields block.
       onInput(el) {
         var text = el.innerText;
         this.hasContent = text.trim().length > 0;
-        clearTimeout(this._draftTimer);
-        var self = this;
-        this._draftTimer = setTimeout(function() {
-          var s = window.getSessionStore(self.sessionKey);
-          if (s) s.draftText = text;
-        }, 300);
+        var s = window.getSessionStore(this.sessionKey);
+        if (s) s.draftText = text;
       },
 
       async sendMessage() {
