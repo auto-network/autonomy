@@ -568,10 +568,16 @@ def find_live_session(session_uuid: str | None = None, file_path: str | None = N
 
 
 def revive_session(tmux_name: str, *, file_offset: int = 0) -> None:
-    """Re-activate a dead session: set is_live=1 and reset file_offset for backfill."""
+    """Re-activate a dead session: set is_live=1, reset file_offset, and
+    clear the 'dead' activity_state flag so the row isn't contradictory
+    (alive but flagged dead). Leaves non-dead activity states alone."""
     conn = get_conn()
     conn.execute(
-        "UPDATE tmux_sessions SET is_live=1, file_offset=? WHERE tmux_name=?",
+        "UPDATE tmux_sessions SET"
+        "  is_live=1,"
+        "  file_offset=?,"
+        "  activity_state=CASE WHEN activity_state='dead' THEN 'idle' ELSE activity_state END"
+        " WHERE tmux_name=?",
         (file_offset, tmux_name),
     )
     conn.commit()
@@ -616,7 +622,13 @@ def upsert_session(
         "  file_offset = excluded.file_offset,"
         "  last_message = CASE WHEN excluded.last_message != ''"
         "    THEN excluded.last_message ELSE last_message END,"
-        "  is_live = excluded.is_live",
+        "  is_live = excluded.is_live,"
+        # When a previously-dead row is revived via seed, clear the stale
+        # 'dead' activity_state so it doesn't contradict is_live=1. Non-dead
+        # states (idle / thinking / tool_running) are preserved.
+        "  activity_state = CASE"
+        "    WHEN excluded.is_live=1 AND activity_state='dead' THEN 'idle'"
+        "    ELSE activity_state END",
         (
             tmux_name, session_type, project, bead_id, jsonl_path, session_uuid,
             resolution_dir, session_uuids, curr_jsonl_file,
