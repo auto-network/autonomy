@@ -4765,7 +4765,9 @@ async def page_experiments_redirect(request):
 # ── HTML Pages ────────────────────────────────────────────────
 
 def _load_template(name: str) -> str:
-    content = (TEMPLATE_DIR / name).read_text()
+    # Render via Jinja so {% include %} partials are expanded; the static
+    # version token stays a literal marker Jinja leaves untouched.
+    content = templates.env.get_template(name).render()
     return content.replace("__STATIC_VERSION__", _static_version())
 
 
