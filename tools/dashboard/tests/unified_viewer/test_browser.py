@@ -212,7 +212,7 @@ class ViewerTestHarness:
             return {{
                 loaded: s.loaded,
                 isLive: s.isLive,
-                linked: s.linked,
+                resolved: s.resolved,
                 entryCount: s.entries ? s.entries.length : 0,
             }};
         """)
@@ -602,14 +602,10 @@ class TestOverlayPanel:
 # ══════════════════════════════════════════════════════════════════════
 
 class TestUnresolvedState:
-    """Unresolved state — host sessions with no JSONL path (linked=false)."""
+    """Unresolved state — host sessions with no JSONL path (resolved=false)."""
 
-    @pytest.mark.xfail(
-        reason="unified viewer Unresolved state not implemented yet",
-        strict=True,
-    )
     def test_link_button_visible(self, h):
-        """Host session with linked=false → Link Terminal button."""
+        """Host session with resolved=false → Link Terminal button."""
         h.open_session_page("autonomy", "host-test-unresolved")
         time.sleep(2)
         text = h.visible_text()
@@ -618,10 +614,6 @@ class TestUnresolvedState:
             f"no Link Terminal button visible. Text: {text[:200]}"
         )
 
-    @pytest.mark.xfail(
-        reason="unified viewer Unresolved state not implemented yet",
-        strict=True,
-    )
     def test_no_entries_when_unresolved(self, h):
         """Unresolved session shows empty state, not stale entries.
 
@@ -635,7 +627,7 @@ class TestUnresolvedState:
         # an explicit message about linking being needed
         state = h.session_store_state("host-test-unresolved")
         if state:
-            assert state.get("linked") is False, (
+            assert state.get("resolved") is False, (
                 "unified viewer Unresolved state not implemented yet"
             )
             # When unresolved state IS implemented, entries should be empty
