@@ -35,13 +35,15 @@ RUN chmod +x /usr/local/bin/dolt
 COPY bin/claude /usr/local/bin/claude
 RUN chmod +x /usr/local/bin/claude
 
-# ── graph CLI (Python module, zero third-party deps) ──
-COPY graph/ /opt/autonomy/tools/graph/
+# ── graph CLI wrapper (resolves tools.graph via runtime repo mount) ──
+# The repo is bind-mounted at /workspace/repo by session_launcher, so there is
+# no need to bake a second copy of tools/graph/ into the image — see
+# graph://af0deb88-d86 for the baked-subtree anti-pattern.
 RUN echo '#!/usr/bin/env bash\nexec python3 -m tools.graph "$@"' > /usr/local/bin/graph \
     && chmod +x /usr/local/bin/graph
 
-# Set PYTHONPATH so `python3 -m tools.graph` resolves
-ENV PYTHONPATH=/opt/autonomy
+# Point PYTHONPATH at the runtime mount so `tools.graph` and `agents` both resolve.
+ENV PYTHONPATH=/workspace/repo
 
 # ── Workspace ──
 WORKDIR /workspace
