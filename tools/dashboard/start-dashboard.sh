@@ -142,6 +142,7 @@ setsid bash -c "
     --port \"$PORT\" \
     --reload \
     --reload-dir tools/dashboard \
+    --reload-exclude 'tools/dashboard/tests/*' \
     \$SSL_ARGS \
     >> \"$LOG_FILE\" 2>&1 &
   wait
