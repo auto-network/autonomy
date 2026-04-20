@@ -168,18 +168,23 @@ class MockEventBus:
 def setup_env(tmp_path):
     """Set up a test environment with DB."""
     db_path = tmp_path / "dashboard.db"
+    dispatch_db_path = tmp_path / "dispatch.db"
     _init_test_db(db_path)
     os.environ["DASHBOARD_DB"] = str(db_path)
+    os.environ["DISPATCH_DB"] = str(dispatch_db_path)
 
     # Reload DAO to pick up test DB
     import importlib
     from tools.dashboard.dao import dashboard_db as db_mod
     importlib.reload(db_mod)
+    from agents import dispatch_db as dispatch_db_mod
+    importlib.reload(dispatch_db_mod)
 
     yield tmp_path, db_path
 
     # Cleanup
     os.environ.pop("DASHBOARD_DB", None)
+    os.environ.pop("DISPATCH_DB", None)
 
 
 async def _start_monitor(bus):
