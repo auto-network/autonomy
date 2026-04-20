@@ -278,6 +278,264 @@ class TestSortMode:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# TestSortDuration — sort=duration orders by (end - start) desc
+# ══════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def duration_dao(tmp_path, monkeypatch):
+    """graph.db seeded with sessions that have distinct durations."""
+    graph_db_path = tmp_path / "graph.db"
+    dashboard_db_path = tmp_path / "dashboard.db"
+
+    from tools.graph.db import GraphDB
+    g = GraphDB(graph_db_path)
+
+    # Row A: 30 min duration (created 2h ago, active 90 min ago)
+    g.conn.execute("""INSERT INTO sources
+        (id, type, platform, project, title, file_path, metadata, created_at,
+         ingested_at, last_activity_at)
+        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        ("src-short", "Short session",
+         "/home/jeremy/sessions/short.jsonl",
+         json.dumps({"session_uuid": "uuid-short", "session_type": "interactive"}),
+         "2026-04-18T22:00:00Z", "2026-04-18T22:30:00Z",
+         "2026-04-18T22:30:00Z"),
+    )
+    # Row B: 2 hour duration
+    g.conn.execute("""INSERT INTO sources
+        (id, type, platform, project, title, file_path, metadata, created_at,
+         ingested_at, last_activity_at)
+        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        ("src-long", "Long session",
+         "/home/jeremy/sessions/long.jsonl",
+         json.dumps({"session_uuid": "uuid-long", "session_type": "interactive"}),
+         "2026-04-18T20:00:00Z", "2026-04-18T22:00:00Z",
+         "2026-04-18T22:00:00Z"),
+    )
+    # Row C: 5 min duration (most recent)
+    g.conn.execute("""INSERT INTO sources
+        (id, type, platform, project, title, file_path, metadata, created_at,
+         ingested_at, last_activity_at)
+        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        ("src-tiny", "Tiny session",
+         "/home/jeremy/sessions/tiny.jsonl",
+         json.dumps({"session_uuid": "uuid-tiny", "session_type": "interactive"}),
+         "2026-04-18T22:55:00Z", "2026-04-18T23:00:00Z",
+         "2026-04-18T23:00:00Z"),
+    )
+    g.commit()
+    g.close()
+
+    monkeypatch.setenv("DASHBOARD_DB", str(dashboard_db_path))
+    from tools.dashboard.dao import dashboard_db as ddb
+    importlib.reload(ddb)
+    ddb.init_db(dashboard_db_path)
+
+    from tools.dashboard.dao import sessions as sessions_dao
+    monkeypatch.setattr(sessions_dao, "_GRAPH_DB", graph_db_path)
+    yield sessions_dao
+
+
+class TestSortDuration:
+    """sort=duration orders by (last_activity_at - created_at) desc (auto-ycry3)."""
+
+    def test_duration_is_a_valid_sort_key(self):
+        """sort=duration must survive the _VALID_RECENT_SORTS gate."""
+        from tools.dashboard.dao import sessions as sessions_dao
+        assert "duration" in sessions_dao._VALID_RECENT_SORTS
+
+    def test_sort_duration_orders_by_end_minus_start_desc(self, duration_dao):
+        """Longest-running sessions appear first."""
+        results = duration_dao.get_recent_sessions(
+            sort="duration", since="all", limit=10,
+        )
+        ids = [r["id"] for r in results]
+        # src-long has 2h, src-short has 30m, src-tiny has 5m
+        assert ids.index("src-long") < ids.index("src-short") < ids.index("src-tiny"), (
+            f"Expected long > short > tiny by duration; got {ids}"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# TestLibrarianTitleFields — librarian rows expose type + target fields
+# ══════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def librarian_dao(tmp_path, monkeypatch):
+    """graph.db with a librarian session + dispatch.db with matching job row."""
+    graph_db_path = tmp_path / "graph.db"
+    dashboard_db_path = tmp_path / "dashboard.db"
+    dispatch_db_path = tmp_path / "dispatch.db"
+
+    from tools.graph.db import GraphDB
+    g = GraphDB(graph_db_path)
+    # Librarian session — metadata carries job_id + job_type so the DAO can
+    # join to librarian_jobs.payload and extract the target bead_id.
+    g.conn.execute("""INSERT INTO sources
+        (id, type, platform, project, title, file_path, metadata, created_at,
+         ingested_at, last_activity_at)
+        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        ("src-lib-1", "librarian-review_report-781221-65a80c94",
+         "/home/jeremy/sessions/lib.jsonl",
+         json.dumps({
+             "session_uuid": "uuid-lib",
+             "session_type": "librarian",
+             "job_id": "job-abcd-1234",
+             "job_type": "review_report",
+         }),
+         "2026-04-18T22:00:00Z", "2026-04-18T22:01:00Z",
+         "2026-04-18T22:30:00Z"),
+    )
+    # Interactive session as a control to ensure non-librarian rows are
+    # not annotated with librarian_type.
+    g.conn.execute("""INSERT INTO sources
+        (id, type, platform, project, title, file_path, metadata, created_at,
+         ingested_at, last_activity_at)
+        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        ("src-inter-1", "Some interactive",
+         "/home/jeremy/sessions/inter.jsonl",
+         json.dumps({"session_uuid": "uuid-inter", "session_type": "interactive"}),
+         "2026-04-18T22:00:00Z", "2026-04-18T22:01:00Z",
+         "2026-04-18T22:30:00Z"),
+    )
+    g.commit()
+    g.close()
+
+    # Build dispatch.db with librarian_jobs table matching the seeded job_id.
+    conn = sqlite3.connect(str(dispatch_db_path))
+    conn.execute("""
+        CREATE TABLE librarian_jobs (
+            id TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL,
+            payload TEXT,
+            status TEXT DEFAULT 'pending',
+            priority INTEGER DEFAULT 1,
+            created_at DATETIME,
+            started_at DATETIME,
+            completed_at DATETIME,
+            librarian_type TEXT,
+            session_id TEXT,
+            attempts INTEGER DEFAULT 0,
+            max_attempts INTEGER DEFAULT 3
+        )
+    """)
+    conn.execute(
+        "INSERT INTO librarian_jobs (id, job_type, payload, status) VALUES (?, ?, ?, ?)",
+        ("job-abcd-1234", "review_report",
+         json.dumps({"bead_id": "auto-target-1", "run_id": "auto-target-1-2026"}),
+         "done"),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("DASHBOARD_DB", str(dashboard_db_path))
+    from tools.dashboard.dao import dashboard_db as ddb
+    importlib.reload(ddb)
+    ddb.init_db(dashboard_db_path)
+
+    from tools.dashboard.dao import sessions as sessions_dao
+    monkeypatch.setattr(sessions_dao, "_GRAPH_DB", graph_db_path)
+    monkeypatch.setattr(sessions_dao, "_DISPATCH_DB", dispatch_db_path)
+    yield sessions_dao
+
+
+class TestLibrarianTitleFields:
+    """Librarian rows surface type + target for UI-side formatting (auto-ycry3)."""
+
+    def test_librarian_type_populated_from_metadata(self, librarian_dao):
+        results = librarian_dao.get_recent_sessions(since="all")
+        lib = next(r for r in results if r["id"] == "src-lib-1")
+        assert lib["librarian_type"] == "review_report"
+
+    def test_librarian_target_bead_id_from_payload(self, librarian_dao):
+        """librarian_target_bead_id is sourced from librarian_jobs.payload."""
+        results = librarian_dao.get_recent_sessions(since="all")
+        lib = next(r for r in results if r["id"] == "src-lib-1")
+        assert lib["librarian_target_bead_id"] == "auto-target-1"
+
+    def test_title_field_is_not_the_raw_process_name_via_ui(self, librarian_dao):
+        """The DAO leaves the raw title in place (Alpine layers librarian_type ·
+        target on top); the UI-facing value composed from the new fields
+        must NOT start with 'librarian-' so the card title can't degrade
+        back to the PID mess."""
+        results = librarian_dao.get_recent_sessions(since="all")
+        lib = next(r for r in results if r["id"] == "src-lib-1")
+        # Formula the UI uses (mirrors _librarianTitle in sessions.js)
+        ui_title = (
+            f"{lib['librarian_type']} · {lib['librarian_target_bead_id']}"
+            if lib["librarian_type"] and lib["librarian_target_bead_id"]
+            else lib.get("librarian_type") or ""
+        )
+        assert ui_title, "UI title must be non-empty for librarian rows"
+        assert not ui_title.startswith("librarian-"), (
+            f"UI-facing title still resembles the raw process name: {ui_title!r}"
+        )
+
+    def test_non_librarian_rows_have_null_librarian_fields(self, librarian_dao):
+        """Only librarian rows should carry librarian_* annotations."""
+        results = librarian_dao.get_recent_sessions(since="all")
+        inter = next(r for r in results if r["id"] == "src-inter-1")
+        assert inter.get("librarian_type") in (None, "")
+        assert inter.get("librarian_target_bead_id") in (None, "")
+
+    def test_unresolvable_target_leaves_bead_id_none(self, tmp_path, monkeypatch):
+        """When librarian_jobs has no matching row, target stays None but
+        librarian_type is still populated from the metadata."""
+        graph_db_path = tmp_path / "graph.db"
+        dashboard_db_path = tmp_path / "dashboard.db"
+        dispatch_db_path = tmp_path / "dispatch.db"
+
+        from tools.graph.db import GraphDB
+        g = GraphDB(graph_db_path)
+        g.conn.execute("""INSERT INTO sources
+            (id, type, platform, project, title, file_path, metadata, created_at,
+             ingested_at, last_activity_at)
+            VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+            ("src-orphan", "librarian-review_report-1-deadbeef",
+             "/home/jeremy/sessions/orphan.jsonl",
+             json.dumps({
+                 "session_uuid": "uuid-orphan",
+                 "session_type": "librarian",
+                 "job_id": "does-not-exist",
+                 "job_type": "review_report",
+             }),
+             "2026-04-18T22:00:00Z", "2026-04-18T22:01:00Z",
+             "2026-04-18T22:30:00Z"),
+        )
+        g.commit()
+        g.close()
+
+        # dispatch.db exists but lacks the referenced job_id
+        conn = sqlite3.connect(str(dispatch_db_path))
+        conn.execute("""
+            CREATE TABLE librarian_jobs (
+                id TEXT PRIMARY KEY, job_type TEXT, payload TEXT,
+                status TEXT, priority INTEGER, created_at DATETIME,
+                started_at DATETIME, completed_at DATETIME,
+                librarian_type TEXT, session_id TEXT,
+                attempts INTEGER, max_attempts INTEGER
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setenv("DASHBOARD_DB", str(dashboard_db_path))
+        from tools.dashboard.dao import dashboard_db as ddb
+        importlib.reload(ddb)
+        ddb.init_db(dashboard_db_path)
+        from tools.dashboard.dao import sessions as sessions_dao
+        monkeypatch.setattr(sessions_dao, "_GRAPH_DB", graph_db_path)
+        monkeypatch.setattr(sessions_dao, "_DISPATCH_DB", dispatch_db_path)
+
+        results = sessions_dao.get_recent_sessions(since="all")
+        orphan = next(r for r in results if r["id"] == "src-orphan")
+        assert orphan["librarian_type"] == "review_report"
+        assert orphan["librarian_target_bead_id"] in (None, "")
+
+
+# ══════════════════════════════════════════════════════════════════════
 # TestSinceWindow — `since` query param filters rows by activity window
 # ══════════════════════════════════════════════════════════════════════
 

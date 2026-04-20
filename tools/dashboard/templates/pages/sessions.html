@@ -135,14 +135,16 @@
       {% endwith %}
     </div>
 
-    <!-- Session cards — same structure as active session cards -->
+    <!-- Session cards — same structure as active session cards.
+         Uses a <div> with @click="navigate(s)" (matching Active) so the
+         org-icon in session-card.html can stopPropagation to open the
+         actions menu without triggering the row-level navigation. -->
     <div class="sc-card-list" style="display:flex;flex-direction:column;gap:6px">
       <template x-for="s in filtered" :key="s.id">
-        <a :href="'/session/' + encodeURIComponent(s.project.replace(/^\[|\]$/g, '') || 'session') + '/' + encodeURIComponent(s.session_id)"
-           class="no-underline" data-testid="recent-session-row"
-           :data-session-id="s.session_id" :data-session-type="s.session_type">
+        <div @click="navigate(s)" data-testid="recent-session-row"
+             :data-session-id="s.session_id" :data-session-type="s.session_type">
           {% include 'partials/session-card.html' %}
-        </a>
+        </div>
       </template>
     </div>
 

@@ -141,6 +141,38 @@ class TestSessionsPageHTML:
         assert "sc-topic" in html
 
 
+class TestRecentLoopWiring:
+    """The Recent loop uses a div + @click, not an <a> wrapper (auto-ycry3).
+
+    A div + @click lets the merged sc-org sc-actions button stop propagation
+    to open the action sheet without triggering the row-level navigation.
+    """
+
+    def test_recent_loop_is_a_div_not_an_anchor(self, test_client):
+        html = test_client.get("/pages/sessions").text
+        # The Recent loop's wrapper carries recent-session-row; it must be a
+        # <div ... data-testid="recent-session-row">, not <a ...>.
+        import re
+        # Search for <a ... recent-session-row — should NOT match
+        assert not re.search(
+            r"<a[^>]+data-testid=\"recent-session-row\"", html, re.DOTALL
+        ), "Recent loop still uses <a href> wrapper; must be a <div @click>"
+
+    def test_recent_loop_uses_click_navigate(self, test_client):
+        html = test_client.get("/pages/sessions").text
+        # The new <div> must bind @click="navigate(s)"
+        assert 'data-testid="recent-session-row"' in html
+        # The @click attribute appears as either @click or x-on:click depending
+        # on build; normalise by checking for 'navigate(s)' in that neighbourhood.
+        import re
+        m = re.search(
+            r'<div[^>]+@click\s*=\s*"navigate\(s\)"[^>]*data-testid="recent-session-row"',
+            html,
+            re.DOTALL,
+        )
+        assert m, "Recent loop div does not bind @click=\"navigate(s)\""
+
+
 # ── JS Wiring (text analysis of source files) ───────────────────────
 
 

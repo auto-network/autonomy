@@ -16,11 +16,20 @@ from pathlib import Path
 import pytest
 
 from tools.dashboard.tests import fixtures
+from datetime import datetime, timedelta, timezone
+
 from tools.dashboard.tests.sessions.conftest import (
     SESSIONS_PAGE_SESSIONS,
     RECENT_SESSIONS,
     sessions_page_fixture,
 )
+
+
+def _iso_inline(minutes_ago: int = 0) -> str:
+    """Produce an ISO timestamp `minutes_ago` minutes before now."""
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 TEST_PORT = 8082
@@ -282,6 +291,137 @@ class TestRecentSessions:
         text = h.visible_text()
         # Recent session titles from fixture
         assert "alpha history" in text.lower() or "beta history" in text.lower()
+
+
+class TestRecentCardActionsMenu:
+    """Recent cards use an actions menu triggered by the org icon (auto-ycry3).
+
+    Resume is a menu entry now — no standalone green button on the card. The
+    org-icon slot opens `window.actionSheet` with Resume + Open entries.
+    """
+
+    def test_no_standalone_resume_button_on_recent_cards(self, h):
+        """data-testid='resume-btn' must not appear inside recent-session-row."""
+        count = ab_eval("""
+            var recent = document.querySelectorAll('[data-testid="recent-session-row"]');
+            var c = 0;
+            recent.forEach(function(row) {
+              if (row.querySelector('[data-testid="resume-btn"]')) c++;
+            });
+            return c;
+        """)
+        assert count == 0, f"Found {count} standalone Resume button(s) on Recent cards"
+
+    def test_recent_cards_have_session_actions_btn(self, h):
+        """Every Recent card exposes the merged sc-org sc-actions button."""
+        count = ab_eval("""
+            var recent = document.querySelectorAll('[data-testid="recent-session-row"]');
+            var n = 0;
+            recent.forEach(function(row) {
+              if (row.querySelector('[data-testid="session-actions-btn"]')) n++;
+            });
+            return {recent: recent.length, with_btn: n};
+        """)
+        assert count["recent"] > 0, "No recent-session-row elements rendered"
+        assert count["with_btn"] == count["recent"], (
+            f"Only {count['with_btn']}/{count['recent']} Recent cards carry the "
+            "session-actions-btn"
+        )
+
+    def test_recent_loop_uses_div_not_anchor(self, h):
+        """The Recent loop emits <div> rows, not <a href> rows."""
+        tag = ab_eval("""
+            var rows = document.querySelectorAll('[data-testid="recent-session-row"]');
+            if (rows.length === 0) return null;
+            return rows[0].tagName.toUpperCase();
+        """)
+        assert tag == "DIV", f"Expected DIV row, got {tag}"
+
+
+class TestRecentSortHasDuration:
+    """Sort dropdown includes Duration (auto-ycry3)."""
+
+    def test_duration_option_exists(self, h):
+        """The Recent sort toggle must list Duration as a selectable option.
+
+        The dropdown options are only emitted into the DOM once the toggle is
+        open, so click the trigger first, then read the menu contents.
+        """
+        # Click the toggle to open its menu, then read the rendered options.
+        result = ab_eval("""
+            var btn = document.querySelector('[data-testid="recent-sort-toggle"]');
+            if (btn) btn.click();
+            return btn ? true : false;
+        """)
+        assert result, "recent-sort-toggle button not found"
+        # Give Alpine a tick to render the menu
+        import time as _t
+        _t.sleep(0.5)
+        options = ab_eval("""
+            var menu = document.querySelector('[data-testid="recent-sort-toggle-menu"]');
+            if (!menu) return [];
+            return Array.from(menu.querySelectorAll('.sort-option'))
+              .map(function(n) { return n.textContent.trim(); });
+        """) or []
+        found_duration = any("Duration" in (t or "") for t in options)
+        assert found_duration, f"Duration option not rendered; got options={options!r}"
+        # Dismiss the menu so it doesn't affect subsequent tests
+        ab_eval("""
+            var btn = document.querySelector('[data-testid="recent-sort-toggle"]');
+            if (btn) btn.click();
+            return true;
+        """)
+
+
+class TestLibrarianRecentTitle:
+    """Librarian recent cards render a meaningful title (auto-ycry3).
+
+    The raw process name ('librarian-review_report-PID-JOBID') must not be the
+    card's displayed label. When the target bead is resolvable, the label
+    reads '{type} · {bead_id}'.
+    """
+
+    @pytest.fixture(scope="class")
+    def librarian_fixture_ready(self, h):
+        fixture = sessions_page_fixture()
+        fixture["recent_sessions"] = list(fixture["recent_sessions"]) + [
+            {
+                "id": "src-lib-recent",
+                "type": "session",
+                "session_type": "librarian",
+                "title": "librarian-review_report-12345-deadbeef",
+                "project": "autonomy",
+                "tmux_session": "librarian-review_report-12345-deadbeef",
+                "librarian_type": "review_report",
+                "librarian_target_bead_id": "auto-targetx",
+                "librarian_target_bead_title": "Fix X behaviour",
+                "last_activity_at": _iso_inline(minutes_ago=5),
+                "created_at": _iso_inline(minutes_ago=25),
+                "entry_count": 7,
+                "context_tokens": 2500,
+            }
+        ]
+        h.set_fixture(fixture)
+        h.open_sessions_page()
+        time.sleep(2)
+        yield
+        # Restore default fixture after the class finishes
+        h.set_fixture(sessions_page_fixture())
+        h.open_sessions_page()
+
+    def test_librarian_title_is_not_raw_process_name(self, h, librarian_fixture_ready):
+        """The visible title must NOT match the raw `librarian-...` pattern."""
+        titles = ab_eval("""
+            var rows = document.querySelectorAll('[data-testid="recent-session-row"]');
+            return Array.from(rows).map(function(row) {
+              var t = row.querySelector('.sc-title');
+              return t ? t.textContent.trim() : '';
+            });
+        """) or []
+        offenders = [t for t in titles if t.startswith("librarian-")]
+        assert not offenders, (
+            f"Librarian cards still show raw process names: {offenders!r}"
+        )
 
 
 class TestEmptyState:
