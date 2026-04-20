@@ -91,14 +91,17 @@ SESSIONS_PAGE_SESSIONS[2]["nag_message"] = "Check review status"
 RECENT_SESSIONS = [
     {"id": "src-aaa111222333", "type": "session", "date": "2026-03-25",
      "title": "Session alpha history", "project": "autonomy",
+     "tmux_session": "auto-recent-alpha",
      "last_activity_at": _iso(10), "created_at": _iso(90),
      "entry_count": 42, "context_tokens": 12000},
     {"id": "src-bbb444555666", "type": "session", "date": "2026-03-24",
      "title": "Session beta history", "project": "autonomy",
+     "tmux_session": "auto-recent-beta",
      "last_activity_at": _iso(30), "created_at": _iso(120),
      "entry_count": 17, "context_tokens": 4000},
     {"id": "src-ccc777888999", "type": "session", "date": "2026-03-23",
      "title": "Session gamma history", "project": "default",
+     "tmux_session": "auto-recent-gamma",
      "last_activity_at": _iso(120), "created_at": _iso(300),
      "entry_count": 8, "context_tokens": 900},
 ]
