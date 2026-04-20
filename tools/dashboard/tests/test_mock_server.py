@@ -13,10 +13,12 @@ import urllib.error
 import pytest
 
 from tools.dashboard.mock_server import main, _pid_file, _read_pid, RUN_DIR
+from tools.dashboard.tests._xdist import worker_test_port
 
 
-# Use high ports to avoid collisions with other tests
-TEST_PORT = 8091
+# Use high ports to avoid collisions with other tests. worker_test_port
+# offsets by 10 per xdist worker so each worker's 8091 / 8092 pair is unique.
+TEST_PORT = worker_test_port(8091)
 
 
 def _server_responds(port: int) -> bool:

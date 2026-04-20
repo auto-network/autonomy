@@ -108,7 +108,9 @@ class TestLastActivityConversion:
 
 # ── Browser test: no NaN on dispatch page ────────────────────────────
 
-TEST_PORT = 8083
+from tools.dashboard.tests._xdist import worker_test_port
+
+TEST_PORT = worker_test_port(8083)
 
 
 def ab(*args, timeout=10):
