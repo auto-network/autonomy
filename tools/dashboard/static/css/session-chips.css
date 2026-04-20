@@ -391,6 +391,60 @@
   40% { opacity: 1; transform: scale(1); }
 }
 
+/* ── Todo status indicator (TaskUpdate tile + drawer list) ────
+   The status icon replaces the tool-name chip on TaskUpdate tiles so
+   progress is scannable at-a-glance. Sized to match the chip's metrics
+   so the rest of the line doesn't reflow across state transitions. */
+.todo-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 700;
+  /* Crisp at DPR 1/2/3 — integer pixel geometry + centered glyph */
+  box-sizing: border-box;
+}
+.todo-status--completed {
+  background: #22c55e;
+  color: #0f172a;
+}
+.todo-status--in_progress {
+  background: transparent;
+  border: 1.5px solid #facc15;
+  color: transparent;
+  position: relative;
+}
+.todo-status--in_progress::before {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: #facc15;
+  animation: sc-running-pulse 2s ease-in-out infinite;
+}
+.todo-status--pending {
+  background: transparent;
+  border: 1.5px solid #6b7280;
+}
+
+/* ── Tool tile body text (Task* expanded description) ─────────
+   Contrasts with the default monospace <pre> detail panel: this renders
+   flowing, line-wrapped prose to match chat body styling. */
+.tool-tile-body-text {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: #d1d5db;
+  margin-top: 6px;
+  padding: 6px 2px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ── Inline attachment images ─────────────────────────────── */
 .attachment-img {
   max-width: 100%;

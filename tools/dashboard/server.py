@@ -63,7 +63,7 @@ logging.basicConfig(
 )
 
 from tools.dashboard.event_bus import event_bus, _SERVER_EPOCH
-from tools.dashboard.session_monitor import count_tool_uses, session_monitor
+from tools.dashboard.session_monitor import count_tool_uses, session_monitor, TaskStateTracker
 from tools.dashboard.dao import auth_db, dashboard_db
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
@@ -2816,6 +2816,7 @@ async def api_session_tail(request):
                  if s.get("session_id") == session_id),
                 {},
             )
+            TaskStateTracker().enrich(session_id, entries)
             resp = {
                 "entries": entries, "offset": len(entries),
                 "is_live": bool(mock_session.get("is_live", True)),
@@ -2907,6 +2908,28 @@ async def api_session_tail(request):
 
     entries = _dedup_queued_entries(entries)
     _enrich_entries(entries, session_dir=session_file.parent / session_file.stem)
+    # Task* tile annotations need full-history context to resolve taskId→subject.
+    # Partial polls (after>0) miss earlier TaskCreates, so replay from offset 0.
+    if after > 0:
+        history: list = []
+        with open(session_file, "rb") as f:
+            history_data = f.read(after)
+        for line in history_data.decode("utf-8", errors="replace").split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            parsed = _parse_jsonl_entry(line)
+            if parsed is None:
+                continue
+            if isinstance(parsed, list):
+                history.extend(parsed)
+            else:
+                history.append(parsed)
+        local_tracker = TaskStateTracker()
+        local_tracker.enrich("_http", history)
+        local_tracker.enrich("_http", entries)
+    else:
+        TaskStateTracker().enrich("_http", entries)
     resp = {"entries": entries, "offset": new_offset, "is_live": is_live,
             "type": session_type, "role": role,
             "activity_state": activity_state,
@@ -6354,6 +6377,11 @@ routes = [
 _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
 
+# Task* tile enricher — per-session taskId → subject/status map. Populated by
+# the session monitor tailer as it walks JSONL entries; also used by the HTTP
+# history endpoint to produce identical annotations on page load.
+_task_state_tracker = TaskStateTracker()
+
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task
     if os.environ.get("DASHBOARD_MOCK"):
@@ -6387,7 +6415,11 @@ async def _on_startup():
     auth_db.init_db()  # ensure auth.db schema exists
     # Seed from filesystem on first run (one-time), then start background tasks
     await session_monitor.seed_from_filesystem()
-    await session_monitor.start(event_bus=event_bus, entry_parser=_parse_jsonl_entry)
+    await session_monitor.start(
+        event_bus=event_bus,
+        entry_parser=_parse_jsonl_entry,
+        entry_enricher=_task_state_tracker.enrich,
+    )
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
