@@ -1362,102 +1362,6 @@ def _has_running_tool(jsonl_file: Path) -> bool:
         return False
 
 
-def _read_jsonl_incremental(
-    jsonl_path: Path,
-    offset: int,
-) -> tuple[str | None, int, int, int, int, str | None]:
-    """Read new JSONL lines starting at byte offset.
-
-    Returns (snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity_iso).
-
-    snippet        — last assistant/user text seen (first 300 chars), or None
-    context_tokens — total input tokens from the last assistant turn (context window usage)
-    new_offset     — byte offset after last complete line consumed
-    tool_delta     — count of tool_use entries in new lines
-    turn_delta     — count of assistant + thinking entries in new lines
-    last_activity_iso — ISO timestamp of last entry seen, or None
-    """
-    snippet: str | None = None
-    context_tokens = 0
-    tool_delta = 0
-    turn_delta = 0
-    last_activity: str | None = None
-
-    try:
-        file_size = jsonl_path.stat().st_size
-        if file_size <= offset:
-            return snippet, context_tokens, offset, tool_delta, turn_delta, last_activity
-
-        with open(jsonl_path, "rb") as fh:
-            fh.seek(offset)
-            data = fh.read()
-
-        # Only process up to the last complete line (ends with \n)
-        last_nl = data.rfind(b"\n")
-        if last_nl == -1:
-            return snippet, context_tokens, offset, tool_delta, turn_delta, last_activity
-
-        complete = data[: last_nl + 1]
-        new_offset = offset + last_nl + 1
-
-        for raw_line in complete.splitlines():
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            etype = entry.get("type")
-            ts = entry.get("timestamp", "")
-            if ts:
-                last_activity = ts
-
-            # Count tool_use entries
-            if etype == "tool_use":
-                tool_delta += 1
-                continue
-
-            # Count assistant + thinking entries as turns
-            if etype in ("assistant", "thinking"):
-                turn_delta += 1
-
-            if etype not in ("user", "assistant"):
-                continue
-
-            msg = entry.get("message", {})
-
-            # Track context size: total input tokens from the latest assistant turn
-            usage = msg.get("usage", {})
-            if etype == "assistant" and usage:
-                ctx = (usage.get("input_tokens", 0)
-                       + usage.get("cache_creation_input_tokens", 0)
-                       + usage.get("cache_read_input_tokens", 0))
-                if ctx > 0:
-                    context_tokens = ctx
-
-            # Extract text for snippet
-            content = msg.get("content", "")
-            text = ""
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "")
-                        break
-
-            text = text.strip()
-            if text:
-                snippet = text[:300]
-
-        return snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity
-
-    except OSError:
-        return snippet, context_tokens, offset, tool_delta, turn_delta, last_activity
-
-
 def _read_cgroup_mem_mb(container_id: str) -> int | None:
     """Read current memory usage in MB from cgroup memory.current.
 
@@ -1492,29 +1396,133 @@ def _read_cgroup_cpu_usec(container_id: str) -> int | None:
     return None
 
 
+def _upsert_monitor_row(
+    tmux_name: str,
+    *,
+    session_type: str,
+    jsonl_file: Path,
+    bead_id: str | None = None,
+) -> None:
+    """Insert or update a tmux_sessions row so the monitor picks up the JSONL.
+
+    The monitor (in the dashboard process) tails JSONLs for every row that
+    has ``is_live=1`` and a ``jsonl_path``. Dispatcher and dashboard share
+    ``dashboard.db`` as IPC; by inserting here the monitor automatically
+    sees the dispatch + librarian sessions on its next liveness sweep.
+    """
+    try:
+        from tools.dashboard.dao import dashboard_db as _dbmod
+    except Exception:
+        return
+    try:
+        project = jsonl_file.parent.name if jsonl_file.is_file() else "autonomy"
+        session_uuid = jsonl_file.stem if jsonl_file.is_file() else None
+        _dbmod.upsert_session(
+            tmux_name=tmux_name,
+            session_type=session_type,
+            project=project,
+            bead_id=bead_id,
+            jsonl_path=str(jsonl_file),
+            session_uuid=session_uuid,
+            resolution_dir=str(jsonl_file.parent),
+            is_live=True,
+        )
+    except Exception as e:
+        print(f"  WARNING: monitor upsert for {tmux_name} failed: {e}",
+              file=sys.stderr)
+
+
+def _register_dispatch_session(agent: "RunningAgent", jsonl_file: Path) -> None:
+    """Register a dispatch session with the monitor (idempotent, best-effort)."""
+    tmux_name = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+    _upsert_monitor_row(
+        tmux_name,
+        session_type="dispatch",
+        jsonl_file=jsonl_file,
+        bead_id=agent.bead_id,
+    )
+
+
+def _register_librarian_session(
+    lib: "RunningLibrarian", jsonl_file: Path,
+) -> None:
+    """Register a librarian session with the monitor (idempotent, best-effort)."""
+    tmux_name = Path(lib.output_dir).name if lib.output_dir else lib.job_id
+    _upsert_monitor_row(
+        tmux_name,
+        session_type="librarian",
+        jsonl_file=jsonl_file,
+    )
+
+
+def _deregister_session_with_monitor(tmux_name: str) -> None:
+    """Mark a session dead in dashboard.db so the monitor stops tailing it."""
+    try:
+        from tools.dashboard.dao import dashboard_db as _dbmod
+    except Exception:
+        return
+    try:
+        _dbmod.mark_dead(tmux_name)
+    except Exception as e:
+        print(f"  WARNING: monitor deregister for {tmux_name} failed: {e}",
+              file=sys.stderr)
+
+
+def _read_stats_via_monitor(
+    tmux_name: str,
+    holder: "RunningAgent | RunningLibrarian",
+) -> tuple[str | None, int, int, int, str | None]:
+    """Read snippet/tokens/entries from the monitor's DB view.
+
+    Returns (snippet, context_tokens, entry_count, turn_delta, last_activity).
+    turn_delta is the delta in entry_count since the last poll — the
+    dispatcher's dispatch_runs table is still keyed on per-tick deltas.
+    """
+    try:
+        from tools.dashboard.dao.dashboard_db import get_session
+    except Exception:
+        return None, 0, 0, 0, None
+    try:
+        row = get_session(tmux_name)
+    except Exception:
+        return None, 0, 0, 0, None
+    if not row:
+        return None, 0, 0, 0, None
+    snippet = (row.get("last_message") or "") or None
+    if snippet:
+        snippet = snippet[:300]
+    context_tokens = int(row.get("context_tokens") or 0)
+    entry_count = int(row.get("entry_count") or 0)
+    prev_count = getattr(holder, "_prev_entry_count", 0)
+    turn_delta = max(0, entry_count - prev_count)
+    holder._prev_entry_count = entry_count
+    last_activity = row.get("last_activity")
+    if last_activity is not None:
+        last_activity = str(last_activity)
+    return snippet, context_tokens, entry_count, turn_delta, last_activity
+
+
 def _collect_live_stats(agent: RunningAgent) -> None:
     """Collect live stats for a running agent and persist to dispatch_runs.
 
-    Called each poll cycle. Reads new JSONL lines incrementally (seeking
-    to jsonl_offset), reads cgroup memory and CPU, then calls update_live_stats().
-    All errors are swallowed — stats are best-effort and must not disrupt dispatch.
+    Card stats (snippet, context_tokens, entry_count, last_activity) are read
+    through the session monitor — the single source of truth for JSONL tail
+    state (graph://554a08c6-887). Cgroup memory and CPU are still read
+    directly. Also registers the dispatch session with the monitor once the
+    JSONL appears so overlays and tail endpoints share its reader.
     """
     try:
         run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
 
-        # --- JSONL: incremental read ---
-        snippet: str | None = None
-        context_tokens = 0
-        tool_delta = 0
-        turn_delta = 0
-        last_activity: str | None = None
-
         jsonl_file = _find_jsonl_file(agent.output_dir)
         if jsonl_file:
-            snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
-                jsonl_file, agent.jsonl_offset
-            )
-            agent.jsonl_offset = new_offset
+            _register_dispatch_session(agent, jsonl_file)
+
+        # --- JSONL stats via monitor (dashboard.db is the shared reader) ---
+        snippet, context_tokens, entry_count, turn_delta, last_activity = (
+            _read_stats_via_monitor(run_id, agent)
+        )
+        tool_delta = 0  # tool-use counting lives in monitor.get_session_stats
 
         # --- Cgroup: memory ---
         mem_mb = _read_cgroup_mem_mb(agent.container_id)
@@ -1882,6 +1890,9 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
     # Process normally-completed agents
     for agent, exit_code in completed:
         running.remove(agent)
+        _deregister_session_with_monitor(
+            Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+        )
         print(f"  Collecting: {agent.bead_id} (container: {agent.container_name})")
         try:
             result = collect_results(agent, exit_code)
@@ -1922,6 +1933,9 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
     # Handle timed-out agents — kill, then try to recover results
     for agent, stale_secs in timed_out:
         running.remove(agent)
+        _deregister_session_with_monitor(
+            Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+        )
         elapsed = time.time() - agent.started_at
         if stale_secs >= 0:
             timeout_reason = f"JSONL stale {int(stale_secs)}s after {int(elapsed)}s"
@@ -2000,6 +2014,9 @@ def poll_and_collect_librarians(running_librarians: list[RunningLibrarian]) -> N
 
     for lib, exit_code in completed:
         running_librarians.remove(lib)
+        _deregister_session_with_monitor(
+            Path(lib.output_dir).name if lib.output_dir else lib.job_id
+        )
         status = "DONE" if exit_code == 0 else "FAILED"
         try:
             remove_container(lib.container_name)
@@ -2021,6 +2038,9 @@ def poll_and_collect_librarians(running_librarians: list[RunningLibrarian]) -> N
 
     for lib in timed_out:
         running_librarians.remove(lib)
+        _deregister_session_with_monitor(
+            Path(lib.output_dir).name if lib.output_dir else lib.job_id
+        )
         print(f"  Killing timed-out librarian: {lib.container_name}")
         kill_container(lib.container_name)
         try:
@@ -2036,18 +2056,14 @@ def _collect_live_stats_for_librarian(lib: RunningLibrarian) -> None:
     try:
         run_id = Path(lib.output_dir).name if lib.output_dir else lib.job_id
 
-        snippet: str | None = None
-        context_tokens = 0
-        tool_delta = 0
-        turn_delta = 0
-        last_activity: str | None = None
-
         jsonl_file = _find_jsonl_file(lib.output_dir)
         if jsonl_file:
-            snippet, context_tokens, new_offset, tool_delta, turn_delta, last_activity = _read_jsonl_incremental(
-                jsonl_file, lib.jsonl_offset
-            )
-            lib.jsonl_offset = new_offset
+            _register_librarian_session(lib, jsonl_file)
+
+        snippet, context_tokens, entry_count, turn_delta, last_activity = (
+            _read_stats_via_monitor(run_id, lib)
+        )
+        tool_delta = 0
 
         mem_mb = _read_cgroup_mem_mb(lib.container_id)
 

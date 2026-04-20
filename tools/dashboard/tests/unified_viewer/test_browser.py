@@ -10,7 +10,10 @@ Test server runs HTTP on port 8082 (not HTTPS).
 Expected test results:
   - TestSessionDetailPage: PASS (session viewer already works)
   - TestExperimentPanel: likely PASS (auto-ozev wired chatWithPanel)
-  - TestOverlayPanel: FAIL (overlay uses live-panel-viewer.js, not unified viewer)
+  - TestOverlayPanel: FAIL on master — Phase 0 contract for auto-ylj6r.
+    The overlay must use the unified viewer AND load entries for dispatch
+    sessions through the unified tail. Fails because the unified tail
+    endpoint cannot resolve dispatch runDirs to JSONL files (Phase 3).
   - TestUnresolvedState: FAIL (unified viewer Unresolved state not implemented yet)
 """
 import json
@@ -227,6 +230,67 @@ class ViewerTestHarness:
         """)
         return result
 
+    # ── Overlay helpers (Phase 0 contract for auto-ylj6r) ───────────
+
+    def open_overlay(self, run_dir, is_live=True):
+        """Trigger the dispatch live-trace overlay. Returns 'called' or 'missing'."""
+        return ab_eval(f"""
+            if (typeof window._livePanelLoad === 'function') {{
+                window._livePanelLoad('{run_dir}', {'true' if is_live else 'false'});
+                return 'called';
+            }}
+            return 'missing';
+        """)
+
+    def overlay_state(self):
+        """Inspect the visible overlay panel's Alpine state.
+
+        Returns {rendered, entries, state, hasConfigure} — or {error:...}.
+        A unified-viewer overlay exposes entries + state + a configure() method.
+        """
+        return ab_eval("""
+            // Find the overlay panel — it's a session-viewer in _mode='overlay'.
+            var viewers = document.querySelectorAll('.session-viewer');
+            for (var i = 0; i < viewers.length; i++) {
+                var cmp = typeof Alpine !== 'undefined' ? Alpine.$data(viewers[i]) : null;
+                if (!cmp) continue;
+                if (cmp._mode === 'overlay' || cmp._runDir) {
+                    return {
+                        rendered: true,
+                        entries: Array.isArray(cmp.entries) ? cmp.entries.length : -1,
+                        state: cmp.state || '',
+                        hasConfigure: typeof cmp.configure === 'function',
+                        mode: cmp._mode || ''
+                    };
+                }
+            }
+            // Fallback: any viewer
+            if (viewers.length) {
+                var cmp2 = Alpine.$data(viewers[0]);
+                return {
+                    rendered: true,
+                    entries: Array.isArray(cmp2.entries) ? cmp2.entries.length : -1,
+                    state: cmp2.state || '',
+                    hasConfigure: typeof cmp2.configure === 'function',
+                    mode: cmp2._mode || ''
+                };
+            }
+            return {rendered: false};
+        """)
+
+    def overlay_close(self):
+        """Invoke the overlay close hook."""
+        return ab_eval("""
+            if (typeof window._livePanelReset === 'function') {
+                window._livePanelReset();
+                return 'called';
+            }
+            // Fallback: click a close button if present
+            var btn = document.querySelector('[data-testid="overlay-close"], .sv-overlay-close, .live-panel-close');
+            if (btn) { btn.click(); return 'clicked'; }
+            return 'missing';
+        """)
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -242,6 +306,15 @@ def _make_viewer_fixture(sessions, entries_map=None):
     }
 
 
+# Overlay test constants — live + completed dispatch runs for overlay tests
+_OVERLAY_LIVE_TMUX = "auto-ovl-live"
+_OVERLAY_LIVE_UUID = "11111111-0000-0000-0000-000000000001"
+_OVERLAY_LIVE_RUN_DIR = "auto-ovl-live-0420-130000"
+_OVERLAY_DEAD_TMUX = "auto-ovl-dead"
+_OVERLAY_DEAD_UUID = "22222222-0000-0000-0000-000000000002"
+_OVERLAY_DEAD_RUN_DIR = "auto-ovl-dead-0420-140000"
+
+
 @pytest.fixture(scope="module")
 def h(tmp_path_factory):
     """Test harness — server + browser + fixture management."""
@@ -254,8 +327,21 @@ def h(tmp_path_factory):
                                    role="reviewer", last_message="Completed"),
         fixtures.make_unresolved_session("host-test-unresolved", label="Unresolved Host",
                                          last_message="No JSONL yet"),
+        # Dispatch fixtures for overlay tests (auto-ylj6r Phase 0)
+        {**fixtures.make_session(_OVERLAY_LIVE_TMUX, label="Overlay — running dispatch",
+                                  role="dispatch", last_message="dispatch working"),
+         "type": "dispatch", "session_uuid": _OVERLAY_LIVE_UUID,
+         "is_live": True, "linked": True},
+        {**fixtures.make_session(_OVERLAY_DEAD_TMUX, label="Overlay — ended dispatch",
+                                  role="dispatch", last_message="dispatch done"),
+         "type": "dispatch", "session_uuid": _OVERLAY_DEAD_UUID,
+         "is_live": False, "linked": True},
     ]
-    harness.set_fixture(_make_viewer_fixture(sessions))
+    entries_map = {s["session_id"]: fixtures.MOCK_SESSION_ENTRIES for s in sessions}
+    # Also key entries by session_uuid so the unified tail can resolve either way.
+    entries_map[_OVERLAY_LIVE_UUID] = fixtures.MOCK_SESSION_ENTRIES
+    entries_map[_OVERLAY_DEAD_UUID] = fixtures.MOCK_SESSION_ENTRIES
+    harness.set_fixture(_make_viewer_fixture(sessions, entries_map))
     harness.start_server()
     yield harness
     ab_raw("close")
@@ -370,50 +456,142 @@ class TestExperimentPanel:
 
 # ══════════════════════════════════════════════════════════════════════
 # TestOverlayPanel — dispatch live trace overlay
-# EXPECTED FAIL: overlay uses live-panel-viewer.js, not unified viewer
+#
+# Phase 0 contract for auto-ylj6r. Previously these were XFAIL stubs
+# with `assert False`. Now they exercise the real post-consolidation
+# contract: the overlay uses the unified viewer and loads entries for
+# dispatch sessions via the unified tail endpoint. They MUST FAIL on
+# master and transition to PASS after Phase 1-4 consolidation.
 # ══════════════════════════════════════════════════════════════════════
 
 class TestOverlayPanel:
-    """Overlay panel for dispatch runs — currently uses live-panel-viewer.js."""
+    """Overlay panel for dispatch runs — must use the unified viewer."""
 
-    @pytest.mark.xfail(
-        reason="overlay uses live-panel-viewer.js, not unified viewer",
-        strict=True,
-    )
+    def _navigate_to_dispatch(self):
+        """Park the browser on a page so window.* overlay hooks are wired.
+
+        The overlay globals (`window._livePanelLoad`, `window._livePanelReset`)
+        are registered when session-viewer.js boots in overlay mode. The
+        /dispatch page is the canonical host.
+        """
+        ab_raw("close")
+        ab_raw("open", f"http://localhost:{TEST_PORT}/dispatch",
+               "--ignore-https-errors")
+        time.sleep(3)
+
     def test_overlay_opens_from_dispatch(self, h):
-        """Click Live Trace → overlay panel appears with entries.
+        """Click Live Trace → unified-viewer overlay appears with entries.
 
-        EXPECTED FAIL: The overlay currently uses live-panel-viewer.js,
-        a separate component. Until the unified viewer replaces it
-        (auto-vl46), this test cannot pass.
+        FAILS TODAY: The dispatch page's _livePanelLoad is wired, but the
+        overlay's configure({runDir}) path fetches /api/dispatch/tail/{runDir}
+        to resolve runDir → sessionId. On master that endpoint returns no
+        entries for arbitrary runDirs (filesystem scanning in AGENT_RUNS_DIR
+        finds nothing under mock/test conditions), so the overlay opens
+        with entries.length == 0. After Phase 3, the overlay configures
+        via the unified tail which resolves dispatch UUIDs and returns
+        entries from dashboard.db — so entries.length > 0.
         """
-        # The overlay is triggered by window._livePanelLoad(runDir, isLive)
-        # which is wired to live-panel-viewer.js, not the unified viewer.
-        # When auto-vl46 ships, the overlay will use configure({runDir})
-        # on the unified viewer instead.
-        assert False, "overlay uses live-panel-viewer.js, not unified viewer"
+        self._navigate_to_dispatch()
 
-    @pytest.mark.xfail(
-        reason="overlay uses live-panel-viewer.js, not unified viewer",
-        strict=True,
-    )
+        opened = h.open_overlay(_OVERLAY_LIVE_RUN_DIR, is_live=True)
+        assert opened == "called", (
+            f"window._livePanelLoad missing; got {opened!r}. "
+            "Overlay globals not registered on /dispatch page."
+        )
+
+        # Give overlay ~6s to resolve runDir → sessionId → fetch entries
+        time.sleep(6)
+
+        state = h.overlay_state()
+        assert isinstance(state, dict) and state.get("rendered"), (
+            f"Overlay did not render a .session-viewer panel; got {state!r}."
+        )
+        assert state.get("hasConfigure") is True, (
+            f"Overlay is NOT the unified viewer (configure() missing). "
+            f"state={state!r}. Overlay is still using live-panel-viewer.js."
+        )
+        assert state.get("entries", 0) > 0, (
+            f"Overlay rendered with 0 entries. state={state!r}. "
+            "Unified tail cannot resolve dispatch runDir yet — Phase 3 "
+            "must add runDir/UUID resolution through dashboard.db."
+        )
+
     def test_overlay_shows_completed_trace(self, h):
-        """Completed run → overlay with historical entries.
+        """Completed dispatch → unified-viewer overlay with historical entries.
 
-        EXPECTED FAIL: same reason — overlay uses live-panel-viewer.js.
+        FAILS TODAY: Same resolution gap as #22 but for a completed run.
+        Additionally, master's api_dispatch_tail (which the current overlay
+        uses to bootstrap) finds no files under agent-runs/ for our mock
+        run_dir, so the overlay shows 0 entries. Post-consolidation,
+        configure() resolves via the unified tail which reads from
+        dashboard.db directly.
         """
-        assert False, "overlay uses live-panel-viewer.js, not unified viewer"
+        self._navigate_to_dispatch()
 
-    @pytest.mark.xfail(
-        reason="overlay uses live-panel-viewer.js, not unified viewer",
-        strict=True,
-    )
+        opened = h.open_overlay(_OVERLAY_DEAD_RUN_DIR, is_live=False)
+        assert opened == "called", (
+            f"window._livePanelLoad missing; got {opened!r}."
+        )
+        time.sleep(6)
+
+        state = h.overlay_state()
+        assert isinstance(state, dict) and state.get("rendered"), (
+            f"Overlay did not render; got {state!r}."
+        )
+        assert state.get("hasConfigure") is True, (
+            f"Overlay is NOT the unified viewer. state={state!r}."
+        )
+        assert state.get("entries", 0) > 0, (
+            f"Completed dispatch overlay has 0 entries. state={state!r}. "
+            "Unified tail cannot resolve completed dispatch runs yet."
+        )
+
     def test_overlay_close_removes_panel(self, h):
-        """Close button hides overlay.
+        """Close hook hides the overlay and frees Alpine store state.
 
-        EXPECTED FAIL: same reason — overlay uses live-panel-viewer.js.
+        FAILS TODAY: The overlay close path (`window._livePanelReset` or
+        equivalent) leaves the .session-viewer element in the DOM because
+        live-panel-viewer.js controls visibility via _mode state rather
+        than removing/hiding the shared viewer root. Phase 4 consolidation
+        wires close → _reset() → element hidden (display:none) or removed.
         """
-        assert False, "overlay uses live-panel-viewer.js, not unified viewer"
+        self._navigate_to_dispatch()
+
+        opened = h.open_overlay(_OVERLAY_LIVE_RUN_DIR, is_live=True)
+        assert opened == "called", f"open_overlay failed: {opened!r}"
+        time.sleep(3)
+
+        # Sanity: overlay is rendered
+        before = h.overlay_state()
+        assert before.get("rendered"), f"Overlay never opened; state={before!r}"
+
+        # Close it
+        closed = h.overlay_close()
+        assert closed in ("called", "clicked"), (
+            f"No overlay close hook available; got {closed!r}. "
+            "Expected window._livePanelReset or a clickable close button."
+        )
+        time.sleep(2)
+
+        # After close: overlay panel should no longer be visible
+        after = ab_eval("""
+            var viewers = document.querySelectorAll('.session-viewer');
+            var visible = 0;
+            for (var i = 0; i < viewers.length; i++) {
+                var cs = getComputedStyle(viewers[i]);
+                if (cs.display !== 'none' && cs.visibility !== 'hidden') {
+                    // Overlay-mode viewer specifically — not the page-level one
+                    var cmp = typeof Alpine !== 'undefined' ? Alpine.$data(viewers[i]) : null;
+                    if (cmp && cmp._mode === 'overlay') visible++;
+                }
+            }
+            return visible;
+        """)
+        assert after == 0, (
+            f"After close, {after} overlay-mode viewer(s) still visible. "
+            "Close hook did not hide/remove the overlay. "
+            "Phase 4 wires _livePanelReset to hide the unified viewer."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════

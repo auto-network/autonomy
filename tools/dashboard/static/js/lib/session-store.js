@@ -57,7 +57,7 @@ window.getSessionStore = function(sessionId) {
       entries: [],
       offset: 0,
       seq: 0,
-      isLive: true,
+      isLive: false,
       sessionType: '',
       project: '',
       label: '',
