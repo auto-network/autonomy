@@ -176,6 +176,12 @@ class MockEventBus:
             w.set()
         return 1
 
+    def update_cache(self, topic: str, data) -> None:
+        # Real EventBus caches the latest payload per topic for replay to
+        # new subscribers. Tests don't exercise replay — no-op stub keeps
+        # session_monitor's call path green.
+        pass
+
     def get_messages(self, session_id: str | None = None) -> list[tuple[str, dict]]:
         msgs = [(t, d) for t, d in self.events if t == "session:messages"]
         if session_id:
