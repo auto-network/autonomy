@@ -495,7 +495,7 @@ class TestConfirmLinkEndpointToSSE:
     the inotify watch.
     """
 
-    @pytest.mark.xfail(reason="investigating — see auto-hy3pl", strict=False)
+    @pytest.mark.xfail(reason="investigating — see auto-c1zj5", strict=False)
     @pytest.mark.asyncio
     async def test_confirm_link_installs_tailing(self, setup_env, monkeypatch):
         """Real endpoint → JSONL write → SSE broadcast. No simulation."""
