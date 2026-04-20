@@ -40,11 +40,27 @@ _TS_FIELDS = {"started_at", "completed_at", "last_activity"}
 
 
 def _coerce_ts(row: dict) -> dict:
-    """Append Z to bare UTC timestamp strings returned from SQLite."""
-    return {
-        k: (v + "Z") if (k in _TS_FIELDS and isinstance(v, str) and not v.endswith("Z")) else v
-        for k, v in row.items()
-    }
+    """Normalise UTC timestamp fields to ISO-string with trailing 'Z'.
+
+    DATETIME columns can come back as float when a writer accidentally stored
+    str(float) — SQLite's NUMERIC affinity round-trips it to REAL. Defensive:
+    convert numeric values to ISO strings so downstream callers see a single
+    shape (graph://39f0560 — pre-fix dispatcher wrote floats, blanking the
+    dispatch SSE payload).
+    """
+    from datetime import datetime, timezone
+
+    out: dict = {}
+    for k, v in row.items():
+        if k in _TS_FIELDS and v is not None:
+            if isinstance(v, (int, float)):
+                v = datetime.fromtimestamp(float(v), tz=timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ) + "Z"
+            elif isinstance(v, str) and not v.endswith("Z"):
+                v = v + "Z"
+        out[k] = v
+    return out
 
 
 def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
