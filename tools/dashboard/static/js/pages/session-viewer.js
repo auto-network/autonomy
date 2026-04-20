@@ -101,6 +101,13 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return (s && s.topics) || [];
       },
+      get todos() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return (s && Array.isArray(s.todos)) ? s.todos : [];
+      },
+      get hasTodos() {
+        return this.todos.length > 0;
+      },
       get entryCount() {
         var s = Alpine.store('sessions')[this.sessionKey];
         return (s && s.entryCount) || this.entries.length;
@@ -138,6 +145,10 @@
 
       // Header expand/collapse
       headerOpen: false,
+      // Drawer tab: 'topics' | 'todos'. Only meaningful when hasTodos is true.
+      // Auto-resets to 'topics' whenever hasTodos transitions true → false
+      // (handled by the $watch in init(), so there's no stuck-tab state).
+      selectedDrawerTab: 'topics',
 
       // Terminal toggle (full-screen xterm.js swaps the chat body)
       showTerminal: false,
@@ -355,6 +366,13 @@
       // ── Lifecycle ───────────────────────────────────────────────
 
       init() {
+        // Auto-reset the drawer tab to 'topics' whenever the session's todo
+        // list empties out. Without this, clearing the final todo would leave
+        // the viewer stuck on an empty Todos panel after the tab strip hides.
+        this.$watch('hasTodos', (now) => {
+          if (!now) this.selectedDrawerTab = 'topics';
+        });
+
         // Keyboard padding toggle — applies to whichever .sv-input is present in the DOM.
         // Harmless when no .sv-input exists (e.g. overlay mode, pre-ready state).
         if (window.visualViewport && !window._svKeyboardListener) {
