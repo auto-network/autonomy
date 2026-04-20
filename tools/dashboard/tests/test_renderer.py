@@ -465,9 +465,9 @@ class TestSemanticTileRendering:
     def test_enriched_tile_shows_title(self):
         """semantic_bash with source_id → enables lazy title fetch via /api/graph/{id}."""
         entries = _parse_sequence([
-            _make_tool_result("tu_ns", "Note saved (src:f6c6c43e-24a1-4b9f-8c3d-1e2f3a4b5c6d)\nTags: pitfall, dashboard"),
+            _make_tool_result("tu_ns", "\u2713 Note saved (src:f6c6c43e-24a1-4b9f-8c3d-1e2f3a4b5c6d)\nTags: pitfall, dashboard"),
         ])
-        entry = entries[0]
+        entry = next(e for e in entries if e.get("type") == "semantic_bash")
         assert entry["type"] == "semantic_bash"
         assert entry["source_id"] == "f6c6c43e-24a1-4b9f-8c3d-1e2f3a4b5c6d"
         # Client fetches /api/graph/{source_id} to populate _enriched_title
@@ -475,18 +475,18 @@ class TestSemanticTileRendering:
     def test_enriched_tile_shows_preview(self):
         """semantic_bash content field serves as preview fallback."""
         entries = _parse_sequence([
-            _make_tool_result("tu_np", "Note saved (src:abcdef01-2345-6789-0123-456789abcdef)\nTags: design"),
+            _make_tool_result("tu_np", "\u2713 Note saved (src:abcdef01-2345-6789-0123-456789abcdef)\nTags: design"),
         ])
-        entry = entries[0]
+        entry = next(e for e in entries if e.get("type") == "semantic_bash")
         assert len(entry["content"]) > 0
         # Content is the preview until lazy enrichment populates _enriched_preview
 
     def test_enriched_tile_shows_tags(self):
         """Note creation includes tag info in content for immediate display."""
         entries = _parse_sequence([
-            _make_tool_result("tu_nt", "Note saved (src:aabb0011-2233-4455-6677-8899aabbccdd)\nTags: pitfall, security"),
+            _make_tool_result("tu_nt", "\u2713 Note saved (src:aabb0011-2233-4455-6677-8899aabbccdd)\nTags: pitfall, security"),
         ])
-        entry = entries[0]
+        entry = next(e for e in entries if e.get("type") == "semantic_bash")
         assert entry["semantic_type"] == "note-created"
         # Tag names are in the content string; client also fetches from API
         assert "pitfall" in entry["content"] or entry.get("source_id")
@@ -499,7 +499,7 @@ class TestSemanticTileRendering:
         entries = _parse_sequence([
             _make_tool_result("tu_ue", "\u2713 Captured: deadbeef-1234-5678-9abc-def012345678 (raw thought)"),
         ])
-        entry = entries[0]
+        entry = next(e for e in entries if e.get("type") == "semantic_bash")
         assert entry["type"] == "semantic_bash"
         assert entry["content"]  # non-empty string for fallback display
 
@@ -511,7 +511,7 @@ class TestSemanticTileRendering:
         entries = _parse_sequence([
             _make_tool_result("tu_tc", "\u2713 Captured: a1b2c3d4-5e6f-7890-abcd-ef1234567890 (thought about auth)"),
         ])
-        entry = entries[0]
+        entry = next(e for e in entries if e.get("type") == "semantic_bash")
         assert entry["type"] == "semantic_bash"
         assert entry["semantic_type"] == "thought-captured"
         assert entry["source_id"] == "a1b2c3d4-5e6f-7890-abcd-ef1234567890"
@@ -524,9 +524,9 @@ class TestSemanticTileRendering:
         the pitfall styling when tags include 'pitfall'.
         """
         entries = _parse_sequence([
-            _make_tool_result("tu_pf", "Note saved (src:f6c6c43e-24a1-4b9f-8c3d-1e2f3a4b5c6d)\nTags: pitfall, dashboard"),
+            _make_tool_result("tu_pf", "\u2713 Note saved (src:f6c6c43e-24a1-4b9f-8c3d-1e2f3a4b5c6d)\nTags: pitfall, dashboard"),
         ])
-        entry = entries[0]
+        entry = next(e for e in entries if e.get("type") == "semantic_bash")
         assert entry["type"] == "semantic_bash"
         assert entry["semantic_type"] == "note-created"
         assert entry["source_id"]  # enables tag fetch for pitfall styling
@@ -537,7 +537,7 @@ class TestSemanticTileRendering:
         entries = _parse_sequence([
             _make_tool_use("Bash", "tu_da", {"command": "graph dispatch approve auto-5kj"}, _ts(0)),
         ])
-        entry = entries[0]
+        entry = next(e for e in entries if e.get("type") == "semantic_bash")
         assert entry["type"] == "semantic_bash"
         assert entry["semantic_type"] == "dispatch-approved"
         assert entry["bead_id"] == "auto-5kj"
@@ -550,7 +550,7 @@ class TestSemanticTileRendering:
                 "command": "bd set-state auto-5kj status=done --reason 'tests pass'",
             }, _ts(0)),
         ])
-        entry = entries[0]
+        entry = next(e for e in entries if e.get("type") == "semantic_bash")
         assert entry["type"] == "semantic_bash"
         assert entry["semantic_type"] == "state-changed"
         assert entry["bead_id"] == "auto-5kj"
@@ -563,7 +563,7 @@ class TestSemanticTileRendering:
                 "command": "graph comment dc4c73ee 'Fixed the wording'",
             }, _ts(0)),
         ])
-        entry = entries[0]
+        entry = next(e for e in entries if e.get("type") == "semantic_bash")
         assert entry["type"] == "semantic_bash"
         assert entry["semantic_type"] == "comment-added"
         assert entry["source_id"] == "dc4c73ee"
@@ -571,9 +571,9 @@ class TestSemanticTileRendering:
     def test_comment_added_from_tool_result(self):
         """Comment added tool_result → semantic_bash with comment_id."""
         entries = _parse_sequence([
-            _make_tool_result("tu_ca", "Comment added (id:df5f1546-9a8b-4c7d-e6f5-1234abcd5678) on f6c6c43e"),
+            _make_tool_result("tu_ca", "\u2713 Comment added (id:df5f1546-9a8b-4c7d-e6f5-1234abcd5678) on f6c6c43e"),
         ])
-        entry = entries[0]
+        entry = next(e for e in entries if e.get("type") == "semantic_bash")
         assert entry["type"] == "semantic_bash"
         assert entry["semantic_type"] == "comment-added"
         assert entry["comment_id"] == "df5f1546-9a8b-4c7d-e6f5-1234abcd5678"

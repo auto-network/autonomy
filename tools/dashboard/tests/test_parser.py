@@ -182,7 +182,7 @@ FIXTURE_TOOL_RESULT_LIST = {
 
 FIXTURE_TOOL_RESULT_NOTE_SAVED = {
     "type": "tool_result", "toolUseId": "toolu_01NS",
-    "message": {"role": "user", "content": "Note saved (src:f6c6c43e-24a1-4b9f-8c3d-1e2f3a4b5c6d)\nTags: pitfall, dashboard"},
+    "message": {"role": "user", "content": "\u2713 Note saved (src:f6c6c43e-24a1-4b9f-8c3d-1e2f3a4b5c6d)\nTags: pitfall, dashboard"},
     "timestamp": TS,
 }
 
@@ -194,7 +194,7 @@ FIXTURE_TOOL_RESULT_THOUGHT_CAPTURED = {
 
 FIXTURE_TOOL_RESULT_COMMENT_ADDED = {
     "type": "tool_result", "toolUseId": "toolu_01CA",
-    "message": {"role": "user", "content": "Comment added (id:df5f1546-9a8b-4c7d-e6f5-1234abcd5678) on f6c6c43e"},
+    "message": {"role": "user", "content": "\u2713 Comment added (id:df5f1546-9a8b-4c7d-e6f5-1234abcd5678) on f6c6c43e"},
     "timestamp": TS,
 }
 
@@ -482,21 +482,27 @@ class TestUpconversion:
 
     def test_note_saved_upconverted(self):
         result = _parse_jsonl_entry(_line(FIXTURE_TOOL_RESULT_NOTE_SAVED))
-        assert result["type"] == "semantic_bash"
-        assert result["semantic_type"] == "note-created"
-        assert result["source_id"] == "f6c6c43e-24a1-4b9f-8c3d-1e2f3a4b5c6d"
+        entries = result if isinstance(result, list) else [result]
+        sem = next((e for e in entries if e.get("type") == "semantic_bash"), None)
+        assert sem is not None
+        assert sem["semantic_type"] == "note-created"
+        assert sem["source_id"] == "f6c6c43e-24a1-4b9f-8c3d-1e2f3a4b5c6d"
 
     def test_thought_captured_upconverted(self):
         result = _parse_jsonl_entry(_line(FIXTURE_TOOL_RESULT_THOUGHT_CAPTURED))
-        assert result["type"] == "semantic_bash"
-        assert result["semantic_type"] == "thought-captured"
-        assert result["source_id"] == "a1b2c3d4-5e6f-7890-abcd-ef1234567890"
+        entries = result if isinstance(result, list) else [result]
+        sem = next((e for e in entries if e.get("type") == "semantic_bash"), None)
+        assert sem is not None
+        assert sem["semantic_type"] == "thought-captured"
+        assert sem["source_id"] == "a1b2c3d4-5e6f-7890-abcd-ef1234567890"
 
     def test_comment_added_upconverted(self):
         result = _parse_jsonl_entry(_line(FIXTURE_TOOL_RESULT_COMMENT_ADDED))
-        assert result["type"] == "semantic_bash"
-        assert result["semantic_type"] == "comment-added"
-        assert result["comment_id"] == "df5f1546-9a8b-4c7d-e6f5-1234abcd5678"
+        entries = result if isinstance(result, list) else [result]
+        sem = next((e for e in entries if e.get("type") == "semantic_bash"), None)
+        assert sem is not None
+        assert sem["semantic_type"] == "comment-added"
+        assert sem["comment_id"] == "df5f1546-9a8b-4c7d-e6f5-1234abcd5678"
 
     def test_normal_tool_result_not_upconverted(self):
         result = _parse_jsonl_entry(_line(FIXTURE_TOOL_RESULT_STRING))
@@ -509,13 +515,15 @@ class TestUpconversion:
             "type": "user", "timestamp": TS,
             "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "toolu_01NS",
-                 "content": "Note saved (src:abcdef12-3456)"},
+                 "content": "\u2713 Note saved (src:abcdef12-3456)"},
             ]},
         }
         result = _parse_jsonl_entry(_line(fixture))
-        assert result["type"] == "semantic_bash"
-        assert result["semantic_type"] == "note-created"
-        assert result["source_id"] == "abcdef12-3456"
+        entries = result if isinstance(result, list) else [result]
+        sem = next((e for e in entries if e.get("type") == "semantic_bash"), None)
+        assert sem is not None
+        assert sem["semantic_type"] == "note-created"
+        assert sem["source_id"] == "abcdef12-3456"
 
 
 # ── TestContentExtraction ────────────────────────────────────────────
