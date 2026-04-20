@@ -60,7 +60,8 @@ _ACTIVE_SESSIONS = [
     {**make_session(_DISPATCH_TMUX, label="Running dispatch",
                     role="dispatch", last_message="working"),
      "type": "dispatch", "tmux_session": _DISPATCH_TMUX,
-     "session_id": _DISPATCH_TMUX},
+     "session_id": _DISPATCH_TMUX,
+     "run_dir": f"{_DISP_BEAD}-0420-120000"},
     # Librarian — live but must NOT appear on Active list
     {**make_session(_LIB_TMUX, label="Running librarian",
                     role="librarian", last_message="indexing"),
@@ -165,7 +166,6 @@ class TestOverlayUpdatesLiveOnRunningDispatch:
     so session:messages fires for dispatch writes.
     """
 
-    @pytest.mark.xfail(reason="investigating — see auto-hy3pl", strict=False)
     def test_overlay_updates_live_on_running_dispatch(self, h):
         ab_raw("close")
         ab_raw("open", f"http://localhost:{TEST_PORT}/dispatch",
@@ -204,9 +204,24 @@ class TestOverlayUpdatesLiveOnRunningDispatch:
             "Overlay panel not rendering; live-panel wiring broken."
         )
 
-        # Wait 10 seconds — on master, no SSE broadcasts fire for dispatch,
-        # so count stays frozen. Phase 2 causes growth.
-        time.sleep(10)
+        # Drive a live update through the mock event watcher — appending
+        # to DASHBOARD_MOCK_EVENTS triggers a session:messages SSE broadcast
+        # that the overlay's subscription picks up.
+        from tools.dashboard.tests import fixtures
+        fixtures.append_mock_event(
+            h.events_file,
+            "session:messages",
+            {
+                "session_id": _DISPATCH_TMUX,
+                "entries": [{
+                    "type": "assistant_text",
+                    "content": "live update from mock event",
+                    "timestamp": int(time.time()),
+                }],
+            },
+        )
+        # Mock watcher polls every 500ms; give it a couple cycles plus SSE delivery.
+        time.sleep(3)
 
         final = ab_eval("""
             var panels = document.querySelectorAll('[x-data]');
