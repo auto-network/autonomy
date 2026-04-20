@@ -1017,7 +1017,11 @@
       <span class="text-xs text-gray-500 ml-auto" id="live-panel-status"></span>
       <button onclick="event.stopPropagation(); hideLivePanel();" class="text-gray-500 hover:text-gray-300 text-sm px-1">✕</button>
     </div>
-    <div id="live-panel-body" x-data="sessionViewerPage({mode:'overlay'})">
+    <div id="live-panel-body"
+         class="session-viewer"
+         data-mode="overlay"
+         x-data="sessionViewerPage({mode:'overlay'})"
+         x-effect="$el.setAttribute('data-mode', _mode)">
 
       <!-- Loading -->
       <template x-if="state === 'loading'">
