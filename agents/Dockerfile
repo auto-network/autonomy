@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libdbus-1-3 libcups2 \
         libnss3 libnspr4 libasound2t64 \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --break-system-packages --no-cache-dir pytest pyyaml
+    && pip install --break-system-packages --no-cache-dir pytest pytest-xdist pyyaml
 
 # ── bd CLI (Go binary, statically-ish linked — just needs libc) ──
 COPY bin/bd /usr/local/bin/bd
