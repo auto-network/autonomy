@@ -540,6 +540,104 @@ def run_tier2(base_url: str) -> dict:
     print("  Checking session viewer terminal toggle...", file=sys.stderr)
     page_results.append({"page": "/session/{id}", **_check("session_viewer_terminal_toggle", check_session_viewer_terminal_toggle)})
 
+    # Dispatch overlay live-update check — bead auto-ylj6r Phase 0 test 29.
+    # Opens /dispatch, clicks the Live Trace button on a running bead,
+    # snapshots the overlay entry count, waits 10s, asserts the count grew.
+    # Catches a broken monitor-to-overlay SSE path that would otherwise
+    # pass the static tier 2 sweep (page loads) while leaving users staring
+    # at a frozen overlay. See bead description for full rationale.
+    def check_dispatch_overlay_live_updates():
+        api_sess = requests.Session()
+        api_sess.verify = False
+        # Only meaningful when there is an actually-running dispatch. Ask
+        # the server for the current running set; if none, skip cleanly.
+        try:
+            r = api_sess.get(f"{base_url}/api/dispatch/runs", timeout=10)
+            runs = r.json() if r.status_code == 200 else []
+        except Exception as e:
+            return f"failed to read dispatch runs: {e}"
+        running = [
+            r for r in (runs if isinstance(runs, list) else [])
+            if str(r.get("status", "")).upper() in ("RUNNING", "ACTIVE")
+        ]
+        if not running:
+            return True  # no running dispatch — nothing to exercise
+        target = running[0]
+        run_dir = target.get("run_dir") or target.get("id") or ""
+        if not run_dir:
+            return True  # can't address an overlay without a run_dir
+
+        try:
+            r1 = subprocess.run(
+                ["agent-browser", "open", f"{base_url}/dispatch",
+                 "--ignore-https-errors"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r1.returncode != 0:
+                return f"open /dispatch failed: {r1.stderr.strip()}"
+            subprocess.run(
+                ["agent-browser", "wait", "--load", "networkidle"],
+                capture_output=True, text=True, timeout=30,
+            )
+            time.sleep(3)
+
+            # Trigger the overlay programmatically — clicking the Live
+            # Trace button by selector is brittle across templates.
+            r2 = subprocess.run(
+                ["agent-browser", "eval",
+                 f"(function(){{ if (typeof window._livePanelLoad === 'function')"
+                 f" {{ window._livePanelLoad('{run_dir}', true); return 'called'; }}"
+                 f" return 'missing'; }})()"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "called" not in r2.stdout:
+                return f"overlay trigger missing: {r2.stdout.strip()!r}"
+            time.sleep(2)
+
+            def _read_count():
+                r = subprocess.run(
+                    ["agent-browser", "eval",
+                     "(function(){"
+                     " var vs = document.querySelectorAll('.session-viewer');"
+                     " for (var i=0; i<vs.length; i++) {"
+                     "   var cmp = typeof Alpine !== 'undefined' ? Alpine.$data(vs[i]) : null;"
+                     "   if (cmp && Array.isArray(cmp.entries) && cmp.configure) {"
+                     "     return cmp.entries.length;"
+                     "   }"
+                     " }"
+                     " return -1;"
+                     "})()"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                try:
+                    return int(r.stdout.strip().strip('"'))
+                except ValueError:
+                    return -1
+
+            initial = _read_count()
+            if initial < 0:
+                return f"could not read overlay entry count (initial={initial})"
+            time.sleep(10)
+            final = _read_count()
+            if final <= initial:
+                return (
+                    f"overlay entry count did not grow over 10s "
+                    f"(initial={initial}, final={final}); SSE "
+                    f"broadcasts for dispatch session not reaching overlay."
+                )
+            return True
+        finally:
+            subprocess.run(
+                ["agent-browser", "close"],
+                capture_output=True, text=True, timeout=10,
+            )
+
+    print("  Checking dispatch overlay live updates...", file=sys.stderr)
+    page_results.append({
+        "page": "/dispatch overlay",
+        **_check("dispatch_overlay_live_updates", check_dispatch_overlay_live_updates),
+    })
+
     passed = all(p["pass"] for p in page_results)
     return {"pass": passed, "skipped": False, "pages": page_results}
 
