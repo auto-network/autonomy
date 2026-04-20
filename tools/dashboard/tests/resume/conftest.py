@@ -11,6 +11,7 @@ import importlib
 import json
 import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -20,6 +21,11 @@ from tools.dashboard.tests.fixtures import (
     make_experiment,
     make_session,
 )
+
+
+def _iso(minutes_ago):
+    """ISO 8601 UTC timestamp minutes_ago minutes before now."""
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 RESUME_SESSIONS = [
@@ -139,9 +145,9 @@ def mock_fixture(tmp_path, resume_env):
             "resumable": True,
             # Timestamps inside the endpoint's default since=1d window —
             # the mock defaults to 2026-01-01 which the filter drops.
-            "created_at": "2026-04-19T20:00:00Z",
-            "last_activity_at": "2026-04-19T22:00:00Z",
-            "ended_at": "2026-04-19T22:00:00Z",
+            "created_at": _iso(120),        # 2h ago
+            "last_activity_at": _iso(60),   # 1h ago
+            "ended_at": _iso(60),           # 1h ago
         },
         {
             "id": "src-missing-jsonl",
@@ -152,9 +158,9 @@ def mock_fixture(tmp_path, resume_env):
             "session_uuid": "missing-uuid-000",
             "file_path": "/tmp/nonexistent/gone.jsonl",
             "resumable": False,
-            "created_at": "2026-04-19T20:00:00Z",
-            "last_activity_at": "2026-04-19T22:00:00Z",
-            "ended_at": "2026-04-19T22:00:00Z",
+            "created_at": _iso(120),        # 2h ago
+            "last_activity_at": _iso(60),   # 1h ago
+            "ended_at": _iso(60),           # 1h ago
         },
     ]
     fixture = {
