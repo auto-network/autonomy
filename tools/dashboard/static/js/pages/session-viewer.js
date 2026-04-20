@@ -283,6 +283,13 @@
           try {
             await this._fetchBacklog(store);
           } catch (e) {
+            if (e && e.missingSession) {
+              // Pruned or unknown session: surface as an explicit error.
+              store._loading = false;
+              this.errorMsg = (e && e.message) || 'Session not found';
+              this.state = 'error';
+              return;
+            }
             // New session with no JSONL yet — show empty ready state
             if (this.sessionKey) {
               store._loading = false;
@@ -786,14 +793,25 @@
 
       async _fetchBacklog(store) {
         var self = this;
-        var data = await window.fetchWithProgress(
-          this._tailUrl + '?after=0',
-          function(received, total) {
-            self.loadProgress = Math.round(received / total * 100);
-            self.loadedMB = (received / 1048576).toFixed(1);
-            self.totalMB = (total / 1048576).toFixed(1);
-          }
-        );
+        // Probe first: 404 means the session does not exist and the viewer
+        // must surface an error state (auto-ylj6r test #19). We do a HEAD-
+        // equivalent lightweight GET so we can inspect response.status.
+        var probe = await fetch(this._tailUrl + '?after=0');
+        if (probe.status === 404) {
+          var err = new Error('Session not found');
+          err.missingSession = true;
+          try {
+            var body = await probe.json();
+            if (body && body.error) err.message = body.error;
+          } catch (e) { /* best-effort */ }
+          throw err;
+        }
+        if (!probe.ok) {
+          var perr = new Error('Tail request failed (' + probe.status + ')');
+          perr.failed = true;
+          throw perr;
+        }
+        var data = await probe.json();
 
         if (data.error) throw new Error(data.error);
 

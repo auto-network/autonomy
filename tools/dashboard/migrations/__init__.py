@@ -1,0 +1,1 @@
+"""Dashboard DB migrations."""

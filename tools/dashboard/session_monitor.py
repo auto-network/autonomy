@@ -494,6 +494,130 @@ class SessionMonitor:
         )
         await self._broadcast_registry()
 
+    async def register_session(
+        self,
+        tmux_name: str,
+        type: str,
+        jsonl_path: Path | str | None = None,
+        *,
+        run_dir: Path | str | None = None,
+        bead_id: str | None = None,
+        project: str | None = None,
+    ) -> None:
+        """Register a session of any type (container/host/dispatch/librarian).
+
+        Thin wrapper over register() that lets the dispatcher and other callers
+        register dispatch + librarian sessions with the monitor. Run_dir is
+        accepted for dispatch sessions where the JSONL is inside an agent-run
+        tree; it is used as resolution_dir when jsonl_path is a directory.
+        """
+        jp: Path | None = None
+        if jsonl_path is not None:
+            jp = jsonl_path if isinstance(jsonl_path, Path) else Path(jsonl_path)
+
+        res_dir: Path | None = None
+        if run_dir is not None:
+            rd = run_dir if isinstance(run_dir, Path) else Path(run_dir)
+            sess_dir = rd / "sessions"
+            res_dir = sess_dir if sess_dir.exists() else rd
+        elif jp is not None:
+            res_dir = jp if jp.is_dir() else jp.parent
+
+        session_uuid = None
+        if jp is not None and not jp.is_dir() and jp.suffix == ".jsonl":
+            session_uuid = jp.stem
+
+        proj = project
+        if proj is None and jp is not None and not jp.is_dir():
+            proj = jp.parent.name
+        if proj is None:
+            proj = "autonomy"
+
+        await self.register(
+            tmux_name=tmux_name,
+            session_type=type,
+            project=proj,
+            jsonl_path=jp,
+            bead_id=bead_id,
+            session_uuid=session_uuid,
+            resolution_dir=res_dir,
+        )
+
+    async def deregister_session(self, tmux_name: str) -> None:
+        """Mark a session dead but preserve the DB row (keeps history)."""
+        await self.deregister(tmux_name)
+
+    def get_session_stats(self, session_id: str) -> dict | None:
+        """Return tail statistics for a session — the single source of truth.
+
+        Callers (dispatcher card stats, server tail endpoint, dashboard UI)
+        read from this helper instead of maintaining their own JSONL readers.
+        Resolves by tmux_name primary key, then falls through to session_uuid
+        lookup for dispatch callers that pass a JSONL UUID.
+        """
+        row = get_session(session_id)
+        if row is None:
+            owner = self._find_session_by_uuid(session_id)
+            if owner:
+                row = get_session(owner)
+        if row is None:
+            return None
+        return {
+            "tmux_name": row.get("tmux_name"),
+            "session_id": row.get("tmux_name"),
+            "entry_count": int(row.get("entry_count") or 0),
+            "context_tokens": int(row.get("context_tokens") or 0),
+            "last_message": row.get("last_message") or "",
+            "last_activity": row.get("last_activity"),
+            "activity_state": row.get("activity_state") or "idle",
+            "file_offset": int(row.get("file_offset") or 0),
+            "is_live": bool(row.get("is_live")),
+            "jsonl_path": row.get("jsonl_path"),
+            "type": row.get("type"),
+        }
+
+    def resolve_session_file(self, session_id: str) -> Path | None:
+        """Resolve session_id to a JSONL file, scanning agent-runs as fallback.
+
+        Order of resolution:
+          1. DB by tmux_name — returns jsonl_path if present
+          2. DB by session_uuid or session_uuids JSON array — returns jsonl_path
+          3. Fallback: scan data/agent-runs/*/sessions/**/{session_id}.jsonl
+             and data/agent-runs/{session_id}*/sessions/**/*.jsonl
+        """
+        import os as _os
+        row = get_session(session_id)
+        if row is None:
+            owner = self._find_session_by_uuid(session_id)
+            if owner:
+                row = get_session(owner)
+        if row and row.get("jsonl_path"):
+            p = Path(row["jsonl_path"])
+            if p.exists():
+                return p
+
+        env_override = _os.environ.get("DASHBOARD_AGENT_RUNS_DIR")
+        if env_override:
+            agent_runs = Path(env_override)
+        else:
+            agent_runs = Path(__file__).resolve().parents[2] / "data" / "agent-runs"
+        if not agent_runs.exists():
+            return None
+
+        for jsonl in agent_runs.rglob(f"{session_id}.jsonl"):
+            if "subagents" in jsonl.parts:
+                continue
+            return jsonl
+        for run_dir in agent_runs.glob(f"{session_id}*"):
+            sess_dir = run_dir / "sessions"
+            if not sess_dir.exists():
+                continue
+            for jsonl in sess_dir.rglob("*.jsonl"):
+                if "subagents" in jsonl.parts:
+                    continue
+                return jsonl
+        return None
+
     async def register_revived(
         self,
         tmux_name: str,
