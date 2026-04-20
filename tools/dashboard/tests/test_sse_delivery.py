@@ -500,7 +500,6 @@ class TestConfirmLinkEndpointToSSE:
     the inotify watch.
     """
 
-    @pytest.mark.xfail(reason="investigating — see auto-c1zj5", strict=False)
     @pytest.mark.asyncio
     async def test_confirm_link_installs_tailing(self, setup_env, monkeypatch):
         """Real endpoint → JSONL write → SSE broadcast. No simulation."""
@@ -563,29 +562,32 @@ class TestConfirmLinkEndpointToSSE:
                 body = resp.json()
                 assert body["ok"] is True
 
-            await asyncio.sleep(0.1)
-            bus.events.clear()
+                # Keep write + wait inside the with block — TestClient's __aexit__
+                # triggers lifespan shutdown which stops the monitor and
+                # invalidates inotify watches.
+                await asyncio.sleep(0.1)
+                bus.events.clear()
 
-            # Now simulate Claude appending a new entry to the linked JSONL.
-            # If confirm-link did its job, the monitor has an IN_MODIFY watch
-            # on this file and will broadcast session:messages.
-            _write_jsonl_entry(jsonl, _make_assistant_entry("after-link msg"))
+                # Now simulate Claude appending a new entry to the linked JSONL.
+                # If confirm-link did its job, the monitor has an IN_MODIFY watch
+                # on this file and will broadcast session:messages.
+                _write_jsonl_entry(jsonl, _make_assistant_entry("after-link msg"))
 
-            events = await bus.wait_for_event(
-                "session:messages", session_id="host-e2e", timeout=3.0,
-            )
-            assert len(events) >= 1, (
-                "confirm-link did not install tailing: JSONL write after "
-                "successful handshake produced no session:messages broadcast. "
-                "The endpoint must call session_monitor._add_file_watch() "
-                "after link_and_enrich()."
-            )
-            _, data = events[0]
-            assert data["session_id"] == "host-e2e"
-            assert any(
-                "after-link msg" in (e.get("content") or "")
-                for e in data["entries"]
-            )
+                events = await bus.wait_for_event(
+                    "session:messages", session_id="host-e2e", timeout=3.0,
+                )
+                assert len(events) >= 1, (
+                    "confirm-link did not install tailing: JSONL write after "
+                    "successful handshake produced no session:messages broadcast. "
+                    "The endpoint must call session_monitor._add_file_watch() "
+                    "after link_and_enrich()."
+                )
+                _, data = events[0]
+                assert data["session_id"] == "host-e2e"
+                assert any(
+                    "after-link msg" in (e.get("content") or "")
+                    for e in data["entries"]
+                )
         finally:
             run_patcher.stop()
             link_patcher.stop()
