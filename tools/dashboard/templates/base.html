@@ -505,6 +505,7 @@
 
     /* Row 1 — Header (normal flow grid child) */
     .sv-header {
+      position: relative;
       background: rgba(17, 24, 39, 0.82);
       -webkit-backdrop-filter: blur(12px);
       backdrop-filter: blur(12px);
@@ -519,10 +520,26 @@
        max-height animation; no x-show fighting the transition. Sections
        separated by top borders per the mockup spec. */
     .sv-header-expanded {
-      max-height: 0; overflow: hidden;
-      transition: max-height 0.25s ease;
+      position: absolute;
+      top: 100%;
+      left: 0; right: 0;
+      z-index: 20;
+      max-height: 0;
+      overflow: hidden;
+      opacity: 0;
+      pointer-events: none;
+      transition: max-height 0.25s ease, opacity 0.2s ease;
+      background: rgba(31, 41, 55, 0.88);
+      -webkit-backdrop-filter: blur(20px);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid rgba(75, 85, 99, 0.9);
+      box-shadow: 0 12px 24px -8px rgba(0, 0, 0, 0.6);
     }
-    .sv-header.open .sv-header-expanded { max-height: min(480px, calc(100dvh - 120px)); }
+    .sv-header.open .sv-header-expanded {
+      max-height: min(480px, calc(100dvh - 120px));
+      opacity: 1;
+      pointer-events: auto;
+    }
     .sv-exp-section {
       padding: 12px 16px;
       border-top: 1px solid rgba(55, 65, 81, 0.4);
