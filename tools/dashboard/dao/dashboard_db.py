@@ -419,13 +419,27 @@ def get_dispatch_nag_sessions() -> list[str]:
 
 
 def mark_dead(tmux_name: str) -> None:
-    """CLOSE step: mark session as no longer live."""
+    """CLOSE step: mark session as no longer live.
+
+    Logs at INFO so every deactivation is visible — silent mark_dead calls
+    from background sweeps (e.g. /api/terminals when tmux list is transiently
+    empty) previously mass-flipped sessions with no log trace. Callers are
+    identified via the standard logging stack (filename + lineno) in the log
+    formatter.
+    """
+    import inspect
+    caller = inspect.stack()[1]
+    caller_loc = f"{Path(caller.filename).name}:{caller.lineno}"
     conn = get_conn()
-    conn.execute(
+    cursor = conn.execute(
         "UPDATE tmux_sessions SET is_live=0, activity_state='dead' WHERE tmux_name=?",
         (tmux_name,),
     )
     conn.commit()
+    logger.info(
+        "dashboard_db: mark_dead  tmux=%s  updated_rows=%d  caller=%s",
+        tmux_name, cursor.rowcount, caller_loc,
+    )
 
 
 def update_activity_state(tmux_name: str, state: str) -> None:
