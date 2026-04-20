@@ -81,25 +81,29 @@ BRANCH="agent/$BEAD_ID"
 WORKTREE_DIR="$REPO_ROOT/.worktrees/$BEAD_ID-$TIMESTAMP"
 
 echo "==> Creating worktree: $BRANCH"
-# Prune stale worktree records (directory deleted but git reference remains)
+# Prune stale worktree records (directory deleted but git reference remains).
 git -C "$REPO_ROOT" worktree prune
-# Clean up any existing worktree for this branch (stale from prior/failed runs)
-existing=$(git -C "$REPO_ROOT" worktree list --porcelain | grep -B1 "branch refs/heads/$BRANCH" | grep "^worktree " | awk '{print $2}' || true)
-if [ -n "$existing" ]; then
-    echo "    Removing stale worktree: $existing"
-    git -C "$REPO_ROOT" worktree remove "$existing" --force 2>/dev/null || true
+
+# Detect existing worktree for this branch and REUSE it. Supports the TDD
+# handoff pattern: host pre-commits failing tests to agent/BEAD_ID at
+# .worktrees/BEAD_ID, then the dispatcher boots directly into that worktree
+# with the tests already present — no merge, no Step 0 ceremony. If no
+# worktree exists (fresh dispatch), create branch-from-master + fresh
+# timestamped worktree as before.
+existing_wt=$(git -C "$REPO_ROOT" worktree list --porcelain \
+    | awk -v br="refs/heads/$BRANCH" '/^worktree / {wt=$2} $0=="branch "br {print wt}')
+WORKTREE_REUSED=false
+if [ -n "$existing_wt" ]; then
+    echo "    Reusing existing worktree: $existing_wt"
+    WORKTREE_DIR="$existing_wt"
+    WORKTREE_REUSED=true
+else
+    if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null 2>&1; then
+        git -C "$REPO_ROOT" branch "$BRANCH"
+    fi
+    mkdir -p "$(dirname "$WORKTREE_DIR")"
+    git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH"
 fi
-# Create branch from current HEAD only if it does not already exist.
-# Preserves any pre-existing branch content — TDD-style pre-committed
-# failing tests on agent/BEAD_ID (e.g. auto-bv343), or commits from a
-# prior dispatch that failed after committing. The previous implementation
-# did `git branch -D` + `git branch`, which silently orphaned any commit
-# on the branch that was not already on master.
-if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null 2>&1; then
-    git -C "$REPO_ROOT" branch "$BRANCH"
-fi
-mkdir -p "$(dirname "$WORKTREE_DIR")"
-git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH" 2>&1
 echo "    Worktree: $WORKTREE_DIR"
 
 # Save branch base BEFORE agent runs — used to detect new commits after
@@ -124,8 +128,11 @@ if $DRY_RUN; then
     echo ""
     echo "--- PROMPT ---"
     echo "$PROMPT"
-    # Clean up worktree on dry run
-    git -C "$REPO_ROOT" worktree remove "$WORKTREE_DIR" 2>/dev/null || true
+    # Clean up worktree on dry run — but only if we created it. Reused
+    # worktrees (TDD handoff pattern) belong to the user and must survive.
+    if ! $WORKTREE_REUSED; then
+        git -C "$REPO_ROOT" worktree remove "$WORKTREE_DIR" 2>/dev/null || true
+    fi
     exit 0
 fi
 
