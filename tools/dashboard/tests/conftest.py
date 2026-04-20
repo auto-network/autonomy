@@ -25,6 +25,42 @@ import pytest
 import httpx
 
 
+# ── Read-only workspace auto-redirect ──────────────────────────────────
+# Sub-session envs that mount /workspace/repo read-only still need DB
+# fixtures that init_db() can open for write. Probe for write access and,
+# on failure, redirect DISPATCH_DB/DASHBOARD_DB to a per-worker tmp copy.
+# Writable envs short-circuit after the probe.
+import os as _os
+import shutil as _shutil
+import tempfile as _tempfile
+from pathlib import Path as _Path
+
+
+def _configure_writable_dbs_if_readonly():
+    repo = _Path(__file__).resolve().parents[2]
+    data_dir = repo / "data"
+    probe = data_dir / f".pytest-write-probe-{_os.getpid()}"
+    try:
+        probe.touch()
+        probe.unlink()
+        return
+    except (OSError, PermissionError):
+        pass
+    worker = _os.environ.get("PYTEST_XDIST_WORKER", "master")
+    tmp = _Path(_tempfile.gettempdir()) / f"pytest-dbs-{_os.getpid()}-{worker}"
+    tmp.mkdir(parents=True, exist_ok=True)
+    for name, env in (("dispatch.db", "DISPATCH_DB"),
+                      ("dashboard.db", "DASHBOARD_DB")):
+        src = data_dir / name
+        dst = tmp / name
+        if src.exists() and not dst.exists():
+            _shutil.copy(src, dst)
+        _os.environ.setdefault(env, str(dst))
+
+
+_configure_writable_dbs_if_readonly()
+
+
 # ── JSONL Fixture ──────────────────────────────────────────────────────
 
 MOCK_ENTRIES = [
