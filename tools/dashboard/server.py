@@ -518,7 +518,10 @@ async def api_dispatch_approved(request):
     return JSONResponse({"waiting": waiting, "blocked": blocked})
 
 
-AGENT_RUNS_DIR = Path(__file__).parent.parent.parent / "data" / "agent-runs"
+AGENT_RUNS_DIR = Path(os.environ.get(
+    "DASHBOARD_AGENT_RUNS_DIR",
+    str(Path(__file__).parent.parent.parent / "data" / "agent-runs"),
+))
 
 
 def _enrich_dispatch_runs(runs: list[dict]) -> None:
@@ -2734,13 +2737,27 @@ async def api_dispatch_tail(request):
     file_size = session_file.stat().st_size
     is_live = (import_time() - session_file.stat().st_mtime) < 120
 
-    session_id = session_file.stem
+    session_uuid = session_file.stem
     project = session_file.parent.name
+
+    # Resolve tmux_name for this dispatch run. The monitor broadcasts
+    # session:messages keyed on tmux_name (session_monitor.py:1075), so the
+    # tail response MUST key its session_id on tmux_name too — otherwise the
+    # overlay's SSE filter drops every broadcast (auto-yaw58).
+    db_row = session_monitor.get_one(run_name)
+    if db_row is None:
+        owner = session_monitor._find_session_by_uuid(session_uuid)
+        if owner:
+            db_row = session_monitor.get_one(owner)
+    tmux_name = db_row["tmux_name"] if db_row else run_name
+    session_id = tmux_name
 
     if after >= file_size:
         return JSONResponse({
             "entries": [], "offset": file_size, "is_live": is_live,
-            "session_id": session_id, "project": project,
+            "session_id": session_id, "tmux_name": tmux_name,
+            "tmux_session": tmux_name, "session_uuid": session_uuid,
+            "project": project,
         })
 
     entries = []
@@ -2769,6 +2786,9 @@ async def api_dispatch_tail(request):
         "offset": new_offset,
         "is_live": is_live,
         "session_id": session_id,
+        "tmux_name": tmux_name,
+        "tmux_session": tmux_name,
+        "session_uuid": session_uuid,
         "project": project,
     })
 
@@ -3045,7 +3065,10 @@ async def api_session_tail(request):
                 "entries": [], "offset": 0, "is_live": True,
                 "type": db_row.get("type", ""),
                 "role": db_row.get("role", ""),
+                "session_id": db_row.get("tmux_name", ""),
                 "tmux_session": db_row.get("tmux_name", ""),
+                "tmux_name": db_row.get("tmux_name", ""),
+                "session_uuid": db_row.get("session_uuid", ""),
                 "seq": 0, "resolved": False,
             })
         return JSONResponse(
@@ -3058,7 +3081,10 @@ async def api_session_tail(request):
                 "entries": [], "offset": 0, "is_live": True,
                 "type": db_row.get("type", ""),
                 "role": db_row.get("role", ""),
+                "session_id": db_row.get("tmux_name", ""),
                 "tmux_session": db_row.get("tmux_name", ""),
+                "tmux_name": db_row.get("tmux_name", ""),
+                "session_uuid": db_row.get("session_uuid", ""),
                 "seq": 0, "resolved": False,
             })
         return JSONResponse(
@@ -3083,12 +3109,17 @@ async def api_session_tail(request):
 
     role = db_row.get("role", "") if db_row else ""
     activity_state = db_row.get("activity_state", "idle") if db_row else "idle"
+    session_uuid = db_row.get("session_uuid", "") if db_row else ""
     base_resp = {"entries": [], "offset": file_size, "is_live": is_live,
                  "type": session_type, "role": role,
                  "activity_state": activity_state,
                  "seq": seq, "resolved": resolved}
     if tmux_name:
+        base_resp["session_id"] = tmux_name
         base_resp["tmux_session"] = tmux_name
+        base_resp["tmux_name"] = tmux_name
+    if session_uuid:
+        base_resp["session_uuid"] = session_uuid
     if after >= file_size:
         return JSONResponse(base_resp)
 
@@ -3139,7 +3170,11 @@ async def api_session_tail(request):
             "activity_state": activity_state,
             "seq": seq, "resolved": resolved}
     if tmux_name:
+        resp["session_id"] = tmux_name
         resp["tmux_session"] = tmux_name
+        resp["tmux_name"] = tmux_name
+    if session_uuid:
+        resp["session_uuid"] = session_uuid
     return JSONResponse(resp)
 
 
