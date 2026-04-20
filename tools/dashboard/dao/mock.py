@@ -331,6 +331,21 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
     return _attach_org(rows)
 
 
+def get_session_by_id(session_id: str) -> dict | None:
+    """Return any active-session row by session_id without the type filter.
+
+    Production DAO (dao/sessions.py) treats session_id as ``session_uuid OR
+    tmux_name``; mock rows may key either field, so check both. The mock
+    tail needs this because get_active_sessions filters out dispatch and
+    librarian rows via _ACTIVE_SESSION_TYPES.
+    """
+    data = _load()
+    for s in data.get("active_sessions", []):
+        if s.get("session_id") == session_id or s.get("session_uuid") == session_id:
+            return _attach_org([_fill(s, SESSION_DEFAULTS)])[0]
+    return None
+
+
 def get_session_entries(session_id: str) -> list[dict] | None:
     """Return mock session entries for tail endpoint, or None if not found."""
     data = _load()
