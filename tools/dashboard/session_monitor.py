@@ -1473,6 +1473,14 @@ class SessionMonitor:
 
                 for row in sessions:
                     tmux_name = row["tmux_name"]
+                    # Dispatch + librarian sessions are owned by their
+                    # respective dispatchers (agents/dispatcher.py). They
+                    # never had a tmux session, so has-session always
+                    # returns False and polling would mark them dead within
+                    # 10s. Their death signal is an explicit POST to
+                    # /api/monitor/deregister, not tmux polling.
+                    if row.get("type") in ("dispatch", "librarian"):
+                        continue
                     alive = await asyncio.to_thread(self._check_tmux, tmux_name)
                     if not alive:
                         self._remove_watches(tmux_name)
