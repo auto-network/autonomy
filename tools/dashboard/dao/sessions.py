@@ -23,7 +23,9 @@ _GRAPH_DB = Path(__file__).parents[3] / "data" / "graph.db"
 # `recent_sessions?since=` query param and the `graph sessions --status --since`
 # CLI (auto-0r86); see design acb2829b-4fc0 revision b39626f2.
 _SINCE_WINDOWS = {"6h": "6h", "1d": "1d", "1w": "1w"}
-_VALID_RECENT_SORTS = {"lastActivity", "created", "turns", "ctx"}
+_VALID_RECENT_SORTS = {"lastActivity", "created", "turns", "ctx", "duration"}
+
+_DISPATCH_DB = Path(__file__).parents[3] / "data" / "dispatch.db"
 
 # Session-type → group mapping. The DAO emits 'interactive', 'dispatch',
 # or 'librarian' from _derive_session_type, but extra values are routed
@@ -98,6 +100,105 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
         sessions.append(entry)
     sessions.sort(key=lambda s: s["age_seconds"])
     return sessions
+
+
+def _librarian_targets_by_job_id(job_ids: list[str]) -> dict[str, dict]:
+    """Look up librarian job payloads by id and extract target metadata.
+
+    Reads ``librarian_jobs.payload`` (JSON) from dispatch.db and returns a
+    mapping of ``{job_id: {"bead_id": str|None, "run_id": str|None}}`` for
+    each job_id that exists in the table. Missing job_ids are simply absent
+    from the result. Best-effort — a missing/broken dispatch.db returns {}.
+    """
+    if not job_ids or not _DISPATCH_DB.exists():
+        return {}
+    out: dict[str, dict] = {}
+    try:
+        conn = sqlite3.connect(str(_DISPATCH_DB))
+        conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" * len(job_ids))
+        rows = conn.execute(
+            f"SELECT id, payload FROM librarian_jobs WHERE id IN ({placeholders})",
+            job_ids,
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            payload: dict = {}
+            if r["payload"]:
+                try:
+                    payload = _json.loads(r["payload"]) or {}
+                except Exception:
+                    payload = {}
+            out[r["id"]] = {
+                "bead_id": payload.get("bead_id") or None,
+                "run_id": payload.get("run_id") or None,
+            }
+    except Exception:
+        return {}
+    return out
+
+
+def _bead_titles(bead_ids: list[str]) -> dict[str, str]:
+    """Cheap bulk lookup of bead titles by id from the beads DB.
+
+    Uses the dashboard DAO when available. Returns ``{}`` on any failure —
+    the UI degrades to showing just the bead id without a title.
+    """
+    if not bead_ids:
+        return {}
+    try:
+        from tools.dashboard.dao import beads as _beads_dao  # type: ignore
+
+        try:
+            return {
+                bid: row.get("title", "")
+                for bid, row in _beads_dao.get_bead_title_priority(list(set(bead_ids))).items()
+                if row and row.get("title")
+            }
+        except Exception:
+            pass
+        out: dict[str, str] = {}
+        for bid in set(bead_ids):
+            try:
+                bead = _beads_dao.get_bead(bid)
+            except Exception:
+                bead = None
+            if bead and bead.get("title"):
+                out[bid] = bead["title"]
+        return out
+    except Exception:
+        return {}
+
+
+def _annotate_librarian_rows(rows: list[dict]) -> None:
+    """Populate librarian_type / librarian_target_* fields in place.
+
+    For each row whose ``session_type`` is ``librarian``, read the
+    ``job_type`` and ``job_id`` fields that the session-launcher wrote into
+    the graph source metadata, join back to ``librarian_jobs.payload`` for
+    the target bead id, and append a best-effort bead title lookup.
+
+    The DAO does not mutate the ``title`` field — the UI renders from the
+    new fields so the raw process name remains available for fallback.
+    """
+    librarian_rows = [r for r in rows if (r.get("session_type") == "librarian")]
+    if not librarian_rows:
+        return
+    job_ids: list[str] = []
+    for r in librarian_rows:
+        job_id = r.get("_job_id") or ""
+        if job_id:
+            job_ids.append(job_id)
+    targets = _librarian_targets_by_job_id(job_ids) if job_ids else {}
+    bead_ids = [t.get("bead_id") for t in targets.values() if t.get("bead_id")]
+    titles = _bead_titles([b for b in bead_ids if b])
+    for r in librarian_rows:
+        job_id = r.get("_job_id") or ""
+        tgt = targets.get(job_id, {}) if job_id else {}
+        bead_id = tgt.get("bead_id")
+        r["librarian_type"] = r.get("_job_type") or None
+        r["librarian_target_bead_id"] = bead_id
+        r["librarian_target_bead_title"] = titles.get(bead_id, "") if bead_id else ""
 
 
 def _derive_session_type(meta: dict, file_path: str) -> str:
@@ -225,6 +326,11 @@ def get_recent_sessions(
                 "last_activity_at": last_activity,
                 "ended_at": meta.get("ended_at") or last_activity,
                 "bead_id": meta.get("bead_id", ""),
+                # Internal-only fields used to resolve librarian target below;
+                # stripped off before the DAO returns. Pulled from the session
+                # metadata written by agents/session_launcher.launch_session().
+                "_job_id": meta.get("job_id", ""),
+                "_job_type": meta.get("job_type", ""),
                 "_source": "graph",
             })
     except Exception:
@@ -318,6 +424,11 @@ def get_recent_sessions(
     elif sort == "ctx":
         def _sort_key(r: dict) -> float:
             return float(r.get("context_tokens") or r.get("total_tokens") or 0)
+    elif sort == "duration":
+        def _sort_key(r: dict) -> float:
+            end = _iso_to_epoch(r.get("last_activity_at") or r.get("ended_at") or "")
+            start = _iso_to_epoch(r.get("created_at") or "")
+            return end - start if end and start else 0.0
     else:  # "lastActivity" (default)
         def _sort_key(r: dict) -> float:
             return _iso_to_epoch(r.get("last_activity_at", ""))
@@ -340,7 +451,13 @@ def get_recent_sessions(
     trimmed.sort(key=_sort_key, reverse=True)
     out = trimmed if limit is None else trimmed[:limit]
 
-    # Strip internal field
+    # Annotate librarian rows with type + target so the UI can render a
+    # meaningful title ('{type} · {target}') instead of the raw process name.
+    _annotate_librarian_rows(out)
+
+    # Strip internal fields used only during row construction
     for r in out:
         r.pop("_source", None)
+        r.pop("_job_id", None)
+        r.pop("_job_type", None)
     return out

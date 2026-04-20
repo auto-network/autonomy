@@ -118,6 +118,9 @@ RECENT_SESSION_DEFAULTS: dict[str, Any] = {
     "created_at": "2026-01-01T00:00:00Z",
     "last_activity_at": "2026-01-01T00:00:00Z",
     "ended_at": "2026-01-01T00:00:00Z",
+    "librarian_type": None,
+    "librarian_target_bead_id": None,
+    "librarian_target_bead_title": "",
 }
 
 RUN_DEFAULTS: dict[str, Any] = {
@@ -390,6 +393,11 @@ def get_recent_sessions(
     elif sort == "ctx":
         def _sort_key(r):
             return float(r.get("context_tokens") or r.get("total_tokens") or 0)
+    elif sort == "duration":
+        def _sort_key(r):
+            end = _epoch(r.get("last_activity_at") or r.get("ended_at") or "")
+            start = _epoch(r.get("created_at") or "")
+            return end - start if end and start else 0.0
     else:  # lastActivity (default)
         def _sort_key(r):
             return _epoch(r.get("last_activity_at", ""))

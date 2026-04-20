@@ -106,6 +106,21 @@
     return '';
   }
 
+  // Build a human-readable title for a librarian recent-card row.
+  // The DAO populates librarian_type + librarian_target_bead_id from
+  // librarian_jobs.payload. We format as:
+  //   "{type} · {bead_id}"         — when target resolves
+  //   "{type}"                     — type known but no target
+  //   null                         — neither: caller falls back to r.title
+  // Separate from the bead title which renders in muted color next to the id.
+  function _librarianTitle(r) {
+    var type = r.librarian_type;
+    var target = r.librarian_target_bead_id;
+    if (!type && !target) return null;
+    if (type && target) return type + ' · ' + target;
+    return type || null;
+  }
+
   // Derive canonical session_type from store sessionType
   function _deriveSessionType(s) {
     var t = s.sessionType || 'terminal';
@@ -215,6 +230,7 @@
         {k: 'created',      l: 'Start time'},
         {k: 'turns',        l: 'Most Turns'},
         {k: 'ctx',          l: 'Most Context'},
+        {k: 'duration',     l: 'Duration'},
       ],
       recentSinceOptions: [
         {k: '6h',  l: '6 hours'},
@@ -224,7 +240,7 @@
       ],
       recentSort: (function() {
         var saved = localStorage.getItem('recentSort');
-        var allowed = ['lastActivity', 'created', 'turns', 'ctx'];
+        var allowed = ['lastActivity', 'created', 'turns', 'ctx', 'duration'];
         return allowed.indexOf(saved) !== -1 ? saved : 'lastActivity';
       })(),
       recentSince: (function() {
@@ -485,10 +501,18 @@
             // entry keyed off the unknown uuid.
             var sessionId = r.tmux_session || r.session_uuid || r.id;
             var lastTs = r.last_activity_at || r.created_at || '';
+            // For librarian rows, the raw title is the process name
+            // ("librarian-review_report-$pid-$job_uuid"). Replace with a
+            // type + target formatting derived from librarian_jobs.payload.
+            var label = r.title || '';
+            if (r.session_type === 'librarian') {
+              var libLabel = _librarianTitle(r);
+              if (libLabel) label = libLabel;
+            }
             return {
               id: r.id,
               session_id: sessionId,
-              label: r.title || '',
+              label: label,
               session_type: r.session_type || 'interactive',
               type: r.type || 'container',
               is_live: !!r.is_live,
@@ -508,6 +532,9 @@
               resumable: r.resumable || false,
               bead_id: r.bead_id || '',
               org: r.org || null,
+              librarian_type: r.librarian_type || null,
+              librarian_target_bead_id: r.librarian_target_bead_id || null,
+              librarian_target_bead_title: r.librarian_target_bead_title || '',
             };
           });
         } catch (e) {
@@ -517,7 +544,10 @@
 
       navigate(s) {
         if (window.actionSheet.isOpen()) return;
-        var path = '/session/' + encodeURIComponent(s.project) + '/' + s.session_id
+        // Recent cards carry project wrapped in brackets for legacy display
+        // (dao/sessions.py:get_recent_sessions). Strip them before routing.
+        var proj = (s.project || '').replace(/^\[|\]$/g, '') || 'session';
+        var path = '/session/' + encodeURIComponent(proj) + '/' + s.session_id
           + '?tmux=' + encodeURIComponent(s.session_id);
         navigateTo(path);
       },
@@ -525,43 +555,60 @@
       showSessionActions(s) {
         var label = s.label || s.session_id.slice(0, 12);
         var tmux = s.session_id;
-        var nagLabel = s.nag_enabled ? 'Disable Nag' : 'Enable Nag (15m)';
         var actions = [];
+        var self = this;
 
-        // Nag toggle
-        actions.push({
-          label: nagLabel,
-          handler: function() {
-            fetch('/api/session/' + encodeURIComponent(tmux) + '/nag', {
-              method: s.nag_enabled ? 'DELETE' : 'PUT',
-              headers: {'Content-Type': 'application/json'},
-              body: s.nag_enabled ? undefined : JSON.stringify({enabled: true, interval: 15}),
-            });
-          },
-        });
-
-        // Nag interval presets (only show if nag is enabled)
-        if (s.nag_enabled) {
-          [5, 15, 30, 60].forEach(function(mins) {
-            if (mins !== s.nag_interval) {
-              actions.push({
-                label: 'Nag every ' + mins + 'm',
-                handler: function() { _setNag(tmux, mins, s.nag_message); },
+        if (s.is_live) {
+          // ── Live session: nag toggle, nag presets, destructive close ──
+          var nagLabel = s.nag_enabled ? 'Disable Nag' : 'Enable Nag (15m)';
+          actions.push({
+            label: nagLabel,
+            handler: function() {
+              fetch('/api/session/' + encodeURIComponent(tmux) + '/nag', {
+                method: s.nag_enabled ? 'DELETE' : 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: s.nag_enabled ? undefined : JSON.stringify({enabled: true, interval: 15}),
               });
-            }
+            },
           });
-        }
 
-        // Close session (always last, destructive)
-        actions.push({
-          label: 'Close Session',
-          style: 'destructive',
-          handler: async function() {
-            if (tmux) {
-              await fetch('/api/terminal/' + encodeURIComponent(tmux) + '/kill', { method: 'POST' });
-            }
-          },
-        });
+          if (s.nag_enabled) {
+            [5, 15, 30, 60].forEach(function(mins) {
+              if (mins !== s.nag_interval) {
+                actions.push({
+                  label: 'Nag every ' + mins + 'm',
+                  handler: function() { _setNag(tmux, mins, s.nag_message); },
+                });
+              }
+            });
+          }
+
+          actions.push({
+            label: 'Close Session',
+            style: 'destructive',
+            handler: async function() {
+              if (tmux) {
+                await fetch('/api/terminal/' + encodeURIComponent(tmux) + '/kill', { method: 'POST' });
+              }
+            },
+          });
+        } else {
+          // ── Dead (recent) session: Open + optional Resume ──
+          actions.push({
+            label: 'Open',
+            handler: function() { self.navigate(s); },
+          });
+          if (s.resumable) {
+            actions.push({
+              label: 'Resume',
+              handler: function() {
+                // resumeSession expects an $event object; synthesize one.
+                var fake = {preventDefault: function(){}, stopPropagation: function(){}};
+                self.resumeSession(s, fake);
+              },
+            });
+          }
+        }
 
         window.actionSheet.show({title: label, actions: actions});
       },
