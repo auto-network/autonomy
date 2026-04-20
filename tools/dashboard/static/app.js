@@ -1394,11 +1394,6 @@ function route() {
   if (globalHeader) {
     globalHeader.style.display = isDesignPage ? 'none' : '';
   }
-  // Also hide pinned beads strip
-  const pinnedStrip = document.querySelector('[x-show*="pinned"]');
-  if (pinnedStrip) {
-    pinnedStrip.style.display = isDesignPage ? 'none' : '';
-  }
   // Remove content padding for full-bleed design
   content.style.padding = isDesignPage ? '0' : '';
 
