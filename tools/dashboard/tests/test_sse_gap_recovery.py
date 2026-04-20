@@ -328,122 +328,127 @@ def harness(tmp_path_factory):
 # TestSmallGapRecovery — 10 events during disconnect, buffer covers gap
 # ═══════════════════════════════════════════════════════════════════════
 
+@pytest.fixture(scope="module")
+def small_gap_recovered(harness):
+    """Drive a full small-gap recovery scenario once per worker, capture end state.
+
+    Module-scoped so each xdist worker that lands any TestSmallGapRecovery method
+    pays the setup cost exactly once. Returns plain Python data so each test
+    method asserts against the captured state instead of re-querying the browser
+    (which would only work if all methods landed on the same worker).
+    """
+    harness.open_session_page()
+
+    # Wait for backfill to complete
+    initial = None
+    for _ in range(10):
+        initial = ab_eval(f"""
+            var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
+            if (!s) return null;
+            return {{ entries: s.entries.length, seq: s.seq, loaded: s.loaded }};
+        """)
+        if initial and initial.get("entries", 0) >= len(INITIAL_ENTRIES):
+            break
+        time.sleep(0.5)
+
+    assert initial is not None, "Session store not initialized"
+    assert initial["entries"] >= len(INITIAL_ENTRIES), (
+        f"Expected >= {len(INITIAL_ENTRIES)} entries, got {initial['entries']}"
+    )
+    initial_count = initial["entries"]
+    initial_seq = ab_eval("return window._lastSeq;") or 0
+
+    # Disconnect — close EventSource, snapshot pre-disconnect state
+    disconnect_result = ab_eval(f"""
+        window._savedSeq = window._lastSeq;
+        window._savedEntryCount = Alpine.store('sessions')['{TEST_SESSION_ID}'].entries.length;
+        window._es.close();
+        return {{ seq: window._savedSeq, entries: window._savedEntryCount }};
+    """)
+    assert disconnect_result is not None, "Failed to disconnect"
+
+    # Write 10 gap events while disconnected
+    gap_events = _make_gap_events()
+    harness.write_gap_events(gap_events)
+
+    # Wait for mock event watcher to process (polls every 0.5s)
+    time.sleep(1.5)
+
+    # Reconnect — new EventSource, cached events arrive with seq=0
+    ab_eval("window._connect(); return 'reconnecting';")
+
+    # Trigger event arrives with a high seq, causing the client to detect a gap
+    # and replay missed events from the ring buffer.
+    trigger = _assistant_entry("Trigger event for gap detection", 20)
+    harness.write_gap_events([trigger])
+
+    # Wait for gap detection + replay
+    time.sleep(4)
+
+    # Capture every property the assertions read, in one round-trip.
+    final = ab_eval(f"""
+        var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
+        var unmatched = [];
+        var toolIds = Object.keys(s.toolMap);
+        for (var i = 0; i < toolIds.length; i++) {{
+            if (!s.resultMap[toolIds[i]]) unmatched.push(toolIds[i]);
+        }}
+        var timestamps = [];
+        for (var i = 0; i < s.entries.length; i++) {{
+            timestamps.push(s.entries[i].timestamp || '');
+        }}
+        return {{
+            entries: s.entries.length,
+            toolCount: toolIds.length,
+            unmatched: unmatched,
+            timestamps: timestamps,
+            sseInterrupted: Alpine.store('app').sseInterrupted,
+        }};
+    """)
+    assert final is not None, "Failed to capture final state after recovery"
+
+    return {
+        "initial_count": initial_count,
+        "initial_seq": initial_seq,
+        "entries": final["entries"],
+        "tool_count": final["toolCount"],
+        "unmatched_tools": final["unmatched"],
+        "timestamps": final["timestamps"],
+        "sse_interrupted": final["sseInterrupted"],
+    }
+
+
 class TestSmallGapRecovery:
-    """10 events during disconnect, buffer covers gap. Tests 1-6."""
+    """10 events during disconnect, buffer covers gap."""
 
-    # Shared state across ordered tests
-    _initial_count = 0
-    _initial_seq = 0
-
-    def test_setup(self, harness):
-        """Page loads, SSE connects, initial entries visible."""
-        harness.open_session_page()
-
-        # Wait for backfill to complete
-        for _ in range(10):
-            result = ab_eval(f"""
-                var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
-                if (!s) return null;
-                return {{ entries: s.entries.length, seq: s.seq, loaded: s.loaded }};
-            """)
-            if result and result.get("entries", 0) >= len(INITIAL_ENTRIES):
-                break
-            time.sleep(0.5)
-
-        assert result is not None, "Session store not initialized"
-        assert result["entries"] >= len(INITIAL_ENTRIES), (
-            f"Expected >= {len(INITIAL_ENTRIES)} entries, got {result['entries']}"
-        )
-        TestSmallGapRecovery._initial_count = result["entries"]
-
-        # Record _lastSeq (global EventBus seq)
-        seq = ab_eval("return window._lastSeq;")
-        TestSmallGapRecovery._initial_seq = seq or 0
-
-    def test_disconnect_and_reconnect(self, harness):
-        """Close EventSource, write 10 events, reconnect."""
-        # Disconnect
-        disconnect_result = ab_eval(f"""
-            window._savedSeq = window._lastSeq;
-            window._savedEntryCount = Alpine.store('sessions')['{TEST_SESSION_ID}'].entries.length;
-            window._es.close();
-            return {{ seq: window._savedSeq, entries: window._savedEntryCount }};
-        """)
-        assert disconnect_result is not None, "Failed to disconnect"
-
-        # Write 10 gap events while disconnected
-        gap_events = _make_gap_events()
-        harness.write_gap_events(gap_events)
-
-        # Wait for mock event watcher to process (polls every 0.5s)
-        time.sleep(1.5)
-
-        # Reconnect — new EventSource, cached events arrive with seq=0
-        ab_eval("window._connect(); return 'reconnecting';")
-
-        # Write a trigger event — this arrives with a high seq, causing the
-        # client to detect a gap and replay missed events from the ring buffer
-        trigger = _assistant_entry("Trigger event for gap detection", 20)
-        harness.write_gap_events([trigger])
-
-        # Wait for gap detection + replay
-        time.sleep(4)
-
-    def test_all_entries_present(self, harness):
+    def test_all_entries_present(self, small_gap_recovered):
         """Total entries = initial + gap events + trigger. No gaps."""
-        result = ab_eval(f"""
-            var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
-            return {{
-                entries: s.entries.length,
-                initial: window._savedEntryCount,
-            }};
-        """)
-        assert result is not None
-        # 10 gap events + 1 trigger event
         new_count = len(_make_gap_events()) + 1
-        expected = TestSmallGapRecovery._initial_count + new_count
-        assert result["entries"] >= expected, (
-            f"Expected >= {expected} entries, got {result['entries']} "
-            f"(initial={TestSmallGapRecovery._initial_count}, new={new_count})"
+        expected = small_gap_recovered["initial_count"] + new_count
+        assert small_gap_recovered["entries"] >= expected, (
+            f"Expected >= {expected} entries, got {small_gap_recovered['entries']} "
+            f"(initial={small_gap_recovered['initial_count']}, new={new_count})"
         )
 
-    def test_tools_matched(self, harness):
+    def test_tools_matched(self, small_gap_recovered):
         """Every tool_use has a matching tool_result. No permanently running tools."""
-        result = ab_eval(f"""
-            var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
-            var unmatched = [];
-            var toolIds = Object.keys(s.toolMap);
-            for (var i = 0; i < toolIds.length; i++) {{
-                if (!s.resultMap[toolIds[i]]) unmatched.push(toolIds[i]);
-            }}
-            return {{ toolCount: toolIds.length, unmatched: unmatched }};
-        """)
-        assert result is not None
-        assert result["unmatched"] == [], (
-            f"Unmatched tool_use IDs (still 'running'): {result['unmatched']}"
+        assert small_gap_recovered["unmatched_tools"] == [], (
+            f"Unmatched tool_use IDs (still 'running'): "
+            f"{small_gap_recovered['unmatched_tools']}"
         )
 
-    def test_no_interruption_banner(self, harness):
+    def test_no_interruption_banner(self, small_gap_recovered):
         """sseInterrupted is false — replay was complete."""
-        result = ab_eval("return Alpine.store('app').sseInterrupted;")
-        assert result is False or result is None or result == 0, (
-            f"Expected sseInterrupted=false after complete replay, got {result}"
+        sse = small_gap_recovered["sse_interrupted"]
+        assert sse is False or sse is None or sse == 0, (
+            f"Expected sseInterrupted=false after complete replay, got {sse}"
         )
 
-    def test_entry_order(self, harness):
+    def test_entry_order(self, small_gap_recovered):
         """Entries are chronological. No out-of-order from replay + held events."""
-        result = ab_eval(f"""
-            var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
-            var timestamps = [];
-            for (var i = 0; i < s.entries.length; i++) {{
-                timestamps.push(s.entries[i].timestamp || '');
-            }}
-            return timestamps;
-        """)
-        assert result is not None
-        assert len(result) > 0, "No entries found"
-        # Filter out empty timestamps and verify order
-        ts = [t for t in result if t]
+        ts_all = small_gap_recovered["timestamps"]
+        assert len(ts_all) > 0, "No entries found"
+        ts = [t for t in ts_all if t]
         for i in range(1, len(ts)):
             assert ts[i] >= ts[i - 1], (
                 f"Out-of-order entries: {ts[i - 1]} > {ts[i]} at index {i}"
@@ -454,80 +459,88 @@ class TestSmallGapRecovery:
 # TestBufferOverflow — buffer can't cover the gap, _onInterruption fires
 # ═══════════════════════════════════════════════════════════════════════
 
+@pytest.fixture(scope="module")
+def buffer_overflow_recovered(harness):
+    """Drive the full overflow + post-overflow scenario once per worker, capture state.
+
+    Module-scoped so each xdist worker pays the (slow) overflow setup once and
+    every dependent assertion lands on the captured Python data, not a re-query
+    that may execute on a worker where the scenario was never driven.
+    """
+    harness.open_session_page()
+    time.sleep(2)
+
+    # Prime _lastSeq > 0 so gap detection can trigger. On a fresh page only
+    # cached events (seq=0) have arrived — need one real broadcast first.
+    primer = _assistant_entry("Primer event", 55)
+    harness.write_gap_events([primer])
+    primed_seq = 0
+    for _ in range(10):
+        last_seq = ab_eval("return window._lastSeq;")
+        if last_seq and last_seq > 0:
+            primed_seq = last_seq
+            break
+        time.sleep(0.5)
+    assert primed_seq > 0, "Failed to prime _lastSeq"
+
+    # Disconnect
+    ab_eval("window._es.close(); return 'disconnected';")
+
+    # Write many large events to overflow the 2MB buffer
+    # Each entry ~10KB, need ~200+ to fill 2MB, then more to evict
+    harness.write_large_events(count=250, size_per_entry=10000)
+
+    # Wait for mock event watcher to process all events
+    time.sleep(4)
+
+    # Reconnect
+    ab_eval("window._connect(); return 'reconnecting';")
+
+    # Trigger event arrives with a high seq → client detects gap → buffer
+    # can't cover it → _onInterruption fires.
+    trigger = _assistant_entry("Overflow trigger", 60)
+    harness.write_gap_events([trigger])
+    time.sleep(4)
+
+    sse_interrupted = ab_eval("return Alpine.store('app').sseInterrupted;")
+
+    # Post-overflow event verifies dedup didn't reject fresh events after reset
+    fresh_entry = _assistant_entry("Post-overflow event", 61)
+    harness.write_gap_events([fresh_entry])
+    time.sleep(2)
+
+    post = ab_eval(f"""
+        var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
+        var found = false;
+        for (var i = 0; i < s.entries.length; i++) {{
+            if (s.entries[i].content === 'Post-overflow event') found = true;
+        }}
+        return {{ found: found, entries: s.entries.length }};
+    """)
+    assert post is not None, "Failed to capture post-overflow state"
+
+    return {
+        "sse_interrupted": sse_interrupted,
+        "post_overflow_found": post["found"],
+        "entries_count": post["entries"],
+    }
+
+
 class TestBufferOverflow:
-    """Ring buffer overflow — events evicted before replay. Tests 7-8."""
+    """Ring buffer overflow — events evicted before replay."""
 
-    def _prime_lastSeq(self, harness):
-        """Send a primer event so _lastSeq > 0 before disconnect.
-
-        Gap detection requires _lastSeq > 0 to fire. On a fresh page, only
-        cached events (seq=0) have been received, so we need at least one
-        real broadcast to set _lastSeq.
-        """
-        primer = _assistant_entry("Primer event", 55)
-        harness.write_gap_events([primer])
-        # Wait for mock watcher to poll + client to receive
-        for _ in range(10):
-            last_seq = ab_eval("return window._lastSeq;")
-            if last_seq and last_seq > 0:
-                return last_seq
-            time.sleep(0.5)
-        return 0
-
-    def test_overflow_shows_banner(self, harness):
-        """Write enough events to exceed 2MB buffer. Reconnect shows banner."""
-        harness.open_session_page()
-        time.sleep(2)
-
-        # Ensure _lastSeq > 0 so gap detection can trigger
-        primed_seq = self._prime_lastSeq(harness)
-        assert primed_seq > 0, "Failed to prime _lastSeq"
-
-        # Disconnect
-        ab_eval("""
-            window._es.close();
-            return 'disconnected';
-        """)
-
-        # Write many large events to overflow the 2MB buffer
-        # Each entry ~10KB, need ~200+ to fill 2MB, then more to evict
-        harness.write_large_events(count=250, size_per_entry=10000)
-
-        # Wait for mock event watcher to process all events
-        time.sleep(4)
-
-        # Reconnect
-        ab_eval("window._connect(); return 'reconnecting';")
-
-        # Write a trigger event — this arrives with a high seq, causing the
-        # client to detect a gap. Buffer can't cover it → _onInterruption fires.
-        trigger = _assistant_entry("Overflow trigger", 60)
-        harness.write_gap_events([trigger])
-        time.sleep(4)
-
-        # Check for interruption banner
-        result = ab_eval("return Alpine.store('app').sseInterrupted;")
-        assert result, (
-            f"Expected sseInterrupted to be truthy after buffer overflow, got {result}"
+    def test_overflow_shows_banner(self, buffer_overflow_recovered):
+        """Buffer overflow during disconnect → reconnect shows banner."""
+        sse = buffer_overflow_recovered["sse_interrupted"]
+        assert sse, (
+            f"Expected sseInterrupted to be truthy after buffer overflow, got {sse}"
         )
 
-    def test_seqs_reset_after_overflow(self, harness):
+    def test_seqs_reset_after_overflow(self, buffer_overflow_recovered):
         """After overflow interruption, new events are accepted (not deduped)."""
-        # Write a fresh event after the overflow reconnect
-        fresh_entry = _assistant_entry("Post-overflow event", 61)
-        harness.write_gap_events([fresh_entry])
-        time.sleep(2)
-
-        result = ab_eval(f"""
-            var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
-            var found = false;
-            for (var i = 0; i < s.entries.length; i++) {{
-                if (s.entries[i].content === 'Post-overflow event') found = true;
-            }}
-            return {{ found: found, entries: s.entries.length }};
-        """)
-        assert result is not None
-        assert result["found"], "Post-overflow event was not accepted (dedup rejected it)"
+        assert buffer_overflow_recovered["post_overflow_found"], (
+            "Post-overflow event was not accepted (dedup rejected it)"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
