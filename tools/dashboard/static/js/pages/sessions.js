@@ -492,14 +492,12 @@
           const data = await fetch(url).then(r => r.json());
           if (!Array.isArray(data)) { this.recent = []; return; }
           this.recent = data.map(function(r) {
-            // tmux_session is the viewer's keying field — the tail endpoint
-            // resolves by tmux_name. session_uuid is a fallback for legacy
-            // sessions that lack a tmux name; graph source id is last resort.
-            // Passing session_uuid when tmux_session exists yields a broken
-            // viewer (tail can't find the JSONL) AND a phantom Active card,
-            // because session-viewer.js init() creates a default-isLive store
-            // entry keyed off the unknown uuid.
-            var sessionId = r.tmux_session || r.session_uuid || r.id;
+            // tmux_session is the viewer's keying field — the unified tail
+            // endpoint also resolves dispatch/librarian UUIDs, but tmux_name
+            // remains authoritative. Falling back to session_uuid or graph
+            // source id used to yield phantom Active cards (auto-ylj6r).
+            var sessionId = r.tmux_session;
+            if (!sessionId) return null;
             var lastTs = r.last_activity_at || r.created_at || '';
             // For librarian rows, the raw title is the process name
             // ("librarian-review_report-$pid-$job_uuid"). Replace with a
@@ -525,7 +523,7 @@
               created_at: r.created_at || '',
               last_activity_at: r.last_activity_at || '',
               ended_at: r.ended_at || r.last_activity_at || '',
-              tmux_session: r.tmux_session || sessionId,
+              tmux_session: r.tmux_session,
               nag_enabled: false,
               dispatch_nag_enabled: false,
               role: r.role || '',
@@ -536,7 +534,7 @@
               librarian_target_bead_id: r.librarian_target_bead_id || null,
               librarian_target_bead_title: r.librarian_target_bead_title || '',
             };
-          });
+          }).filter(function(x) { return x !== null; });
         } catch (e) {
           console.warn('[sessionsPage] recent fetch error', e);
         }
