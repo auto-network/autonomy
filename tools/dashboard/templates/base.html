@@ -136,11 +136,6 @@
     /* #live-panel-body is the .session-viewer[data-mode="overlay"] mount —
        its height/padding/background rules live below under that selector. */
     #live-panel.collapsed #live-panel-body { display: none; }
-    .lp-viewer { display: flex; flex-direction: column; max-height: 50vh; }
-    .lp-entries {
-      overflow-y: auto; padding: 0.75rem 1rem;
-      scroll-behavior: smooth; flex: 1;
-    }
     .live-resume-btn {
       position: sticky; bottom: 0.5rem; align-self: center;
       padding: 0.25rem 1rem; background: #4f46e5; color: white;
@@ -465,6 +460,16 @@
       max-height: 50vh;
       padding: 0;
       background: transparent;
+      display: flex;
+      flex-direction: column;
+    }
+    /* Overlay's entry list stretches to fill the panel, no local background
+       (parent #live-panel already provides it), smooth scroll like chat. */
+    .session-viewer[data-mode="overlay"] .sv-entries {
+      flex: 1;
+      padding: 0.75rem 1rem;
+      background: transparent;
+      scroll-behavior: smooth;
     }
     /* iOS PWA: propagate --app-height up the wrapper chain so body / main
        don't clamp to the stale WebKit 100dvh value (787 vs screen 844),
@@ -1044,16 +1049,14 @@
 
       <!-- Session entries — reuses shared partial, same as detail page -->
       <template x-if="state === 'ready'">
-        <div class="lp-viewer">
-          <div class="lp-entries" x-ref="entriesContainer" @scroll="onScroll()">
+        <div class="sv-entries" x-ref="entriesContainer" @scroll="onScroll()">
 
-            <template x-if="entries.length === 0">
-              <div class="text-sm text-gray-500 p-2">No session entries yet.</div>
-            </template>
+          <template x-if="entries.length === 0">
+            <div class="text-sm text-gray-500 p-2">No session entries yet.</div>
+          </template>
 
-            {% include "partials/session-entries.html" %}
+          {% include "partials/session-entries.html" %}
 
-          </div>
         </div>
       </template>
 
