@@ -32,7 +32,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import importlib
@@ -1498,7 +1498,14 @@ def _read_stats_via_monitor(
     holder._prev_entry_count = entry_count
     last_activity = row.get("last_activity")
     if last_activity is not None:
-        last_activity = str(last_activity)
+        # tmux_sessions.last_activity is REAL (float epoch). dispatch_runs
+        # stores it as DATETIME. str(float) rounds-trips back to REAL via
+        # SQLite's NUMERIC affinity and the server then TypeErrors on
+        # datetime.fromisoformat(float). Format as ISO string here so the
+        # column holds the intended datetime shape end-to-end.
+        last_activity = datetime.fromtimestamp(
+            float(last_activity), tz=timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S")
     return snippet, context_tokens, entry_count, turn_delta, last_activity
 
 
