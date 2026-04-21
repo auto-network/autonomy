@@ -1,6 +1,8 @@
 """``graph set`` subcommand group — Settings primitive CLI.
 
-Spec: graph://0d3f750f-f9c. Thin layer over ``settings_ops``.
+Spec: graph://0d3f750f-f9c. Thin layer over ``settings_ops``, dispatched
+via :func:`tools.graph.client.get_client` so container CLIs route through
+the dashboard API instead of opening local sqlite files.
 
 The argparse setup lives in cli.py; per-subcommand handlers live here.
 """
@@ -13,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import ops
+from .client import get_client
 from .schemas.registry import SchemaValidationError
 
 
@@ -81,7 +83,7 @@ def _org(args) -> str | None:
 
 
 def cmd_set_list(args) -> None:
-    set_ids = ops.list_set_ids(org=_org(args))
+    set_ids = get_client().list_set_ids(org=_org(args))
     if not set_ids:
         print("(no Settings yet)")
         return
@@ -103,7 +105,7 @@ def cmd_set_members(args) -> None:
     target, minrev, stored, no_upconvert = _resolve_read_flags(args)
     if no_upconvert:
         target = None  # explicit "show stored shape"
-    members = ops.read_set(
+    members = get_client().read_set(
         args.set_id, target_revision=target, min_revision=minrev,
         org=_org(args),
     )
@@ -140,7 +142,7 @@ def cmd_set_show(args) -> None:
     target, _, _, no_upconvert = _resolve_read_flags(args)
     if no_upconvert:
         target = None
-    got = ops.get_setting(
+    got = get_client().get_setting(
         args.id, target_revision=target, org=_org(args),
     )
     if got is None:
@@ -172,7 +174,7 @@ def cmd_set_add(args) -> None:
     set_id, rev = _parse_set_at_rev(args.set_at_rev)
     payload = _read_payload_file(args.from_file)
     try:
-        sid = ops.add_setting(
+        sid = get_client().add_setting(
             set_id, rev, args.key, payload, state=args.state,
             org=_org(args),
         )
@@ -185,7 +187,7 @@ def cmd_set_add(args) -> None:
 def cmd_set_override(args) -> None:
     payload = _read_payload_file(args.from_file)
     try:
-        sid = ops.override_setting(
+        sid = get_client().override_setting(
             args.target_id, payload, state=args.state,
             org=_org(args),
         )
@@ -200,7 +202,7 @@ def cmd_set_override(args) -> None:
 
 def cmd_set_exclude(args) -> None:
     try:
-        sid = ops.exclude_setting(
+        sid = get_client().exclude_setting(
             args.target_id, state=args.state, org=_org(args),
         )
     except LookupError as e:
@@ -220,7 +222,7 @@ def cmd_set_promote(args) -> None:
         )
         sys.exit(1)
     try:
-        ops.promote_setting(args.id, args.to, org=_org(args))
+        get_client().promote_setting(args.id, args.to, org=_org(args))
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -229,7 +231,7 @@ def cmd_set_promote(args) -> None:
 
 def cmd_set_deprecate(args) -> None:
     try:
-        ops.deprecate_setting(
+        get_client().deprecate_setting(
             args.id, successor_id=args.successor,
             org=_org(args),
         )
@@ -242,7 +244,7 @@ def cmd_set_deprecate(args) -> None:
 
 def cmd_set_remove(args) -> None:
     try:
-        ops.remove_setting(args.id, org=_org(args))
+        get_client().remove_setting(args.id, org=_org(args))
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -257,7 +259,7 @@ def cmd_set_remove(args) -> None:
 
 def cmd_set_migrate(args) -> None:
     try:
-        report = ops.migrate_setting_revisions(
+        report = get_client().migrate_setting_revisions(
             args.set_id, args.to_rev, dry_run=args.dry_run,
             org=_org(args),
         )
