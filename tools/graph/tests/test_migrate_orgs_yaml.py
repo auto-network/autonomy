@@ -381,16 +381,19 @@ def test_cli_apply(yaml_path, orgs_dir, capsys):
 
 
 def test_real_projects_yaml_migrates_cleanly(tmp_path, monkeypatch):
-    """Acceptance §3 sanity: the real ``agents/projects.yaml`` maps
+    """Acceptance §3 sanity: the frozen shipped yaml fixture maps
     cleanly — autonomy, anchore, personal land with canonical identity
-    in their respective DBs."""
-    from tools.graph.migrations.migrate_orgs_yaml import (
-        DEFAULT_PROJECTS_YAML,
-    )
+    in their respective DBs.
+
+    ``agents/projects.yaml`` itself was retired in auto-gko4e; the
+    fixture under ``agents/tests/fixtures/`` preserves its final shape
+    for regression coverage.
+    """
+    from agents.tests.conftest import SHIPPED_PROJECTS_YAML
 
     orgs_dir = tmp_path / "orgs"
     orgs_dir.mkdir()
-    report = build_plan(DEFAULT_PROJECTS_YAML, orgs_dir)
+    report = build_plan(SHIPPED_PROJECTS_YAML, orgs_dir)
     apply_migration(report)
 
     slugs = {e.slug for e in report.entries}
