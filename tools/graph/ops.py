@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .db import GraphDB
+from .db import GraphDB, resolve_caller_db_path
 from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
     ResolvedSetting,
     SetMembers,
@@ -42,21 +42,29 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
 
 
 def _db_path(caller_org: str | None = None) -> str | None:
-    """Resolve graph DB path. ``GRAPH_DB`` env var wins; default falls back to
-    GraphDB's built-in default. ``caller_org`` is unused today; reserved for
-    per-org routing.
+    """Resolve graph DB path for the given ``caller_org``.
+
+    ``GRAPH_DB`` env var wins (test/override path); otherwise routes to
+    ``data/orgs/<caller_org>.db`` if present, falling back to the legacy
+    ``data/graph.db`` when the per-org DB has not yet been materialised
+    (autonomy pre-migration). See :func:`db.resolve_caller_db_path`.
     """
-    return os.environ.get("GRAPH_DB") or None
+    env_db = os.environ.get("GRAPH_DB")
+    if env_db:
+        return env_db
+    return str(resolve_caller_db_path(caller_org))
 
 
 def _open(caller_org: str | None = None) -> GraphDB:
-    """Open a GraphDB connection for the given caller_org.
+    """Open a GraphDB for ``caller_org``'s routed path.
 
-    Single-DB world: returns ``GraphDB(GRAPH_DB or default)``. Per-org DB
-    world: will dispatch to the org-specific DB file.
+    Returns a fresh (non-pooled) connection. Callers are expected to use
+    the existing ``try: ... finally: db.close()`` pattern. Process-
+    lifetime pooling is available via :meth:`GraphDB.for_org` for the
+    dashboard's server-side handlers that want to amortise connection
+    cost across requests.
     """
-    p = _db_path(caller_org)
-    return GraphDB(p) if p else GraphDB()
+    return GraphDB(_db_path(caller_org))
 
 
 # ── Read paths ───────────────────────────────────────────────

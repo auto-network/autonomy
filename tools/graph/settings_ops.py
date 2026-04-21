@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 from uuid import uuid4
 
-from .db import GraphDB
+from .db import GraphDB, resolve_caller_db_path
 from . import schemas
 
 
@@ -97,12 +97,14 @@ class MigrationReport:
 
 
 def _db_path(caller_org: str | None = None) -> str | None:
-    return os.environ.get("GRAPH_DB") or None
+    env_db = os.environ.get("GRAPH_DB")
+    if env_db:
+        return env_db
+    return str(resolve_caller_db_path(caller_org))
 
 
 def _open(caller_org: str | None = None) -> GraphDB:
-    p = _db_path(caller_org)
-    return GraphDB(p) if p else GraphDB()
+    return GraphDB(_db_path(caller_org))
 
 
 # ── JSON merge-patch (RFC 7396) ──────────────────────────────

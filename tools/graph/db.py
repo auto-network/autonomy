@@ -2,14 +2,100 @@
 
 from __future__ import annotations
 import json
+import os
+import secrets
 import sqlite3
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .models import Source, Thought, Derivation, Entity, Claim, Edge, Node, Attachment, new_id
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-DEFAULT_DB = Path(__file__).parents[2] / "data" / "graph.db"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DB = REPO_ROOT / "data" / "graph.db"
+DEFAULT_ORGS_DIR = REPO_ROOT / "data" / "orgs"
+
+VALID_ORG_TYPES = ("shared", "personal")
+
+
+def _orgs_dir(root: Path | str | None = None) -> Path:
+    """Resolve ``data/orgs/`` location, respecting ``AUTONOMY_ORGS_DIR`` env."""
+    if root is not None:
+        return Path(root)
+    env = os.environ.get("AUTONOMY_ORGS_DIR")
+    if env:
+        return Path(env)
+    return DEFAULT_ORGS_DIR
+
+
+def _org_db_path(slug: str, root: Path | str | None = None) -> Path:
+    """Return ``<orgs_dir>/<slug>.db``."""
+    return _orgs_dir(root) / f"{slug}.db"
+
+
+def _uuid7() -> str:
+    """Generate a time-ordered UUID v7 in canonical 8-4-4-4-12 hex form.
+
+    Mirrors :func:`org_ops.uuid7`; duplicated here to avoid circular imports
+    between db and org_ops.
+    """
+    ts_ms = int(time.time() * 1000) & 0xFFFFFFFFFFFF
+    rand = secrets.token_bytes(10)
+    b = bytearray(16)
+    b[0] = (ts_ms >> 40) & 0xFF
+    b[1] = (ts_ms >> 32) & 0xFF
+    b[2] = (ts_ms >> 24) & 0xFF
+    b[3] = (ts_ms >> 16) & 0xFF
+    b[4] = (ts_ms >> 8) & 0xFF
+    b[5] = ts_ms & 0xFF
+    b[6] = 0x70 | (rand[0] & 0x0F)
+    b[7] = rand[1]
+    b[8] = 0x80 | (rand[2] & 0x3F)
+    b[9] = rand[3]
+    b[10:16] = rand[4:10]
+    h = b.hex()
+    return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def resolve_caller_db_path(
+    caller_org: str | None = None,
+    *,
+    root: Path | str | None = None,
+) -> Path:
+    """Resolve the DB path for a given ``caller_org``.
+
+    Priority:
+      1. ``GRAPH_DB`` env (test override / explicit pin) → that path.
+      2. ``data/orgs/<caller_org>.db`` (``caller_org`` defaults to ``'autonomy'``).
+      3. Legacy ``data/graph.db`` (``DEFAULT_DB``) if no per-org DB yet and
+         the caller is ``autonomy`` — preserves behaviour pre-migration
+         (auto-txg5.2).
+
+    Unknown ``caller_org`` with no DB file falls back to ``DEFAULT_DB`` as
+    well; per-org write routing (auto-txg5.3) will tighten this later.
+    """
+    env_db = os.environ.get("GRAPH_DB")
+    if env_db:
+        return Path(env_db)
+    slug = caller_org or "autonomy"
+    org_path = _org_db_path(slug, root)
+    if org_path.exists():
+        return org_path
+    # Pre-migration fallback: autonomy routes to the legacy single DB.
+    return DEFAULT_DB
+
+
+# ── Per-org connection pool ────────────────────────────────────
+# Module-level because the pool is process-lifetime; tests should call
+# ``GraphDB.close_all_pooled()`` in teardown.
+
+_CONNECTION_POOL: dict[tuple[str, str], "GraphDB"] = {}
 
 
 import re as _re
@@ -55,10 +141,14 @@ def _sanitize_fts_query(query: str, or_mode: bool = False) -> str:
 
 
 class GraphDB:
-    def __init__(self, db_path: Path | str = DEFAULT_DB):
+    def __init__(self, db_path: Path | str = DEFAULT_DB, *, mode: Literal["rw", "ro"] = "rw"):
         self.db_path = Path(db_path)
         self.read_only = False
         self._immutable = False
+        self._pooled = False  # set to True by for_org when cached
+        if mode == "ro":
+            self._open_ro()
+            return
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self.conn = sqlite3.connect(str(self.db_path))
@@ -68,14 +158,19 @@ class GraphDB:
             self._init_schema()
         except (sqlite3.OperationalError, OSError):
             # Read-only mount — try mode=ro first (WAL-visible), fall back to immutable
-            try:
-                self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
-                self.conn.row_factory = sqlite3.Row
-            except (sqlite3.OperationalError, OSError):
-                self.conn = sqlite3.connect(f"file:{self.db_path}?immutable=1", uri=True)
-                self.conn.row_factory = sqlite3.Row
-                self._immutable = True
-            self.read_only = True
+            self._open_ro()
+
+    def _open_ro(self):
+        """Open the DB read-only. Used when the filesystem is ro-mounted
+        or when ``mode='ro'`` is requested explicitly."""
+        try:
+            self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+            self.conn.row_factory = sqlite3.Row
+        except (sqlite3.OperationalError, OSError):
+            self.conn = sqlite3.connect(f"file:{self.db_path}?immutable=1", uri=True)
+            self.conn.row_factory = sqlite3.Row
+            self._immutable = True
+        self.read_only = True
 
     def _init_schema(self):
         schema = SCHEMA_PATH.read_text()
@@ -212,13 +307,128 @@ class GraphDB:
         self.conn.commit()
 
     def close(self):
-        self.conn.close()
+        """Close the underlying connection. Pool-managed instances are
+        evicted from the pool first so the slot becomes available for
+        the next ``for_org`` call.
+        """
+        if self._pooled:
+            keys = [k for k, v in _CONNECTION_POOL.items() if v is self]
+            for k in keys:
+                _CONNECTION_POOL.pop(k, None)
+            self._pooled = False
+        try:
+            self.conn.close()
+        except sqlite3.ProgrammingError:
+            pass  # already closed
 
     def __enter__(self):
         return self
 
     def __exit__(self, *args):
         self.close()
+
+    # ── Per-org factory + pool ────────────────────────────────
+
+    @classmethod
+    def create_org_db(
+        cls,
+        slug: str,
+        *,
+        type_: str = "shared",
+        path: Path | str | None = None,
+        root: Path | str | None = None,
+        org_id: str | None = None,
+        created_at: str | None = None,
+    ) -> "GraphDB":
+        """Create a per-org DB at ``data/orgs/<slug>.db``.
+
+        Applies the canonical schema (every table, index, FTS5 virtual
+        table, plus the bootstrap ``orgs`` table, ``settings`` table and
+        ``publication_state`` columns) and inserts the single identifying
+        ``orgs`` row.
+
+        Raises :class:`FileExistsError` when the DB file already exists
+        (callers that want idempotency should check ``path.exists()`` or
+        use :func:`org_ops.create_org` which layers the identity seed on
+        top).
+        """
+        if type_ not in VALID_ORG_TYPES:
+            raise ValueError(
+                f"invalid org type {type_!r}; valid: {VALID_ORG_TYPES}"
+            )
+        resolved = _org_db_path(slug, root) if path is None else Path(path)
+        if resolved.exists():
+            raise FileExistsError(f"org DB already exists: {resolved}")
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        db = cls(resolved)  # runs full schema init on the empty file
+        oid = org_id or _uuid7()
+        created = created_at or _now_iso()
+        db.conn.execute(
+            "INSERT INTO orgs(id, slug, type, created_at) VALUES (?, ?, ?, ?)",
+            (oid, slug, type_, created),
+        )
+        db.conn.commit()
+        return db
+
+    @classmethod
+    def open_org_db(
+        cls,
+        slug: str,
+        *,
+        mode: Literal["rw", "ro"] = "rw",
+        root: Path | str | None = None,
+    ) -> "GraphDB":
+        """Open an existing per-org DB.
+
+        Raises :class:`FileNotFoundError` if ``data/orgs/<slug>.db`` is
+        absent. Caller owns the returned connection's lifetime; for a
+        pooled connection use :meth:`for_org`.
+        """
+        path = _org_db_path(slug, root)
+        if not path.exists():
+            raise FileNotFoundError(f"per-org DB not found: {path}")
+        return cls(path, mode=mode)
+
+    @classmethod
+    def for_org(
+        cls,
+        slug: str,
+        *,
+        mode: Literal["rw", "ro"] = "rw",
+        root: Path | str | None = None,
+    ) -> "GraphDB":
+        """Return a process-lifetime cached connection to a per-org DB.
+
+        Pool key is ``(slug, mode)`` — ``'rw'`` and ``'ro'`` are distinct
+        slots. Subsequent calls with the same key return the same
+        :class:`GraphDB` instance (same underlying connection). Calling
+        ``close()`` on the returned instance evicts the slot.
+        """
+        key = (slug, mode)
+        cached = _CONNECTION_POOL.get(key)
+        if cached is not None:
+            return cached
+        db = cls.open_org_db(slug, mode=mode, root=root)
+        db._pooled = True
+        _CONNECTION_POOL[key] = db
+        return db
+
+    @classmethod
+    def close_all_pooled(cls) -> None:
+        """Evict and close every pooled connection. Used by test teardown
+        and dashboard shutdown."""
+        for db in list(_CONNECTION_POOL.values()):
+            db._pooled = False
+            try:
+                db.conn.close()
+            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                pass
+        _CONNECTION_POOL.clear()
+
+    @classmethod
+    def pooled_slots(cls) -> list[tuple[str, str]]:
+        """Return currently-cached ``(slug, mode)`` pool keys — test helper."""
+        return list(_CONNECTION_POOL.keys())
 
     @property
     def is_immutable(self) -> bool:
