@@ -306,7 +306,7 @@ def test_read_set_with_caller_org_returns_workspace_artifacts(
     # Must exist for resolve_caller_db_path to return the per-org path.
     assert (orgs_dir / "anchore.db").exists()
 
-    got = ops.read_set(SET_ID, caller_org="anchore")
+    got = ops.read_set(SET_ID, caller_org="anchore", peers=[])
     keys = sorted(m.key for m in got.members)
     assert keys == [
         "enterprise-ng:id_ed25519",
@@ -315,8 +315,10 @@ def test_read_set_with_caller_org_returns_workspace_artifacts(
         "enterprise:license.yaml",
     ]
 
-    # The autonomy org DB has no artifact Settings.
-    autonomy_got = ops.read_set(SET_ID, caller_org="autonomy")
+    # The autonomy org DB has no artifact Settings of its own. ``peers=[]``
+    # pins the read to autonomy only — cross-org reads (default) would
+    # pull the canonical anchore rows through, per auto-txg5.4.
+    autonomy_got = ops.read_set(SET_ID, caller_org="autonomy", peers=[])
     assert autonomy_got.members == []
 
 
@@ -358,10 +360,19 @@ def test_cli_set_members_caller_org_lists_artifacts(
     assert "enterprise-ng:id_ed25519" in out
     assert "enterprise-ng:workspace-conf" in out  # truncated display
 
-    # Same call with caller-org=autonomy routes to the empty autonomy DB.
-    rc, out, err = _run_cli(["set", "members", SET_ID, "--caller-org", "autonomy"])
-    assert rc == 0, err
-    assert "no Settings in" in out
+    # autonomy.db has no artifact Settings of its own — confirm by
+    # opening the DB directly. The CLI view, post auto-txg5.4, would
+    # cross-org-merge the anchore canonical rows in; that's by design,
+    # so we check own-org emptiness at the SQLite level instead.
+    if (orgs_dir / "autonomy.db").exists():
+        conn = sqlite3.connect(str(orgs_dir / "autonomy.db"))
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM settings WHERE set_id = ?", (SET_ID,),
+            ).fetchone()[0]
+            assert n == 0
+        finally:
+            conn.close()
 
 
 # ── CLI main() entry point ──────────────────────────────────
