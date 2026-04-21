@@ -117,3 +117,37 @@ def test_close_non_pooled_instance_safe(orgs_root):
     fresh.close()
     # Pool slot still populated.
     assert ("autonomy", "rw") in GraphDB.pooled_slots()
+
+
+def test_ro_connection_usable_from_different_thread(orgs_root):
+    """Regression: pooled ro connection must serve queries from a different
+    thread than the one that created it.
+
+    Before auto-7oh9k hot-patch, dashboard workers running on starlette's
+    threadpool hit
+    ``sqlite3.ProgrammingError: SQLite objects created in a thread can
+    only be used in that same thread`` because ``check_same_thread=True``
+    (Python sqlite3 default) tripped whenever a cached connection was
+    reused on a different worker thread.
+
+    Fix: ro connections open with ``check_same_thread=False``. SQLite
+    serialized mode + GIL + read-only + no-cursors-held-across-awaits
+    make this safe for dashboard query load.
+    """
+    import threading
+
+    _seed("autonomy")
+    ro = GraphDB.for_org("autonomy", mode="ro")
+
+    errors: list[BaseException] = []
+
+    def _run():
+        try:
+            ro.conn.execute("SELECT id FROM settings LIMIT 1").fetchone()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=_run)
+    t.start()
+    t.join(timeout=5)
+    assert not errors, f"ro connection rejected cross-thread use: {errors}"
