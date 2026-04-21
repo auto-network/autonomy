@@ -27,6 +27,9 @@ class Source:
     created_at: str = field(default_factory=now_iso)
     ingested_at: str = field(default_factory=now_iso)
     last_activity_at: str | None = None
+    publication_state: str = "raw"        # raw | curated | published | canonical — see graph://8cf067e3-ca3
+    deprecated: bool = False
+    successor_id: str | None = None
 
 
 @dataclass
