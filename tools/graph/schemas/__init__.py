@@ -20,6 +20,10 @@ from .registry import (
     list_registered_set_ids,
 )
 
+# Concrete schema registrations. Importing for side effects — each module
+# calls ``register_schema`` at import time.
+from . import workspace  # noqa: F401
+
 __all__ = [
     "SchemaValidationError",
     "SettingSchema",
