@@ -31,6 +31,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route, Mount, WebSocketRoute
@@ -6040,7 +6041,71 @@ async def api_graph_attachment_get(request):
 
 async def api_graph_collab_topics(request):
     """List tag taxonomy entries. Companion to HttpClient.list_collab_topics."""
-    return JSONResponse({"topics": graph_ops.list_collab_topics()})
+    org = _caller_org(request)
+    return JSONResponse({"topics": graph_ops.list_collab_topics(org=org)})
+
+
+async def api_graph_attention(request):
+    """GET /api/graph/attention — human input across sessions, chronologically.
+
+    Companion to ``HttpClient.list_attention`` (container ``graph attention``).
+    """
+    params = request.query_params
+    org = _caller_org(request)
+    since = params.get("since") or None
+    search = params.get("search") or None
+    last_raw = params.get("last")
+    last = int(last_raw) if last_raw else None
+    session = params.get("session") or None
+    ctx_raw = params.get("context")
+    context = int(ctx_raw) if ctx_raw else 0
+    rows = graph_ops.list_attention(
+        org=org, since=since, search=search, last=last,
+        session=session, context=context,
+    )
+    return JSONResponse({"rows": rows})
+
+
+async def api_graph_stats(request):
+    """GET /api/graph/stats — DB table counts."""
+    org = _caller_org(request)
+    return JSONResponse(graph_ops.stats(org=org))
+
+
+async def api_graph_tree(request):
+    """GET /api/graph/tree — knowledge hierarchy tree."""
+    org = _caller_org(request)
+    params = request.query_params
+    root = params.get("root") or None
+    depth = int(params.get("depth", "3"))
+    return JSONResponse({"nodes": graph_ops.get_tree(root, depth=depth, org=org)})
+
+
+async def api_graph_entities(request):
+    """GET /api/graph/entities — list or search entities."""
+    org = _caller_org(request)
+    params = request.query_params
+    query = params.get("query") or None
+    etype = params.get("type") or None
+    limit = int(params.get("limit", "20"))
+    if query:
+        entities = graph_ops.search_entities(query, limit=limit, org=org)
+    else:
+        entities = graph_ops.list_entities(entity_type=etype, limit=limit, org=org)
+    # Annotate with mention counts so the CLI doesn't have to do N+1 round-trips.
+    for e in entities:
+        e["mentions"] = graph_ops.entity_mention_count(e["id"], org=org)
+    return JSONResponse({"entities": entities})
+
+
+async def api_graph_entity_thoughts(request):
+    """GET /api/graph/entity/{id}/thoughts — thoughts mentioning an entity."""
+    org = _caller_org(request)
+    entity_id = request.path_params["id"]
+    limit = int(request.query_params.get("limit", "20"))
+    return JSONResponse(
+        {"thoughts": graph_ops.entity_thoughts(entity_id, limit=limit, org=org)},
+    )
 
 
 # ── Settings primitive (graph://0d3f750f-f9c) ──────────────
@@ -6376,17 +6441,18 @@ async def api_graph_resolve(request):
             })
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    source = graph_ops.get_source(id)
+    org = _caller_org(request)
+    source = graph_ops.get_source(id, org=org)
     if source:
         result = await asyncio.to_thread(
-            graph_ops.read_source_full, source["id"], max_chars=50000,
+            graph_ops.read_source_full, source["id"], org=org, max_chars=50000,
         )
         if result is None:
             result = {"source": source, "entries": [], "truncated": False,
                       "total_chars": 0}
         _attach_source_org(result)
         return JSONResponse(result)
-    att = graph_ops.get_attachment(id)
+    att = graph_ops.get_attachment(id, org=org)
     if att:
         return JSONResponse({
             "type": "attachment",
@@ -6539,7 +6605,7 @@ async def api_graph_tag_add(request):
     else:
         msg = f"  Already tagged: {source['id'][:12]} \"{title}\" ← {tag_name}"
     _checkpoint_graph()
-    return JSONResponse({"ok": True, "output": msg})
+    return JSONResponse({"ok": True, "added": bool(added), "output": msg})
 
 
 async def api_graph_tag_remove(request):
@@ -6564,7 +6630,7 @@ async def api_graph_tag_remove(request):
     else:
         msg = f"  Not tagged: {source['id'][:12]} \"{title}\" ✗ {tag_name}"
     _checkpoint_graph()
-    return JSONResponse({"ok": True, "output": msg})
+    return JSONResponse({"ok": True, "removed": bool(removed), "output": msg})
 
 
 async def api_graph_tag_merge(request):
@@ -6622,7 +6688,9 @@ async def api_graph_thought(request):
         if not thread:
             return JSONResponse({"error": f"thread not found: {thread_id}"}, status_code=404)
         thread_id = thread["id"]
-    capture_id = new_id()
+    # Honour client-supplied capture_id so the CLI's printed id matches
+    # what thoughts-list returns. Generate only if not supplied.
+    capture_id = (body.get("capture_id") or "").strip() or new_id()
     graph_ops.insert_capture(
         capture_id, content,
         source_id=source_id,
@@ -6648,8 +6716,10 @@ async def api_graph_thread(request):
     if len(title) > 500:
         return JSONResponse({"error": "title too long (max 500)"}, status_code=400)
     priority = int(body.get("priority", 1))
-    actor = body.get("actor", "user")
-    thread_id = new_id()
+    actor = body.get("created_by") or body.get("actor", "user")
+    # Honour client-supplied thread_id so the CLI's printed id matches
+    # what lists return. Generate only if the client didn't send one.
+    thread_id = (body.get("thread_id") or "").strip() or new_id()
     graph_ops.insert_thread(thread_id, title, priority=priority, created_by=actor)
     msg = f"  \u2713 Thread: {thread_id[:11]} \"{title}\" [active, P{priority}]"
     _checkpoint_graph()
@@ -6892,6 +6962,11 @@ routes = [
     Route("/api/graph/source/{id}", api_graph_source_get, methods=["GET"]),
     Route("/api/graph/attachment/{attachment_id}", api_graph_attachment_get, methods=["GET"]),
     Route("/api/graph/collab-topics", api_graph_collab_topics, methods=["GET"]),
+    Route("/api/graph/attention", api_graph_attention, methods=["GET"]),
+    Route("/api/graph/stats", api_graph_stats, methods=["GET"]),
+    Route("/api/graph/tree", api_graph_tree, methods=["GET"]),
+    Route("/api/graph/entities", api_graph_entities, methods=["GET"]),
+    Route("/api/graph/entity/{id}/thoughts", api_graph_entity_thoughts, methods=["GET"]),
     # Settings primitive (graph://0d3f750f-f9c). Routes ordered specific → generic.
     Route("/api/graph/sets", api_graph_set_ids, methods=["GET"]),
     Route("/api/graph/settings/{set_id}/{key}", api_graph_settings_get_by_key, methods=["GET"]),
@@ -7105,8 +7180,49 @@ class _CSPMiddleware(BaseHTTPMiddleware):
         return response
 
 
-app = Starlette(routes=routes, lifespan=_lifespan)
-app.add_middleware(_CSPMiddleware)
+class _CallerOrgMiddleware:
+    """Bind ``X-Graph-Org`` to the ops-layer contextvar for every request.
+
+    Every ``graph_ops.X()`` call made while a handler is on the stack
+    picks up the caller org automatically — handlers don't need to read
+    the header or thread ``org=`` through each call. This is the single
+    per-request boundary for caller-org routing; forgetting it in a new
+    endpoint is structurally impossible because middleware runs first.
+
+    See graph://bcce359d-a1d § Cross-org request routing.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        from tools.graph import ops as _graph_ops
+        header_org: str | None = None
+        for name, value in scope.get("headers", []):
+            if name == b"x-graph-org":
+                header_org = value.decode("latin-1") or None
+                break
+        token = _graph_ops.set_caller_org(header_org)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _graph_ops.reset_caller_org(token)
+
+
+app = Starlette(
+    routes=routes,
+    lifespan=_lifespan,
+    middleware=[
+        # Outer: bind X-Graph-Org to the ops-layer contextvar for every
+        # request. Every ``graph_ops.X()`` made while a handler is on the
+        # stack picks up the caller org automatically.
+        Middleware(_CallerOrgMiddleware),
+        Middleware(_CSPMiddleware),
+    ],
+)
 
 
 def main():

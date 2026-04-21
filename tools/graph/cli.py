@@ -220,8 +220,7 @@ from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_a
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_stats, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
 from .worktree_cmd import cmd_worktree_default, cmd_worktree_list, cmd_worktree_prune
-from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_journal_write, api_sessions, api_set_label, api_set_topics, api_set_role, api_set_nag, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action, api_tag_add, api_tag_remove, api_tag_merge
-from .client import get_client
+from .client import get_client, HttpClient
 
 
 def cmd_ingest(args):
@@ -290,7 +289,7 @@ def cmd_search(args):
     # container's session isn't visible to the server anyway.
     session_ids: list[str] | None = None
     author_pattern: str | None = None
-    if not is_api_mode():
+    if not isinstance(get_client(), HttpClient):
         db = GraphDB(args.db)
         try:
             session_ids, author_pattern = _current_session_context(db)
@@ -706,6 +705,11 @@ def cmd_read(args):
                 print(f"Error: invalid version '{version_part}' (must be integer)", file=sys.stderr)
                 return
 
+    client = get_client()
+    if isinstance(client, HttpClient):
+        _cmd_read_via_api(args, source_arg, version_req, client)
+        return
+
     result, db, close_db = _resolve_source_cross_org(
         args, source_arg, first=args.first,
     )
@@ -727,6 +731,55 @@ def cmd_read(args):
     finally:
         if close_db:
             db.close()
+
+
+def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") -> None:
+    """Container path: fetch the source + content via /api/graph/{id}.
+
+    Version history + HTML-body-export are host-only for now (no server
+    endpoints yet); the common ``graph read <id>`` path covers what
+    container agents need day-to-day.
+    """
+    org = os.environ.get("GRAPH_ORG")
+    try:
+        payload = client._get(f"/api/graph/{source_arg}", org=org)
+    except LookupError:
+        print(f"No source found matching '{source_arg}'")
+        return
+    if not isinstance(payload, dict):
+        print(f"No source found matching '{source_arg}'")
+        return
+    source = payload.get("source") or {}
+    if not source:
+        print(f"No source found matching '{source_arg}'")
+        return
+    entries = payload.get("entries") or []
+    if version_req is not None:
+        print(
+            "Error: @version reads are only available on the host today",
+            file=sys.stderr,
+        )
+        return
+    proj = f" [{source.get('project')}]" if source.get("project") else ""
+    org = source.get("org") or ""
+    # Dedupe — if project already matches org, skip the separate org tag.
+    org_tag = (
+        f" [{org}]" if org and (not proj or proj.strip(" []") != org) else ""
+    )
+    print(f"Source: {source.get('id', '')[:12]}  {source.get('type', '?')}{proj}{org_tag}")
+    print(f"Title:  {source.get('title', '?')}")
+    if source.get("created_at"):
+        print(f"Date:   {source['created_at'][:10]}")
+    print(f"{'─' * 72}")
+    for e in entries:
+        turn = e.get("turn_number", "?")
+        etype = e.get("entry_type", "?")
+        label = "USER" if etype == "thought" else "ASSISTANT"
+        content = e.get("content") or ""
+        if args.max_chars and len(content) > args.max_chars:
+            content = content[: args.max_chars] + f"\n... [{len(content) - args.max_chars} chars truncated]"
+        print(f"\n## Turn {turn} — {label}")
+        print(content)
 
 
 def _cmd_read_body(args, source, db, version_req, _json):
@@ -948,7 +1001,7 @@ def cmd_sources(args):
     # writer's session, not the container's).
     session_ids: list[str] | None = None
     author_pattern: str | None = None
-    if not is_api_mode():
+    if not isinstance(get_client(), HttpClient):
         db = GraphDB(args.db)
         try:
             session_ids, author_pattern = _current_session_context(db)
@@ -980,15 +1033,14 @@ def cmd_sources(args):
 
 
 def _auto_ingest(db: GraphDB) -> None:
-    """Silently ingest latest sessions so queries see fresh data (~100ms when unchanged)."""
-    if is_api_mode():
-        import io, contextlib
-        with contextlib.redirect_stdout(io.StringIO()):
-            api_sessions(type('Args', (), {'all': True, 'project': None, 'force': False, 'status': False})())
-    else:
-        # Route per session unless GRAPH_DB pins a specific target.
-        sessions_db = db if os.environ.get("GRAPH_DB") else None
-        ingest_all_claude_code(sessions_db, force=False)
+    """Silently ingest latest sessions so host queries see fresh data
+    (~100ms when unchanged). No-op under the HTTP client — the dashboard
+    owns ingest freshness and the container can't scan local JSONL."""
+    if isinstance(get_client(), HttpClient):
+        return
+    # Route per session unless GRAPH_DB pins a specific target.
+    sessions_db = db if os.environ.get("GRAPH_DB") else None
+    ingest_all_claude_code(sessions_db, force=False)
 
 
 def cmd_context(args):
@@ -999,60 +1051,54 @@ def cmd_context(args):
     turn read.
     """
     org = os.environ.get("GRAPH_ORG")
+    client = get_client()
 
-    # Source resolution: container routes through the API (which does
-    # cross-org resolve server-side); host tries own-db first (honours
-    # --db pins), then falls back to the cross-org resolver via the
-    # client.
-    if is_api_mode():
-        source = get_client().get_source(args.source, org=org)
-        if not source:
-            print(f"Source not found: {args.source}")
-            return
-        db = None
-        close_db = False
-    else:
+    # Host-only carve-out: refresh session ingest so fresh local sessions
+    # are searchable. Container delegates to the dashboard's own schedule.
+    if not isinstance(client, HttpClient):
         own_db = GraphDB(args.db)
         try:
             _auto_ingest(own_db)
-            source = own_db.get_source(args.source)
         finally:
             own_db.close()
 
-        if source is not None:
-            source.setdefault("org", org or "")
-            db = GraphDB(args.db)
-            close_db = True
-        else:
-            source = get_client().get_source(args.source, org=org)
-            if not source:
+    source = client.get_source(args.source, org=org)
+    if not source:
+        print(f"Source not found: {args.source}")
+        return
+    source.setdefault("org", org or "")
+
+    # For turn-level content we need the raw per-turn rows. Host reads
+    # from the source's home-org DB; container round-trips through the
+    # dashboard's ``read_source_full`` endpoint.
+    db = None
+    close_db = False
+    if isinstance(client, HttpClient):
+        entries = (_read_source_full_via_api(source["id"], org=org) or {}).get("entries") or []
+    else:
+        home_org = source.get("org") or ""
+        caller = org or ""
+        if home_org and home_org != caller:
+            try:
+                db = GraphDB.for_org(home_org, mode="ro")
+            except FileNotFoundError:
                 print(f"Source not found: {args.source}")
                 return
-            home_org = source.get("org") or ""
-            caller = org or ""
-            if home_org and home_org != caller:
-                try:
-                    db = GraphDB.for_org(home_org, mode="ro")
-                except FileNotFoundError:
-                    print(f"Source not found: {args.source}")
-                    return
-                close_db = False
-            else:
-                db = GraphDB(args.db)
-                close_db = True
+        else:
+            db = GraphDB(args.db)
+            close_db = True
+        entries = None
 
     try:
-        if db is not None:
+        if db is not None and entries is None:
+            # CLIENT_EXEMPT: host-only — db is only bound in the non-HttpClient branch above.
             entries = db.get_source_content(source["id"])
-        else:
-            # Container path — ``read_source_full`` from the dashboard
-            # returns the same entries shape.
-            full = _read_source_full_via_api(source["id"], org=org)
-            entries = (full or {}).get("entries") or []
+        entries = entries or []
 
         # Resolve "last" keyword to max turn number
         if args.turn == "last":
             if db is not None:
+                # CLIENT_EXEMPT: host-only — see cmd_context db-binding comment above.
                 target_turn = db.get_latest_turn(source["id"])
             else:
                 target_turn = max(
@@ -1087,6 +1133,7 @@ def cmd_context(args):
             print(content)
     finally:
         if close_db and db is not None:
+            # CLIENT_EXEMPT: host-only — db is only bound in the non-HttpClient branch above.
             db.close()
 
 
@@ -1094,8 +1141,7 @@ def _read_source_full_via_api(source_id: str, *, org: str | None) -> dict | None
     """Container-mode source-content read: go through /api/graph/resolve/{id}
     which returns the full ``read_source_full`` payload."""
     client = get_client()
-    if not hasattr(client, "_get"):
-        # LocalClient — shouldn't be hit from cmd_context's API path.
+    if not isinstance(client, HttpClient):
         return None
     try:
         return client._get(f"/api/graph/resolve/{source_id}", org=org)
@@ -1105,47 +1151,42 @@ def _read_source_full_via_api(source_id: str, *, org: str | None) -> dict | None
 
 def cmd_entities(args):
     """List or search entities."""
-    db = GraphDB(args.db)
-
+    client = get_client()
+    org = os.environ.get("GRAPH_ORG")
     if args.query:
-        entities = db.search_entities(args.query, limit=args.limit)
+        entities = client.search_entities(args.query, limit=args.limit, org=org)
     else:
-        entities = db.list_entities(entity_type=args.type, limit=args.limit)
-
+        entities = client.list_entities(entity_type=args.type, limit=args.limit, org=org)
     if not entities:
         print("No entities found.")
-        db.close()
         return
-
+    # Host path: pre-fetch mention counts inline. Container path: the server
+    # annotates each row with ``mentions`` so no per-entity round-trip needed.
     for e in entities:
-        mention_count = db.conn.execute(
-            "SELECT SUM(count) as total FROM entity_mentions WHERE entity_id = ?",
-            (e["id"],)
-        ).fetchone()
-        mentions = mention_count["total"] or 0
+        if "mentions" in e:
+            mentions = int(e["mentions"] or 0)
+        elif isinstance(client, HttpClient):
+            mentions = 0
+        else:
+            mentions = client.entity_mention_count(e["id"], org=org)
         print(f"  {e['name']:40s}  [{e['type']:12s}]  {mentions:3d} mentions")
-
-    db.close()
 
 
 def cmd_stats(args):
     """Show database statistics."""
-    db = GraphDB(args.db)
-    stats = db.stats()
+    stats = get_client().stats(org=os.environ.get("GRAPH_ORG"))
     print("Knowledge Graph Stats:")
     for table, count in stats.items():
         print(f"  {table:20s}  {count:6d}")
-    db.close()
 
 
 def cmd_tree(args):
     """Show the knowledge hierarchy tree."""
-    db = GraphDB(args.db)
-    nodes = db.get_tree(args.root, depth=args.depth)
-
+    nodes = get_client().get_tree(
+        args.root, depth=args.depth, org=os.environ.get("GRAPH_ORG"),
+    )
     if not nodes:
         print("No hierarchy nodes found. Use 'seed' to create the initial structure.")
-        db.close()
         return
 
     for n in nodes:
@@ -1156,8 +1197,6 @@ def cmd_tree(args):
         if n.get("description") and args.verbose:
             desc = textwrap.shorten(n["description"], width=80 - len(indent) * 2, placeholder="…")
             print(f"  {indent}  {desc}")
-
-    db.close()
 
 
 def cmd_seed(args):
@@ -1239,8 +1278,17 @@ def cmd_sessions(args):
     if args.status:
         _print_session_status(since=getattr(args, "since", None))
         return
-    if is_api_mode():
-        api_sessions(args)
+    client = get_client()
+    if isinstance(client, HttpClient):
+        result = client.ingest_sessions(
+            all_projects=bool(args.all),
+            project=args.project,
+            force=bool(getattr(args, "force", False)),
+            org=os.environ.get("GRAPH_ORG"),
+        ) or {}
+        output = result.get("output") or ""
+        if output:
+            print(output, end="" if output.endswith("\n") else "\n")
         return
     db = GraphDB(args.db)
 
@@ -1291,27 +1339,18 @@ def cmd_sessions(args):
 
 def cmd_set_label(args):
     """Set the label for the current session."""
-    if is_api_mode():
-        api_set_label(args)
-        return
     _session_put("label", {"label": " ".join(args.text)})
     print(f"  \u2713 Label set: {' '.join(args.text)}")
 
 
 def cmd_set_topics(args):
     """Set topic status lines on the session card."""
-    if is_api_mode():
-        api_set_topics(args)
-        return
     _session_put("topics", {"topics": args.topics})
     print(f"  \u2713 Topics set ({len(args.topics)} lines)")
 
 
 def cmd_set_role(args):
     """Set the session role."""
-    if is_api_mode():
-        api_set_role(args)
-        return
     role = " ".join(args.role)
     _session_put("role", {"role": role})
     print(f"  \u2713 Role set: {role}")
@@ -1319,9 +1358,6 @@ def cmd_set_role(args):
 
 def cmd_set_nag(args):
     """Enable or disable session nags (idle or dispatch)."""
-    if is_api_mode():
-        api_set_nag(args)
-        return
     if getattr(args, "dispatch", False):
         # Dispatch completion nag
         enabled = not args.off
@@ -1680,18 +1716,21 @@ def cmd_playbooks(args):
 
 def cmd_bead(args):
     """Create a bead with provenance — links to the source conversation turns that inspired it."""
-    if is_api_mode():
-        # Auto-detect source + turn before API dispatch
-        if not args.source and not args.turns:
-            db = GraphDB(args.db)
-            source, turn = _auto_provenance(db, title=args.title)
-            db.close()
-            if source and turn:
-                args.source = source["id"]
-                args.turns = str(turn)
-                title = (source.get("title") or "?")[:60]
-                print(f'  Auto-provenance: {source["id"][:12]} turn {turn} "{title}"')
-        api_bead(args)
+    client = get_client()
+    if isinstance(client, HttpClient):
+        # Container mode: dashboard creates the bead + provenance server-side.
+        desc = args.desc
+        if desc == "-":
+            desc = sys.stdin.read().strip()
+        result = client.create_bead(
+            args.title, priority=args.priority,
+            description=desc, bead_type=args.type,
+            source=args.source, turns=args.turns, note=args.note,
+            org=os.environ.get("GRAPH_ORG"),
+        ) or {}
+        output = result.get("output") or ""
+        if output:
+            print(output, end="" if output.endswith("\n") else "\n")
         return
     import subprocess
     db = GraphDB(args.db)
@@ -1796,57 +1835,53 @@ def cmd_bead(args):
 
 def cmd_link(args):
     """Create an edge between two graph nodes (bead, source, or note)."""
-    if is_api_mode():
-        # Auto-detect turn before API dispatch
-        if not args.turns:
-            db = GraphDB(args.db)
-            source, turn = _auto_provenance(db)
+    client = get_client()
+
+    # Auto-detect turn + resolve source/target host-side. Container callers
+    # pass full UUIDs and skip the local DB resolve; the dashboard does its
+    # own resolve and accepts either a bead id or a source id for ``bead``.
+    resolved_from_id = args.bead
+    resolved_from_type = "bead" if args.bead.startswith("auto-") else "source"
+    target_id = args.source
+    if not isinstance(client, HttpClient):
+        db = GraphDB(args.db)
+        try:
+            if not args.turns:
+                _, turn = _auto_provenance(db)
+                if turn:
+                    args.turns = str(turn)
+            from_source, _ = _resolve_source_for_link(db, args.bead)
+            if from_source:
+                resolved_from_id = from_source["id"]
+                resolved_from_type = from_source.get("type", "source")
+            elif args.bead.startswith("auto-"):
+                resolved_from_id = args.bead
+                resolved_from_type = "bead"
+            else:
+                print(
+                    f"Cannot resolve '{args.bead}' as a source or bead ID. "
+                    f"Use 'graph search' to find the right ID.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            target, err = _resolve_source_for_link(db, args.source)
+            if err:
+                print(err, file=sys.stderr)
+                sys.exit(1)
+            target_id = target["id"]
+        finally:
             db.close()
-            if turn:
-                args.turns = str(turn)
-        api_link(args)
-        return
 
-    db = GraphDB(args.db)
-    try:
-        if not args.turns:
-            _, turn = _auto_provenance(db)
-            if turn:
-                args.turns = str(turn)
-
-        turn_range = None
-        if args.turns:
-            parts = args.turns.split("-")
-            if len(parts) == 2:
-                turn_range = (int(parts[0]), int(parts[1]))
-            elif len(parts) == 1:
-                turn_range = (int(parts[0]), int(parts[0]))
-
-        from_source, _ = _resolve_source_for_link(db, args.bead)
-        if from_source:
-            resolved_from_id = from_source["id"]
-            resolved_from_type = from_source.get("type", "source")
-        elif args.bead.startswith("auto-"):
-            resolved_from_id = args.bead
-            resolved_from_type = "bead"
-        else:
-            print(
-                f"Cannot resolve '{args.bead}' as a source or bead ID. "
-                f"Use 'graph search' to find the right ID.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        target, err = _resolve_source_for_link(db, args.source)
-        if err:
-            print(err, file=sys.stderr)
-            sys.exit(1)
-        target_id = target["id"]
-    finally:
-        db.close()
+    turn_range = None
+    if args.turns:
+        parts = args.turns.split("-")
+        if len(parts) == 2:
+            turn_range = (int(parts[0]), int(parts[1]))
+        elif len(parts) == 1:
+            turn_range = (int(parts[0]), int(parts[0]))
 
     with _pin_db(args):
-        get_client().create_edge(
+        client.create_edge(
             resolved_from_id,
             target_id,
             from_type=resolved_from_type,
@@ -1866,7 +1901,7 @@ def cmd_link(args):
             f"  ✓ {from_label} —[{args.relation}]→ {target_id[:12]}{turns_str}"
         )
         if turn_range:
-            snippet = get_client().get_turn_content(
+            snippet = client.get_turn_content(
                 target_id,
                 turn_range[0],
                 org=getattr(args, "org", None),
@@ -1980,14 +2015,19 @@ def _query_attention(db, since=None, search=None, last=None, session=None, conte
 
 def cmd_attention(args):
     """Show human input from sessions, chronologically. Fast query for sovereign content."""
-    db = GraphDB(args.db)
-
-    # Auto-ingest to ensure fresh data
-    _auto_ingest(db)
+    client = get_client()
+    # Host-only refresh so fresh local session data is visible. Container
+    # relies on the dashboard's own ingest schedule.
+    if not isinstance(client, HttpClient):
+        own_db = GraphDB(args.db)
+        try:
+            _auto_ingest(own_db)
+        finally:
+            own_db.close()
 
     ctx = getattr(args, "context", 0)
-    rows = _query_attention(
-        db,
+    rows = client.list_attention(
+        org=os.environ.get("GRAPH_ORG"),
         since=getattr(args, "since", None),
         search=getattr(args, "search", None),
         last=getattr(args, "last", None),
@@ -2010,7 +2050,6 @@ def cmd_attention(args):
                 print(f"      AGENT: {d_preview}")
 
     print(f"\n  {len(rows)} messages")
-    db.close()
 
 
 def _age_str(created_at: str) -> str:
@@ -2050,33 +2089,24 @@ def cmd_collab_list(args):
 
 def cmd_collab_tag(args):
     """Add the 'collab' tag to an existing note."""
-    if is_api_mode():
-        api_collab_tag(args)
-        return
-    db = GraphDB(args.db)
-    source = db.get_source(args.source_id)
-    if not source:
-        print(f"No source found matching '{args.source_id}'", file=sys.stderr)
-        db.close()
+    client = get_client()
+    org = os.environ.get("GRAPH_ORG")
+    resolved_id, title = _resolve_source_for_tag(client, args.source_id)
+    if resolved_id is None:
         sys.exit(1)
-    if isinstance(source, list):
-        print(f"Multiple sources match '{args.source_id}' — use a longer prefix", file=sys.stderr)
-        db.close()
-        sys.exit(1)
-    added = db.add_source_tag(source["id"], "collab")
-    db.close()
-    title = (source.get("title") or "?")[:60]
+    added = client.add_tag(resolved_id, "collab", org=org)
     if added:
-        print(f"  \u2713 Tagged {source['id'][:12]} \"{title}\" as collab")
+        print(f"  \u2713 Tagged {resolved_id[:12]} \"{title[:60]}\" as collab")
     else:
-        print(f"  Already tagged: {source['id'][:12]} \"{title}\"")
+        print(f"  Already tagged: {resolved_id[:12]} \"{title[:60]}\"")
 
 
 def cmd_collab_topics(args):
     """List tags with descriptions and note counts."""
-    db = GraphDB(args.db)
-    tags = db.list_tags(limit=args.limit)
-    db.close()
+    tags = get_client().list_collab_topics(org=os.environ.get("GRAPH_ORG"))
+    # Limit client-side; server already returns the full taxonomy.
+    if args.limit:
+        tags = tags[: args.limit]
     if not tags:
         print("No tags found")
         return
@@ -2091,15 +2121,14 @@ def cmd_collab_topics(args):
 
 def cmd_collab_tag_describe(args):
     """Set or update a tag's description."""
-    if is_api_mode():
-        api_collab_tag_describe(args)
-        return
-    db = GraphDB(args.db)
     desc = args.description
     if desc == "-":
         desc = sys.stdin.read().strip()
-    db.update_tag_description(args.tag_name, desc, actor=os.environ.get("BD_ACTOR", "user"))
-    db.close()
+    get_client().update_tag_description(
+        args.tag_name, desc,
+        actor=os.environ.get("BD_ACTOR", "user"),
+        org=os.environ.get("GRAPH_ORG"),
+    )
     print(f"  \u2713 Tag '{args.tag_name}': {desc[:60]}")
 
 
@@ -2108,151 +2137,86 @@ def cmd_collab_tag_describe(args):
 
 def cmd_tag_add(args):
     """Add tag(s) to source(s)."""
-    if is_api_mode():
-        api_tag_add(args)
-        return
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
     if not tags:
         print("Error: no tags specified", file=sys.stderr)
         sys.exit(1)
-    db = GraphDB(args.db)
-    try:
-        for sid in args.source_ids:
-            source = db.get_source(sid)
-            if not source:
-                print(f"  ✗ No source found matching '{sid}'", file=sys.stderr)
-                continue
-            if isinstance(source, list):
-                print(f"  ✗ Multiple sources match '{sid}' — use a longer prefix", file=sys.stderr)
-                continue
-            for tag in tags:
-                added = db.add_source_tag(source["id"], tag)
-                title = (source.get("title") or "?")[:50]
-                if added:
-                    print(f"  ✓ Tagged {source['id'][:12]} \"{title}\" ← {tag}")
-                else:
-                    print(f"  Already tagged: {source['id'][:12]} \"{title}\" ← {tag}")
-    finally:
-        db.close()
+    client = get_client()
+    org = os.environ.get("GRAPH_ORG")
+    for sid in args.source_ids:
+        # Host prefix-resolve convenience; container passes full UUID.
+        resolved_id, title = _resolve_source_for_tag(client, sid)
+        if resolved_id is None:
+            continue
+        for tag in tags:
+            added = client.add_tag(resolved_id, tag, org=org)
+            if added:
+                print(f"  ✓ Tagged {resolved_id[:12]} \"{title[:50]}\" ← {tag}")
+            else:
+                print(f"  Already tagged: {resolved_id[:12]} \"{title[:50]}\" ← {tag}")
 
 
 def cmd_tag_remove(args):
     """Remove tag(s) from source(s)."""
-    if is_api_mode():
-        api_tag_remove(args)
-        return
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
     if not tags:
         print("Error: no tags specified", file=sys.stderr)
         sys.exit(1)
-    db = GraphDB(args.db)
-    try:
-        for sid in args.source_ids:
-            source = db.get_source(sid)
-            if not source:
-                print(f"  ✗ No source found matching '{sid}'", file=sys.stderr)
-                continue
-            if isinstance(source, list):
-                print(f"  ✗ Multiple sources match '{sid}' — use a longer prefix", file=sys.stderr)
-                continue
-            for tag in tags:
-                removed = db.remove_source_tag(source["id"], tag)
-                title = (source.get("title") or "?")[:50]
-                if removed:
-                    print(f"  ✓ Untagged {source['id'][:12]} \"{title}\" ✗ {tag}")
-                else:
-                    print(f"  Not tagged: {source['id'][:12]} \"{title}\" ✗ {tag}")
-    finally:
-        db.close()
+    client = get_client()
+    org = os.environ.get("GRAPH_ORG")
+    for sid in args.source_ids:
+        resolved_id, title = _resolve_source_for_tag(client, sid)
+        if resolved_id is None:
+            continue
+        for tag in tags:
+            removed = client.remove_tag(resolved_id, tag, org=org)
+            if removed:
+                print(f"  ✓ Untagged {resolved_id[:12]} \"{title[:50]}\" ✗ {tag}")
+            else:
+                print(f"  Not tagged: {resolved_id[:12]} \"{title[:50]}\" ✗ {tag}")
+
+
+def _resolve_source_for_tag(client, sid: str) -> tuple[str | None, str]:
+    """Resolve a source id/prefix to ``(full_id, title)`` via the client.
+
+    Host ``ops.get_source`` accepts prefixes and does cross-org resolve;
+    ``HttpClient.get_source`` on container round-trips to the dashboard
+    which also resolves — both return a dict or ``None``.
+    """
+    source = client.get_source(sid, org=os.environ.get("GRAPH_ORG"))
+    if not source:
+        print(f"  ✗ No source found matching '{sid}'", file=sys.stderr)
+        return None, ""
+    if isinstance(source, list):
+        print(f"  ✗ Multiple sources match '{sid}' — use a longer prefix", file=sys.stderr)
+        return None, ""
+    return source["id"], source.get("title") or "?"
 
 
 def cmd_tag_merge(args):
-    """Merge one tag into another with auto-provenance."""
-    if is_api_mode():
-        api_tag_merge(args)
-        return
-    from_tag = args.from_tag
-    to_tag = args.to_tag
-    db = GraphDB(args.db)
-    try:
-        from_sources = db.sources_with_tag(from_tag)
-        to_sources = db.sources_with_tag(to_tag)
-        from_count = len(from_sources)
-        to_count = len(to_sources)
+    """Merge one tag into another with auto-provenance.
 
-        if from_count == 0:
-            print(f"  ✗ No sources tagged '{from_tag}'", file=sys.stderr)
-            sys.exit(1)
-
-        # Safety gate: majority into minority requires --force
-        if from_count > to_count and not args.force:
-            print(f"  ⚠ '{from_tag}' has {from_count} sources, '{to_tag}' has {to_count}. "
-                  f"Use --force to merge majority into minority.", file=sys.stderr)
-            sys.exit(1)
-
-        # Retag all --from sources to --to
-        retagged = 0
-        for src in from_sources:
-            db.remove_source_tag(src["id"], from_tag)
-            db.add_source_tag(src["id"], to_tag)
-            retagged += 1
-
-        # Create merge log note with auto-provenance
-        from .models import Source, Thought, Edge, new_id
-        reason = args.reason or ""
-        note_text = (
-            f"Tag merge: {from_tag} → {to_tag}\n"
-            f"Retagged {retagged} sources.\n"
-        )
-        if reason:
-            note_text += f"Reason: {reason}\n"
-
-        source_key = f"note:{new_id()}"
-        note_source = Source(
-            type="note",
-            platform="local",
-            project=_get_scope() or "autonomy",
-            title=f"Tag merge: {from_tag} → {to_tag}",
-            file_path=source_key,
-            metadata={"tags": ["taxonomy", "tag-merge"], "author": os.environ.get("BD_ACTOR", "user")},
-        )
-        db.insert_source(note_source)
-
-        t = Thought(
-            source_id=note_source.id,
-            content=note_text,
-            role="user",
-            turn_number=1,
-            tags=["taxonomy", "tag-merge"],
-        )
-        db.insert_thought(t)
-
-        # Auto-provenance: link merge note to current session
-        auto_src, auto_turn = _auto_provenance(db, title=f"tag merge {from_tag} {to_tag}")
-        prov_info = ""
-        if auto_src and auto_turn:
-            db.insert_edge(Edge(
-                source_id=note_source.id,
-                source_type="source",
-                target_id=auto_src["id"],
-                target_type="source",
-                relation="conceived_at",
-                metadata={"turns": {"from": auto_turn, "to": auto_turn}},
-            ))
-            prov_info = f" (linked to {auto_src['id'][:12]} turn {auto_turn})"
-
-        # Set --from tag description to deprecated pointer
-        db.update_tag_description(
-            from_tag,
-            f"Deprecated — see graph://{note_source.id[:12]}",
-            actor=os.environ.get("BD_ACTOR", "user"),
-        )
-
-        db.commit()
-        print(f"  ✓ Merged '{from_tag}' → '{to_tag}' ({retagged} sources retagged)")
-        print(f"  Provenance: graph://{note_source.id[:12]}{prov_info}")
-    finally:
-        db.close()
+    ``ops.tag_merge`` (host) and the ``POST /api/graph/tag/merge`` endpoint
+    (container) share the same contract: retag every source, write a
+    merge-log note, deprecate the old tag description. Host runs the
+    transaction locally; container round-trips the same op server-side.
+    """
+    client = get_client()
+    org = os.environ.get("GRAPH_ORG")
+    result = client.tag_merge(
+        args.from_tag, args.to_tag,
+        reason=args.reason or "", force=bool(args.force), org=org,
+    )
+    if not isinstance(result, dict):
+        result = {}
+    if result.get("error"):
+        print(f"  ✗ {result['error']}", file=sys.stderr)
+        sys.exit(1)
+    count = result.get("count") or 0
+    note_id = result.get("note_id") or ""
+    print(f"  ✓ Merged {args.from_tag} → {args.to_tag} ({count} sources retagged)")
+    if note_id:
+        print(f"  ✓ Merge log: graph://{note_id[:12]}")
 
 
 def cmd_tag_help(args):
@@ -2272,39 +2236,40 @@ def cmd_tag_help(args):
 
 def cmd_thought(args):
     """Capture a raw thought/idea with optional provenance."""
-    if is_api_mode():
-        api_thought(args)
-        return
     from .models import new_id
-    db = GraphDB(args.db)
+    client = get_client()
     content = " ".join(args.text) if args.text else ""
     if args.content_stdin == "-" or not content:
         if args.content_stdin == "-":
             content = sys.stdin.read().strip()
         if not content:
             print("No content provided", file=sys.stderr)
-            db.close()
             sys.exit(1)
-    # Resolve thread prefix to full UUID before insert (FK requires exact match)
-    resolved_thread = None
-    if hasattr(args, 'thread') and args.thread:
-        thread = db.get_thread(args.thread)
-        if not thread:
-            print(f"Thread not found: {args.thread}", file=sys.stderr)
-            db.close()
-            sys.exit(1)
-        resolved_thread = thread["id"]
-    # Auto-detect provenance if not explicitly provided
+
+    # Host-only: resolve thread prefix + auto-provenance (both read local
+    # session/DB state that the container doesn't have access to).
+    resolved_thread = args.thread if hasattr(args, 'thread') and args.thread else None
     prov_source_id = args.source if hasattr(args, 'source') and args.source else None
     prov_turn = args.turn if hasattr(args, 'turn') and args.turn else None
-    if not prov_source_id:
-        auto_src, auto_turn = _auto_provenance(db, title=content[:80])
-        if auto_src and auto_turn:
-            prov_source_id = auto_src["id"]
-            prov_turn = auto_turn
+    if not isinstance(client, HttpClient):
+        db = GraphDB(args.db)
+        try:
+            if resolved_thread:
+                thread = db.get_thread(resolved_thread)
+                if not thread:
+                    print(f"Thread not found: {resolved_thread}", file=sys.stderr)
+                    sys.exit(1)
+                resolved_thread = thread["id"]
+            if not prov_source_id:
+                auto_src, auto_turn = _auto_provenance(db, title=content[:80])
+                if auto_src and auto_turn:
+                    prov_source_id = auto_src["id"]
+                    prov_turn = auto_turn
+        finally:
+            db.close()
 
     capture_id = new_id()
-    db.insert_capture(
+    client.insert_capture(
         capture_id, content,
         source_id=prov_source_id,
         turn_number=prov_turn,
@@ -2312,30 +2277,25 @@ def cmd_thought(args):
         actor=os.environ.get("BD_ACTOR", "user"),
     )
     thread_info = ""
-    if resolved_thread:
-        thread = db.get_thread(resolved_thread)
+    if resolved_thread and not isinstance(client, HttpClient):
+        thread = client.get_thread(resolved_thread)
         thread_info = f' \u2192 thread "{thread["title"]}"' if thread else ""
-    db.close()
     print(f"  \u2713 Captured: {capture_id[:11]}{thread_info}")
 
 
 def cmd_thoughts(args):
     """List thought captures (inbox or by thread)."""
-    if is_api_mode():
-        api_thoughts(args)
-        return
-    db = GraphDB(args.db)
+    client = get_client()
     since_iso = None
     if args.since:
         from datetime import datetime, timezone, timedelta
         secs = _parse_duration(args.since)
         since_iso = (datetime.now(timezone.utc) - timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    captures = db.list_captures(
+    captures = client.list_captures(
         thread_id=args.thread if hasattr(args, 'thread') and args.thread else None,
         since=since_iso,
         limit=args.limit,
     )
-    db.close()
     if not captures:
         print("No captures found")
         return
@@ -2354,59 +2314,44 @@ def cmd_thread_dispatch(args):
     """Dispatch thread subcommand: create, action, or list."""
     parts = args.thread_args or []
     if not parts:
-        # No args — list threads
         cmd_threads(args)
         return
     if parts[0] in _THREAD_ACTIONS:
-        # Action mode: graph thread park/done/active/assign ...
         action = parts[0]
         if len(parts) < 2:
             print(f"Usage: graph thread {action} <thread_id>", file=sys.stderr)
             sys.exit(1)
         cmd_thread_action(args, action, parts[1], parts[2] if len(parts) > 2 else None)
     else:
-        # Create mode: graph thread "Title"
-        if is_api_mode():
-            api_thread(args)
-            return
-        title = " ".join(parts)
-        cmd_thread_create(args, title)
+        cmd_thread_create(args, " ".join(parts))
 
 
 def cmd_thread_create_sub(args):
     """Entry point for 'graph thread create' subcommand."""
-    title = " ".join(args.title)
-    if is_api_mode():
-        # Bridge to API — set thread_args for compatibility
-        args.thread_args = args.title
-        api_thread(args)
-        return
-    cmd_thread_create(args, title)
+    cmd_thread_create(args, " ".join(args.title))
 
 
 def cmd_thread_create(args, title: str):
     """Create a new thread."""
     from .models import new_id
-    db = GraphDB(args.db)
     thread_id = new_id()
-    db.insert_thread(
+    get_client().insert_thread(
         thread_id, title,
         priority=args.priority,
         created_by=os.environ.get("BD_ACTOR", "user"),
+        org=os.environ.get("GRAPH_ORG"),
     )
-    db.close()
     print(f"  \u2713 Thread: {thread_id[:11]} \"{title}\" [active, P{args.priority}]")
 
 
 def cmd_threads(args):
     """List threads."""
-    if is_api_mode():
-        api_threads(args)
-        return
-    db = GraphDB(args.db)
-    status = None if args.all else (args.status if hasattr(args, 'status') and args.status else "active")
-    threads = db.list_threads(status=status, limit=args.limit)
-    db.close()
+    include_all = bool(getattr(args, "all", False))
+    status = None if include_all else (args.status if hasattr(args, 'status') and args.status else "active")
+    threads = get_client().list_threads(
+        status=status, include_all=include_all, limit=args.limit,
+        org=os.environ.get("GRAPH_ORG"),
+    )
     if not threads:
         print("No threads found")
         return
@@ -2423,23 +2368,19 @@ def cmd_threads(args):
 
 def cmd_thread_action(args, action: str, thread_id: str, target: str | None = None):
     """Thread actions: park, done, active, assign."""
-    if is_api_mode():
-        api_thread_action(args, action, thread_id, target)
-        return
-    db = GraphDB(args.db)
+    client = get_client()
+    org = os.environ.get("GRAPH_ORG")
     if action in ("park", "done", "active"):
-        db.update_thread_status(thread_id, "parked" if action == "park" else action)
-        thread = db.get_thread(thread_id)
+        client.thread_action(action, thread_id, org=org)
+        thread = client.get_thread(thread_id, org=org)
         title = thread["title"] if thread else thread_id
         print(f"  \u2713 {action.capitalize()}: {thread_id} \"{title}\"")
     elif action in ("assign", "attach"):
         if not target:
             print("assign requires a thread ID: graph thread assign CAPTURE_ID THREAD_ID", file=sys.stderr)
-            db.close()
             sys.exit(1)
-        db.assign_capture_to_thread(thread_id, target)
+        client.thread_action(action, thread_id, target=target, org=org)
         print(f"  \u2713 Assigned {thread_id} \u2192 thread {target}")
-    db.close()
 
 
 def _parse_duration(s: str) -> float:
@@ -2455,24 +2396,33 @@ def _parse_duration(s: str) -> float:
 
 def cmd_notes(args):
     """List notes, optionally filtered by recency."""
-    db = GraphDB(args.db)
+    since_iso = None
+    if args.since:
+        try:
+            secs = _parse_duration(args.since)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        from datetime import datetime, timezone, timedelta
+        since_dt = datetime.now(timezone.utc) - timedelta(seconds=secs)
+        since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
+    states, include_raw = _parse_state_args(args)
+
+    client = get_client()
+    session_ids: list[str] | None = None
+    author_pattern: str | None = None
+    # Host-only carve-out: filter by current tmux session via local DB.
+    if not isinstance(client, HttpClient):
+        db = GraphDB(args.db)
+        try:
+            session_ids, author_pattern = _current_session_context(db)
+        finally:
+            db.close()
+
     try:
-        since_iso = None
-        if args.since:
-            try:
-                secs = _parse_duration(args.since)
-            except ValueError as e:
-                print(f"Error: {e}", file=sys.stderr)
-                sys.exit(1)
-            from datetime import datetime, timezone, timedelta
-            since_dt = datetime.now(timezone.utc) - timedelta(seconds=secs)
-            since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
-        states, include_raw = _parse_state_args(args)
-        session_ids, author_pattern = _current_session_context(db)
-
-        sources = db.list_sources(
+        sources = client.list_sources(
             source_type="note",
             project=args.project,
             since=since_iso,
@@ -2481,6 +2431,7 @@ def cmd_notes(args):
             states=states, include_raw=include_raw,
             session_source_ids=session_ids,
             session_author_pattern=author_pattern,
+            org=os.environ.get("GRAPH_ORG"),
         )
         if not sources:
             print("No notes found")
@@ -2528,8 +2479,9 @@ def cmd_notes(args):
             print(f"  {sid}  {date}  [{project}]  {title}")
             if tags_str:
                 print(f"           tags: {tags_str}")
-    finally:
-        db.close()
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_journal(args):
@@ -2543,101 +2495,48 @@ def cmd_journal(args):
 
 def cmd_journal_write(args):
     """Write a structured journal entry from JSON stdin."""
-    if is_api_mode():
-        api_journal_write(args)
-        return
-
     raw = sys.stdin.read().strip() if args.content == "-" else args.content
     if not raw:
         print("Error: no JSON content provided", file=sys.stderr)
         sys.exit(1)
-
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         print(f"Error: invalid JSON: {e}", file=sys.stderr)
         sys.exit(1)
-
-    # Validate required fields
     for field in ("compact", "normal", "timestamp_start", "timestamp_end"):
         if field not in data:
             print(f"Error: missing required field: {field}", file=sys.stderr)
             sys.exit(1)
-
-    from .models import Source, Thought, Edge, new_id
-
-    db = GraphDB(args.db)
-    source_key = f"journal:{new_id()}"
-    src = Source(
-        type="journal",
-        platform="autonomy",
-        project=_get_scope() or "autonomy",
-        title=data["compact"],
-        file_path=source_key,
-        metadata={
-            "expanded": data.get("expanded", ""),
-            "timestamp_start": data["timestamp_start"],
-            "timestamp_end": data["timestamp_end"],
-            "entry_type": data.get("entry_type", "attention"),
-        },
-        created_at=data["timestamp_start"],
-    )
-    db.insert_source(src)
-
-    # Store normal-level content as a thought (FTS indexed)
-    t = Thought(
-        source_id=src.id,
-        content=data["normal"],
-        role="user",
-        turn_number=1,
-    )
-    db.insert_thought(t)
-
-    # Create provenance edges
-    edge_count = 0
-    for edge_data in data.get("edges", []):
-        target = edge_data.get("target")
-        if not target:
-            continue
-        # Resolve prefix to full UUID
-        resolved_src = db.get_source(target)
-        resolved = resolved_src["id"] if resolved_src else target
-        edge = Edge(
-            source_id=src.id,
-            source_type="source",
-            target_id=resolved,
-            target_type="source",
-            relation=edge_data.get("relation", "drew_from"),
-            metadata={"turn": edge_data.get("turn")},
-        )
-        db.insert_edge(edge)
-        edge_count += 1
-
-    db.commit()
-    db.close()
-    print(f"  \u2713 Journal entry saved (src:{src.id[:12]}) \u2014 {edge_count} edges")
+    data.setdefault("project", _get_scope() or "autonomy")
+    result = get_client().write_journal_entry(
+        data, org=os.environ.get("GRAPH_ORG"),
+    ) or {}
+    sid = result.get("source_id") or ""
+    edge_count = result.get("edge_count") or 0
+    print(f"  \u2713 Journal entry saved (src:{sid[:12]}) \u2014 {edge_count} edges")
 
 
 def cmd_journal_list(args):
     """List journal entries, optionally filtered by recency."""
-    db = GraphDB(args.db)
-    try:
-        since_iso = None
-        if args.since:
-            try:
-                secs = _parse_duration(args.since)
-            except ValueError as e:
-                print(f"Error: {e}", file=sys.stderr)
-                sys.exit(1)
-            from datetime import datetime, timezone, timedelta
-            since_dt = datetime.now(timezone.utc) - timedelta(seconds=secs)
-            since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    since_iso = None
+    if args.since:
+        try:
+            secs = _parse_duration(args.since)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        from datetime import datetime, timezone, timedelta
+        since_dt = datetime.now(timezone.utc) - timedelta(seconds=secs)
+        since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        sources = db.list_sources(
-            source_type="journal",
-            since=since_iso,
-            limit=args.limit,
-        )
+    sources = get_client().list_sources(
+        source_type="journal",
+        since=since_iso,
+        limit=args.limit,
+        org=os.environ.get("GRAPH_ORG"),
+    )
+    try:
         if not sources:
             print("No journal entries found")
             return
@@ -2669,20 +2568,16 @@ def cmd_journal_list(args):
                 if expanded:
                     print(f"\n{expanded}")
                 else:
-                    # Fall back to normal level from thought
-                    rows = db.conn.execute(
-                        "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = 1",
-                        (s["id"],),
-                    ).fetchall()
-                    if rows:
-                        print(f"\n{rows[0]['content']}")
+                    # Fall back to normal level from thought (turn 1).
+                    content = get_client().get_turn_content(
+                        s["id"], 1, org=os.environ.get("GRAPH_ORG"),
+                    )
+                    if content:
+                        print(f"\n{content}")
             elif getattr(args, "normal", False):
-                # Show normal level (from thought content)
-                rows = db.conn.execute(
-                    "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = 1",
-                    (s["id"],),
-                ).fetchall()
-                content = rows[0]["content"] if rows else ""
+                content = get_client().get_turn_content(
+                    s["id"], 1, org=os.environ.get("GRAPH_ORG"),
+                ) or ""
                 print(f"\n  {sid}  {time_range}")
                 if content:
                     for line in content.split("\n"):
@@ -2691,8 +2586,9 @@ def cmd_journal_list(args):
                 # Compact level (title only)
                 title = s.get("title", "")
                 print(f"  {sid}  {time_range}  {title}")
-    finally:
-        db.close()
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _auto_save_note(source_id: str, content: str) -> str:
@@ -2713,15 +2609,9 @@ def cmd_note_router(args):
             sys.exit(1)
         args.source = args.text[1]
         args.text = args.text[2:]
-        if is_api_mode():
-            api_note_update(args)
-        else:
-            cmd_note_update(args)
+        cmd_note_update(args)
     else:
-        if is_api_mode():
-            api_note(args)
-        else:
-            cmd_note(args)
+        cmd_note(args)
 
 
 def _check_single_line_content(content: str, force: bool) -> None:
@@ -2759,20 +2649,22 @@ def cmd_note(args):
 
     # Auto-provenance runs in the CLI layer so the graph sessions refresh
     # subprocess (which rereads the local JSONL feeds) is scoped to the
-    # interactive caller, not every API write.
+    # interactive caller, not every API write. Host-only — the container
+    # can't read the caller's tmux session state from its bind mount.
     auto_src_id: str | None = None
     auto_turn: int | None = None
-    try:
-        own_db = GraphDB(args.db)
+    if not isinstance(get_client(), HttpClient):
         try:
-            auto_src, turn = _auto_provenance(own_db, title=text[:80])
-            if auto_src and turn:
-                auto_src_id = auto_src["id"]
-                auto_turn = turn
-        finally:
-            own_db.close()
-    except Exception:
-        pass
+            own_db = GraphDB(args.db)
+            try:
+                auto_src, turn = _auto_provenance(own_db, title=text[:80])
+                if auto_src and turn:
+                    auto_src_id = auto_src["id"]
+                    auto_turn = turn
+            finally:
+                own_db.close()
+        except Exception:
+            pass
 
     with _pin_db(args):
         try:
@@ -2816,18 +2708,12 @@ def cmd_comment_router(args):
             print("Error: usage: graph comment integrate <comment_id>", file=sys.stderr)
             sys.exit(1)
         args.comment_id = positionals[1]
-        if is_api_mode():
-            api_comment_integrate(args)
-        else:
-            cmd_comment_integrate(args)
+        cmd_comment_integrate(args)
     else:
         # add mode: first arg is source, rest is text
         args.source = positionals[0] if positionals else None
         args.text = positionals[1:] if len(positionals) > 1 else []
-        if is_api_mode():
-            api_comment_add(args)
-        else:
-            cmd_comment_add(args)
+        cmd_comment_add(args)
 
 
 def cmd_comment_add(args):
@@ -2911,6 +2797,21 @@ def cmd_comment_integrate(args):
 
 def cmd_note_update(args):
     """Update a note with versioned history."""
+    from . import ops as _ops
+    # Cross-org gate runs first: updating a peer-org note is a policy error
+    # (CrossOrgWriteError, exit 2) that should surface cleanly without making
+    # the caller read the Revision Protocol note to find out they shouldn't
+    # have tried. The Revision Protocol gate fires only if the target is
+    # actually writable from the caller's org.
+    caller_org = os.environ.get("GRAPH_ORG")
+    if caller_org:
+        src = get_client().get_source(args.source, org=caller_org)
+        src_org = (src or {}).get("org")
+        if src and src_org and src_org != caller_org:
+            raise_err = _ops.CrossOrgWriteError(args.source, src_org)
+            print(f"Error: {raise_err}", file=sys.stderr)
+            sys.exit(2)
+
     if getattr(args, "html", None):
         _require_read("c62b0142", "Agents must read the Rich-Content Creation Guide before creating/updating rich-content notes.\n  See: graph://c62b0142-fb3")
     _require_read("843a8137", "Agents must read the Note Revision Protocol before updating notes.\n  See: graph://843a8137-3c7")
@@ -3222,20 +3123,17 @@ def cmd_ui_design(args):
 
 def cmd_related(args):
     """Find content related to a search term."""
-    db = GraphDB(args.db)
-
-    # Find entity
-    entities = db.search_entities(args.term)
+    client = get_client()
+    org = os.environ.get("GRAPH_ORG")
+    entities = client.search_entities(args.term, org=org)
     if not entities:
         print(f"No entity found matching '{args.term}'")
-        db.close()
         return
 
     entity = entities[0]
     print(f"Entity: {entity['name']} [{entity['type']}]\n")
 
-    # Find thoughts mentioning this entity
-    thoughts = db.entity_thoughts(entity["id"])
+    thoughts = client.entity_thoughts(entity["id"], org=org)
     if thoughts:
         print(f"Referenced in {len(thoughts)} thought(s):")
         for t in thoughts[:10]:
@@ -3243,8 +3141,6 @@ def cmd_related(args):
             print(f"  [{t['platform']}/{t['source_title']}] turn {t.get('turn_number', '?')}")
             print(f"    {snippet}")
             print()
-
-    db.close()
 
 
 def _cmd_primer(args):
@@ -3490,14 +3386,12 @@ def _store_attachment(db, file_path_str, source_id=None, turn_number=None, alt_t
 
 def cmd_attach(args):
     """Attach a file to the graph with hash-based dedup."""
-    if is_api_mode():
-        api_attach(args)
-        return
-
+    client = get_client()
     source_id = getattr(args, "source", None)
     turn_number = getattr(args, "turn", None)
 
-    if not source_id and not turn_number:
+    # Host-only auto-provenance: the tmux session context lives locally.
+    if not isinstance(client, HttpClient) and not source_id and not turn_number:
         db = GraphDB(args.db)
         try:
             auto_src, auto_turn = _auto_provenance(db)
@@ -3519,7 +3413,7 @@ def cmd_attach(args):
     from . import ops as _ops
     with _pin_db(args):
         try:
-            att = get_client().attach_file(
+            att = client.attach_file(
                 args.file_path,
                 source_id=source_id,
                 turn_number=turn_number,
@@ -3543,21 +3437,18 @@ def cmd_attach(args):
 def cmd_attachment(args):
     """Show metadata for a single attachment (cross-org aware)."""
     org = os.environ.get("GRAPH_ORG")
+    client = get_client()
 
-    if is_api_mode():
-        # Container path — dashboard resolves cross-org server-side.
-        att = get_client().get_attachment(args.id, org=org)
+    if isinstance(client, HttpClient):
+        att = client.get_attachment(args.id, org=org)
     else:
-        # Host path: try args.db first (honours --db pins + own-org
-        # default), then fall back to the cross-org public-surface scan.
         own_db = GraphDB(args.db)
         try:
             att = own_db.get_attachment(args.id)
         finally:
             own_db.close()
-
         if att is None:
-            att = get_client().get_attachment(args.id, org=org)
+            att = client.get_attachment(args.id, org=org)
 
     if not att:
         print(f"No attachment found matching '{args.id}'", file=sys.stderr)
@@ -3600,11 +3491,9 @@ def cmd_attachments(args):
     source_id = getattr(args, "source_id", None)
     limit = getattr(args, "limit", 50)
     org = os.environ.get("GRAPH_ORG")
+    client = get_client()
 
-    if is_api_mode():
-        # Container path: unfiltered listing isn't supported by the
-        # dashboard API (and isn't meaningful cross-org); require a
-        # source_id.
+    if isinstance(client, HttpClient):
         if not source_id:
             print(
                 "  Unfiltered attachment listing is only available on the host. "
@@ -3612,11 +3501,11 @@ def cmd_attachments(args):
                 file=sys.stderr,
             )
             return
-        src = get_client().get_source(source_id, org=org)
+        src = client.get_source(source_id, org=org)
         if src is None:
             print("  No attachments found.")
             return
-        atts = get_client().list_attachments(
+        atts = client.list_attachments(
             source_id=src["id"], org=org, limit=limit,
         )
         if not atts:

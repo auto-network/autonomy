@@ -95,17 +95,50 @@ class CrossOrgWriteError(RuntimeError):
 # ── DB selection ─────────────────────────────────────────────
 
 
-def _resolve_org(org: str | None) -> str | None:
-    """Apply the org resolution cascade (explicit → env → default).
+import contextvars as _ctxvars
 
-    Returns ``None`` only when ``GRAPH_DB`` is pinned (tests/override),
-    because the resolver short-circuits on that env var before it cares
-    about org scope. Otherwise returns a concrete slug — explicit kwarg
-    wins, then ``GRAPH_ORG`` env, then :func:`resolve_caller_db_path`
-    applies the scopeless default (``personal``).
+# Per-request caller-org context. The dashboard's ``caller_org_middleware``
+# sets this from the ``X-Graph-Org`` header on every inbound request, so
+# every ``ops.*`` call inside any handler sees the right org automatically
+# — no manual ``org=`` threading at each endpoint. See
+# graph://bcce359d-a1d § Cross-org request routing.
+_caller_org_var: "_ctxvars.ContextVar[str | None]" = _ctxvars.ContextVar(
+    "graph_caller_org", default=None,
+)
+
+
+def set_caller_org(org: str | None):
+    """Set the request-scoped caller org and return the reset token.
+
+    Callers MUST call ``reset(token)`` in a ``finally`` block to avoid
+    leaking state between requests. Middleware does this automatically.
+    """
+    return _caller_org_var.set(org)
+
+
+def reset_caller_org(token) -> None:
+    """Reset the caller-org contextvar using the token from ``set_caller_org``."""
+    _caller_org_var.reset(token)
+
+
+def _resolve_org(org: str | None) -> str | None:
+    """Apply the org resolution cascade (explicit → contextvar → env → default).
+
+    Priority:
+      1. Explicit ``org=`` kwarg (wins; used by code that knows exactly
+         which org it wants — ``ops`` internal helpers, host CLI tests).
+      2. Per-request contextvar — set by ``caller_org_middleware`` on the
+         dashboard from ``X-Graph-Org``. Handlers don't need to thread
+         ``org=`` through; the ops layer picks it up automatically.
+      3. ``GRAPH_ORG`` env — host CLI (no middleware in play).
+      4. ``None`` — scopeless default (``personal.db`` via
+         :func:`resolve_caller_db_path`).
     """
     if org is not None:
         return org
+    ctx_org = _caller_org_var.get()
+    if ctx_org:
+        return ctx_org
     env_org = os.environ.get("GRAPH_ORG")
     if env_org:
         return env_org
@@ -1175,6 +1208,31 @@ def get_thread(
         db.close()
 
 
+def thread_action(
+    action: str,
+    thread_id: str,
+    *,
+    target: str | None = None,
+    org: str | None = None,
+) -> dict:
+    """Apply a thread action: ``park`` / ``done`` / ``active`` update the
+    thread status; ``assign`` / ``attach`` bind a capture to a thread.
+
+    Mirrors the ``POST /api/graph/thread/action`` dashboard endpoint so
+    CLI handlers can call ``get_client().thread_action(...)`` uniformly.
+    """
+    if action in ("park", "done", "active"):
+        status = "parked" if action == "park" else action
+        update_thread_status(thread_id, status, org=org)
+        return {"ok": True, "action": action, "thread_id": thread_id}
+    if action in ("assign", "attach"):
+        if not target:
+            raise ValueError(f"{action} requires a target thread id")
+        assign_capture_to_thread(thread_id, target, org=org)
+        return {"ok": True, "action": action, "capture_id": thread_id, "thread_id": target}
+    raise ValueError(f"unknown thread action: {action!r}")
+
+
 def list_captures(
     *,
     org: str | None = None,
@@ -1202,9 +1260,13 @@ def list_threads(
     *,
     org: str | None = None,
     status: str | None = "active",
+    include_all: bool = False,
     limit: int = 20,
 ) -> list[dict]:
-    """List threads with optional status filter."""
+    """List threads with optional status filter. ``include_all=True``
+    overrides ``status`` and returns every status."""
+    if include_all:
+        status = None
     db = _open(org)
     try:
         return db.list_threads(status=status, limit=limit)
@@ -1429,6 +1491,10 @@ def create_note(
         meta["rich_content"] = True
 
     source_key = f"note:{new_id()}"
+    # publication_state explicit even though the Source dataclass default is
+    # "curated" — long-running server processes may have imported an older
+    # Source class, and the intent ("graph note is cross-session visible")
+    # shouldn't hinge on process restart.
     source = Source(
         type="note",
         platform="local",
@@ -1436,6 +1502,7 @@ def create_note(
         title=content[:80],
         file_path=source_key,
         metadata=meta,
+        publication_state="curated",
     )
 
     db = _open(org)
@@ -1823,6 +1890,79 @@ def stats(
     db = _open(org)
     try:
         return db.stats()
+    finally:
+        db.close()
+
+
+def get_tree(
+    root: str | None = None,
+    *,
+    depth: int = 3,
+    org: str | None = None,
+) -> list[dict]:
+    """Return hierarchy tree nodes rooted at ``root`` (or full tree)."""
+    db = _open(org)
+    try:
+        return db.get_tree(root, depth=depth)
+    finally:
+        db.close()
+
+
+def search_entities(
+    query: str,
+    *,
+    limit: int = 20,
+    org: str | None = None,
+) -> list[dict]:
+    """Full-text search entities by name."""
+    db = _open(org)
+    try:
+        return db.search_entities(query, limit=limit)
+    finally:
+        db.close()
+
+
+def list_entities(
+    *,
+    entity_type: str | None = None,
+    limit: int = 20,
+    org: str | None = None,
+) -> list[dict]:
+    """List entities, optionally filtered by type."""
+    db = _open(org)
+    try:
+        return db.list_entities(entity_type=entity_type, limit=limit)
+    finally:
+        db.close()
+
+
+def entity_thoughts(
+    entity_id: str,
+    *,
+    limit: int = 20,
+    org: str | None = None,
+) -> list[dict]:
+    """Thoughts mentioning a given entity id."""
+    db = _open(org)
+    try:
+        return db.entity_thoughts(entity_id)[:limit]
+    finally:
+        db.close()
+
+
+def entity_mention_count(
+    entity_id: str,
+    *,
+    org: str | None = None,
+) -> int:
+    """Total mentions of an entity across all sources."""
+    db = _open(org)
+    try:
+        row = db.conn.execute(
+            "SELECT SUM(count) AS total FROM entity_mentions WHERE entity_id = ?",
+            (entity_id,),
+        ).fetchone()
+        return int(row["total"] or 0) if row else 0
     finally:
         db.close()
 

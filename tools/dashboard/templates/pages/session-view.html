@@ -32,7 +32,7 @@
            @click="headerOpen = !headerOpen">
         <div class="sv-header-inner">
           <!-- Header row 1: status dot, role badge, indicator rail, terminal toggle, chevron -->
-          <div class="sv-header-row1" style="display:flex;align-items:center;gap:12px;">
+          <div class="sv-header-row1" style="display:flex;align-items:center;gap:12px;margin-top:3px;">
             <span class="indicator-dot"
                   :class="{ 'indicator--green': isLive, 'indicator--gray': !isLive, 'indicator-dot--working': isWorking }"></span>
             <span class="sc-role sc-type-host"

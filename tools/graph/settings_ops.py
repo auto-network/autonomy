@@ -561,15 +561,12 @@ def list_set_ids(
 
 
 def _resolve_settings_caller(org: str | None) -> str | None:
-    """Mirror of ``ops._resolve_org`` avoiding the import cycle.
-
-    Returns the concrete slug a caller should be treated as when
-    resolving peer reads — explicit > ``GRAPH_ORG`` > ``None`` (triggers
-    the scopeless default inside ``resolve_caller_db_path``).
-    """
-    if org is not None:
-        return org
-    return os.environ.get("GRAPH_ORG")
+    """Thin wrapper over ``ops._resolve_org`` to avoid the import cycle
+    at module import time. Honours the same cascade: explicit kwarg,
+    then per-request contextvar (set by dashboard middleware), then
+    ``GRAPH_ORG`` env, then ``None`` (scopeless default)."""
+    from . import ops as _ops
+    return _ops._resolve_org(org)
 
 
 def _fetch_setting_any_org(
