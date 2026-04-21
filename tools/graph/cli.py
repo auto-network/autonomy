@@ -72,6 +72,7 @@ from .primer import generate_primer, collect_primer_data, format_for_agent, form
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_stats, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
 from .worktree_cmd import cmd_worktree_default, cmd_worktree_list, cmd_worktree_prune
 from .api_client import is_api_mode, api_note, api_note_update, api_comment_add, api_comment_integrate, api_bead, api_link, api_journal_write, api_sessions, api_set_label, api_set_topics, api_set_role, api_set_nag, api_attach, api_collab_list, api_collab_tag, api_collab_tag_describe, api_thought, api_thoughts, api_thread, api_threads, api_thread_action, api_tag_add, api_tag_remove, api_tag_merge
+from .client import get_client
 
 
 def cmd_ingest(args):
@@ -116,22 +117,24 @@ def cmd_ingest(args):
 
 def cmd_search(args):
     """Full-text search across the graph."""
-    db = GraphDB(args.db)
-    results = db.search(args.query, limit=args.limit, project=getattr(args, 'project', None), or_mode=getattr(args, 'or_mode', False), tag=getattr(args, 'tag', None))
+    results = get_client().search(
+        args.query,
+        limit=args.limit,
+        project=getattr(args, 'project', None),
+        or_mode=getattr(args, 'or_mode', False),
+        tag=getattr(args, 'tag', None),
+    )
 
     if args.json:
         import json as _json
-        # Truncate content for JSON output
         for r in results:
             if len(r.get("content", "")) > args.width:
                 r["content"] = r["content"][:args.width] + "…"
         print(_json.dumps(results, default=str))
-        db.close()
         return
 
     if not results:
         print("No results found.")
-        db.close()
         return
 
     width = args.width
@@ -142,7 +145,6 @@ def cmd_search(args):
         sid = r.get("source_id", "?")[:12]
 
         if rtype == "source":
-            # Direct source match
             stype = r.get("source_type", "")
             platform = r.get("platform", "")
             created = (r.get("created_at") or "")[:10]
@@ -151,7 +153,6 @@ def cmd_search(args):
             print(f"    {' | '.join(detail_parts)}")
             print()
         elif rtype == "edge":
-            # Linked source via edge
             direction = r.get("direction", "→")
             relation = r.get("relation", "linked")
             title = r.get("source_title") or "?"
@@ -161,8 +162,7 @@ def cmd_search(args):
             print(f"    relation: {relation}")
             print()
         else:
-            # Normal thought/derivation FTS result
-            tag = rtype[0].upper()  # T or D
+            tag = rtype[0].upper()
             source = r.get("source_title") or "?"
             turn = r.get("turn_number", "?")
             content = r["content"]
@@ -172,8 +172,6 @@ def cmd_search(args):
             print(f"  [{tag}] {source[:50]} t{turn} (src:{sid}){proj_tag}")
             print(f"    {lines}")
             print()
-
-    db.close()
 
 
 def _in_container() -> bool:
@@ -1655,16 +1653,10 @@ def _age_str(created_at: str) -> str:
 
 def cmd_collab_list(args):
     """List collaborative reference notes ranked by activity."""
-    if is_api_mode():
-        api_collab_list(args)
-        return
-    db = GraphDB(args.db)
-    sources = db.list_collab_sources(limit=args.limit)
-    db.close()
+    sources = get_client().list_collab_sources(limit=args.limit)
     if not sources:
         print("No collab notes found. Tag notes with: graph note --tags collab")
         return
-    # Header
     print(f"{'ID':14s} {'Title':50s} {'Comments':>8s} {'Reads':>6s} {'Age'}")
     print(f"{'─' * 14} {'─' * 50} {'─' * 8} {'─' * 6} {'─' * 10}")
     for s in sources:
