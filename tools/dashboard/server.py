@@ -5697,6 +5697,192 @@ async def api_graph_collab_topics(request):
     return JSONResponse({"topics": graph_ops.list_collab_topics()})
 
 
+# ── Settings primitive (graph://0d3f750f-f9c) ──────────────
+
+
+def _parse_settings_read_params(query_params) -> tuple[int | None, int | None, int | None, str | None]:
+    """Pull target/min/stored revision + error str from query params."""
+    def _to_int(name):
+        v = query_params.get(name)
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except ValueError:
+            return f"invalid {name}: {v!r}"
+    for name in ("target_revision", "min_revision", "stored_revision"):
+        v = _to_int(name)
+        if isinstance(v, str):
+            return None, None, None, v
+    return (
+        int(query_params["target_revision"]) if "target_revision" in query_params else None,
+        int(query_params["min_revision"]) if "min_revision" in query_params else None,
+        int(query_params["stored_revision"]) if "stored_revision" in query_params else None,
+        None,
+    )
+
+
+async def api_graph_settings_list(request):
+    """GET /api/graph/settings/<set_id> — resolved members of a SET."""
+    set_id = request.path_params["set_id"]
+    target, minrev, stored, err = _parse_settings_read_params(request.query_params)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    members = graph_ops.read_set(
+        set_id, target_revision=target, min_revision=minrev,
+    )
+    out = members.to_dict()
+    if stored is not None:
+        out["members"] = [m for m in out["members"] if m["stored_revision"] == stored]
+    return JSONResponse(out)
+
+
+async def api_graph_settings_get_by_key(request):
+    """GET /api/graph/settings/<set_id>/<key> — single resolved member by key."""
+    set_id = request.path_params["set_id"]
+    key = request.path_params["key"]
+    target, minrev, stored, err = _parse_settings_read_params(request.query_params)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    members = graph_ops.read_set(
+        set_id, target_revision=target, min_revision=minrev,
+    )
+    for m in members.members:
+        if m.key == key:
+            return JSONResponse(m.to_dict())
+    return JSONResponse({"error": "not found"}, status_code=404)
+
+
+async def api_graph_setting_get(request):
+    """GET /api/graph/setting/<id> — resolve a single Setting by id."""
+    sid = request.path_params["id"]
+    target, _, _, err = _parse_settings_read_params(request.query_params)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    got = graph_ops.get_setting(sid, target_revision=target)
+    if got is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(got.to_dict())
+
+
+async def api_graph_setting_create(request):
+    """POST /api/graph/setting — body: {set_id, schema_revision, key, payload, state}."""
+    from tools.graph.schemas.registry import SchemaValidationError
+    body = await request.json()
+    required = ("set_id", "schema_revision", "key", "payload")
+    missing = [k for k in required if k not in body]
+    if missing:
+        return JSONResponse(
+            {"error": f"missing fields: {missing}"}, status_code=400,
+        )
+    try:
+        sid = graph_ops.add_setting(
+            body["set_id"],
+            int(body["schema_revision"]),
+            body["key"],
+            body["payload"],
+            state=body.get("state", "raw"),
+        )
+    except SchemaValidationError as e:
+        return JSONResponse(
+            {"error": "schema validation failed", "detail": str(e)},
+            status_code=400,
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"id": sid}, status_code=201)
+
+
+async def api_graph_setting_override(request):
+    """POST /api/graph/setting/<id>/override — body: {payload, state}."""
+    from tools.graph.schemas.registry import SchemaValidationError
+    target_id = request.path_params["id"]
+    body = await request.json()
+    if "payload" not in body:
+        return JSONResponse({"error": "payload required"}, status_code=400)
+    try:
+        sid = graph_ops.override_setting(
+            target_id, body["payload"], state=body.get("state", "raw"),
+        )
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except SchemaValidationError as e:
+        return JSONResponse(
+            {"error": "schema validation failed", "detail": str(e)},
+            status_code=400,
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"id": sid}, status_code=201)
+
+
+async def api_graph_setting_exclude(request):
+    """POST /api/graph/setting/<id>/exclude — body: {state}."""
+    target_id = request.path_params["id"]
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    try:
+        sid = graph_ops.exclude_setting(
+            target_id, state=body.get("state", "raw"),
+        )
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"id": sid}, status_code=201)
+
+
+async def api_graph_setting_promote(request):
+    """POST /api/graph/setting/<id>/promote — body: {to_state}."""
+    sid = request.path_params["id"]
+    body = await request.json()
+    to_state = body.get("to_state") or body.get("to")
+    if not to_state:
+        return JSONResponse({"error": "to_state required"}, status_code=400)
+    try:
+        graph_ops.promote_setting(sid, to_state)
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"ok": True})
+
+
+async def api_graph_setting_deprecate(request):
+    """POST /api/graph/setting/<id>/deprecate — body: {successor_id?}."""
+    sid = request.path_params["id"]
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    try:
+        graph_ops.deprecate_setting(sid, successor_id=body.get("successor_id"))
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+async def api_graph_setting_delete(request):
+    """DELETE /api/graph/setting/<id> — hard-delete (raw only)."""
+    sid = request.path_params["id"]
+    try:
+        graph_ops.remove_setting(sid)
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"ok": True})
+
+
+async def api_graph_set_ids(request):
+    """GET /api/graph/sets — list known set_ids."""
+    return JSONResponse({"set_ids": graph_ops.list_set_ids()})
+
+
 async def api_graph_resolve(request):
     """Universal graph entity resolver — sources, attachments, partial ID prefix."""
     id = request.path_params["id"]
@@ -6236,6 +6422,17 @@ routes = [
     Route("/api/graph/source/{id}", api_graph_source_get, methods=["GET"]),
     Route("/api/graph/attachment/{attachment_id}", api_graph_attachment_get, methods=["GET"]),
     Route("/api/graph/collab-topics", api_graph_collab_topics, methods=["GET"]),
+    # Settings primitive (graph://0d3f750f-f9c). Routes ordered specific → generic.
+    Route("/api/graph/sets", api_graph_set_ids, methods=["GET"]),
+    Route("/api/graph/settings/{set_id}/{key}", api_graph_settings_get_by_key, methods=["GET"]),
+    Route("/api/graph/settings/{set_id}", api_graph_settings_list, methods=["GET"]),
+    Route("/api/graph/setting", api_graph_setting_create, methods=["POST"]),
+    Route("/api/graph/setting/{id}/override", api_graph_setting_override, methods=["POST"]),
+    Route("/api/graph/setting/{id}/exclude", api_graph_setting_exclude, methods=["POST"]),
+    Route("/api/graph/setting/{id}/promote", api_graph_setting_promote, methods=["POST"]),
+    Route("/api/graph/setting/{id}/deprecate", api_graph_setting_deprecate, methods=["POST"]),
+    Route("/api/graph/setting/{id}", api_graph_setting_get, methods=["GET"]),
+    Route("/api/graph/setting/{id}", api_graph_setting_delete, methods=["DELETE"]),
     Route("/api/graph/{id}", api_graph_resolve),
     Route("/api/source/{id}", api_source_read),
     Route("/api/source/{id}/attachments", api_source_attachments),
