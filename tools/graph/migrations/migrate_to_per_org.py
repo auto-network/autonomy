@@ -117,6 +117,12 @@ class MigrationPlan:
     # see the data-loss surface before applying, and so verify_migration
     # can subtract from the expected legacy totals.
     orphans_by_table: dict[str, int] = field(default_factory=dict)
+    # Rows deleted by the post-copy ``PRAGMA foreign_key_check`` safety
+    # net (see :func:`apply_migration`). Keyed by table. Covers FK
+    # violations that the explicit per-table orphan filters did not
+    # anticipate — most commonly ``entity_mentions.entity_id`` pointing
+    # at an entity we didn't copy into that org.
+    fk_check_drops: dict[str, int] = field(default_factory=dict)
 
 
 # ── Pre-flight ───────────────────────────────────────────────
@@ -603,6 +609,17 @@ def apply_migration(
         for slug in plan.org_slugs:
             org_dbs[slug] = _open_org_db_for_write(slug, plan.orgs_dir)
 
+        # Disable FK enforcement during the copy. The legacy DB ran
+        # with FKs off at runtime (SQLite default) and accumulated
+        # orphans that the per-table filters above try to predict. To
+        # keep the migration robust against schema evolution we also
+        # run ``PRAGMA foreign_key_check`` after the copy and drop any
+        # remaining offenders (see below). SQLite silently ignores FK
+        # pragma flips inside an open transaction, so commit first.
+        for db in org_dbs.values():
+            db.conn.commit()
+            db.conn.execute("PRAGMA foreign_keys = OFF")
+
         try:
             # Order matters for FK-like dependencies (sources before
             # children) and for FTS triggers to fire correctly.
@@ -686,8 +703,45 @@ def apply_migration(
                       "updated_at"),
                 log=log,
             )
-            for slug, db in org_dbs.items():
+            # Commit inserts so foreign_key_check sees the final state.
+            for db in org_dbs.values():
                 db.conn.commit()
+
+            # Safety net: ``PRAGMA foreign_key_check`` scans every FK
+            # relationship in the schema and returns offending rows.
+            # We drop each by rowid and re-enable FK enforcement. This
+            # catches classes of orphan the per-table filters above
+            # don't handle — notably ``entity_mentions.entity_id``
+            # pointing at an entity we didn't seed into this org's DB.
+            for slug, db in org_dbs.items():
+                violations = list(
+                    db.conn.execute("PRAGMA foreign_key_check")
+                )
+                if violations:
+                    by_table: dict[str, int] = {}
+                    for (table, rowid, _parent, _fkid) in violations:
+                        if rowid is None:
+                            # WITHOUT ROWID tables — none in our schema
+                            # today. Skip gracefully if that changes.
+                            continue
+                        db.conn.execute(
+                            f"DELETE FROM {table} WHERE rowid = ?",
+                            (rowid,),
+                        )
+                        by_table[table] = by_table.get(table, 0) + 1
+                    detail = ", ".join(
+                        f"{t}:{n}" for t, n in sorted(by_table.items())
+                    )
+                    log(
+                        f"  {slug}: FK-check dropped "
+                        f"{sum(by_table.values())} rows ({detail})"
+                    )
+                    for t, n in by_table.items():
+                        plan.fk_check_drops[t] = (
+                            plan.fk_check_drops.get(t, 0) + n
+                        )
+                    db.conn.commit()
+                db.conn.execute("PRAGMA foreign_keys = ON")
         finally:
             for db in org_dbs.values():
                 db.close()
@@ -1267,15 +1321,18 @@ def verify_migration(plan: MigrationPlan) -> VerificationReport:
             # Tags are duplicated across orgs; not a sum check.
             continue
         adjusted = expected
+        orphan_drops = 0
         if tbl in _dropped_on_orphan:
-            adjusted -= plan.orphans_by_table.get(tbl, 0)
+            orphan_drops += plan.orphans_by_table.get(tbl, 0)
+        # FK-check safety net drops apply to every table uniformly.
+        orphan_drops += plan.fk_check_drops.get(tbl, 0)
+        adjusted -= orphan_drops
         if total != adjusted:
             report.ok = False
             orphan_note = ""
-            if tbl in _dropped_on_orphan and plan.orphans_by_table.get(tbl):
+            if orphan_drops:
                 orphan_note = (
-                    f" (expected adjusted for "
-                    f"{plan.orphans_by_table[tbl]} orphan rows)"
+                    f" (expected adjusted for {orphan_drops} dropped rows)"
                 )
             report.issues.append(
                 f"{tbl}: legacy={expected}, per-org sum={total}"
