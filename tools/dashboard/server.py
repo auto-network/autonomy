@@ -2755,6 +2755,7 @@ async def api_dispatch_tail(request):
             "session_id": session_id, "tmux_name": tmux_name,
             "tmux_session": tmux_name, "session_uuid": session_uuid,
             "project": project,
+            "type": (db_row["type"] if db_row else "dispatch"),
         })
 
     entries = []
@@ -2787,6 +2788,7 @@ async def api_dispatch_tail(request):
         "tmux_session": tmux_name,
         "session_uuid": session_uuid,
         "project": project,
+        "type": (db_row["type"] if db_row else "dispatch"),
     })
 
 
