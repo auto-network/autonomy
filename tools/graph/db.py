@@ -64,15 +64,15 @@ def _now_iso() -> str:
 
 
 def resolve_caller_db_path(
-    caller_org: str | None = None,
+    org: str | None = None,
     *,
     root: Path | str | None = None,
 ) -> Path:
-    """Resolve the DB path for a given ``caller_org``.
+    """Resolve the DB path for a given ``org``.
 
     Priority:
       1. ``GRAPH_DB`` env (test override / explicit pin) → that path.
-      2. ``data/orgs/<caller_org>.db`` — ``caller_org`` defaults to
+      2. ``data/orgs/<org>.db`` — ``org`` defaults to
          ``'personal'`` (scopeless convergence, auto-txg5.3): every write
          without an explicit org lands in the operator's personal DB.
       3. Legacy ``data/graph.db`` (``DEFAULT_DB``) when the per-org DB
@@ -83,7 +83,7 @@ def resolve_caller_db_path(
     env_db = os.environ.get("GRAPH_DB")
     if env_db:
         return Path(env_db)
-    slug = caller_org or "personal"
+    slug = org or "personal"
     org_path = _org_db_path(slug, root)
     if org_path.exists():
         return org_path
@@ -146,10 +146,10 @@ class GraphDB:
         db_path: Path | str | None = None,
         *,
         mode: Literal["rw", "ro"] = "rw",
-        caller_org: str | None = None,
+        org: str | None = None,
     ):
         if db_path is None:
-            db_path = resolve_caller_db_path(caller_org)
+            db_path = resolve_caller_db_path(org)
         self.db_path = Path(db_path)
         self.read_only = False
         self._immutable = False

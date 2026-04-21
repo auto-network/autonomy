@@ -149,17 +149,17 @@ def test_streams_summary_aggregates_tags(graph_db_env):
     assert by_tag.get("beta") == 1
 
 
-def test_caller_org_kwarg_accepted(graph_db_env):
-    """caller_org and peers parameters are accepted (placeholder for per-org DB).
+def test_org_kwarg_accepted(graph_db_env):
+    """org and peers parameters are accepted (placeholder for per-org DB).
 
     Today they are ignored — verify the signatures accept them without error
     so downstream beads can pass them through call sites.
     """
     GraphDB(str(graph_db_env)).close()
     # Should not raise
-    ops.search("anything", caller_org="autonomy", peers=["anchore"])
-    ops.list_sources(caller_org="autonomy", peers=["anchore"], limit=1)
-    ops.get_source("missing", caller_org="autonomy", peers=None)
+    ops.search("anything", org="autonomy", peers=["anchore"])
+    ops.list_sources(org="autonomy", peers=["anchore"], limit=1)
+    ops.get_source("missing", org="autonomy", peers=None)
 
 
 def _seed_and_commit(db: GraphDB, *, title: str, tags: list[str],
@@ -171,8 +171,8 @@ def _seed_and_commit(db: GraphDB, *, title: str, tags: list[str],
     return src
 
 
-def test_caller_org_none_defaults_to_personal(tmp_path, monkeypatch):
-    """With per-org DBs present and no GRAPH_DB override, ``caller_org=None``
+def test_org_none_defaults_to_personal(tmp_path, monkeypatch):
+    """With per-org DBs present and no GRAPH_DB override, ``org=None``
     resolves to ``personal`` — writes/reads land in ``personal.db``
     (auto-txg5.3 scopeless convergence, absorbing auto-s45z9)."""
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
@@ -193,8 +193,8 @@ def test_caller_org_none_defaults_to_personal(tmp_path, monkeypatch):
     )
 
 
-def test_caller_org_routes_to_specific_org_db(tmp_path, monkeypatch):
-    """Different caller_org values open different per-org DBs."""
+def test_org_routes_to_specific_org_db(tmp_path, monkeypatch):
+    """Different org values open different per-org DBs."""
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
@@ -205,8 +205,8 @@ def test_caller_org_routes_to_specific_org_db(tmp_path, monkeypatch):
         finally:
             db.close()
 
-    aut_hits = ops.search("autonomy", caller_org="autonomy", include_raw=True)
-    anc_hits = ops.search("anchore", caller_org="anchore", include_raw=True)
+    aut_hits = ops.search("autonomy", org="autonomy", include_raw=True)
+    anc_hits = ops.search("anchore", org="anchore", include_raw=True)
 
     def titles(rs):
         return {r.get("source_title") or r.get("content") for r in rs}
@@ -220,7 +220,7 @@ def test_caller_org_routes_to_specific_org_db(tmp_path, monkeypatch):
 def test_legacy_graph_db_still_openable(tmp_path, monkeypatch):
     """Pre-migration deployments with no data/orgs/ still work.
 
-    When caller_org resolves to autonomy and autonomy.db is absent, we
+    When org resolves to autonomy and autonomy.db is absent, we
     fall back to the ``GRAPH_DB`` env override (and further to the legacy
     ``data/graph.db``). Existing tests use this fallback via the
     ``graph_db_env`` fixture.

@@ -123,7 +123,7 @@ def test_search_from_anchore_session_finds_autonomy_canonical(orgs_root):
     ids = _seed_anchore_and_autonomy(orgs_root)
 
     results = ops.search(
-        "dispatch lifecycle", caller_org="anchore", limit=25,
+        "dispatch lifecycle", org="anchore", limit=25,
     )
     matched = {r["source_id"] for r in results}
     assert ids["autonomy_sign"] in matched, (
@@ -141,7 +141,7 @@ def test_search_from_anchore_does_not_leak_autonomy_curated(orgs_root):
     ids = _seed_anchore_and_autonomy(orgs_root)
 
     results = ops.search(
-        "D1 per-org DB decision", caller_org="anchore", limit=25,
+        "D1 per-org DB decision", org="anchore", limit=25,
     )
     matched = {r["source_id"] for r in results}
     assert ids["autonomy_curated"] not in matched, (
@@ -156,7 +156,7 @@ def test_resolve_uuid_reaches_autonomy_canonical_from_anchore(orgs_root):
     """Acceptance #3: ``graph read <canonical-id>`` resolves across orgs."""
     ids = _seed_anchore_and_autonomy(orgs_root)
 
-    src = ops.get_source(ids["autonomy_sign"], caller_org="anchore")
+    src = ops.get_source(ids["autonomy_sign"], org="anchore")
     assert src is not None
     assert src["org"] == "autonomy"
 
@@ -165,7 +165,7 @@ def test_resolve_uuid_rejects_autonomy_curated_from_anchore(orgs_root):
     """Acceptance #4: curated autonomy id → 404 from anchore session."""
     ids = _seed_anchore_and_autonomy(orgs_root)
 
-    src = ops.get_source(ids["autonomy_curated"], caller_org="anchore")
+    src = ops.get_source(ids["autonomy_curated"], org="anchore")
     assert src is None
 
 
@@ -173,7 +173,7 @@ def test_resolve_uuid_own_org_sees_all_states(orgs_root):
     """Caller's own DB is the full surface — even raw content is visible."""
     ids = _seed_anchore_and_autonomy(orgs_root)
 
-    src = ops.get_source(ids["autonomy_curated"], caller_org="autonomy")
+    src = ops.get_source(ids["autonomy_curated"], org="autonomy")
     assert src is not None
     assert src["publication_state"] == "curated"
 
@@ -206,7 +206,7 @@ def test_resolve_uuid_own_first_beats_peer(orgs_root):
     finally:
         autonomy_db.close()
 
-    src = ops.get_source(shared_id, caller_org="anchore")
+    src = ops.get_source(shared_id, org="anchore")
     assert src is not None
     assert src["title"] == "anchore-shared"
     assert src["org"] == "anchore"
@@ -215,7 +215,7 @@ def test_resolve_uuid_own_first_beats_peer(orgs_root):
 # ── Acceptance 6: notes stay in origin DB ────────────────────────────
 
 
-def test_pitfall_note_lands_in_caller_org_only(orgs_root):
+def test_pitfall_note_lands_in_org_only(orgs_root):
     """Acceptance #6: a note authored in anchore lives in anchore.db alone.
 
     Mostly a regression check (writes were routed in auto-txg5.3) — but
@@ -265,11 +265,11 @@ def test_autonomy_with_empty_peers_sees_own_canonical(orgs_root):
     settings_ops.add_setting(
         cross_org.PEER_SUBSCRIPTION_SET_ID, 1,
         key="autonomy", payload={"peers": []},
-        caller_org="personal", state="canonical",
+        org="personal", state="canonical",
     )
 
     results = ops.search(
-        "dispatch lifecycle", caller_org="autonomy", limit=25,
+        "dispatch lifecycle", org="autonomy", limit=25,
     )
     matched = {r["source_id"] for r in results}
     # Own signpost visible.
@@ -286,11 +286,11 @@ def test_autonomy_with_anchore_peer_sees_canonical_only(orgs_root):
     settings_ops.add_setting(
         cross_org.PEER_SUBSCRIPTION_SET_ID, 1,
         key="autonomy", payload={"peers": ["anchore"]},
-        caller_org="personal", state="canonical",
+        org="personal", state="canonical",
     )
 
     results = ops.search(
-        "anchore runbook", caller_org="autonomy", limit=25,
+        "anchore runbook", org="autonomy", limit=25,
     )
     matched = {r["source_id"] for r in results}
     assert ids["anchore_canonical"] in matched
@@ -310,7 +310,7 @@ def test_list_sources_merges_chronologically_across_orgs(orgs_root):
     # ``published``/``canonical`` regardless — that's the contract
     # we're exercising.
     rows = ops.list_sources(
-        caller_org="anchore", limit=50, include_raw=True,
+        org="anchore", limit=50, include_raw=True,
     )
     assert rows, "expected something to come through"
     # Every row carries an origin.
@@ -336,7 +336,7 @@ def test_only_org_pins_search_to_single_db(orgs_root):
     ids = _seed_anchore_and_autonomy(orgs_root)
 
     results = ops.search(
-        "autonomy", caller_org="anchore", only_org="autonomy", limit=25,
+        "autonomy", org="anchore", only_org="autonomy", limit=25,
     )
     for r in results:
         assert r.get("org") == "autonomy", r
@@ -350,7 +350,7 @@ def test_only_org_self_returns_full_surface(orgs_root):
     ids = _seed_anchore_and_autonomy(orgs_root)
 
     results = ops.search(
-        "autonomy", caller_org="autonomy", only_org="autonomy", limit=25,
+        "autonomy", org="autonomy", only_org="autonomy", limit=25,
         include_raw=True,
     )
     matched = {r["source_id"] for r in results}
@@ -385,19 +385,19 @@ def test_read_set_includes_peer_published_rows(orgs_root):
     auto_sid = settings_ops.add_setting(
         SET_ID, 1, key="shared",
         payload={"k": "auto-canonical"},
-        caller_org="autonomy", state="canonical",
+        org="autonomy", state="canonical",
     )
     settings_ops.add_setting(
         SET_ID, 1, key="local",
         payload={"k": "anchore-raw"},
-        caller_org="anchore", state="raw",
+        org="anchore", state="raw",
     )
 
-    result = ops.read_set(SET_ID, caller_org="anchore")
+    result = ops.read_set(SET_ID, org="anchore")
     keys = {m.key: m for m in result.members}
     assert "shared" in keys, "peer canonical should be in read_set"
     assert keys["shared"].org == "autonomy"
-    assert keys["shared"].publication_state == "canonical"
+    assert keys["shared"].state == "canonical"
 
     # Own-org raw is visible; peer raw is NOT.
     assert "local" in keys
@@ -425,18 +425,18 @@ def test_get_setting_resolves_peer_canonical_by_id(orgs_root):
 
     canonical_id = settings_ops.add_setting(
         SET_ID, 1, key="k", payload={"x": 1},
-        caller_org="autonomy", state="canonical",
+        org="autonomy", state="canonical",
     )
     raw_id = settings_ops.add_setting(
         SET_ID, 1, key="k", payload={"x": 2},
-        caller_org="autonomy", state="raw",
+        org="autonomy", state="raw",
     )
 
-    from_peer = ops.get_setting(canonical_id, caller_org="anchore")
+    from_peer = ops.get_setting(canonical_id, org="anchore")
     assert from_peer is not None
     assert from_peer.org == "autonomy"
 
-    raw_from_peer = ops.get_setting(raw_id, caller_org="anchore")
+    raw_from_peer = ops.get_setting(raw_id, org="anchore")
     assert raw_from_peer is None, "peer raw Setting must be invisible"
 
 
@@ -448,7 +448,7 @@ def test_add_tag_rejects_peer_origin_source(orgs_root):
     ids = _seed_anchore_and_autonomy(orgs_root)
 
     with pytest.raises(ops.CrossOrgWriteError) as exc:
-        ops.add_tag(ids["autonomy_sign"], "new-tag", caller_org="anchore")
+        ops.add_tag(ids["autonomy_sign"], "new-tag", org="anchore")
     err = exc.value
     assert err.origin_org == "autonomy"
     assert err.target_id == ids["autonomy_sign"]
@@ -465,7 +465,7 @@ def test_add_comment_rejects_peer_origin_note(orgs_root):
 
     with pytest.raises(ops.CrossOrgWriteError):
         ops.add_comment(
-            ids["autonomy_sign"], "hey", caller_org="anchore",
+            ids["autonomy_sign"], "hey", org="anchore",
         )
 
 
@@ -474,7 +474,7 @@ def test_promote_source_rejects_peer_target(orgs_root):
 
     with pytest.raises(ops.CrossOrgWriteError):
         ops.promote_source(
-            ids["autonomy_sign"], "canonical", caller_org="anchore",
+            ids["autonomy_sign"], "canonical", org="anchore",
         )
 
 
@@ -498,11 +498,11 @@ def test_promote_setting_rejects_peer_target(orgs_root):
 
     sid = settings_ops.add_setting(
         SET_ID, 1, key="k", payload={"x": 1},
-        caller_org="autonomy", state="canonical",
+        org="autonomy", state="canonical",
     )
 
     with pytest.raises(ops.CrossOrgWriteError) as exc:
-        settings_ops.promote_setting(sid, "canonical", caller_org="anchore")
+        settings_ops.promote_setting(sid, "canonical", org="anchore")
     assert exc.value.origin_org == "autonomy"
 
 
@@ -511,7 +511,7 @@ def test_update_source_title_rejects_peer_target(orgs_root):
 
     with pytest.raises(ops.CrossOrgWriteError):
         ops.update_source_title(
-            ids["autonomy_sign"], "new title", caller_org="anchore",
+            ids["autonomy_sign"], "new title", org="anchore",
         )
 
 
@@ -522,7 +522,7 @@ def test_resolve_source_strict_cross_org_own_first(orgs_root):
     """Strict resolver same contract as ``get_source``: own-first then peers."""
     ids = _seed_anchore_and_autonomy(orgs_root)
 
-    hit = ops.resolve_source_strict(ids["autonomy_sign"], caller_org="anchore")
+    hit = ops.resolve_source_strict(ids["autonomy_sign"], org="anchore")
     assert isinstance(hit, dict)
     assert hit["org"] == "autonomy"
 
@@ -531,5 +531,5 @@ def test_resolve_source_strict_returns_none_on_peer_curated(orgs_root):
     ids = _seed_anchore_and_autonomy(orgs_root)
 
     assert ops.resolve_source_strict(
-        ids["autonomy_curated"], caller_org="anchore",
+        ids["autonomy_curated"], org="anchore",
     ) is None

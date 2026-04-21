@@ -5,9 +5,9 @@ All graph DB access flows through this module. CLI commands (via
 neither imports ``GraphDB`` directly outside this layer.
 
 Per-org write routing is live (auto-txg5.3): every write lands in the
-caller's own org DB. ``caller_org`` resolution cascade:
+caller's own org DB. ``org`` resolution cascade:
 
-  1. Explicit ``caller_org=`` kwarg (API handlers, tests, container-aware
+  1. Explicit ``org=`` kwarg (API handlers, tests, container-aware
      call sites).
   2. ``GRAPH_ORG`` env var (container-scoped default — session launcher
      exports it, dashboard API handlers pass the incoming ``X-Graph-Org``
@@ -70,9 +70,9 @@ class CrossOrgWriteError(RuntimeError):
     content; act in origin org <slug>`` response shape without string
     parsing.
 
-    Exceptions (link/bead primitives) stay write-routed to caller_org
+    Exceptions (link/bead primitives) stay write-routed to org
     even when the *target* source lives in a peer DB — the edge/bead
-    row is owned by caller_org, so it's a local write that happens to
+    row is owned by org, so it's a local write that happens to
     reference a peer ID.
     """
 
@@ -95,8 +95,8 @@ class CrossOrgWriteError(RuntimeError):
 # ── DB selection ─────────────────────────────────────────────
 
 
-def _resolve_caller_org(caller_org: str | None) -> str | None:
-    """Apply the caller_org resolution cascade (explicit → env → default).
+def _resolve_org(org: str | None) -> str | None:
+    """Apply the org resolution cascade (explicit → env → default).
 
     Returns ``None`` only when ``GRAPH_DB`` is pinned (tests/override),
     because the resolver short-circuits on that env var before it cares
@@ -104,16 +104,16 @@ def _resolve_caller_org(caller_org: str | None) -> str | None:
     wins, then ``GRAPH_ORG`` env, then :func:`resolve_caller_db_path`
     applies the scopeless default (``personal``).
     """
-    if caller_org is not None:
-        return caller_org
+    if org is not None:
+        return org
     env_org = os.environ.get("GRAPH_ORG")
     if env_org:
         return env_org
     return None
 
 
-def _db_path(caller_org: str | None = None) -> str | None:
-    """Resolve graph DB path for the given ``caller_org``.
+def _db_path(org: str | None = None) -> str | None:
+    """Resolve graph DB path for the given ``org``.
 
     ``GRAPH_DB`` env var wins (test/override path); otherwise routes to
     ``data/orgs/<slug>.db`` where ``slug`` is the resolved caller org
@@ -123,11 +123,11 @@ def _db_path(caller_org: str | None = None) -> str | None:
     env_db = os.environ.get("GRAPH_DB")
     if env_db:
         return env_db
-    return str(resolve_caller_db_path(_resolve_caller_org(caller_org)))
+    return str(resolve_caller_db_path(_resolve_org(org)))
 
 
-def _open(caller_org: str | None = None) -> GraphDB:
-    """Open a GraphDB for ``caller_org``'s routed path.
+def _open(org: str | None = None) -> GraphDB:
+    """Open a GraphDB for ``org``'s routed path.
 
     Returns a fresh (non-pooled) connection. Callers are expected to use
     the existing ``try: ... finally: db.close()`` pattern. Process-
@@ -135,7 +135,7 @@ def _open(caller_org: str | None = None) -> GraphDB:
     dashboard's server-side handlers that want to amortise connection
     cost across requests.
     """
-    return GraphDB(_db_path(caller_org))
+    return GraphDB(_db_path(org))
 
 
 # ── Read paths ───────────────────────────────────────────────
@@ -144,7 +144,7 @@ def _open(caller_org: str | None = None) -> GraphDB:
 def search(
     q: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     peers: list[str] | None = None,
     only_org: str | None = None,
     limit: int = 25,
@@ -173,12 +173,12 @@ def search(
     ``peers`` overrides the resolved peer set (empty list = isolated,
     None = default from subscription Setting or every sibling DB).
     """
-    resolved_org = _resolve_caller_org(caller_org)
+    resolved_org = _resolve_org(org)
 
     # Single-org pin: skip peer resolution entirely.
     if only_org is not None:
         if only_org == resolved_org:
-            db = _open(caller_org)
+            db = _open(org)
             try:
                 rows = db.search(
                     q, limit=limit, project=project, or_mode=or_mode, tag=tag,
@@ -238,7 +238,7 @@ def search(
 def get_source(
     source_id: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     peers: list[str] | None = None,
 ) -> dict | None:
     """Resolve a source by exact ID or prefix, own-first then peers.
@@ -248,8 +248,8 @@ def get_source(
     surface filter (``published``/``canonical`` only). First hit wins;
     the returned dict carries an ``org`` field identifying the origin.
     """
-    resolved_org = _resolve_caller_org(caller_org)
-    db = _open(caller_org)
+    resolved_org = _resolve_org(org)
+    db = _open(org)
     try:
         src = db.get_source(source_id)
     finally:
@@ -275,7 +275,7 @@ def get_source(
 def resolve_source_strict(
     source_id: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     peers: list[str] | None = None,
 ) -> dict | list[dict] | None:
     """Strict resolver — own-first, then peers (public surface only).
@@ -285,8 +285,8 @@ def resolve_source_strict(
     in own-org wins over a peer prefix match; ambiguity within a single
     scope surfaces as a list like in the single-DB world.
     """
-    resolved_org = _resolve_caller_org(caller_org)
-    db = _open(caller_org)
+    resolved_org = _resolve_org(org)
+    db = _open(org)
     try:
         own = db.resolve_source_strict(source_id)
     finally:
@@ -330,7 +330,7 @@ def resolve_source_strict(
 def get_attachment(
     attachment_id: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     peers: list[str] | None = None,
 ) -> dict | None:
     """Get an attachment row by ID prefix — own-first, then peers.
@@ -340,8 +340,8 @@ def get_attachment(
     :data:`PEER_VISIBLE_STATES` (orphan attachments with no ``source_id``
     are skipped cross-org — their visibility can't be derived).
     """
-    resolved_org = _resolve_caller_org(caller_org)
-    db = _open(caller_org)
+    resolved_org = _resolve_org(org)
+    db = _open(org)
     try:
         att = db.get_attachment(attachment_id)
     finally:
@@ -374,12 +374,12 @@ def get_attachment(
 def list_attachments(
     source_id: str | None = None,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     peers: list[str] | None = None,
     limit: int = 50,
 ) -> list[dict]:
     """List attachments, optionally filtered by source_id."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         return db.list_attachments(source_id=source_id, limit=limit)
     finally:
@@ -391,7 +391,7 @@ _CROSS_ORG_LIST_SLOP = 10
 
 def list_sources(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     peers: list[str] | None = None,
     only_org: str | None = None,
     limit: int = 50,
@@ -415,12 +415,12 @@ def list_sources(
 
     ``only_org`` pins the listing to a single org (own slug or a peer).
     """
-    resolved_org = _resolve_caller_org(caller_org)
+    resolved_org = _resolve_org(org)
     per_db_limit = limit + _CROSS_ORG_LIST_SLOP
 
     if only_org is not None:
         if only_org == resolved_org:
-            db = _open(caller_org)
+            db = _open(org)
             try:
                 rows = db.list_sources(
                     project=project, source_type=source_type, limit=limit,
@@ -477,7 +477,7 @@ def list_sources(
 
 def list_notes(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     peers: list[str] | None = None,
     only_org: str | None = None,
     since: str | None = None,
@@ -491,7 +491,7 @@ def list_notes(
     "ship-hot-takes-to-peers only when curated" contract.
     """
     return list_sources(
-        caller_org=caller_org,
+        org=org,
         peers=peers,
         only_org=only_org,
         limit=limit,
@@ -503,11 +503,11 @@ def list_notes(
 
 def list_collab_sources(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
     """List collab-tagged sources ranked by activity."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         return db.list_collab_sources(limit=limit)
     finally:
@@ -516,13 +516,13 @@ def list_collab_sources(
 
 def list_collab_topics(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> list[dict]:
     """List tag taxonomy entries (name + description + counts).
 
     Today returns rows from the ``tags`` table. Empty list if table absent.
     """
-    db = _open(caller_org)
+    db = _open(org)
     try:
         return db.list_tags(limit=200)
     finally:
@@ -531,7 +531,7 @@ def list_collab_topics(
 
 def list_attention(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     since: str | None = None,
     search: str | None = None,
     last: int | None = None,
@@ -542,7 +542,7 @@ def list_attention(
 
     Mirrors ``cli._query_attention`` so callers can drop the inline SQL.
     """
-    db = _open(caller_org)
+    db = _open(org)
     try:
         return _query_attention(
             db,
@@ -559,11 +559,11 @@ def list_attention(
 def get_recent_turns(
     source_id: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
     """Get recent turns of a source. Used by primer/context flows."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         return db.get_recent_turns(source_id, limit=limit)
     finally:
@@ -573,10 +573,10 @@ def get_recent_turns(
 def get_session(
     session_id: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> dict | None:
     """Get a session-type source by id or session_id metadata. Always own-org."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         # session_id may be the source id, a tmux name, or a session_uuid.
         # Try direct source first; fall back to metadata lookup.
@@ -599,7 +599,7 @@ def get_session(
 def stream_get(
     tag: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
@@ -609,7 +609,7 @@ def stream_get(
     id, title (cleaned), created_at, author, tags, source_type, preview.
     """
     sources = list_sources(
-        caller_org=caller_org,
+        org=org,
         tags=[tag],
         limit=limit,
         source_type="note",
@@ -638,10 +638,10 @@ def stream_get(
 
 def count_active_streams(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> int:
     """Return the count of distinct tags across all notes."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         row = db.conn.execute(
             "SELECT COUNT(DISTINCT value) AS cnt "
@@ -655,11 +655,11 @@ def count_active_streams(
 
 def streams_summary(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
     """Summarize active tag streams: tag, count, description, last_active."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         rows = db.conn.execute(
             """SELECT metadata, created_at FROM sources
@@ -697,7 +697,7 @@ def streams_summary(
 def resolve_embed(
     embed_id: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     version: str | None = None,
 ) -> dict | None:
     """Resolve a ![[id]] embed reference for the dashboard renderer.
@@ -706,7 +706,7 @@ def resolve_embed(
     attachment), or ``None`` if not found. See ``api_resolve_embed`` for the
     response shape.
     """
-    db = _open(caller_org)
+    db = _open(org)
     try:
         source = db.get_source(embed_id)
         if source:
@@ -768,12 +768,12 @@ def resolve_embed(
 
 def list_journal_entries(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     since: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
     """List journal-type sources with the dashboard's three-zoom-level shape."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         sources = db.list_sources(source_type="journal", since=since, limit=limit)
         entries = []
@@ -809,10 +809,10 @@ def list_journal_entries(
 def get_comment(
     comment_id: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> dict | None:
     """Look up a note comment by id (or id prefix)."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         row = db.conn.execute(
             "SELECT * FROM note_comments WHERE id = ? OR id LIKE ?",
@@ -829,18 +829,18 @@ def get_comment(
 def _assert_own_source(
     source_id: str,
     *,
-    caller_org: str | None,
+    org: str | None,
 ) -> None:
     """Refuse mutations against peer-origin sources (graph://bcce359d-a1d).
 
-    If the source does not exist in caller_org's DB but *does* exist in
+    If the source does not exist in org's DB but *does* exist in
     a peer DB, raise :class:`CrossOrgWriteError` with the origin slug.
     If the source is absent from every scope the caller sees, fall
     through silently — the downstream write will raise its own
     not-found error (or no-op) as usual.
     """
-    resolved_org = _resolve_caller_org(caller_org)
-    db = _open(caller_org)
+    resolved_org = _resolve_org(org)
+    db = _open(org)
     try:
         if db.get_source(source_id) is not None:
             return
@@ -859,11 +859,11 @@ def _assert_own_source(
 def _assert_own_comment(
     comment_id: str,
     *,
-    caller_org: str | None,
+    org: str | None,
 ) -> None:
     """Same rule as :func:`_assert_own_source` but for note comments."""
-    resolved_org = _resolve_caller_org(caller_org)
-    db = _open(caller_org)
+    resolved_org = _resolve_org(org)
+    db = _open(org)
     try:
         row = db.conn.execute(
             "SELECT 1 FROM note_comments WHERE id = ? OR id LIKE ? LIMIT 1",
@@ -890,7 +890,7 @@ def add_tag(
     source_id: str,
     tag: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> bool:
     """Add a tag to a source. Returns True if newly added, False if already present.
 
@@ -898,8 +898,8 @@ def add_tag(
     peer DB — tags are metadata on the source row, so they must be
     authored in the origin org.
     """
-    _assert_own_source(source_id, caller_org=caller_org)
-    db = _open(caller_org)
+    _assert_own_source(source_id, org=org)
+    db = _open(org)
     try:
         return db.add_source_tag(source_id, tag)
     finally:
@@ -910,14 +910,14 @@ def remove_tag(
     source_id: str,
     tag: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> bool:
     """Remove a tag from a source. Returns True if removed, False if not present.
 
     Peer-origin sources raise :class:`CrossOrgWriteError` (see ``add_tag``).
     """
-    _assert_own_source(source_id, caller_org=caller_org)
-    db = _open(caller_org)
+    _assert_own_source(source_id, org=org)
+    db = _open(org)
     try:
         return db.remove_source_tag(source_id, tag)
     finally:
@@ -928,7 +928,7 @@ def add_comment(
     source_id: str,
     content: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     actor: str = "user",
 ) -> dict:
     """Add a comment to a note. Returns the inserted row.
@@ -936,8 +936,8 @@ def add_comment(
     Peer-origin notes raise :class:`CrossOrgWriteError` — comments have
     to land in the origin org for anyone there to see them.
     """
-    _assert_own_source(source_id, caller_org=caller_org)
-    db = _open(caller_org)
+    _assert_own_source(source_id, org=org)
+    db = _open(org)
     try:
         return db.insert_comment(source_id, content, actor=actor)
     finally:
@@ -947,14 +947,14 @@ def add_comment(
 def integrate_comment(
     comment_id: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> bool:
     """Mark a comment as integrated. Returns True if state changed.
 
     Peer-origin comments raise :class:`CrossOrgWriteError`.
     """
-    _assert_own_comment(comment_id, caller_org=caller_org)
-    db = _open(caller_org)
+    _assert_own_comment(comment_id, org=org)
+    db = _open(org)
     try:
         return db.integrate_comment(comment_id)
     finally:
@@ -965,7 +965,7 @@ def tag_merge(
     from_tag: str,
     to_tag: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     reason: str = "",
     force: bool = False,
 ) -> dict:
@@ -978,7 +978,7 @@ def tag_merge(
     ``{"error": str, "status": int}`` on validation failure.
     """
     from .models import Source, Thought, new_id  # local import: writes only
-    db = _open(caller_org)
+    db = _open(org)
     try:
         from_sources = db.sources_with_tag(from_tag)
         to_sources = db.sources_with_tag(to_tag)
@@ -1033,11 +1033,11 @@ def update_tag_description(
     tag_name: str,
     description: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     actor: str = "user",
 ) -> bool:
     """Set or update a tag description in the tags table."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         return db.update_tag_description(tag_name, description, actor=actor)
     finally:
@@ -1048,14 +1048,14 @@ def insert_capture(
     capture_id: str,
     content: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     source_id: str | None = None,
     turn_number: int | None = None,
     thread_id: str | None = None,
     actor: str = "user",
 ) -> None:
     """Insert a thought capture. ``thread_id`` must be the full UUID."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         db.insert_capture(
             capture_id, content,
@@ -1072,12 +1072,12 @@ def insert_thread(
     thread_id: str,
     title: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     priority: int = 1,
     created_by: str = "user",
 ) -> None:
     """Insert a new thought thread."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         db.insert_thread(thread_id, title, priority=priority, created_by=created_by)
     finally:
@@ -1088,10 +1088,10 @@ def update_thread_status(
     thread_id: str,
     status: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> dict | None:
     """Update a thread's status. Returns the updated thread row (for title display)."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         db.update_thread_status(thread_id, status)
         return db.get_thread(thread_id)
@@ -1103,10 +1103,10 @@ def assign_capture_to_thread(
     capture_id: str,
     thread_id: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> None:
     """Assign a capture to a thread."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         db.assign_capture_to_thread(capture_id, thread_id)
     finally:
@@ -1116,10 +1116,10 @@ def assign_capture_to_thread(
 def get_thread(
     thread_id: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> dict | None:
     """Get a thread by id (or id prefix)."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         return db.get_thread(thread_id)
     finally:
@@ -1128,14 +1128,14 @@ def get_thread(
 
 def list_captures(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     thread_id: str | None = None,
     status: str | None = None,
     since: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
     """List thought captures with optional filters."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         return db.list_captures(
             thread_id=thread_id,
@@ -1151,12 +1151,12 @@ def list_captures(
 
 def list_threads(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
     status: str | None = "active",
     limit: int = 20,
 ) -> list[dict]:
     """List threads with optional status filter."""
-    db = _open(caller_org)
+    db = _open(org)
     try:
         return db.list_threads(status=status, limit=limit)
     except Exception:
@@ -1169,14 +1169,14 @@ def update_source_title(
     source_id: str,
     title: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> None:
     """Update a source title. Last write wins.
 
     Peer-origin sources raise :class:`CrossOrgWriteError`.
     """
-    _assert_own_source(source_id, caller_org=caller_org)
-    db = _open(caller_org)
+    _assert_own_source(source_id, org=org)
+    db = _open(org)
     try:
         db.update_source_title(source_id, title)
     finally:
@@ -1196,7 +1196,7 @@ def promote_source(
     source_id: str,
     to_state: str,
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> dict:
     """Transition ``sources.publication_state`` for the given id.
 
@@ -1208,7 +1208,7 @@ def promote_source(
         raise ValueError(
             f"invalid publication_state {to_state!r}; valid: {_SOURCE_VALID_STATES}"
         )
-    db = _open(caller_org)
+    db = _open(org)
     try:
         row = db.conn.execute(
             "SELECT id, publication_state FROM sources WHERE id = ?", (source_id,)
@@ -1216,7 +1216,7 @@ def promote_source(
         if not row:
             # Distinguish peer-origin from not-found so operators get a
             # useful message ("act in origin org X") instead of bare 404.
-            resolved_org = _resolve_caller_org(caller_org)
+            resolved_org = _resolve_org(org)
             for peer in sorted(resolve_peers(resolved_org, None)):
                 peer_db = open_peer_db(peer)
                 if peer_db is None:
@@ -1246,14 +1246,14 @@ def promote_source(
 
 def checkpoint(
     *,
-    caller_org: str | None = None,
+    org: str | None = None,
 ) -> None:
     """Force a WAL checkpoint so immutable=1 readers see current writes.
 
     Best-effort — silently swallows errors (read-only mounts, etc.).
     """
     try:
-        db = _open(caller_org)
+        db = _open(org)
         try:
             db.conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         finally:

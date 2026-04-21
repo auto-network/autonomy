@@ -127,7 +127,7 @@ def _read_peer_subscription(caller_slug: str) -> list[str] | None:
 
 
 def resolve_peers(
-    caller_org: str | None,
+    org: str | None,
     explicit_peers: list[str] | None,
     *,
     root: Path | str | None = None,
@@ -139,7 +139,7 @@ def resolve_peers(
     1. Explicit ``explicit_peers`` kwarg (call-site override; ``[]`` means
        "isolated", a non-empty list pins the set).
     2. ``autonomy.org.peer-subscription#1`` Setting in ``personal.db``
-       keyed by ``caller_org`` — when the Setting declares ``peers``,
+       keyed by ``org`` — when the Setting declares ``peers``,
        its value wins regardless of how many other org DBs exist.
     3. Default: every other org slug under ``data/orgs/*.db``, minus the
        caller.
@@ -150,26 +150,26 @@ def resolve_peers(
     the set of org DBs IS the registry.
     """
     if explicit_peers is not None:
-        return _filter_existing_peers(explicit_peers, caller_org, root=root)
+        return _filter_existing_peers(explicit_peers, org, root=root)
 
     if os.environ.get("GRAPH_DB"):
         # Pinned path → no peers. Matches what a fresh ``GraphDB(path)``
         # sees: a single DB with no siblings to route into.
         return []
 
-    if caller_org:
-        subscribed = _read_peer_subscription(caller_org)
+    if org:
+        subscribed = _read_peer_subscription(org)
         if subscribed is not None:
-            return _filter_existing_peers(subscribed, caller_org, root=root)
+            return _filter_existing_peers(subscribed, org, root=root)
 
     # Default: every other org under data/orgs.
     all_slugs = list_org_slugs(root=root)
-    return [s for s in all_slugs if s != (caller_org or "")]
+    return [s for s in all_slugs if s != (org or "")]
 
 
 def _filter_existing_peers(
     peers: Iterable[str],
-    caller_org: str | None,
+    org: str | None,
     *,
     root: Path | str | None = None,
 ) -> list[str]:
@@ -178,7 +178,7 @@ def _filter_existing_peers(
     out: list[str] = []
     seen: set[str] = set()
     for p in peers:
-        if not p or p == caller_org or p in seen:
+        if not p or p == org or p in seen:
             continue
         if p in all_slugs:
             out.append(p)
@@ -273,7 +273,7 @@ def chronological_merge(
 
 
 def run_across_orgs(
-    caller_org: str | None,
+    org: str | None,
     peers: list[str] | None,
     fetch_own: "callable[[GraphDB], list[dict]]",
     fetch_peer: "callable[[GraphDB, str], list[dict]]",
@@ -298,9 +298,9 @@ def run_across_orgs(
     if include_own:
         if own_db is None:
             from .ops import _open as _ops_open  # local: avoid circular
-            own_db = _ops_open(caller_org)
+            own_db = _ops_open(org)
             close_own = True
-        own_slug = caller_org or ""
+        own_slug = org or ""
         try:
             results.append((own_slug, list(fetch_own(own_db))))
         finally:

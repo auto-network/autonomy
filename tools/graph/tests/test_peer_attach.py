@@ -125,7 +125,7 @@ def test_resolve_peers_honours_subscription_setting(orgs_root):
         "autonomy.org.peer-subscription", 1,
         key="anchore",
         payload={"peers": ["autonomy"]},
-        caller_org="personal",
+        org="personal",
         state="canonical",
     )
 
@@ -144,7 +144,7 @@ def test_resolve_peers_empty_subscription_means_isolated(orgs_root):
         "autonomy.org.peer-subscription", 1,
         key="anchore",
         payload={"peers": []},
-        caller_org="personal",
+        org="personal",
         state="canonical",
     )
 
