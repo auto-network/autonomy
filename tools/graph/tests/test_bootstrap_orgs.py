@@ -90,7 +90,11 @@ def test_ensure_bootstrap_seeds_identity(orgs_root, stub_org_schema):
 
 
 def test_bootstrap_skips_seed_when_schema_unregistered(orgs_root):
-    # No stub_org_schema fixture here — schema is unregistered.
+    # Explicitly unregister autonomy.org#1 (normally registered at import
+    # time by tools.graph.schemas.org) to simulate the pre-S1 world.
+    # The autouse _isolate_schema_registry fixture restores it after.
+    from tools.graph.schemas.registry import unregister_schema
+    unregister_schema("autonomy.org", 1)
     refs = org_ops.ensure_bootstrap_orgs()
     assert sorted(r.slug for r in refs) == ["autonomy", "personal"]
     # DB exists, but no autonomy.org#1 Setting was seeded.
