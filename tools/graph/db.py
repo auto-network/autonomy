@@ -170,12 +170,24 @@ class GraphDB:
 
     def _open_ro(self):
         """Open the DB read-only. Used when the filesystem is ro-mounted
-        or when ``mode='ro'`` is requested explicitly."""
+        or when ``mode='ro'`` is requested explicitly.
+
+        ``check_same_thread=False`` allows the process-lifetime connection
+        pool (``GraphDB.for_org``) to share ro connections across Starlette
+        threadpool workers. SQLite's serialized threading mode + GIL +
+        single-query-per-call (no cursor held across awaits, no
+        transactions on ro connections) make this safe. Hot-patched
+        2026-04-21 after a dashboard 500-error regression; formalize in
+        follow-up bead."""
         try:
-            self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+            self.conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro", uri=True, check_same_thread=False,
+            )
             self.conn.row_factory = sqlite3.Row
         except (sqlite3.OperationalError, OSError):
-            self.conn = sqlite3.connect(f"file:{self.db_path}?immutable=1", uri=True)
+            self.conn = sqlite3.connect(
+                f"file:{self.db_path}?immutable=1", uri=True, check_same_thread=False,
+            )
             self.conn.row_factory = sqlite3.Row
             self._immutable = True
         self.read_only = True
