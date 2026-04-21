@@ -17,27 +17,19 @@ org: autonomy
 version: 1
 
 canonical:
-  - 38c10838-094  # Signpost Index
-  - eabec73c-baa  # Workspaces & Orgs
+  # Promoted in v1 bootstrap (2026-04-21) — entries below cleared comment
+  # integration. 14 notes originally intended for canonical have been
+  # temporarily downgraded to `published` to unblock the cross-org read
+  # milestone (auto-hbgow). They are still cross-org visible; a librarian
+  # pass will integrate pending comments and re-promote them to canonical.
+  # See: decision in design session 710976e2-e518, 2026-04-21.
   - e2c81892-0fb  # Workspace Container Lifecycle
   - bc0dda40-f56  # Artifact Layering
-  - dc526569-af4  # Credential Injection Patterns
   - 75f1b82d-9ef  # Scoping Boundary Reference
-  - 5de95c4e-c52  # Session Management
   - c07a3d75-bfb  # Primer Composition Contract
   - c706c9f3-5a8  # Dispatch Lifecycle
-  - 527150ad-743  # Testing Architecture
-  - 225a4af7-ee5  # Design Studio Guide
-  - 16e00cb2-4f2  # Card Design System
-  - 38613c2c-5e9  # Shared Partial Contract
   - 3fda1d59-23f  # Knowledge Graph signpost
-  - a0a5b2cc-15a  # Chat With
   - 098a5407-39d  # Host Operations Protocol
-  - f6c6c43e-24a  # Bead Polishing Protocol
-  - 843a8137-3c7  # Note Revision Protocol
-  - 2cef91f8-c32  # Juggling Protocol
-  - 7603f779-90f  # Monitor Protocol
-  - 1e365009-1dc  # Productization Protocol
   - f069c902-d65  # Attention Journal
 
 published:
@@ -48,7 +40,23 @@ published:
   - bcce359d-a1d  # Cross-Org Search Architecture
   - d970d946-f95  # Org Registry & Identity
   - 0d3f750f-f9c  # Setting Primitive
+  # Comment-pending notes (downgraded from canonical temporarily — see above)
+  - 38c10838-094  # Signpost Index (pending_comments=13)
+  - eabec73c-baa  # Workspaces & Orgs (pending_comments=4)
+  - dc526569-af4  # Credential Injection Patterns (pending_comments=1)
+  - 5de95c4e-c52  # Session Management (pending_comments=1)
+  - 527150ad-743  # Testing Architecture (pending_comments=1)
+  - 225a4af7-ee5  # Design Studio Guide (pending_comments=3)
+  - 16e00cb2-4f2  # Card Design System (pending_comments=1)
+  - 38613c2c-5e9  # Shared Partial Contract (pending_comments=2)
+  - a0a5b2cc-15a  # Chat With (pending_comments=1)
+  - f6c6c43e-24a  # Bead Polishing Protocol (pending_comments=6)
+  - 843a8137-3c7  # Note Revision Protocol (pending_comments=2)
+  - 2cef91f8-c32  # Juggling Protocol (pending_comments=6)
+  - 7603f779-90f  # Monitor Protocol (pending_comments=1)
+  - 1e365009-1dc  # Productization Protocol (pending_comments=1)
 
 # Audit notes filed by promote runs are recorded here for traceability.
 # The runner appends one entry per successful bulk promotion.
-audit_notes: []
+audit_notes:
+  - id: 82a4de45-7fea-4885-a6a2-9456aa5fe1d1  # v1 bootstrap 2026-04-21 09:01:54Z — 29 promoted (8 canonical + 21 published)
