@@ -55,15 +55,26 @@ def search(
     project: str | None = None,
     or_mode: bool = False,
     tag: str | None = None,
+    states: list[str] | None = None,
+    include_raw: bool = False,
+    session_source_ids: list[str] | None = None,
+    session_author_pattern: str | None = None,
 ) -> list[dict]:
     """Full-text search across the graph.
 
     Returns a list of result dicts (sources, edges, thoughts) — see
     ``GraphDB.search`` for shape. ``peers`` is reserved for cross-org search.
+    ``states`` / ``include_raw`` / ``session_*`` tune the publication_state
+    filter (see graph://8cf067e3-ca3).
     """
     db = _open(caller_org)
     try:
-        return db.search(q, limit=limit, project=project, or_mode=or_mode, tag=tag)
+        return db.search(
+            q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+            states=states, include_raw=include_raw,
+            session_source_ids=session_source_ids,
+            session_author_pattern=session_author_pattern,
+        )
     finally:
         db.close()
 
@@ -138,6 +149,10 @@ def list_sources(
     until: str | None = None,
     author: str | None = None,
     tags: list[str] | None = None,
+    states: list[str] | None = None,
+    include_raw: bool = False,
+    session_source_ids: list[str] | None = None,
+    session_author_pattern: str | None = None,
 ) -> list[dict]:
     """List sources with optional filters (project, type, time, tags, author)."""
     db = _open(caller_org)
@@ -150,6 +165,10 @@ def list_sources(
             until=until,
             author=author,
             tags=tags,
+            states=states,
+            include_raw=include_raw,
+            session_source_ids=session_source_ids,
+            session_author_pattern=session_author_pattern,
         )
     finally:
         db.close()

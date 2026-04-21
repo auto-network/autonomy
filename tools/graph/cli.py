@@ -58,6 +58,63 @@ def _apply_scope(args) -> None:
         # Override project on any command that supports it
         if hasattr(args, 'project') and args.project is None:
             args.project = scope
+
+
+_VALID_STATES = ("raw", "curated", "published", "canonical")
+
+
+def _resolve_session_name() -> str | None:
+    """Resolve current session name from env (AUTONOMY_SESSION or BD_ACTOR tail)."""
+    name = os.environ.get("AUTONOMY_SESSION")
+    if name:
+        return name
+    bd_actor = os.environ.get("BD_ACTOR")
+    if bd_actor and ":" in bd_actor:
+        return bd_actor.split(":", 1)[1]
+    return None
+
+
+def _current_session_context(db) -> tuple[list[str], str | None]:
+    """Return (session_source_ids, author_pattern) for the current session.
+
+    Used by default search to keep raw content visible inside its originating
+    session while excluding it from cross-session surfaces. When no session
+    can be resolved, returns ([], None) — the filter then treats every
+    caller as cross-session.
+    """
+    session_name = _resolve_session_name()
+    if not session_name:
+        return [], None
+    try:
+        rows = db.conn.execute(
+            "SELECT id FROM sources "
+            "WHERE json_extract(metadata, '$.session_id') = ? "
+            "   OR json_extract(metadata, '$.session_uuid') = ?",
+            (session_name, session_name),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    source_ids = [r[0] for r in rows]
+    return source_ids, f"%{session_name}%"
+
+
+def _parse_state_args(args) -> tuple[list[str] | None, bool]:
+    """Read --state and --include from argparse and validate.
+
+    Returns (states, include_raw). If --state is passed, the list of states
+    is authoritative. --include raw opts in to raw across sessions.
+    """
+    include_val = getattr(args, "include", None)
+    include_raw = include_val == "raw"
+    states_raw = getattr(args, "state", None)
+    if not states_raw:
+        return None, include_raw
+    states = [s.strip() for s in states_raw.split(",") if s.strip()]
+    for s in states:
+        if s not in _VALID_STATES:
+            print(f"Error: invalid --state '{s}' (valid: {', '.join(_VALID_STATES)})", file=sys.stderr)
+            sys.exit(1)
+    return states, include_raw
 from .ingest import (
     ingest_conversation, ingest_musing, ingest_directory,
     ingest_claude_code_session, ingest_claude_code_project, ingest_all_claude_code,
@@ -117,12 +174,22 @@ def cmd_ingest(args):
 
 def cmd_search(args):
     """Full-text search across the graph."""
+    states, include_raw = _parse_state_args(args)
+    db = GraphDB(args.db)
+    try:
+        session_ids, author_pattern = _current_session_context(db)
+    finally:
+        db.close()
     results = get_client().search(
         args.query,
         limit=args.limit,
         project=getattr(args, 'project', None),
         or_mode=getattr(args, 'or_mode', False),
         tag=getattr(args, 'tag', None),
+        states=states,
+        include_raw=include_raw,
+        session_source_ids=session_ids,
+        session_author_pattern=author_pattern,
     )
 
     if args.json:
@@ -654,9 +721,14 @@ def cmd_read(args):
 def cmd_sources(args):
     """List sources with optional filters."""
     db = GraphDB(args.db)
+    states, include_raw = _parse_state_args(args)
+    session_ids, author_pattern = _current_session_context(db)
     sources = db.list_sources(
         project=args.project, source_type=args.type, limit=args.limit,
         since=args.since, until=getattr(args, 'until', None), author=args.author,
+        states=states, include_raw=include_raw,
+        session_source_ids=session_ids,
+        session_author_pattern=author_pattern,
     )
 
     if not sources:
@@ -2090,6 +2162,8 @@ def cmd_notes(args):
             since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
+        states, include_raw = _parse_state_args(args)
+        session_ids, author_pattern = _current_session_context(db)
 
         sources = db.list_sources(
             source_type="note",
@@ -2097,6 +2171,9 @@ def cmd_notes(args):
             since=since_iso,
             tags=tags,
             limit=args.limit,
+            states=states, include_raw=include_raw,
+            session_source_ids=session_ids,
+            session_author_pattern=author_pattern,
         )
         if not sources:
             print("No notes found")
@@ -3456,6 +3533,8 @@ def main():
     p.add_argument("--width", "-w", type=int, default=500, help="Max chars per result (default 500)")
     p.add_argument("--or", dest="or_mode", action="store_true", help="Join terms with OR instead of AND")
     p.add_argument("--tag", help="Filter results to sources with this tag")
+    p.add_argument("--state", help="Filter by publication_state (comma-separated: raw,curated,published,canonical)")
+    p.add_argument("--include", choices=["raw"], help="Include additional state categories (use 'raw' to surface raw sources from other sessions)")
     p.add_argument("--json", action="store_true", help="Output as JSON array")
     p.set_defaults(func=cmd_search)
 
@@ -3479,6 +3558,8 @@ def main():
     p.add_argument("--since", help="Filter to sources created on or after this timestamp (ISO 8601)")
     p.add_argument("--until", help="Filter to sources created on or before this timestamp (ISO 8601)")
     p.add_argument("--author", help="Filter by metadata author (e.g. terminal:auto-t3, user)")
+    p.add_argument("--state", help="Filter by publication_state (comma-separated: raw,curated,published,canonical)")
+    p.add_argument("--include", choices=["raw"], help="Include additional state categories (use 'raw' to surface raw sources from other sessions)")
     p.set_defaults(func=cmd_sources)
 
     # context
@@ -3647,6 +3728,8 @@ def main():
     p_notes.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     p_notes.add_argument("--short", action="store_true", help="One-line compact output")
     p_notes.add_argument("--headline", action="store_true", help="Digest table: id, time, tags, title, author")
+    p_notes.add_argument("--state", help="Filter by publication_state (comma-separated: raw,curated,published,canonical)")
+    p_notes.add_argument("--include", choices=["raw"], help="Include additional state categories (use 'raw' to surface raw notes from other sessions)")
     p_notes.set_defaults(func=cmd_notes)
 
     # journal

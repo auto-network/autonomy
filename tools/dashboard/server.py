@@ -5642,7 +5642,18 @@ async def api_graph_search(request):
     project = request.query_params.get("project")
     or_mode = bool(request.query_params.get("or"))
     tag = request.query_params.get("tag")
-    results = graph_ops.search(q, limit=limit, project=project, or_mode=or_mode, tag=tag)
+    states_param = request.query_params.get("states")
+    states = [s for s in states_param.split(",") if s] if states_param else None
+    include_raw = bool(request.query_params.get("include_raw"))
+    ssi_param = request.query_params.get("session_source_ids")
+    session_source_ids = [s for s in ssi_param.split(",") if s] if ssi_param else None
+    session_author_pattern = request.query_params.get("session_author_pattern")
+    results = graph_ops.search(
+        q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+        states=states, include_raw=include_raw,
+        session_source_ids=session_source_ids,
+        session_author_pattern=session_author_pattern,
+    )
     return JSONResponse(results)
 
 
