@@ -82,6 +82,7 @@ class GraphDB:
         self.conn.executescript(schema)
         self._migrate_attachments_alt_text()
         self._migrate_sources_last_activity()
+        self._migrate_publication_state()
         self._seed_tags()
 
     def _migrate_attachments_alt_text(self):
@@ -90,6 +91,42 @@ class GraphDB:
         if "alt_text" not in cols:
             self.conn.execute("ALTER TABLE attachments ADD COLUMN alt_text TEXT")
             self.conn.commit()
+
+    def _migrate_publication_state(self):
+        """Add publication_state / deprecated / successor_id (idempotent).
+
+        Lands the scope+facet primitive on sources, plus pinned-to-'raw' columns
+        on thoughts, note_comments, and captures. See graph://8cf067e3-ca3.
+        """
+        # sources: three fields
+        scols = {r[1] for r in self.conn.execute("PRAGMA table_info(sources)").fetchall()}
+        if "publication_state" not in scols:
+            self.conn.execute(
+                "ALTER TABLE sources ADD COLUMN publication_state TEXT NOT NULL DEFAULT 'raw' "
+                "CHECK (publication_state IN ('raw','curated','published','canonical'))"
+            )
+        if "deprecated" not in scols:
+            self.conn.execute(
+                "ALTER TABLE sources ADD COLUMN deprecated INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (deprecated IN (0,1))"
+            )
+        if "successor_id" not in scols:
+            self.conn.execute("ALTER TABLE sources ADD COLUMN successor_id TEXT")
+
+        # thoughts / note_comments / captures: pinned to 'raw' via CHECK
+        for table in ("thoughts", "note_comments", "captures"):
+            cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "publication_state" not in cols:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN publication_state TEXT NOT NULL DEFAULT 'raw' "
+                    "CHECK (publication_state = 'raw')"
+                )
+
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sources_publication_state "
+            "ON sources(publication_state)"
+        )
+        self.conn.commit()
 
     def _migrate_sources_last_activity(self):
         """Add last_activity_at column + index to sources table if missing (idempotent).
@@ -131,11 +168,14 @@ class GraphDB:
 
     def insert_source(self, src: Source) -> Source:
         self.conn.execute(
-            """INSERT INTO sources (id, type, platform, project, title, url, file_path, metadata, created_at, ingested_at, last_activity_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO sources (id, type, platform, project, title, url, file_path, metadata,
+                                    created_at, ingested_at, last_activity_at,
+                                    publication_state, deprecated, successor_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (src.id, src.type, src.platform, src.project, src.title, src.url,
              src.file_path, json.dumps(src.metadata), src.created_at, src.ingested_at,
-             src.last_activity_at),
+             src.last_activity_at,
+             src.publication_state, int(bool(src.deprecated)), src.successor_id),
         )
         self.conn.commit()
         return src
@@ -455,9 +495,53 @@ class GraphDB:
         )
         self.conn.commit()
 
+    # ── Publication state filter ─────────────────────────────
+
+    VALID_STATES = ("raw", "curated", "published", "canonical")
+
+    @staticmethod
+    def _build_state_filter(
+        states: list[str] | None,
+        include_raw: bool,
+        session_source_ids: list[str] | None,
+        session_author_pattern: str | None,
+        *,
+        alias: str = "s",
+    ) -> tuple[str, list]:
+        """Build a SQL predicate and params for filtering by publication_state.
+
+        Semantics:
+          - If `states` is given, restrict to exactly those states (authoritative
+            override, used for `--state X,Y`).
+          - Else if `include_raw` is True, no filter is applied.
+          - Else (default): exclude raw sources unless the row belongs to the
+            current session (by id membership or metadata.author match).
+
+        Returns ("", []) when no filter should be applied.
+        """
+        if states:
+            placeholders = ",".join("?" for _ in states)
+            return f" AND {alias}.publication_state IN ({placeholders})", list(states)
+        if include_raw:
+            return "", []
+        # Default: hide raw from other sessions; keep raw from current session.
+        clauses = [f"{alias}.publication_state != 'raw'"]
+        params: list = []
+        if session_source_ids:
+            ph = ",".join("?" for _ in session_source_ids)
+            clauses.append(f"{alias}.id IN ({ph})")
+            params.extend(session_source_ids)
+        if session_author_pattern:
+            clauses.append(f"json_extract({alias}.metadata, '$.author') LIKE ?")
+            params.append(session_author_pattern)
+        return " AND (" + " OR ".join(clauses) + ")", params
+
     # ── Search ───────────────────────────────────────────────
 
-    def search(self, query: str, limit: int = 20, project: str | None = None, or_mode: bool = False, tag: str | None = None) -> list[dict]:
+    def search(self, query: str, limit: int = 20, project: str | None = None, or_mode: bool = False, tag: str | None = None,
+               states: list[str] | None = None, include_raw: bool = False,
+               session_source_ids: list[str] | None = None,
+               session_author_pattern: str | None = None) -> list[dict]:
         """Full-text search across thoughts and derivations. Optionally filter by project.
 
         If *query* looks like a hex source ID (6+ hex chars), resolves it
@@ -465,6 +549,7 @@ class GraphDB:
         before falling back to FTS for content mentions.
         """
         if _is_source_id(query):
+            # Explicit ID lookup — user asked for this specific source, do not filter by state.
             return self._search_source_id(query.strip(), limit=limit, project=project, tag=tag)
 
         results = []
@@ -476,6 +561,10 @@ class GraphDB:
             tag_clause = " AND json_extract(s.metadata, '$.tags') LIKE ?"
             tag_params = [f'%"{tag}"%']
 
+        state_clause, state_params = self._build_state_filter(
+            states, include_raw, session_source_ids, session_author_pattern,
+        )
+
         if project:
             # Project-scoped search
             rows = self.conn.execute(
@@ -486,10 +575,10 @@ class GraphDB:
                    FROM thoughts_fts fts
                    JOIN thoughts t ON t.rowid = fts.rowid
                    JOIN sources s ON s.id = t.source_id
-                   WHERE thoughts_fts MATCH ? AND s.project = ?{tag_clause}
+                   WHERE thoughts_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, project, *tag_params, limit),
+                (fts_query, project, *tag_params, *state_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -501,10 +590,10 @@ class GraphDB:
                    FROM derivations_fts fts
                    JOIN derivations d ON d.rowid = fts.rowid
                    JOIN sources s ON s.id = d.source_id
-                   WHERE derivations_fts MATCH ? AND s.project = ?{tag_clause}
+                   WHERE derivations_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, project, *tag_params, limit),
+                (fts_query, project, *tag_params, *state_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
         else:
@@ -517,10 +606,10 @@ class GraphDB:
                    FROM thoughts_fts fts
                    JOIN thoughts t ON t.rowid = fts.rowid
                    JOIN sources s ON s.id = t.source_id
-                   WHERE thoughts_fts MATCH ?{tag_clause}
+                   WHERE thoughts_fts MATCH ?{tag_clause}{state_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, *tag_params, limit),
+                (fts_query, *tag_params, *state_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -532,10 +621,10 @@ class GraphDB:
                    FROM derivations_fts fts
                    JOIN derivations d ON d.rowid = fts.rowid
                    JOIN sources s ON s.id = d.source_id
-                   WHERE derivations_fts MATCH ?{tag_clause}
+                   WHERE derivations_fts MATCH ?{tag_clause}{state_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, *tag_params, limit),
+                (fts_query, *tag_params, *state_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -869,30 +958,43 @@ class GraphDB:
 
     def list_sources(self, project: str | None = None, source_type: str | None = None, limit: int = 20,
                      since: str | None = None, until: str | None = None, author: str | None = None,
-                     tags: list[str] | None = None) -> list[dict]:
-        """List sources with optional filters."""
-        query = "SELECT * FROM sources WHERE 1=1"
-        params = []
+                     tags: list[str] | None = None,
+                     states: list[str] | None = None, include_raw: bool = False,
+                     session_source_ids: list[str] | None = None,
+                     session_author_pattern: str | None = None) -> list[dict]:
+        """List sources with optional filters.
+
+        Publication-state defaults: excludes raw sources from other sessions.
+        Pass `include_raw=True` to disable the filter, or `states=[...]` to
+        restrict to specific states.
+        """
+        query = "SELECT * FROM sources s WHERE 1=1"
+        params: list = []
         if project:
-            query += " AND project = ?"
+            query += " AND s.project = ?"
             params.append(project)
         if source_type:
-            query += " AND type = ?"
+            query += " AND s.type = ?"
             params.append(source_type)
         if since:
-            query += " AND created_at >= ?"
+            query += " AND s.created_at >= ?"
             params.append(since)
         if until:
-            query += " AND created_at <= ?"
+            query += " AND s.created_at <= ?"
             params.append(until)
         if author:
-            query += " AND json_extract(metadata, '$.author') = ?"
+            query += " AND json_extract(s.metadata, '$.author') = ?"
             params.append(author)
         if tags:
             for tag in tags:
-                query += " AND json_extract(metadata, '$.tags') LIKE ?"
+                query += " AND json_extract(s.metadata, '$.tags') LIKE ?"
                 params.append(f'%"{tag}"%')
-        query += " ORDER BY created_at DESC LIMIT ?"
+        state_clause, state_params = self._build_state_filter(
+            states, include_raw, session_source_ids, session_author_pattern,
+        )
+        query += state_clause
+        params.extend(state_params)
+        query += " ORDER BY s.created_at DESC LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
