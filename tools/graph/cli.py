@@ -1834,9 +1834,8 @@ def cmd_link(args):
     finally:
         db.close()
 
-    from . import ops as _ops
     with _pin_db(args):
-        _ops.create_edge(
+        get_client().create_edge(
             resolved_from_id,
             target_id,
             from_type=resolved_from_type,
@@ -1856,7 +1855,7 @@ def cmd_link(args):
             f"  ✓ {from_label} —[{args.relation}]→ {target_id[:12]}{turns_str}"
         )
         if turn_range:
-            snippet = _ops.get_turn_content(
+            snippet = get_client().get_turn_content(
                 target_id,
                 turn_range[0],
                 org=getattr(args, "org", None),
@@ -2764,10 +2763,9 @@ def cmd_note(args):
     except Exception:
         pass
 
-    from . import ops as _ops
     with _pin_db(args):
         try:
-            result = _ops.create_note(
+            result = get_client().create_note(
                 text,
                 tags=tags,
                 author=args.author,
@@ -2838,12 +2836,13 @@ def cmd_comment_add(args):
 
     from . import ops as _ops
     org = getattr(args, "org", None)
+    client = get_client()
 
     with _pin_db(args):
-        resolved = _ops.resolve_source_strict(args.source, org=org)
+        resolved = client.resolve_source_strict(args.source, org=org)
         if resolved is None:
             # Retry via get_source so own-org raw matches are visible.
-            resolved = _ops.get_source(args.source, org=org)
+            resolved = client.get_source(args.source, org=org)
         if resolved is None:
             print(f"No source found matching '{args.source}'", file=sys.stderr)
             sys.exit(1)
@@ -2862,7 +2861,7 @@ def cmd_comment_add(args):
             sys.exit(1)
 
         try:
-            comment = _ops.add_comment(
+            comment = client.add_comment(
                 resolved["id"], content, actor=args.actor, org=org,
             )
         except _ops.CrossOrgWriteError as e:
@@ -2876,9 +2875,10 @@ def cmd_comment_add(args):
 def cmd_comment_integrate(args):
     """Mark a comment as integrated into the note body."""
     from . import ops as _ops
+    client = get_client()
 
     with _pin_db(args):
-        comment = _ops.get_comment(
+        comment = client.get_comment(
             args.comment_id, org=getattr(args, "org", None),
         )
         if not comment:
@@ -2889,7 +2889,9 @@ def cmd_comment_integrate(args):
             return
 
         try:
-            _ops.integrate_comment(comment["id"], org=getattr(args, "org", None))
+            client.integrate_comment(
+                comment["id"], org=getattr(args, "org", None),
+            )
         except _ops.CrossOrgWriteError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
@@ -2919,7 +2921,7 @@ def cmd_note_update(args):
     from . import ops as _ops
     with _pin_db(args):
         try:
-            result = _ops.update_note(
+            result = get_client().update_note(
                 args.source,
                 new_content,
                 integrate_comments=integrate_ids,
@@ -3506,7 +3508,7 @@ def cmd_attach(args):
     from . import ops as _ops
     with _pin_db(args):
         try:
-            att = _ops.attach_file(
+            att = get_client().attach_file(
                 args.file_path,
                 source_id=source_id,
                 turn_number=turn_number,
