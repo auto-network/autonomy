@@ -1,16 +1,16 @@
 #!/bin/bash
-# Enterprise project startup — runs inside the container in the background.
+# Enterprise v5 project startup — runs inside the container in the background.
 # The dind entrypoint wrapper (Dockerfile.dind) picks this up at /startup.sh,
 # logs to /workspace/output/.setup.log, and records exit status in
 # /workspace/output/.setup-exit.
 #
 # Steps: start dockerd (--tls=false + vfs storage for nested Docker safety),
-# wait for it to accept connections, mark the enterprise repo clones as
+# wait for it to accept connections, mark the enterprise repo clone as
 # safe.directory for git, and run poetry install so the agent can import
 # project deps without the first command paying install cost.
 set -euo pipefail
 
-echo "[startup] $(date -u +%FT%TZ) enterprise startup begin"
+echo "[startup] $(date -u +%FT%TZ) enterprise-v5 startup begin"
 
 # ── 1. Start dockerd in the background ──────────────────────────
 # --tls=false skips the 15s deprecation delay (src:3a627ab2-901).
@@ -33,11 +33,10 @@ for i in $(seq 1 30); do
 done
 docker info >/dev/null 2>&1 || { echo "[startup] dockerd never became ready"; exit 1; }
 
-# ── 3. git safe.directory for the mounted worktrees ─────────────
-# Worktrees are owned by the host user; git refuses otherwise.
-for d in /workspace/enterprise /workspace/enterprise_ng; do
-    [ -d "$d" ] && git config --global --add safe.directory "$d"
-done
+# ── 3. git safe.directory for the mounted worktree ──────────────
+# Worktree is owned by the host user; git refuses otherwise.
+[ -d /workspace/enterprise ] && \
+    git config --global --add safe.directory /workspace/enterprise
 
 # ── 4. Poetry install for enterprise ────────────────────────────
 if [ -f /workspace/enterprise/pyproject.toml ]; then
@@ -47,4 +46,4 @@ if [ -f /workspace/enterprise/pyproject.toml ]; then
     }
 fi
 
-echo "[startup] $(date -u +%FT%TZ) enterprise startup complete"
+echo "[startup] $(date -u +%FT%TZ) enterprise-v5 startup complete"

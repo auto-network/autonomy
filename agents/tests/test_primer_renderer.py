@@ -238,17 +238,18 @@ def test_autonomy_shape(shipped_workspaces):
     assert "`--network=host`" in out
 
 
-def test_enterprise_shape(shipped_workspaces):
-    """Enterprise workspace: two writable repos, DinD, startup."""
-    out = render_workspace_primer(get_workspace("enterprise"))
+def test_enterprise_v5_shape(shipped_workspaces):
+    """Enterprise v5 workspace: single writable enterprise repo, DinD, startup."""
+    out = render_workspace_primer(get_workspace("enterprise-v5"))
 
     assert "## Docker-in-Docker" in out
     assert "## Background Setup" in out
     assert "## Editing and Committing" in out
     assert "`/workspace/enterprise` — **writable**" in out
-    assert "`/workspace/enterprise_ng` — **writable**" in out
+    # v5 is the lean subset — does not mount enterprise_ng.
+    assert "`/workspace/enterprise_ng`" not in out
     assert "GRAPH_SCOPE=anchore" in out
-    assert "GRAPH_TAGS=enterprise" in out
+    assert "GRAPH_TAGS=enterprise,enterprise-v5" in out
 
 
 # ── Output hygiene ───────────────────────────────────────────────────

@@ -89,23 +89,20 @@ projects:
     dispatch_labels: [dashboard]
     dind: false
 
-  enterprise:
-    name: "Enterprise"
-    description: "Anchore Enterprise — full stack dev with DinD"
-    image: "autonomy-agent:enterprise"
+  enterprise-v5:
+    name: "Enterprise v5"
+    description: "Anchore Enterprise v5 — lean v5-only patch workspace with DinD"
+    image: "autonomy-agent:enterprise-v5"
     repos:
       - url: "git@github.com:anchore/enterprise.git"
         mount: "/workspace/enterprise"
         writable: true
-      - url: "git@github.com:anchore/enterprise_ng.git"
-        mount: "/workspace/enterprise_ng"
-        writable: true
     working_dir: "/workspace/enterprise"
-    startup: "agents/projects/enterprise/startup.sh"
+    startup: "agents/projects/enterprise-v5/startup.sh"
     dind: true
     graph_project: anchore
-    default_tags: [enterprise]
-    dispatch_labels: [enterprise]
+    default_tags: [enterprise, enterprise-v5]
+    dispatch_labels: [enterprise-v5]
 
   enterprise-ng:
     name: "Enterprise NG"
