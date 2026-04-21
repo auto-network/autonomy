@@ -332,6 +332,21 @@ CREATE TRIGGER IF NOT EXISTS captures_au AFTER UPDATE ON captures BEGIN
 END;
 
 -- ============================================================
+-- ORGS — bootstrap identity row for a per-org DB (graph://d970d946-f95)
+-- ============================================================
+-- Exactly one row per per-org DB; that row is the org's own identity
+-- record. Queried at every connection open to know "which org is this DB?"
+-- Rich identity (display name, color, favicon, etc.) lives as an
+-- `autonomy.org#1` Setting in the same DB; this table is the thin,
+-- schema-stable bootstrap layer.
+CREATE TABLE IF NOT EXISTS orgs (
+    id          TEXT PRIMARY KEY,        -- UUID v7, minted at DB create
+    slug        TEXT NOT NULL,           -- matches data/orgs/<slug>.db filename
+    type        TEXT NOT NULL CHECK (type IN ('shared','personal')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- ============================================================
 -- SETTINGS — layered configuration primitive (graph://0d3f750f-f9c)
 -- ============================================================
 -- A Setting is a structured, schema-validated, machine-consumable value.

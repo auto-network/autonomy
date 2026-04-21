@@ -4038,6 +4038,10 @@ def main():
     from .set_cmd import attach_set_subparser
     attach_set_subparser(sub)
 
+    # org — org registry (graph://d970d946-f95)
+    from .org_cmd import attach_org_subparser
+    attach_org_subparser(sub)
+
     args = parser.parse_args()
 
     # Apply scope from environment
