@@ -22,6 +22,7 @@ from .registry import (
 
 # Concrete schema registrations. Importing for side effects — each module
 # calls ``register_schema`` at import time.
+from . import org  # noqa: F401
 from . import workspace  # noqa: F401
 from . import workspace_artifact  # noqa: F401 — autonomy.workspace.artifact#1
 
