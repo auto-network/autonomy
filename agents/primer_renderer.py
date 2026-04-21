@@ -1,4 +1,4 @@
-"""Render the workspace runtime primer from a ProjectConfig.
+"""Render the workspace runtime primer from a WorkspaceV1.
 
 The primer is layer 1 of the workspace context stack: the shared Autonomy
 runtime (graph, bd, agent-browser, CrossTalk, session identity) plus the
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import jinja2
 
-from agents.project_config import ProjectConfig
+from agents.workspace_settings import WorkspaceV1
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "primers"
 PROJECTS_DIR = Path(__file__).resolve().parent / "projects"
@@ -54,7 +54,7 @@ _READONLY_RE = re.compile(r"\bread[\s-]?only\b", re.IGNORECASE)
 
 
 def _find_overlay_writability_drift(
-    config: ProjectConfig, overlay_text: str
+    config: WorkspaceV1, overlay_text: str
 ) -> list[str]:
     """Return drift messages for overlay claims that contradict config.repos.
 
@@ -103,7 +103,7 @@ def _find_overlay_writability_drift(
     return messages
 
 
-def render_workspace_primer(config: ProjectConfig) -> str:
+def render_workspace_primer(config: WorkspaceV1) -> str:
     """Render the workspace runtime primer for a given project config.
 
     Args:

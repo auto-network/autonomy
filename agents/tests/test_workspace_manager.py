@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from agents import workspace_manager as wm
-from agents.project_config import ProjectConfig, RepoMount
+from agents.workspace_settings import WorkspaceV1 as ProjectConfig, RepoMount
 
 
 # ── URL parsing ────────────────────────────────────────────────────

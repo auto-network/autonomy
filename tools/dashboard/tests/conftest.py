@@ -224,6 +224,34 @@ def mock_tmux():
 
 
 @pytest.fixture
+def shipped_settings_orgs(tmp_path_factory, monkeypatch):
+    """Populate shipped-workspace Settings into a tmp orgs/ dir.
+
+    Dashboard API handlers that render the workspace registry read from
+    ``autonomy.workspace#1`` + ``autonomy.org#1`` Settings; tests need
+    those populated so ``load_workspaces`` returns the same registry the
+    live dashboard shows. Tests opt in by taking this fixture; ``test_app``
+    alone doesn't trigger population so tests with their own ``orgs_root``
+    stay isolated.
+    """
+    from tools.graph.db import GraphDB
+    from agents.tests.conftest import (
+        SHIPPED_PROJECTS_YAML,
+        populate_workspaces_from_yaml,
+    )
+
+    orgs_dir = tmp_path_factory.mktemp("orgs")
+    GraphDB.close_all_pooled()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    populate_workspaces_from_yaml(SHIPPED_PROJECTS_YAML, orgs_dir)
+    try:
+        yield orgs_dir
+    finally:
+        GraphDB.close_all_pooled()
+
+
+@pytest.fixture
 def test_app(test_db, mock_tmux):
     """Boot the dashboard app against test data with tmux mocked."""
     os.environ["DASHBOARD_DB"] = test_db

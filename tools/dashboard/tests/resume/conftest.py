@@ -34,7 +34,7 @@ RESUME_SESSIONS = [
 
 
 def _make_graph_db(db_path, sources):
-    """Create a minimal graph.db with sources table."""
+    """Create a minimal graph.db with sources + settings tables."""
     conn = sqlite3.connect(str(db_path))
     conn.execute("""CREATE TABLE IF NOT EXISTS sources (
         id TEXT PRIMARY KEY,
@@ -56,6 +56,34 @@ def _make_graph_db(db_path, sources):
              src.get("title", ""), src.get("file_path", ""),
              json.dumps(src.get("metadata", {}))),
         )
+
+    # Resume endpoint needs an ``autonomy.workspace#1`` Setting for the
+    # project field to resolve (primer rendering, artifact mounts).
+    conn.execute("""CREATE TABLE IF NOT EXISTS settings (
+        id TEXT PRIMARY KEY,
+        set_id TEXT NOT NULL,
+        schema_revision INTEGER NOT NULL,
+        key TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        publication_state TEXT NOT NULL DEFAULT 'raw',
+        supersedes TEXT,
+        excludes TEXT,
+        deprecated INTEGER NOT NULL DEFAULT 0,
+        successor_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )""")
+    conn.execute(
+        "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
+        "publication_state) VALUES(?,?,?,?,?,?)",
+        ("workspace-autonomy", "autonomy.workspace", 1, "autonomy",
+         json.dumps({
+             "name": "Autonomy Network",
+             "image": "autonomy-agent:dashboard",
+             "working_dir": "/workspace/repo",
+         }),
+         "canonical"),
+    )
     conn.commit()
     conn.close()
     return str(db_path)

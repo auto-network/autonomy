@@ -44,7 +44,7 @@ from agents.dispatch_db import (
     clear_paused, is_paused, get_pause_reason,
 )
 from agents.session_launcher import launch_session
-from agents import project_config
+from agents import workspace_settings
 from agents.primer_renderer import render_workspace_primer
 from agents.workspace_manager import WorkspaceError, prepare_session_mounts
 if os.environ.get("DASHBOARD_MOCK"):
@@ -1535,8 +1535,8 @@ async def api_projects(request):
     is enabled — drives the UI badge).
     """
     try:
-        projects = project_config.load_projects()
-    except project_config.ProjectConfigError as e:
+        projects = workspace_settings.load_workspaces()
+    except workspace_settings.WorkspaceSettingsError as e:
         return JSONResponse({"projects": [], "error": str(e)}, status_code=500)
     from tools.dashboard.org_identity import resolve_org_identity
     entries = []
@@ -3639,19 +3639,19 @@ async def api_session_create(request):
     proj = None
     if project_name:
         try:
-            proj = project_config.get_project(project_name)
+            proj = workspace_settings.get_workspace(project_name)
         except KeyError:
             return JSONResponse(
                 {"error": f"Unknown project '{project_name}'"}, status_code=400,
             )
-        except project_config.ProjectConfigError as e:
+        except workspace_settings.WorkspaceSettingsError as e:
             return JSONResponse(
                 {"error": f"Project config error: {e}"}, status_code=500,
             )
-        missing_artifacts = project_config.validate_artifacts(proj)
+        missing_artifacts = workspace_settings.validate_artifacts(proj)
         if missing_artifacts:
             first = missing_artifacts[0]
-            message = project_config.format_missing_artifact_error(first, proj)
+            message = workspace_settings.format_missing_artifact_error(first, proj)
             logger.warning(
                 "api_session_create: missing required artifact  project=%s  name=%s  path=%s",
                 proj.id, first.artifact.name, first.path,
@@ -3681,7 +3681,7 @@ async def api_session_create(request):
             return JSONResponse(
                 {"error": f"Workspace prep failed: {e}"}, status_code=500,
             )
-        project_mounts.update(project_config.artifact_mounts(proj))
+        project_mounts.update(workspace_settings.artifact_mounts(proj))
         meta: dict = {
             "tmux_session": tmux_name,
             "project": proj.id,
@@ -3990,15 +3990,15 @@ async def api_session_resume(request):
         dead_project = (dead_session or {}).get("project") if dead_session else None
         if dead_project:
             try:
-                proj_for_resume = project_config.get_project(dead_project)
-            except (KeyError, project_config.ProjectConfigError):
+                proj_for_resume = workspace_settings.get_workspace(dead_project)
+            except (KeyError, workspace_settings.WorkspaceSettingsError):
                 proj_for_resume = None
 
         if proj_for_resume is not None:
-            missing_artifacts = project_config.validate_artifacts(proj_for_resume)
+            missing_artifacts = workspace_settings.validate_artifacts(proj_for_resume)
             if missing_artifacts:
                 first = missing_artifacts[0]
-                message = project_config.format_missing_artifact_error(first, proj_for_resume)
+                message = workspace_settings.format_missing_artifact_error(first, proj_for_resume)
                 logger.warning(
                     "api_session_resume: missing required artifact  project=%s  name=%s  path=%s",
                     proj_for_resume.id, first.artifact.name, first.path,
@@ -4028,7 +4028,7 @@ async def api_session_resume(request):
                 return JSONResponse(
                     {"error": f"Workspace prep failed: {e}"}, status_code=500,
                 )
-            resume_mounts.update(project_config.artifact_mounts(proj_for_resume))
+            resume_mounts.update(workspace_settings.artifact_mounts(proj_for_resume))
             meta: dict = {
                 "tmux_session": tmux_name,
                 "project": proj_for_resume.id,
