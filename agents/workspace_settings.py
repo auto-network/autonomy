@@ -239,7 +239,7 @@ def _artifacts_for_workspace(
     composite-key prefix ``<workspace-id>:``.
     """
     members = ops.read_set(
-        ARTIFACT_SET_ID, caller_org=caller_org,
+        ARTIFACT_SET_ID, caller_org=caller_org, peers=[],
     ).members
     prefix = f"{workspace_id}:"
     out: list[ArtifactSpec] = []
@@ -252,8 +252,16 @@ def _artifacts_for_workspace(
 
 
 def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
-    """Read every ``autonomy.workspace#1`` visible to *slug* + attach artifacts."""
-    members = ops.read_set(WORKSPACE_SET_ID, caller_org=slug).members
+    """Read every ``autonomy.workspace#1`` owned by *slug* + attach artifacts.
+
+    ``peers=[]`` is explicit — ``load_workspaces`` iterates the org
+    registry itself and stamps every workspace with its owning org
+    slug; pulling peer rows via cross-org here would double-attribute
+    shared workspaces to whichever org iterated first (auto-txg5.4).
+    """
+    members = ops.read_set(
+        WORKSPACE_SET_ID, caller_org=slug, peers=[],
+    ).members
     out: dict[str, WorkspaceV1] = {}
     for m in members:
         artifacts = _artifacts_for_workspace(m.key, caller_org=slug)
@@ -320,7 +328,12 @@ def load_org_overrides() -> dict[str, OrgOverride]:
             out[m.key] = _org_override_from_payload(m.key, m.payload)
         return out
     for ref in refs:
-        members = ops.read_set(ORG_SET_ID, caller_org=ref.slug).members
+        # ``peers=[]`` — each org publishes its own identity Setting;
+        # cross-org merge here would double-register every org's row
+        # from every iteration (auto-txg5.4).
+        members = ops.read_set(
+            ORG_SET_ID, caller_org=ref.slug, peers=[],
+        ).members
         for m in members:
             out.setdefault(m.key, _org_override_from_payload(m.key, m.payload))
     return out

@@ -31,6 +31,15 @@ from pathlib import Path
 from typing import Any
 
 from .db import GraphDB, resolve_caller_db_path
+from . import cross_org
+from .cross_org import (
+    PEER_VISIBLE_STATES,
+    chronological_merge,
+    open_peer_db,
+    resolve_peers,
+    rrf_merge,
+    run_across_orgs,
+)
 from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
     ResolvedSetting,
     SetMembers,
@@ -47,6 +56,40 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
     migrate_setting_revisions,
     json_merge_patch,
 )
+
+
+# ── Cross-org write-rejection error ──────────────────────────
+
+
+class CrossOrgWriteError(RuntimeError):
+    """Raised when a mutation targets a peer-origin Source/Setting.
+
+    Per the spec (graph://bcce359d-a1d § Cross-org write semantics):
+    writes MUST act in the origin org. We surface a structured message
+    so CLI + API can translate it into the ``cannot modify cross-org
+    content; act in origin org <slug>`` response shape without string
+    parsing.
+
+    Exceptions (link/bead primitives) stay write-routed to caller_org
+    even when the *target* source lives in a peer DB — the edge/bead
+    row is owned by caller_org, so it's a local write that happens to
+    reference a peer ID.
+    """
+
+    def __init__(self, target_id: str, origin_org: str):
+        self.target_id = target_id
+        self.origin_org = origin_org
+        super().__init__(
+            f"cannot modify cross-org content; act in origin org {origin_org!r}"
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "error": "cross_org_write_rejected",
+            "target_id": self.target_id,
+            "origin_org": self.origin_org,
+            "message": str(self),
+        }
 
 
 # ── DB selection ─────────────────────────────────────────────
@@ -103,6 +146,7 @@ def search(
     *,
     caller_org: str | None = None,
     peers: list[str] | None = None,
+    only_org: str | None = None,
     limit: int = 25,
     project: str | None = None,
     or_mode: bool = False,
@@ -112,23 +156,83 @@ def search(
     session_source_ids: list[str] | None = None,
     session_author_pattern: str | None = None,
 ) -> list[dict]:
-    """Full-text search across the graph.
+    """Full-text search across the graph with cross-org RRF merge.
 
     Returns a list of result dicts (sources, edges, thoughts) — see
-    ``GraphDB.search`` for shape. ``peers`` is reserved for cross-org search.
+    ``GraphDB.search`` for the base shape. Every row is annotated with
+    ``org`` (origin slug) and ``rrf_score`` (see graph://bcce359d-a1d
+    § Merge algorithms).
+
     ``states`` / ``include_raw`` / ``session_*`` tune the publication_state
-    filter (see graph://8cf067e3-ca3).
+    filter on the caller's own DB (full surface). Peer rows are always
+    clamped to ``published``/``canonical`` regardless — that's the
+    public surface contract.
+
+    ``only_org`` pins the search to a single org (own slug or a peer
+    slug), bypassing peer merge. Useful for ``graph search --only-org``.
+    ``peers`` overrides the resolved peer set (empty list = isolated,
+    None = default from subscription Setting or every sibling DB).
     """
-    db = _open(caller_org)
-    try:
+    resolved_org = _resolve_caller_org(caller_org)
+
+    # Single-org pin: skip peer resolution entirely.
+    if only_org is not None:
+        if only_org == resolved_org:
+            db = _open(caller_org)
+            try:
+                rows = db.search(
+                    q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+                    states=states, include_raw=include_raw,
+                    session_source_ids=session_source_ids,
+                    session_author_pattern=session_author_pattern,
+                )
+            finally:
+                db.close()
+            for r in rows:
+                r.setdefault("org", resolved_org or "")
+            return rows
+        # Peer-only search — force public-surface states.
+        peer_db = open_peer_db(only_org)
+        if peer_db is None:
+            return []
+        rows = peer_db.search(
+            q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+            states=list(PEER_VISIBLE_STATES), include_raw=False,
+        )
+        for r in rows:
+            r.setdefault("org", only_org)
+        return rows
+
+    resolved_peers = resolve_peers(resolved_org, peers)
+
+    def fetch_own(db: GraphDB) -> list[dict]:
         return db.search(
             q, limit=limit, project=project, or_mode=or_mode, tag=tag,
             states=states, include_raw=include_raw,
             session_source_ids=session_source_ids,
             session_author_pattern=session_author_pattern,
         )
-    finally:
-        db.close()
+
+    def fetch_peer(db: GraphDB, _slug: str) -> list[dict]:
+        return db.search(
+            q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+            states=list(PEER_VISIBLE_STATES), include_raw=False,
+        )
+
+    org_lists = run_across_orgs(
+        resolved_org, resolved_peers, fetch_own, fetch_peer,
+    )
+    if not resolved_peers:
+        # Own-org only → preserve legacy shape (no RRF re-ranking) so
+        # existing tests keep passing. Still annotate ``org`` for
+        # consumers that expect it.
+        rows = org_lists[0][1] if org_lists else []
+        for r in rows:
+            r.setdefault("org", resolved_org or "")
+        return rows[:limit]
+    return rrf_merge(
+        org_lists, limit=limit, own_org=resolved_org, key="id",
+    )
 
 
 def get_source(
@@ -137,12 +241,35 @@ def get_source(
     caller_org: str | None = None,
     peers: list[str] | None = None,
 ) -> dict | None:
-    """Resolve a source by exact ID or prefix. ``None`` if not found."""
+    """Resolve a source by exact ID or prefix, own-first then peers.
+
+    Own-org is queried first with the full surface. If no hit, every
+    subscribed peer is queried in alphabetical order with the public
+    surface filter (``published``/``canonical`` only). First hit wins;
+    the returned dict carries an ``org`` field identifying the origin.
+    """
+    resolved_org = _resolve_caller_org(caller_org)
     db = _open(caller_org)
     try:
-        return db.get_source(source_id)
+        src = db.get_source(source_id)
     finally:
         db.close()
+    if src is not None:
+        src.setdefault("org", resolved_org or "")
+        return src
+
+    for peer in sorted(resolve_peers(resolved_org, peers)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        src = peer_db.get_source(source_id)
+        if src is None:
+            continue
+        if src.get("publication_state") not in PEER_VISIBLE_STATES:
+            continue
+        src["org"] = peer
+        return src
+    return None
 
 
 def resolve_source_strict(
@@ -151,14 +278,53 @@ def resolve_source_strict(
     caller_org: str | None = None,
     peers: list[str] | None = None,
 ) -> dict | list[dict] | None:
-    """Strict resolver — returns the source dict, ``None`` (not found), or a
-    list (ambiguous prefix). Used by bead/link commands.
+    """Strict resolver — own-first, then peers (public surface only).
+
+    Returns the source dict, ``None`` (not found), or a list (ambiguous
+    prefix on one scope). Ambiguity is resolved per-scope: an exact hit
+    in own-org wins over a peer prefix match; ambiguity within a single
+    scope surfaces as a list like in the single-DB world.
     """
+    resolved_org = _resolve_caller_org(caller_org)
     db = _open(caller_org)
     try:
-        return db.resolve_source_strict(source_id)
+        own = db.resolve_source_strict(source_id)
     finally:
         db.close()
+    if own is not None:
+        if isinstance(own, dict):
+            own.setdefault("org", resolved_org or "")
+            return own
+        # Ambiguous in own org — surface the list untouched so the caller
+        # can ask the user to disambiguate without surfacing peer data.
+        for r in own:
+            r.setdefault("org", resolved_org or "")
+        return own
+
+    for peer in sorted(resolve_peers(resolved_org, peers)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        hit = peer_db.resolve_source_strict(source_id)
+        if hit is None:
+            continue
+        if isinstance(hit, dict):
+            if hit.get("publication_state") not in PEER_VISIBLE_STATES:
+                continue
+            hit["org"] = peer
+            return hit
+        visible = [
+            h for h in hit
+            if h.get("publication_state") in PEER_VISIBLE_STATES
+        ]
+        if not visible:
+            continue
+        for h in visible:
+            h["org"] = peer
+        if len(visible) == 1:
+            return visible[0]
+        return visible
+    return None
 
 
 def get_attachment(
@@ -190,10 +356,14 @@ def list_attachments(
         db.close()
 
 
+_CROSS_ORG_LIST_SLOP = 10
+
+
 def list_sources(
     *,
     caller_org: str | None = None,
     peers: list[str] | None = None,
+    only_org: str | None = None,
     limit: int = 50,
     project: str | None = None,
     source_type: str | None = None,
@@ -206,38 +376,94 @@ def list_sources(
     session_source_ids: list[str] | None = None,
     session_author_pattern: str | None = None,
 ) -> list[dict]:
-    """List sources with optional filters (project, type, time, tags, author)."""
-    db = _open(caller_org)
-    try:
+    """List sources, merged chronologically across own + peers.
+
+    Per graph://bcce359d-a1d § Merge algorithms: fetch ``limit + slop``
+    rows from each DB, merge-sort by ``created_at`` DESC, truncate to
+    limit. Each row is annotated with ``org`` (origin slug). Peer DBs
+    are always clamped to ``published``/``canonical``.
+
+    ``only_org`` pins the listing to a single org (own slug or a peer).
+    """
+    resolved_org = _resolve_caller_org(caller_org)
+    per_db_limit = limit + _CROSS_ORG_LIST_SLOP
+
+    if only_org is not None:
+        if only_org == resolved_org:
+            db = _open(caller_org)
+            try:
+                rows = db.list_sources(
+                    project=project, source_type=source_type, limit=limit,
+                    since=since, until=until, author=author, tags=tags,
+                    states=states, include_raw=include_raw,
+                    session_source_ids=session_source_ids,
+                    session_author_pattern=session_author_pattern,
+                )
+            finally:
+                db.close()
+            for r in rows:
+                r.setdefault("org", resolved_org or "")
+            return rows
+        peer_db = open_peer_db(only_org)
+        if peer_db is None:
+            return []
+        rows = peer_db.list_sources(
+            project=project, source_type=source_type, limit=limit,
+            since=since, until=until, author=author, tags=tags,
+            states=list(PEER_VISIBLE_STATES),
+        )
+        for r in rows:
+            r.setdefault("org", only_org)
+        return rows
+
+    resolved_peers = resolve_peers(resolved_org, peers)
+
+    def fetch_own(db: GraphDB) -> list[dict]:
         return db.list_sources(
-            project=project,
-            source_type=source_type,
-            limit=limit,
-            since=since,
-            until=until,
-            author=author,
-            tags=tags,
-            states=states,
-            include_raw=include_raw,
+            project=project, source_type=source_type, limit=per_db_limit,
+            since=since, until=until, author=author, tags=tags,
+            states=states, include_raw=include_raw,
             session_source_ids=session_source_ids,
             session_author_pattern=session_author_pattern,
         )
-    finally:
-        db.close()
+
+    def fetch_peer(db: GraphDB, _slug: str) -> list[dict]:
+        return db.list_sources(
+            project=project, source_type=source_type, limit=per_db_limit,
+            since=since, until=until, author=author, tags=tags,
+            states=list(PEER_VISIBLE_STATES),
+        )
+
+    org_lists = run_across_orgs(
+        resolved_org, resolved_peers, fetch_own, fetch_peer,
+    )
+    if not resolved_peers:
+        rows = org_lists[0][1] if org_lists else []
+        for r in rows:
+            r.setdefault("org", resolved_org or "")
+        return rows[:limit]
+    return chronological_merge(org_lists, limit=limit, time_field="created_at")
 
 
 def list_notes(
     *,
     caller_org: str | None = None,
     peers: list[str] | None = None,
+    only_org: str | None = None,
     since: str | None = None,
     tags: list[str] | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    """List note-type sources (chronological, optional time/tag filters)."""
+    """List note-type sources (chronological, optional time/tag filters).
+
+    Peers only contribute ``published``/``canonical`` rows — raw notes
+    (pitfalls, everyday session notes) stay org-internal. This is the
+    "ship-hot-takes-to-peers only when curated" contract.
+    """
     return list_sources(
         caller_org=caller_org,
         peers=peers,
+        only_org=only_org,
         limit=limit,
         source_type="note",
         since=since,
@@ -570,6 +796,66 @@ def get_comment(
 # ── Write paths ──────────────────────────────────────────────
 
 
+def _assert_own_source(
+    source_id: str,
+    *,
+    caller_org: str | None,
+) -> None:
+    """Refuse mutations against peer-origin sources (graph://bcce359d-a1d).
+
+    If the source does not exist in caller_org's DB but *does* exist in
+    a peer DB, raise :class:`CrossOrgWriteError` with the origin slug.
+    If the source is absent from every scope the caller sees, fall
+    through silently — the downstream write will raise its own
+    not-found error (or no-op) as usual.
+    """
+    resolved_org = _resolve_caller_org(caller_org)
+    db = _open(caller_org)
+    try:
+        if db.get_source(source_id) is not None:
+            return
+    finally:
+        db.close()
+
+    for peer in sorted(resolve_peers(resolved_org, None)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        peer_row = peer_db.get_source(source_id)
+        if peer_row is not None:
+            raise CrossOrgWriteError(source_id, peer)
+
+
+def _assert_own_comment(
+    comment_id: str,
+    *,
+    caller_org: str | None,
+) -> None:
+    """Same rule as :func:`_assert_own_source` but for note comments."""
+    resolved_org = _resolve_caller_org(caller_org)
+    db = _open(caller_org)
+    try:
+        row = db.conn.execute(
+            "SELECT 1 FROM note_comments WHERE id = ? OR id LIKE ? LIMIT 1",
+            (comment_id, f"{comment_id}%"),
+        ).fetchone()
+        if row is not None:
+            return
+    finally:
+        db.close()
+
+    for peer in sorted(resolve_peers(resolved_org, None)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        peer_row = peer_db.conn.execute(
+            "SELECT 1 FROM note_comments WHERE id = ? OR id LIKE ? LIMIT 1",
+            (comment_id, f"{comment_id}%"),
+        ).fetchone()
+        if peer_row is not None:
+            raise CrossOrgWriteError(comment_id, peer)
+
+
 def add_tag(
     source_id: str,
     tag: str,
@@ -577,7 +863,12 @@ def add_tag(
     caller_org: str | None = None,
 ) -> bool:
     """Add a tag to a source. Returns True if newly added, False if already present.
+
+    Raises :class:`CrossOrgWriteError` when the target source lives in a
+    peer DB — tags are metadata on the source row, so they must be
+    authored in the origin org.
     """
+    _assert_own_source(source_id, caller_org=caller_org)
     db = _open(caller_org)
     try:
         return db.add_source_tag(source_id, tag)
@@ -591,7 +882,11 @@ def remove_tag(
     *,
     caller_org: str | None = None,
 ) -> bool:
-    """Remove a tag from a source. Returns True if removed, False if not present."""
+    """Remove a tag from a source. Returns True if removed, False if not present.
+
+    Peer-origin sources raise :class:`CrossOrgWriteError` (see ``add_tag``).
+    """
+    _assert_own_source(source_id, caller_org=caller_org)
     db = _open(caller_org)
     try:
         return db.remove_source_tag(source_id, tag)
@@ -606,7 +901,12 @@ def add_comment(
     caller_org: str | None = None,
     actor: str = "user",
 ) -> dict:
-    """Add a comment to a note. Returns the inserted row."""
+    """Add a comment to a note. Returns the inserted row.
+
+    Peer-origin notes raise :class:`CrossOrgWriteError` — comments have
+    to land in the origin org for anyone there to see them.
+    """
+    _assert_own_source(source_id, caller_org=caller_org)
     db = _open(caller_org)
     try:
         return db.insert_comment(source_id, content, actor=actor)
@@ -619,7 +919,11 @@ def integrate_comment(
     *,
     caller_org: str | None = None,
 ) -> bool:
-    """Mark a comment as integrated. Returns True if state changed."""
+    """Mark a comment as integrated. Returns True if state changed.
+
+    Peer-origin comments raise :class:`CrossOrgWriteError`.
+    """
+    _assert_own_comment(comment_id, caller_org=caller_org)
     db = _open(caller_org)
     try:
         return db.integrate_comment(comment_id)
@@ -837,7 +1141,11 @@ def update_source_title(
     *,
     caller_org: str | None = None,
 ) -> None:
-    """Update a source title. Last write wins."""
+    """Update a source title. Last write wins.
+
+    Peer-origin sources raise :class:`CrossOrgWriteError`.
+    """
+    _assert_own_source(source_id, caller_org=caller_org)
     db = _open(caller_org)
     try:
         db.update_source_title(source_id, title)
@@ -863,7 +1171,8 @@ def promote_source(
     """Transition ``sources.publication_state`` for the given id.
 
     Returns a transition record ``{id, prev_state, new_state, ts}``. Raises
-    ``ValueError`` on invalid state, ``LookupError`` on unknown id.
+    ``ValueError`` on invalid state, ``LookupError`` on unknown id,
+    :class:`CrossOrgWriteError` on peer-origin targets.
     """
     if to_state not in _SOURCE_VALID_STATES:
         raise ValueError(
@@ -875,6 +1184,17 @@ def promote_source(
             "SELECT id, publication_state FROM sources WHERE id = ?", (source_id,)
         ).fetchone()
         if not row:
+            # Distinguish peer-origin from not-found so operators get a
+            # useful message ("act in origin org X") instead of bare 404.
+            resolved_org = _resolve_caller_org(caller_org)
+            for peer in sorted(resolve_peers(resolved_org, None)):
+                peer_db = open_peer_db(peer)
+                if peer_db is None:
+                    continue
+                if peer_db.conn.execute(
+                    "SELECT 1 FROM sources WHERE id = ?", (source_id,)
+                ).fetchone() is not None:
+                    raise CrossOrgWriteError(source_id, peer)
             raise LookupError(f"source not found: {source_id!r}")
         prev = row["publication_state"]
         now = db.conn.execute(
