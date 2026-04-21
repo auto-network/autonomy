@@ -5645,11 +5645,16 @@ async def api_graph_search(request):
     states_param = request.query_params.get("states")
     states = [s for s in states_param.split(",") if s] if states_param else None
     include_raw = bool(request.query_params.get("include_raw"))
+    only_org = request.query_params.get("only_org")
+    peers_param = request.query_params.get("peers")
+    peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
+    caller_org = request.headers.get("X-Graph-Org")
     ssi_param = request.query_params.get("session_source_ids")
     session_source_ids = [s for s in ssi_param.split(",") if s] if ssi_param else None
     session_author_pattern = request.query_params.get("session_author_pattern")
     results = graph_ops.search(
-        q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+        q, caller_org=caller_org, peers=peers, only_org=only_org,
+        limit=limit, project=project, or_mode=or_mode, tag=tag,
         states=states, include_raw=include_raw,
         session_source_ids=session_source_ids,
         session_author_pattern=session_author_pattern,
@@ -5658,24 +5663,42 @@ async def api_graph_search(request):
 
 
 async def api_graph_source_get(request):
-    """Get a single source by id (or id prefix). Companion to HttpClient.get_source."""
+    """Resolve a source by id across own + peer DBs (cross-org read).
+
+    ``X-Graph-Org`` request header pins ``caller_org``; ``?only_org=<slug>``
+    restricts to a single DB; ``?peers=a,b`` overrides the default peer
+    set. Returns 404 when no org can see the ID.
+    """
     source_id = request.path_params["id"]
     if not _GRAPH_SOURCE_ID_RE.match(source_id):
         return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
-    src = graph_ops.get_source(source_id)
+    caller_org = request.headers.get("X-Graph-Org")
+    peers_param = request.query_params.get("peers")
+    peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
+    src = graph_ops.get_source(source_id, caller_org=caller_org, peers=peers)
     if not src:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(src)
 
 
 async def api_graph_sources_list(request):
-    """List sources with filters. Companion to HttpClient.list_sources."""
+    """List sources across own + peer DBs (chronological merge).
+
+    Per ``graph://bcce359d-a1d`` § Merge algorithms. Peer rows are
+    clamped to ``published``/``canonical``. ``?only_org=<slug>`` pins to
+    a single DB; ``X-Graph-Org`` header supplies ``caller_org``.
+    """
     limit = int(request.query_params.get("limit", "50"))
     project = request.query_params.get("project")
     source_type = request.query_params.get("type")
     tags_param = request.query_params.get("tags")
     tags = [t for t in tags_param.split(",") if t] if tags_param else None
+    only_org = request.query_params.get("only_org")
+    peers_param = request.query_params.get("peers")
+    peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
+    caller_org = request.headers.get("X-Graph-Org")
     sources = graph_ops.list_sources(
+        caller_org=caller_org, peers=peers, only_org=only_org,
         limit=limit, project=project, source_type=source_type, tags=tags,
     )
     return JSONResponse({"sources": sources})

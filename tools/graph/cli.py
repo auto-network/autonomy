@@ -106,6 +106,47 @@ def _current_session_context(db) -> tuple[list[str], str | None]:
     return source_ids, f"%{session_name}%"
 
 
+def _parse_org_args(args) -> tuple[str | None, list[str] | None]:
+    """Read ``--only-org`` / ``--org`` into ``(only_org, peers)``.
+
+    Mapping (per graph://bcce359d-a1d § Command taxonomy):
+
+    * ``--only-org SLUG`` (or ``--org SLUG``) → ``only_org=SLUG, peers=None``.
+      One-DB scan, peer merge bypassed.
+    * ``--org all`` → ``only_org=None, peers=<all known orgs minus caller>``.
+      Admin/host mode: overrides any personal subscription Setting.
+    * No flags → ``(None, None)`` → default cross-org per subscription.
+
+    ``--only-org`` + ``--org`` combined: ``--only-org`` wins, the redundant
+    ``--org`` value is ignored with a stderr note.
+    """
+    only_org = getattr(args, "only_org", None)
+    org_mode = getattr(args, "org_mode", None)
+
+    if only_org and org_mode:
+        print(
+            f"Note: --only-org={only_org} overrides --org={org_mode}",
+            file=sys.stderr,
+        )
+        org_mode = None
+
+    if only_org:
+        return only_org, None
+
+    if org_mode is None:
+        return None, None
+
+    if org_mode == "all":
+        from .cross_org import list_org_slugs
+        caller = os.environ.get("GRAPH_ORG")
+        all_slugs = list_org_slugs()
+        peers = [s for s in all_slugs if s != (caller or "")]
+        return None, peers
+
+    # `--org <slug>` shortcut (non-"all") behaves like `--only-org`.
+    return org_mode, None
+
+
 def _parse_state_args(args) -> tuple[list[str] | None, bool]:
     """Read --state and --include from argparse and validate.
 
@@ -200,6 +241,7 @@ def cmd_ingest(args):
 def cmd_search(args):
     """Full-text search across the graph."""
     states, include_raw = _parse_state_args(args)
+    only_org, peers = _parse_org_args(args)
     db = GraphDB(args.db)
     try:
         session_ids, author_pattern = _current_session_context(db)
@@ -213,6 +255,8 @@ def cmd_search(args):
         tag=getattr(args, 'tag', None),
         states=states,
         include_raw=include_raw,
+        only_org=only_org,
+        peers=peers,
         session_source_ids=session_ids,
         session_author_pattern=author_pattern,
     )
@@ -234,13 +278,15 @@ def cmd_search(args):
         rtype = r["result_type"]
         project = r.get("project", "")
         proj_tag = f" [{project}]" if project else ""
+        org = r.get("org") or ""
+        org_tag = f" [{org}]" if org and not project else (f" [{org}]" if org and project != org else "")
         sid = r.get("source_id", "?")[:12]
 
         if rtype == "source":
             stype = r.get("source_type", "")
             platform = r.get("platform", "")
             created = (r.get("created_at") or "")[:10]
-            print(f"  [S] {r.get('source_title', '?')[:60]} (src:{sid}){proj_tag}")
+            print(f"  [S] {r.get('source_title', '?')[:60]} (src:{sid}){proj_tag}{org_tag}")
             detail_parts = [p for p in [stype, platform, created] if p]
             print(f"    {' | '.join(detail_parts)}")
             print()
@@ -250,7 +296,7 @@ def cmd_search(args):
             title = r.get("source_title") or "?"
             turn = r.get("turn_number")
             turn_tag = f" t{turn}" if turn else ""
-            print(f"  [{direction}] {title[:50]}{turn_tag} (src:{sid}){proj_tag}")
+            print(f"  [{direction}] {title[:50]}{turn_tag} (src:{sid}){proj_tag}{org_tag}")
             print(f"    relation: {relation}")
             print()
         else:
@@ -261,7 +307,7 @@ def cmd_search(args):
             if len(content) > width:
                 content = content[:width] + "…"
             lines = content.replace("\n", "\n    ").rstrip()
-            print(f"  [{tag}] {source[:50]} t{turn} (src:{sid}){proj_tag}")
+            print(f"  [{tag}] {source[:50]} t{turn} (src:{sid}){proj_tag}{org_tag}")
             print(f"    {lines}")
             print()
 
@@ -744,32 +790,43 @@ def cmd_read(args):
 
 
 def cmd_sources(args):
-    """List sources with optional filters."""
-    db = GraphDB(args.db)
+    """List sources with optional filters (cross-org when available)."""
     states, include_raw = _parse_state_args(args)
-    session_ids, author_pattern = _current_session_context(db)
-    sources = db.list_sources(
+    only_org, peers = _parse_org_args(args)
+
+    # Session context still uses a direct DB open (we need WAL-visible
+    # session rows for raw-from-current-session carve-out). The listing
+    # itself routes through ``ops.list_sources`` so peer DBs merge in
+    # when no only-org pin is set.
+    db = GraphDB(args.db)
+    try:
+        session_ids, author_pattern = _current_session_context(db)
+    finally:
+        db.close()
+
+    from . import ops as _ops
+    sources = _ops.list_sources(
         project=args.project, source_type=args.type, limit=args.limit,
         since=args.since, until=getattr(args, 'until', None), author=args.author,
         states=states, include_raw=include_raw,
+        only_org=only_org, peers=peers,
         session_source_ids=session_ids,
         session_author_pattern=author_pattern,
     )
 
     if not sources:
         print("No sources found.")
-        db.close()
         return
 
     for s in sources:
         proj = f" [{s['project']}]" if s.get('project') else ""
+        org = s.get('org') or ""
+        org_tag = f" [{org}]" if org and (not proj or proj.strip(' []') != org) else ""
         date = (s.get("created_at") or "")[:10]
-        print(f"  {s['id'][:12]}  {s['type']:10s}  {date}  {s.get('title', '?')[:55]}{proj}")
+        print(f"  {s['id'][:12]}  {s['type']:10s}  {date}  {s.get('title', '?')[:55]}{proj}{org_tag}")
         if args.verbose:
             fp = s.get("file_path")
             print(f"                {fp if fp else '(no file)'}")
-
-    db.close()
 
 
 def _auto_ingest(db: GraphDB) -> None:
@@ -3576,6 +3633,18 @@ def main():
     p.add_argument("--tag", help="Filter results to sources with this tag")
     p.add_argument("--state", help="Filter by publication_state (comma-separated: raw,curated,published,canonical)")
     p.add_argument("--include", choices=["raw"], help="Include additional state categories (use 'raw' to surface raw sources from other sessions)")
+    p.add_argument(
+        "--only-org",
+        dest="only_org",
+        metavar="SLUG",
+        help="Restrict to a single org (own slug or a peer). Skips cross-org RRF merge.",
+    )
+    p.add_argument(
+        "--org",
+        dest="org_mode",
+        metavar="SLUG",
+        help="Peer scope: 'all' includes every known org (admin); any other slug is an alias for --only-org.",
+    )
     p.add_argument("--json", action="store_true", help="Output as JSON array")
     p.set_defaults(func=cmd_search)
 
@@ -3601,6 +3670,12 @@ def main():
     p.add_argument("--author", help="Filter by metadata author (e.g. terminal:auto-t3, user)")
     p.add_argument("--state", help="Filter by publication_state (comma-separated: raw,curated,published,canonical)")
     p.add_argument("--include", choices=["raw"], help="Include additional state categories (use 'raw' to surface raw sources from other sessions)")
+    p.add_argument(
+        "--org",
+        dest="org_mode",
+        metavar="SLUG",
+        help="Pin the listing to a single org (own slug or peer).",
+    )
     p.set_defaults(func=cmd_sources)
 
     # context

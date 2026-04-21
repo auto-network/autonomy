@@ -218,18 +218,19 @@ def override_setting(
     """Create a Setting with ``supersedes=target_id`` and partial payload.
 
     Validation runs against the target's ``(set_id, schema_revision)``
-    using the *merged* shape — what consumers will actually see. Raises
-    ``LookupError`` if the target does not exist.
+    using the *merged* shape — what consumers will actually see. The
+    override Setting itself lives in caller_org's DB; the *target* may
+    be either own-org or peer-origin — overriding peer content is the
+    expected way to adapt shared primitives to a local org. Raises
+    ``LookupError`` only when the target exists nowhere (own or peers).
     """
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
+    target = _fetch_setting_any_org(target_id, caller_org)
+    if target is None:
+        raise LookupError(f"override target not found: {target_id!r}")
     db = _open(caller_org)
     try:
-        target = db.conn.execute(
-            "SELECT * FROM settings WHERE id = ?", (target_id,)
-        ).fetchone()
-        if not target:
-            raise LookupError(f"override target not found: {target_id!r}")
         target_payload = json.loads(target["payload"])
         merged = json_merge_patch(target_payload, payload_overrides)
         schemas.validate_payload(
@@ -259,17 +260,16 @@ def exclude_setting(
 ) -> str:
     """Create a Setting with ``excludes=target_id`` and empty payload.
 
-    Drops the target from ``read_set`` output for callers in this DB's scope.
+    The exclude row itself lives in caller_org's DB and only affects
+    reads scoped to this caller — so peer-origin targets are allowed.
     """
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
+    target = _fetch_setting_any_org(target_id, caller_org)
+    if target is None:
+        raise LookupError(f"exclude target not found: {target_id!r}")
     db = _open(caller_org)
     try:
-        target = db.conn.execute(
-            "SELECT * FROM settings WHERE id = ?", (target_id,)
-        ).fetchone()
-        if not target:
-            raise LookupError(f"exclude target not found: {target_id!r}")
         sid = str(uuid4())
         now = _now_iso()
         db.conn.execute(
@@ -285,13 +285,42 @@ def exclude_setting(
         db.close()
 
 
+def _reject_peer_setting_target(
+    setting_id: str,
+    caller_org: str | None,
+) -> None:
+    """Raise :class:`ops.CrossOrgWriteError` when ``setting_id`` lives in a peer DB.
+
+    Lookup order mirrors :func:`_fetch_setting_any_org`, but instead of
+    returning the row we raise so promote/deprecate/remove fail fast
+    with the structured cross-org error rather than a bare LookupError.
+    """
+    from .cross_org import open_peer_db, resolve_peers
+    from .ops import CrossOrgWriteError  # local: avoid import cycle at top
+
+    resolved_org = _resolve_settings_caller(caller_org)
+    for peer in sorted(resolve_peers(resolved_org, None)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        row = peer_db.conn.execute(
+            "SELECT 1 FROM settings WHERE id = ?", (setting_id,)
+        ).fetchone()
+        if row is not None:
+            raise CrossOrgWriteError(setting_id, peer)
+
+
 def promote_setting(
     setting_id: str,
     to_state: str,
     *,
     caller_org: str | None = None,
 ) -> None:
-    """Transition publication_state. ``LookupError`` if not present."""
+    """Transition publication_state. ``LookupError`` if not present.
+
+    Peer-origin targets raise :class:`ops.CrossOrgWriteError` — only the
+    origin org may alter a Setting's publication state.
+    """
     if to_state not in VALID_STATES:
         raise ValueError(f"invalid state {to_state!r}; valid: {VALID_STATES}")
     now = _now_iso()
@@ -303,6 +332,7 @@ def promote_setting(
             (to_state, now, setting_id),
         )
         if cur.rowcount == 0:
+            _reject_peer_setting_target(setting_id, caller_org)
             raise LookupError(f"setting not found: {setting_id!r}")
         db.conn.commit()
     finally:
@@ -315,7 +345,10 @@ def deprecate_setting(
     caller_org: str | None = None,
     successor_id: str | None = None,
 ) -> None:
-    """Mark a Setting deprecated, optionally pointing at a successor."""
+    """Mark a Setting deprecated, optionally pointing at a successor.
+
+    Peer-origin targets raise :class:`ops.CrossOrgWriteError`.
+    """
     now = _now_iso()
     db = _open(caller_org)
     try:
@@ -325,6 +358,7 @@ def deprecate_setting(
             (successor_id, now, setting_id),
         )
         if cur.rowcount == 0:
+            _reject_peer_setting_target(setting_id, caller_org)
             raise LookupError(f"setting not found: {setting_id!r}")
         db.conn.commit()
     finally:
@@ -337,7 +371,10 @@ def remove_setting(
     caller_org: str | None = None,
 ) -> None:
     """Hard-delete a Setting. Spec restricts to ``raw``; higher states must
-    be deprecated first."""
+    be deprecated first.
+
+    Peer-origin targets raise :class:`ops.CrossOrgWriteError`.
+    """
     db = _open(caller_org)
     try:
         row = db.conn.execute(
@@ -345,6 +382,7 @@ def remove_setting(
             (setting_id,),
         ).fetchone()
         if not row:
+            _reject_peer_setting_target(setting_id, caller_org)
             raise LookupError(f"setting not found: {setting_id!r}")
         if row["publication_state"] != "raw":
             raise ValueError(
@@ -365,17 +403,98 @@ def list_set_ids(
     caller_org: str | None = None,
     peers: list[str] | None = None,
 ) -> list[str]:
-    """Distinct ``set_id`` values visible to caller_org. Today: every set_id
-    in caller's own DB plus published/canonical from peers (no peers in
-    single-DB world)."""
+    """Distinct ``set_id`` values visible to caller_org.
+
+    Own DB contributes every ``set_id``; peer DBs contribute only
+    ``set_id`` values backed by a ``published``/``canonical`` row. See
+    graph://bcce359d-a1d § External view.
+    """
+    from .cross_org import (
+        PEER_VISIBLE_STATES,
+        open_peer_db,
+        resolve_peers,
+    )
+
+    seen: set[str] = set()
     db = _open(caller_org)
     try:
         rows = db.conn.execute(
-            "SELECT DISTINCT set_id FROM settings ORDER BY set_id"
+            "SELECT DISTINCT set_id FROM settings"
         ).fetchall()
-        return [r[0] for r in rows]
+        for r in rows:
+            if r[0]:
+                seen.add(r[0])
     finally:
         db.close()
+
+    resolved_org = _resolve_settings_caller(caller_org)
+    for peer in sorted(resolve_peers(resolved_org, peers)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
+        rows = peer_db.conn.execute(
+            f"SELECT DISTINCT set_id FROM settings "
+            f"WHERE publication_state IN ({placeholders}) "
+            f"  AND excludes IS NULL AND deprecated = 0",
+            list(PEER_VISIBLE_STATES),
+        ).fetchall()
+        for r in rows:
+            if r[0]:
+                seen.add(r[0])
+    return sorted(seen)
+
+
+def _resolve_settings_caller(caller_org: str | None) -> str | None:
+    """Mirror of ``ops._resolve_caller_org`` avoiding the import cycle.
+
+    Returns the concrete slug a caller should be treated as when
+    resolving peer reads — explicit > ``GRAPH_ORG`` > ``None`` (triggers
+    the scopeless default inside ``resolve_caller_db_path``).
+    """
+    if caller_org is not None:
+        return caller_org
+    return os.environ.get("GRAPH_ORG")
+
+
+def _fetch_setting_any_org(
+    setting_id: str,
+    caller_org: str | None,
+) -> dict | None:
+    """Return the Setting row as a plain dict, searching own-org then peers.
+
+    Peer rows must satisfy the public-surface filter
+    (``publication_state IN ('published','canonical')``). Used by
+    override/exclude targets, which are allowed to reference peer
+    content — the *override row* itself still lands in caller_org's DB.
+    """
+    from .cross_org import (
+        PEER_VISIBLE_STATES,
+        open_peer_db,
+        resolve_peers,
+    )
+
+    db = _open(caller_org)
+    try:
+        row = db.conn.execute(
+            "SELECT * FROM settings WHERE id = ?", (setting_id,)
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+    finally:
+        db.close()
+
+    resolved_org = _resolve_settings_caller(caller_org)
+    for peer in sorted(resolve_peers(resolved_org, None)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        row = peer_db.conn.execute(
+            "SELECT * FROM settings WHERE id = ?", (setting_id,)
+        ).fetchone()
+        if row is not None and row["publication_state"] in PEER_VISIBLE_STATES:
+            return dict(row)
+    return None
 
 
 def get_setting(
@@ -385,18 +504,43 @@ def get_setting(
     peers: list[str] | None = None,
     target_revision: int | None = None,
 ) -> ResolvedSetting | None:
-    """Resolve a single Setting by id. ``None`` if not found or dropped by
-    revision constraints."""
+    """Resolve a single Setting by id, own-first then peers.
+
+    ``None`` if not found or dropped by revision constraints. Peer rows
+    only surface when their ``publication_state`` is ``published`` or
+    ``canonical``.
+    """
+    from .cross_org import (
+        PEER_VISIBLE_STATES,
+        open_peer_db,
+        resolve_peers,
+    )
+
+    resolved_org = _resolve_settings_caller(caller_org)
     db = _open(caller_org)
     try:
         row = db.conn.execute(
             "SELECT * FROM settings WHERE id = ?", (setting_id,)
         ).fetchone()
-        if not row:
-            return None
-        resolved = _row_to_resolved(row, org=caller_org)
+        if row:
+            resolved = _row_to_resolved(row, org=resolved_org)
     finally:
         db.close()
+
+    if 'resolved' not in locals():
+        resolved = None
+        for peer in sorted(resolve_peers(resolved_org, peers)):
+            peer_db = open_peer_db(peer)
+            if peer_db is None:
+                continue
+            row = peer_db.conn.execute(
+                "SELECT * FROM settings WHERE id = ?", (setting_id,)
+            ).fetchone()
+            if row and row["publication_state"] in PEER_VISIBLE_STATES:
+                resolved = _row_to_resolved(row, org=peer)
+                break
+        if resolved is None:
+            return None
 
     if target_revision is None:
         return resolved
@@ -427,6 +571,13 @@ def read_set(
     upconverts (or drops if no chain). Returns a ``SetMembers`` with drop
     accounting populated.
     """
+    from .cross_org import (
+        PEER_VISIBLE_STATES,
+        open_peer_db,
+        resolve_peers,
+    )
+
+    resolved_org = _resolve_settings_caller(caller_org)
     raw_rows: list[tuple[str | None, Any]] = []
     db = _open(caller_org)
     try:
@@ -434,15 +585,24 @@ def read_set(
             "SELECT * FROM settings WHERE set_id = ?", (set_id,)
         ).fetchall()
         for r in rows:
-            raw_rows.append((caller_org, r))
-
-        # Peer-org loop (no-op in single-DB world): would open each peer DB
-        # and select rows where publication_state IN ('published','canonical').
-        for peer in (peers or []):
-            # Future: open_org_db(peer); apply filter; extend raw_rows.
-            pass
+            raw_rows.append((resolved_org, r))
     finally:
         db.close()
+
+    # Peer-org contributions: public surface only.
+    resolved_peers = resolve_peers(resolved_org, peers)
+    for peer in sorted(resolved_peers):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
+        rows = peer_db.conn.execute(
+            f"SELECT * FROM settings WHERE set_id = ? "
+            f"  AND publication_state IN ({placeholders})",
+            (set_id, *PEER_VISIBLE_STATES),
+        ).fetchall()
+        for r in rows:
+            raw_rows.append((peer, r))
 
     dropped = {
         "below_min_revision": 0,

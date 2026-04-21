@@ -33,6 +33,7 @@ class GraphClient:
         *,
         caller_org: str | None = None,
         peers: list[str] | None = None,
+        only_org: str | None = None,
         limit: int = 25,
         project: str | None = None,
         or_mode: bool = False,
@@ -77,6 +78,7 @@ class GraphClient:
         *,
         caller_org: str | None = None,
         peers: list[str] | None = None,
+        only_org: str | None = None,
         limit: int = 50,
         project: str | None = None,
         source_type: str | None = None,
@@ -121,6 +123,7 @@ class LocalClient(GraphClient):
         *,
         caller_org: str | None = None,
         peers: list[str] | None = None,
+        only_org: str | None = None,
         limit: int = 25,
         project: str | None = None,
         or_mode: bool = False,
@@ -134,6 +137,7 @@ class LocalClient(GraphClient):
             q,
             caller_org=caller_org,
             peers=peers,
+            only_org=only_org,
             limit=limit,
             project=project,
             or_mode=or_mode,
@@ -160,6 +164,7 @@ class LocalClient(GraphClient):
         *,
         caller_org=None,
         peers=None,
+        only_org=None,
         limit=50,
         project=None,
         source_type=None,
@@ -168,6 +173,7 @@ class LocalClient(GraphClient):
         return ops.list_sources(
             caller_org=caller_org,
             peers=peers,
+            only_org=only_org,
             limit=limit,
             project=project,
             source_type=source_type,
@@ -241,6 +247,7 @@ class HttpClient(GraphClient):
         *,
         caller_org=None,
         peers=None,
+        only_org=None,
         limit=25,
         project=None,
         or_mode=False,
@@ -261,6 +268,10 @@ class HttpClient(GraphClient):
             params["states"] = ",".join(states)
         if include_raw:
             params["include_raw"] = "1"
+        if only_org:
+            params["only_org"] = only_org
+        if peers is not None:
+            params["peers"] = ",".join(peers)
         if session_source_ids:
             params["session_source_ids"] = ",".join(session_source_ids)
         if session_author_pattern:
@@ -297,6 +308,7 @@ class HttpClient(GraphClient):
         *,
         caller_org=None,
         peers=None,
+        only_org=None,
         limit=50,
         project=None,
         source_type=None,
@@ -309,6 +321,10 @@ class HttpClient(GraphClient):
             params["type"] = source_type
         if tags:
             params["tags"] = ",".join(tags)
+        if only_org:
+            params["only_org"] = only_org
+        if peers is not None:
+            params["peers"] = ",".join(peers)
         result = self._get("/api/graph/sources", params)
         if isinstance(result, dict) and "sources" in result:
             return result["sources"]
