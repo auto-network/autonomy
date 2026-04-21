@@ -1,9 +1,15 @@
 """Shared fixtures for agents/tests.
 
 Provides a ``shipped_workspaces`` fixture that populates per-org Settings
-from ``agents/projects.yaml`` into a tmp ``data/orgs/`` tree so tests that
-previously exercised the yaml loader can now exercise the Settings-backed
-:mod:`agents.workspace_settings` module with identical data.
+from the shipped yaml fixture into a tmp ``data/orgs/`` tree so tests
+that previously exercised the yaml loader can now exercise the
+Settings-backed :mod:`agents.workspace_settings` module with identical
+data.
+
+The fixture yaml lives under ``agents/tests/fixtures/`` because
+``agents/projects.yaml`` itself was retired in auto-gko4e (all content
+now lives in per-org Setting DBs). Tests keep a frozen copy of the
+final yaml shape as ground truth for the migration round-trip.
 
 Tests that construct :class:`agents.workspace_settings.WorkspaceV1`
 directly do not need this fixture — they bypass the read path.
@@ -26,7 +32,9 @@ from tools.graph.migrations.migrate_workspaces_yaml import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SHIPPED_PROJECTS_YAML = REPO_ROOT / "agents" / "projects.yaml"
+SHIPPED_PROJECTS_YAML = (
+    REPO_ROOT / "agents" / "tests" / "fixtures" / "shipped_projects.yaml"
+)
 
 
 def populate_workspaces_from_yaml(

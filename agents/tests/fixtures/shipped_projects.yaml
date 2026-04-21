@@ -1,0 +1,152 @@
+# Project registry — defines containerized project environments for the
+# dispatcher and session launcher.
+#
+# Every entry is a containerized project. Host sessions are a separate,
+# pre-existing concept and are NOT part of this config.
+#
+# Design refs:
+#   graph://e9448254-18f  Pluggable project-specific container sessions
+#   graph://9df4dd6d-b34  Hard project + soft tags scoping model
+#
+# Per-project fields:
+#   name              Display name (UI label).
+#   description       Short description for UI.
+#   image             Docker image name (required), e.g. autonomy-agent:dashboard.
+#   repos             List of git repos. Each entry:
+#                       url       Git remote URL. Autonomy clones into a managed
+#                                 location (data/repos/) — NOT a host path.
+#                       mount     Path inside the container.
+#                       writable  true -> a worktree is created and mounted;
+#                                 false -> the managed clone is mounted read-only.
+#   working_dir       Container CWD (usually one of the repo mounts).
+#   startup           Per-project startup script path (relative to repo root).
+#   dind              true -> run with --privileged for Docker-in-Docker.
+#   graph_project     Hard graph boundary — passed as GRAPH_SCOPE env var.
+#                     Required.
+#   default_tags      Soft graph scoping tags — passed as GRAPH_TAGS env var.
+#                     Auto-applied to notes; influences search ranking.
+#   dispatch_labels   Bead labels that route to this project's image.
+#   env               Extra environment variables passed into the container.
+#   artifacts         Files the project expects inside the container. Each entry:
+#                       name         File name (also the path under
+#                                    /etc/autonomy/artifacts/ inside the container).
+#                       scope        Layering scope — one of:
+#                                      personal-org       data/artifacts/personal/{org}/
+#                                      shared-org         data/artifacts/shared/{org}/
+#                                      personal-workspace data/artifacts/personal/{org}/{workspace}/
+#                                      shared-workspace   data/artifacts/shared/{org}/{workspace}/
+#                                    where {org} = graph_project, {workspace} = project id.
+#                       required     true -> launch fails if file is missing.
+#                       description  Human-readable label (shown in launch errors).
+#                       help         Instructions for obtaining the file.
+#
+# Top-level `orgs:` (operator-local overrides — graph://497cdc20-d43)
+#   Identity primitives the dashboard shows for an org. Each value is a
+#   per-field OVERRIDE of the canonical identity an org publishes for
+#   itself. In Stage 1 (today) operator-local overrides are the only
+#   source; once the federation read-layer (auto-hoi4) lands, missing
+#   fields fall back to the org's own published identity, then to a
+#   deterministic generated fallback (hash-of-slug colour + initial).
+#   Per-field cascade: setting only `color` keeps generated `name` and
+#   `favicon`. Schema is forward-compatible with auto-rruc, which adds
+#   inheritance fields (artifacts, env_from_host, default_tags) under
+#   the same `orgs:<slug>:` keys.
+#
+#   Fields:
+#     name      Display name.
+#     byline    Short tagline rendered under the name in long-form views.
+#     color     Hex colour for the org indicator (background of the
+#               circular favicon/initial). Use a value that reads on
+#               #0f172a (the dashboard background).
+#     favicon   Optional. Path (repo-relative) or URL to a square icon.
+#               When omitted, the renderer paints the first letter of
+#               `name` on a circle of `color`.
+
+orgs:
+  autonomy:
+    name: "Autonomy Network"
+    byline: "AGI platform"
+    color: "#6C63FF"
+    favicon: /static/icon-192.png
+  anchore:
+    name: "Anchore"
+    byline: "Security platform"
+    color: "#2D7DD2"
+    favicon: /static/orgs/anchore.png
+  personal:
+    name: "Personal"
+    color: "#A0A0A0"
+
+projects:
+
+  autonomy:
+    name: "Autonomy Network"
+    description: "Core platform — graph, dashboard, dispatcher"
+    image: "autonomy-agent:dashboard"
+    working_dir: "/workspace/repo"
+    graph_project: autonomy
+    default_tags: []
+    dispatch_labels: [dashboard]
+    dind: false
+
+  enterprise:
+    name: "Enterprise"
+    description: "Anchore Enterprise — full stack dev with DinD"
+    image: "autonomy-agent:enterprise"
+    repos:
+      - url: "git@github.com:anchore/enterprise.git"
+        mount: "/workspace/enterprise"
+        writable: true
+      - url: "git@github.com:anchore/enterprise_ng.git"
+        mount: "/workspace/enterprise_ng"
+        writable: true
+    working_dir: "/workspace/enterprise"
+    startup: "agents/projects/enterprise/startup.sh"
+    dind: true
+    graph_project: anchore
+    default_tags: [enterprise]
+    dispatch_labels: [enterprise]
+
+  enterprise-ng:
+    name: "Enterprise NG"
+    description: "Anchore Enterprise NG — component_catalog development"
+    image: "autonomy-agent:enterprise-ng"
+    repos:
+      - url: "git@github.com:anchore/enterprise.git"
+        mount: "/workspace/enterprise"
+        writable: true
+      - url: "git@github.com:anchore/enterprise_ng.git"
+        mount: "/workspace/enterprise_ng"
+        writable: true
+    working_dir: "/workspace/enterprise_ng"
+    startup: "agents/projects/enterprise-ng/startup.sh"
+    dind: true
+    network_host: false
+    graph_project: anchore
+    default_tags: [enterprise, enterprise-ng]
+    dispatch_labels: [enterprise-ng]
+    env:
+      # Only container-specific overrides go here — project defaults
+      # (DB host/port, auth, logging, timeouts, etc.) belong in the
+      # repo's .env.example / default_config.yaml, not in the workspace
+      # spec.
+      ANCHORE_CONFIG_PATH: /workspace/enterprise_ng/config/default_config.yaml
+      ANCHORE_SSH_PRIV_KEY_PATH: /etc/autonomy/artifacts/id_ed25519
+    env_from_host:
+      - GITHUB_RELEASE_PULL_TOKEN
+    artifacts:
+      - name: license.yaml
+        scope: personal-org
+        required: true
+        description: Anchore Enterprise license
+        help: "Generate at https://license.anchore.io — save to data/artifacts/personal/anchore/license.yaml"
+      - name: id_ed25519
+        scope: personal-org
+        required: true
+        description: SSH key for Anchore private repos
+        help: "Copy your GitHub-authorized SSH key to data/artifacts/personal/anchore/id_ed25519"
+      - name: docker-config.json
+        scope: personal-org
+        required: true
+        description: Docker CLI auth config for private registry pulls
+        help: "Copy your ~/.docker/config.json to data/artifacts/personal/anchore/docker-config.json"

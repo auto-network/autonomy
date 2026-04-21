@@ -25,6 +25,8 @@ from .registry import (
 from . import org  # noqa: F401
 from . import workspace  # noqa: F401
 from . import workspace_artifact  # noqa: F401 — autonomy.workspace.artifact#1
+from . import artifact_path  # noqa: F401 — autonomy.artifact-path#1
+from . import org_peer_subscription  # noqa: F401 — autonomy.org.peer-subscription#1
 
 __all__ = [
     "SchemaValidationError",
