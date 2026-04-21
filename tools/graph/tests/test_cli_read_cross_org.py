@@ -46,6 +46,11 @@ def orgs_root(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
+    # Forcing LocalClient: these tests drive the host-side cmd_* paths
+    # directly; with GRAPH_API set in the container env, the newly-wired
+    # ``get_client()`` dispatch would route through HTTP and miss the
+    # seeded test DBs.
+    monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", legacy)
     return root
 

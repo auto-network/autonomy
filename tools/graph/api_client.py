@@ -17,9 +17,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-GRAPH_API = os.environ.get("GRAPH_API")
-
-# Accept self-signed certs — dashboard uses Tailscale TLS
+# ``GRAPH_API`` is read on every call, not cached at import time — tests
+# that monkeypatch.delenv("GRAPH_API") must see the new value on the next
+# ``is_api_mode()`` call. Helpers that need the URL call ``_graph_api()``.
+# Accept self-signed certs — dashboard uses Tailscale TLS.
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
@@ -29,14 +30,19 @@ _SOURCE_ID_RE = re.compile(r'^[0-9a-f-]+$', re.IGNORECASE)
 _TAGS_RE = re.compile(r'^[a-zA-Z0-9_,:-]+$')
 
 
+def _graph_api() -> str | None:
+    """Current ``GRAPH_API`` value — read from env per call (no caching)."""
+    return os.environ.get("GRAPH_API")
+
+
 def is_api_mode() -> bool:
     """Return True if GRAPH_API is set and writes should go through the API."""
-    return bool(GRAPH_API)
+    return bool(_graph_api())
 
 
 def _post(endpoint: str, data: dict) -> dict:
     """POST JSON to the dashboard graph API. Returns parsed JSON response."""
-    url = f"{GRAPH_API}{endpoint}"
+    url = f"{_graph_api()}{endpoint}"
     body = json.dumps(data).encode()
     req = urllib.request.Request(
         url,
@@ -57,13 +63,13 @@ def _post(endpoint: str, data: dict) -> dict:
         print(f"API error: {error_msg}", file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        print(f"Cannot reach graph API at {_graph_api()}: {e.reason}", file=sys.stderr)
         sys.exit(1)
 
 
 def _put(endpoint: str, data: dict) -> dict:
     """PUT JSON to the dashboard API. Returns parsed JSON response."""
-    url = f"{GRAPH_API}{endpoint}"
+    url = f"{_graph_api()}{endpoint}"
     body = json.dumps(data).encode()
     req = urllib.request.Request(
         url,
@@ -84,13 +90,13 @@ def _put(endpoint: str, data: dict) -> dict:
         print(f"API error: {error_msg}", file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        print(f"Cannot reach graph API at {_graph_api()}: {e.reason}", file=sys.stderr)
         sys.exit(1)
 
 
 def _get(endpoint: str) -> dict:
     """GET from the dashboard API. Returns parsed JSON response."""
-    url = f"{GRAPH_API}{endpoint}"
+    url = f"{_graph_api()}{endpoint}"
     req = urllib.request.Request(url, method="GET")
     try:
         resp = urllib.request.urlopen(req, timeout=30, context=_SSL_CTX)
@@ -105,7 +111,7 @@ def _get(endpoint: str) -> dict:
         print(f"API error: {error_msg}", file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        print(f"Cannot reach graph API at {_graph_api()}: {e.reason}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -129,7 +135,7 @@ def _post_multipart(endpoint: str, fields: dict, files: list[tuple[str, str, byt
         body += data + b"\r\n"
     body += f"--{boundary}--\r\n".encode()
 
-    url = f"{GRAPH_API}{endpoint}"
+    url = f"{_graph_api()}{endpoint}"
     req = urllib.request.Request(
         url, data=body,
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
@@ -147,7 +153,7 @@ def _post_multipart(endpoint: str, fields: dict, files: list[tuple[str, str, byt
         print(f"API error: {error_msg}", file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        print(f"Cannot reach graph API at {_graph_api()}: {e.reason}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -412,7 +418,7 @@ def api_attach(args) -> None:
         else:
             body += part.encode()
 
-    url = f"{GRAPH_API}/api/graph/attach"
+    url = f"{_graph_api()}/api/graph/attach"
     req = urllib.request.Request(
         url,
         data=body,
@@ -432,7 +438,7 @@ def api_attach(args) -> None:
         print(f"API error: {error_msg}", file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        print(f"Cannot reach graph API at {_graph_api()}: {e.reason}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -526,7 +532,7 @@ def api_collab_tag_describe(args) -> None:
 
 def _delete(endpoint: str) -> dict:
     """DELETE to the dashboard API. Returns parsed JSON response."""
-    url = f"{GRAPH_API}{endpoint}"
+    url = f"{_graph_api()}{endpoint}"
     req = urllib.request.Request(url, method="DELETE")
     try:
         resp = urllib.request.urlopen(req, timeout=30, context=_SSL_CTX)
@@ -541,7 +547,7 @@ def _delete(endpoint: str) -> dict:
         print(f"API error: {error_msg}", file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"Cannot reach graph API at {GRAPH_API}: {e.reason}", file=sys.stderr)
+        print(f"Cannot reach graph API at {_graph_api()}: {e.reason}", file=sys.stderr)
         sys.exit(1)
 
 
