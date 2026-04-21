@@ -7,35 +7,48 @@ PRAGMA foreign_keys = ON;
 -- ============================================================
 -- SOURCES — origin records (conversations, files, URLs)
 -- ============================================================
+-- publication_state: scope+facet primitive (graph://8cf067e3-ca3).
+--   'raw' (default)    — substrate/telemetry; excluded from cross-session search surface.
+--   'curated'          — org-reviewed reference; visible in org default surface.
+--   'published'        — cross-org reference; visible to subscriber orgs.
+--   'canonical'        — authoritative, pinned top-rank.
+-- deprecated/successor_id: terminal modifiers orthogonal to state.
 CREATE TABLE IF NOT EXISTS sources (
-    id               TEXT PRIMARY KEY,
-    type             TEXT NOT NULL,          -- 'conversation', 'musing', 'document', 'url', 'session'
-    platform         TEXT,                   -- 'chatgpt', 'claude', 'claude-code', 'local', etc.
-    project          TEXT,                   -- project identifier (e.g. '-home-jeremy-workspace-autonomy')
-    title            TEXT,
-    url              TEXT,
-    file_path        TEXT UNIQUE,            -- local file path (for dedup on re-ingest)
-    metadata         TEXT DEFAULT '{}',      -- JSON blob for extra fields
-    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    ingested_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    last_activity_at TEXT                    -- timestamp of latest ingested turn (for activity-based ordering)
+    id                TEXT PRIMARY KEY,
+    type              TEXT NOT NULL,          -- 'conversation', 'musing', 'document', 'url', 'session'
+    platform          TEXT,                   -- 'chatgpt', 'claude', 'claude-code', 'local', etc.
+    project           TEXT,                   -- project identifier (e.g. '-home-jeremy-workspace-autonomy')
+    title             TEXT,
+    url               TEXT,
+    file_path         TEXT UNIQUE,            -- local file path (for dedup on re-ingest)
+    metadata          TEXT DEFAULT '{}',      -- JSON blob for extra fields
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    ingested_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    last_activity_at  TEXT,                   -- timestamp of latest ingested turn (for activity-based ordering)
+    publication_state TEXT NOT NULL DEFAULT 'raw'
+        CHECK (publication_state IN ('raw','curated','published','canonical')),
+    deprecated        INTEGER NOT NULL DEFAULT 0 CHECK (deprecated IN (0,1)),
+    successor_id      TEXT                    -- loose reference to another source (promotion succession)
 );
--- idx_sources_last_activity is created via _migrate_sources_last_activity
--- (so legacy DBs that pre-date the column don't fail on CREATE INDEX).
+-- idx_sources_last_activity and idx_sources_publication_state are created via
+-- their _migrate_* methods, so legacy DBs that pre-date these columns don't
+-- fail on CREATE INDEX during executescript.
 
 -- ============================================================
 -- THOUGHTS — user assertions, questions, intents (sovereign)
 -- ============================================================
+-- thoughts are session turns — publication_state is pinned to 'raw' (fixed-state).
 CREATE TABLE IF NOT EXISTS thoughts (
-    id          TEXT PRIMARY KEY,
-    source_id   TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-    content     TEXT NOT NULL,
-    role        TEXT NOT NULL DEFAULT 'user',   -- 'user' for sovereign thoughts
-    turn_number INTEGER,                        -- position in conversation
-    message_id  TEXT,                            -- platform message ID if available
-    tags        TEXT DEFAULT '[]',              -- JSON array of topic tags
-    metadata    TEXT DEFAULT '{}',              -- JSON blob
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    id                TEXT PRIMARY KEY,
+    source_id         TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    content           TEXT NOT NULL,
+    role              TEXT NOT NULL DEFAULT 'user',   -- 'user' for sovereign thoughts
+    turn_number       INTEGER,                        -- position in conversation
+    message_id        TEXT,                            -- platform message ID if available
+    tags              TEXT DEFAULT '[]',              -- JSON array of topic tags
+    metadata          TEXT DEFAULT '{}',              -- JSON blob
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    publication_state TEXT NOT NULL DEFAULT 'raw' CHECK (publication_state = 'raw')
 );
 CREATE INDEX IF NOT EXISTS idx_thoughts_source ON thoughts(source_id);
 
@@ -197,13 +210,15 @@ CREATE TABLE IF NOT EXISTS node_refs (
 -- ============================================================
 -- NOTE COMMENTS — annotations on note sources
 -- ============================================================
+-- note_comments are annotations — publication_state is pinned to 'raw' (fixed-state).
 CREATE TABLE IF NOT EXISTS note_comments (
-    id          TEXT PRIMARY KEY,
-    source_id   TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-    content     TEXT NOT NULL,
-    actor       TEXT DEFAULT 'user',
-    integrated  INTEGER DEFAULT 0,    -- 0=active, 1=integrated (content rolled into note body)
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    id                TEXT PRIMARY KEY,
+    source_id         TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    content           TEXT NOT NULL,
+    actor             TEXT DEFAULT 'user',
+    integrated        INTEGER DEFAULT 0,    -- 0=active, 1=integrated (content rolled into note body)
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    publication_state TEXT NOT NULL DEFAULT 'raw' CHECK (publication_state = 'raw')
 );
 CREATE INDEX IF NOT EXISTS idx_note_comments_source ON note_comments(source_id);
 
@@ -280,16 +295,18 @@ CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status);
 -- ============================================================
 -- CAPTURES — raw thought captures (inbox → threads)
 -- ============================================================
+-- captures are inbox thoughts / attention records — publication_state pinned to 'raw'.
 CREATE TABLE IF NOT EXISTS captures (
-    id          TEXT PRIMARY KEY,
-    content     TEXT NOT NULL,
-    thread_id   TEXT REFERENCES threads(id) ON DELETE SET NULL,
-    source_id   TEXT REFERENCES sources(id) ON DELETE SET NULL,
-    turn_number INTEGER,
-    status      TEXT NOT NULL DEFAULT 'captured',
-    actor       TEXT DEFAULT 'user',
-    metadata    TEXT DEFAULT '{}',
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    id                TEXT PRIMARY KEY,
+    content           TEXT NOT NULL,
+    thread_id         TEXT REFERENCES threads(id) ON DELETE SET NULL,
+    source_id         TEXT REFERENCES sources(id) ON DELETE SET NULL,
+    turn_number       INTEGER,
+    status            TEXT NOT NULL DEFAULT 'captured',
+    actor             TEXT DEFAULT 'user',
+    metadata          TEXT DEFAULT '{}',
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    publication_state TEXT NOT NULL DEFAULT 'raw' CHECK (publication_state = 'raw')
 );
 CREATE INDEX IF NOT EXISTS idx_captures_thread ON captures(thread_id);
 CREATE INDEX IF NOT EXISTS idx_captures_status ON captures(status);
