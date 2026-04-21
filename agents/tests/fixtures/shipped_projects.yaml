@@ -89,23 +89,20 @@ projects:
     dispatch_labels: [dashboard]
     dind: false
 
-  enterprise:
-    name: "Enterprise"
-    description: "Anchore Widgets — full stack dev with DinD"
-    image: "autonomy-agent:enterprise"
+  widgets-v5:
+    name: "Enterprise v5"
+    description: "Anchore Widgets v5 — lean v5-only patch workspace with DinD"
+    image: "autonomy-agent:widgets-v5"
     repos:
       - url: "git@github.com:anchore/widgets.git"
         mount: "/workspace/widgets"
         writable: true
-      - url: "git@github.com:anchore/widgets_ng.git"
-        mount: "/workspace/widgets_ng"
-        writable: true
     working_dir: "/workspace/widgets"
-    startup: "agents/projects/enterprise/startup.sh"
+    startup: "agents/projects/widgets-v5/startup.sh"
     dind: true
     graph_project: anchore
-    default_tags: [enterprise]
-    dispatch_labels: [enterprise]
+    default_tags: [enterprise, widgets-v5]
+    dispatch_labels: [widgets-v5]
 
   widgets-ng:
     name: "Widgets NG"
