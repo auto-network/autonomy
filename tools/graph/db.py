@@ -84,6 +84,7 @@ class GraphDB:
         self._migrate_sources_last_activity()
         self._migrate_publication_state()
         self._migrate_settings()
+        self._migrate_orgs()
         self._seed_tags()
 
     def _migrate_attachments_alt_text(self):
@@ -166,6 +167,25 @@ class GraphDB:
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_settings_schema "
             "ON settings(set_id, schema_revision)"
+        )
+        self.conn.commit()
+
+    def _migrate_orgs(self):
+        """Create the bootstrap ``orgs`` table if missing (idempotent).
+
+        See graph://d970d946-f95 (Org Registry & Identity). Each per-org
+        DB carries this table with exactly one row identifying the org.
+        Legacy single-DB world: table exists but stays empty until the
+        per-org DB migration (auto-txg5.2) populates it.
+        """
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS orgs ("
+            " id TEXT PRIMARY KEY,"
+            " slug TEXT NOT NULL,"
+            " type TEXT NOT NULL CHECK (type IN ('shared','personal')),"
+            " created_at TEXT NOT NULL DEFAULT "
+            "  (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"
+            ")"
         )
         self.conn.commit()
 
