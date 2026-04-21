@@ -1,6 +1,6 @@
 """Tests for agents.primer_renderer — workspace runtime primer rendering.
 
-Covers the conditional sections driven by ProjectConfig flags:
+Covers the conditional sections driven by WorkspaceV1 flags:
 - writable / read-only repo listing
 - background startup check
 - docker-in-docker
@@ -17,11 +17,11 @@ from agents.primer_renderer import (
     _find_overlay_writability_drift,
     render_workspace_primer,
 )
-from agents.project_config import ProjectConfig, RepoMount
+from agents.workspace_settings import WorkspaceV1, RepoMount, get_workspace
 
 
-def _cfg(**overrides) -> ProjectConfig:
-    """Build a ProjectConfig with reasonable defaults for rendering tests."""
+def _cfg(**overrides) -> WorkspaceV1:
+    """Build a WorkspaceV1 with reasonable defaults for rendering tests."""
     defaults = dict(
         id="sample",
         name="Sample",
@@ -37,7 +37,7 @@ def _cfg(**overrides) -> ProjectConfig:
         env={},
     )
     defaults.update(overrides)
-    return ProjectConfig(**defaults)
+    return WorkspaceV1(**defaults)
 
 
 # ── Header / identity ────────────────────────────────────────────────
@@ -190,12 +190,10 @@ def test_bridge_network_section_when_disabled():
 
 # ── End-to-end parity with real project configs ──────────────────────
 
-def test_enterprise_ng_shape():
+def test_enterprise_ng_shape(shipped_workspaces):
     """Full integration: render for the real enterprise-ng workspace config
     and verify every acceptance-criterion-bearing section is present."""
-    from agents.project_config import clear_cache, get_project
-    clear_cache()
-    out = render_workspace_primer(get_project("enterprise-ng"))
+    out = render_workspace_primer(get_workspace("enterprise-ng"))
 
     # 1. Full Autonomy tooling
     assert "### graph — Knowledge Graph" in out
@@ -225,11 +223,9 @@ def test_enterprise_ng_shape():
     assert "`https://host.docker.internal:8080`" in out
 
 
-def test_autonomy_shape():
+def test_autonomy_shape(shipped_workspaces):
     """Default autonomy workspace: read-only, no DinD, no startup."""
-    from agents.project_config import clear_cache, get_project
-    clear_cache()
-    out = render_workspace_primer(get_project("autonomy"))
+    out = render_workspace_primer(get_workspace("autonomy"))
 
     assert "## Docker-in-Docker" not in out
     assert "## Background Setup" not in out
@@ -242,11 +238,9 @@ def test_autonomy_shape():
     assert "`--network=host`" in out
 
 
-def test_enterprise_shape():
+def test_enterprise_shape(shipped_workspaces):
     """Enterprise workspace: two writable repos, DinD, startup."""
-    from agents.project_config import clear_cache, get_project
-    clear_cache()
-    out = render_workspace_primer(get_project("enterprise"))
+    out = render_workspace_primer(get_workspace("enterprise"))
 
     assert "## Docker-in-Docker" in out
     assert "## Background Setup" in out
@@ -374,11 +368,9 @@ def test_render_succeeds_when_overlay_agrees_with_config(tmp_path, monkeypatch):
     assert "mounted writable at `/workspace/foo`" in out
 
 
-def test_real_enterprise_ng_overlay_has_no_drift():
+def test_real_enterprise_ng_overlay_has_no_drift(shipped_workspaces):
     """Acceptance criterion for bead auto-yj7o: the real NG overlay must
     agree with projects.yaml after the fix."""
-    from agents.project_config import clear_cache, get_project
-    clear_cache()
     # No exception = overlay no longer claims the enterprise repo is
     # read-only while projects.yaml sets writable=true.
-    render_workspace_primer(get_project("enterprise-ng"))
+    render_workspace_primer(get_workspace("enterprise-ng"))

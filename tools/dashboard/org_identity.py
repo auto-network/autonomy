@@ -22,7 +22,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from agents import project_config
+from agents import workspace_settings
 
 # Curated palette — 16 distinct, accessible colours that read on the
 # dashboard's #0f172a background. Ordered to maximise visual distance
@@ -127,7 +127,7 @@ def resolve_org_identity(slug: str | None) -> dict[str, Any]:
             "resolved": False,
         }
 
-    overrides = project_config.load_org_overrides()
+    overrides = workspace_settings.load_org_overrides()
     override = overrides.get(slug)
     canonical = _canonical_identity(slug)
     generated = _generated_identity(slug)
@@ -197,7 +197,7 @@ def session_org_slug(session: dict) -> str:
     if raw.startswith("-"):
         return UNKNOWN_SLUG
     try:
-        workspace = project_config.get_project(raw)
+        workspace = workspace_settings.get_workspace(raw)
         return workspace.graph_project
     except KeyError:
         return raw

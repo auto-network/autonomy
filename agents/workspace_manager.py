@@ -1,6 +1,6 @@
 """Per-session workspace preparation — managed clones and worktrees.
 
-Given a ProjectConfig and a session name, this module:
+Given a WorkspaceV1 and a session name, this module:
 
 1. Ensures a managed clone of each repo URL exists under ``data/repos/``.
 2. Runs ``git fetch origin --prune`` on every clone.
@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from agents.project_config import ProjectConfig
+from agents.workspace_settings import WorkspaceV1
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
@@ -149,19 +149,19 @@ def _update_readonly_clone(clone: Path) -> None:
 
 
 def prepare_session_mounts(
-    project: ProjectConfig,
+    workspace: WorkspaceV1,
     session_name: str,
     *,
     repos_dir: Path = REPOS_DIR,
     worktrees_dir: Path = WORKTREES_DIR,
 ) -> dict[str, str]:
-    """Prepare clones + worktrees for ``project`` and return launch_session mounts.
+    """Prepare clones + worktrees for ``workspace`` and return launch_session mounts.
 
     The returned dict maps host paths to ``container_path[:mode]`` strings,
     suitable for ``launch_session(mounts=...)``.
     """
     mounts: dict[str, str] = {}
-    for repo in project.repos:
+    for repo in workspace.repos:
         clone = ensure_managed_clone(repo.url, repos_dir=repos_dir)
         if repo.writable:
             worktree = worktrees_dir / session_name / _worktree_basename(repo.url)

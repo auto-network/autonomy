@@ -11,47 +11,103 @@ Acceptance from auto-jl9dc:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
-import yaml
+
+from tools.graph.db import GraphDB
+from tools.graph.settings_ops import _now_iso
 
 
 @pytest.fixture
 def isolated_orgs(tmp_path, monkeypatch):
-    """Reload project_config + org_identity against a tmp projects.yaml.
+    """Populate ``autonomy.workspace#1`` + ``autonomy.org#1`` Settings into
+    per-org DBs under a tmp ``data/orgs/`` tree and redirect
+    :envvar:`AUTONOMY_ORGS_DIR` at it.
 
-    Each test gets a clean cache and can mutate the YAML by writing a new
-    file before calling resolve_org_identity().
+    Tests call the returned ``write(orgs)`` helper to seed (or re-seed) the
+    ``autonomy.org#1`` overrides. Workspaces ``autonomy`` and
+    ``enterprise-ng`` are always present so ``session_org_slug`` lookups
+    resolve.
     """
-    config_path = tmp_path / "projects.yaml"
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    GraphDB.close_all_pooled()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+
+    org_slugs = {"autonomy", "anchore", "personal"}
+
+    def _ensure_org_db(slug: str) -> Path:
+        path = orgs_dir / f"{slug}.db"
+        if not path.exists():
+            db = GraphDB.create_org_db(slug, type_="shared", path=path)
+            db.close()
+        return path
+
+    def _set_workspace(slug: str, workspace_id: str, payload: dict) -> None:
+        path = _ensure_org_db(slug)
+        db = GraphDB(path)
+        try:
+            db.conn.execute("DELETE FROM settings WHERE set_id = ? AND key = ?",
+                            ("autonomy.workspace", workspace_id))
+            db.conn.execute(
+                "INSERT INTO settings(id, set_id, schema_revision, key, "
+                "payload, publication_state, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (str(uuid4()), "autonomy.workspace", 1, workspace_id,
+                 json.dumps(payload), "canonical", _now_iso(), _now_iso()),
+            )
+            db.conn.commit()
+        finally:
+            db.close()
+
+    def _set_org_identity(slug: str, payload: dict) -> None:
+        path = _ensure_org_db(slug)
+        db = GraphDB(path)
+        try:
+            db.conn.execute("DELETE FROM settings WHERE set_id = ? AND key = ?",
+                            ("autonomy.org", slug))
+            if payload:
+                db.conn.execute(
+                    "INSERT INTO settings(id, set_id, schema_revision, key, "
+                    "payload, publication_state, created_at, updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (str(uuid4()), "autonomy.org", 1, slug,
+                     json.dumps(payload), "canonical",
+                     _now_iso(), _now_iso()),
+                )
+            db.conn.commit()
+        finally:
+            db.close()
+
+    _set_workspace("autonomy", "autonomy", {
+        "name": "autonomy", "image": "autonomy-agent:dashboard",
+    })
+    _set_workspace("anchore", "enterprise-ng", {
+        "name": "enterprise-ng", "image": "autonomy-agent:enterprise-ng",
+    })
 
     def write(orgs: dict | None) -> None:
-        data = {
-            "projects": {
-                "autonomy": {
-                    "image": "autonomy-agent:dashboard",
-                    "graph_project": "autonomy",
-                },
-                "enterprise-ng": {
-                    "image": "autonomy-agent:enterprise-ng",
-                    "graph_project": "anchore",
-                },
-            },
-        }
-        if orgs is not None:
-            data["orgs"] = orgs
-        config_path.write_text(yaml.safe_dump(data))
+        if orgs is None:
+            return
+        for slug in org_slugs:
+            _set_org_identity(slug, {})
+        for slug, payload in (orgs or {}).items():
+            filtered = {k: v for k, v in payload.items() if v not in (None, "")}
+            if filtered:
+                _set_org_identity(slug, filtered)
+            else:
+                _set_org_identity(slug, {})
 
-    write({})  # baseline so the import succeeds
+    write({})
 
-    from agents import project_config
-    monkeypatch.setattr(project_config, "DEFAULT_CONFIG_PATH", config_path)
-    project_config.clear_cache()
-
-    yield write
-
-    project_config.clear_cache()
+    try:
+        yield write
+    finally:
+        GraphDB.close_all_pooled()
 
 
 # ── (a) full override ────────────────────────────────────────────────
