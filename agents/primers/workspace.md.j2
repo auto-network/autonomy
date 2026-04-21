@@ -88,6 +88,12 @@ These environment variables are already exported — **do not create a
 {% endfor %}
 {% endif %}
 {% endif %}
+{% if org_primer %}
+
+## Org Conventions ({{ org }})
+
+{{ org_primer.rstrip() }}
+{% endif %}
 {% if workspace_primer %}
 
 {{ workspace_primer.rstrip() }}
