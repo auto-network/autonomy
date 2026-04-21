@@ -75,6 +75,7 @@ else:
     from tools.dashboard.dao import sessions as dao_sessions
 
 from tools.dashboard.tmux_send import tmux_send, tmux_send_sync
+from tools.graph import ops as graph_ops
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -595,15 +596,13 @@ def _enrich_dispatch_runs(runs: list[dict]) -> None:
 
     # ── Validation + pitfall notes (batched graph query) ─────
     try:
-        from tools.graph.db import GraphDB
-        gdb = GraphDB()
 
         # Collect bead IDs from regular runs
         bead_ids = {r["bead_id"] for r in regular_runs if r.get("bead_id")}
 
         # Batch query: validation notes
         if bead_ids:
-            val_notes = gdb.list_sources(source_type="note", tags=["validation"], limit=200)
+            val_notes = graph_ops.list_sources(source_type="note", tags=["validation"], limit=200)
             val_by_bead: dict[str, dict] = {}
             for n in val_notes:
                 title = n.get("title") or ""
@@ -621,7 +620,7 @@ def _enrich_dispatch_runs(runs: list[dict]) -> None:
             default=None,
         )
         if earliest_start:
-            pitfall_notes = gdb.list_sources(
+            pitfall_notes = graph_ops.list_sources(
                 source_type="note", tags=["pitfall"], since=earliest_start, limit=500,
             )
             for run in regular_runs:
@@ -638,8 +637,6 @@ def _enrich_dispatch_runs(runs: list[dict]) -> None:
                         {"id": p["id"][:12], "title": (p.get("title") or "")[:60]}
                         for p in matched
                     ]
-
-        gdb.close()
     except Exception:
         pass
 
@@ -3437,12 +3434,7 @@ async def api_session_label(request):
     # Also update graph source title if the session has been ingested
     session_row = dashboard_db.get_session(tmux_name)
     if session_row and session_row.get("graph_source_id"):
-        from tools.graph.db import GraphDB
-        gdb = GraphDB()
-        try:
-            gdb.update_source_title(session_row["graph_source_id"], label)
-        finally:
-            gdb.close()
+        graph_ops.update_source_title(session_row["graph_source_id"], label)
     # Broadcast via SSE so all clients update
     await event_bus.broadcast("session:registry", session_monitor.get_registry())
     return JSONResponse({"ok": True})
@@ -3895,10 +3887,7 @@ async def api_session_resume(request):
     # ── Resolve from graph source metadata if source_id provided ──
     if source_id:
         try:
-            from tools.graph.db import GraphDB
-            gdb = GraphDB()
-            src = gdb.resolve_source_strict(source_id)
-            gdb.close()
+            src = graph_ops.resolve_source_strict(source_id)
         except Exception:
             return JSONResponse({"error": "Failed to query graph.db"}, status_code=500)
 
@@ -5133,20 +5122,7 @@ def _count_today_done() -> int:
 
 def _count_streams() -> int:
     """Count distinct tags across all notes (active stream count)."""
-    from tools.graph.db import GraphDB
-
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        row = db.conn.execute(
-            "SELECT COUNT(DISTINCT value) AS cnt FROM sources, json_each(json_extract(sources.metadata, '$.tags')) WHERE sources.type = 'note'"
-        ).fetchone()
-        return row["cnt"] if row else 0
-    finally:
-        db.close()
+    return graph_ops.count_active_streams()
 
 
 async def _dispatch_watcher():
@@ -5604,16 +5580,10 @@ async def api_graph_attach(request):
 
 async def api_source_attachments(request):
     """List attachments linked to a source."""
-    from tools.graph.db import GraphDB
-
     source_id = request.path_params["id"]
     if not _GRAPH_SOURCE_ID_RE.match(source_id):
         return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
-    db = GraphDB()
-    try:
-        atts = db.list_attachments(source_id=source_id)
-    finally:
-        db.close()
+    atts = graph_ops.list_attachments(source_id=source_id)
     return JSONResponse({"attachments": atts})
 
 
@@ -5642,12 +5612,7 @@ async def api_attachment_serve(request):
             return Response(b"<html><body>Mock HTML attachment</body></html>", media_type="text/html")
         return Response(b"mock content", media_type=mime or "application/octet-stream")
 
-    from tools.graph.db import GraphDB
-    db = GraphDB()
-    try:
-        att = db.get_attachment(attachment_id)
-    finally:
-        db.close()
+    att = graph_ops.get_attachment(attachment_id)
     if not att:
         return JSONResponse({"error": "attachment not found"}, status_code=404)
     file_path = Path(att["file_path"])
@@ -5660,6 +5625,65 @@ async def api_attachment_serve(request):
         media_type=att.get("mime_type") or "application/octet-stream",
         headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
+
+
+async def api_graph_search(request):
+    """Container-side CLI calls this to get WAL-fresh, cross-org-ready results.
+
+    Mirrors what ``graph search`` would return on the host: a JSON list of
+    result rows from ``ops.search``. The dashboard's own search UI uses the
+    older ``/api/search`` endpoint (which shells out to ``graph search``);
+    this endpoint is the structured companion meant for ``HttpClient.search``.
+    """
+    q = request.query_params.get("q", "")
+    if not q:
+        return JSONResponse({"error": "missing q parameter"}, status_code=400)
+    limit = int(request.query_params.get("limit", "25"))
+    project = request.query_params.get("project")
+    or_mode = bool(request.query_params.get("or"))
+    tag = request.query_params.get("tag")
+    results = graph_ops.search(q, limit=limit, project=project, or_mode=or_mode, tag=tag)
+    return JSONResponse(results)
+
+
+async def api_graph_source_get(request):
+    """Get a single source by id (or id prefix). Companion to HttpClient.get_source."""
+    source_id = request.path_params["id"]
+    if not _GRAPH_SOURCE_ID_RE.match(source_id):
+        return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
+    src = graph_ops.get_source(source_id)
+    if not src:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(src)
+
+
+async def api_graph_sources_list(request):
+    """List sources with filters. Companion to HttpClient.list_sources."""
+    limit = int(request.query_params.get("limit", "50"))
+    project = request.query_params.get("project")
+    source_type = request.query_params.get("type")
+    tags_param = request.query_params.get("tags")
+    tags = [t for t in tags_param.split(",") if t] if tags_param else None
+    sources = graph_ops.list_sources(
+        limit=limit, project=project, source_type=source_type, tags=tags,
+    )
+    return JSONResponse({"sources": sources})
+
+
+async def api_graph_attachment_get(request):
+    """Get attachment metadata by id. Companion to HttpClient.get_attachment."""
+    attachment_id = request.path_params["attachment_id"]
+    if not _GRAPH_SOURCE_ID_RE.match(attachment_id):
+        return JSONResponse({"error": f"malformed attachment_id: {attachment_id!r}"}, status_code=400)
+    att = graph_ops.get_attachment(attachment_id)
+    if not att:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(att)
+
+
+async def api_graph_collab_topics(request):
+    """List tag taxonomy entries. Companion to HttpClient.list_collab_topics."""
+    return JSONResponse({"topics": graph_ops.list_collab_topics()})
 
 
 async def api_graph_resolve(request):
@@ -5689,48 +5713,38 @@ async def api_graph_resolve(request):
             })
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    from tools.graph.db import GraphDB
-    db = GraphDB()
-    try:
-        source = db.get_source(id)
-        if source:
-            result = await run_cli_json(
-                ["graph", "read", source["id"], "--json", "--max-chars", "50000", "--first"]
-            )
-            _attach_source_org(result)
-            return JSONResponse(result)
-        att = db.get_attachment(id)
-        if att:
-            return JSONResponse({
-                "type": "attachment",
-                "id": att["id"],
-                "filename": att["filename"],
-                "mime_type": att["mime_type"],
-                "size_bytes": att["size_bytes"],
-                "source_id": att["source_id"],
-                "turn": att.get("turn"),
-                "created_at": att["created_at"],
-                "url": f"/api/attachment/{att['id'][:12]}",
-            })
-        # Try comment
-        comment = db.conn.execute(
-            "SELECT * FROM note_comments WHERE id = ? OR id LIKE ?",
-            (id, f"{id}%")
-        ).fetchone()
-        if comment:
-            comment = dict(comment)
-            return JSONResponse({
-                "type": "comment",
-                "id": comment["id"],
-                "source_id": comment["source_id"],
-                "content": comment["content"],
-                "actor": comment.get("actor", "user"),
-                "created_at": comment.get("created_at", ""),
-                "integrated": bool(comment.get("integrated", 0)),
-                "redirect": f"/graph/{comment['source_id'][:12]}?highlight={comment['id'][:12]}",
-            })
-    finally:
-        db.close()
+    source = graph_ops.get_source(id)
+    if source:
+        result = await run_cli_json(
+            ["graph", "read", source["id"], "--json", "--max-chars", "50000", "--first"]
+        )
+        _attach_source_org(result)
+        return JSONResponse(result)
+    att = graph_ops.get_attachment(id)
+    if att:
+        return JSONResponse({
+            "type": "attachment",
+            "id": att["id"],
+            "filename": att["filename"],
+            "mime_type": att["mime_type"],
+            "size_bytes": att["size_bytes"],
+            "source_id": att["source_id"],
+            "turn": att.get("turn"),
+            "created_at": att["created_at"],
+            "url": f"/api/attachment/{att['id'][:12]}",
+        })
+    comment = graph_ops.get_comment(id)
+    if comment:
+        return JSONResponse({
+            "type": "comment",
+            "id": comment["id"],
+            "source_id": comment["source_id"],
+            "content": comment["content"],
+            "actor": comment.get("actor", "user"),
+            "created_at": comment.get("created_at", ""),
+            "integrated": bool(comment.get("integrated", 0)),
+            "redirect": f"/graph/{comment['source_id'][:12]}?highlight={comment['id'][:12]}",
+        })
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
@@ -5752,74 +5766,9 @@ async def api_resolve_embed(request):
             return JSONResponse(result)
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    from tools.graph.db import GraphDB
-    db = GraphDB()
-    try:
-        # Try as a source (note)
-        source = db.get_source(embed_id)
-        if source:
-            meta = source.get("metadata") or {}
-            if isinstance(meta, str):
-                import json as _json
-                try:
-                    meta = _json.loads(meta)
-                except Exception:
-                    meta = {}
-            if meta.get("rich_content"):
-                # Rich-content note — find HTML attachment
-                if version:
-                    versioned_key = f"{source['id']}@{version}"
-                else:
-                    # Find latest versioned attachment
-                    row = db.conn.execute(
-                        "SELECT * FROM attachments WHERE source_id LIKE ? ORDER BY created_at DESC LIMIT 1",
-                        (f"{source['id']}@%",)
-                    ).fetchone()
-                    versioned_key = dict(row)["source_id"] if row else None
-                att = None
-                if versioned_key:
-                    att_row = db.conn.execute(
-                        "SELECT * FROM attachments WHERE source_id = ? LIMIT 1",
-                        (versioned_key,)
-                    ).fetchone()
-                    if att_row:
-                        att = dict(att_row)
-                # Get alt-text from note content
-                entries = db.get_source_content(source["id"])
-                alt_text = entries[0]["content"] if entries else ""
-                return JSONResponse({
-                    "type": "rich-content",
-                    "id": source["id"],
-                    "title": source.get("title", ""),
-                    "attachment_url": f"/api/attachment/{att['id'][:12]}" if att else None,
-                    "alt_text": alt_text,
-                    "mime_type": "text/html",
-                })
-            else:
-                # Plain note
-                entries = db.get_source_content(source["id"])
-                content = entries[0]["content"] if entries else ""
-                return JSONResponse({
-                    "type": "note",
-                    "id": source["id"],
-                    "title": source.get("title", ""),
-                    "content": content,
-                })
-
-        # Try as an attachment
-        att = db.get_attachment(embed_id)
-        if att:
-            return JSONResponse({
-                "type": "attachment",
-                "id": att["id"],
-                "filename": att["filename"],
-                "attachment_url": f"/api/attachment/{att['id'][:12]}",
-                "alt_text": att.get("alt_text") or "",
-                "mime_type": att.get("mime_type") or "application/octet-stream",
-            })
-    finally:
-        db.close()
-
+    embed = graph_ops.resolve_embed(embed_id, version=version)
+    if embed:
+        return JSONResponse(embed)
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
@@ -5831,17 +5780,7 @@ def _graph_db_path() -> str | None:
 
 def _checkpoint_graph():
     """Flush WAL to main DB so immutable=1 readers see current data."""
-    from tools.graph.db import GraphDB
-    try:
-        db_args = {}
-        p = _graph_db_path()
-        if p:
-            db_args["db_path"] = p
-        db = GraphDB(**db_args)
-        db.conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-        db.close()
-    except Exception:
-        pass  # best-effort
+    graph_ops.checkpoint()
 
 
 async def api_graph_stream(request):
@@ -5852,40 +5791,10 @@ async def api_graph_stream(request):
         items = dao_beads.get_stream_items(tag, limit)
         return JSONResponse({"tag": tag, "count": len(items), "items": items})
 
-    from tools.graph.db import GraphDB
-
     tag = request.path_params["tag"]
     limit = int(request.query_params.get("limit", "50"))
     offset = int(request.query_params.get("offset", "0"))
-
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        sources = db.list_sources(tags=[tag], limit=limit)
-    finally:
-        db.close()
-
-    items = []
-    for s in sources:
-        meta = json.loads(s["metadata"]) if isinstance(s.get("metadata"), str) else (s.get("metadata") or {})
-        raw_title = s.get("title") or ""
-        clean_title = raw_title.lstrip("# ").split("\n")[0][:80]
-        items.append({
-            "id": s["id"],
-            "title": clean_title,
-            "created_at": s.get("created_at", ""),
-            "author": meta.get("author", ""),
-            "tags": meta.get("tags", []),
-            "source_type": s.get("type", "note"),
-            "preview": raw_title[:200],
-        })
-
-    # Apply offset (list_sources doesn't support offset natively)
-    items = items[offset:]
-
+    items = graph_ops.stream_get(tag, limit=limit, offset=offset)
     return JSONResponse({"tag": tag, "count": len(items), "items": items})
 
 
@@ -5893,48 +5802,7 @@ async def api_graph_streams(request):
     """List active tag streams with note counts, descriptions, and last_active."""
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"streams": dao_beads.get_streams()})
-
-    from tools.graph.db import GraphDB
-
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        rows = db.conn.execute(
-            """SELECT metadata, created_at FROM sources
-               WHERE type = 'note' AND json_extract(metadata, '$.tags') IS NOT NULL"""
-        ).fetchall()
-        # Load tag descriptions (tags table from auto-dbdg)
-        tag_desc: dict[str, str] = {}
-        try:
-            for r2 in db.conn.execute("SELECT name, description FROM tags"):
-                tag_desc[r2["name"]] = r2["description"] or ""
-        except Exception:
-            pass  # tags table may not exist in older DBs
-    finally:
-        db.close()
-
-    tag_counts: dict[str, int] = {}
-    tag_last: dict[str, str] = {}
-    for r in rows:
-        try:
-            meta = json.loads(r["metadata"]) if isinstance(r["metadata"], str) else (r["metadata"] or {})
-            created = r["created_at"] or ""
-            for t in meta.get("tags", []):
-                if isinstance(t, str):
-                    tag_counts[t] = tag_counts.get(t, 0) + 1
-                    if created > tag_last.get(t, ""):
-                        tag_last[t] = created
-        except (json.JSONDecodeError, TypeError):
-            continue
-
-    streams = sorted(tag_counts.items(), key=lambda x: -x[1])[:50]
-    return JSONResponse({"streams": [
-        {"tag": t, "count": c, "description": tag_desc.get(t, ""), "last_active": tag_last.get(t, "")}
-        for t, c in streams
-    ]})
+    return JSONResponse({"streams": graph_ops.streams_summary()})
 
 
 async def api_graph_collab_list(request):
@@ -5943,22 +5811,11 @@ async def api_graph_collab_list(request):
         limit = int(request.query_params.get("limit", "20"))
         return JSONResponse({"notes": dao_beads.get_collab_notes(limit)})
 
-    from tools.graph.db import GraphDB
-    import json as _json
     limit = int(request.query_params.get("limit", "20"))
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        sources = db.list_collab_sources(limit=limit)
-    finally:
-        db.close()
-
+    sources = graph_ops.list_collab_sources(limit=limit)
     items = []
     for s in sources:
-        meta = _json.loads(s["metadata"]) if isinstance(s.get("metadata"), str) else (s.get("metadata") or {})
+        meta = json.loads(s["metadata"]) if isinstance(s.get("metadata"), str) else (s.get("metadata") or {})
         items.append({
             "id": s["id"],
             "title": s.get("title", ""),
@@ -5976,20 +5833,15 @@ async def api_graph_collab_tag(request):
     """Add the 'collab' tag to an existing source."""
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"ok": True, "output": "  \u2713 Mock: tag operation skipped"})
-    from tools.graph.db import GraphDB
     source_id = request.path_params["source_id"]
     if not _GRAPH_SOURCE_ID_RE.match(source_id):
         return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
-    db = GraphDB()
-    try:
-        source = db.get_source(source_id)
-        if not source:
-            return JSONResponse({"error": f"no source found matching '{source_id}'"}, status_code=404)
-        if isinstance(source, list):
-            return JSONResponse({"error": f"multiple sources match '{source_id}' — use a longer prefix"}, status_code=400)
-        added = db.add_source_tag(source["id"], "collab")
-    finally:
-        db.close()
+    source = graph_ops.get_source(source_id)
+    if not source:
+        return JSONResponse({"error": f"no source found matching '{source_id}'"}, status_code=404)
+    if isinstance(source, list):
+        return JSONResponse({"error": f"multiple sources match '{source_id}' — use a longer prefix"}, status_code=400)
+    added = graph_ops.add_tag(source["id"], "collab")
     title = (source.get("title") or "?")[:60]
     if added:
         msg = f"  \u2713 Tagged {source['id'][:12]} \"{title}\" as collab"
@@ -6003,27 +5855,18 @@ async def api_graph_tag_add(request):
     """Add a tag to a source."""
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"ok": True, "output": "  \u2713 Mock: tag add operation skipped"})
-    from tools.graph.db import GraphDB
     source_id = request.path_params["source_id"]
     tag_name = request.path_params["tag_name"]
     if not _GRAPH_SOURCE_ID_RE.match(source_id):
         return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
     if not _GRAPH_TAGS_RE.match(tag_name):
         return JSONResponse({"error": f"malformed tag name: {tag_name!r}"}, status_code=400)
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        source = db.get_source(source_id)
-        if not source:
-            return JSONResponse({"error": f"no source found matching '{source_id}'"}, status_code=404)
-        if isinstance(source, list):
-            return JSONResponse({"error": f"multiple sources match '{source_id}' — use a longer prefix"}, status_code=400)
-        added = db.add_source_tag(source["id"], tag_name)
-    finally:
-        db.close()
+    source = graph_ops.get_source(source_id)
+    if not source:
+        return JSONResponse({"error": f"no source found matching '{source_id}'"}, status_code=404)
+    if isinstance(source, list):
+        return JSONResponse({"error": f"multiple sources match '{source_id}' — use a longer prefix"}, status_code=400)
+    added = graph_ops.add_tag(source["id"], tag_name)
     title = (source.get("title") or "?")[:60]
     if added:
         msg = f"  ✓ Tagged {source['id'][:12]} \"{title}\" ← {tag_name}"
@@ -6037,27 +5880,18 @@ async def api_graph_tag_remove(request):
     """Remove a tag from a source."""
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"ok": True, "output": "  \u2713 Mock: tag remove operation skipped"})
-    from tools.graph.db import GraphDB
     source_id = request.path_params["source_id"]
     tag_name = request.path_params["tag_name"]
     if not _GRAPH_SOURCE_ID_RE.match(source_id):
         return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
     if not _GRAPH_TAGS_RE.match(tag_name):
         return JSONResponse({"error": f"malformed tag name: {tag_name!r}"}, status_code=400)
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        source = db.get_source(source_id)
-        if not source:
-            return JSONResponse({"error": f"no source found matching '{source_id}'"}, status_code=404)
-        if isinstance(source, list):
-            return JSONResponse({"error": f"multiple sources match '{source_id}' — use a longer prefix"}, status_code=400)
-        removed = db.remove_source_tag(source["id"], tag_name)
-    finally:
-        db.close()
+    source = graph_ops.get_source(source_id)
+    if not source:
+        return JSONResponse({"error": f"no source found matching '{source_id}'"}, status_code=404)
+    if isinstance(source, list):
+        return JSONResponse({"error": f"multiple sources match '{source_id}' — use a longer prefix"}, status_code=400)
+    removed = graph_ops.remove_tag(source["id"], tag_name)
     title = (source.get("title") or "?")[:60]
     if removed:
         msg = f"  ✓ Untagged {source['id'][:12]} \"{title}\" ✗ {tag_name}"
@@ -6071,8 +5905,6 @@ async def api_graph_tag_merge(request):
     """Merge one tag into another."""
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"ok": True, "output": "  \u2713 Mock: tag merge operation skipped"})
-    from tools.graph.db import GraphDB
-    from tools.graph.models import Source, Thought, Edge, new_id
     try:
         body = await request.json()
     except Exception:
@@ -6083,83 +5915,24 @@ async def api_graph_tag_merge(request):
         return JSONResponse({"error": "'from' and 'to' are required"}, status_code=400)
     reason = (body.get("reason") or "").strip()
     force = body.get("force", False)
-
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        from_sources = db.sources_with_tag(from_tag)
-        to_sources = db.sources_with_tag(to_tag)
-        from_count = len(from_sources)
-        to_count = len(to_sources)
-
-        if from_count == 0:
-            return JSONResponse({"error": f"no sources tagged '{from_tag}'"}, status_code=404)
-
-        if from_count > to_count and not force:
-            return JSONResponse({
-                "error": f"'{from_tag}' has {from_count} sources, '{to_tag}' has {to_count}. "
-                         f"Use force=true to merge majority into minority."
-            }, status_code=409)
-
-        # Retag
-        retagged = 0
-        for src in from_sources:
-            db.remove_source_tag(src["id"], from_tag)
-            db.add_source_tag(src["id"], to_tag)
-            retagged += 1
-
-        # Create merge log note
-        note_text = f"Tag merge: {from_tag} → {to_tag}\nRetagged {retagged} sources.\n"
-        if reason:
-            note_text += f"Reason: {reason}\n"
-
-        source_key = f"note:{new_id()}"
-        note_source = Source(
-            type="note",
-            platform="local",
-            project="autonomy",
-            title=f"Tag merge: {from_tag} → {to_tag}",
-            file_path=source_key,
-            metadata={"tags": ["taxonomy", "tag-merge"], "author": "api"},
-        )
-        db.insert_source(note_source)
-
-        t = Thought(
-            source_id=note_source.id,
-            content=note_text,
-            role="user",
-            turn_number=1,
-            tags=["taxonomy", "tag-merge"],
-        )
-        db.insert_thought(t)
-
-        # Set deprecated tag description
-        db.update_tag_description(
-            from_tag,
-            f"Deprecated — see graph://{note_source.id[:12]}",
-            actor="api",
-        )
-        db.commit()
-    finally:
-        db.close()
-
+    result = graph_ops.tag_merge(from_tag, to_tag, reason=reason, force=force)
+    if "error" in result:
+        return JSONResponse({"error": result["error"]}, status_code=result.get("status", 400))
+    retagged = result["count"]
+    note_id = result["note_id"]
     msg = (f"  ✓ Merged '{from_tag}' → '{to_tag}' ({retagged} sources retagged)\n"
-           f"  Provenance: graph://{note_source.id[:12]}")
+           f"  Provenance: graph://{note_id[:12]}")
     _checkpoint_graph()
     return JSONResponse({
         "ok": True,
         "output": msg,
         "count": retagged,
-        "note_id": note_source.id,
+        "note_id": note_id,
     })
 
 
 async def api_graph_thought(request):
     """Create a thought capture via API proxy."""
-    from tools.graph.db import GraphDB
     from tools.graph.models import new_id
     try:
         body = await request.json()
@@ -6178,29 +5951,19 @@ async def api_graph_thought(request):
         return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
     if thread_id and not _GRAPH_SOURCE_ID_RE.match(thread_id):
         return JSONResponse({"error": f"malformed thread_id: {thread_id!r}"}, status_code=400)
-    capture_id = new_id()
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    # Resolve thread_id prefix to full UUID (FK requires exact match)
     if thread_id:
-        thread = db.get_thread(thread_id)
+        thread = graph_ops.get_thread(thread_id)
         if not thread:
-            db.close()
             return JSONResponse({"error": f"thread not found: {thread_id}"}, status_code=404)
         thread_id = thread["id"]
-    try:
-        db.insert_capture(
-            capture_id, content,
-            source_id=source_id,
-            turn_number=int(turn_number) if turn_number else None,
-            thread_id=thread_id,
-            actor=actor,
-        )
-    finally:
-        db.close()
+    capture_id = new_id()
+    graph_ops.insert_capture(
+        capture_id, content,
+        source_id=source_id,
+        turn_number=int(turn_number) if turn_number else None,
+        thread_id=thread_id,
+        actor=actor,
+    )
     msg = f"  \u2713 Captured: {capture_id[:11]}"
     _checkpoint_graph()
     return JSONResponse({"ok": True, "output": msg, "id": capture_id})
@@ -6208,7 +5971,6 @@ async def api_graph_thought(request):
 
 async def api_graph_thread(request):
     """Create a thread via API proxy."""
-    from tools.graph.db import GraphDB
     from tools.graph.models import new_id
     try:
         body = await request.json()
@@ -6222,15 +5984,7 @@ async def api_graph_thread(request):
     priority = int(body.get("priority", 1))
     actor = body.get("actor", "user")
     thread_id = new_id()
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        db.insert_thread(thread_id, title, priority=priority, created_by=actor)
-    finally:
-        db.close()
+    graph_ops.insert_thread(thread_id, title, priority=priority, created_by=actor)
     msg = f"  \u2713 Thread: {thread_id[:11]} \"{title}\" [active, P{priority}]"
     _checkpoint_graph()
     return JSONResponse({"ok": True, "output": msg, "id": thread_id})
@@ -6238,7 +5992,6 @@ async def api_graph_thread(request):
 
 async def api_graph_thread_action(request):
     """Thread actions (park/done/active/assign/attach) via API proxy."""
-    from tools.graph.db import GraphDB
     try:
         body = await request.json()
     except Exception:
@@ -6250,24 +6003,16 @@ async def api_graph_thread_action(request):
     if action not in ("park", "done", "active", "assign", "attach"):
         return JSONResponse({"error": f"unknown action: {action}"}, status_code=400)
 
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        if action in ("park", "done", "active"):
-            db.update_thread_status(thread_id, "parked" if action == "park" else action)
-            thread = db.get_thread(thread_id)
-            title = thread["title"] if thread else thread_id
-            return JSONResponse({"ok": True, "output": f"  \u2713 {action.capitalize()}: {thread_id} \"{title}\"\n"})
-        elif action in ("assign", "attach"):
-            if not target:
-                return JSONResponse({"error": "assign requires target thread_id"}, status_code=400)
-            db.assign_capture_to_thread(thread_id, target)
-            return JSONResponse({"ok": True, "output": f"  \u2713 Assigned {thread_id} \u2192 thread {target}\n"})
-    finally:
-        db.close()
+    if action in ("park", "done", "active"):
+        thread = graph_ops.update_thread_status(
+            thread_id, "parked" if action == "park" else action,
+        )
+        title = thread["title"] if thread else thread_id
+        return JSONResponse({"ok": True, "output": f"  \u2713 {action.capitalize()}: {thread_id} \"{title}\"\n"})
+    if not target:
+        return JSONResponse({"error": "assign requires target thread_id"}, status_code=400)
+    graph_ops.assign_capture_to_thread(thread_id, target)
+    return JSONResponse({"ok": True, "output": f"  \u2713 Assigned {thread_id} \u2192 thread {target}\n"})
 
 
 async def api_graph_thoughts(request):
@@ -6278,29 +6023,19 @@ async def api_graph_thoughts(request):
         since_param = request.query_params.get("since")
         return JSONResponse({"thoughts": dao_beads.get_thoughts(limit, thread_id, since_param)})
 
-    from tools.graph.db import GraphDB
     limit = int(request.query_params.get("limit", "50"))
     thread_id = request.query_params.get("thread")
     since_param = request.query_params.get("since")
-    since_iso = None
-    if since_param:
-        since_iso = _parse_range(since_param)
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        all_mode = not thread_id and not request.query_params.get("inbox")
-        captures = db.list_captures(thread_id=thread_id, status="*" if all_mode else None, since=since_iso, limit=limit)
-    except Exception:
-        captures = []  # captures table may not exist in older DBs
-    finally:
-        db.close()
-
-    items = []
-    for c in captures:
-        items.append({
+    since_iso = _parse_range(since_param) if since_param else None
+    all_mode = not thread_id and not request.query_params.get("inbox")
+    captures = graph_ops.list_captures(
+        thread_id=thread_id,
+        status="*" if all_mode else None,
+        since=since_iso,
+        limit=limit,
+    )
+    items = [
+        {
             "id": c["id"],
             "content": c.get("content", ""),
             "status": c.get("status", "captured"),
@@ -6308,7 +6043,9 @@ async def api_graph_thoughts(request):
             "source_id": c.get("source_id"),
             "turn_number": c.get("turn_number"),
             "created_at": c.get("created_at", ""),
-        })
+        }
+        for c in captures
+    ]
     return JSONResponse({"thoughts": items})
 
 
@@ -6320,25 +6057,12 @@ async def api_graph_threads(request):
         show_all = request.query_params.get("all")
         return JSONResponse({"threads": dao_beads.get_threads(limit, status=None if show_all else status)})
 
-    from tools.graph.db import GraphDB
     limit = int(request.query_params.get("limit", "20"))
     status = request.query_params.get("status", "active")
     show_all = request.query_params.get("all")
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        threads = db.list_threads(status=None if show_all else status, limit=limit)
-    except Exception:
-        threads = []  # threads table may not exist in older DBs
-    finally:
-        db.close()
-
-    items = []
-    for t in threads:
-        items.append({
+    threads = graph_ops.list_threads(status=None if show_all else status, limit=limit)
+    items = [
+        {
             "id": t["id"],
             "title": t.get("title", ""),
             "status": t.get("status", "active"),
@@ -6346,57 +6070,18 @@ async def api_graph_threads(request):
             "capture_count": t.get("capture_count", 0),
             "created_at": t.get("created_at", ""),
             "updated_at": t.get("updated_at", ""),
-        })
+        }
+        for t in threads
+    ]
     return JSONResponse({"threads": items})
 
 
 async def api_journal(request):
     """List journal entries with three zoom levels."""
-    from tools.graph.db import GraphDB
     limit = int(request.query_params.get("limit", "50"))
     since_param = request.query_params.get("since")
-    since_iso = None
-    if since_param:
-        since_iso = _parse_range(since_param)
-
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        sources = db.list_sources(source_type="journal", since=since_iso, limit=limit)
-        entries = []
-        for s in sources:
-            meta = s.get("metadata")
-            if meta and isinstance(meta, str):
-                try:
-                    meta = json.loads(meta)
-                except Exception:
-                    meta = {}
-            if not isinstance(meta, dict):
-                meta = {}
-
-            # Fetch normal-level content from thoughts table
-            rows = db.conn.execute(
-                "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = 1",
-                (s["id"],),
-            ).fetchall()
-            normal = rows[0]["content"] if rows else ""
-
-            entries.append({
-                "id": s["id"],
-                "compact": s.get("title", ""),
-                "normal": normal,
-                "expanded": meta.get("expanded", ""),
-                "timestamp_start": meta.get("timestamp_start", ""),
-                "timestamp_end": meta.get("timestamp_end", ""),
-                "entry_type": meta.get("entry_type", ""),
-                "created_at": s.get("created_at", ""),
-            })
-        return JSONResponse({"entries": entries})
-    finally:
-        db.close()
+    since_iso = _parse_range(since_param) if since_param else None
+    return JSONResponse({"entries": graph_ops.list_journal_entries(since=since_iso, limit=limit)})
 
 
 async def api_graph_journal_write(request):
@@ -6430,7 +6115,6 @@ async def api_graph_collab_tag_describe(request):
     """Set or update a tag description via API proxy."""
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"ok": True, "output": "  \u2713 Mock: tag describe operation skipped"})
-    from tools.graph.db import GraphDB
     tag_name = request.path_params["name"]
     if not _GRAPH_TAGS_RE.match(tag_name):
         return JSONResponse({"error": f"malformed tag name: {tag_name!r}"}, status_code=400)
@@ -6444,15 +6128,7 @@ async def api_graph_collab_tag_describe(request):
     if len(description) > _GRAPH_MAX_CONTENT:
         return JSONResponse({"error": f"description exceeds {_GRAPH_MAX_CONTENT} bytes"}, status_code=400)
     actor = body.get("actor", "user")
-    db_args = {}
-    p = _graph_db_path()
-    if p:
-        db_args["db_path"] = p
-    db = GraphDB(**db_args)
-    try:
-        db.update_tag_description(tag_name, description, actor=actor)
-    finally:
-        db.close()
+    graph_ops.update_tag_description(tag_name, description, actor=actor)
     msg = f"  \u2713 Tag '{tag_name}': {description[:60]}"
     _checkpoint_graph()
     return JSONResponse({"ok": True, "output": msg})
@@ -6543,6 +6219,12 @@ routes = [
     Route("/api/graph/thought", api_graph_thought, methods=["POST"]),
     Route("/api/graph/thread", api_graph_thread, methods=["POST"]),
     Route("/api/graph/thread/action", api_graph_thread_action, methods=["POST"]),
+    # Service-layer GET endpoints — used by HttpClient (container CLI).
+    Route("/api/graph/search", api_graph_search, methods=["GET"]),
+    Route("/api/graph/sources", api_graph_sources_list, methods=["GET"]),
+    Route("/api/graph/source/{id}", api_graph_source_get, methods=["GET"]),
+    Route("/api/graph/attachment/{attachment_id}", api_graph_attachment_get, methods=["GET"]),
+    Route("/api/graph/collab-topics", api_graph_collab_topics, methods=["GET"]),
     Route("/api/graph/{id}", api_graph_resolve),
     Route("/api/source/{id}", api_source_read),
     Route("/api/source/{id}/attachments", api_source_attachments),
