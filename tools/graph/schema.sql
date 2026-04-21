@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS sources (
     created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     ingested_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     last_activity_at  TEXT,                   -- timestamp of latest ingested turn (for activity-based ordering)
-    publication_state TEXT NOT NULL DEFAULT 'raw'
+    publication_state TEXT NOT NULL DEFAULT 'curated'
         CHECK (publication_state IN ('raw','curated','published','canonical')),
     deprecated        INTEGER NOT NULL DEFAULT 0 CHECK (deprecated IN (0,1)),
     successor_id      TEXT                    -- loose reference to another source (promotion succession)

@@ -334,15 +334,42 @@ def test_cmd_note_routes_through_api(
     graph_cli.cmd_note(args)
     out = capsys.readouterr().out
     assert "Note saved" in out
-    # Verify it landed in autonomy.db (not personal.db). Evict the pool
-    # + re-open fresh so WAL writes from the server-side handle are
-    # visible to this reader.
     GraphDB.close_all_pooled()
     db = GraphDB.open_org_db("autonomy", mode="rw")
     try:
         rows = db.conn.execute(
             "SELECT COUNT(*) FROM sources WHERE title LIKE ?",
             ("smoke test note%",),
+        ).fetchone()
+        assert rows[0] == 1
+    finally:
+        db.close()
+
+
+def test_graph_note_router_roundtrip_via_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """The real user invocation path: argparse → cmd_note_router → persisted.
+
+    Regression for the silent-write bug: router branches on is_api_mode()
+    and dispatches to api_client.api_note (old path), which expects the
+    pre-iv6c5 server response shape and swallows the new one. Result:
+    exit 0, no output, nothing persisted.
+    """
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        text=["router", "smoke", "ping"],
+        tags=None, author=None, project="autonomy",
+    )
+    graph_cli.cmd_note_router(args)
+    out = capsys.readouterr().out
+    assert "Note saved" in out
+    GraphDB.close_all_pooled()
+    db = GraphDB.open_org_db("autonomy", mode="rw")
+    try:
+        rows = db.conn.execute(
+            "SELECT COUNT(*) FROM sources WHERE title LIKE ?",
+            ("router smoke ping%",),
         ).fetchone()
         assert rows[0] == 1
     finally:
@@ -417,6 +444,25 @@ def test_cmd_comment_add_routes_through_api(
     assert "Comment added" in out
 
 
+def test_graph_comment_router_roundtrip_via_api(
+    api_client, forbid_cli_sqlite, seeded_source_id, capsys, monkeypatch,
+):
+    """Real user path: argparse → cmd_comment_router → visible success.
+
+    Same class of regression as the note-router silent-write: the router
+    branched on is_api_mode() and sent API-mode callers to api_client's
+    duplicate path, bypassing the migrated cmd_comment_add.
+    """
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        args=[seeded_source_id, "router", "comment", "ping"],
+        actor="test",
+    )
+    graph_cli.cmd_comment_router(args)
+    out = capsys.readouterr().out
+    assert "Comment added" in out
+
+
 # ── Settings command smoke tests ──────────────────────────────
 
 
@@ -481,6 +527,265 @@ def test_http_client_translates_cross_org_409_to_exception(
     with pytest.raises(SystemExit) as exc_info:
         graph_cli.cmd_note_update(args)
     assert exc_info.value.code == 2
+
+
+# ── Read-command smoke for previously-bypassed commands ──────
+
+
+def test_cmd_attention_routes_through_api(
+    api_client, forbid_cli_sqlite, seeded_source_id, capsys, monkeypatch,
+):
+    """``graph attention`` hits the server, never opens a local DB."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        since=None, search=None, last=5, session=None, context=0,
+    )
+    graph_cli.cmd_attention(args)
+    capsys.readouterr()  # just make sure no sqlite3.connect fired
+
+
+def test_cmd_collab_topics_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph collab topics`` round-trips via /api/graph/collab-topics."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(limit=50)
+    graph_cli.cmd_collab_topics(args)
+    capsys.readouterr()
+
+
+def test_cmd_notes_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph notes`` lists notes through the dashboard API."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        since=None, tags=None, project=None, limit=10,
+        states=None, include_raw=False, short=False, headline=False,
+    )
+    graph_cli.cmd_notes(args)
+    capsys.readouterr()
+
+
+def test_cmd_journal_list_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph journal`` (list mode) round-trips via the API."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(since=None, limit=10, expanded=False)
+    graph_cli.cmd_journal_list(args)
+    capsys.readouterr()
+
+
+def test_cmd_stats_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph stats`` hits /api/graph/stats instead of opening graph.db."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args()
+    graph_cli.cmd_stats(args)
+    out = capsys.readouterr().out
+    assert "Knowledge Graph Stats" in out
+
+
+def test_cmd_tree_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph tree`` asks the server for the hierarchy, not the local DB."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(root=None, depth=3)
+    graph_cli.cmd_tree(args)
+    capsys.readouterr()
+
+
+def test_cmd_entities_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph entities`` lists / searches via the server."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(query=None, type=None, limit=20)
+    graph_cli.cmd_entities(args)
+    capsys.readouterr()
+
+
+def test_cmd_related_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph related <term>`` resolves an entity and its thoughts via API."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args()
+    args.term = "nothing-here"
+    graph_cli.cmd_related(args)
+    capsys.readouterr()
+
+
+def test_cmd_read_routes_through_api(
+    api_client, forbid_cli_sqlite, seeded_source_id, capsys, monkeypatch,
+):
+    """``graph read <id>`` fetches the source + content via the API."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        source=seeded_source_id, first=False, max_chars=0, json=False,
+        all_comments=False, html_output=False, save=None,
+    )
+    graph_cli.cmd_read(args)
+    out = capsys.readouterr().out
+    # The seeded source has a canonical thought; the output must include
+    # the source title so we know the content really came back.
+    assert "Dispatch Lifecycle" in out
+
+
+# ── Response-shape regressions (client ↔ server contract) ─────
+
+
+def test_list_captures_surfaces_just_written_thought(
+    api_client, forbid_cli_sqlite, monkeypatch,
+):
+    """Writing via ``insert_capture`` and immediately listing via
+    ``list_captures`` must return the same capture row.
+
+    Regression: ``HttpClient.list_captures`` previously looked for
+    ``result["captures"]`` while ``api_graph_thoughts`` returns
+    ``{"thoughts": [...]}``. Client silently fell through to the
+    ``isinstance(list) else []`` branch → always empty. Write went through
+    fine, read returned nothing — a ghost capture.
+    """
+    from tools.graph.client import HttpClient
+
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    http = HttpClient("https://localhost:8080")
+    probe = f"list-captures regression {uuid.uuid4()}"
+    capture_id = str(uuid.uuid4())
+    http.insert_capture(capture_id, probe, org="autonomy")
+    rows = http.list_captures(limit=50, org="autonomy")
+    matches = [r for r in rows if r.get("content") == probe]
+    assert matches, (
+        f"list_captures did not surface the just-written capture. "
+        f"Got {len(rows)} rows, none matched content={probe!r}. "
+        f"Likely the client is looking for the wrong JSON key in the "
+        f"response envelope."
+    )
+
+
+def test_insert_thread_honors_client_supplied_id(
+    api_client, forbid_cli_sqlite, monkeypatch,
+):
+    """The id the client generates for ``insert_thread`` must match the
+    id that ``list_threads`` returns for that same thread.
+
+    Regression: ``api_graph_thread`` ignored the client's ``thread_id``
+    and generated its own. The CLI printed "Thread: <client-id>" but
+    the DB row (and the list endpoint) had a different server-generated
+    id. Users saw phantom-id mismatches on every thread create.
+    """
+    from tools.graph.client import HttpClient
+
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    http = HttpClient("https://localhost:8080")
+    supplied_id = str(uuid.uuid4())
+    title = f"thread-id regression {uuid.uuid4()}"
+    http.insert_thread(supplied_id, title, priority=2, org="autonomy")
+
+    threads = http.list_threads(include_all=True, limit=50, org="autonomy")
+    matches = [t for t in threads if t.get("id") == supplied_id]
+    assert matches, (
+        f"list_threads did not return the client-supplied id {supplied_id!r}. "
+        f"Server likely generated its own id and discarded the client's. "
+        f"Rows with the probe title: "
+        f"{[t for t in threads if t.get('title') == title]}"
+    )
+
+
+def test_add_tag_returns_added_bool(
+    api_client, forbid_cli_sqlite, seeded_source_id, monkeypatch,
+):
+    """``HttpClient.add_tag`` must return ``True`` on a first-time tag
+    add, ``False`` on a duplicate — so the CLI can print "Tagged" vs
+    "Already tagged" correctly.
+
+    Regression: ``api_graph_tag_add`` returned ``{"ok": True, "output":
+    msg}`` with no ``"added"`` key. Client's ``bool(result.get("added"))``
+    always evaluated ``bool(None) == False``, so every successful add
+    reported "Already tagged" including the first one.
+    """
+    from tools.graph.client import HttpClient
+
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    http = HttpClient("https://localhost:8080")
+    tag_name = f"regression-tag-{uuid.uuid4().hex[:8]}"
+    first = http.add_tag(seeded_source_id, tag_name, org="autonomy")
+    assert first is True, (
+        f"First add_tag of a fresh tag returned {first!r}; "
+        "server must include an 'added': true field in the JSON response."
+    )
+    second = http.add_tag(seeded_source_id, tag_name, org="autonomy")
+    assert second is False, (
+        f"Second add_tag of the same tag returned {second!r}; "
+        "server must return 'added': false so the CLI can report "
+        "'Already tagged' correctly."
+    )
+
+
+# ── Env-leak regression: handlers must honour X-Graph-Org, NOT env ──
+
+
+def test_handler_reads_x_graph_org_without_env_leak(
+    api_client, forbid_cli_sqlite, monkeypatch,
+):
+    """Server handlers must route per request via the X-Graph-Org header,
+    not by reading ``GRAPH_ORG`` out of the server process's environment.
+
+    In production, the dashboard process runs on the host with NO
+    ``GRAPH_ORG``. Every container call arrives with an ``X-Graph-Org``
+    header. A handler that forgets to read that header — and just calls
+    ``graph_ops.X(...)`` scopelessly — falls back to ``os.environ.get
+    ("GRAPH_ORG")``, which is ``None`` on the host. The write silently
+    lands in ``personal.db`` instead of the caller's org.
+
+    This test reproduces that failure: explicit ``GRAPH_ORG`` unset in
+    the test process, HttpClient called with ``org="autonomy"`` so the
+    X-Graph-Org header IS sent, and we assert the write lands in
+    autonomy.db rather than personal.db. An env-leak handler shape
+    passes today against ``monkeypatch.setenv("GRAPH_ORG", "autonomy")``
+    — only once ``GRAPH_ORG`` is cleared does the bug surface.
+    """
+    from tools.graph.client import HttpClient
+
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    http = HttpClient("https://localhost:8080")
+    probe = f"env-leak regression probe {uuid.uuid4()}"
+    http.insert_capture(str(uuid.uuid4()), probe, org="autonomy")
+
+    # Probe by content, not id — the server generates its own capture_id
+    # on the thought endpoint, so we can't predict it client-side.
+    GraphDB.close_all_pooled()
+    autonomy_db = GraphDB.open_org_db("autonomy", mode="rw")
+    try:
+        row = autonomy_db.conn.execute(
+            "SELECT content FROM captures WHERE content=?", (probe,),
+        ).fetchone()
+    finally:
+        autonomy_db.close()
+    assert row is not None and row["content"] == probe, (
+        "Capture should have landed in autonomy.db because the request "
+        "carried X-Graph-Org=autonomy. If it's missing, the handler is "
+        "falling back to a process-env lookup instead of reading the header."
+    )
+
+    # Sanity: it should NOT have landed in personal.db.
+    GraphDB.close_all_pooled()
+    personal_db = GraphDB.open_org_db("personal", mode="rw")
+    try:
+        bad = personal_db.conn.execute(
+            "SELECT 1 FROM captures WHERE content=?", (probe,),
+        ).fetchone()
+    finally:
+        personal_db.close()
+    assert bad is None, (
+        "Capture ended up in personal.db — classic env-leak fallback. "
+        "The handler ignored X-Graph-Org and scopelessly resolved to "
+        "the default org."
+    )
 
 
 # ── Conformance guard (defence in depth) ──────────────────────
