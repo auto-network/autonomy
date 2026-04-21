@@ -826,34 +826,83 @@ def get_comment(
 # ── Write paths ──────────────────────────────────────────────
 
 
+def _resolve_source_home(
+    source_id: str,
+    *,
+    org: str | None,
+) -> str | None:
+    """Find which org owns ``source_id``. Returns slug or ``None`` if absent.
+
+    Per graph://bcce359d-a1d § Cross-org write semantics: writes always
+    target the source's home org. Scopeless callers auto-derive; explicit
+    callers that mismatch raise :class:`CrossOrgWriteError`. This helper
+    returns the home slug so the callers can route the write accordingly.
+    """
+    resolved_org = _resolve_org(org) or ""
+    db = _open(org)
+    try:
+        if db.get_source(source_id) is not None:
+            return resolved_org
+    finally:
+        db.close()
+
+    for peer in sorted(resolve_peers(resolved_org or None, None)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        if peer_db.get_source(source_id) is not None:
+            return peer
+    return None
+
+
 def _assert_own_source(
     source_id: str,
     *,
     org: str | None,
 ) -> None:
-    """Refuse mutations against peer-origin sources (graph://bcce359d-a1d).
+    """Refuse mutations against peer-origin sources when caller is
+    explicit (graph://bcce359d-a1d).
 
-    If the source does not exist in org's DB but *does* exist in
-    a peer DB, raise :class:`CrossOrgWriteError` with the origin slug.
-    If the source is absent from every scope the caller sees, fall
-    through silently — the downstream write will raise its own
-    not-found error (or no-op) as usual.
+    * Scopeless caller + peer source → silently permitted (auto-derive).
+    * Explicit caller + peer source → :class:`CrossOrgWriteError`.
+    * Source absent everywhere → silently fall through; downstream write
+      will raise its own not-found error.
     """
     resolved_org = _resolve_org(org)
-    db = _open(org)
-    try:
-        if db.get_source(source_id) is not None:
-            return
-    finally:
-        db.close()
+    home = _resolve_source_home(source_id, org=org)
+    if home is None:
+        return
+    # Caller-explicit mismatch → reject. Scopeless falls through so the
+    # caller can redirect the write to the home DB.
+    if resolved_org and home != resolved_org:
+        raise CrossOrgWriteError(source_id, home)
 
-    for peer in sorted(resolve_peers(resolved_org, None)):
-        peer_db = open_peer_db(peer)
-        if peer_db is None:
-            continue
-        peer_row = peer_db.get_source(source_id)
-        if peer_row is not None:
-            raise CrossOrgWriteError(source_id, peer)
+
+def _write_org_for_source(
+    source_id: str,
+    *,
+    org: str | None,
+) -> str | None:
+    """Compute the effective write org for mutations targeting ``source_id``.
+
+    Mirrors the spec's cross-org write semantics:
+
+    * Explicit caller mismatching the source's home → raise.
+    * Scopeless caller + peer source → peer slug (auto-derive).
+    * Own-org source → caller slug (or ``None`` for pinned ``GRAPH_DB``).
+    * Source absent everywhere → return caller's slug unchanged so the
+      downstream write raises its own not-found.
+    """
+    resolved_org = _resolve_org(org)
+    home = _resolve_source_home(source_id, org=org)
+    if home is None:
+        return org
+    if resolved_org and home != resolved_org:
+        raise CrossOrgWriteError(source_id, home)
+    # Scopeless caller: auto-derive to home. Own-org hit: stick with caller.
+    if not resolved_org and home:
+        return home
+    return org
 
 
 def _assert_own_comment(
@@ -894,12 +943,11 @@ def add_tag(
 ) -> bool:
     """Add a tag to a source. Returns True if newly added, False if already present.
 
-    Raises :class:`CrossOrgWriteError` when the target source lives in a
-    peer DB — tags are metadata on the source row, so they must be
-    authored in the origin org.
+    Scopeless caller: auto-derive write to the source's home org.
+    Explicit caller + peer source: :class:`CrossOrgWriteError`.
     """
-    _assert_own_source(source_id, org=org)
-    db = _open(org)
+    write_org = _write_org_for_source(source_id, org=org)
+    db = _open(write_org)
     try:
         return db.add_source_tag(source_id, tag)
     finally:
@@ -914,10 +962,10 @@ def remove_tag(
 ) -> bool:
     """Remove a tag from a source. Returns True if removed, False if not present.
 
-    Peer-origin sources raise :class:`CrossOrgWriteError` (see ``add_tag``).
+    Cross-org semantics identical to :func:`add_tag`.
     """
-    _assert_own_source(source_id, org=org)
-    db = _open(org)
+    write_org = _write_org_for_source(source_id, org=org)
+    db = _open(write_org)
     try:
         return db.remove_source_tag(source_id, tag)
     finally:
@@ -933,11 +981,12 @@ def add_comment(
 ) -> dict:
     """Add a comment to a note. Returns the inserted row.
 
-    Peer-origin notes raise :class:`CrossOrgWriteError` — comments have
-    to land in the origin org for anyone there to see them.
+    Scopeless caller: auto-derive to the note's home org (so comments
+    land where the note author can see them). Explicit caller + peer note:
+    :class:`CrossOrgWriteError`.
     """
-    _assert_own_source(source_id, org=org)
-    db = _open(org)
+    write_org = _write_org_for_source(source_id, org=org)
+    db = _open(write_org)
     try:
         return db.insert_comment(source_id, content, actor=actor)
     finally:
@@ -1173,10 +1222,11 @@ def update_source_title(
 ) -> None:
     """Update a source title. Last write wins.
 
-    Peer-origin sources raise :class:`CrossOrgWriteError`.
+    Cross-org: scopeless caller auto-derives; explicit caller mismatch
+    raises :class:`CrossOrgWriteError`.
     """
-    _assert_own_source(source_id, org=org)
-    db = _open(org)
+    write_org = _write_org_for_source(source_id, org=org)
+    db = _open(write_org)
     try:
         db.update_source_title(source_id, title)
     finally:
@@ -1260,6 +1310,726 @@ def checkpoint(
             db.close()
     except Exception:
         pass
+
+
+# ── Note create / update (migrated from cli.py cmd_note / cmd_note_update) ──
+
+
+def _store_attachment_db(
+    db: GraphDB,
+    file_path_str: str,
+    *,
+    source_id: str | None = None,
+    turn_number: int | None = None,
+    alt_text: str | None = None,
+    original_filename: str | None = None,
+):
+    """Hash, dedup, store a file and insert an attachment record.
+
+    Returns the ``Attachment`` dataclass, or raises :class:`FileNotFoundError`
+    when the source path does not exist. Shared by :func:`attach_file`,
+    :func:`create_note`, and :func:`update_note` so all three use the same
+    dedup semantics.
+
+    ``original_filename`` overrides the on-disk basename — needed when
+    callers stream uploads into a tempfile and want to preserve the
+    caller-supplied name (e.g. dashboard multipart handlers).
+    """
+    import hashlib
+    import mimetypes
+    import shutil
+    from .models import Attachment
+
+    file_path = Path(file_path_str)
+    if not file_path.is_file():
+        raise FileNotFoundError(f"{file_path} not found or not a file")
+
+    file_data = file_path.read_bytes()
+    file_hash = hashlib.sha256(file_data).hexdigest()
+    size_bytes = len(file_data)
+    filename = original_filename or file_path.name
+
+    existing = db.get_attachment_by_hash(file_hash)
+    if existing:
+        updates, params = [], []
+        if source_id and not existing.get("source_id"):
+            updates.append("source_id = ?")
+            params.append(source_id)
+        if alt_text and not existing.get("alt_text"):
+            updates.append("alt_text = ?")
+            params.append(alt_text)
+        if updates:
+            params.append(existing["id"])
+            db.conn.execute(
+                f"UPDATE attachments SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            db.conn.commit()
+        return Attachment(
+            id=existing["id"], hash=file_hash, filename=filename,
+            mime_type=existing.get("mime_type"), size_bytes=size_bytes,
+            file_path=existing["file_path"],
+            source_id=source_id or existing.get("source_id"),
+            alt_text=alt_text or existing.get("alt_text"),
+        )
+
+    mime_type, _ = mimetypes.guess_type(filename)
+    ext = file_path.suffix or ""
+    store_dir = db.db_path.parent / "attachments" / file_hash[:2]
+    store_path = store_dir / f"{file_hash}{ext}"
+    store_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(file_path), str(store_path))
+
+    att = Attachment(
+        hash=file_hash,
+        filename=filename,
+        mime_type=mime_type,
+        size_bytes=size_bytes,
+        file_path=str(store_path),
+        source_id=source_id,
+        turn_number=int(turn_number) if turn_number else None,
+        alt_text=alt_text,
+    )
+    db.insert_attachment(att)
+    return att
+
+
+def create_note(
+    content: str,
+    *,
+    tags: list[str] | None = None,
+    author: str | None = None,
+    project: str | None = None,
+    attachments: list[str] | None = None,
+    html_path: str | None = None,
+    auto_provenance_source_id: str | None = None,
+    auto_provenance_turn: int | None = None,
+    org: str | None = None,
+) -> dict:
+    """Create a note source + turn-1 thought in ``org``'s DB.
+
+    Returns a dict with ``id``, ``source_id`` (same as ``id``), ``title``,
+    ``org``, ``lines``, ``chars``, ``attachments`` (list of attachment
+    dicts), ``rich_content`` (bool), ``auto_provenance`` (optional dict
+    ``{source_id, turn}``). Mirrors :func:`cli.cmd_note` output fields so
+    callers can render the same echo lines.
+
+    ``html_path`` enables rich-content mode — the HTML is stored as a
+    version-paired attachment keyed by ``<source-id>@1``. ``attachments``
+    files are stored and ``{1}``/``{2}`` positional placeholders in
+    ``content`` are rewritten to ``graph://<id>`` markers.
+    """
+    from .models import Source, Thought, Edge, new_id
+    from .ingest import extract_entities
+
+    tags = list(tags or [])
+    is_rich = bool(html_path)
+    meta: dict = {"tags": tags, "author": author or os.environ.get("BD_ACTOR", "user")}
+    if is_rich:
+        meta["rich_content"] = True
+
+    source_key = f"note:{new_id()}"
+    source = Source(
+        type="note",
+        platform="local",
+        project=project or "autonomy",
+        title=content[:80],
+        file_path=source_key,
+        metadata=meta,
+    )
+
+    db = _open(org)
+    try:
+        db.insert_source(source)
+
+        att_records: list[dict] = []
+
+        if is_rich:
+            html_att = _store_attachment_db(
+                db, html_path, source_id=f"{source.id}@1",
+            )
+            att_records.append({
+                "id": html_att.id, "filename": html_att.filename,
+                "kind": "html", "source_id": f"{source.id}@1",
+            })
+
+        if attachments:
+            att_ids = []
+            for fp in attachments:
+                att = _store_attachment_db(db, fp, source_id=source.id)
+                att_ids.append(att.id)
+                att_records.append({
+                    "id": att.id, "filename": att.filename,
+                    "kind": "file", "source_id": source.id,
+                })
+            for i, att_id in enumerate(att_ids, 1):
+                content = content.replace(
+                    '{' + str(i) + '}', f'graph://{att_id[:12]}',
+                )
+
+        thought = Thought(
+            source_id=source.id,
+            content=content,
+            role="user",
+            turn_number=1,
+            tags=tags,
+        )
+        db.insert_thought(thought)
+        db.insert_note_version(source.id, 1, content)
+
+        for name, etype in extract_entities(content):
+            eid = db.upsert_entity(name, etype)
+            db.add_mention(eid, thought.id, "thought")
+
+        if auto_provenance_source_id and auto_provenance_turn:
+            db.insert_edge(Edge(
+                source_id=source.id,
+                source_type="source",
+                target_id=auto_provenance_source_id,
+                target_type="source",
+                relation="conceived_at",
+                metadata={
+                    "turns": {
+                        "from": auto_provenance_turn,
+                        "to": auto_provenance_turn,
+                    },
+                },
+            ))
+
+        db.commit()
+    finally:
+        db.close()
+
+    lines = content.count("\n") + (1 if content else 0)
+    return {
+        "id": source.id,
+        "source_id": source.id,
+        "title": source.title,
+        "org": _resolve_org(org) or "",
+        "lines": lines,
+        "chars": len(content),
+        "content": content,
+        "attachments": att_records,
+        "rich_content": is_rich,
+        "auto_provenance": (
+            {"source_id": auto_provenance_source_id, "turn": auto_provenance_turn}
+            if auto_provenance_source_id and auto_provenance_turn else None
+        ),
+    }
+
+
+def update_note(
+    source_id: str,
+    content: str,
+    *,
+    integrate_comments: list[str] | None = None,
+    attachments: list[str] | None = None,
+    html_path: str | None = None,
+    org: str | None = None,
+) -> dict:
+    """Append a new version to an existing note.
+
+    Cross-org resolves ``source_id``; refuses peer-origin targets with
+    :class:`CrossOrgWriteError`. Returns a dict with ``new_version``,
+    ``source_id``, ``org``, ``lines``, ``chars``, ``integrated``
+    (list of integrated comment ids), ``rich_content`` (post-update),
+    ``attachments`` (list of new attachment records).
+
+    Rich-content notes (``metadata.rich_content == True``) require
+    ``html_path``; the dual HTML/markdown update keeps the version
+    pair consistent.
+    """
+    from .ingest import extract_entities
+
+    # Resolve source cross-org. Scopeless callers auto-derive the write
+    # target to the source's home org. Callers with an explicit caller
+    # org that mismatches the source's home raise CrossOrgWriteError
+    # (per graph://bcce359d-a1d § Cross-org write semantics).
+    caller = _resolve_org(org) or ""
+
+    # Try own-org first; if that misses, scan peers (including raw rows
+    # so the auto-derive path works even for internal-state peer notes).
+    own_db = _open(org)
+    try:
+        resolved: dict | None = own_db.get_source(source_id)
+    finally:
+        own_db.close()
+
+    origin_org = caller if resolved else ""
+    if resolved is None:
+        for peer in sorted(resolve_peers(caller or None, None)):
+            peer_db = open_peer_db(peer)
+            if peer_db is None:
+                continue
+            hit = peer_db.get_source(source_id)
+            if hit is not None:
+                resolved = hit
+                origin_org = peer
+                break
+
+    if resolved is None:
+        raise LookupError(f"No source found matching '{source_id}'")
+
+    # Explicit-mismatch → refuse. Scopeless caller falls through and writes
+    # to the source's home.
+    if caller and origin_org and origin_org != caller:
+        raise CrossOrgWriteError(resolved["id"], origin_org)
+
+    if resolved.get("type") != "note":
+        raise ValueError(
+            f"can only update notes (source is type {resolved.get('type')!r})"
+        )
+
+    src_id = resolved["id"]
+    meta = resolved.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+    is_rich = bool(meta.get("rich_content"))
+
+    if is_rich and not html_path:
+        raise ValueError(
+            "rich-content note requires html_path on update "
+            "(both markdown and HTML must be updated together)"
+        )
+
+    # Write to the source's home org (auto-derive). For scopeless callers
+    # the resolved peer DB IS the home. Only when caller + origin are
+    # identical does the explicit-org path apply.
+    write_org = origin_org or None
+    db = _open(write_org)
+    try:
+        att_records: list[dict] = []
+        if attachments:
+            att_ids = []
+            for fp in attachments:
+                att = _store_attachment_db(db, fp, source_id=src_id)
+                att_ids.append(att.id)
+                att_records.append({
+                    "id": att.id, "filename": att.filename,
+                    "kind": "file", "source_id": src_id,
+                })
+            for i, att_id in enumerate(att_ids, 1):
+                content = content.replace(
+                    '{' + str(i) + '}', f'graph://{att_id[:12]}',
+                )
+
+        thoughts = db.get_thoughts_by_source(src_id)
+        if not thoughts:
+            raise LookupError(f"no thought found for source {src_id[:12]}")
+        thought = thoughts[0]
+
+        current_max = db.get_max_note_version(src_id)
+        if current_max == 0:
+            db.insert_note_version(src_id, 1, thought["content"])
+            next_version = 2
+        else:
+            next_version = current_max + 1
+
+        db.insert_note_version(src_id, next_version, content)
+
+        if html_path:
+            html_att = _store_attachment_db(
+                db, html_path, source_id=f"{src_id}@{next_version}",
+            )
+            att_records.append({
+                "id": html_att.id, "filename": html_att.filename,
+                "kind": "html", "source_id": f"{src_id}@{next_version}",
+            })
+            if not is_rich:
+                meta["rich_content"] = True
+                db.conn.execute(
+                    "UPDATE sources SET metadata = ? WHERE id = ?",
+                    (json.dumps(meta), src_id),
+                )
+                is_rich = True
+
+        db.update_thought_content(thought["id"], content)
+        db.conn.execute(
+            "UPDATE sources SET title = ? WHERE id = ?",
+            (content[:80], src_id),
+        )
+
+        for name, etype in extract_entities(content):
+            eid = db.upsert_entity(name, etype)
+            db.add_mention(eid, thought["id"], "thought")
+
+        integrated: list[str] = []
+        not_found: list[str] = []
+        for cid in (integrate_comments or []):
+            row = db.conn.execute(
+                "SELECT id FROM note_comments "
+                "WHERE (id = ? OR id LIKE ?) AND source_id = ?",
+                (cid, f"{cid}%", src_id),
+            ).fetchone()
+            if row:
+                db.integrate_comment(row["id"])
+                integrated.append(row["id"])
+            else:
+                not_found.append(cid)
+
+        db.commit()
+    finally:
+        db.close()
+
+    lines = content.count("\n") + (1 if content else 0)
+    return {
+        "new_version": next_version,
+        "source_id": src_id,
+        "org": origin_org or caller or "",
+        "lines": lines,
+        "chars": len(content),
+        "content": content,
+        "integrated": integrated,
+        "not_found_comments": not_found,
+        "rich_content": is_rich,
+        "attachments": att_records,
+    }
+
+
+def attach_file(
+    file_path: str,
+    *,
+    source_id: str | None = None,
+    turn_number: int | None = None,
+    alt_text: str | None = None,
+    original_filename: str | None = None,
+    org: str | None = None,
+) -> dict:
+    """Store a file attachment in ``org``'s DB (hash-dedup).
+
+    Returns a dict shaped like the ``attachments`` row: ``id``, ``hash``,
+    ``filename``, ``mime_type``, ``size_bytes``, ``file_path``,
+    ``source_id``, ``turn_number``, ``alt_text``. Raises
+    :class:`FileNotFoundError` if the file does not exist.
+
+    Cross-org: scopeless caller auto-derives to the source's home org;
+    explicit caller mismatch raises :class:`CrossOrgWriteError`.
+    Attachments travel with their source.
+    """
+    if source_id:
+        write_org = _write_org_for_source(source_id, org=org)
+    else:
+        write_org = org
+    db = _open(write_org)
+    try:
+        att = _store_attachment_db(
+            db,
+            file_path,
+            source_id=source_id,
+            turn_number=turn_number,
+            alt_text=alt_text,
+            original_filename=original_filename,
+        )
+    finally:
+        db.close()
+    return {
+        "id": att.id,
+        "hash": att.hash,
+        "filename": att.filename,
+        "mime_type": att.mime_type,
+        "size_bytes": att.size_bytes,
+        "file_path": att.file_path,
+        "source_id": att.source_id,
+        "turn_number": att.turn_number,
+        "alt_text": att.alt_text,
+    }
+
+
+def create_edge(
+    from_id: str,
+    to_id: str,
+    *,
+    from_type: str = "source",
+    to_type: str = "source",
+    relation: str = "references",
+    turns: tuple[int, int] | None = None,
+    note: str | None = None,
+    metadata: dict | None = None,
+    org: str | None = None,
+) -> dict:
+    """Create a graph edge in ``org``'s DB.
+
+    Used by :func:`cli.cmd_link` and ``api_graph_link``. Edges live
+    in the caller's own org DB even when the target source is peer-origin
+    — per the signpost (graph://bcce359d-a1d § Cross-org write semantics),
+    edges/beads are caller-owned artifacts that may reference peer IDs.
+
+    Returns the inserted edge row as a dict: ``id``, ``source_id``,
+    ``source_type``, ``target_id``, ``target_type``, ``relation``,
+    ``metadata``, ``created_at``.
+    """
+    from .models import Edge as _Edge
+
+    meta = dict(metadata or {})
+    if turns is not None:
+        meta["turns"] = {"from": int(turns[0]), "to": int(turns[1])}
+    if note:
+        meta["note"] = note
+
+    edge = _Edge(
+        source_id=from_id,
+        source_type=from_type,
+        target_id=to_id,
+        target_type=to_type,
+        relation=relation,
+        metadata=meta,
+    )
+
+    db = _open(org)
+    try:
+        db.insert_edge(edge)
+        db.commit()
+    finally:
+        db.close()
+    return {
+        "id": edge.id,
+        "source_id": edge.source_id,
+        "source_type": edge.source_type,
+        "target_id": edge.target_id,
+        "target_type": edge.target_type,
+        "relation": edge.relation,
+        "metadata": edge.metadata,
+        "created_at": edge.created_at,
+    }
+
+
+def get_turn_content(
+    source_id: str,
+    turn_number: int,
+    *,
+    org: str | None = None,
+) -> str | None:
+    """Return the content of a single turn of ``source_id`` (or None)."""
+    db = _open(org)
+    try:
+        row = db.conn.execute(
+            "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = ? "
+            "LIMIT 1",
+            (source_id, turn_number),
+        ).fetchone()
+        return row["content"] if row else None
+    finally:
+        db.close()
+
+
+def stats(
+    *,
+    org: str | None = None,
+) -> dict:
+    """Return DB statistics (table counts). Always own-org."""
+    db = _open(org)
+    try:
+        return db.stats()
+    finally:
+        db.close()
+
+
+def write_journal_entry(
+    data: dict,
+    *,
+    org: str | None = None,
+) -> dict:
+    """Write a structured journal entry to ``org``'s DB.
+
+    ``data`` must include ``compact``, ``normal``, ``timestamp_start``,
+    ``timestamp_end``. Optional: ``expanded``, ``entry_type``, ``edges``
+    (list of ``{target, relation, turn}``). Mirrors ``cli.cmd_journal_write``.
+
+    Returns ``{"source_id": str, "edge_count": int, "org": str}``.
+    """
+    from .models import Source, Thought, Edge as _Edge, new_id
+
+    for field in ("compact", "normal", "timestamp_start", "timestamp_end"):
+        if field not in data:
+            raise ValueError(f"missing required field: {field}")
+
+    project = data.get("project") or "autonomy"
+    source_key = f"journal:{new_id()}"
+    src = Source(
+        type="journal",
+        platform="autonomy",
+        project=project,
+        title=data["compact"],
+        file_path=source_key,
+        metadata={
+            "expanded": data.get("expanded", ""),
+            "timestamp_start": data["timestamp_start"],
+            "timestamp_end": data["timestamp_end"],
+            "entry_type": data.get("entry_type", "attention"),
+        },
+        created_at=data["timestamp_start"],
+    )
+
+    db = _open(org)
+    try:
+        db.insert_source(src)
+        db.insert_thought(Thought(
+            source_id=src.id, content=data["normal"], role="user", turn_number=1,
+        ))
+        edge_count = 0
+        for edge_data in data.get("edges", []) or []:
+            target = edge_data.get("target")
+            if not target:
+                continue
+            resolved_src = db.get_source(target)
+            resolved = resolved_src["id"] if resolved_src else target
+            db.insert_edge(_Edge(
+                source_id=src.id,
+                source_type="source",
+                target_id=resolved,
+                target_type="source",
+                relation=edge_data.get("relation", "drew_from"),
+                metadata={"turn": edge_data.get("turn")},
+            ))
+            edge_count += 1
+        db.commit()
+    finally:
+        db.close()
+
+    return {
+        "source_id": src.id,
+        "edge_count": edge_count,
+        "org": _resolve_org(org) or "",
+    }
+
+
+def get_context(
+    source_id: str,
+    turn_number: int,
+    *,
+    window: int = 3,
+    org: str | None = None,
+) -> dict | None:
+    """Return the content of ``turn_number`` plus ``window`` turns on
+    either side, cross-org resolved.
+
+    Mirrors the ``graph context`` CLI output in structured form so the
+    dashboard ``/api/context/*`` handler and future consumers can stop
+    parsing plain-text output.
+
+    Returns ``None`` if the source is not found. Otherwise:
+
+        {"source": {...}, "center_turn": int,
+         "turns": [{"turn_number", "role", "content", "created_at"}, ...]}
+    """
+    source = get_source(source_id, org=org)
+    if source is None:
+        return None
+    origin = source.get("org") or ""
+    caller = _resolve_org(org) or ""
+
+    if not origin or origin == caller:
+        db: GraphDB | None = _open(org)
+        own = True
+    else:
+        db = open_peer_db(origin)
+        own = False
+    if db is None:
+        return None
+
+    try:
+        # ``derivations`` stores the model in ``model`` (not ``role``) so
+        # project it to a uniform ``role`` label for the merged result.
+        rows = db.conn.execute(
+            """SELECT turn_number, role, content, created_at FROM thoughts
+               WHERE source_id = ? AND turn_number BETWEEN ? AND ?
+               UNION ALL
+               SELECT turn_number, COALESCE(model, 'assistant') as role,
+                      content, created_at FROM derivations
+               WHERE source_id = ? AND turn_number BETWEEN ? AND ?
+               ORDER BY turn_number""",
+            (source["id"], turn_number - window, turn_number + window,
+             source["id"], turn_number - window, turn_number + window),
+        ).fetchall()
+    finally:
+        if own:
+            db.close()
+
+    return {
+        "source": source,
+        "center_turn": turn_number,
+        "turns": [
+            {
+                "turn_number": r["turn_number"],
+                "role": r["role"],
+                "content": r["content"] or "",
+                "created_at": r["created_at"] or "",
+            }
+            for r in rows
+        ],
+    }
+
+
+def read_source_full(
+    source_id: str,
+    *,
+    max_chars: int = 50000,
+    org: str | None = None,
+    peers: list[str] | None = None,
+) -> dict | None:
+    """Return a dashboard-ready full read of a source.
+
+    Mirrors the ``graph read --json --first`` response shape so the
+    dashboard ``/api/graph/resolve/<id>`` handler (and any other
+    full-read consumer) can drop the subprocess fork:
+
+        {"source": {...}, "entries": [{turn, role, content, created_at}, ...],
+         "truncated": bool, "total_chars": int}
+
+    Cross-org: own-org full surface first, then peer public surface.
+    """
+    resolved = _resolve_org(org)
+    source = get_source(source_id, org=org, peers=peers)
+    if source is None:
+        return None
+    origin = source.get("org") or ""
+    caller = resolved or ""
+
+    # Empty/matching origin → own-org DB. Peer origin → peer pool handle.
+    if not origin or origin == caller:
+        db: GraphDB | None = _open(org)
+        own = True
+    else:
+        db = open_peer_db(origin)
+        own = False
+    if db is None:
+        return None
+
+    try:
+        entries_src = db.get_source_content(source["id"])
+    finally:
+        if own:
+            db.close()
+
+    total_chars = 0
+    truncated = False
+    out_entries: list[dict] = []
+    for e in entries_src:
+        c = e.get("content") or ""
+        remaining = max_chars - total_chars
+        if remaining <= 0:
+            truncated = True
+            break
+        if len(c) > remaining:
+            c = c[:remaining]
+            truncated = True
+        out_entries.append({
+            "turn_number": e.get("turn_number"),
+            "role": e.get("role"),
+            "content": c,
+            "created_at": e.get("created_at"),
+        })
+        total_chars += len(c)
+
+    return {
+        "source": source,
+        "entries": out_entries,
+        "truncated": truncated,
+        "total_chars": total_chars,
+    }
 
 
 # ── Helpers ──────────────────────────────────────────────────
