@@ -506,6 +506,49 @@ def test_apply_filters_orphan_derivations(
     assert report.ok, report.issues
 
 
+def test_apply_fk_check_drops_orphan_entity_mentions(
+    legacy_db, orgs_dir, yaml_path,
+):
+    """entity_mentions pointing at an entity we don't seed gets dropped.
+
+    Repro: with legacy FK enforcement off, an entity_mention can reference
+    an ``entity_id`` whose row was subsequently deleted (or never copied
+    into this org's entities table). The plan's explicit orphan filters
+    don't catch this class; the post-copy ``PRAGMA foreign_key_check``
+    safety net does, and the row is dropped with the violation logged in
+    ``plan.fk_check_drops``.
+    """
+    conn = sqlite3.connect(legacy_db)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    # Orphan mention — entity_id 'ghost-ent' has no matching entities row.
+    conn.execute(
+        "INSERT INTO entity_mentions(entity_id, content_id, content_type) "
+        "VALUES('ghost-ent', 'th-auton-1', 'thought')"
+    )
+    conn.commit()
+    conn.close()
+
+    plan = build_plan(legacy_db, orgs_dir, yaml_path)
+    # Apply: must not raise IntegrityError even though entity_id is FK'd.
+    apply_migration(plan, log=lambda *a, **kw: None)
+
+    # The orphan mention was dropped by the FK-check safety net.
+    assert plan.fk_check_drops.get("entity_mentions", 0) >= 1
+
+    # Every resulting per-org DB is FK-clean.
+    for slug in plan.org_slugs:
+        c = sqlite3.connect(orgs_dir / f"{slug}.db")
+        try:
+            violations = c.execute("PRAGMA foreign_key_check").fetchall()
+        finally:
+            c.close()
+        assert violations == [], f"{slug} still has FK violations: {violations}"
+
+    # Verification still passes — fk_check_drops subtract from expected.
+    report = verify_migration(plan)
+    assert report.ok, report.issues
+
+
 def test_plan_prints_orphan_counts(legacy_db, orgs_dir, yaml_path, capsys):
     """Dry-run output includes orphan row counts (acceptance #2)."""
     conn = sqlite3.connect(legacy_db)
