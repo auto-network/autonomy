@@ -24,6 +24,7 @@ from agents.workspace_settings import WorkspaceV1
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "primers"
 PROJECTS_DIR = Path(__file__).resolve().parent / "projects"
+ORGS_DIR = Path(__file__).resolve().parent / "orgs"
 
 _env = jinja2.Environment(
     loader=jinja2.FileSystemLoader(str(TEMPLATE_DIR)),
@@ -125,6 +126,12 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         if workspace_primer_path.is_file()
         else ""
     )
+    org_primer_path = ORGS_DIR / config.graph_project / "primer.md"
+    org_primer = (
+        org_primer_path.read_text()
+        if org_primer_path.is_file()
+        else ""
+    )
     drift = _find_overlay_writability_drift(config, workspace_primer)
     if drift:
         raise PrimerOverlayDriftError(
@@ -136,4 +143,6 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         writable_repos=writable_repos,
         readonly_repos=readonly_repos,
         workspace_primer=workspace_primer,
+        org_primer=org_primer,
+        org=config.graph_project,
     )
