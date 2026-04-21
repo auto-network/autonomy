@@ -5883,6 +5883,88 @@ async def api_graph_set_ids(request):
     return JSONResponse({"set_ids": graph_ops.list_set_ids()})
 
 
+# ── Org registry (graph://d970d946-f95) ──────────────────────
+
+
+def _enrich_org_identity(detail: dict) -> dict:
+    """Resolve identity through the override→canonical→generated cascade.
+
+    Mutates ``detail`` in place to add ``identity_resolved`` carrying the
+    final display values; preserves the raw bootstrap row + the raw
+    canonical Setting under the original keys.
+    """
+    from tools.dashboard.org_identity import resolve_org_identity
+    org = detail.get("org") or {}
+    slug = org.get("slug")
+    detail["identity_resolved"] = resolve_org_identity(slug)
+    return detail
+
+
+async def api_orgs_list(request):
+    """GET /api/orgs — enumerate orgs with bootstrap row + cascade identity."""
+    from tools.graph import org_ops
+    orgs = org_ops.list_orgs()
+    entries = []
+    for ref in orgs:
+        detail = org_ops.show_org(ref.slug)
+        if detail is None:
+            continue
+        entries.append(_enrich_org_identity(detail))
+    return JSONResponse({"orgs": entries})
+
+
+async def api_orgs_show(request):
+    """GET /api/orgs/<slug> — bootstrap row + autonomy.org#1 Setting."""
+    from tools.graph import org_ops
+    slug = request.path_params["slug"]
+    detail = org_ops.show_org(slug)
+    if detail is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(_enrich_org_identity(detail))
+
+
+async def api_orgs_create(request):
+    """POST /api/orgs — body: {slug, type?, identity?}."""
+    from tools.graph import org_ops
+    body = await request.json()
+    slug = body.get("slug")
+    if not slug:
+        return JSONResponse({"error": "slug required"}, status_code=400)
+    type_ = body.get("type", "shared")
+    identity_payload = body.get("identity")
+    try:
+        ref = org_ops.create_org(
+            slug, type_=type_, identity_payload=identity_payload,
+        )
+    except org_ops.OrgExistsError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    except org_ops.OrgError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse(ref.to_dict(), status_code=201)
+
+
+async def api_orgs_delete(request):
+    """DELETE /api/orgs/<slug>?force=1 — refuses on cross-DB references."""
+    from tools.graph import org_ops
+    slug = request.path_params["slug"]
+    force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
+    try:
+        report = org_ops.remove_org(slug, force=force)
+    except org_ops.OrgNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except org_ops.OrgReferencedError as e:
+        return JSONResponse(
+            {
+                "error": str(e),
+                "references": [r.to_dict() for r in e.references],
+            },
+            status_code=409,
+        )
+    except org_ops.OrgError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse(report.to_dict())
+
+
 async def api_graph_resolve(request):
     """Universal graph entity resolver — sources, attachments, partial ID prefix."""
     id = request.path_params["id"]
@@ -6438,6 +6520,10 @@ routes = [
     Route("/api/source/{id}/attachments", api_source_attachments),
     Route("/api/context/{id}/{turn}", api_context),
     Route("/api/projects", api_projects),
+    Route("/api/orgs", api_orgs_list, methods=["GET"]),
+    Route("/api/orgs", api_orgs_create, methods=["POST"]),
+    Route("/api/orgs/{slug}", api_orgs_show, methods=["GET"]),
+    Route("/api/orgs/{slug}", api_orgs_delete, methods=["DELETE"]),
     Route("/api/stats", api_stats),
     Route("/api/attention", api_attention),
     Route("/api/active", api_active_sessions),
@@ -6555,6 +6641,13 @@ async def _on_startup():
     init_db()  # ensure dispatch schema exists
     dashboard_db.init_db()  # ensure dashboard.db schema exists
     auth_db.init_db()  # ensure auth.db schema exists
+    # First-launch bootstrap: ensure data/orgs/{autonomy,personal}.db exist.
+    # Idempotent — pre-existing DBs are left untouched. See graph://d970d946-f95.
+    try:
+        from tools.graph import org_ops
+        org_ops.ensure_bootstrap_orgs()
+    except Exception:
+        logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
     # Seed from filesystem on first run (one-time), then start background tasks
     await session_monitor.seed_from_filesystem()
     await session_monitor.start(
