@@ -330,3 +330,27 @@ CREATE TRIGGER IF NOT EXISTS captures_au AFTER UPDATE ON captures BEGIN
     INSERT INTO captures_fts(captures_fts, rowid, id, content) VALUES('delete', old.rowid, old.id, old.content);
     INSERT INTO captures_fts(rowid, id, content) VALUES (new.rowid, new.id, new.content);
 END;
+
+-- ============================================================
+-- SETTINGS — layered configuration primitive (graph://0d3f750f-f9c)
+-- ============================================================
+-- A Setting is a structured, schema-validated, machine-consumable value.
+-- Keyed by (set_id, key) within an org; (set_id, schema_revision) declares
+-- the contract version. Cross-org reads honour publication_state via the
+-- same filter rule as Notes (graph://bcce359d-a1d).
+CREATE TABLE IF NOT EXISTS settings (
+    id                TEXT PRIMARY KEY,
+    set_id            TEXT NOT NULL,
+    schema_revision   INTEGER NOT NULL,
+    key               TEXT NOT NULL,
+    payload           TEXT NOT NULL,            -- JSON conforming to (set_id, schema_revision)
+    publication_state TEXT NOT NULL DEFAULT 'raw'
+        CHECK (publication_state IN ('raw','curated','published','canonical')),
+    supersedes        TEXT,                      -- target Setting id (per-field override)
+    excludes          TEXT,                      -- target Setting id (drop)
+    deprecated        INTEGER NOT NULL DEFAULT 0 CHECK (deprecated IN (0,1)),
+    successor_id      TEXT,
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+-- Indices created via _migrate_settings so legacy DBs survive executescript.

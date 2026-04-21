@@ -83,6 +83,7 @@ class GraphDB:
         self._migrate_attachments_alt_text()
         self._migrate_sources_last_activity()
         self._migrate_publication_state()
+        self._migrate_settings()
         self._seed_tags()
 
     def _migrate_attachments_alt_text(self):
@@ -125,6 +126,46 @@ class GraphDB:
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sources_publication_state "
             "ON sources(publication_state)"
+        )
+        self.conn.commit()
+
+    def _migrate_settings(self):
+        """Create the settings table + indices if missing (idempotent).
+
+        See graph://0d3f750f-f9c (Setting Primitive). Additive migration —
+        existing data unaffected. Index creation lives here so legacy DBs
+        that never had `settings` survive the executescript pass.
+        """
+        # CREATE TABLE itself runs via schema.sql executescript; this guard
+        # exists for the rare case where executescript skipped (edge cases).
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings ("
+            " id TEXT PRIMARY KEY,"
+            " set_id TEXT NOT NULL,"
+            " schema_revision INTEGER NOT NULL,"
+            " key TEXT NOT NULL,"
+            " payload TEXT NOT NULL,"
+            " publication_state TEXT NOT NULL DEFAULT 'raw'"
+            "   CHECK (publication_state IN ('raw','curated','published','canonical')),"
+            " supersedes TEXT,"
+            " excludes TEXT,"
+            " deprecated INTEGER NOT NULL DEFAULT 0 CHECK (deprecated IN (0,1)),"
+            " successor_id TEXT,"
+            " created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),"
+            " updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"
+            ")"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_settings_set "
+            "ON settings(set_id, key)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_settings_state "
+            "ON settings(publication_state)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_settings_schema "
+            "ON settings(set_id, schema_revision)"
         )
         self.conn.commit()
 

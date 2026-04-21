@@ -30,6 +30,15 @@ def legacy_db_path(tmp_path):
     """Create a DB with the schema as it existed before publication_state landed."""
     path = tmp_path / "legacy.db"
     schema = SCHEMA_PATH.read_text()
+    # Drop the entire `settings` block — that primitive postdates publication_state
+    # and would not exist in a true legacy DB. Stripping its publication_state
+    # column would also corrupt downstream column delimiters.
+    schema = re.sub(
+        r"CREATE TABLE IF NOT EXISTS settings \([^;]*\);",
+        "",
+        schema,
+        flags=re.DOTALL,
+    )
     # Strip publication_state / deprecated / successor_id from CREATE TABLE blocks.
     schema_legacy = re.sub(
         r",\s*\n\s*publication_state TEXT[^\n]*(\n\s*CHECK[^\n]*)?",
