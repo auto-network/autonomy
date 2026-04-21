@@ -422,6 +422,113 @@ def test_apply_tags_in_every_org(legacy_db, orgs_dir, yaml_path):
         assert n == 2, f"{slug} missing tags"
 
 
+def test_apply_filters_orphan_derivations(
+    legacy_db, orgs_dir, yaml_path,
+):
+    """Legacy DBs accumulated orphan rows when FK enforcement was off.
+
+    Repro: insert a derivation whose ``source_id`` has no matching
+    ``sources`` row. The migration must skip it (instead of tripping
+    the per-org DB's ``NOT NULL REFERENCES sources(id)`` constraint)
+    and report the orphan count in the plan. Same goes for an orphan
+    thought and a ``note_comments`` row — all three tables have
+    non-null FKs to sources.
+    """
+    # Use a raw connection with FK pragma off so we can mimic legacy
+    # state (which lacked FK enforcement and accumulated orphans).
+    conn = sqlite3.connect(legacy_db)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    # Orphan derivation — source_id 'ghost-src' isn't in sources.
+    conn.execute(
+        "INSERT INTO derivations("
+        "id, source_id, thought_id, content, model, turn_number) "
+        "VALUES('dr-orphan', 'ghost-src', NULL, 'orphan', 'claude', 1)"
+    )
+    # Orphan thought — also points at a missing source.
+    conn.execute(
+        "INSERT INTO thoughts(id, source_id, content, role, turn_number) "
+        "VALUES('th-orphan-src', 'ghost-src', 'orphan t', 'user', 1)"
+    )
+    # Orphan note_comment (NOT NULL FK).
+    conn.execute(
+        "INSERT INTO note_comments(id, source_id, content) "
+        "VALUES('c-orphan', 'ghost-src', 'orphan comment')"
+    )
+    # Orphan claim (nullable FK → source_id should get NULLed).
+    conn.execute(
+        "INSERT INTO claims(id, subject_id, predicate, source_id) "
+        "VALUES('cl-orphan', 'e1', 'is_a', 'ghost-src')"
+    )
+    # Orphan capture (nullable FK → source_id nulled, routes to personal).
+    conn.execute(
+        "INSERT INTO captures(id, content, source_id) "
+        "VALUES('cap-orphan', 'orphan capture', 'ghost-src')"
+    )
+    conn.commit()
+    conn.close()
+
+    plan = build_plan(legacy_db, orgs_dir, yaml_path)
+    # Plan surfaces orphan counts (acceptance #2).
+    assert plan.orphans_by_table.get("derivations") == 1
+    assert plan.orphans_by_table.get("thoughts") == 1
+    assert plan.orphans_by_table.get("note_comments") == 1
+    assert plan.orphans_by_table.get("captures") == 1
+
+    # Apply: must not raise IntegrityError on the NOT NULL FKs.
+    summary = apply_migration(plan, log=lambda *a, **kw: None)
+    assert summary["autonomy"] >= 1
+
+    # Orphan derivation dropped from every org.
+    for slug in plan.org_slugs:
+        c = sqlite3.connect(orgs_dir / f"{slug}.db")
+        try:
+            n = c.execute(
+                "SELECT COUNT(*) FROM derivations WHERE id = 'dr-orphan'"
+            ).fetchone()[0]
+        finally:
+            c.close()
+        assert n == 0, f"orphan derivation leaked into {slug}"
+
+    # Orphan capture landed in personal with source_id nulled.
+    pc = sqlite3.connect(orgs_dir / "personal.db")
+    try:
+        row = pc.execute(
+            "SELECT source_id FROM captures WHERE id = 'cap-orphan'"
+        ).fetchone()
+    finally:
+        pc.close()
+    assert row is not None, "orphan capture dropped instead of kept"
+    assert row[0] is None, "orphan capture source_id should be NULL"
+
+    # Verification still passes — expected totals are adjusted for the
+    # dropped orphan rows.
+    report = verify_migration(plan)
+    assert report.ok, report.issues
+
+
+def test_plan_prints_orphan_counts(legacy_db, orgs_dir, yaml_path, capsys):
+    """Dry-run output includes orphan row counts (acceptance #2)."""
+    conn = sqlite3.connect(legacy_db)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        "INSERT INTO derivations("
+        "id, source_id, thought_id, content, model, turn_number) "
+        "VALUES('dr-ghost', 'ghost-src', NULL, 'orphan', 'claude', 1)"
+    )
+    conn.commit()
+    conn.close()
+    rc = migrate_main([
+        "--legacy-db", str(legacy_db),
+        "--orgs-dir", str(orgs_dir),
+        "--projects-yaml", str(yaml_path),
+        "--pid-dir", str(legacy_db.parent),
+        "--dry-run",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Orphan derivations: 1" in out
+
+
 def test_apply_captures_unsourced_route_to_personal(
     legacy_db, orgs_dir, yaml_path,
 ):

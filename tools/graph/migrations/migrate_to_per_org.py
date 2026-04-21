@@ -112,6 +112,11 @@ class MigrationPlan:
     unknown_project_count: int = 0
     unknown_projects: dict[str, int] = field(default_factory=dict)
     partitions: dict[str, OrgPartition] = field(default_factory=dict)
+    # Per-table orphan counts: rows with source_id that no longer has a
+    # matching sources row. Populated by build_plan so the operator can
+    # see the data-loss surface before applying, and so verify_migration
+    # can subtract from the expected legacy totals.
+    orphans_by_table: dict[str, int] = field(default_factory=dict)
 
 
 # ── Pre-flight ───────────────────────────────────────────────
@@ -342,6 +347,14 @@ def build_plan(
         for sid, slug in source_org.items():
             source_ids_by_org[slug].add(sid)
 
+        # Tables whose FK to sources is NOT NULL — orphan rows will be
+        # dropped on migration (and must be subtracted from partition
+        # counts + from the verifier's expected legacy totals).
+        drop_on_orphan = {"thoughts", "derivations", "note_comments",
+                          "note_versions"}
+        # Tables with either nullable FK (claims) or no FK (note_reads,
+        # attachments) — orphan rows are kept (claims get source_id set
+        # to NULL; note_reads/attachments just carry the stale id).
         for table in (
             "thoughts", "derivations", "note_comments",
             "note_versions", "note_reads", "attachments",
@@ -349,6 +362,7 @@ def build_plan(
         ):
             try:
                 buckets: dict[str, int] = {slug: 0 for slug in target_orgs}
+                orphans = 0
                 rows = conn.execute(
                     f"SELECT source_id FROM {table}"
                 ).fetchall()
@@ -360,17 +374,30 @@ def build_plan(
                             buckets.get(DEFAULT_FALLBACK_ORG, 0) + 1
                         )
                         continue
+                    if sid not in source_org:
+                        orphans += 1
+                        if table in drop_on_orphan:
+                            # Row will be skipped — don't bucket.
+                            continue
+                        # Nullable-FK / FK-less tables keep the row and
+                        # route it to the fallback org (source_org.get
+                        # fallback below preserves historical behaviour).
                     home = source_org.get(sid, DEFAULT_FALLBACK_ORG)
                     buckets[home] = buckets.get(home, 0) + 1
                 for slug, n in buckets.items():
                     setattr(plan.partitions[slug], table, n)
+                if orphans:
+                    plan.orphans_by_table[table] = orphans
             except sqlite3.OperationalError:
                 # Table absent in legacy DB (older schema).
                 continue
 
         # captures: source_id is nullable; NULL → personal (operator-local).
+        # Orphan source_id → source_id set to NULL → personal (matches
+        # the ON DELETE SET NULL semantics in the schema).
         try:
             buckets = {slug: 0 for slug in target_orgs}
+            orphans = 0
             rows = conn.execute(
                 "SELECT source_id FROM captures"
             ).fetchall()
@@ -378,11 +405,16 @@ def build_plan(
                 sid = r["source_id"]
                 if sid is None:
                     buckets["personal"] = buckets.get("personal", 0) + 1
+                elif sid not in source_org:
+                    orphans += 1
+                    buckets["personal"] = buckets.get("personal", 0) + 1
                 else:
                     home = source_org.get(sid, DEFAULT_FALLBACK_ORG)
                     buckets[home] = buckets.get(home, 0) + 1
             for slug, n in buckets.items():
                 plan.partitions[slug].captures = n
+            if orphans:
+                plan.orphans_by_table["captures"] = orphans
         except sqlite3.OperationalError:
             pass
 
@@ -562,6 +594,10 @@ def apply_migration(
     try:
         # Pre-build content_id → org for entity_mentions / edges.
         content_to_org = _content_id_to_org(src, plan.source_org)
+        # Canonical set of valid source IDs — used to drop/NULL orphan
+        # FK references that would otherwise trip the per-org DB's
+        # PRAGMA foreign_keys = ON enforcement.
+        valid_source_ids = set(plan.source_org.keys())
 
         org_dbs = {}
         for slug in plan.org_slugs:
@@ -571,9 +607,11 @@ def apply_migration(
             # Order matters for FK-like dependencies (sources before
             # children) and for FTS triggers to fire correctly.
             _copy_sources(src, org_dbs, plan, log=log)
-            _copy_thoughts_and_derivations(
-                src, org_dbs, plan.source_org, log=log,
+            td_orphans = _copy_thoughts_and_derivations(
+                src, org_dbs, plan.source_org,
+                valid_source_ids=valid_source_ids, log=log,
             )
+            plan.orphans_by_table.update(td_orphans)
             _copy_entities_and_mentions(
                 src, org_dbs, content_to_org, log=log,
             )
@@ -585,17 +623,28 @@ def apply_migration(
                       "confidence", "status", "evidence", "metadata",
                       "created_at"),
                 null_target=DEFAULT_FALLBACK_ORG,
+                valid_source_ids=valid_source_ids,
+                fk_mode="nullable",
                 log=log,
             )
             _copy_edges(src, org_dbs, plan.source_org, log=log)
-            _copy_simple_source_keyed(
+            nc_orphans = _copy_simple_source_keyed(
                 src, org_dbs, plan.source_org,
                 table="note_comments",
                 cols=("id", "source_id", "content", "actor",
                       "integrated", "created_at", "publication_state"),
+                valid_source_ids=valid_source_ids,
+                fk_mode="not_null",
                 log=log,
             )
-            _copy_note_versions(src, org_dbs, plan.source_org, log=log)
+            if nc_orphans:
+                plan.orphans_by_table["note_comments"] = nc_orphans
+            nv_orphans = _copy_note_versions(
+                src, org_dbs, plan.source_org,
+                valid_source_ids=valid_source_ids, log=log,
+            )
+            if nv_orphans:
+                plan.orphans_by_table["note_versions"] = nv_orphans
             _copy_simple_source_keyed(
                 src, org_dbs, plan.source_org,
                 table="attachments",
@@ -606,7 +655,12 @@ def apply_migration(
                 log=log,
             )
             _copy_note_reads(src, org_dbs, plan.source_org, log=log)
-            _copy_captures(src, org_dbs, plan.source_org, log=log)
+            cap_orphans = _copy_captures(
+                src, org_dbs, plan.source_org,
+                valid_source_ids=valid_source_ids, log=log,
+            )
+            if cap_orphans:
+                plan.orphans_by_table["captures"] = cap_orphans
             _copy_tags_to_all(src, org_dbs, log=log)
             _copy_threads_to(src, org_dbs, DEFAULT_FALLBACK_ORG, log=log)
             _copy_global_to(
@@ -686,34 +740,95 @@ def _copy_sources(src, org_dbs, plan: MigrationPlan, *, log) -> None:
 
 
 def _copy_thoughts_and_derivations(
-    src, org_dbs, source_org, *, log,
-) -> None:
-    """Copy thoughts + derivations; FTS triggers fire on insert."""
-    for table, cols in (
-        ("thoughts", ("id", "source_id", "content", "role", "turn_number",
-                      "message_id", "tags", "metadata", "created_at",
-                      "publication_state")),
-        ("derivations", ("id", "source_id", "thought_id", "content", "model",
-                         "turn_number", "message_id", "metadata",
-                         "created_at")),
-    ):
-        try:
-            rows = src.execute(
-                f"SELECT {', '.join(cols)} FROM {table}"
-            ).fetchall()
-        except sqlite3.OperationalError:
-            continue
+    src, org_dbs, source_org, *, valid_source_ids, log,
+) -> dict[str, int]:
+    """Copy thoughts + derivations; FTS triggers fire on insert.
+
+    Filters orphan rows (``source_id`` not in legacy ``sources``) so the
+    per-org DB's NOT NULL REFERENCES sources(id) constraint isn't
+    violated. For derivations, a ``thought_id`` referencing a thought
+    we dropped (or that routes to a different org) is set to NULL —
+    mirrors the schema's ``ON DELETE SET NULL`` semantics.
+    """
+    orphans: dict[str, int] = {}
+
+    # Thoughts first so we can build a {thought_id: home_org} map that
+    # derivations use to NULL out cross-org / orphaned thought_id refs.
+    thought_to_org: dict[str, str] = {}
+    t_cols = ("id", "source_id", "content", "role", "turn_number",
+              "message_id", "tags", "metadata", "created_at",
+              "publication_state")
+    try:
+        t_rows = src.execute(
+            f"SELECT {', '.join(t_cols)} FROM thoughts"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        t_rows = None
+    if t_rows is not None:
         n = 0
-        for r in rows:
-            home = source_org.get(r["source_id"], DEFAULT_FALLBACK_ORG)
-            placeholders = ", ".join("?" * len(cols))
+        skipped = 0
+        for r in t_rows:
+            sid = r["source_id"]
+            if sid is None or sid not in valid_source_ids:
+                skipped += 1
+                continue
+            home = source_org.get(sid, DEFAULT_FALLBACK_ORG)
+            thought_to_org[r["id"]] = home
+            placeholders = ", ".join("?" * len(t_cols))
             org_dbs[home].conn.execute(
-                f"INSERT OR IGNORE INTO {table}({', '.join(cols)}) "
+                f"INSERT OR IGNORE INTO thoughts({', '.join(t_cols)}) "
                 f"VALUES({placeholders})",
-                tuple(r[c] for c in cols),
+                tuple(r[c] for c in t_cols),
             )
             n += 1
-        log(f"  {table}: {n} rows")
+        if skipped:
+            orphans["thoughts"] = skipped
+            log(f"  thoughts: {n} rows ({skipped} orphans dropped)")
+        else:
+            log(f"  thoughts: {n} rows")
+
+    d_cols = ("id", "source_id", "thought_id", "content", "model",
+              "turn_number", "message_id", "metadata", "created_at")
+    try:
+        d_rows = src.execute(
+            f"SELECT {', '.join(d_cols)} FROM derivations"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        d_rows = None
+    if d_rows is not None:
+        n = 0
+        skipped = 0
+        nulled = 0
+        tid_idx = d_cols.index("thought_id")
+        placeholders = ", ".join("?" * len(d_cols))
+        for r in d_rows:
+            sid = r["source_id"]
+            if sid is None or sid not in valid_source_ids:
+                skipped += 1
+                continue
+            home = source_org.get(sid, DEFAULT_FALLBACK_ORG)
+            vals = [r[c] for c in d_cols]
+            tid = vals[tid_idx]
+            if tid is not None and thought_to_org.get(tid) != home:
+                vals[tid_idx] = None
+                nulled += 1
+            org_dbs[home].conn.execute(
+                f"INSERT OR IGNORE INTO derivations({', '.join(d_cols)}) "
+                f"VALUES({placeholders})",
+                tuple(vals),
+            )
+            n += 1
+        if skipped:
+            orphans["derivations"] = skipped
+        bits = []
+        if skipped:
+            bits.append(f"{skipped} orphans dropped")
+        if nulled:
+            bits.append(f"{nulled} thought_id nulled")
+        suffix = f" ({', '.join(bits)})" if bits else ""
+        log(f"  derivations: {n} rows{suffix}")
+
+    return orphans
 
 
 def _copy_entities_and_mentions(
@@ -784,51 +899,105 @@ def _copy_entities_and_mentions(
 
 
 def _copy_simple_source_keyed(
-    src, org_dbs, source_org, *, table, cols, null_target=None, log,
-) -> None:
+    src, org_dbs, source_org, *,
+    table, cols, null_target=None,
+    valid_source_ids=None, fk_mode=None, log,
+) -> int:
+    """Copy a source-keyed table.
+
+    ``fk_mode``:
+      * ``"not_null"``: ``source_id`` has a NOT NULL FK to sources;
+        orphan rows are dropped and counted.
+      * ``"nullable"``: ``source_id`` has a nullable FK with
+        ``ON DELETE SET NULL``; orphan rows are kept with ``source_id``
+        set to NULL and routed to ``null_target``.
+      * ``None``: no FK constraint; rows are kept as-is (orphan
+        ``source_id`` is harmless).
+
+    Returns the orphan count so callers can aggregate into the migration
+    summary.
+    """
     try:
         rows = src.execute(
             f"SELECT {', '.join(cols)} FROM {table}"
         ).fetchall()
     except sqlite3.OperationalError:
-        return
+        return 0
     placeholders = ", ".join("?" * len(cols))
+    sid_idx = cols.index("source_id") if "source_id" in cols else None
     n = 0
+    orphans = 0
     for r in rows:
         sid = r["source_id"]
+        is_orphan = (
+            sid is not None
+            and valid_source_ids is not None
+            and sid not in valid_source_ids
+        )
+        if is_orphan:
+            orphans += 1
+            if fk_mode == "not_null":
+                continue
+            if fk_mode == "nullable":
+                sid = None  # fall through — routed via null_target
         if sid is None:
             home = null_target or DEFAULT_FALLBACK_ORG
         else:
             home = source_org.get(sid, DEFAULT_FALLBACK_ORG)
+        vals = [r[c] for c in cols]
+        if is_orphan and fk_mode == "nullable" and sid_idx is not None:
+            vals[sid_idx] = None
         org_dbs[home].conn.execute(
             f"INSERT OR IGNORE INTO {table}({', '.join(cols)}) "
             f"VALUES({placeholders})",
-            tuple(r[c] for c in cols),
+            tuple(vals),
         )
         n += 1
-    log(f"  {table}: {n} rows")
+    if orphans:
+        action = "dropped" if fk_mode == "not_null" else "nulled"
+        log(f"  {table}: {n} rows ({orphans} orphans {action})")
+    else:
+        log(f"  {table}: {n} rows")
+    return orphans
 
 
-def _copy_note_versions(src, org_dbs, source_org, *, log) -> None:
-    """note_versions has an AUTOINCREMENT id we leave SQLite to mint."""
+def _copy_note_versions(
+    src, org_dbs, source_org, *, valid_source_ids=None, log,
+) -> int:
+    """note_versions has an AUTOINCREMENT id we leave SQLite to mint.
+
+    ``source_id`` is NOT NULL REFERENCES sources — orphan rows are
+    dropped to avoid the FK violation.
+    """
     try:
         rows = src.execute(
             "SELECT source_id, version, content, created_at "
             "FROM note_versions"
         ).fetchall()
     except sqlite3.OperationalError:
-        return
+        return 0
     n = 0
+    orphans = 0
     for r in rows:
-        home = source_org.get(r["source_id"], DEFAULT_FALLBACK_ORG)
+        sid = r["source_id"]
+        if sid is None or (
+            valid_source_ids is not None and sid not in valid_source_ids
+        ):
+            orphans += 1
+            continue
+        home = source_org.get(sid, DEFAULT_FALLBACK_ORG)
         org_dbs[home].conn.execute(
             "INSERT OR IGNORE INTO note_versions("
             "source_id, version, content, created_at) "
             "VALUES(?, ?, ?, ?)",
-            (r["source_id"], r["version"], r["content"], r["created_at"]),
+            (sid, r["version"], r["content"], r["created_at"]),
         )
         n += 1
-    log(f"  note_versions: {n} rows")
+    if orphans:
+        log(f"  note_versions: {n} rows ({orphans} orphans dropped)")
+    else:
+        log(f"  note_versions: {n} rows")
+    return orphans
 
 
 def _copy_note_reads(src, org_dbs, source_org, *, log) -> None:
@@ -850,7 +1019,18 @@ def _copy_note_reads(src, org_dbs, source_org, *, log) -> None:
     log(f"  note_reads: {n} rows")
 
 
-def _copy_captures(src, org_dbs, source_org, *, log) -> None:
+def _copy_captures(
+    src, org_dbs, source_org, *,
+    valid_source_ids=None, thread_home=DEFAULT_FALLBACK_ORG, log,
+) -> int:
+    """Copy captures.
+
+    ``captures.source_id`` and ``captures.thread_id`` both have
+    ``ON DELETE SET NULL`` FKs. Threads live only in ``thread_home``
+    (``autonomy`` by default), so any capture landing elsewhere has
+    its ``thread_id`` nulled. Orphan ``source_id`` is likewise nulled,
+    which re-routes the capture to ``personal``.
+    """
     try:
         rows = src.execute(
             "SELECT id, content, thread_id, source_id, turn_number, "
@@ -858,27 +1038,40 @@ def _copy_captures(src, org_dbs, source_org, *, log) -> None:
             "FROM captures"
         ).fetchall()
     except sqlite3.OperationalError:
-        return
+        return 0
     n = 0
+    orphans = 0
     for r in rows:
         sid = r["source_id"]
+        if sid is not None and (
+            valid_source_ids is not None and sid not in valid_source_ids
+        ):
+            orphans += 1
+            sid = None
         if sid is None:
             home = "personal"
         else:
             home = source_org.get(sid, DEFAULT_FALLBACK_ORG)
+        tid = r["thread_id"]
+        if tid is not None and home != thread_home:
+            tid = None
         org_dbs[home].conn.execute(
             "INSERT OR IGNORE INTO captures("
             "id, content, thread_id, source_id, turn_number, "
             "status, actor, metadata, created_at, publication_state) "
             "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                r["id"], r["content"], r["thread_id"], r["source_id"],
+                r["id"], r["content"], tid, sid,
                 r["turn_number"], r["status"], r["actor"], r["metadata"],
                 r["created_at"], r["publication_state"],
             ),
         )
         n += 1
-    log(f"  captures: {n} rows")
+    if orphans:
+        log(f"  captures: {n} rows ({orphans} orphans nulled → personal)")
+    else:
+        log(f"  captures: {n} rows")
+    return orphans
 
 
 def _copy_edges(src, org_dbs, source_org, *, log) -> None:
@@ -1062,16 +1255,31 @@ def verify_migration(plan: MigrationPlan) -> VerificationReport:
         finally:
             ro.close()
 
+    # Orphans dropped during migration shrink the expected per-org sum;
+    # orphans whose source_id was nulled (claims, captures) stay counted.
+    _dropped_on_orphan = {"thoughts", "derivations",
+                          "note_comments", "note_versions"}
+
     # Sum per-table row counts across orgs and compare.
     for tbl, expected in legacy_counts.items():
         total = sum(c.get(tbl, 0) for c in org_counts.values())
         if tbl == "tags":
             # Tags are duplicated across orgs; not a sum check.
             continue
-        if total != expected:
+        adjusted = expected
+        if tbl in _dropped_on_orphan:
+            adjusted -= plan.orphans_by_table.get(tbl, 0)
+        if total != adjusted:
             report.ok = False
+            orphan_note = ""
+            if tbl in _dropped_on_orphan and plan.orphans_by_table.get(tbl):
+                orphan_note = (
+                    f" (expected adjusted for "
+                    f"{plan.orphans_by_table[tbl]} orphan rows)"
+                )
             report.issues.append(
                 f"{tbl}: legacy={expected}, per-org sum={total}"
+                f"{orphan_note}"
             )
 
     report.counts = org_counts
@@ -1115,6 +1323,15 @@ def _print_plan(plan: MigrationPlan) -> None:
                 f"  Unknown project {proj!r}: {n} rows "
                 f"→ {DEFAULT_FALLBACK_ORG} (warning)"
             )
+    if plan.orphans_by_table:
+        # Tables whose orphans are dropped (NOT NULL FK to sources) vs.
+        # kept with source_id nulled (nullable FK) — the distinction
+        # matters for the operator's expectations about row counts.
+        _drop_tables = {"thoughts", "derivations",
+                        "note_comments", "note_versions"}
+        for tbl, n in sorted(plan.orphans_by_table.items()):
+            action = "dropped" if tbl in _drop_tables else "source_id → NULL"
+            print(f"  Orphan {tbl}: {n} rows ({action})")
     print()
     print(
         f"{'org':<20} {'src':>6} {'thg':>6} {'der':>6} {'edg':>6} "
