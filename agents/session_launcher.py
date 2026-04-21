@@ -278,7 +278,7 @@ def launch_session(
 
     # Project scoping: GRAPH_SCOPE (hard project boundary) and GRAPH_TAGS
     # (soft tags auto-applied to notes) are sourced from metadata when
-    # present. Callers pass these through project_config → metadata.
+    # present. Callers pass these through workspace_settings → metadata.
     if metadata:
         graph_project = metadata.get("graph_project")
         if graph_project:

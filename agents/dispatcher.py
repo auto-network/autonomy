@@ -45,7 +45,7 @@ from agents.dispatch_db import (
     set_dispatcher_paused, is_paused as db_is_paused, get_pause_reason,
 )
 from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
-from agents.project_config import ProjectConfig, load_projects
+from agents.workspace_settings import WorkspaceV1, load_workspaces
 from agents.session_launcher import launch_session
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -465,28 +465,29 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
 
 
 def _build_label_image_map() -> dict[str, str]:
-    """Map bead label → container image, sourced from agents/projects.yaml.
+    """Map bead label → container image, sourced from ``autonomy.workspace#1``.
 
-    Each project's ``dispatch_labels`` list contributes one entry per label.
-    Adding dispatch routing for a new project is a config change only.
+    Each workspace's ``dispatch_labels`` list contributes one entry per label.
+    Adding dispatch routing for a new workspace is a Settings update only.
     """
     mapping: dict[str, str] = {}
-    for cfg in load_projects().values():
+    for cfg in load_workspaces().values():
         for label in cfg.dispatch_labels:
             mapping[label] = cfg.image
     return mapping
 
 
-def project_for_bead(bead: dict) -> ProjectConfig | None:
-    """Return the ProjectConfig whose ``dispatch_labels`` match any bead label.
+def project_for_bead(bead: dict) -> WorkspaceV1 | None:
+    """Return the workspace whose ``dispatch_labels`` match any bead label.
 
-    Projects are scanned in registry order; first match wins. Returns None
-    when no project claims the bead — caller falls back to the rig default.
+    Workspaces are scanned in Setting-enumeration order; first match wins.
+    Returns None when no workspace claims the bead — caller falls back to
+    the rig default.
     """
     labels = set(bead.get("labels") or ())
     if not labels:
         return None
-    for cfg in load_projects().values():
+    for cfg in load_workspaces().values():
         if labels.intersection(cfg.dispatch_labels):
             return cfg
     return None

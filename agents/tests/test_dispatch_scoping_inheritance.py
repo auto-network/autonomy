@@ -18,55 +18,48 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from textwrap import dedent
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from agents import dispatcher, launch_session_cli, project_config, session_launcher
-from agents.project_config import ProjectConfig
+from agents import dispatcher, launch_session_cli, session_launcher
+from agents.workspace_settings import WorkspaceV1 as ProjectConfig
 from tools.graph.db import GraphDB
 from tools.graph.ingest import ingest_claude_code_session
 
 
 # ── Helpers ──────────────────────────────────────────────────────
 
-def _write_projects_yaml(tmp_path: Path, body: str) -> Path:
-    path = tmp_path / "projects.yaml"
-    path.write_text(dedent(body).lstrip())
-    return path
-
-
 def _completed_process(stdout: str = "", stderr: str = "", returncode: int = 0):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 @pytest.fixture
-def test_projects(tmp_path):
-    """Load a synthetic projects.yaml and patch dispatcher.load_projects to use it."""
-    path = _write_projects_yaml(tmp_path, """
-        projects:
-          autonomy:
-            name: "Autonomy Network"
-            image: autonomy-agent:dashboard
-            graph_project: autonomy
-            default_tags: [dashboard, ui]
-            dispatch_labels: [dashboard]
-          enterprise:
-            name: "Enterprise"
-            image: autonomy-agent:enterprise
-            graph_project: anchore
-            default_tags: [enterprise]
-            dispatch_labels: [enterprise]
-    """)
-    project_config.clear_cache()
-    projects = project_config.load_projects(path)
-
-    with patch.object(dispatcher, "load_projects", return_value=projects):
+def test_projects():
+    """Patch ``dispatcher.load_workspaces`` with a synthetic Settings-backed registry."""
+    projects = {
+        "autonomy": ProjectConfig(
+            id="autonomy",
+            name="Autonomy Network",
+            description="",
+            image="autonomy-agent:dashboard",
+            graph_project="autonomy",
+            default_tags=("dashboard", "ui"),
+            dispatch_labels=("dashboard",),
+        ),
+        "enterprise": ProjectConfig(
+            id="enterprise",
+            name="Enterprise",
+            description="",
+            image="autonomy-agent:enterprise",
+            graph_project="anchore",
+            default_tags=("enterprise",),
+            dispatch_labels=("enterprise",),
+        ),
+    }
+    with patch.object(dispatcher, "load_workspaces", return_value=projects):
         yield projects
-
-    project_config.clear_cache()
 
 
 # ══════════════════════════════════════════════════════════════════════

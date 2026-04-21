@@ -5,8 +5,8 @@ from __future__ import annotations
 from starlette.testclient import TestClient
 
 
-def test_api_projects_lists_all_workspaces(test_app):
-    """Endpoint returns the full project registry loaded from projects.yaml."""
+def test_api_projects_lists_all_workspaces(shipped_settings_orgs, test_app):
+    """Endpoint returns the full workspace registry loaded from Settings."""
     with TestClient(test_app) as client:
         r = client.get("/api/projects")
         assert r.status_code == 200
@@ -27,7 +27,7 @@ def test_api_projects_lists_all_workspaces(test_app):
     assert by_id["enterprise-ng"]["graph_project"] == "anchore"
 
 
-def test_api_projects_includes_resolved_org_identity(test_app):
+def test_api_projects_includes_resolved_org_identity(shipped_settings_orgs, test_app):
     """Each project entry carries a resolved ``org`` identity dict so the
     frontend can render the workspace picker header without a second
     round-trip. Shape: ``{slug, name, color, favicon, initial, resolved}``."""
