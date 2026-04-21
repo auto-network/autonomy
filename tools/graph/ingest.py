@@ -567,6 +567,20 @@ def _load_session_meta(file_path: Path) -> dict:
     return {}
 
 
+def session_target_org(file_path: Path | str, default: str = "autonomy") -> str:
+    """Return the org slug a session file should land in.
+
+    Reads ``.session_meta.json`` next to (or one level above) *file_path*
+    and returns its ``graph_project`` value, falling back to *default*
+    (``autonomy`` per the platform default-scope convention).
+
+    Helper for per-org DB write routing (auto-9iq2s migration + auto-36v11
+    routing). Pure read; no DB or filesystem mutation.
+    """
+    meta = _load_session_meta(Path(file_path))
+    return meta.get("graph_project") or default
+
+
 # Patterns for low-signal first-turn content that should NOT become a title.
 _HANDSHAKE_RE = re.compile(r"\[dashboard\] confirming terminal link", re.IGNORECASE)
 _IMAGE_PLACEHOLDER_RE = re.compile(r"^\s*\[Image #\d+\]\s*$", re.IGNORECASE)
