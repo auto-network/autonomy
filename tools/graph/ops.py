@@ -20,6 +20,22 @@ from pathlib import Path
 from typing import Any
 
 from .db import GraphDB
+from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
+    ResolvedSetting,
+    SetMembers,
+    MigrationReport,
+    add_setting,
+    override_setting,
+    exclude_setting,
+    promote_setting,
+    deprecate_setting,
+    remove_setting,
+    list_set_ids,
+    get_setting,
+    read_set,
+    migrate_setting_revisions,
+    json_merge_patch,
+)
 
 
 # ── DB selection ─────────────────────────────────────────────
