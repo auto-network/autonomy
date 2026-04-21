@@ -930,18 +930,21 @@ def cmd_sources(args):
     states, include_raw = _parse_state_args(args)
     only_org, peers = _parse_org_args(args)
 
-    # Session context still uses a direct DB open (we need WAL-visible
-    # session rows for raw-from-current-session carve-out). The listing
-    # itself routes through ``ops.list_sources`` so peer DBs merge in
-    # when no only-org pin is set.
-    db = GraphDB(args.db)
-    try:
-        session_ids, author_pattern = _current_session_context(db)
-    finally:
-        db.close()
+    # Session context: local on host, nothing in container — it's a
+    # raw-from-current-session carve-out keyed to the tmux session that
+    # started the CLI, which only the host-side knows about. HttpClient
+    # callers don't need it (the server-side carve-out applies to the
+    # writer's session, not the container's).
+    session_ids: list[str] | None = None
+    author_pattern: str | None = None
+    if not is_api_mode():
+        db = GraphDB(args.db)
+        try:
+            session_ids, author_pattern = _current_session_context(db)
+        finally:
+            db.close()
 
-    from . import ops as _ops
-    sources = _ops.list_sources(
+    sources = get_client().list_sources(
         project=args.project, source_type=args.type, limit=args.limit,
         since=args.since, until=getattr(args, 'until', None), author=args.author,
         states=states, include_raw=include_raw,
@@ -984,44 +987,67 @@ def cmd_context(args):
     then peer public surface) and opens the source's home-org DB for the
     turn read.
     """
-    # Refresh own-org sessions, then try own-db first (honours --db pins).
-    own_db = GraphDB(args.db)
-    try:
-        _auto_ingest(own_db)
-        source = own_db.get_source(args.source)
-    finally:
-        own_db.close()
-
     org = os.environ.get("GRAPH_ORG")
-    if source is not None:
-        source.setdefault("org", org or "")
-        db = GraphDB(args.db)
-        close_db = True
-    else:
-        from . import ops as _ops
-        source = _ops.get_source(args.source, org=org)
+
+    # Source resolution: container routes through the API (which does
+    # cross-org resolve server-side); host tries own-db first (honours
+    # --db pins), then falls back to the cross-org resolver via the
+    # client.
+    if is_api_mode():
+        source = get_client().get_source(args.source, org=org)
         if not source:
             print(f"Source not found: {args.source}")
             return
-        home_org = source.get("org") or ""
-        caller = org or ""
-        if home_org and home_org != caller:
-            try:
-                db = GraphDB.for_org(home_org, mode="ro")
-            except FileNotFoundError:
-                print(f"Source not found: {args.source}")
-                return
-            close_db = False
-        else:
+        db = None
+        close_db = False
+    else:
+        own_db = GraphDB(args.db)
+        try:
+            _auto_ingest(own_db)
+            source = own_db.get_source(args.source)
+        finally:
+            own_db.close()
+
+        if source is not None:
+            source.setdefault("org", org or "")
             db = GraphDB(args.db)
             close_db = True
+        else:
+            source = get_client().get_source(args.source, org=org)
+            if not source:
+                print(f"Source not found: {args.source}")
+                return
+            home_org = source.get("org") or ""
+            caller = org or ""
+            if home_org and home_org != caller:
+                try:
+                    db = GraphDB.for_org(home_org, mode="ro")
+                except FileNotFoundError:
+                    print(f"Source not found: {args.source}")
+                    return
+                close_db = False
+            else:
+                db = GraphDB(args.db)
+                close_db = True
 
     try:
-        entries = db.get_source_content(source["id"])
+        if db is not None:
+            entries = db.get_source_content(source["id"])
+        else:
+            # Container path — ``read_source_full`` from the dashboard
+            # returns the same entries shape.
+            full = _read_source_full_via_api(source["id"], org=org)
+            entries = (full or {}).get("entries") or []
 
         # Resolve "last" keyword to max turn number
         if args.turn == "last":
-            target_turn = db.get_latest_turn(source["id"])
+            if db is not None:
+                target_turn = db.get_latest_turn(source["id"])
+            else:
+                target_turn = max(
+                    (e.get("turn_number") or 0 for e in entries),
+                    default=None,
+                )
             if target_turn is None:
                 print("No turns found for this source", file=sys.stderr)
                 return
@@ -1049,8 +1075,21 @@ def cmd_context(args):
             print(f"\n## Turn {turn} — {label}{marker}")
             print(content)
     finally:
-        if close_db:
+        if close_db and db is not None:
             db.close()
+
+
+def _read_source_full_via_api(source_id: str, *, org: str | None) -> dict | None:
+    """Container-mode source-content read: go through /api/graph/resolve/{id}
+    which returns the full ``read_source_full`` payload."""
+    client = get_client()
+    if not hasattr(client, "_get"):
+        # LocalClient — shouldn't be hit from cmd_context's API path.
+        return None
+    try:
+        return client._get(f"/api/graph/resolve/{source_id}", org=org)
+    except LookupError:
+        return None
 
 
 def cmd_entities(args):
@@ -3490,18 +3529,22 @@ def cmd_attach(args):
 
 def cmd_attachment(args):
     """Show metadata for a single attachment (cross-org aware)."""
-    # Step 1: try args.db (honours --db pins + own-org default).
-    own_db = GraphDB(args.db)
-    try:
-        att = own_db.get_attachment(args.id)
-    finally:
-        own_db.close()
+    org = os.environ.get("GRAPH_ORG")
 
-    if att is None:
-        # Step 2: cross-org peer scan (public-surface only).
-        from . import ops as _ops
-        org = os.environ.get("GRAPH_ORG")
-        att = _ops.get_attachment(args.id, org=org)
+    if is_api_mode():
+        # Container path — dashboard resolves cross-org server-side.
+        att = get_client().get_attachment(args.id, org=org)
+    else:
+        # Host path: try args.db first (honours --db pins + own-org
+        # default), then fall back to the cross-org public-surface scan.
+        own_db = GraphDB(args.db)
+        try:
+            att = own_db.get_attachment(args.id)
+        finally:
+            own_db.close()
+
+        if att is None:
+            att = get_client().get_attachment(args.id, org=org)
 
     if not att:
         print(f"No attachment found matching '{args.id}'", file=sys.stderr)
@@ -3543,6 +3586,33 @@ def cmd_attachments(args):
     """
     source_id = getattr(args, "source_id", None)
     limit = getattr(args, "limit", 50)
+    org = os.environ.get("GRAPH_ORG")
+
+    if is_api_mode():
+        # Container path: unfiltered listing isn't supported by the
+        # dashboard API (and isn't meaningful cross-org); require a
+        # source_id.
+        if not source_id:
+            print(
+                "  Unfiltered attachment listing is only available on the host. "
+                "Pass --source-id <id>.",
+                file=sys.stderr,
+            )
+            return
+        src = get_client().get_source(source_id, org=org)
+        if src is None:
+            print("  No attachments found.")
+            return
+        atts = get_client().list_attachments(
+            source_id=src["id"], org=org, limit=limit,
+        )
+        if not atts:
+            print("  No attachments found.")
+            return
+        for att in atts:
+            mime = att.get("mime_type") or "unknown"
+            print(f"  {att['id'][:12]}  {mime:20s}  {att['size_bytes']:>8}  {att['filename']}")
+        return
 
     if source_id:
         # Step 1: own-db lookup (honours --db pins).
@@ -3556,10 +3626,8 @@ def cmd_attachments(args):
             close_db = True
             lookup_id = src["id"]
         else:
-            # Step 2: cross-org peer scan.
-            from . import ops as _ops
-            org = os.environ.get("GRAPH_ORG")
-            src = _ops.get_source(source_id, org=org)
+            # Step 2: cross-org peer scan via the client.
+            src = get_client().get_source(source_id, org=org)
             if src is None:
                 print("  No attachments found.")
                 return
