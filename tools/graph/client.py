@@ -37,6 +37,10 @@ class GraphClient:
         project: str | None = None,
         or_mode: bool = False,
         tag: str | None = None,
+        states: list[str] | None = None,
+        include_raw: bool = False,
+        session_source_ids: list[str] | None = None,
+        session_author_pattern: str | None = None,
     ) -> list[dict]:
         raise NotImplementedError
 
@@ -121,6 +125,10 @@ class LocalClient(GraphClient):
         project: str | None = None,
         or_mode: bool = False,
         tag: str | None = None,
+        states: list[str] | None = None,
+        include_raw: bool = False,
+        session_source_ids: list[str] | None = None,
+        session_author_pattern: str | None = None,
     ) -> list[dict]:
         return ops.search(
             q,
@@ -130,6 +138,10 @@ class LocalClient(GraphClient):
             project=project,
             or_mode=or_mode,
             tag=tag,
+            states=states,
+            include_raw=include_raw,
+            session_source_ids=session_source_ids,
+            session_author_pattern=session_author_pattern,
         )
 
     def get_source(self, source_id, *, caller_org=None, peers=None):
@@ -233,6 +245,10 @@ class HttpClient(GraphClient):
         project=None,
         or_mode=False,
         tag=None,
+        states=None,
+        include_raw=False,
+        session_source_ids=None,
+        session_author_pattern=None,
     ) -> list[dict]:
         params = {"q": q, "limit": str(limit)}
         if project:
@@ -241,6 +257,14 @@ class HttpClient(GraphClient):
             params["or"] = "1"
         if tag:
             params["tag"] = tag
+        if states:
+            params["states"] = ",".join(states)
+        if include_raw:
+            params["include_raw"] = "1"
+        if session_source_ids:
+            params["session_source_ids"] = ",".join(session_source_ids)
+        if session_author_pattern:
+            params["session_author_pattern"] = session_author_pattern
         result = self._get("/api/graph/search", params)
         return result if isinstance(result, list) else []
 

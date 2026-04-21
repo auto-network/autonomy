@@ -55,7 +55,9 @@ def test_search_returns_results_for_known_term(graph_db_env):
     _seed_note(db, title="unrelated content here", tags=["misc"])
     db.close()
 
-    results = ops.search("passkey")
+    # include_raw=True: seeded notes default to publication_state='raw' and
+    # would be hidden from cross-session callers under the new default filter.
+    results = ops.search("passkey", include_raw=True)
     assert any("passkey" in (r.get("content") or "").lower()
                or "passkey" in (r.get("source_title") or "").lower()
                for r in results)
@@ -86,7 +88,7 @@ def test_list_sources_filters_by_tag(graph_db_env):
     _seed_note(db, title="other note", tags=["misc"])
     db.close()
 
-    pitfalls = ops.list_sources(source_type="note", tags=["pitfall"])
+    pitfalls = ops.list_sources(source_type="note", tags=["pitfall"], include_raw=True)
     titles = [s["title"] for s in pitfalls]
     assert "pitfall A" in titles
     assert "other note" not in titles
