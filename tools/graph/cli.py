@@ -12,7 +12,7 @@ import textwrap
 import time
 from pathlib import Path
 
-from .db import GraphDB, DEFAULT_DB
+from .db import GraphDB, DEFAULT_DB, resolve_caller_db_path
 
 
 # ── Scoped Access ────────────────────────────────────────────
@@ -40,15 +40,16 @@ def _get_session_name() -> str:
     sys.exit(1)
 
 
-def _get_db_path() -> Path:
-    """Get DB path with resolution order: (a) GRAPH_DB env, (b) ./data/graph.db, (c) legacy parents[2] fallback."""
-    env_db = os.environ.get("GRAPH_DB")
-    if env_db:
-        return Path(env_db)
-    cwd_db = Path.cwd() / "data" / "graph.db"
-    if cwd_db.exists():
-        return cwd_db
-    return DEFAULT_DB
+def _get_db_path(caller_org: str | None = None) -> Path:
+    """Resolve DB path via :func:`resolve_caller_db_path`.
+
+    Priority (inherited from the resolver):
+      1. ``GRAPH_DB`` env (test override / explicit pin).
+      2. ``data/orgs/<caller_org>.db`` (``caller_org`` defaults to ``'autonomy'``)
+         when the per-org DB exists.
+      3. Legacy ``data/graph.db`` fallback for pre-migration compatibility.
+    """
+    return resolve_caller_db_path(caller_org)
 
 
 def _apply_scope(args) -> None:
