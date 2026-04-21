@@ -456,7 +456,7 @@
             created_at: s.startedAt || 0,
             last_activity: s.lastActivity || 0,
             latest: lastEntry ? (lastEntry.content || '').slice(0, 150) : (s.lastMessage || ''),
-            type: s.sessionType || 'terminal',
+            type: s.sessionType || '',
             session_type: _deriveSessionType(s),
             tmux_session: id,
             bead_id: s.beadId || '',
@@ -478,7 +478,7 @@
           all.sort(function(a, b) { return (b.created_at || 0) - (a.created_at || 0); });
           var interactiveTypes = ['terminal', 'chatwith', 'host', 'container'];
           this.interactive = all.filter(s =>
-            s.session_id && interactiveTypes.indexOf(s.type) !== -1
+            s.session_id && s.type && interactiveTypes.indexOf(s.type) !== -1
           );
           this.loading = false;
         }
