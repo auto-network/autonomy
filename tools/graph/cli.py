@@ -43,12 +43,19 @@ def _get_session_name() -> str:
 def _get_db_path(caller_org: str | None = None) -> Path:
     """Resolve DB path via :func:`resolve_caller_db_path`.
 
-    Priority (inherited from the resolver):
+    Priority (inherited from the resolver + CLI cascade):
       1. ``GRAPH_DB`` env (test override / explicit pin).
-      2. ``data/orgs/<caller_org>.db`` (``caller_org`` defaults to ``'autonomy'``)
-         when the per-org DB exists.
-      3. Legacy ``data/graph.db`` fallback for pre-migration compatibility.
+      2. Explicit ``caller_org`` kwarg → that org's DB.
+      3. ``GRAPH_ORG`` env → that org's DB (session launcher exports it
+         in containers rooted on a specific org).
+      4. Scopeless default: ``data/orgs/personal.db`` (auto-txg5.3 — host
+         CLI writes with no org context converge on the operator's
+         personal DB, absorbing auto-s45z9).
+      5. Legacy ``data/graph.db`` fallback when the per-org DB file is
+         absent (pre-migration compatibility).
     """
+    if caller_org is None:
+        caller_org = os.environ.get("GRAPH_ORG")
     return resolve_caller_db_path(caller_org)
 
 
@@ -135,6 +142,9 @@ from .client import get_client
 
 def cmd_ingest(args):
     """Ingest files or directories into the graph."""
+    # JSONL sessions self-route to their org DB via .session_meta.json.
+    # Non-session ingests (directories of musings, conversation markdown)
+    # stay pinned to ``args.db`` — the caller picked a specific target.
     db = GraphDB(args.db)
     path = Path(args.path)
 
@@ -142,7 +152,9 @@ def cmd_ingest(args):
         # Check if this looks like a Claude Code project dir (contains .jsonl files)
         jsonl_files = list(path.glob("*.jsonl"))
         if jsonl_files:
-            results = ingest_claude_code_project(db, path, force=args.force)
+            # Per-session routing: don't pass ``db``; each session opens
+            # its own org's DB from its meta.
+            results = ingest_claude_code_project(None, path, force=args.force)
         else:
             results = ingest_directory(db, path, force=args.force)
         for r in results:
@@ -158,7 +170,19 @@ def cmd_ingest(args):
                 print(f"  ~ {Path(f).name}: {status} ({r.get('reason', '')})")
     elif path.is_file():
         if path.suffix == ".jsonl":
-            result = ingest_claude_code_session(db, path, force=args.force)
+            # Route to the org named in this session's .session_meta.json
+            # unless GRAPH_DB is pinned — args.db is ignored for JSONL.
+            from .ingest import _open_db_for_session
+            if os.environ.get("GRAPH_DB"):
+                result = ingest_claude_code_session(db, path, force=args.force)
+            else:
+                session_db = _open_db_for_session(path)
+                try:
+                    result = ingest_claude_code_session(
+                        session_db, path, force=args.force,
+                    )
+                finally:
+                    session_db.close()
         else:
             text = path.read_text()
             if "## Turn " in text:
@@ -755,7 +779,9 @@ def _auto_ingest(db: GraphDB) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             api_sessions(type('Args', (), {'all': True, 'project': None, 'force': False, 'status': False})())
     else:
-        ingest_all_claude_code(db, force=False)
+        # Route per session unless GRAPH_DB pins a specific target.
+        sessions_db = db if os.environ.get("GRAPH_DB") else None
+        ingest_all_claude_code(sessions_db, force=False)
 
 
 def cmd_context(args):
@@ -949,13 +975,21 @@ def cmd_sessions(args):
         return
     db = GraphDB(args.db)
 
+    # Per-session routing (post-txg5.3): each session lands in its own
+    # org DB based on .session_meta.json.graph_org. GRAPH_DB env still
+    # pins every write to a single path (test / maintenance override).
+    route_per_session = os.environ.get("GRAPH_DB") is None
+    sessions_db = None if route_per_session else db
+
     if args.all:
-        results = ingest_all_claude_code(db, force=args.force)
+        results = ingest_all_claude_code(sessions_db, force=args.force)
     elif args.project:
-        results = ingest_claude_code_project(db, Path(args.project), force=args.force)
+        results = ingest_claude_code_project(
+            sessions_db, Path(args.project), force=args.force,
+        )
     else:
         # Default: current project
-        results = ingest_claude_code_project(db, force=args.force)
+        results = ingest_claude_code_project(sessions_db, force=args.force)
 
     ingested = [r for r in results if r["status"] == "ingested"]
     updated = [r for r in results if r["status"] == "updated"]
@@ -1240,17 +1274,23 @@ def cmd_ingest_session(args):
     Idempotent: if the source already exists, returns the existing ID.
     Prints only the source ID to stdout (for subprocess capture).
     """
-    db = GraphDB(args.db)
     file_path = Path(args.file).resolve()
 
     if not file_path.exists():
         print(f"error: file not found: {file_path}", file=sys.stderr)
-        db.close()
         sys.exit(1)
 
-    result = ingest_claude_code_session(db, file_path, project=args.project)
+    # Route to the session's own org DB unless GRAPH_DB pins a target.
+    from .ingest import _open_db_for_session
+    if os.environ.get("GRAPH_DB"):
+        db = GraphDB(args.db)
+    else:
+        db = _open_db_for_session(file_path)
+    try:
+        result = ingest_claude_code_session(db, file_path, project=args.project)
+    finally:
+        db.close()
     source_id = result.get("source_id")
-    db.close()
 
     if source_id:
         print(source_id)

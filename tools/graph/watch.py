@@ -12,17 +12,26 @@ import time
 from pathlib import Path
 
 from .db import GraphDB, DEFAULT_DB
-from .ingest import _load_session_meta, ingest_claude_code_session
+from .ingest import (
+    _load_session_meta,
+    _open_db_for_session,
+    ingest_claude_code_session,
+)
 
 
 def watch_sessions(
-    db_path: Path = DEFAULT_DB,
+    db_path: Path | None = None,
     projects_dir: Path | None = None,
     interval: float = 5.0,
     project_filter: str | None = None,
     verbose: bool = False,
 ):
     """Watch for JSONL file changes and incrementally ingest new turns.
+
+    ``db_path=None`` (the default) routes each session to its own per-org
+    DB based on ``.session_meta.json.graph_org`` (post-txg5.3). Passing
+    an explicit ``db_path`` forces every session into that file — test /
+    legacy behaviour.
 
     Uses polling with file size tracking. Checks every `interval` seconds
     for files that have grown since last check.
@@ -34,7 +43,7 @@ def watch_sessions(
         print(f"Error: {projects_dir} does not exist", file=sys.stderr)
         return
 
-    db = GraphDB(db_path)
+    pinned_db = GraphDB(db_path) if db_path is not None else None
 
     # Track file sizes to detect changes
     file_sizes: dict[str, int] = {}
@@ -64,7 +73,8 @@ def watch_sessions(
 
                 if current_size > prev_size:
                     # File has grown — pull project scope from .session_meta.json
-                    project = _load_session_meta(jsonl_file).get("graph_project")
+                    meta = _load_session_meta(jsonl_file)
+                    project = meta.get("graph_project")
                     if project_filter and project_filter not in (project or ""):
                         file_sizes[path_str] = current_size
                         continue
@@ -77,8 +87,11 @@ def watch_sessions(
 
             # Ingest changes
             for jsonl_file, project, delta_bytes in changed:
+                session_db = pinned_db or _open_db_for_session(jsonl_file)
                 try:
-                    result = ingest_claude_code_session(db, jsonl_file, project=project)
+                    result = ingest_claude_code_session(
+                        session_db, jsonl_file, project=project,
+                    )
                     status = result["status"]
                     ts = time.strftime("%H:%M:%S")
 
@@ -97,10 +110,14 @@ def watch_sessions(
 
                 except Exception as e:
                     print(f"  [ERROR] {jsonl_file.stem[:12]}: {e}", file=sys.stderr)
+                finally:
+                    if pinned_db is None:
+                        session_db.close()
 
             time.sleep(interval)
 
     except KeyboardInterrupt:
         print("\nStopped watching.")
     finally:
-        db.close()
+        if pinned_db is not None:
+            pinned_db.close()

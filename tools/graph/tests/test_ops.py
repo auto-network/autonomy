@@ -171,17 +171,19 @@ def _seed_and_commit(db: GraphDB, *, title: str, tags: list[str],
     return src
 
 
-def test_caller_org_none_defaults_to_autonomy(tmp_path, monkeypatch):
+def test_caller_org_none_defaults_to_personal(tmp_path, monkeypatch):
     """With per-org DBs present and no GRAPH_DB override, ``caller_org=None``
-    resolves to ``autonomy`` — writes/reads land in ``autonomy.db``."""
+    resolves to ``personal`` — writes/reads land in ``personal.db``
+    (auto-txg5.3 scopeless convergence, absorbing auto-s45z9)."""
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
-    autonomy = GraphDB.create_org_db("autonomy", type_="shared")
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    personal = GraphDB.create_org_db("personal", type_="personal")
     try:
-        _seed_and_commit(autonomy, title="default-routed note", tags=["routing"])
+        _seed_and_commit(personal, title="default-routed note", tags=["routing"])
     finally:
-        autonomy.close()
+        personal.close()
 
     results = ops.search("default-routed", include_raw=True)
     assert any(
