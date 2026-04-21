@@ -4034,6 +4034,10 @@ def main():
     p_ct_log.add_argument("--limit", type=int, default=30, help="Max messages (default: 30)")
     p_ct_log.set_defaults(func=cmd_crosstalk)
 
+    # set — Settings primitive (graph://0d3f750f-f9c)
+    from .set_cmd import attach_set_subparser
+    attach_set_subparser(sub)
+
     args = parser.parse_args()
 
     # Apply scope from environment
