@@ -141,7 +141,15 @@ def _sanitize_fts_query(query: str, or_mode: bool = False) -> str:
 
 
 class GraphDB:
-    def __init__(self, db_path: Path | str = DEFAULT_DB, *, mode: Literal["rw", "ro"] = "rw"):
+    def __init__(
+        self,
+        db_path: Path | str | None = None,
+        *,
+        mode: Literal["rw", "ro"] = "rw",
+        caller_org: str | None = None,
+    ):
+        if db_path is None:
+            db_path = resolve_caller_db_path(caller_org)
         self.db_path = Path(db_path)
         self.read_only = False
         self._immutable = False
