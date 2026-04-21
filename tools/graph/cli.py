@@ -354,6 +354,106 @@ def _resolve_source(db, source_arg, first=False):
     return source
 
 
+def _resolve_source_cross_org(args, source_arg, *, first=False, allow_title=True):
+    """Resolve a source (own-first, then cross-org peers) and open its
+    home-org DB.
+
+    Resolution order:
+
+    1. ``args.db`` — ID / prefix / session_uuid / file_path match.
+       Honours ``--db`` pins (tests, host-admin paths) before any peer
+       scan. Title search also runs here when ``allow_title`` is set.
+    2. :func:`tools.graph.ops.resolve_source_strict` — cross-org peer
+       scan (public surface only). Only reached when step 1 misses; the
+       peer set comes from the caller's subscription Setting with
+       ``GRAPH_DB`` pinning honoured inside ``resolve_peers``.
+
+    Returns ``(result, db, close_db)``:
+
+    * ``result`` — source dict on match; list of dicts on ambiguous
+      prefix; ``None`` when nothing matches.
+    * ``db`` — ``GraphDB`` handle pointing at the source's home-org
+      (pooled RO for peer sources; fresh handle on ``args.db`` for own).
+      ``None`` when no source was resolved or the result is a list.
+    * ``close_db`` — ``True`` when the caller must ``db.close()``;
+      ``False`` for peer-pooled handles (pool owns them).
+    """
+    from . import ops as _ops
+    caller_org = os.environ.get("GRAPH_ORG")
+
+    # Step 1: own-org resolution against args.db (honours --db pins).
+    own_db = GraphDB(args.db)
+    own_result: dict | list | None
+    own_title_matches: list[dict] | None = None
+    try:
+        own_result = own_db.resolve_source_strict(source_arg)
+        immutable_hint = own_db.is_immutable
+        if own_result is None and allow_title:
+            matches = own_db.find_sources(source_arg, limit=5)
+            scope = _get_scope()
+            if scope:
+                matches = [s for s in matches if s.get("project") == scope]
+            own_title_matches = matches or None
+    finally:
+        own_db.close()
+
+    if own_result is not None:
+        if isinstance(own_result, dict):
+            own_result.setdefault("org", caller_org or "")
+            return own_result, GraphDB(args.db), True
+        # Ambiguous in own-org — mirror pre-rewire behavior.
+        for r in own_result:
+            r.setdefault("org", caller_org or "")
+        if first:
+            return own_result[0], GraphDB(args.db), True
+        return own_result, None, False
+
+    if own_title_matches:
+        for s in own_title_matches:
+            s.setdefault("org", caller_org or "")
+        if len(own_title_matches) == 1 or first:
+            return own_title_matches[0], GraphDB(args.db), True
+        return own_title_matches, None, False
+
+    # Step 2: cross-org peer scan (public-surface only).
+    peer_result = _ops.resolve_source_strict(
+        source_arg, caller_org=caller_org,
+    )
+
+    if peer_result is None:
+        if immutable_hint:
+            print(
+                "  (immutable mode — WAL data may not be visible)",
+                file=sys.stderr,
+            )
+        return None, None, False
+
+    if isinstance(peer_result, list):
+        if first:
+            peer_result = peer_result[0]
+        else:
+            return peer_result, None, False
+
+    home_org = peer_result.get("org") or ""
+    caller = caller_org or ""
+    if home_org and home_org != caller:
+        try:
+            db = GraphDB.for_org(home_org, mode="ro")
+        except FileNotFoundError:
+            return peer_result, None, False
+        return peer_result, db, False
+
+    # Peer scan surfaced an own-org match — open that org's DB by slug
+    # so subsequent reads target the routed file (args.db may be stale
+    # if ``GRAPH_ORG`` was set after parser bootstrap).
+    if home_org:
+        try:
+            return peer_result, GraphDB.open_org_db(home_org, mode="rw"), True
+        except FileNotFoundError:
+            pass
+    return peer_result, GraphDB(args.db), True
+
+
 def _resolve_current_source(db):
     """Find the graph source for the session we're running inside.
 
@@ -540,8 +640,7 @@ def _get_html_for_version(db, source_id, version):
 
 
 def cmd_read(args):
-    """Read full content of a source by ID or title search."""
-    db = GraphDB(args.db)
+    """Read full content of a source by ID or title search (cross-org aware)."""
     import json as _json
 
     # Parse @N version suffix
@@ -556,15 +655,13 @@ def cmd_read(args):
                 version_req = int(version_part)
             except ValueError:
                 print(f"Error: invalid version '{version_part}' (must be integer)", file=sys.stderr)
-                db.close()
                 return
 
-    result = _resolve_source(db, source_arg, first=args.first)
+    result, db, close_db = _resolve_source_cross_org(
+        args, source_arg, first=args.first,
+    )
     if result is None:
         print(f"No source found matching '{args.source}'")
-        if db.is_immutable:
-            print("  (immutable mode — recent writes may not be visible yet)", file=sys.stderr)
-        db.close()
         return
     if isinstance(result, list):
         print(f"Multiple sources match '{args.source}':")
@@ -572,11 +669,19 @@ def cmd_read(args):
             proj = f" [{s['project']}]" if s.get('project') else ""
             print(f"  {s['id'][:12]}  {s['type']:10s}  {s.get('title', '?')[:60]}{proj}")
         print(f"\nUse the source ID to read a specific one, or --first to read the top match.")
-        db.close()
         return
     source = result
     _mark_read(source["id"])
 
+    try:
+        _cmd_read_body(args, source, db, version_req, _json)
+    finally:
+        if close_db:
+            db.close()
+
+
+def _cmd_read_body(args, source, db, version_req, _json):
+    """Inner body of :func:`cmd_read` — runs against the source's home-org DB."""
     # Track reads for collab-tagged notes (silently skip on read-only DBs)
     meta = json.loads(source.get("metadata", "{}")) if isinstance(source.get("metadata"), str) else source.get("metadata", {})
     if "collab" in meta.get("tags", []):
@@ -609,7 +714,6 @@ def cmd_read(args):
             print(html_content)
         else:
             print(f"No HTML attachment found for version {target_version}", file=sys.stderr)
-        db.close()
         return
 
     # Handle version requests for notes
@@ -625,13 +729,11 @@ def cmd_read(args):
                     if len(v["content"]) > 60:
                         preview += "…"
                     print(f"  v{v['version']}  {v['created_at'][:16]}  {preview}")
-            db.close()
             return
         else:
             ver = db.get_note_version(source["id"], version_req)
             if not ver:
                 print(f"Version {version_req} not found for {source['id'][:12]}", file=sys.stderr)
-                db.close()
                 return
             proj = f" [{source['project']}]" if source.get('project') else ""
             print(f"Source: {source['id'][:12]}  {source['type']}{proj}  (version {version_req})")
@@ -642,7 +744,6 @@ def cmd_read(args):
             # Resolve embeds
             content = _resolve_embeds_in_text(db, content)
             print(f"\n{content}")
-            db.close()
             return
 
     entries = db.get_source_content(source["id"])
@@ -664,7 +765,6 @@ def cmd_read(args):
         save_file.write_text(raw)
         _lines = raw.count("\n") + (1 if raw else 0)
         print(f"  ✓ Saved to {save_path} ({_lines} lines, {len(raw)} chars)")
-        db.close()
         return
 
     # Get edges for this source
@@ -704,6 +804,7 @@ def cmd_read(args):
                 "created_at": source.get("created_at"),
                 "file_path": source.get("file_path") or None,
                 "metadata": source.get("metadata"),
+                "org": source.get("org"),
             },
             "entries": entry_list,
             "edges": edge_list,
@@ -714,7 +815,6 @@ def cmd_read(args):
             versions = db.list_note_versions(source["id"])
             output["version_count"] = len(versions) + 1 if versions else 1
         print(_json.dumps(output, default=str))
-        db.close()
         return
 
     # Text output (existing behavior)
@@ -786,8 +886,6 @@ def cmd_read(args):
                                 print(f"\n**{c['actor']}** · {c['created_at'][:16]}{status}  (id:{c['id'][:12]})")
                                 print(c["content"])
 
-    db.close()
-
 
 def cmd_sources(args):
     """List sources with optional filters (cross-org when available)."""
@@ -842,53 +940,79 @@ def _auto_ingest(db: GraphDB) -> None:
 
 
 def cmd_context(args):
-    """Show turns around a specific turn in a source — useful for expanding search hits."""
-    db = GraphDB(args.db)
+    """Show turns around a specific turn in a source — useful for expanding search hits.
 
-    # Auto-ingest to ensure fresh data
-    _auto_ingest(db)
+    Cross-org aware: resolves the source via ``ops.get_source`` (own-first,
+    then peer public surface) and opens the source's home-org DB for the
+    turn read.
+    """
+    # Refresh own-org sessions, then try own-db first (honours --db pins).
+    own_db = GraphDB(args.db)
+    try:
+        _auto_ingest(own_db)
+        source = own_db.get_source(args.source)
+    finally:
+        own_db.close()
 
-    # Find the source
-    source = db.get_source(args.source)
-    if not source:
-        print(f"Source not found: {args.source}")
-        db.close()
-        return
-
-    entries = db.get_source_content(source["id"])
-
-    # Resolve "last" keyword to max turn number
-    if args.turn == "last":
-        target_turn = db.get_latest_turn(source["id"])
-        if target_turn is None:
-            print("No turns found for this source", file=sys.stderr)
-            db.close()
-            return
+    caller_org = os.environ.get("GRAPH_ORG")
+    if source is not None:
+        source.setdefault("org", caller_org or "")
+        db = GraphDB(args.db)
+        close_db = True
     else:
-        target_turn = int(args.turn)
+        from . import ops as _ops
+        source = _ops.get_source(args.source, caller_org=caller_org)
+        if not source:
+            print(f"Source not found: {args.source}")
+            return
+        home_org = source.get("org") or ""
+        caller = caller_org or ""
+        if home_org and home_org != caller:
+            try:
+                db = GraphDB.for_org(home_org, mode="ro")
+            except FileNotFoundError:
+                print(f"Source not found: {args.source}")
+                return
+            close_db = False
+        else:
+            db = GraphDB(args.db)
+            close_db = True
 
-    window = args.window
+    try:
+        entries = db.get_source_content(source["id"])
 
-    # Filter to turns within the window
-    relevant = [e for e in entries if abs((e.get("turn_number") or 0) - target_turn) <= window]
+        # Resolve "last" keyword to max turn number
+        if args.turn == "last":
+            target_turn = db.get_latest_turn(source["id"])
+            if target_turn is None:
+                print("No turns found for this source", file=sys.stderr)
+                return
+        else:
+            target_turn = int(args.turn)
 
-    proj = f" [{source['project']}]" if source.get('project') else ""
-    print(f"Source: {source.get('title', '?')[:60]}{proj}")
-    print(f"Showing turns {target_turn - window}–{target_turn + window}")
-    print(f"{'─' * 72}")
+        window = args.window
 
-    for e in relevant:
-        turn = e.get("turn_number", "?")
-        etype = e.get("entry_type", "?")
-        label = "USER" if etype == "thought" else "ASSISTANT"
-        marker = " ◀" if turn == target_turn else ""
-        content = e["content"]
-        if args.max_chars and len(content) > args.max_chars:
-            content = content[:args.max_chars] + f"\n... [{len(content) - args.max_chars} chars truncated]"
-        print(f"\n## Turn {turn} — {label}{marker}")
-        print(content)
+        # Filter to turns within the window
+        relevant = [e for e in entries if abs((e.get("turn_number") or 0) - target_turn) <= window]
 
-    db.close()
+        proj = f" [{source['project']}]" if source.get('project') else ""
+        print(f"Source: {source.get('title', '?')[:60]}{proj}")
+        print(f"Showing turns {target_turn - window}–{target_turn + window}")
+        print(f"{'─' * 72}")
+
+        for e in relevant:
+            turn = e.get("turn_number", "?")
+            etype = e.get("entry_type", "?")
+            label = "USER" if etype == "thought" else "ASSISTANT"
+            marker = " ◀" if turn == target_turn else ""
+            content = e["content"]
+            if args.max_chars and len(content) > args.max_chars:
+                content = content[:args.max_chars] + f"\n... [{len(content) - args.max_chars} chars truncated]"
+            print(f"\n## Turn {turn} — {label}{marker}")
+            print(content)
+    finally:
+        if close_db:
+            db.close()
 
 
 def cmd_entities(args):
@@ -3402,12 +3526,22 @@ def cmd_attach(args):
 
 
 def cmd_attachment(args):
-    """Show metadata for a single attachment."""
-    db = GraphDB(args.db)
-    att = db.get_attachment(args.id)
+    """Show metadata for a single attachment (cross-org aware)."""
+    # Step 1: try args.db (honours --db pins + own-org default).
+    own_db = GraphDB(args.db)
+    try:
+        att = own_db.get_attachment(args.id)
+    finally:
+        own_db.close()
+
+    if att is None:
+        # Step 2: cross-org peer scan (public-surface only).
+        from . import ops as _ops
+        caller_org = os.environ.get("GRAPH_ORG")
+        att = _ops.get_attachment(args.id, caller_org=caller_org)
+
     if not att:
         print(f"No attachment found matching '{args.id}'", file=sys.stderr)
-        db.close()
         sys.exit(1)
 
     print(f"  id:          {att['id']}")
@@ -3419,6 +3553,8 @@ def cmd_attachment(args):
     print(f"  source_id:   {att['source_id'] or '—'}")
     print(f"  turn:        {att['turn_number'] if att['turn_number'] is not None else '—'}")
     print(f"  created_at:  {att['created_at']}")
+    if att.get("org"):
+        print(f"  org:         {att['org']}")
     if att.get("alt_text"):
         preview = att["alt_text"][:120].replace("\n", " ")
         if len(att["alt_text"]) > 120:
@@ -3432,23 +3568,67 @@ def cmd_attachment(args):
             meta = {}
     if meta:
         print(f"  metadata:    {json.dumps(meta)}")
-    db.close()
 
 
 def cmd_attachments(args):
-    """List attachments, optionally filtered by source."""
-    db = GraphDB(args.db)
-    source_id = getattr(args, "source_id", None)
-    atts = db.list_attachments(source_id=source_id, limit=getattr(args, "limit", 50))
-    if not atts:
-        print("  No attachments found.")
-        db.close()
-        return
+    """List attachments, optionally filtered by source.
 
-    for att in atts:
-        mime = att.get("mime_type") or "unknown"
-        print(f"  {att['id'][:12]}  {mime:20s}  {att['size_bytes']:>8}  {att['filename']}")
-    db.close()
+    When ``--source-id`` is supplied, the source is resolved cross-org and
+    its home-org DB is consulted. Unfiltered listing stays own-org only —
+    peers' attachment tables are not merged in (they'd dilute the feed
+    with orphan rows whose visibility can't be derived here).
+    """
+    source_id = getattr(args, "source_id", None)
+    limit = getattr(args, "limit", 50)
+
+    if source_id:
+        # Step 1: own-db lookup (honours --db pins).
+        own_db = GraphDB(args.db)
+        try:
+            src = own_db.get_source(source_id)
+        finally:
+            own_db.close()
+        if src is not None:
+            db = GraphDB(args.db)
+            close_db = True
+            lookup_id = src["id"]
+        else:
+            # Step 2: cross-org peer scan.
+            from . import ops as _ops
+            caller_org = os.environ.get("GRAPH_ORG")
+            src = _ops.get_source(source_id, caller_org=caller_org)
+            if src is None:
+                print("  No attachments found.")
+                return
+            home_org = src.get("org") or ""
+            caller = caller_org or ""
+            lookup_id = src["id"]
+            if home_org and home_org != caller:
+                try:
+                    db = GraphDB.for_org(home_org, mode="ro")
+                except FileNotFoundError:
+                    print("  No attachments found.")
+                    return
+                close_db = False
+            else:
+                db = GraphDB(args.db)
+                close_db = True
+    else:
+        db = GraphDB(args.db)
+        close_db = True
+        lookup_id = None
+
+    try:
+        atts = db.list_attachments(source_id=lookup_id, limit=limit)
+        if not atts:
+            print("  No attachments found.")
+            return
+        for att in atts:
+            mime = att.get("mime_type") or "unknown"
+            print(f"  {att['id'][:12]}  {mime:20s}  {att['size_bytes']:>8}  {att['filename']}")
+    finally:
+        if close_db:
+            db.close()
 
 
 def _parse_duration(s: str) -> float:

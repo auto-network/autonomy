@@ -21,6 +21,33 @@ import subprocess
 from .db import GraphDB, DEFAULT_DB, _sanitize_fts_query
 
 
+def _open_source_db(source_id: str, own_db: GraphDB) -> GraphDB:
+    """Return the DB to read ``source_id``'s content from — cross-org aware.
+
+    When the source lives in a peer org (resolved via ``ops.get_source``),
+    returns the peer's pooled read-only DB. For own-org sources — or when
+    resolution fails — returns ``own_db``. Callers MUST NOT close the
+    returned handle: peer DBs are pool-managed, and the own-org handle
+    is owned upstream.
+    """
+    from . import ops
+    from .db import GraphDB as _GraphDB
+    try:
+        src = ops.get_source(source_id)
+    except Exception:
+        return own_db
+    if src is None:
+        return own_db
+    home_org = src.get("org") or ""
+    caller = ops._resolve_caller_org(None) or ""
+    if home_org and home_org != caller:
+        try:
+            return _GraphDB.for_org(home_org, mode="ro")
+        except FileNotFoundError:
+            return own_db
+    return own_db
+
+
 def _run_bd(args: list[str], timeout: int = 15) -> str:
     """Run a bd CLI command and return stdout."""
     try:
@@ -133,7 +160,8 @@ def collect_primer_data(
             if turns_range:
                 from_turn = turns_range.get("from", 0)
                 to_turn = turns_range.get("to", from_turn)
-                entries = db.get_source_content(source_id)
+                source_db = _open_source_db(source_id, db)
+                entries = source_db.get_source_content(source_id)
                 relevant = [e for e in entries
                             if e.get("turn_number") and from_turn <= e["turn_number"] <= to_turn]
                 for entry in relevant:
