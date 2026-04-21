@@ -375,3 +375,43 @@ def test_real_enterprise_ng_overlay_has_no_drift(shipped_workspaces):
     # No exception = overlay no longer claims the enterprise repo is
     # read-only while projects.yaml sets writable=true.
     render_workspace_primer(get_workspace("enterprise-ng"))
+
+
+# ── Org primer layer (bead auto-31i3) ───────────────────────────────
+
+def test_org_primer_loaded_when_present(tmp_path, monkeypatch):
+    """Workspaces in an org with an org primer file pick it up."""
+    monkeypatch.setattr("agents.primer_renderer.ORGS_DIR", tmp_path)
+    (tmp_path / "acme").mkdir()
+    (tmp_path / "acme" / "primer.md").write_text(
+        "### Acme conventions\n\n- Always use tabs\n"
+    )
+    out = render_workspace_primer(_cfg(graph_project="acme"))
+    assert "## Org Conventions (acme)" in out
+    assert "### Acme conventions" in out
+    assert "Always use tabs" in out
+
+
+def test_org_primer_missing_silently_skipped(tmp_path, monkeypatch):
+    """Workspaces in an org without a primer file render without the section."""
+    monkeypatch.setattr("agents.primer_renderer.ORGS_DIR", tmp_path)
+    out = render_workspace_primer(_cfg(graph_project="no-such-org"))
+    assert "## Org Conventions" not in out
+
+
+def test_real_anchore_primer_appears_in_enterprise_workspaces(shipped_workspaces):
+    """Acceptance criterion: both enterprise-ng and enterprise-v5 sessions
+    see the Anchore org conventions without duplication."""
+    ng = render_workspace_primer(get_workspace("enterprise-ng"))
+    v5 = render_workspace_primer(get_workspace("enterprise-v5"))
+    for out in (ng, v5):
+        assert "## Org Conventions (anchore)" in out
+        # Representative content from agents/orgs/anchore/primer.md
+        assert "Pre-existing" in out
+        assert "task lint" in out
+
+
+def test_autonomy_workspace_has_no_anchore_primer(shipped_workspaces):
+    """Autonomy org has no primer file today — section must be absent."""
+    out = render_workspace_primer(get_workspace("autonomy"))
+    assert "## Org Conventions (anchore)" not in out
