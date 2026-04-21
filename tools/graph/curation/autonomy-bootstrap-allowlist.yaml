@@ -1,0 +1,54 @@
+# Autonomy Network bootstrap public-surface allowlist.
+#
+# Charter: graph://93cf3026-1df (Bootstrap Allowlist)
+# Three-axis model: graph://8cf067e3-ca3 (publication_state semantics)
+# Cross-org filter: graph://bcce359d-a1d (why raw/curated stays invisible to peers)
+#
+# Each entry is a short source-id prefix + a trailing comment naming the note.
+# The curation runner resolves the prefix against the org DB, refuses to act on
+# ambiguous prefixes, and requires every canonical entry to have no pending
+# comments (Note Revision Protocol, graph://843a8137-3c7).
+#
+# Anything not listed here keeps its current publication_state. This file
+# promotes only — demotions live in a separate allowlist to keep the audit
+# trail clean.
+
+org: autonomy
+version: 1
+
+canonical:
+  - 38c10838-094  # Signpost Index
+  - eabec73c-baa  # Workspaces & Orgs
+  - e2c81892-0fb  # Workspace Container Lifecycle
+  - bc0dda40-f56  # Artifact Layering
+  - dc526569-af4  # Credential Injection Patterns
+  - 75f1b82d-9ef  # Scoping Boundary Reference
+  - 5de95c4e-c52  # Session Management
+  - c07a3d75-bfb  # Primer Composition Contract
+  - c706c9f3-5a8  # Dispatch Lifecycle
+  - 527150ad-743  # Testing Architecture
+  - 225a4af7-ee5  # Design Studio Guide
+  - 16e00cb2-4f2  # Card Design System
+  - 38613c2c-5e9  # Shared Partial Contract
+  - 3fda1d59-23f  # Knowledge Graph signpost
+  - a0a5b2cc-15a  # Chat With
+  - 098a5407-39d  # Host Operations Protocol
+  - f6c6c43e-24a  # Bead Polishing Protocol
+  - 843a8137-3c7  # Note Revision Protocol
+  - 2cef91f8-c32  # Juggling Protocol
+  - 7603f779-90f  # Monitor Protocol
+  - 1e365009-1dc  # Productization Protocol
+  - f069c902-d65  # Attention Journal
+
+published:
+  - 497cdc20-d43  # Org identity cascade
+  - 46c9a669-711  # WAL pitfall
+  - 99fa69c7-e49  # Provenance bug analysis
+  - 8cf067e3-ca3  # Three-axis model
+  - bcce359d-a1d  # Cross-Org Search Architecture
+  - d970d946-f95  # Org Registry & Identity
+  - 0d3f750f-f9c  # Setting Primitive
+
+# Audit notes filed by promote runs are recorded here for traceability.
+# The runner appends one entry per successful bulk promotion.
+audit_notes: []

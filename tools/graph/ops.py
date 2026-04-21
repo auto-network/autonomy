@@ -817,6 +817,55 @@ def update_source_title(
         db.close()
 
 
+# ── Publication state transitions ────────────────────────────
+# Narrow primitive that backs the bootstrap curation runner
+# (tools/graph/curation/) and will back the ``graph promote`` CLI from
+# auto-j1l9 once it lands. Mirrors ``promote_setting`` shape for the Settings
+# primitive (see ``settings_ops.promote_setting``).
+
+_SOURCE_VALID_STATES = ("raw", "curated", "published", "canonical")
+
+
+def promote_source(
+    source_id: str,
+    to_state: str,
+    *,
+    caller_org: str | None = None,
+) -> dict:
+    """Transition ``sources.publication_state`` for the given id.
+
+    Returns a transition record ``{id, prev_state, new_state, ts}``. Raises
+    ``ValueError`` on invalid state, ``LookupError`` on unknown id.
+    """
+    if to_state not in _SOURCE_VALID_STATES:
+        raise ValueError(
+            f"invalid publication_state {to_state!r}; valid: {_SOURCE_VALID_STATES}"
+        )
+    db = _open(caller_org)
+    try:
+        row = db.conn.execute(
+            "SELECT id, publication_state FROM sources WHERE id = ?", (source_id,)
+        ).fetchone()
+        if not row:
+            raise LookupError(f"source not found: {source_id!r}")
+        prev = row["publication_state"]
+        now = db.conn.execute(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+        ).fetchone()[0]
+        if prev == to_state:
+            return {"id": row["id"], "prev_state": prev, "new_state": to_state, "ts": now,
+                    "changed": False}
+        db.conn.execute(
+            "UPDATE sources SET publication_state = ? WHERE id = ?",
+            (to_state, row["id"]),
+        )
+        db.conn.commit()
+        return {"id": row["id"], "prev_state": prev, "new_state": to_state, "ts": now,
+                "changed": True}
+    finally:
+        db.close()
+
+
 def checkpoint(
     *,
     caller_org: str | None = None,
