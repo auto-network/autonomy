@@ -72,22 +72,22 @@ def resolve_caller_db_path(
 
     Priority:
       1. ``GRAPH_DB`` env (test override / explicit pin) → that path.
-      2. ``data/orgs/<caller_org>.db`` (``caller_org`` defaults to ``'autonomy'``).
-      3. Legacy ``data/graph.db`` (``DEFAULT_DB``) if no per-org DB yet and
-         the caller is ``autonomy`` — preserves behaviour pre-migration
-         (auto-txg5.2).
-
-    Unknown ``caller_org`` with no DB file falls back to ``DEFAULT_DB`` as
-    well; per-org write routing (auto-txg5.3) will tighten this later.
+      2. ``data/orgs/<caller_org>.db`` — ``caller_org`` defaults to
+         ``'personal'`` (scopeless convergence, auto-txg5.3): every write
+         without an explicit org lands in the operator's personal DB.
+      3. Legacy ``data/graph.db`` (``DEFAULT_DB``) when the per-org DB
+         file is absent — preserves pre-migration fallback so existing
+         installations keep reading their legacy store until bootstrap
+         has materialised the per-org files.
     """
     env_db = os.environ.get("GRAPH_DB")
     if env_db:
         return Path(env_db)
-    slug = caller_org or "autonomy"
+    slug = caller_org or "personal"
     org_path = _org_db_path(slug, root)
     if org_path.exists():
         return org_path
-    # Pre-migration fallback: autonomy routes to the legacy single DB.
+    # Pre-migration fallback: legacy single DB when no per-org file yet.
     return DEFAULT_DB
 
 
