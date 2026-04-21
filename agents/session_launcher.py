@@ -279,7 +279,6 @@ def launch_session(
         "-e", f"BD_ACTOR={session_type}:{name}",
         "-e", f"AUTONOMY_SESSION={name}",
         "-e", "BD_READONLY=0",
-        "-e", "GRAPH_DB=/home/agent/graph.db",
         "-e", f"GRAPH_API={graph_api}",
         "-e", f"CROSSTALK_TOKEN={raw_token}",
         *auth_args,

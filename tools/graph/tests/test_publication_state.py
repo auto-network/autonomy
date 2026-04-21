@@ -96,7 +96,11 @@ def test_legacy_db_migrates_on_open(legacy_db_path):
         row = db.conn.execute(
             "SELECT publication_state, deprecated, successor_id FROM sources WHERE id='legacy_note'"
         ).fetchone()
-        assert row["publication_state"] == "raw"
+        # Default flipped to 'curated' (graph://8cf067e3-ca3 follow-up): every
+        # new/migrated source row lands cross-session-visible unless explicitly
+        # held back in 'raw'. Substrate tables (thoughts/comments/captures)
+        # remain CHECK-pinned to 'raw' below.
+        assert row["publication_state"] == "curated"
         assert row["deprecated"] == 0
         assert row["successor_id"] is None
 
@@ -168,13 +172,18 @@ def test_fixed_state_tables_reject_non_raw(fresh_db, table):
             )
 
 
-def test_new_sources_default_to_raw(fresh_db):
+def test_new_sources_default_to_curated(fresh_db):
+    """New sources default to ``curated`` so ``graph note`` output is
+    visible in cross-session reads by default. See follow-up to
+    graph://8cf067e3-ca3 — ``raw`` is reserved for genuinely incomplete
+    drafts; operators explicitly mark those with ``publication_state="raw"``.
+    """
     src = Source(type="note", title="new", file_path="note:new")
     fresh_db.insert_source(src)
     row = fresh_db.conn.execute(
         "SELECT publication_state FROM sources WHERE id=?", (src.id,)
     ).fetchone()
-    assert row["publication_state"] == "raw"
+    assert row["publication_state"] == "curated"
 
 
 # ── Search / list filter behavior ───────────────────────────────────────

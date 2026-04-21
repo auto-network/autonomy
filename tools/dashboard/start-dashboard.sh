@@ -125,6 +125,12 @@ echo "Starting dashboard: host=$HOST, port=$PORT (hot-reload enabled, tailwind -
 # Launch tailwindcss --watch and uvicorn as two background processes sharing a
 # process group.  setsid creates a new session so the child bash becomes the
 # group leader; its PID == PGID of both children.  One kill -- -$PGID stops all.
+#
+# IMPORTANT: redirect the setsid bash -c's own stdio to /dev/null + the log
+# file. Without this, the detached subshell keeps inheriting the caller's
+# stdout/stderr FDs — a pipe like `start-dashboard.sh | tail -10` never
+# closes because the setsid subshell (running ``wait``) holds the write end
+# open forever. Redirecting here lets the parent script exit cleanly.
 setsid bash -c "
   cd \"$REPO_ROOT\"
   \"$TAILWIND_BIN\" \
@@ -142,11 +148,16 @@ setsid bash -c "
     --port \"$PORT\" \
     --reload \
     --reload-dir tools/dashboard \
+    --reload-dir tools/graph \
+    --reload-dir agents \
     --reload-exclude 'tools/dashboard/tests/*' \
+    --reload-exclude 'tools/graph/tests/*' \
+    --reload-exclude 'agents/tests/*' \
+    --reload-exclude '**/__pycache__/*' \
     \$SSL_ARGS \
     >> \"$LOG_FILE\" 2>&1 &
   wait
-" &
+" </dev/null >>"$LOG_FILE" 2>&1 &
 
 PGID=$!
 echo "$PGID" > "$PID_FILE"
@@ -161,7 +172,7 @@ if kill -0 "-$PGID" 2>/dev/null || kill -0 "$PGID" 2>/dev/null; then
     fi
     echo "  Log: $LOG_FILE"
     echo "  PID file: $PID_FILE (stores PGID)"
-    echo "  Hot-reload: tools/dashboard/"
+    echo "  Hot-reload: tools/dashboard/ tools/graph/ agents/"
     echo "  Tailwind:   watching tailwind.input.css → static/tailwind.css"
 else
     echo "ERROR: dashboard failed to start. Check $LOG_FILE" >&2

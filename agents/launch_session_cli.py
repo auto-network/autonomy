@@ -162,7 +162,6 @@ def main() -> int:
             "--network=host",
             "-e", f"BD_ACTOR={args.session_type}:{args.name}",
             "-e", "BD_READONLY=0",
-            "-e", "GRAPH_DB=/home/agent/graph.db",
             *auth_args,
         ]
         if args.graph_project:

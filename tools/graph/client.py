@@ -64,272 +64,8 @@ def _translate_http_error(status: int, body: dict) -> Exception:
     return GraphHttpError(body.get("error") or f"HTTP {status}", status, body)
 
 
-class GraphClient:
-    """Abstract interface; concrete subclasses implement each method."""
 
-    # ── reads ───────────────────────────────────────────────
-
-    def search(self, q, **kw) -> list[dict]:
-        raise NotImplementedError
-
-    def get_source(self, source_id, *, org=None, peers=None) -> dict | None:
-        raise NotImplementedError
-
-    def get_attachment(self, attachment_id, *, org=None, peers=None) -> dict | None:
-        raise NotImplementedError
-
-    def list_attachments(self, source_id=None, *, org=None, peers=None, limit=50) -> list[dict]:
-        raise NotImplementedError
-
-    def list_sources(self, **kw) -> list[dict]:
-        raise NotImplementedError
-
-    def list_attention(self, **kw) -> list[dict]:
-        raise NotImplementedError
-
-    def list_collab_topics(self, *, org=None) -> list[dict]:
-        raise NotImplementedError
-
-    def list_collab_sources(self, *, org=None, limit=50) -> list[dict]:
-        raise NotImplementedError
-
-    def resolve_source_strict(self, source_id, *, org=None, peers=None) -> dict | list[dict] | None:
-        raise NotImplementedError
-
-    def get_turn_content(self, source_id, turn, *, org=None) -> str | None:
-        raise NotImplementedError
-
-    def get_comment(self, comment_id, *, org=None) -> dict | None:
-        raise NotImplementedError
-
-    # ── writes ──────────────────────────────────────────────
-
-    def create_note(self, content, **kw) -> dict:
-        raise NotImplementedError
-
-    def update_note(self, source_id, content, **kw) -> dict:
-        raise NotImplementedError
-
-    def add_comment(self, source_id, content, **kw) -> dict:
-        raise NotImplementedError
-
-    def integrate_comment(self, comment_id, **kw) -> bool:
-        raise NotImplementedError
-
-    def create_edge(self, from_id, to_id, **kw) -> dict:
-        raise NotImplementedError
-
-    def attach_file(self, file_path, **kw) -> dict:
-        raise NotImplementedError
-
-    # ── settings (graph://0d3f750f-f9c) ──────────────────────
-
-    def list_set_ids(self, *, org=None) -> list[str]:
-        raise NotImplementedError
-
-    def read_set(self, set_id, **kw):
-        raise NotImplementedError
-
-    def get_setting(self, setting_id, **kw):
-        raise NotImplementedError
-
-    def add_setting(self, set_id, schema_revision, key, payload, **kw) -> str:
-        raise NotImplementedError
-
-    def override_setting(self, target_id, payload, **kw) -> str:
-        raise NotImplementedError
-
-    def exclude_setting(self, target_id, **kw) -> str:
-        raise NotImplementedError
-
-    def promote_setting(self, setting_id, to_state, **kw) -> None:
-        raise NotImplementedError
-
-    def deprecate_setting(self, setting_id, **kw) -> None:
-        raise NotImplementedError
-
-    def remove_setting(self, setting_id, **kw) -> None:
-        raise NotImplementedError
-
-    def migrate_setting_revisions(self, set_id, to_rev, **kw):
-        raise NotImplementedError
-
-
-# ── LocalClient ─────────────────────────────────────────────────
-
-
-class LocalClient(GraphClient):
-    """Calls ``ops.*`` directly against the local DB. Used on the host."""
-
-    # ── reads ───────────────────────────────────────────────
-
-    def search(
-        self, q, *, org=None, peers=None, only_org=None, limit=25,
-        project=None, or_mode=False, tag=None, states=None, include_raw=False,
-        session_source_ids=None, session_author_pattern=None,
-    ):
-        return ops.search(
-            q, org=org, peers=peers, only_org=only_org, limit=limit,
-            project=project, or_mode=or_mode, tag=tag, states=states,
-            include_raw=include_raw,
-            session_source_ids=session_source_ids,
-            session_author_pattern=session_author_pattern,
-        )
-
-    def get_source(self, source_id, *, org=None, peers=None):
-        return ops.get_source(source_id, org=org, peers=peers)
-
-    def get_attachment(self, attachment_id, *, org=None, peers=None):
-        return ops.get_attachment(attachment_id, org=org, peers=peers)
-
-    def list_attachments(self, source_id=None, *, org=None, peers=None, limit=50):
-        return ops.list_attachments(
-            source_id=source_id, org=org, peers=peers, limit=limit,
-        )
-
-    def list_sources(
-        self, *, org=None, peers=None, only_org=None, limit=50, project=None,
-        source_type=None, tags=None, since=None, until=None, author=None,
-        states=None, include_raw=False,
-        session_source_ids=None, session_author_pattern=None,
-    ):
-        return ops.list_sources(
-            org=org, peers=peers, only_org=only_org, limit=limit,
-            project=project, source_type=source_type, tags=tags,
-            since=since, until=until, author=author,
-            states=states, include_raw=include_raw,
-            session_source_ids=session_source_ids,
-            session_author_pattern=session_author_pattern,
-        )
-
-    def list_attention(
-        self, *, org=None, since=None, search=None, last=None, session=None,
-        context=0,
-    ):
-        return ops.list_attention(
-            org=org, since=since, search=search, last=last, session=session,
-            context=context,
-        )
-
-    def list_collab_topics(self, *, org=None):
-        return ops.list_collab_topics(org=org)
-
-    def list_collab_sources(self, *, org=None, limit=50):
-        return ops.list_collab_sources(org=org, limit=limit)
-
-    def resolve_source_strict(self, source_id, *, org=None, peers=None):
-        return ops.resolve_source_strict(source_id, org=org, peers=peers)
-
-    def get_turn_content(self, source_id, turn, *, org=None):
-        return ops.get_turn_content(source_id, turn, org=org)
-
-    def get_comment(self, comment_id, *, org=None):
-        return ops.get_comment(comment_id, org=org)
-
-    # ── writes ──────────────────────────────────────────────
-
-    def create_note(
-        self, content, *, tags=None, author=None, project=None,
-        attachments=None, html_path=None,
-        auto_provenance_source_id=None, auto_provenance_turn=None,
-        org=None,
-    ):
-        return ops.create_note(
-            content, tags=tags, author=author, project=project,
-            attachments=attachments, html_path=html_path,
-            auto_provenance_source_id=auto_provenance_source_id,
-            auto_provenance_turn=auto_provenance_turn,
-            org=org,
-        )
-
-    def update_note(
-        self, source_id, content, *, integrate_comments=None,
-        attachments=None, html_path=None, org=None,
-    ):
-        return ops.update_note(
-            source_id, content,
-            integrate_comments=integrate_comments,
-            attachments=attachments, html_path=html_path, org=org,
-        )
-
-    def add_comment(self, source_id, content, *, actor="user", org=None):
-        return ops.add_comment(source_id, content, actor=actor, org=org)
-
-    def integrate_comment(self, comment_id, *, org=None):
-        return ops.integrate_comment(comment_id, org=org)
-
-    def create_edge(
-        self, from_id, to_id, *, from_type="source", to_type="source",
-        relation="informed_by", turns=None, note=None, org=None,
-    ):
-        return ops.create_edge(
-            from_id, to_id,
-            from_type=from_type, to_type=to_type,
-            relation=relation, turns=turns, note=note, org=org,
-        )
-
-    def attach_file(
-        self, file_path, *, source_id=None, turn_number=None,
-        alt_text=None, original_filename=None, org=None,
-    ):
-        return ops.attach_file(
-            file_path,
-            source_id=source_id, turn_number=turn_number,
-            alt_text=alt_text, original_filename=original_filename,
-            org=org,
-        )
-
-    # ── settings ────────────────────────────────────────────
-
-    def list_set_ids(self, *, org=None):
-        return ops.list_set_ids(org=org)
-
-    def read_set(self, set_id, *, target_revision=None, min_revision=None, org=None):
-        return ops.read_set(
-            set_id,
-            target_revision=target_revision, min_revision=min_revision,
-            org=org,
-        )
-
-    def get_setting(self, setting_id, *, target_revision=None, org=None):
-        return ops.get_setting(
-            setting_id, target_revision=target_revision, org=org,
-        )
-
-    def add_setting(
-        self, set_id, schema_revision, key, payload, *, state="raw", org=None,
-    ):
-        return ops.add_setting(
-            set_id, schema_revision, key, payload, state=state, org=org,
-        )
-
-    def override_setting(self, target_id, payload, *, state="raw", org=None):
-        return ops.override_setting(target_id, payload, state=state, org=org)
-
-    def exclude_setting(self, target_id, *, state="raw", org=None):
-        return ops.exclude_setting(target_id, state=state, org=org)
-
-    def promote_setting(self, setting_id, to_state, *, org=None):
-        return ops.promote_setting(setting_id, to_state, org=org)
-
-    def deprecate_setting(self, setting_id, *, successor_id=None, org=None):
-        return ops.deprecate_setting(
-            setting_id, successor_id=successor_id, org=org,
-        )
-
-    def remove_setting(self, setting_id, *, org=None):
-        return ops.remove_setting(setting_id, org=org)
-
-    def migrate_setting_revisions(self, set_id, to_rev, *, dry_run=False, org=None):
-        return ops.migrate_setting_revisions(
-            set_id, to_rev, dry_run=dry_run, org=org,
-        )
-
-
-# ── HttpClient ──────────────────────────────────────────────────
-
-
-class HttpClient(GraphClient):
+class HttpClient:
     """Routes reads and writes through the dashboard API.
 
     Used in containers where ``GRAPH_API`` is set. Single-writer via the
@@ -517,14 +253,25 @@ class HttpClient(GraphClient):
             return result["sources"]
         return result if isinstance(result, list) else []
 
-    def list_attention(self, **kw):
-        # Container CLI reads attention via the API; server endpoint returns
-        # formatted rows. Not on the critical path for this migration —
-        # container ``graph attention`` can stay on the host for now.
-        raise NotImplementedError(
-            "HttpClient.list_attention: server endpoint TODO — use LocalClient "
-            "on the host for now."
-        )
+    def list_attention(
+        self, *, org=None, since=None, search=None, last=None, session=None,
+        context=0,
+    ):
+        params: dict[str, Any] = {}
+        if since:
+            params["since"] = since
+        if search:
+            params["search"] = search
+        if last is not None:
+            params["last"] = str(last)
+        if session:
+            params["session"] = session
+        if context:
+            params["context"] = str(context)
+        result = self._get("/api/graph/attention", params or None, org=org)
+        if isinstance(result, dict) and "rows" in result:
+            return result["rows"]
+        return result if isinstance(result, list) else []
 
     def list_collab_topics(self, *, org=None):
         result = self._get("/api/graph/collab-topics", org=org)
@@ -841,6 +588,174 @@ class HttpClient(GraphClient):
             affected_ids=result.get("affected_ids") or [],
         )
 
+    # ── tags ───────────────────────────────────────────────
+
+    def add_tag(self, source_id, tag, *, org=None):
+        """PUT /api/graph/tag/{source_id}/{tag}. Returns True if newly added."""
+        result = self._put(f"/api/graph/tag/{source_id}/{tag}", org=org)
+        return bool(result.get("added"))
+
+    def remove_tag(self, source_id, tag, *, org=None):
+        """DELETE /api/graph/tag/{source_id}/{tag}. Returns True if removed."""
+        result = self._delete(f"/api/graph/tag/{source_id}/{tag}", org=org)
+        return bool(result.get("removed"))
+
+    def tag_merge(self, from_tag, to_tag, *, reason="", force=False, org=None):
+        body = {"from": from_tag, "to": to_tag, "reason": reason, "force": force}
+        return self._post("/api/graph/tag/merge", body, org=org) or {}
+
+    def update_tag_description(self, tag_name, description, *, actor="user", org=None):
+        body = {"description": description, "actor": actor}
+        return self._put(
+            f"/api/graph/collab/tag-describe/{tag_name}", body, org=org,
+        ) or {}
+
+    def set_collab_tag(self, source_id, *, org=None):
+        return self._put(f"/api/graph/collab/tag/{source_id}", {}, org=org) or {}
+
+    # ── thoughts / threads ─────────────────────────────────
+
+    def insert_capture(
+        self, capture_id, content, *,
+        source_id=None, turn_number=None, thread_id=None,
+        actor="user", org=None,
+    ):
+        body = {
+            "capture_id": capture_id,
+            "content": content,
+            "actor": actor,
+        }
+        if source_id:
+            body["source_id"] = source_id
+        if turn_number is not None:
+            body["turn_number"] = turn_number
+        if thread_id:
+            body["thread_id"] = thread_id
+        return self._post("/api/graph/thought", body, org=org) or {}
+
+    def list_captures(self, *, thread_id=None, since=None, limit=50, org=None):
+        params = {"limit": str(limit)}
+        if thread_id:
+            params["thread"] = thread_id
+        if since:
+            params["since"] = since
+        result = self._get("/api/graph/thoughts", params, org=org)
+        # Server returns ``{"thoughts": [...]}`` — the endpoint name is the
+        # user-facing "thoughts" but the rows are capture records.
+        if isinstance(result, dict):
+            for k in ("thoughts", "captures"):
+                if k in result:
+                    return result[k]
+        return result if isinstance(result, list) else []
+
+    def insert_thread(
+        self, thread_id, title, *, priority=1, created_by="user", org=None,
+    ):
+        body = {
+            "thread_id": thread_id, "title": title,
+            "priority": priority, "created_by": created_by,
+        }
+        return self._post("/api/graph/thread", body, org=org) or {}
+
+    def list_threads(self, *, status=None, include_all=False, limit=50, org=None):
+        params = {"limit": str(limit)}
+        if include_all:
+            params["all"] = "1"
+        elif status:
+            params["status"] = status
+        result = self._get("/api/graph/threads", params, org=org)
+        if isinstance(result, dict) and "threads" in result:
+            return result["threads"]
+        return result if isinstance(result, list) else []
+
+    def thread_action(self, action, thread_id, *, target=None, org=None):
+        body = {"action": action, "thread_id": thread_id}
+        if target:
+            body["target"] = target
+        return self._post("/api/graph/thread/action", body, org=org) or {}
+
+    def get_thread(self, thread_id, *, org=None):
+        try:
+            return self._get(f"/api/graph/thread/{thread_id}", org=org)
+        except LookupError:
+            return None
+
+    # ── bead / journal / sessions ──────────────────────────
+
+    def create_bead(
+        self, title, *, priority=2, description=None, bead_type=None,
+        source=None, turns=None, note=None, org=None,
+    ):
+        body = {"title": title, "priority": priority}
+        if description:
+            body["description"] = description
+        if bead_type:
+            body["type"] = bead_type
+        if source:
+            body["source"] = source
+        if turns:
+            body["turns"] = turns
+        if note:
+            body["note"] = note
+        return self._post("/api/graph/bead", body, org=org) or {}
+
+    def write_journal_entry(self, payload, *, org=None):
+        return self._post("/api/graph/journal", payload, org=org) or {}
+
+    def ingest_sessions(self, *, all_projects=False, project=None, force=False, org=None):
+        body = {}
+        if all_projects:
+            body["all"] = True
+        if project:
+            body["project"] = project
+        if force:
+            body["force"] = True
+        return self._post("/api/graph/sessions", body, org=org) or {}
+
+    # ── stats / tree / entities ────────────────────────────
+
+    def stats(self, *, org=None):
+        return self._get("/api/graph/stats", org=org) or {}
+
+    def get_tree(self, root=None, *, depth=3, org=None):
+        params: dict[str, Any] = {"depth": str(depth)}
+        if root:
+            params["root"] = root
+        result = self._get("/api/graph/tree", params, org=org)
+        if isinstance(result, dict) and "nodes" in result:
+            return result["nodes"]
+        return result if isinstance(result, list) else []
+
+    def list_entities(self, *, entity_type=None, limit=20, org=None):
+        params: dict[str, Any] = {"limit": str(limit)}
+        if entity_type:
+            params["type"] = entity_type
+        result = self._get("/api/graph/entities", params, org=org)
+        if isinstance(result, dict) and "entities" in result:
+            return result["entities"]
+        return result if isinstance(result, list) else []
+
+    def search_entities(self, query, *, limit=20, org=None):
+        params: dict[str, Any] = {"query": query, "limit": str(limit)}
+        result = self._get("/api/graph/entities", params, org=org)
+        if isinstance(result, dict) and "entities" in result:
+            return result["entities"]
+        return result if isinstance(result, list) else []
+
+    def entity_thoughts(self, entity_id, *, limit=20, org=None):
+        params = {"limit": str(limit)}
+        result = self._get(f"/api/graph/entity/{entity_id}/thoughts", params, org=org)
+        if isinstance(result, dict) and "thoughts" in result:
+            return result["thoughts"]
+        return result if isinstance(result, list) else []
+
+    def entity_mention_count(self, entity_id, *, org=None):
+        """On host callers short-circuit; container uses annotated entities."""
+        raise NotImplementedError(
+            "container callers should read the 'mentions' field embedded in "
+            "list_entities / search_entities output; this helper stays host-only.",
+        )
+
 
 # ── helpers ─────────────────────────────────────────────────────
 
@@ -941,13 +856,18 @@ def _dict_to_resolved_setting(d: dict):
 # ── Dispatcher ──────────────────────────────────────────────────
 
 
-def get_client() -> GraphClient:
-    """Return the appropriate GraphClient for the current environment.
+def get_client():
+    """Return the right graph client for the current environment.
 
-    Container (GRAPH_API set) → HttpClient.
-    Host                      → LocalClient.
+    Container (GRAPH_API set) → :class:`HttpClient` over HTTPS.
+    Host                          → the :mod:`ops` module itself; it
+                                    duck-types as a client since every
+                                    method HttpClient exposes is already
+                                    a top-level `ops.X` function with
+                                    the same name and signature.
     """
     api = os.environ.get("GRAPH_API")
     if api:
         return HttpClient(api)
-    return LocalClient()
+    from . import ops
+    return ops
