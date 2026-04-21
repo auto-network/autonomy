@@ -38,7 +38,7 @@ def orgs_root(tmp_path, monkeypatch):
 
 
 def test_no_args_routes_to_personal_when_per_org_db_present(orgs_root):
-    # Scopeless default is ``personal`` post-txg5.3 — caller_org=None with
+    # Scopeless default is ``personal`` post-txg5.3 — org=None with
     # no env must land on personal.db when that file exists.
     GraphDB.create_org_db("personal", type_="personal").close()
 
@@ -59,17 +59,17 @@ def test_no_args_falls_back_to_legacy_when_per_org_absent(orgs_root):
         db.close()
 
 
-def test_caller_org_routes_to_that_org_db(orgs_root):
+def test_org_routes_to_that_org_db(orgs_root):
     GraphDB.create_org_db("anchore").close()
 
-    db = GraphDB(caller_org="anchore")
+    db = GraphDB(org="anchore")
     try:
         assert db.db_path == orgs_root / "anchore.db"
     finally:
         db.close()
 
 
-def test_explicit_db_path_wins_over_caller_org(orgs_root, tmp_path):
+def test_explicit_db_path_wins_over_org(orgs_root, tmp_path):
     """An explicit positional ``db_path`` bypasses routing — required so
     test overrides and the migration script keep working unchanged."""
     GraphDB.create_org_db("autonomy").close()

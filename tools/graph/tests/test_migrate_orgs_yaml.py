@@ -338,7 +338,7 @@ def test_read_set_returns_org_identity_per_caller(
 
     def _with_caller(slug: str):
         monkeypatch.setenv("GRAPH_DB", str(orgs_dir / f"{slug}.db"))
-        return settings_ops.read_set(ORG_SET_ID, caller_org=slug)
+        return settings_ops.read_set(ORG_SET_ID, org=slug)
 
     for slug in ("autonomy", "anchore", "personal"):
         result = _with_caller(slug)

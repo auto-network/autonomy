@@ -14,7 +14,7 @@ CLI::
 
     python -m tools.graph.curation.promote \\
         --allowlist tools/graph/curation/autonomy-bootstrap-allowlist.yaml \\
-        --caller-org autonomy
+        --org autonomy
 
 ``--dry-run`` prints the plan without touching the DB. Default behavior is to
 refuse to write when any entry is missing, ambiguous, or has pending comments.
@@ -161,7 +161,7 @@ class PromotionBlocked(RuntimeError):
 def execute(
     *,
     plan: Plan,
-    caller_org: str | None,
+    org: str | None,
     actor: str,
     db_path: str,
 ) -> RunResult:
@@ -184,7 +184,7 @@ def execute(
         rec = ops.promote_source(
             entry.resolved_id,      # type: ignore[arg-type]
             entry.target_state,
-            caller_org=caller_org,
+            org=org,
         )
         result.transitions.append(
             Transition(
@@ -328,21 +328,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--allowlist", default=str(DEFAULT_AUTONOMY_PATH))
     p.add_argument("--db", default=None, help="Graph DB path (default: GRAPH_DB env or ops routing).")
-    p.add_argument("--caller-org", default=None, help="Override caller_org for ops routing.")
+    p.add_argument("--org", default=None, help="Override org for ops routing.")
     p.add_argument("--actor", default=None, help="Override actor name in the audit note.")
     p.add_argument("--dry-run", action="store_true", help="Print the plan; do not mutate.")
     p.add_argument("--json", action="store_true", help="JSON output instead of text.")
     return p
 
 
-def _resolve_db_path(cli_db: str | None, caller_org: str | None) -> str:
+def _resolve_db_path(cli_db: str | None, org: str | None) -> str:
     if cli_db:
         return cli_db
     env = os.environ.get("GRAPH_DB")
     if env:
         return env
     from tools.graph.ops import _db_path
-    path = _db_path(caller_org)
+    path = _db_path(org)
     if not path:
         raise SystemExit("no GRAPH_DB configured and no --db given")
     return path
@@ -351,11 +351,11 @@ def _resolve_db_path(cli_db: str | None, caller_org: str | None) -> str:
 def run(argv: Iterable[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     allowlist = load_allowlist(args.allowlist)
-    caller_org = args.caller_org or allowlist.org
-    db_path = _resolve_db_path(args.db, caller_org)
+    org = args.org or allowlist.org
+    db_path = _resolve_db_path(args.db, org)
     actor = args.actor or os.environ.get("BD_ACTOR") or os.environ.get("USER") or "librarian"
 
-    # The CLI honours caller_org routing through ops for the mutation path,
+    # The CLI honours org routing through ops for the mutation path,
     # but we still open a direct GraphDB for planning + audit-note insert —
     # both operations are DB-local and already scoped to the selected path.
     prev_env = os.environ.get("GRAPH_DB")
@@ -382,7 +382,7 @@ def run(argv: Iterable[str] | None = None) -> int:
             return 2
         try:
             result = execute(
-                plan=plan, caller_org=caller_org,
+                plan=plan, org=org,
                 actor=actor, db_path=db_path,
             )
         except PromotionBlocked:

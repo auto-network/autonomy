@@ -58,21 +58,21 @@ def test_graph_db_env_wins(orgs_root, tmp_path, monkeypatch):
     assert _get_db_path() == pinned
 
 
-def test_non_default_caller_org_routes_to_that_org_db(orgs_root):
+def test_non_default_org_routes_to_that_org_db(orgs_root):
     graph_db.GraphDB.create_org_db("anchore").close()
 
     assert _get_db_path("anchore") == orgs_root / "anchore.db"
 
 
-def test_graph_org_env_sets_caller_org(orgs_root, monkeypatch):
-    """``GRAPH_ORG`` env var drives routing when no explicit caller_org."""
+def test_graph_org_env_sets_org(orgs_root, monkeypatch):
+    """``GRAPH_ORG`` env var drives routing when no explicit org."""
     graph_db.GraphDB.create_org_db("anchore").close()
     monkeypatch.setenv("GRAPH_ORG", "anchore")
 
     assert _get_db_path() == orgs_root / "anchore.db"
 
 
-def test_explicit_caller_org_beats_graph_org_env(orgs_root, monkeypatch):
+def test_explicit_org_beats_graph_org_env(orgs_root, monkeypatch):
     """Explicit kwarg wins over ``GRAPH_ORG`` env — tests/API handlers
     with a concrete caller pin the destination regardless of env."""
     graph_db.GraphDB.create_org_db("anchore").close()

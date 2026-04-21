@@ -108,7 +108,7 @@ def test_add_and_read_round_trip(graph_db_env, example_schema):
     assert m.id == sid
     assert m.key == "foo"
     assert m.payload == {"x": 1, "name": "bar"}
-    assert m.publication_state == "raw"
+    assert m.state == "raw"
 
 
 def test_add_unknown_schema_raises(graph_db_env):
@@ -255,7 +255,7 @@ def test_promote_changes_state(graph_db_env, example_schema):
     sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1})
     ops.promote_setting(sid, "canonical")
     got = ops.get_setting(sid)
-    assert got.publication_state == "canonical"
+    assert got.state == "canonical"
 
 
 def test_promote_invalid_state_raises(graph_db_env, example_schema):
@@ -291,17 +291,17 @@ def test_remove_raw_succeeds(graph_db_env, example_schema):
     assert ops.get_setting(sid) is None
 
 
-# ── caller_org / peers plumbing ─────────────────────────────
+# ── org / peers plumbing ─────────────────────────────
 
 
-def test_caller_org_param_accepted(graph_db_env, example_schema):
-    """caller_org / peers parameters are no-op today but must be accepted."""
+def test_org_param_accepted(graph_db_env, example_schema):
+    """org / peers parameters are no-op today but must be accepted."""
     sid = ops.add_setting(
-        "autonomy.test.example", 1, "k", {"v": 1}, caller_org="autonomy",
+        "autonomy.test.example", 1, "k", {"v": 1}, org="autonomy",
     )
-    got = ops.get_setting(sid, caller_org="autonomy", peers=["anchore"])
+    got = ops.get_setting(sid, org="autonomy", peers=["anchore"])
     assert got is not None
     members = ops.read_set(
-        "autonomy.test.example", caller_org="autonomy", peers=["anchore"],
+        "autonomy.test.example", org="autonomy", peers=["anchore"],
     )
     assert len(members.members) == 1

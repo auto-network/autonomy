@@ -44,6 +44,12 @@ from tools.graph.schemas.workspace_artifact import (
     VALID_SCOPES as VALID_ARTIFACT_SCOPES,
 )
 from tools.graph.schemas.org import ORG_SET_ID, ORG_REVISION
+from tools.graph.schemas.mount import (
+    SET_ID as MOUNT_SET_ID,
+    SCHEMA_REVISION as MOUNT_REVISION,
+    WorkspaceMountV1,
+)
+from tools.graph.settings_ops import ResolvedSetting
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ARTIFACTS_ROOT = REPO_ROOT / "data" / "artifacts"
@@ -57,6 +63,44 @@ logger = logging.getLogger(__name__)
 
 class WorkspaceSettingsError(ValueError):
     """Raised when Setting-derived workspace data is missing or malformed."""
+
+
+class WorkspaceMountMissingError(Exception):
+    """A required ``autonomy.workspace.mount#1`` host path is absent.
+
+    Surfaces enough provenance (origin org, state, the exact paths) for
+    an operator to find the mount declaration and either populate the
+    host path, mark the mount optional, or exclude/override the Setting
+    in their own DB.
+    """
+
+    def __init__(
+        self,
+        *,
+        mount_key: str,
+        origin_org: str | None,
+        state: str,
+        host_path: str,
+        container_path: str,
+    ):
+        self.mount_key = mount_key
+        self.origin_org = origin_org
+        self.state = state
+        self.host_path = host_path
+        self.container_path = container_path
+        super().__init__(
+            f"Required mount {mount_key!r} from org={origin_org} state={state}: "
+            f"host path {host_path!r} does not exist on this machine."
+        )
+
+
+class WorkspaceMountInvalidError(Exception):
+    """A mount's declared host path exists but is not usable (e.g. not a dir)."""
+
+    def __init__(self, *, mount_key: str, reason: str):
+        self.mount_key = mount_key
+        self.reason = reason
+        super().__init__(f"Invalid mount {mount_key!r}: {reason}")
 
 
 # ── Typed composition models ────────────────────────────────
@@ -112,11 +156,14 @@ class OrgOverride:
 @dataclass(frozen=True)
 class WorkspaceV1:
     """Composed workspace config — one ``autonomy.workspace#1`` Setting
-    plus its attached artifact Settings plus the owning org slug.
+    plus its attached artifact + mount Settings plus the owning org slug.
 
     Field names match the legacy ``ProjectConfig`` surface so existing
     consumers (dispatcher, session launcher, primer renderer, dashboard)
-    read the same attributes.
+    read the same attributes. ``mounts`` carries resolved
+    ``autonomy.workspace.mount#1`` Settings keyed by composite key
+    (``<workspace-id>:<mount-name>``) so consumers can inspect
+    origin/state for error reporting without re-querying.
     """
     id: str
     name: str
@@ -133,6 +180,7 @@ class WorkspaceV1:
     env: dict[str, str] = field(default_factory=dict)
     env_from_host: tuple[str, ...] = ()
     artifacts: tuple[ArtifactSpec, ...] = ()
+    mounts: dict[str, ResolvedSetting] = field(default_factory=dict)
 
 
 # ── Setting payload → typed model helpers ──────────────────
@@ -160,6 +208,7 @@ def _workspace_from_setting(
     workspace_id: str,
     graph_project: str,
     artifacts: tuple[ArtifactSpec, ...],
+    mounts: dict[str, ResolvedSetting],
 ) -> WorkspaceV1:
     """Compose a :class:`WorkspaceV1` from a resolved Setting payload.
 
@@ -198,6 +247,7 @@ def _workspace_from_setting(
             str(v) for v in (setting_payload.get("env_from_host") or ())
         ),
         artifacts=artifacts,
+        mounts=mounts,
     )
 
 
@@ -233,13 +283,13 @@ def _artifact_from_setting(
 
 
 def _artifacts_for_workspace(
-    workspace_id: str, *, caller_org: str | None,
+    workspace_id: str, *, org: str | None,
 ) -> tuple[ArtifactSpec, ...]:
     """Read the ``autonomy.workspace.artifact#1`` Set and filter by
     composite-key prefix ``<workspace-id>:``.
     """
     members = ops.read_set(
-        ARTIFACT_SET_ID, caller_org=caller_org, peers=[],
+        ARTIFACT_SET_ID, org=org, peers=[],
     ).members
     prefix = f"{workspace_id}:"
     out: list[ArtifactSpec] = []
@@ -251,6 +301,30 @@ def _artifacts_for_workspace(
     return tuple(out)
 
 
+def load_mounts(
+    workspace_id: str, *, org: str | None = None,
+) -> dict[str, ResolvedSetting]:
+    """Return the :class:`WorkspaceMountV1` Settings for *workspace_id*.
+
+    Reads ``autonomy.workspace.mount#1`` with composite-key prefix
+    ``<workspace-id>:`` and validates each payload through
+    :class:`WorkspaceMountV1`. The returned dict maps composite key
+    (``<workspace-id>:<mount-name>``) to the resolved Setting so
+    consumers can inspect ``payload`` (typed), ``state``, and ``org``
+    without re-querying. Missing schema registration returns an empty
+    dict (mount declaration is optional per workspace).
+    """
+    if get_schema(MOUNT_SET_ID, MOUNT_REVISION) is None:
+        return {}
+    return ops.read_set(
+        MOUNT_SET_ID,
+        org=org,
+        peers=[],
+        prefix=workspace_id,
+        model=WorkspaceMountV1,
+    ).to_dict()
+
+
 def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
     """Read every ``autonomy.workspace#1`` owned by *slug* + attach artifacts.
 
@@ -260,14 +334,15 @@ def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
     shared workspaces to whichever org iterated first (auto-txg5.4).
     """
     members = ops.read_set(
-        WORKSPACE_SET_ID, caller_org=slug, peers=[],
+        WORKSPACE_SET_ID, org=slug, peers=[],
     ).members
     out: dict[str, WorkspaceV1] = {}
     for m in members:
-        artifacts = _artifacts_for_workspace(m.key, caller_org=slug)
+        artifacts = _artifacts_for_workspace(m.key, org=slug)
+        mounts = load_mounts(m.key, org=slug)
         out[m.key] = _workspace_from_setting(
             m.payload, workspace_id=m.key, graph_project=slug,
-            artifacts=artifacts,
+            artifacts=artifacts, mounts=mounts,
         )
     return out
 
@@ -288,11 +363,12 @@ def load_workspaces() -> dict[str, WorkspaceV1]:
         members = ops.read_set(WORKSPACE_SET_ID).members
         out: dict[str, WorkspaceV1] = {}
         for m in members:
-            artifacts = _artifacts_for_workspace(m.key, caller_org=None)
+            artifacts = _artifacts_for_workspace(m.key, org=None)
+            mounts = load_mounts(m.key, org=None)
             graph_project = m.org or ""
             out[m.key] = _workspace_from_setting(
                 m.payload, workspace_id=m.key, graph_project=graph_project,
-                artifacts=artifacts,
+                artifacts=artifacts, mounts=mounts,
             )
         return out
     out = {}
@@ -332,7 +408,7 @@ def load_org_overrides() -> dict[str, OrgOverride]:
         # cross-org merge here would double-register every org's row
         # from every iteration (auto-txg5.4).
         members = ops.read_set(
-            ORG_SET_ID, caller_org=ref.slug, peers=[],
+            ORG_SET_ID, org=ref.slug, peers=[],
         ).members
         for m in members:
             out.setdefault(m.key, _org_override_from_payload(m.key, m.payload))
@@ -375,7 +451,7 @@ def _artifact_path_override(
     key = f"{workspace.id}:{artifact.name}"
     try:
         members = ops.read_set(
-            ARTIFACT_PATH_SET_ID, caller_org="personal",
+            ARTIFACT_PATH_SET_ID, org="personal",
         ).members
     except Exception:
         # Personal DB absent is fine — fall through to the default rule.

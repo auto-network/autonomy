@@ -31,7 +31,7 @@ class GraphClient:
         self,
         q: str,
         *,
-        caller_org: str | None = None,
+        org: str | None = None,
         peers: list[str] | None = None,
         only_org: str | None = None,
         limit: int = 25,
@@ -49,7 +49,7 @@ class GraphClient:
         self,
         source_id: str,
         *,
-        caller_org: str | None = None,
+        org: str | None = None,
         peers: list[str] | None = None,
     ) -> dict | None:
         raise NotImplementedError
@@ -58,7 +58,7 @@ class GraphClient:
         self,
         attachment_id: str,
         *,
-        caller_org: str | None = None,
+        org: str | None = None,
         peers: list[str] | None = None,
     ) -> dict | None:
         raise NotImplementedError
@@ -67,7 +67,7 @@ class GraphClient:
         self,
         source_id: str | None = None,
         *,
-        caller_org: str | None = None,
+        org: str | None = None,
         peers: list[str] | None = None,
         limit: int = 50,
     ) -> list[dict]:
@@ -76,7 +76,7 @@ class GraphClient:
     def list_sources(
         self,
         *,
-        caller_org: str | None = None,
+        org: str | None = None,
         peers: list[str] | None = None,
         only_org: str | None = None,
         limit: int = 50,
@@ -89,7 +89,7 @@ class GraphClient:
     def list_attention(
         self,
         *,
-        caller_org: str | None = None,
+        org: str | None = None,
         since: str | None = None,
         search: str | None = None,
         last: int | None = None,
@@ -101,14 +101,14 @@ class GraphClient:
     def list_collab_topics(
         self,
         *,
-        caller_org: str | None = None,
+        org: str | None = None,
     ) -> list[dict]:
         raise NotImplementedError
 
     def list_collab_sources(
         self,
         *,
-        caller_org: str | None = None,
+        org: str | None = None,
         limit: int = 50,
     ) -> list[dict]:
         raise NotImplementedError
@@ -121,7 +121,7 @@ class LocalClient(GraphClient):
         self,
         q: str,
         *,
-        caller_org: str | None = None,
+        org: str | None = None,
         peers: list[str] | None = None,
         only_org: str | None = None,
         limit: int = 25,
@@ -135,7 +135,7 @@ class LocalClient(GraphClient):
     ) -> list[dict]:
         return ops.search(
             q,
-            caller_org=caller_org,
+            org=org,
             peers=peers,
             only_org=only_org,
             limit=limit,
@@ -148,21 +148,21 @@ class LocalClient(GraphClient):
             session_author_pattern=session_author_pattern,
         )
 
-    def get_source(self, source_id, *, caller_org=None, peers=None):
-        return ops.get_source(source_id, caller_org=caller_org, peers=peers)
+    def get_source(self, source_id, *, org=None, peers=None):
+        return ops.get_source(source_id, org=org, peers=peers)
 
-    def get_attachment(self, attachment_id, *, caller_org=None, peers=None):
-        return ops.get_attachment(attachment_id, caller_org=caller_org, peers=peers)
+    def get_attachment(self, attachment_id, *, org=None, peers=None):
+        return ops.get_attachment(attachment_id, org=org, peers=peers)
 
-    def list_attachments(self, source_id=None, *, caller_org=None, peers=None, limit=50):
+    def list_attachments(self, source_id=None, *, org=None, peers=None, limit=50):
         return ops.list_attachments(
-            source_id=source_id, caller_org=caller_org, peers=peers, limit=limit,
+            source_id=source_id, org=org, peers=peers, limit=limit,
         )
 
     def list_sources(
         self,
         *,
-        caller_org=None,
+        org=None,
         peers=None,
         only_org=None,
         limit=50,
@@ -171,7 +171,7 @@ class LocalClient(GraphClient):
         tags=None,
     ):
         return ops.list_sources(
-            caller_org=caller_org,
+            org=org,
             peers=peers,
             only_org=only_org,
             limit=limit,
@@ -183,7 +183,7 @@ class LocalClient(GraphClient):
     def list_attention(
         self,
         *,
-        caller_org=None,
+        org=None,
         since=None,
         search=None,
         last=None,
@@ -191,7 +191,7 @@ class LocalClient(GraphClient):
         context=0,
     ):
         return ops.list_attention(
-            caller_org=caller_org,
+            org=org,
             since=since,
             search=search,
             last=last,
@@ -199,11 +199,11 @@ class LocalClient(GraphClient):
             context=context,
         )
 
-    def list_collab_topics(self, *, caller_org=None):
-        return ops.list_collab_topics(caller_org=caller_org)
+    def list_collab_topics(self, *, org=None):
+        return ops.list_collab_topics(org=org)
 
-    def list_collab_sources(self, *, caller_org=None, limit=50):
-        return ops.list_collab_sources(caller_org=caller_org, limit=limit)
+    def list_collab_sources(self, *, org=None, limit=50):
+        return ops.list_collab_sources(org=org, limit=limit)
 
 
 class HttpClient(GraphClient):
@@ -245,7 +245,7 @@ class HttpClient(GraphClient):
         self,
         q: str,
         *,
-        caller_org=None,
+        org=None,
         peers=None,
         only_org=None,
         limit=25,
@@ -279,7 +279,7 @@ class HttpClient(GraphClient):
         result = self._get("/api/graph/search", params)
         return result if isinstance(result, list) else []
 
-    def get_source(self, source_id, *, caller_org=None, peers=None):
+    def get_source(self, source_id, *, org=None, peers=None):
         try:
             return self._get(f"/api/graph/source/{source_id}")
         except GraphHttpError as e:
@@ -287,7 +287,7 @@ class HttpClient(GraphClient):
                 return None
             raise
 
-    def get_attachment(self, attachment_id, *, caller_org=None, peers=None):
+    def get_attachment(self, attachment_id, *, org=None, peers=None):
         try:
             return self._get(f"/api/graph/attachment/{attachment_id}")
         except GraphHttpError as e:
@@ -295,7 +295,7 @@ class HttpClient(GraphClient):
                 return None
             raise
 
-    def list_attachments(self, source_id=None, *, caller_org=None, peers=None, limit=50):
+    def list_attachments(self, source_id=None, *, org=None, peers=None, limit=50):
         if not source_id:
             raise NotImplementedError("HttpClient.list_attachments requires source_id")
         result = self._get(f"/api/source/{source_id}/attachments")
@@ -306,7 +306,7 @@ class HttpClient(GraphClient):
     def list_sources(
         self,
         *,
-        caller_org=None,
+        org=None,
         peers=None,
         only_org=None,
         limit=50,
@@ -333,7 +333,7 @@ class HttpClient(GraphClient):
     def list_attention(
         self,
         *,
-        caller_org=None,
+        org=None,
         since=None,
         search=None,
         last=None,
@@ -345,13 +345,13 @@ class HttpClient(GraphClient):
         # the interface uniform for future cross-org use.
         raise NotImplementedError("HttpClient.list_attention: server endpoint TODO")
 
-    def list_collab_topics(self, *, caller_org=None):
+    def list_collab_topics(self, *, org=None):
         result = self._get("/api/graph/collab-topics")
         if isinstance(result, dict) and "topics" in result:
             return result["topics"]
         return result if isinstance(result, list) else []
 
-    def list_collab_sources(self, *, caller_org=None, limit=50):
+    def list_collab_sources(self, *, org=None, limit=50):
         result = self._get("/api/graph/collab", {"limit": str(limit)})
         if isinstance(result, dict) and "notes" in result:
             return result["notes"]

@@ -181,7 +181,7 @@ def test_execute_applies_transitions_and_files_audit_note(env, tmp_path):
     finally:
         db.close()
     result = promote.execute(
-        plan=plan, caller_org=None,
+        plan=plan, org=None,
         actor="test", db_path=str(env),
     )
 
@@ -223,7 +223,7 @@ def test_execute_refuses_with_blockers(env, tmp_path):
         db.close()
     with pytest.raises(promote.PromotionBlocked):
         promote.execute(
-            plan=plan, caller_org=None,
+            plan=plan, org=None,
             actor="test", db_path=str(env),
         )
     db = GraphDB(env)

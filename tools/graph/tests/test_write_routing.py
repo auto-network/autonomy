@@ -1,10 +1,10 @@
-"""Per-org write routing — every ``ops.*`` write lands in ``caller_org``'s DB.
+"""Per-org write routing — every ``ops.*`` write lands in ``org``'s DB.
 
-Covers auto-txg5.3: activates the ``caller_org`` parameter that earlier
+Covers auto-txg5.3: activates the ``org`` parameter that earlier
 beads plumbed through ``ops.*``. Routing cascade (see module docstring
 in ``tools.graph.ops``):
 
-  1. Explicit ``caller_org=`` kwarg
+  1. Explicit ``org=`` kwarg
   2. ``GRAPH_ORG`` env var
   3. Scopeless default → ``personal``
 
@@ -82,10 +82,10 @@ def _seed_note_source(db: GraphDB, *, title: str) -> str:
     return src.id
 
 
-# ── Write routing: explicit caller_org lands in that org's DB ──────────
+# ── Write routing: explicit org lands in that org's DB ──────────
 
 
-def test_explicit_caller_org_routes_add_tag_to_that_db(orgs_root):
+def test_explicit_org_routes_add_tag_to_that_db(orgs_root):
     GraphDB.create_org_db("anchore").close()
     GraphDB.create_org_db("personal", type_="personal").close()
 
@@ -93,7 +93,7 @@ def test_explicit_caller_org_routes_add_tag_to_that_db(orgs_root):
     src_id = _seed_note_source(anchore_db, title="anchore note")
     anchore_db.close()
 
-    ok = ops.add_tag(src_id, "routed", caller_org="anchore")
+    ok = ops.add_tag(src_id, "routed", org="anchore")
     assert ok is True
 
     # Verify the tag actually landed in anchore.db — open and read directly.
@@ -105,7 +105,7 @@ def test_explicit_caller_org_routes_add_tag_to_that_db(orgs_root):
     assert "routed" in tags
 
 
-def test_explicit_caller_org_routes_add_comment_to_that_db(orgs_root):
+def test_explicit_org_routes_add_comment_to_that_db(orgs_root):
     GraphDB.create_org_db("anchore").close()
     GraphDB.create_org_db("personal", type_="personal").close()
 
@@ -113,7 +113,7 @@ def test_explicit_caller_org_routes_add_comment_to_that_db(orgs_root):
     src_id = _seed_note_source(anchore_db, title="commentable")
     anchore_db.close()
 
-    result = ops.add_comment(src_id, "routed comment", caller_org="anchore")
+    result = ops.add_comment(src_id, "routed comment", org="anchore")
     assert result["source_id"] == src_id
 
     # The comment should exist in anchore.db; personal.db should be empty.
@@ -131,11 +131,11 @@ def test_explicit_caller_org_routes_add_comment_to_that_db(orgs_root):
         pc.close()
 
 
-def test_explicit_caller_org_routes_insert_capture_to_that_db(orgs_root):
+def test_explicit_org_routes_insert_capture_to_that_db(orgs_root):
     GraphDB.create_org_db("anchore").close()
     GraphDB.create_org_db("personal", type_="personal").close()
 
-    ops.insert_capture("cap-1", "routed capture", caller_org="anchore")
+    ops.insert_capture("cap-1", "routed capture", org="anchore")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
     pc = sqlite3.connect(str(orgs_root / "personal.db"))
@@ -151,11 +151,11 @@ def test_explicit_caller_org_routes_insert_capture_to_that_db(orgs_root):
         pc.close()
 
 
-def test_explicit_caller_org_routes_insert_thread_to_that_db(orgs_root):
+def test_explicit_org_routes_insert_thread_to_that_db(orgs_root):
     GraphDB.create_org_db("anchore").close()
     GraphDB.create_org_db("personal", type_="personal").close()
 
-    ops.insert_thread("thread-1", "routed thread", caller_org="anchore")
+    ops.insert_thread("thread-1", "routed thread", org="anchore")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
     pc = sqlite3.connect(str(orgs_root / "personal.db"))
@@ -171,11 +171,11 @@ def test_explicit_caller_org_routes_insert_thread_to_that_db(orgs_root):
         pc.close()
 
 
-def test_explicit_caller_org_routes_update_tag_description(orgs_root):
+def test_explicit_org_routes_update_tag_description(orgs_root):
     GraphDB.create_org_db("anchore").close()
     GraphDB.create_org_db("personal", type_="personal").close()
 
-    ops.update_tag_description("security", "Security notes", caller_org="anchore")
+    ops.update_tag_description("security", "Security notes", org="anchore")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
     pc = sqlite3.connect(str(orgs_root / "personal.db"))
@@ -197,7 +197,7 @@ def test_explicit_caller_org_routes_update_tag_description(orgs_root):
 
 
 def test_graph_org_env_drives_routing(orgs_root, monkeypatch):
-    """With no explicit caller_org, ``GRAPH_ORG`` env picks the DB."""
+    """With no explicit org, ``GRAPH_ORG`` env picks the DB."""
     GraphDB.create_org_db("anchore").close()
     GraphDB.create_org_db("personal", type_="personal").close()
 
@@ -219,7 +219,7 @@ def test_graph_org_env_drives_routing(orgs_root, monkeypatch):
         pc.close()
 
 
-def test_explicit_caller_org_beats_graph_org_env(orgs_root, monkeypatch):
+def test_explicit_org_beats_graph_org_env(orgs_root, monkeypatch):
     """Explicit kwarg wins over env — API handlers that know the caller
     pin the destination regardless of container env."""
     GraphDB.create_org_db("anchore").close()
@@ -227,7 +227,7 @@ def test_explicit_caller_org_beats_graph_org_env(orgs_root, monkeypatch):
 
     monkeypatch.setenv("GRAPH_ORG", "anchore")
 
-    ops.insert_capture("cap-explicit", "explicit wins", caller_org="autonomy")
+    ops.insert_capture("cap-explicit", "explicit wins", org="autonomy")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
     au = sqlite3.connect(str(orgs_root / "autonomy.db"))
@@ -247,7 +247,7 @@ def test_explicit_caller_org_beats_graph_org_env(orgs_root, monkeypatch):
 
 
 def test_scopeless_write_lands_in_personal_db(orgs_root):
-    """With no caller_org, no GRAPH_ORG, and personal.db present, writes
+    """With no org, no GRAPH_ORG, and personal.db present, writes
     land in personal.db (absorbs auto-s45z9)."""
     GraphDB.create_org_db("personal", type_="personal").close()
     # autonomy.db also present so we can prove we don't accidentally pick
@@ -319,17 +319,17 @@ def test_graph_db_env_still_wins(orgs_root, tmp_path, monkeypatch):
 
 
 def test_parallel_writes_to_different_orgs_do_not_cross(orgs_root):
-    """Interleaved writes with different caller_org land in their own
+    """Interleaved writes with different org land in their own
     DBs — no cross-contamination even when the connection pool is cold
     / warm / mixed."""
     GraphDB.create_org_db("anchore").close()
     GraphDB.create_org_db("autonomy").close()
     GraphDB.create_org_db("personal", type_="personal").close()
 
-    ops.insert_capture("cap-a-1", "anchore 1", caller_org="anchore")
-    ops.insert_capture("cap-aut-1", "autonomy 1", caller_org="autonomy")
-    ops.insert_capture("cap-p-1", "personal 1", caller_org="personal")
-    ops.insert_capture("cap-a-2", "anchore 2", caller_org="anchore")
+    ops.insert_capture("cap-a-1", "anchore 1", org="anchore")
+    ops.insert_capture("cap-aut-1", "autonomy 1", org="autonomy")
+    ops.insert_capture("cap-p-1", "personal 1", org="personal")
+    ops.insert_capture("cap-a-2", "anchore 2", org="anchore")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
     au = sqlite3.connect(str(orgs_root / "autonomy.db"))
@@ -365,13 +365,13 @@ def stub_schema():
         unregister_schema("test.routing", 1)
 
 
-def test_settings_add_setting_routes_by_caller_org(orgs_root, stub_schema):
+def test_settings_add_setting_routes_by_org(orgs_root, stub_schema):
     GraphDB.create_org_db("anchore").close()
     GraphDB.create_org_db("personal", type_="personal").close()
 
     sid = settings_ops.add_setting(
         "test.routing", 1, "anchore-thing", {"ok": True},
-        caller_org="anchore",
+        org="anchore",
     )
 
     assert _count_settings(orgs_root / "anchore.db") == 1

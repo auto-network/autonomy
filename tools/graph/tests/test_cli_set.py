@@ -180,7 +180,7 @@ def test_cli_promote(graph_db_env, example_schema, tmp_path):
     sid = ops.read_set("autonomy.test.example").members[0].id
     rc, _, _ = _run_cli(["set", "promote", sid, "--to", "canonical"])
     assert rc == 0
-    assert ops.get_setting(sid).publication_state == "canonical"
+    assert ops.get_setting(sid).state == "canonical"
 
 
 def test_cli_deprecate(graph_db_env, example_schema, tmp_path):

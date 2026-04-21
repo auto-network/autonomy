@@ -278,9 +278,9 @@ def test_missing_required_image_raises(tmp_path, orgs_dir):
 # ── Cross-org read (acceptance §3) ─────────────────────────
 
 
-def test_read_set_returns_workspaces_per_caller_org(yaml_path, orgs_dir,
+def test_read_set_returns_workspaces_per_org(yaml_path, orgs_dir,
                                                     monkeypatch):
-    """Acceptance §3: ``read_set`` with the appropriate ``caller_org``
+    """Acceptance §3: ``read_set`` with the appropriate ``org``
     returns the workspaces living in that org's DB.
 
     Single-DB world (today): each call routes to exactly one DB — there
@@ -291,11 +291,11 @@ def test_read_set_returns_workspaces_per_caller_org(yaml_path, orgs_dir,
 
     from tools.graph import settings_ops
 
-    # Route settings_ops._open(caller_org) through our per-org root by
+    # Route settings_ops._open(org) through our per-org root by
     # pointing GRAPH_DB at the per-caller DB file.
     def _with_caller(slug: str):
         monkeypatch.setenv("GRAPH_DB", str(orgs_dir / f"{slug}.db"))
-        return settings_ops.read_set("autonomy.workspace", caller_org=slug)
+        return settings_ops.read_set("autonomy.workspace", org=slug)
 
     anchore = _with_caller("anchore")
     anchore_keys = sorted(m.key for m in anchore.members)

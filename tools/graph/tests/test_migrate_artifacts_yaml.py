@@ -3,7 +3,7 @@
 Bead: auto-hhi23 (auto-txg5.S3). Spec: graph://0d3f750f-f9c.
 
 Exercises ``build_plan`` and ``apply_migration`` against a synthetic
-``projects.yaml`` fixture, plus the ``graph set members --caller-org``
+``projects.yaml`` fixture, plus the ``graph set members --org``
 CLI path that the acceptance criteria use to verify routing.
 """
 
@@ -291,10 +291,10 @@ def test_apply_migration_rejects_unknown_scope(tmp_path, orgs_dir):
         apply_migration(plan)
 
 
-# ── ops.read_set routed by caller_org ───────────────────────
+# ── ops.read_set routed by org ───────────────────────
 
 
-def test_read_set_with_caller_org_returns_workspace_artifacts(
+def test_read_set_with_org_returns_workspace_artifacts(
     synthetic_yaml, orgs_dir, monkeypatch,
 ):
     # Route resolve_caller_db_path() → orgs_dir via AUTONOMY_ORGS_DIR.
@@ -306,7 +306,7 @@ def test_read_set_with_caller_org_returns_workspace_artifacts(
     # Must exist for resolve_caller_db_path to return the per-org path.
     assert (orgs_dir / "anchore.db").exists()
 
-    got = ops.read_set(SET_ID, caller_org="anchore", peers=[])
+    got = ops.read_set(SET_ID, org="anchore", peers=[])
     keys = sorted(m.key for m in got.members)
     assert keys == [
         "enterprise-ng:id_ed25519",
@@ -318,11 +318,11 @@ def test_read_set_with_caller_org_returns_workspace_artifacts(
     # The autonomy org DB has no artifact Settings of its own. ``peers=[]``
     # pins the read to autonomy only — cross-org reads (default) would
     # pull the canonical anchore rows through, per auto-txg5.4.
-    autonomy_got = ops.read_set(SET_ID, caller_org="autonomy", peers=[])
+    autonomy_got = ops.read_set(SET_ID, org="autonomy", peers=[])
     assert autonomy_got.members == []
 
 
-# ── graph set members --caller-org CLI (acceptance criterion) ──
+# ── graph set members --org CLI (acceptance criterion) ──
 
 
 def _run_cli(argv: list[str]) -> tuple[int, str, str]:
@@ -341,7 +341,7 @@ def _run_cli(argv: list[str]) -> tuple[int, str, str]:
     return rc, out.getvalue(), err.getvalue()
 
 
-def test_cli_set_members_caller_org_lists_artifacts(
+def test_cli_set_members_org_lists_artifacts(
     synthetic_yaml, orgs_dir, monkeypatch,
 ):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
@@ -350,7 +350,7 @@ def test_cli_set_members_caller_org_lists_artifacts(
     apply_migration(plan)
 
     rc, out, err = _run_cli([
-        "set", "members", SET_ID, "--caller-org", "anchore",
+        "set", "members", SET_ID, "--org", "anchore",
     ])
     assert rc == 0, err
     # The key column in the CLI table truncates; check the unambiguous
