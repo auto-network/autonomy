@@ -37,27 +37,46 @@ def orgs_root(tmp_path, monkeypatch):
     return root
 
 
-def test_no_env_per_org_present_returns_autonomy_db(orgs_root):
-    graph_db.GraphDB.create_org_db("autonomy").close()
+def test_no_env_per_org_present_returns_personal_db(orgs_root):
+    # Scopeless default shifted to ``personal`` in auto-txg5.3.
+    graph_db.GraphDB.create_org_db("personal", type_="personal").close()
 
-    assert _get_db_path() == orgs_root / "autonomy.db"
+    assert _get_db_path() == orgs_root / "personal.db"
 
 
 def test_no_env_per_org_absent_falls_back_to_legacy(orgs_root):
-    # No autonomy.db materialised — resolver falls back to DEFAULT_DB
+    # No personal.db materialised — resolver falls back to DEFAULT_DB
     # (redirected to tmp by the fixture so we don't touch the real file).
     assert _get_db_path() == graph_db.DEFAULT_DB
 
 
 def test_graph_db_env_wins(orgs_root, tmp_path, monkeypatch):
-    graph_db.GraphDB.create_org_db("autonomy").close()
+    graph_db.GraphDB.create_org_db("personal", type_="personal").close()
     pinned = tmp_path / "pinned.db"
     monkeypatch.setenv("GRAPH_DB", str(pinned))
 
     assert _get_db_path() == pinned
 
 
-def test_non_autonomy_caller_org_routes_to_that_org_db(orgs_root):
+def test_non_default_caller_org_routes_to_that_org_db(orgs_root):
     graph_db.GraphDB.create_org_db("anchore").close()
 
     assert _get_db_path("anchore") == orgs_root / "anchore.db"
+
+
+def test_graph_org_env_sets_caller_org(orgs_root, monkeypatch):
+    """``GRAPH_ORG`` env var drives routing when no explicit caller_org."""
+    graph_db.GraphDB.create_org_db("anchore").close()
+    monkeypatch.setenv("GRAPH_ORG", "anchore")
+
+    assert _get_db_path() == orgs_root / "anchore.db"
+
+
+def test_explicit_caller_org_beats_graph_org_env(orgs_root, monkeypatch):
+    """Explicit kwarg wins over ``GRAPH_ORG`` env — tests/API handlers
+    with a concrete caller pin the destination regardless of env."""
+    graph_db.GraphDB.create_org_db("anchore").close()
+    graph_db.GraphDB.create_org_db("autonomy").close()
+    monkeypatch.setenv("GRAPH_ORG", "anchore")
+
+    assert _get_db_path("autonomy") == orgs_root / "autonomy.db"

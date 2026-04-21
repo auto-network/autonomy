@@ -4,10 +4,21 @@ All graph DB access flows through this module. CLI commands (via
 ``client.LocalClient``) and dashboard API handlers both call into ``ops.*``;
 neither imports ``GraphDB`` directly outside this layer.
 
-The ``caller_org`` and ``peers`` parameters are placeholders for the per-org
-DB world (auto-txg5). Today they are ignored — every call lands on the single
-``GraphDB(db_path)`` selected by ``GRAPH_DB`` env var. Once per-org routing
-ships, only this module changes; call sites stay put.
+Per-org write routing is live (auto-txg5.3): every write lands in the
+caller's own org DB. ``caller_org`` resolution cascade:
+
+  1. Explicit ``caller_org=`` kwarg (API handlers, tests, container-aware
+     call sites).
+  2. ``GRAPH_ORG`` env var (container-scoped default — session launcher
+     exports it, dashboard API handlers pass the incoming ``X-Graph-Org``
+     header through when present).
+  3. Scopeless default → ``personal`` (per the orgs-schema reconciliation;
+     auto-s45z9 absorbed here).
+
+``GRAPH_DB`` env still wins above all of the above (test pinning / override).
+``peers`` stays reserved for cross-org reads (auto-txg5.4); writes remain
+own-org only (cross-org writes are not supported — promote content in
+its origin org).
 
 Design reference: graph://bcce359d-a1d (Cross-Org Search Architecture).
 """
@@ -41,18 +52,35 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
 # ── DB selection ─────────────────────────────────────────────
 
 
+def _resolve_caller_org(caller_org: str | None) -> str | None:
+    """Apply the caller_org resolution cascade (explicit → env → default).
+
+    Returns ``None`` only when ``GRAPH_DB`` is pinned (tests/override),
+    because the resolver short-circuits on that env var before it cares
+    about org scope. Otherwise returns a concrete slug — explicit kwarg
+    wins, then ``GRAPH_ORG`` env, then :func:`resolve_caller_db_path`
+    applies the scopeless default (``personal``).
+    """
+    if caller_org is not None:
+        return caller_org
+    env_org = os.environ.get("GRAPH_ORG")
+    if env_org:
+        return env_org
+    return None
+
+
 def _db_path(caller_org: str | None = None) -> str | None:
     """Resolve graph DB path for the given ``caller_org``.
 
     ``GRAPH_DB`` env var wins (test/override path); otherwise routes to
-    ``data/orgs/<caller_org>.db`` if present, falling back to the legacy
-    ``data/graph.db`` when the per-org DB has not yet been materialised
-    (autonomy pre-migration). See :func:`db.resolve_caller_db_path`.
+    ``data/orgs/<slug>.db`` where ``slug`` is the resolved caller org
+    (explicit kwarg → ``GRAPH_ORG`` env → scopeless default ``personal``).
+    See :func:`db.resolve_caller_db_path`.
     """
     env_db = os.environ.get("GRAPH_DB")
     if env_db:
         return env_db
-    return str(resolve_caller_db_path(caller_org))
+    return str(resolve_caller_db_path(_resolve_caller_org(caller_org)))
 
 
 def _open(caller_org: str | None = None) -> GraphDB:

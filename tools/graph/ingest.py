@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 
 from .models import Source, Thought, Derivation, Entity, Edge, now_iso
-from .db import GraphDB
+from .db import GraphDB, resolve_caller_db_path
 
 
 # ── Frontmatter Parser ───────────────────────────────────────
@@ -567,18 +567,30 @@ def _load_session_meta(file_path: Path) -> dict:
     return {}
 
 
-def session_target_org(file_path: Path | str, default: str = "autonomy") -> str:
+def session_target_org(file_path: Path | str, default: str = "personal") -> str:
     """Return the org slug a session file should land in.
 
     Reads ``.session_meta.json`` next to (or one level above) *file_path*
-    and returns its ``graph_project`` value, falling back to *default*
-    (``autonomy`` per the platform default-scope convention).
+    and returns its ``graph_org`` value — falling back to the legacy
+    ``graph_project`` field (pre-rename sessions), then to *default*
+    (``personal`` per auto-txg5.3 scopeless convergence).
 
     Helper for per-org DB write routing (auto-9iq2s migration + auto-36v11
     routing). Pure read; no DB or filesystem mutation.
     """
     meta = _load_session_meta(Path(file_path))
-    return meta.get("graph_project") or default
+    return meta.get("graph_org") or meta.get("graph_project") or default
+
+
+def _open_db_for_session(file_path: Path, *, default_org: str = "personal") -> GraphDB:
+    """Open the GraphDB that *file_path*'s session should write to.
+
+    Resolves the target org via :func:`session_target_org`, then opens
+    the per-org DB through :func:`resolve_caller_db_path` (same cascade
+    as ``ops._db_path`` — ``GRAPH_DB`` env still wins for test pinning).
+    """
+    org = session_target_org(file_path, default=default_org)
+    return GraphDB(resolve_caller_db_path(org))
 
 
 # Patterns for low-signal first-turn content that should NOT become a title.
@@ -963,8 +975,32 @@ def ingest_claude_code_session(
     }
 
 
-def ingest_claude_code_project(db: GraphDB, project_path: str | Path = None, force: bool = False) -> list[dict]:
-    """Ingest all Claude Code sessions for a project (or the current one)."""
+def _ingest_session_routed(jsonl_file: Path, force: bool) -> dict:
+    """Open the right per-org DB for *jsonl_file* and ingest.
+
+    Separate from :func:`ingest_claude_code_session` so tests and explicit
+    callers (single-session CLI, tests pinning ``GRAPH_DB``) keep passing
+    a ``db`` handle. Batch entry points below call this helper so each
+    session lands in the DB named by its own ``.session_meta.json``.
+    """
+    db = _open_db_for_session(jsonl_file)
+    try:
+        return ingest_claude_code_session(db, jsonl_file, force=force)
+    finally:
+        db.close()
+
+
+def ingest_claude_code_project(
+    db: GraphDB | None = None,
+    project_path: str | Path = None,
+    force: bool = False,
+) -> list[dict]:
+    """Ingest all Claude Code sessions for a project (or the current one).
+
+    ``db=None`` (the norm) routes each session to its own per-org DB based
+    on ``.session_meta.json.graph_org``. Passing a ``db`` handle forces
+    every session into that connection — legacy / test behaviour.
+    """
     if project_path is None:
         # Default: current project
         project_path = Path.home() / ".claude" / "projects" / "-home-jeremy-workspace-autonomy"
@@ -972,24 +1008,31 @@ def ingest_claude_code_project(db: GraphDB, project_path: str | Path = None, for
 
     results = []
     for jsonl_file in sorted(project_path.glob("*.jsonl")):
-        result = ingest_claude_code_session(db, jsonl_file, force)
+        if db is None:
+            result = _ingest_session_routed(jsonl_file, force)
+        else:
+            result = ingest_claude_code_session(db, jsonl_file, force)
         result["file"] = str(jsonl_file)
         results.append(result)
 
     return results
 
 
-def ingest_all_claude_code(db: GraphDB, force: bool = False) -> list[dict]:
+def ingest_all_claude_code(
+    db: GraphDB | None = None, force: bool = False,
+) -> list[dict]:
     """Ingest all Claude Code sessions across all projects.
 
     Scans two locations:
     1. ~/.claude/projects/ — user sessions, chatwith, terminal containers
     2. data/agent-runs/*/sessions/ — dispatch and librarian agent sessions
 
-    Project scoping comes from each session's ``.session_meta.json``
-    (``graph_project`` field). Sessions launched via the autonomy
-    infrastructure always carry meta; legacy sessions retain whatever
-    project they were first ingested with.
+    Org routing comes from each session's ``.session_meta.json``
+    (``graph_org`` / legacy ``graph_project`` field). Sessions launched
+    via the autonomy infrastructure always carry meta; sessions without
+    meta default to ``personal.db`` (auto-txg5.3 scopeless convergence).
+    Passing an explicit ``db`` short-circuits routing — every session is
+    written to that connection (legacy / test behaviour).
     """
     results = []
 
@@ -1000,7 +1043,10 @@ def ingest_all_claude_code(db: GraphDB, force: bool = False) -> list[dict]:
             if not project_dir.is_dir():
                 continue
             for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-                result = ingest_claude_code_session(db, jsonl_file, force)
+                if db is None:
+                    result = _ingest_session_routed(jsonl_file, force)
+                else:
+                    result = ingest_claude_code_session(db, jsonl_file, force)
                 result["file"] = str(jsonl_file)
                 results.append(result)
 
@@ -1017,7 +1063,10 @@ def ingest_all_claude_code(db: GraphDB, force: bool = False) -> list[dict]:
                 if not project_dir.is_dir():
                     continue
                 for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-                    result = ingest_claude_code_session(db, jsonl_file, force)
+                    if db is None:
+                        result = _ingest_session_routed(jsonl_file, force)
+                    else:
+                        result = ingest_claude_code_session(db, jsonl_file, force)
                     result["file"] = str(jsonl_file)
                     results.append(result)
 
