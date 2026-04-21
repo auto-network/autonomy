@@ -1,4 +1,4 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tools/dashboard/tests"]
-addopts = "-n 4 --dist loadfile"
+addopts = "-n 8 --dist loadfile"
