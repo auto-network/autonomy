@@ -333,12 +333,42 @@ def get_attachment(
     caller_org: str | None = None,
     peers: list[str] | None = None,
 ) -> dict | None:
-    """Get an attachment row by ID prefix. ``None`` if not found."""
+    """Get an attachment row by ID prefix — own-first, then peers.
+
+    Own-org returns the attachment unconditionally. Peer attachments are
+    only visible when their parent source's ``publication_state`` is in
+    :data:`PEER_VISIBLE_STATES` (orphan attachments with no ``source_id``
+    are skipped cross-org — their visibility can't be derived).
+    """
+    resolved_org = _resolve_caller_org(caller_org)
     db = _open(caller_org)
     try:
-        return db.get_attachment(attachment_id)
+        att = db.get_attachment(attachment_id)
     finally:
         db.close()
+    if att is not None:
+        att.setdefault("org", resolved_org or "")
+        return att
+
+    for peer in sorted(resolve_peers(resolved_org, peers)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        att = peer_db.get_attachment(attachment_id)
+        if att is None:
+            continue
+        parent_id = att.get("source_id")
+        if not parent_id:
+            # Orphan attachment cross-org: no way to derive visibility.
+            continue
+        parent = peer_db.get_source(parent_id)
+        if parent is None:
+            continue
+        if parent.get("publication_state") not in PEER_VISIBLE_STATES:
+            continue
+        att["org"] = peer
+        return att
+    return None
 
 
 def list_attachments(
