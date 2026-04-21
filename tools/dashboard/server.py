@@ -5511,6 +5511,47 @@ async def api_graph_note_update(request):
     })
 
 
+async def api_graph_comment_get(request):
+    """GET /api/graph/comment/<id> — fetch a single comment (cross-org)."""
+    comment_id = request.path_params["id"]
+    if not _GRAPH_SOURCE_ID_RE.match(comment_id):
+        return JSONResponse(
+            {"error": f"malformed comment_id: {comment_id!r}"}, status_code=400,
+        )
+    org = _caller_org(request)
+    comment = graph_ops.get_comment(comment_id, org=org)
+    if comment is None:
+        return JSONResponse(
+            {"error": f"comment not found: {comment_id}"}, status_code=404,
+        )
+    return JSONResponse(comment)
+
+
+async def api_graph_turn_content(request):
+    """GET /api/graph/turn/<source_id>?turn=N — single-turn content.
+
+    Used by ``graph link`` to echo the linked turn's snippet (via
+    HttpClient.get_turn_content). Keeps the CLI off the local DB.
+    """
+    source_id = request.path_params["source_id"]
+    if not _GRAPH_SOURCE_ID_RE.match(source_id):
+        return JSONResponse(
+            {"error": f"malformed source_id: {source_id!r}"}, status_code=400,
+        )
+    turn_raw = request.query_params.get("turn")
+    try:
+        turn = int(turn_raw)
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"error": f"invalid turn: {turn_raw!r}"}, status_code=400,
+        )
+    org = _caller_org(request)
+    content = graph_ops.get_turn_content(source_id, turn, org=org)
+    if content is None:
+        return JSONResponse({"error": "turn not found"}, status_code=404)
+    return JSONResponse({"source_id": source_id, "turn": turn, "content": content})
+
+
 async def api_graph_comment(request):
     """Add a comment to a note via direct ops call."""
     body = await request.json()
@@ -6913,6 +6954,8 @@ routes = [
     Route("/api/graph/note/update", api_graph_note_update, methods=["POST"]),
     Route("/api/graph/comment", api_graph_comment, methods=["POST"]),
     Route("/api/graph/comment/integrate", api_graph_comment_integrate, methods=["POST"]),
+    Route("/api/graph/comment/{id}", api_graph_comment_get, methods=["GET"]),
+    Route("/api/graph/turn/{source_id}", api_graph_turn_content, methods=["GET"]),
     Route("/api/graph/bead", api_graph_bead, methods=["POST"]),
     Route("/api/graph/link", api_graph_link, methods=["POST"]),
     Route("/api/graph/journal", api_graph_journal_write, methods=["POST"]),

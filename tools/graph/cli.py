@@ -37,6 +37,11 @@ class _pin_db:
 
     def __init__(self, args):
         self.path = None
+        # In API/container mode the dashboard picks the DB (via
+        # X-Graph-Org); pinning GRAPH_DB would override the server's
+        # routing and send every write to the caller's legacy path.
+        if os.environ.get("GRAPH_API"):
+            return
         db_val = getattr(args, "db", None)
         if db_val is None:
             return
@@ -280,11 +285,17 @@ def cmd_search(args):
     """Full-text search across the graph."""
     states, include_raw = _parse_state_args(args)
     only_org, peers = _parse_org_args(args)
-    db = GraphDB(args.db)
-    try:
-        session_ids, author_pattern = _current_session_context(db)
-    finally:
-        db.close()
+    # Session context is a host-local carve-out (raw-from-current-session)
+    # keyed to the tmux session; skip in API/container mode where the
+    # container's session isn't visible to the server anyway.
+    session_ids: list[str] | None = None
+    author_pattern: str | None = None
+    if not is_api_mode():
+        db = GraphDB(args.db)
+        try:
+            session_ids, author_pattern = _current_session_context(db)
+        finally:
+            db.close()
     results = get_client().search(
         args.query,
         limit=args.limit,
