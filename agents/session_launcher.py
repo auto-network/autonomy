@@ -204,6 +204,11 @@ def launch_session(
     # graph_project / graph_tags come in via `metadata` and are also exported
     # as GRAPH_SCOPE / GRAPH_TAGS env vars below so the in-container graph CLI
     # respects the project's hard boundary and soft tags.
+    #
+    # graph_org (the per-org DB routing slug) is derived from graph_project
+    # if the caller didn't supply it explicitly — after the workspaces→orgs
+    # consolidation (auto-0wj9) the yaml's ``graph_project`` field IS the
+    # owning org slug, so a single source of truth carries both concerns.
     if not resume_uuid:
         meta_doc: dict = {
             "type": session_type,
@@ -212,6 +217,10 @@ def launch_session(
         }
         if metadata:
             meta_doc.update(metadata)
+            if "graph_org" not in meta_doc:
+                gp = meta_doc.get("graph_project")
+                if gp:
+                    meta_doc["graph_org"] = gp
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
 
     # ── Auth args (may copy creds file into run_dir) ───────────
@@ -276,9 +285,13 @@ def launch_session(
         *auth_args,
     ]
 
-    # Project scoping: GRAPH_SCOPE (hard project boundary) and GRAPH_TAGS
-    # (soft tags auto-applied to notes) are sourced from metadata when
-    # present. Callers pass these through workspace_settings → metadata.
+    # Project / org scoping:
+    #   GRAPH_SCOPE — hard project boundary (search/list filter).
+    #   GRAPH_TAGS  — soft tags auto-applied to notes.
+    #   GRAPH_ORG   — per-org write routing slug (auto-txg5.3). Every
+    #                 ops.* write in this container lands in that org's DB.
+    #                 Defaults to the same value as graph_project (the yaml
+    #                 field IS the org slug after auto-0wj9).
     if metadata:
         graph_project = metadata.get("graph_project")
         if graph_project:
@@ -288,6 +301,9 @@ def launch_session(
             if isinstance(graph_tags, (list, tuple)):
                 graph_tags = ",".join(str(t) for t in graph_tags)
             cmd.extend(["-e", f"GRAPH_TAGS={graph_tags}"])
+        graph_org = metadata.get("graph_org") or graph_project
+        if graph_org:
+            cmd.extend(["-e", f"GRAPH_ORG={graph_org}"])
 
     for host_path, container_spec in default_mounts.items():
         cmd.extend(["-v", f"{host_path}:{container_spec}"])

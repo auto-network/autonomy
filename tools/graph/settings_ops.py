@@ -97,9 +97,17 @@ class MigrationReport:
 
 
 def _db_path(caller_org: str | None = None) -> str | None:
+    """Resolve Settings DB path via the same cascade as ``ops._db_path``.
+
+    Explicit ``caller_org`` wins; otherwise ``GRAPH_ORG`` env is used; the
+    resolver applies the scopeless default (``personal``) when neither is
+    set. ``GRAPH_DB`` env pins the path regardless (test override).
+    """
     env_db = os.environ.get("GRAPH_DB")
     if env_db:
         return env_db
+    if caller_org is None:
+        caller_org = os.environ.get("GRAPH_ORG")
     return str(resolve_caller_db_path(caller_org))
 
 
