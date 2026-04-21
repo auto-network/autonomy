@@ -1,4 +1,11 @@
-"""Tests for the ingest mutex on POST /api/graph/sessions."""
+"""Tests for the ingest mutex on POST /api/graph/sessions.
+
+After the auto-iv6c5 ops migration, ``api_graph_sessions`` calls
+:func:`tools.graph.ingest.ingest_all_claude_code` /
+:func:`tools.graph.ingest.ingest_claude_code_project` directly instead of
+shelling out to the CLI. The mutex semantics are unchanged — the first
+call runs, the second returns ``skipped=True``.
+"""
 import asyncio
 from unittest.mock import AsyncMock, patch
 
@@ -24,29 +31,37 @@ def client(app):
 
 def test_single_call_succeeds(client):
     """A single POST /api/graph/sessions works normally."""
-    with patch("tools.dashboard.server.run_cli", new_callable=AsyncMock) as mock_cli:
-        mock_cli.return_value = ("ingested 5 sessions", "", 0)
+    with patch("tools.graph.ingest.ingest_all_claude_code") as mock_ingest:
+        mock_ingest.return_value = [
+            {"status": "ingested", "session_id": "s1"},
+            {"status": "ingested", "session_id": "s2"},
+        ]
         resp = client.post("/api/graph/sessions", json={"all": True})
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
-    assert "ingested" in body["output"]
+    assert body["counts"]["ingested"] == 2
     assert "skipped" not in body
 
 
 def test_single_call_passes_flags(client):
-    """Flags from request body are forwarded to graph CLI."""
-    with patch("tools.dashboard.server.run_cli", new_callable=AsyncMock) as mock_cli:
-        mock_cli.return_value = ("ok", "", 0)
-        client.post("/api/graph/sessions", json={"all": True, "project": "test", "force": True})
-    cmd = mock_cli.call_args[0][0]
-    assert cmd == ["graph", "sessions", "--all", "--project", "test", "--force"]
+    """Flags from request body are forwarded to the ingest function."""
+    with patch("tools.graph.ingest.ingest_all_claude_code") as mock_ingest:
+        mock_ingest.return_value = []
+        resp = client.post("/api/graph/sessions", json={"all": True, "force": True})
+    assert resp.status_code == 200
+    assert mock_ingest.called
+    # ingest_all_claude_code(db, force=force) — second kwarg is ``force``.
+    _, kwargs = mock_ingest.call_args
+    assert kwargs.get("force") is True
 
 
-def test_cli_failure_returns_500(client):
-    """CLI error propagates as 500."""
-    with patch("tools.dashboard.server.run_cli", new_callable=AsyncMock) as mock_cli:
-        mock_cli.return_value = ("", "db locked", 1)
+def test_ingest_exception_returns_500(client):
+    """Ingest error propagates as 500."""
+    with patch(
+        "tools.graph.ingest.ingest_claude_code_project",
+        side_effect=RuntimeError("db locked"),
+    ):
         resp = client.post("/api/graph/sessions", json={})
     assert resp.status_code == 500
     assert "db locked" in resp.json()["error"]
@@ -63,35 +78,34 @@ def test_concurrent_calls_second_skipped():
 
         slow_event = asyncio.Event()
 
-        async def slow_cli(cmd, timeout=120, stdin_data=None):
+        async def slow_thread(fn):
+            # ``asyncio.to_thread`` passthrough that waits for the test
+            # to release the event; allows the test to hold the mutex
+            # while the second call races in.
             await slow_event.wait()
-            return ("done", "", 0)
+            return fn()
 
-        with patch("tools.dashboard.server.run_cli", side_effect=slow_cli):
+        with patch("tools.graph.ingest.ingest_all_claude_code", return_value=[]):
+            with patch("asyncio.to_thread", side_effect=slow_thread):
+                async def make_request(body):
+                    req = AsyncMock()
+                    req.json = AsyncMock(return_value=body)
+                    return await api_graph_sessions(req)
 
-            async def make_request(body):
-                req = AsyncMock()
-                req.json = AsyncMock(return_value=body)
-                return await api_graph_sessions(req)
+                task1 = asyncio.create_task(make_request({"all": True}))
+                await asyncio.sleep(0.01)
 
-            # Launch first call (will block on slow_cli)
-            task1 = asyncio.create_task(make_request({"all": True}))
-            # Give event loop a tick so task1 acquires the lock
-            await asyncio.sleep(0.01)
+                assert _ingest_lock.locked(), "First call should hold the lock"
 
-            assert _ingest_lock.locked(), "First call should hold the lock"
+                resp2 = await make_request({"all": True})
+                body2 = json_mod.loads(resp2.body)
+                assert body2["skipped"] is True
+                assert body2["ok"] is True
 
-            # Second call should return immediately with skipped
-            resp2 = await make_request({"all": True})
-            body2 = json_mod.loads(resp2.body)
-            assert body2["skipped"] is True
-            assert body2["ok"] is True
-
-            # Let the first call finish
-            slow_event.set()
-            resp1 = await task1
-            body1 = json_mod.loads(resp1.body)
-            assert body1["ok"] is True
-            assert "skipped" not in body1
+                slow_event.set()
+                resp1 = await task1
+                body1 = json_mod.loads(resp1.body)
+                assert body1["ok"] is True
+                assert "skipped" not in body1
 
     asyncio.run(_run())
