@@ -160,3 +160,79 @@ def test_caller_org_kwarg_accepted(graph_db_env):
     ops.search("anything", caller_org="autonomy", peers=["anchore"])
     ops.list_sources(caller_org="autonomy", peers=["anchore"], limit=1)
     ops.get_source("missing", caller_org="autonomy", peers=None)
+
+
+def _seed_and_commit(db: GraphDB, *, title: str, tags: list[str],
+                     project: str = "autonomy") -> Source:
+    """Seed a note and force a commit (``insert_thought`` does not commit
+    on its own; pending rows would be lost on close otherwise)."""
+    src = _seed_note(db, title=title, tags=tags, project=project)
+    db.conn.commit()
+    return src
+
+
+def test_caller_org_none_defaults_to_autonomy(tmp_path, monkeypatch):
+    """With per-org DBs present and no GRAPH_DB override, ``caller_org=None``
+    resolves to ``autonomy`` — writes/reads land in ``autonomy.db``."""
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    autonomy = GraphDB.create_org_db("autonomy", type_="shared")
+    try:
+        _seed_and_commit(autonomy, title="default-routed note", tags=["routing"])
+    finally:
+        autonomy.close()
+
+    results = ops.search("default-routed", include_raw=True)
+    assert any(
+        "default-routed" in (r.get("content") or "").lower()
+        or "default-routed" in (r.get("source_title") or "").lower()
+        for r in results
+    )
+
+
+def test_caller_org_routes_to_specific_org_db(tmp_path, monkeypatch):
+    """Different caller_org values open different per-org DBs."""
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    for slug in ("autonomy", "anchore"):
+        db = GraphDB.create_org_db(slug)
+        try:
+            _seed_and_commit(db, title=f"lives in {slug}", tags=["x"])
+        finally:
+            db.close()
+
+    aut_hits = ops.search("autonomy", caller_org="autonomy", include_raw=True)
+    anc_hits = ops.search("anchore", caller_org="anchore", include_raw=True)
+
+    def titles(rs):
+        return {r.get("source_title") or r.get("content") for r in rs}
+
+    assert any("lives in autonomy" in (t or "").lower() for t in titles(aut_hits))
+    assert any("lives in anchore" in (t or "").lower() for t in titles(anc_hits))
+    # Autonomy caller must NOT see the anchore-only note.
+    assert not any("anchore" in (t or "").lower() for t in titles(aut_hits))
+
+
+def test_legacy_graph_db_still_openable(tmp_path, monkeypatch):
+    """Pre-migration deployments with no data/orgs/ still work.
+
+    When caller_org resolves to autonomy and autonomy.db is absent, we
+    fall back to the ``GRAPH_DB`` env override (and further to the legacy
+    ``data/graph.db``). Existing tests use this fallback via the
+    ``graph_db_env`` fixture.
+    """
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "absent_orgs"))
+    legacy = tmp_path / "legacy.db"
+    monkeypatch.setenv("GRAPH_DB", str(legacy))
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    db = GraphDB(str(legacy))
+    _seed_and_commit(db, title="legacy routed", tags=["legacy"])
+    db.close()
+
+    results = ops.search("legacy", include_raw=True)
+    assert any(
+        "legacy" in (r.get("source_title") or "").lower()
+        for r in results
+    )

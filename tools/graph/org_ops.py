@@ -202,17 +202,6 @@ def _read_orgs_row(db: GraphDB) -> dict | None:
     return dict(row) if row else None
 
 
-def _write_orgs_row(db: GraphDB, *, slug: str, type_: str) -> dict:
-    org_id = uuid7()
-    created = _now_iso()
-    db.conn.execute(
-        "INSERT INTO orgs(id, slug, type, created_at) VALUES (?, ?, ?, ?)",
-        (org_id, slug, type_, created),
-    )
-    db.conn.commit()
-    return {"id": org_id, "slug": slug, "type": type_, "created_at": created}
-
-
 def _open_org_db(path: Path) -> GraphDB:
     return GraphDB(path)
 
@@ -426,6 +415,9 @@ def create_org(
 ) -> OrgRef:
     """Create ``data/orgs/<slug>.db`` with bootstrap row + optional seed.
 
+    Delegates DB creation + schema init + bootstrap orgs-row insertion to
+    :meth:`GraphDB.create_org_db`; the identity Setting seed layers on top.
+
     The seed identity Setting requires ``autonomy.org#1`` to be registered
     in the schema registry (auto-S1's deliverable). When unregistered, the
     seed is silently skipped — the cascade falls through to the generated
@@ -441,15 +433,14 @@ def create_org(
         raise OrgExistsError(
             f"org already exists: {slug} ({path})"
         )
-    path.parent.mkdir(parents=True, exist_ok=True)
 
-    db = _open_org_db(path)
     try:
-        existing = _read_orgs_row(db)
-        if existing is None:
-            info = _write_orgs_row(db, slug=slug, type_=type_)
-        else:
-            info = existing
+        db = GraphDB.create_org_db(slug, type_=type_, path=path)
+    except FileExistsError as e:
+        raise OrgExistsError(str(e)) from e
+    try:
+        info = _read_orgs_row(db)
+        assert info is not None, "create_org_db did not seed bootstrap row"
         if identity_payload is not None:
             _seed_identity_setting(
                 db, slug, identity_payload, state=identity_state,
