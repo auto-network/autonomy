@@ -40,6 +40,17 @@ def is_api_mode() -> bool:
     return bool(_graph_api())
 
 
+def _org_headers(extra: dict | None = None) -> dict:
+    """Build default request headers. Injects ``X-Graph-Org`` when set
+    so the dashboard routes the write to the caller's org DB (otherwise
+    the scopeless default — personal.db — would absorb everything)."""
+    h = dict(extra or {})
+    org = os.environ.get("GRAPH_ORG")
+    if org:
+        h["X-Graph-Org"] = org
+    return h
+
+
 def _post(endpoint: str, data: dict) -> dict:
     """POST JSON to the dashboard graph API. Returns parsed JSON response."""
     url = f"{_graph_api()}{endpoint}"
@@ -47,7 +58,7 @@ def _post(endpoint: str, data: dict) -> dict:
     req = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=_org_headers({"Content-Type": "application/json"}),
         method="POST",
     )
     try:
@@ -74,7 +85,7 @@ def _put(endpoint: str, data: dict) -> dict:
     req = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=_org_headers({"Content-Type": "application/json"}),
         method="PUT",
     )
     try:
@@ -97,7 +108,7 @@ def _put(endpoint: str, data: dict) -> dict:
 def _get(endpoint: str) -> dict:
     """GET from the dashboard API. Returns parsed JSON response."""
     url = f"{_graph_api()}{endpoint}"
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(url, headers=_org_headers(), method="GET")
     try:
         resp = urllib.request.urlopen(req, timeout=30, context=_SSL_CTX)
         result = json.loads(resp.read())
@@ -138,7 +149,9 @@ def _post_multipart(endpoint: str, fields: dict, files: list[tuple[str, str, byt
     url = f"{_graph_api()}{endpoint}"
     req = urllib.request.Request(
         url, data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        headers=_org_headers(
+            {"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        ),
         method="POST",
     )
     try:
@@ -422,7 +435,9 @@ def api_attach(args) -> None:
     req = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        headers=_org_headers(
+            {"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        ),
         method="POST",
     )
     try:
@@ -533,7 +548,7 @@ def api_collab_tag_describe(args) -> None:
 def _delete(endpoint: str) -> dict:
     """DELETE to the dashboard API. Returns parsed JSON response."""
     url = f"{_graph_api()}{endpoint}"
-    req = urllib.request.Request(url, method="DELETE")
+    req = urllib.request.Request(url, headers=_org_headers(), method="DELETE")
     try:
         resp = urllib.request.urlopen(req, timeout=30, context=_SSL_CTX)
         result = json.loads(resp.read())

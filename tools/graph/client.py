@@ -44,8 +44,14 @@ class GraphHttpError(Exception):
 
 def _translate_http_error(status: int, body: dict) -> Exception:
     """Convert a dashboard API error response into the exception the
-    local-mode callers already handle (so cmd_ bodies stay unchanged)."""
-    if status == 409 and body.get("error") == "cross_org_write_rejected":
+    local-mode callers already handle (so cmd_ bodies stay unchanged).
+
+    The dashboard's 409 body carries ``origin_org`` and ``target_id`` (see
+    ``_cross_org_error_response`` in dashboard/server.py) — that pair is
+    the signature of a CrossOrgWriteError regardless of the human-readable
+    ``error`` message.
+    """
+    if status == 409 and body.get("origin_org") is not None:
         target = body.get("target_id") or body.get("source_id") or ""
         origin = body.get("origin_org") or ""
         return ops.CrossOrgWriteError(target, origin)
@@ -344,9 +350,17 @@ class HttpClient(GraphClient):
     # ── transport ──────────────────────────────────────────
 
     def _headers(self, org: str | None = None) -> dict:
+        """Build per-request headers.
+
+        Precedence for ``X-Graph-Org``: explicit ``org`` arg > ``GRAPH_ORG``
+        env. Matches how ``ops.*`` resolves the caller org on the host so
+        the CLI reaches the same DB in both modes without callers having
+        to pass ``--org`` explicitly.
+        """
         h = {}
-        if org:
-            h["X-Graph-Org"] = org
+        caller = org or os.environ.get("GRAPH_ORG")
+        if caller:
+            h["X-Graph-Org"] = caller
         return h
 
     def _request(
@@ -525,27 +539,11 @@ class HttpClient(GraphClient):
         return result if isinstance(result, list) else []
 
     def resolve_source_strict(self, source_id, *, org=None, peers=None):
-        # Server resolver already does own-first + peer-public surface;
-        # a hit comes back as a source dict, ambiguity as 300 (Multiple
-        # Choices) in some servers — we return the 200 body as-is and
-        # translate a 404 to None.
-        try:
-            result = self._get(
-                f"/api/graph/resolve-source/{source_id}",
-                {"strict": "1"},
-                org=org,
-            )
-        except LookupError:
-            return None
-        # Server returns {"matches": [...]} for ambiguous prefixes.
-        if isinstance(result, dict) and "matches" in result:
-            matches = result.get("matches") or []
-            if not matches:
-                return None
-            if len(matches) == 1:
-                return matches[0]
-            return matches
-        return result
+        # Server's GET /api/graph/source/{id} already does own-first +
+        # peer-public-surface resolve. The dashboard never returns
+        # ambiguous prefix lists over HTTP (callers pass full UUIDs), so
+        # dict-or-None is the only shape we need to map.
+        return self.get_source(source_id, org=org, peers=peers)
 
     def get_turn_content(self, source_id, turn, *, org=None):
         try:
