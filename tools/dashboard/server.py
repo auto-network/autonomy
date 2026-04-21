@@ -1414,17 +1414,16 @@ async def api_search(request):
         results = dao_beads.search(q, limit=limit, project=project)
         _enrich_search_results(results)
         return JSONResponse(results)
-    cmd = ["graph", "search", q, "--json", "--limit", request.query_params.get("limit", "20")]
+    limit = int(request.query_params.get("limit", "20"))
     project = request.query_params.get("project")
-    if project:
-        cmd += ["--project", project]
-    if request.query_params.get("or"):
-        cmd += ["--or"]
-    results = await run_cli_json(cmd)
-    if not isinstance(results, list):
-        return JSONResponse(results)
+    or_mode = bool(request.query_params.get("or"))
+    org = request.headers.get("X-Graph-Org") or None
+    results = await asyncio.to_thread(
+        graph_ops.search,
+        q, org=org, limit=limit, project=project, or_mode=or_mode,
+    )
     if request.query_params.get("group"):
-        grouped = {}
+        grouped: dict = {}
         for r in results:
             sid = r.get("source_id", r.get("id"))
             if sid not in grouped:
@@ -1475,16 +1474,30 @@ def _format_search_date(raw: str) -> str:
 async def api_sources(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"results": "", "error": None})
-    cmd = ["graph", "sources"]
+    org = request.headers.get("X-Graph-Org") or None
     project = request.query_params.get("project")
-    if project:
-        cmd += ["--project", project]
     stype = request.query_params.get("type")
-    if stype:
-        cmd += ["--type", stype]
-    cmd += ["--limit", request.query_params.get("limit", "30")]
-    stdout, stderr, rc = await run_cli(cmd)
-    return JSONResponse({"results": stdout, "error": stderr if rc != 0 else None})
+    limit = int(request.query_params.get("limit", "30"))
+    rows = await asyncio.to_thread(
+        graph_ops.list_sources,
+        org=org, project=project, source_type=stype, limit=limit,
+    )
+    # Render a CLI-equivalent text body so existing UI consumers that parse
+    # ``results`` as a pre-formatted list keep working. Structured clients
+    # can switch to the list payload via the new ``sources`` field.
+    lines = []
+    for r in rows:
+        title = (r.get("title") or "")[:80]
+        created = (r.get("created_at") or "")[:16]
+        lines.append(
+            f"[{r.get('org','')}] {r['id'][:12]} {r.get('type',''):12s} "
+            f"{created}  {title}"
+        )
+    return JSONResponse({
+        "results": "\n".join(lines),
+        "sources": rows,
+        "error": None,
+    })
 
 async def api_source_read(request):
     source_id = request.path_params["id"]
@@ -1494,10 +1507,16 @@ async def api_source_read(request):
             return JSONResponse({"error": "source not found"}, status_code=404)
         _attach_source_org(source)
         return JSONResponse(source)
-    max_chars = request.query_params.get("max_chars", "50000")
-    result = await run_cli_json(
-        ["graph", "read", source_id, "--json", "--max-chars", max_chars, "--first"]
+    try:
+        max_chars = int(request.query_params.get("max_chars", "50000"))
+    except ValueError:
+        return JSONResponse({"error": "invalid max_chars"}, status_code=400)
+    org = request.headers.get("X-Graph-Org") or None
+    result = await asyncio.to_thread(
+        graph_ops.read_source_full, source_id, max_chars=max_chars, org=org,
     )
+    if result is None:
+        return JSONResponse({"error": "source not found"}, status_code=404)
     _attach_source_org(result)
     return JSONResponse(result)
 
@@ -1521,10 +1540,29 @@ async def api_context(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"content": "", "error": None})
     source_id = request.path_params["id"]
-    turn = request.path_params["turn"]
-    window = request.query_params.get("window", "3")
-    stdout, stderr, rc = await run_cli(["graph", "context", source_id, turn, "--window", window])
-    return JSONResponse({"content": stdout, "error": stderr if rc != 0 else None})
+    try:
+        turn = int(request.path_params["turn"])
+        window = int(request.query_params.get("window", "3"))
+    except ValueError:
+        return JSONResponse({"error": "turn/window must be integers"}, status_code=400)
+    org = request.headers.get("X-Graph-Org") or None
+    result = await asyncio.to_thread(
+        graph_ops.get_context, source_id, turn, window=window, org=org,
+    )
+    if result is None:
+        return JSONResponse({"content": "", "error": "source not found"})
+    lines = []
+    for t in result["turns"]:
+        role = t.get("role") or "?"
+        marker = "→ " if t["turn_number"] == turn else "  "
+        lines.append(f"{marker}[{t['turn_number']}] {role}: {t['content']}")
+    return JSONResponse({
+        "content": "\n".join(lines),
+        "turns": result["turns"],
+        "center_turn": result["center_turn"],
+        "source_id": result["source"]["id"],
+        "error": None,
+    })
 
 async def api_projects(request):
     """Return the workspace registry — one entry per containerized project.
@@ -1558,21 +1596,40 @@ async def api_projects(request):
 async def api_stats(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"results": "", "error": None})
-    stdout, stderr, rc = await run_cli(["graph", "stats"])
-    return JSONResponse({"results": stdout, "error": stderr if rc != 0 else None})
+    org = request.headers.get("X-Graph-Org") or None
+    data = await asyncio.to_thread(graph_ops.stats, org=org)
+    lines = ["Knowledge Graph Stats:"]
+    for table, count in data.items():
+        lines.append(f"  {table:20s}  {count:6d}")
+    return JSONResponse({"results": "\n".join(lines), "stats": data, "error": None})
+
 
 async def api_attention(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"results": "", "error": None})
-    cmd = ["graph", "attention"]
+    org = request.headers.get("X-Graph-Org") or None
     last = request.query_params.get("last")
-    if last:
-        cmd += ["--last", last]
     search = request.query_params.get("search")
-    if search:
-        cmd += ["--search", search]
-    stdout, stderr, rc = await run_cli(cmd)
-    return JSONResponse({"results": stdout, "error": stderr if rc != 0 else None})
+    try:
+        last_int = int(last) if last else None
+    except ValueError:
+        return JSONResponse({"error": f"invalid last: {last!r}"}, status_code=400)
+    items = await asyncio.to_thread(
+        graph_ops.list_attention,
+        org=org, search=search, last=last_int,
+    )
+    lines = []
+    for it in items:
+        created = (it.get("created_at") or "")[:19]
+        sid = (it.get("source_id") or "")[:12]
+        sess = it.get("session_name") or ""
+        content = (it.get("content") or "").replace("\n", " ")[:200]
+        lines.append(f"{created}  [{sess}] src:{sid}  {content}")
+    return JSONResponse({
+        "results": "\n".join(lines),
+        "attention": items,
+        "error": None,
+    })
 
 async def api_active_sessions(request):
     """Find currently active Claude Code sessions (JSONL files still being written)."""
@@ -1990,15 +2047,24 @@ async def api_primer(request):
         if not primer:
             return JSONResponse({"error": "bead not found"}, status_code=404)
         return JSONResponse(primer)
-    stdout, stderr, rc = await run_cli(["graph", "primer", bead_id, "--format", "dashboard"])
-    if rc != 0:
-        return JSONResponse({"error": stderr or "primer generation failed"}, status_code=500)
+    org = request.headers.get("X-Graph-Org") or None
+    from tools.graph.primer import collect_primer_data, format_for_dashboard
     try:
-        import json as _json
-        return JSONResponse(_json.loads(stdout))
-    except (ValueError, TypeError):
-        # Fallback: return raw content if JSON parsing fails
-        return JSONResponse({"content": stdout, "error": None})
+        def _collect():
+            # Open the DB for the caller's org so the primer sees the right
+            # provenance edges + pitfall notes.
+            db = graph_ops._open(org)
+            try:
+                return collect_primer_data(
+                    bead_id, db=db,
+                    include_provenance=True, include_pitfalls=True,
+                )
+            finally:
+                db.close()
+        data = await asyncio.to_thread(_collect)
+    except Exception as e:
+        return JSONResponse({"error": str(e) or "primer generation failed"}, status_code=500)
+    return JSONResponse(format_for_dashboard(data))
 
 
 async def api_chatwith_primer(request):
@@ -3594,13 +3660,23 @@ async def _resolve_primer(primer: str) -> str | None:
     if not graph_id:
         return None
     try:
-        stdout, stderr, rc = await run_cli(
-            ["graph", "read", graph_id, "--max-chars", "50000"], timeout=10,
+        payload = await asyncio.to_thread(
+            graph_ops.read_source_full, graph_id, max_chars=50000,
         )
-        if rc == 0 and stdout.strip():
-            return stdout.strip()
-        logger.warning("_resolve_primer: graph read failed  id=%s  rc=%d  stderr=%s",
-                       graph_id, rc, stderr.strip())
+        if payload is None:
+            logger.warning("_resolve_primer: source not found  id=%s", graph_id)
+            return None
+        # Render a text blob from source title + entries (mirrors the
+        # ``graph read`` CLI shape expected by callers of this helper).
+        src = payload.get("source") or {}
+        parts: list[str] = []
+        title = src.get("title") or ""
+        if title:
+            parts.append(f"# {title}")
+        for e in payload.get("entries") or []:
+            parts.append(e.get("content") or "")
+        text = "\n\n".join(p for p in parts if p).strip()
+        return text or None
     except Exception:
         logger.warning("_resolve_primer: exception resolving %s", graph_id, exc_info=True)
     return None
@@ -5241,214 +5317,303 @@ def _graph_validate_source_id(value: str) -> str | None:
     return None
 
 
+_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
+
+
+def _caller_org(request) -> str | None:
+    """Resolve caller org for a dashboard write: header > env > None.
+
+    Per graph://bcce359d-a1d §Cross-org write semantics, explicit caller
+    org selects the destination DB; ``None`` lets ops fall through to
+    ``GRAPH_ORG`` env / scopeless default.
+    """
+    return request.headers.get("X-Graph-Org") or None
+
+
+def _cross_org_error_response(err):
+    """Build the 409 JSON shape emitted for CrossOrgWriteError."""
+    return JSONResponse(
+        {
+            "error": str(err),
+            "ok": False,
+            "target_id": getattr(err, "target_id", None),
+            "origin_org": getattr(err, "origin_org", None),
+        },
+        status_code=409,
+    )
+
+
+async def _materialize_uploads(form, key: str = "attachments"):
+    """Stream multipart uploads to tempfiles; return list of paths.
+
+    Caller must pass each path to ``_safe_unlink`` after use. Returns
+    ``(paths, error_response)`` — ``error_response`` is set and paths are
+    cleaned up if validation fails (e.g. size limit).
+    """
+    import tempfile
+    tmp_paths: list[str] = []
+    for k, upload in form.multi_items():
+        if k != key:
+            continue
+        contents = await upload.read()
+        if not contents:
+            continue
+        if len(contents) > _MAX_ATTACHMENT_BYTES:
+            for p in tmp_paths:
+                _safe_unlink(p)
+            return None, JSONResponse(
+                {"error": "attachment too large (max 50MB)"}, status_code=400,
+            )
+        suffix = ""
+        if upload.filename and "." in upload.filename:
+            suffix = "." + upload.filename.rsplit(".", 1)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(contents)
+            tmp_paths.append(tmp.name)
+    return tmp_paths, None
+
+
 async def api_graph_note(request):
-    """Create a note via graph CLI. Accepts JSON or multipart (when attachments present)."""
-    import tempfile
-
+    """Create a note via direct ops call. JSON or multipart (attachments)."""
     content_type = request.headers.get("content-type", "")
+    org = _caller_org(request)
+
     if "multipart/form-data" in content_type:
         form = await request.form()
-        content = str(form.get("content", ""))
-        if not content:
-            return JSONResponse({"error": "content required"}, status_code=400)
-        if len(content) > _GRAPH_MAX_CONTENT:
-            return JSONResponse({"error": f"content exceeds 100KB limit"}, status_code=400)
-
-        cmd = ["graph", "note", "-c", "-"]
-        tags = form.get("tags")
-        if tags:
-            if not _GRAPH_TAGS_RE.match(str(tags)):
-                return JSONResponse({"error": f"invalid tags: {tags!r}"}, status_code=400)
-            cmd += ["--tags", str(tags)]
-        if form.get("project"):
-            cmd += ["-p", str(form["project"])]
-        if form.get("author"):
-            cmd += ["--author", str(form["author"])]
-
-        # Write uploaded files to temp locations and add --attach flags
-        tmp_paths = []
-        for key, upload in form.multi_items():
-            if key != "attachments":
-                continue
-            file_contents = await upload.read()
-            if not file_contents:
-                continue
-            if len(file_contents) > 50 * 1024 * 1024:
-                for p in tmp_paths:
-                    _safe_unlink(p)
-                return JSONResponse({"error": "attachment too large (max 50MB)"}, status_code=400)
-            suffix = ""
-            if upload.filename and "." in upload.filename:
-                suffix = "." + upload.filename.rsplit(".", 1)[1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(file_contents)
-                tmp_paths.append(tmp.name)
-            cmd += ["--attach", tmp_paths[-1]]
-
-        stdout, stderr, rc = await run_cli(cmd, timeout=60, stdin_data=content)
-
-        for p in tmp_paths:
-            _safe_unlink(p)
-
-        if rc != 0:
-            return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-        _checkpoint_graph()
-        return JSONResponse({"ok": True, "output": stdout})
-    else:
-        body = await request.json()
-        err = _graph_validate_content(body)
-        if err:
-            return JSONResponse({"error": err}, status_code=400)
-
-        content = body["content"]
-
-        cmd = ["graph", "note", "-c", "-"]
-        if body.get("tags"):
-            tags = body["tags"]
-            if not _GRAPH_TAGS_RE.match(tags):
-                return JSONResponse({"error": f"invalid tags: {tags!r}"}, status_code=400)
-            cmd += ["--tags", tags]
-        if body.get("project"):
-            cmd += ["-p", body["project"]]
-        if body.get("author"):
-            cmd += ["--author", body["author"]]
-
-        stdout, stderr, rc = await run_cli(cmd, timeout=30, stdin_data=content)
-
-        if rc != 0:
-            return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-        _checkpoint_graph()
-        return JSONResponse({"ok": True, "output": stdout})
-
-
-async def api_graph_note_update(request):
-    """Update a note via graph CLI. Accepts JSON or multipart (when attachments present)."""
-    import tempfile
-
-    content_type = request.headers.get("content-type", "")
-    if "multipart/form-data" in content_type:
-        form = await request.form()
-        source_id = str(form.get("source_id", ""))
-        err = _graph_validate_source_id(source_id)
-        if err:
-            return JSONResponse({"error": err}, status_code=400)
         content = str(form.get("content", ""))
         if not content:
             return JSONResponse({"error": "content required"}, status_code=400)
         if len(content) > _GRAPH_MAX_CONTENT:
             return JSONResponse({"error": "content exceeds 100KB limit"}, status_code=400)
-
-        cmd = ["graph", "note", "update", source_id, "-c", "-"]
-        integrate_raw = form.get("integrate_ids")
-        if integrate_raw:
-            try:
-                ids = json.loads(str(integrate_raw))
-            except (json.JSONDecodeError, TypeError):
-                ids = []
-            for cid in ids:
-                cmd += ["--integrate", str(cid)]
-
+        tags_raw = form.get("tags")
+        if tags_raw and not _GRAPH_TAGS_RE.match(str(tags_raw)):
+            return JSONResponse({"error": f"invalid tags: {tags_raw!r}"}, status_code=400)
+        project = str(form["project"]) if form.get("project") else None
+        author = str(form["author"]) if form.get("author") else None
+        tmp_paths, err = await _materialize_uploads(form)
+        if err is not None:
+            return err
+    else:
+        body = await request.json()
+        e = _graph_validate_content(body)
+        if e:
+            return JSONResponse({"error": e}, status_code=400)
+        content = body["content"]
+        tags_raw = body.get("tags")
+        if tags_raw and not _GRAPH_TAGS_RE.match(tags_raw):
+            return JSONResponse({"error": f"invalid tags: {tags_raw!r}"}, status_code=400)
+        project = body.get("project")
+        author = body.get("author")
         tmp_paths = []
-        for key, upload in form.multi_items():
-            if key != "attachments":
-                continue
-            file_contents = await upload.read()
-            if not file_contents:
-                continue
-            if len(file_contents) > 50 * 1024 * 1024:
-                for p in tmp_paths:
-                    _safe_unlink(p)
-                return JSONResponse({"error": "attachment too large (max 50MB)"}, status_code=400)
-            suffix = ""
-            if upload.filename and "." in upload.filename:
-                suffix = "." + upload.filename.rsplit(".", 1)[1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(file_contents)
-                tmp_paths.append(tmp.name)
-            cmd += ["--attach", tmp_paths[-1]]
 
-        stdout, stderr, rc = await run_cli(cmd, timeout=60, stdin_data=content)
+    tags = str(tags_raw).split(",") if tags_raw else []
 
+    try:
+        result = await asyncio.to_thread(
+            graph_ops.create_note,
+            content,
+            tags=tags,
+            author=author,
+            project=project,
+            attachments=tmp_paths or None,
+            org=org,
+        )
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except graph_ops.CrossOrgWriteError as e:
+        return _cross_org_error_response(e)
+    finally:
         for p in tmp_paths:
             _safe_unlink(p)
 
-        if rc != 0:
-            return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-        _checkpoint_graph()
-        return JSONResponse({"ok": True, "output": stdout})
+    _checkpoint_graph()
+    return JSONResponse({
+        "ok": True,
+        "source_id": result["source_id"],
+        "org": result["org"],
+        "lines": result["lines"],
+        "chars": result["chars"],
+        "attachments": result["attachments"],
+    })
+
+
+async def api_graph_note_update(request):
+    """Update a note via direct ops call. JSON or multipart (attachments)."""
+    content_type = request.headers.get("content-type", "")
+    org = _caller_org(request)
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        source_id = str(form.get("source_id", ""))
+        e = _graph_validate_source_id(source_id)
+        if e:
+            return JSONResponse({"error": e}, status_code=400)
+        content = str(form.get("content", ""))
+        if not content:
+            return JSONResponse({"error": "content required"}, status_code=400)
+        if len(content) > _GRAPH_MAX_CONTENT:
+            return JSONResponse({"error": "content exceeds 100KB limit"}, status_code=400)
+        integrate_raw = form.get("integrate_ids")
+        integrate_ids: list[str] = []
+        if integrate_raw:
+            try:
+                integrate_ids = [str(x) for x in json.loads(str(integrate_raw))]
+            except (json.JSONDecodeError, TypeError):
+                integrate_ids = []
+        tmp_paths, err = await _materialize_uploads(form)
+        if err is not None:
+            return err
     else:
         body = await request.json()
-
         source_id = body.get("source_id", "")
-        err = _graph_validate_source_id(source_id)
-        if err:
-            return JSONResponse({"error": err}, status_code=400)
-
-        err = _graph_validate_content(body)
-        if err:
-            return JSONResponse({"error": err}, status_code=400)
-
+        e = _graph_validate_source_id(source_id)
+        if e:
+            return JSONResponse({"error": e}, status_code=400)
+        e = _graph_validate_content(body)
+        if e:
+            return JSONResponse({"error": e}, status_code=400)
         content = body["content"]
+        integrate_ids = [str(x) for x in body.get("integrate_ids") or []]
+        tmp_paths = []
 
-        cmd = ["graph", "note", "update", source_id, "-c", "-"]
-        for cid in body.get("integrate_ids", []):
-            cmd += ["--integrate", cid]
+    try:
+        result = await asyncio.to_thread(
+            graph_ops.update_note,
+            source_id,
+            content,
+            integrate_comments=integrate_ids,
+            attachments=tmp_paths or None,
+            org=org,
+        )
+    except graph_ops.CrossOrgWriteError as e:
+        return _cross_org_error_response(e)
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    finally:
+        for p in tmp_paths:
+            _safe_unlink(p)
 
-        stdout, stderr, rc = await run_cli(cmd, timeout=30, stdin_data=content)
-
-        if rc != 0:
-            return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-        _checkpoint_graph()
-        return JSONResponse({"ok": True, "output": stdout})
+    _checkpoint_graph()
+    return JSONResponse({
+        "ok": True,
+        "source_id": result["source_id"],
+        "new_version": result["new_version"],
+        "org": result["org"],
+        "lines": result["lines"],
+        "chars": result["chars"],
+        "integrated": result["integrated"],
+        "not_found_comments": result["not_found_comments"],
+        "attachments": result["attachments"],
+    })
 
 
 async def api_graph_comment(request):
-    """Add a comment to a note via graph CLI."""
+    """Add a comment to a note via direct ops call."""
     body = await request.json()
 
     source_id = body.get("source_id", "")
-    err = _graph_validate_source_id(source_id)
-    if err:
-        return JSONResponse({"error": err}, status_code=400)
+    e = _graph_validate_source_id(source_id)
+    if e:
+        return JSONResponse({"error": e}, status_code=400)
+    e = _graph_validate_content(body)
+    if e:
+        return JSONResponse({"error": e}, status_code=400)
 
-    err = _graph_validate_content(body)
-    if err:
-        return JSONResponse({"error": err}, status_code=400)
+    org = _caller_org(request)
 
-    content = body["content"]
+    # Source lookup goes through the full-surface cross-org resolver so
+    # peer-raw notes still produce the correct CrossOrgWriteError
+    # response instead of a bare 404 (otherwise a caller with an explicit
+    # X-Graph-Org header would get the wrong signal).
+    resolved = graph_ops.get_source(source_id, org=org)
+    if resolved is None:
+        # Fall back to caller-org only — handles the case where the full
+        # id was provided but the caller has explicit org + peer-raw
+        # source isn't visible. Try ops.add_comment anyway; it will
+        # raise CrossOrgWriteError or LookupError as appropriate.
+        try:
+            comment = await asyncio.to_thread(
+                graph_ops.add_comment,
+                source_id, body["content"],
+                actor=body.get("actor", "user"),
+                org=org,
+            )
+        except graph_ops.CrossOrgWriteError as ex:
+            return _cross_org_error_response(ex)
+        _checkpoint_graph()
+        return JSONResponse({
+            "ok": True,
+            "comment_id": comment["id"],
+            "source_id": source_id,
+        })
 
-    cmd = ["graph", "comment", source_id, "-c", "-"]
-    if body.get("actor"):
-        cmd += ["--actor", body["actor"]]
+    if resolved.get("type") != "note":
+        return JSONResponse(
+            {"error": f"comments only supported on notes (got {resolved.get('type')!r})"},
+            status_code=400,
+        )
 
-    stdout, stderr, rc = await run_cli(cmd, timeout=30, stdin_data=content)
+    try:
+        comment = await asyncio.to_thread(
+            graph_ops.add_comment,
+            resolved["id"], body["content"],
+            actor=body.get("actor", "user"),
+            org=org,
+        )
+    except graph_ops.CrossOrgWriteError as ex:
+        return _cross_org_error_response(ex)
 
-    if rc != 0:
-        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
     _checkpoint_graph()
-    return JSONResponse({"ok": True, "output": stdout})
+    return JSONResponse({
+        "ok": True,
+        "comment_id": comment["id"],
+        "source_id": resolved["id"],
+    })
 
 
 async def api_graph_comment_integrate(request):
-    """Mark a comment as integrated via graph CLI."""
+    """Mark a comment as integrated via direct ops call."""
     body = await request.json()
 
     comment_id = body.get("comment_id", "")
-    err = _graph_validate_source_id(comment_id)
-    if err:
+    e = _graph_validate_source_id(comment_id)
+    if e:
         return JSONResponse({"error": f"malformed comment_id: {comment_id!r}"}, status_code=400)
 
-    stdout, stderr, rc = await run_cli(
-        ["graph", "comment", "integrate", comment_id], timeout=15
-    )
+    org = _caller_org(request)
+    comment = graph_ops.get_comment(comment_id, org=org)
+    if comment is None:
+        return JSONResponse(
+            {"error": f"comment not found: {comment_id}"}, status_code=404,
+        )
 
-    if rc != 0:
-        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-    return JSONResponse({"ok": True, "output": stdout})
+    try:
+        changed = await asyncio.to_thread(
+            graph_ops.integrate_comment, comment["id"], org=org,
+        )
+    except graph_ops.CrossOrgWriteError as ex:
+        return _cross_org_error_response(ex)
+
+    return JSONResponse({
+        "ok": True,
+        "comment_id": comment["id"],
+        "integrated": True,
+        "changed": changed,
+    })
 
 
 async def api_graph_bead(request):
-    """Create a bead with provenance via graph CLI."""
+    """Create a bead (via ``bd`` subprocess for the tracker side) + link
+    provenance edge via direct ops call.
+
+    ``bd`` is intentionally retained — the bead tracker is a separate
+    system (Dolt-backed) and owns bead lifecycle; only the graph edge
+    goes through ops.
+    """
     body = await request.json()
 
     title = body.get("title", "")
@@ -5461,38 +5626,72 @@ async def api_graph_bead(request):
     if not isinstance(priority, int) or priority < 0 or priority > 3:
         return JSONResponse({"error": "priority must be integer 0-3"}, status_code=400)
 
-    cmd = ["graph", "bead", title, "-p", str(priority)]
+    desc = body.get("description", "") or ""
+    if desc and len(desc) > _GRAPH_MAX_CONTENT:
+        return JSONResponse({"error": "description exceeds 100KB"}, status_code=400)
 
-    desc = body.get("description", "")
-    stdin_data = None
+    source_id = body.get("source")
+    if source_id:
+        e = _graph_validate_source_id(source_id)
+        if e:
+            return JSONResponse({"error": e}, status_code=400)
+
+    # Create bead via bd (tracker system).
+    bd_cmd = ["bd", "create", title, "-p", str(priority), "-l", "readiness:idea"]
     if desc:
-        if len(desc) > _GRAPH_MAX_CONTENT:
-            return JSONResponse({"error": "description exceeds 100KB"}, status_code=400)
-        cmd += ["-d", "-"]
-        stdin_data = desc
-
+        bd_cmd += ["-d", desc]
     if body.get("type"):
-        cmd += ["-t", body["type"]]
-    if body.get("source"):
-        source_id = body["source"]
-        err = _graph_validate_source_id(source_id)
-        if err:
-            return JSONResponse({"error": err}, status_code=400)
-        cmd += ["--source", source_id]
-    if body.get("turns"):
-        cmd += ["--turns", body["turns"]]
-    if body.get("note"):
-        cmd += ["--note", body["note"]]
+        bd_cmd += ["-t", body["type"]]
 
-    stdout, stderr, rc = await run_cli(cmd, timeout=60, stdin_data=stdin_data)
-
+    stdout, stderr, rc = await run_cli(bd_cmd, timeout=60)
     if rc != 0:
         return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-    return JSONResponse({"ok": True, "output": stdout})
+
+    import re as _re
+    match = _re.search(r"Created issue: (\S+)", stdout)
+    if not match:
+        return JSONResponse({"ok": True, "output": stdout})
+    bead_id = match.group(1)
+
+    # Create the provenance edge via ops.
+    edge = None
+    if source_id and body.get("turns"):
+        org = _caller_org(request)
+        turns_arg = str(body["turns"])
+        parts = turns_arg.split("-")
+        try:
+            if len(parts) == 2:
+                turns = (int(parts[0]), int(parts[1]))
+            elif len(parts) == 1:
+                turns = (int(parts[0]), int(parts[0]))
+            else:
+                turns = None
+        except ValueError:
+            turns = None
+
+        if turns is not None:
+            edge = await asyncio.to_thread(
+                graph_ops.create_edge,
+                bead_id, source_id,
+                from_type="bead",
+                to_type="source",
+                relation="conceived_at",
+                turns=turns,
+                note=body.get("note"),
+                org=org,
+            )
+            _checkpoint_graph()
+
+    return JSONResponse({
+        "ok": True,
+        "output": stdout,
+        "bead_id": bead_id,
+        "edge_id": (edge or {}).get("id"),
+    })
 
 
 async def api_graph_link(request):
-    """Create a provenance edge via graph CLI."""
+    """Create a provenance edge via direct ops call."""
     body = await request.json()
 
     bead_id = body.get("bead_id", "")
@@ -5500,49 +5699,104 @@ async def api_graph_link(request):
         return JSONResponse({"error": "bead_id required"}, status_code=400)
 
     source_id = body.get("source_id", "")
-    err = _graph_validate_source_id(source_id)
-    if err:
-        return JSONResponse({"error": err}, status_code=400)
+    e = _graph_validate_source_id(source_id)
+    if e:
+        return JSONResponse({"error": e}, status_code=400)
 
     relationship = body.get("relationship", "informed_by")
+    org = _caller_org(request)
 
-    cmd = ["graph", "link", bead_id, source_id, "-r", relationship]
-    if body.get("turn"):
-        cmd += ["-t", body["turn"]]
-    if body.get("note"):
-        cmd += ["--note", body["note"]]
+    turns: tuple[int, int] | None = None
+    turns_arg = body.get("turn") or body.get("turns")
+    if turns_arg:
+        parts = str(turns_arg).split("-")
+        try:
+            if len(parts) == 2:
+                turns = (int(parts[0]), int(parts[1]))
+            elif len(parts) == 1:
+                turns = (int(parts[0]), int(parts[0]))
+        except ValueError:
+            return JSONResponse(
+                {"error": f"invalid turns: {turns_arg!r}"}, status_code=400,
+            )
 
-    stdout, stderr, rc = await run_cli(cmd, timeout=30)
+    # Bead IDs stay as-is. For source-to-source, resolve the from side too.
+    from_type = "bead" if bead_id.startswith("auto-") else "source"
 
-    if rc != 0:
-        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-    return JSONResponse({"ok": True, "output": stdout})
+    edge = await asyncio.to_thread(
+        graph_ops.create_edge,
+        bead_id, source_id,
+        from_type=from_type,
+        to_type="source",
+        relation=relationship,
+        turns=turns,
+        note=body.get("note"),
+        org=org,
+    )
+    _checkpoint_graph()
+    return JSONResponse({
+        "ok": True,
+        "edge_id": edge["id"],
+        "source_id": edge["target_id"],
+        "bead_id": edge["source_id"],
+        "relation": edge["relation"],
+    })
 
 
 _ingest_lock = asyncio.Lock()
 
 
 async def api_graph_sessions(request):
-    """Ingest sessions via graph CLI."""
+    """Ingest sessions via direct ingest call (no subprocess)."""
     if _ingest_lock.locked():
         return JSONResponse({"ok": True, "output": "ingest already in progress", "skipped": True})
 
     async with _ingest_lock:
         body = await request.json()
+        from tools.graph.ingest import (
+            ingest_all_claude_code,
+            ingest_claude_code_project,
+        )
 
-        cmd = ["graph", "sessions"]
-        if body.get("all"):
-            cmd += ["--all"]
-        if body.get("project"):
-            cmd += ["--project", body["project"]]
-        if body.get("force"):
-            cmd += ["--force"]
+        force = bool(body.get("force"))
+        project = body.get("project")
+        all_flag = bool(body.get("all"))
 
-        stdout, stderr, rc = await run_cli(cmd, timeout=120)
+        def _run_ingest():
+            # Per-session routing: each session lands in its own org DB based
+            # on .session_meta.json.graph_org. GRAPH_DB env still pins when
+            # set (test / override).
+            route_per_session = os.environ.get("GRAPH_DB") is None
+            sessions_db = None if route_per_session else graph_ops._open()
+            try:
+                if all_flag:
+                    return ingest_all_claude_code(sessions_db, force=force)
+                if project:
+                    from pathlib import Path as _P
+                    return ingest_claude_code_project(
+                        sessions_db, _P(project), force=force,
+                    )
+                return ingest_claude_code_project(sessions_db, force=force)
+            finally:
+                if sessions_db is not None:
+                    sessions_db.close()
 
-        if rc != 0:
-            return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
-        return JSONResponse({"ok": True, "output": stdout})
+        try:
+            results = await asyncio.to_thread(_run_ingest)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+        counts = {
+            "ingested": sum(1 for r in results if r.get("status") == "ingested"),
+            "updated": sum(1 for r in results if r.get("status") == "updated"),
+            "refreshed": sum(1 for r in results if r.get("status") == "refreshed"),
+            "skipped": sum(1 for r in results if r.get("status") == "skipped"),
+        }
+        summary = (
+            f"Total: {counts['ingested']} new, {counts['updated']} updated, "
+            f"{counts['refreshed']} refreshed, {counts['skipped']} skipped"
+        )
+        return JSONResponse({"ok": True, "output": summary, "counts": counts})
 
 
 async def api_graph_attach(request):
@@ -5553,48 +5807,55 @@ async def api_graph_attach(request):
     if not upload:
         return JSONResponse({"error": "file field required"}, status_code=400)
 
-    # Write uploaded file to a temp location
     contents = await upload.read()
     if not contents:
         return JSONResponse({"error": "empty file"}, status_code=400)
-    if len(contents) > 50 * 1024 * 1024:  # 50MB limit
+    if len(contents) > _MAX_ATTACHMENT_BYTES:
         return JSONResponse({"error": "file too large (max 50MB)"}, status_code=400)
+
+    source_id = form.get("source_id")
+    if source_id and not _GRAPH_SOURCE_ID_RE.match(str(source_id)):
+        return JSONResponse(
+            {"error": f"malformed source_id: {source_id!r}"}, status_code=400,
+        )
+    turn = form.get("turn")
+    try:
+        turn_int = int(turn) if turn is not None and str(turn).strip() else None
+    except ValueError:
+        return JSONResponse({"error": f"invalid turn: {turn!r}"}, status_code=400)
 
     suffix = ""
     if upload.filename and "." in upload.filename:
         suffix = "." + upload.filename.rsplit(".", 1)[1]
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(contents)
         tmp_path = tmp.name
 
-    cmd = ["graph", "attach", tmp_path]
-
-    source_id = form.get("source_id")
-    if source_id:
-        if not _GRAPH_SOURCE_ID_RE.match(str(source_id)):
-            import os
-            os.unlink(tmp_path)
-            return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
-        cmd += ["--source", str(source_id)]
-
-    turn = form.get("turn")
-    if turn is not None:
-        cmd += ["--turn", str(turn)]
-
-    stdout, stderr, rc = await run_cli(cmd, timeout=60)
-
-    # Clean up temp file
-    import os
+    org = _caller_org(request)
     try:
-        os.unlink(tmp_path)
-    except OSError:
-        pass
+        att = await asyncio.to_thread(
+            graph_ops.attach_file,
+            tmp_path,
+            source_id=str(source_id) if source_id else None,
+            turn_number=turn_int,
+            original_filename=upload.filename or None,
+            org=org,
+        )
+    except graph_ops.CrossOrgWriteError as ex:
+        return _cross_org_error_response(ex)
+    except FileNotFoundError as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+    finally:
+        _safe_unlink(tmp_path)
 
-    if rc != 0:
-        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
     _checkpoint_graph()
-    return JSONResponse({"ok": True, "output": stdout})
+    return JSONResponse({
+        "ok": True,
+        "attachment_id": att["id"],
+        "filename": att["filename"],
+        "size_bytes": att["size_bytes"],
+        "source_id": att["source_id"],
+    })
 
 
 # ── Attachment serving ────────────────────────────────────────
@@ -6038,9 +6299,12 @@ async def api_graph_resolve(request):
 
     source = graph_ops.get_source(id)
     if source:
-        result = await run_cli_json(
-            ["graph", "read", source["id"], "--json", "--max-chars", "50000", "--first"]
+        result = await asyncio.to_thread(
+            graph_ops.read_source_full, source["id"], max_chars=50000,
         )
+        if result is None:
+            result = {"source": source, "entries": [], "truncated": False,
+                      "total_chars": 0}
         _attach_source_org(result)
         return JSONResponse(result)
     att = graph_ops.get_attachment(id)
@@ -6419,19 +6683,20 @@ async def api_graph_journal_write(request):
         if field not in body:
             return JSONResponse({"error": f"missing required field: {field}"}, status_code=400)
 
-    # Shell out to graph journal write via CLI
-    import json as _json
-    stdin_data = _json.dumps(body)
-    stdout, stderr, rc = await run_cli(
-        ["graph", "journal", "write", "-c", "-"],
-        timeout=30,
-        stdin_data=stdin_data,
-    )
-
-    if rc != 0:
-        return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
+    org = _caller_org(request)
+    try:
+        result = await asyncio.to_thread(
+            graph_ops.write_journal_entry, body, org=org,
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     _checkpoint_graph()
-    return JSONResponse({"ok": True, "output": stdout})
+    return JSONResponse({
+        "ok": True,
+        "source_id": result["source_id"],
+        "edge_count": result["edge_count"],
+        "org": result["org"],
+    })
 
 
 async def api_graph_collab_tag_describe(request):
