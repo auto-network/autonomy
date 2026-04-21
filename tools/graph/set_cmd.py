@@ -76,12 +76,12 @@ def _print_table(rows: list[dict], cols: list[tuple[str, str, int]]) -> None:
 # ── list / members / show ────────────────────────────────────
 
 
-def _caller_org(args) -> str | None:
-    return getattr(args, "caller_org", None)
+def _org(args) -> str | None:
+    return getattr(args, "org", None)
 
 
 def cmd_set_list(args) -> None:
-    set_ids = ops.list_set_ids(caller_org=_caller_org(args))
+    set_ids = ops.list_set_ids(org=_org(args))
     if not set_ids:
         print("(no Settings yet)")
         return
@@ -105,7 +105,7 @@ def cmd_set_members(args) -> None:
         target = None  # explicit "show stored shape"
     members = ops.read_set(
         args.set_id, target_revision=target, min_revision=minrev,
-        caller_org=_caller_org(args),
+        org=_org(args),
     )
     rows = []
     for m in members.members:
@@ -119,7 +119,7 @@ def cmd_set_members(args) -> None:
             "key": m.key,
             "stored_rev": str(m.stored_revision),
             "target_rev": target_disp,
-            "state": m.publication_state,
+            "state": m.state,
         })
     if not rows:
         print(f"(no Settings in {args.set_id})")
@@ -133,7 +133,7 @@ def cmd_set_members(args) -> None:
         ])
     if any(members.dropped.values()):
         print()
-        print(f"Dropped: {dict(members.dropped)}")
+        print(f"Dropped: {members.dropped.to_dict()}")
 
 
 def cmd_set_show(args) -> None:
@@ -141,7 +141,7 @@ def cmd_set_show(args) -> None:
     if no_upconvert:
         target = None
     got = ops.get_setting(
-        args.id, target_revision=target, caller_org=_caller_org(args),
+        args.id, target_revision=target, org=_org(args),
     )
     if got is None:
         print(f"Setting not found (or dropped by --as-rev): {args.id}",
@@ -153,7 +153,7 @@ def cmd_set_show(args) -> None:
         "stored_revision": got.stored_revision,
         "target_revision": got.target_revision,
         "key": got.key,
-        "publication_state": got.publication_state,
+        "state": got.state,
         "supersedes": got.supersedes,
         "excludes": got.excludes,
         "deprecated": got.deprecated,
@@ -174,7 +174,7 @@ def cmd_set_add(args) -> None:
     try:
         sid = ops.add_setting(
             set_id, rev, args.key, payload, state=args.state,
-            caller_org=_caller_org(args),
+            org=_org(args),
         )
     except SchemaValidationError as e:
         print(f"Error: schema validation failed: {e}", file=sys.stderr)
@@ -187,7 +187,7 @@ def cmd_set_override(args) -> None:
     try:
         sid = ops.override_setting(
             args.target_id, payload, state=args.state,
-            caller_org=_caller_org(args),
+            org=_org(args),
         )
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -201,7 +201,7 @@ def cmd_set_override(args) -> None:
 def cmd_set_exclude(args) -> None:
     try:
         sid = ops.exclude_setting(
-            args.target_id, state=args.state, caller_org=_caller_org(args),
+            args.target_id, state=args.state, org=_org(args),
         )
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -220,7 +220,7 @@ def cmd_set_promote(args) -> None:
         )
         sys.exit(1)
     try:
-        ops.promote_setting(args.id, args.to, caller_org=_caller_org(args))
+        ops.promote_setting(args.id, args.to, org=_org(args))
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -231,7 +231,7 @@ def cmd_set_deprecate(args) -> None:
     try:
         ops.deprecate_setting(
             args.id, successor_id=args.successor,
-            caller_org=_caller_org(args),
+            org=_org(args),
         )
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -242,7 +242,7 @@ def cmd_set_deprecate(args) -> None:
 
 def cmd_set_remove(args) -> None:
     try:
-        ops.remove_setting(args.id, caller_org=_caller_org(args))
+        ops.remove_setting(args.id, org=_org(args))
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -259,7 +259,7 @@ def cmd_set_migrate(args) -> None:
     try:
         report = ops.migrate_setting_revisions(
             args.set_id, args.to_rev, dry_run=args.dry_run,
-            caller_org=_caller_org(args),
+            org=_org(args),
         )
     except Exception as e:  # noqa: BLE001 — surface to operator
         print(f"Error: {e}", file=sys.stderr)
@@ -293,9 +293,9 @@ def add_read_flags(parser) -> None:
                         help="Show stored payloads (the default; explicit form)")
 
 
-def _add_caller_org_arg(parser) -> None:
+def _add_org_arg(parser) -> None:
     parser.add_argument(
-        "--caller-org", dest="caller_org", default=None,
+        "--org", dest="org", default=None,
         help="Route to the per-org DB at data/orgs/<slug>.db "
              "(default: autonomy / GRAPH_DB env)",
     )
@@ -311,7 +311,7 @@ def attach_set_subparser(sub) -> None:
 
     # list
     p_list = set_sub.add_parser("list", help="List known set_ids visible to caller")
-    _add_caller_org_arg(p_list)
+    _add_org_arg(p_list)
     p_list.set_defaults(func=cmd_set_list)
 
     # members
@@ -320,14 +320,14 @@ def attach_set_subparser(sub) -> None:
     )
     p_members.add_argument("set_id")
     add_read_flags(p_members)
-    _add_caller_org_arg(p_members)
+    _add_org_arg(p_members)
     p_members.set_defaults(func=cmd_set_members)
 
     # show
     p_show = set_sub.add_parser("show", help="Show a single Setting in detail")
     p_show.add_argument("id")
     add_read_flags(p_show)
-    _add_caller_org_arg(p_show)
+    _add_org_arg(p_show)
     p_show.set_defaults(func=cmd_set_show)
 
     # add
@@ -339,7 +339,7 @@ def attach_set_subparser(sub) -> None:
                        help="Path to JSON or YAML payload file")
     p_add.add_argument("--state", default="raw",
                        choices=("raw", "curated", "published", "canonical"))
-    _add_caller_org_arg(p_add)
+    _add_org_arg(p_add)
     p_add.set_defaults(func=cmd_set_add)
 
     # override
@@ -349,7 +349,7 @@ def attach_set_subparser(sub) -> None:
                         help="Path to partial JSON/YAML payload (merge-patch)")
     p_over.add_argument("--state", default="raw",
                         choices=("raw", "curated", "published", "canonical"))
-    _add_caller_org_arg(p_over)
+    _add_org_arg(p_over)
     p_over.set_defaults(func=cmd_set_override)
 
     # exclude
@@ -357,7 +357,7 @@ def attach_set_subparser(sub) -> None:
     p_excl.add_argument("target_id", help="Setting id being excluded")
     p_excl.add_argument("--state", default="raw",
                         choices=("raw", "curated", "published", "canonical"))
-    _add_caller_org_arg(p_excl)
+    _add_org_arg(p_excl)
     p_excl.set_defaults(func=cmd_set_exclude)
 
     # promote
@@ -365,20 +365,20 @@ def attach_set_subparser(sub) -> None:
     p_prom.add_argument("id")
     p_prom.add_argument("--to", required=True,
                         choices=_VALID_PROMOTION_STATES)
-    _add_caller_org_arg(p_prom)
+    _add_org_arg(p_prom)
     p_prom.set_defaults(func=cmd_set_promote)
 
     # deprecate
     p_dep = set_sub.add_parser("deprecate", help="Mark a Setting deprecated")
     p_dep.add_argument("id")
     p_dep.add_argument("--successor", help="Optional successor Setting id")
-    _add_caller_org_arg(p_dep)
+    _add_org_arg(p_dep)
     p_dep.set_defaults(func=cmd_set_deprecate)
 
     # remove
     p_rem = set_sub.add_parser("remove", help="Hard-delete a raw Setting")
     p_rem.add_argument("id")
-    _add_caller_org_arg(p_rem)
+    _add_org_arg(p_rem)
     p_rem.set_defaults(func=cmd_set_remove)
 
     # migrate
@@ -388,5 +388,5 @@ def attach_set_subparser(sub) -> None:
     p_mig.add_argument("set_id")
     p_mig.add_argument("--to-rev", type=int, required=True, dest="to_rev")
     p_mig.add_argument("--dry-run", action="store_true", dest="dry_run")
-    _add_caller_org_arg(p_mig)
+    _add_org_arg(p_mig)
     p_mig.set_defaults(func=cmd_set_migrate)

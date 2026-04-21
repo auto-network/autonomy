@@ -186,11 +186,11 @@ def _entries_from_peer_subscriptions(raw: Any) -> list[OperatorLocalEntry]:
             "<caller-org>: {peers: [<peer-org>, ...]}"
         )
     out: list[OperatorLocalEntry] = []
-    for caller_org, spec in raw.items():
-        if not isinstance(caller_org, str) or not caller_org:
+    for org, spec in raw.items():
+        if not isinstance(org, str) or not org:
             raise OperatorLocalMigrationError(
                 f"peer_subscriptions: caller-org key must be a non-empty "
-                f"string, got {caller_org!r}"
+                f"string, got {org!r}"
             )
         if spec is None:
             # Treat a bare `caller: ~` as "isolate fully" for ergonomics
@@ -204,13 +204,13 @@ def _entries_from_peer_subscriptions(raw: Any) -> list[OperatorLocalEntry]:
                 peers = []
             elif not isinstance(raw_peers, list):
                 raise OperatorLocalMigrationError(
-                    f"peer_subscriptions[{caller_org!r}].peers must be a list"
+                    f"peer_subscriptions[{org!r}].peers must be a list"
                 )
             else:
                 peers = [str(p) for p in raw_peers]
         else:
             raise OperatorLocalMigrationError(
-                f"peer_subscriptions[{caller_org!r}] must be a mapping "
+                f"peer_subscriptions[{org!r}] must be a mapping "
                 f"with a 'peers' field"
             )
         payload = {"peers": peers}
@@ -220,7 +220,7 @@ def _entries_from_peer_subscriptions(raw: Any) -> list[OperatorLocalEntry]:
         out.append(OperatorLocalEntry(
             set_id=PEER_SUB_SET_ID,
             schema_revision=PEER_SUB_REVISION,
-            key=caller_org,
+            key=org,
             payload=payload,
         ))
     return out

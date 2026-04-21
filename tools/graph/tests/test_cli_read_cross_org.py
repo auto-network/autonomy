@@ -334,7 +334,7 @@ def test_ops_get_attachment_cross_org_canonical(orgs_root):
     ids = _seed_anchore_and_autonomy(orgs_root)
 
     att = ops.get_attachment(
-        ids["autonomy_sign_att"], caller_org="anchore",
+        ids["autonomy_sign_att"], org="anchore",
     )
     assert att is not None
     assert att["org"] == "autonomy"
@@ -346,7 +346,7 @@ def test_ops_get_attachment_peer_raw_parent_invisible(orgs_root):
     ids = _seed_anchore_and_autonomy(orgs_root)
 
     att = ops.get_attachment(
-        ids["autonomy_raw_att"], caller_org="anchore",
+        ids["autonomy_raw_att"], org="anchore",
     )
     assert att is None
 

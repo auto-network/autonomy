@@ -3,7 +3,7 @@
 Bead: auto-gko4e (auto-txg5.S4). Spec: graph://0d3f750f-f9c.
 
 Exercises ``build_plan`` and ``apply_migration`` against synthetic yaml
-fixtures plus the ``graph set members --caller-org personal`` CLI path
+fixtures plus the ``graph set members --org personal`` CLI path
 that the acceptance criteria use to verify routing.
 """
 
@@ -390,10 +390,10 @@ def test_peer_subscription_schema_rejects_non_string_peer():
         )
 
 
-# ── ops.read_set routed by caller_org=personal ─────────────
+# ── ops.read_set routed by org=personal ─────────────
 
 
-def test_read_set_with_caller_org_personal_returns_artifact_paths(
+def test_read_set_with_org_personal_returns_artifact_paths(
     synthetic_yaml, orgs_dir, monkeypatch,
 ):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
@@ -401,7 +401,7 @@ def test_read_set_with_caller_org_personal_returns_artifact_paths(
     plan = build_plan(synthetic_yaml, orgs_root=orgs_dir)
     apply_migration(plan)
 
-    got = ops.read_set(ARTIFACT_PATH_SET_ID, caller_org=PERSONAL_ORG_SLUG)
+    got = ops.read_set(ARTIFACT_PATH_SET_ID, org=PERSONAL_ORG_SLUG)
     keys = sorted(m.key for m in got.members)
     assert keys == [
         "anchore:id_ed25519",
@@ -410,7 +410,7 @@ def test_read_set_with_caller_org_personal_returns_artifact_paths(
     ]
 
 
-def test_read_set_with_caller_org_personal_returns_peer_subscriptions(
+def test_read_set_with_org_personal_returns_peer_subscriptions(
     synthetic_yaml, orgs_dir, monkeypatch,
 ):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
@@ -418,7 +418,7 @@ def test_read_set_with_caller_org_personal_returns_peer_subscriptions(
     plan = build_plan(synthetic_yaml, orgs_root=orgs_dir)
     apply_migration(plan)
 
-    got = ops.read_set(PEER_SUB_SET_ID, caller_org=PERSONAL_ORG_SLUG)
+    got = ops.read_set(PEER_SUB_SET_ID, org=PERSONAL_ORG_SLUG)
     by_key = {m.key: m.payload for m in got.members}
     assert by_key == {
         "autonomy": {"peers": ["personal"]},
@@ -426,7 +426,7 @@ def test_read_set_with_caller_org_personal_returns_peer_subscriptions(
     }
 
 
-# ── graph set members --caller-org personal CLI ────────────
+# ── graph set members --org personal CLI ────────────
 
 
 def _run_cli(argv: list[str]) -> tuple[int, str, str]:
@@ -455,7 +455,7 @@ def test_cli_set_members_artifact_path_personal(
 
     rc, out, err = _run_cli([
         "set", "members", ARTIFACT_PATH_SET_ID,
-        "--caller-org", PERSONAL_ORG_SLUG,
+        "--org", PERSONAL_ORG_SLUG,
     ])
     assert rc == 0, err
     assert "anchore:license.yaml" in out
@@ -473,7 +473,7 @@ def test_cli_set_members_peer_subscription_personal(
 
     rc, out, err = _run_cli([
         "set", "members", PEER_SUB_SET_ID,
-        "--caller-org", PERSONAL_ORG_SLUG,
+        "--org", PERSONAL_ORG_SLUG,
     ])
     assert rc == 0, err
     assert "autonomy" in out
@@ -489,7 +489,7 @@ def test_cli_set_members_empty_when_no_migration(orgs_dir, monkeypatch):
 
     rc, out, err = _run_cli([
         "set", "members", ARTIFACT_PATH_SET_ID,
-        "--caller-org", PERSONAL_ORG_SLUG,
+        "--org", PERSONAL_ORG_SLUG,
     ])
     assert rc == 0, err
     assert "no Settings in" in out

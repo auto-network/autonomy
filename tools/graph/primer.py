@@ -39,7 +39,7 @@ def _open_source_db(source_id: str, own_db: GraphDB) -> GraphDB:
     if src is None:
         return own_db
     home_org = src.get("org") or ""
-    caller = ops._resolve_caller_org(None) or ""
+    caller = ops._resolve_org(None) or ""
     if home_org and home_org != caller:
         try:
             return _GraphDB.for_org(home_org, mode="ro")

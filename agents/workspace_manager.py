@@ -39,7 +39,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from agents.workspace_settings import WorkspaceV1
+from agents.workspace_settings import (
+    WorkspaceV1,
+    WorkspaceMountInvalidError,
+    WorkspaceMountMissingError,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
@@ -176,7 +180,43 @@ def prepare_session_mounts(
         else:
             _update_readonly_clone(clone)
             mounts[str(clone)] = f"{repo.mount}:ro"
+    _apply_workspace_mount_settings(workspace, mounts)
     return mounts
+
+
+def _apply_workspace_mount_settings(
+    workspace: WorkspaceV1, mounts: dict[str, str],
+) -> None:
+    """Extend *mounts* with ``autonomy.workspace.mount#1`` host directories.
+
+    Required mounts whose host path is missing raise
+    :class:`WorkspaceMountMissingError`; optional mounts are silently
+    skipped (logged at DEBUG). A host path that exists but is not a
+    directory raises :class:`WorkspaceMountInvalidError`.
+    """
+    for key, rs in workspace.mounts.items():
+        payload = rs.payload
+        host = Path(payload.host_path)
+        if not host.exists():
+            if payload.required:
+                raise WorkspaceMountMissingError(
+                    mount_key=key,
+                    origin_org=rs.org,
+                    state=rs.state,
+                    host_path=payload.host_path,
+                    container_path=payload.container_path,
+                )
+            logger.debug(
+                "workspace: optional mount %s host_path %s absent — skipping",
+                key, payload.host_path,
+            )
+            continue
+        if not host.is_dir():
+            raise WorkspaceMountInvalidError(
+                mount_key=key,
+                reason=f"host_path is not a directory: {payload.host_path}",
+            )
+        mounts[str(host)] = f"{payload.container_path}:{payload.mode}"
 
 
 # ── Session teardown ──────────────────────────────────────────────

@@ -40,12 +40,12 @@ def _get_session_name() -> str:
     sys.exit(1)
 
 
-def _get_db_path(caller_org: str | None = None) -> Path:
+def _get_db_path(org: str | None = None) -> Path:
     """Resolve DB path via :func:`resolve_caller_db_path`.
 
     Priority (inherited from the resolver + CLI cascade):
       1. ``GRAPH_DB`` env (test override / explicit pin).
-      2. Explicit ``caller_org`` kwarg → that org's DB.
+      2. Explicit ``org`` kwarg → that org's DB.
       3. ``GRAPH_ORG`` env → that org's DB (session launcher exports it
          in containers rooted on a specific org).
       4. Scopeless default: ``data/orgs/personal.db`` (auto-txg5.3 — host
@@ -54,9 +54,9 @@ def _get_db_path(caller_org: str | None = None) -> Path:
       5. Legacy ``data/graph.db`` fallback when the per-org DB file is
          absent (pre-migration compatibility).
     """
-    if caller_org is None:
-        caller_org = os.environ.get("GRAPH_ORG")
-    return resolve_caller_db_path(caller_org)
+    if org is None:
+        org = os.environ.get("GRAPH_ORG")
+    return resolve_caller_db_path(org)
 
 
 def _apply_scope(args) -> None:
@@ -379,7 +379,7 @@ def _resolve_source_cross_org(args, source_arg, *, first=False, allow_title=True
       ``False`` for peer-pooled handles (pool owns them).
     """
     from . import ops as _ops
-    caller_org = os.environ.get("GRAPH_ORG")
+    org = os.environ.get("GRAPH_ORG")
 
     # Step 1: own-org resolution against args.db (honours --db pins).
     own_db = GraphDB(args.db)
@@ -399,25 +399,25 @@ def _resolve_source_cross_org(args, source_arg, *, first=False, allow_title=True
 
     if own_result is not None:
         if isinstance(own_result, dict):
-            own_result.setdefault("org", caller_org or "")
+            own_result.setdefault("org", org or "")
             return own_result, GraphDB(args.db), True
         # Ambiguous in own-org — mirror pre-rewire behavior.
         for r in own_result:
-            r.setdefault("org", caller_org or "")
+            r.setdefault("org", org or "")
         if first:
             return own_result[0], GraphDB(args.db), True
         return own_result, None, False
 
     if own_title_matches:
         for s in own_title_matches:
-            s.setdefault("org", caller_org or "")
+            s.setdefault("org", org or "")
         if len(own_title_matches) == 1 or first:
             return own_title_matches[0], GraphDB(args.db), True
         return own_title_matches, None, False
 
     # Step 2: cross-org peer scan (public-surface only).
     peer_result = _ops.resolve_source_strict(
-        source_arg, caller_org=caller_org,
+        source_arg, org=org,
     )
 
     if peer_result is None:
@@ -435,7 +435,7 @@ def _resolve_source_cross_org(args, source_arg, *, first=False, allow_title=True
             return peer_result, None, False
 
     home_org = peer_result.get("org") or ""
-    caller = caller_org or ""
+    caller = org or ""
     if home_org and home_org != caller:
         try:
             db = GraphDB.for_org(home_org, mode="ro")
@@ -954,19 +954,19 @@ def cmd_context(args):
     finally:
         own_db.close()
 
-    caller_org = os.environ.get("GRAPH_ORG")
+    org = os.environ.get("GRAPH_ORG")
     if source is not None:
-        source.setdefault("org", caller_org or "")
+        source.setdefault("org", org or "")
         db = GraphDB(args.db)
         close_db = True
     else:
         from . import ops as _ops
-        source = _ops.get_source(args.source, caller_org=caller_org)
+        source = _ops.get_source(args.source, org=org)
         if not source:
             print(f"Source not found: {args.source}")
             return
         home_org = source.get("org") or ""
-        caller = caller_org or ""
+        caller = org or ""
         if home_org and home_org != caller:
             try:
                 db = GraphDB.for_org(home_org, mode="ro")
@@ -3537,8 +3537,8 @@ def cmd_attachment(args):
     if att is None:
         # Step 2: cross-org peer scan (public-surface only).
         from . import ops as _ops
-        caller_org = os.environ.get("GRAPH_ORG")
-        att = _ops.get_attachment(args.id, caller_org=caller_org)
+        org = os.environ.get("GRAPH_ORG")
+        att = _ops.get_attachment(args.id, org=org)
 
     if not att:
         print(f"No attachment found matching '{args.id}'", file=sys.stderr)
@@ -3595,13 +3595,13 @@ def cmd_attachments(args):
         else:
             # Step 2: cross-org peer scan.
             from . import ops as _ops
-            caller_org = os.environ.get("GRAPH_ORG")
-            src = _ops.get_source(source_id, caller_org=caller_org)
+            org = os.environ.get("GRAPH_ORG")
+            src = _ops.get_source(source_id, org=org)
             if src is None:
                 print("  No attachments found.")
                 return
             home_org = src.get("org") or ""
-            caller = caller_org or ""
+            caller = org or ""
             lookup_id = src["id"]
             if home_org and home_org != caller:
                 try:

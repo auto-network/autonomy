@@ -232,7 +232,7 @@ def test_post_promote(graph_db_env, example_schema, client):
     sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
     r = client.post(f"/api/graph/setting/{sid}/promote", json={"to_state": "canonical"})
     assert r.status_code == 200
-    assert ops.get_setting(sid).publication_state == "canonical"
+    assert ops.get_setting(sid).state == "canonical"
 
 
 def test_post_promote_invalid_state_400(graph_db_env, example_schema, client):
