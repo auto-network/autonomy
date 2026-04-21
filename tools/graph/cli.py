@@ -25,6 +25,44 @@ def _get_scope() -> str | None:
     return os.environ.get("GRAPH_SCOPE")
 
 
+class _pin_db:
+    """Context manager that pins ``GRAPH_DB`` env to ``args.db`` for the
+    duration of a ``ops.*`` call.
+
+    The CLI's ``--db`` flag is a test/override path that pins every DB
+    access. ``ops.*`` honours ``GRAPH_DB`` above the org cascade, so
+    mirroring the flag into env is the minimal change that preserves
+    ``--db`` semantics across the cli-to-ops migration.
+    """
+
+    def __init__(self, args):
+        self.path = None
+        db_val = getattr(args, "db", None)
+        if db_val is None:
+            return
+        db_str = str(db_val)
+        # The argparse default is ``_get_db_path()`` which already
+        # factors in env + org cascade; mirroring it would be a no-op.
+        default = os.environ.get("GRAPH_DB")
+        if default and default == db_str:
+            return
+        self.path = db_str
+
+    def __enter__(self):
+        if self.path is None:
+            return
+        self._prev = os.environ.get("GRAPH_DB")
+        os.environ["GRAPH_DB"] = self.path
+
+    def __exit__(self, *exc):
+        if self.path is None:
+            return
+        if getattr(self, "_prev", None) is None:
+            os.environ.pop("GRAPH_DB", None)
+        else:
+            os.environ["GRAPH_DB"] = self._prev
+
+
 def _get_session_name() -> str:
     """Resolve the current session name from environment.
 
@@ -1718,77 +1756,75 @@ def cmd_link(args):
                 args.turns = str(turn)
         api_link(args)
         return
+
     db = GraphDB(args.db)
-    from .models import Edge
+    try:
+        if not args.turns:
+            _, turn = _auto_provenance(db)
+            if turn:
+                args.turns = str(turn)
 
-    # Auto-detect turn if not provided
-    if not args.turns:
-        source, turn = _auto_provenance(db)
-        if turn:
-            args.turns = str(turn)
+        turn_range = None
+        if args.turns:
+            parts = args.turns.split("-")
+            if len(parts) == 2:
+                turn_range = (int(parts[0]), int(parts[1]))
+            elif len(parts) == 1:
+                turn_range = (int(parts[0]), int(parts[0]))
 
-    # Parse turn range
-    turn_range = None
-    if args.turns:
-        parts = args.turns.split("-")
-        if len(parts) == 2:
-            turn_range = {"from": int(parts[0]), "to": int(parts[1])}
-        elif len(parts) == 1:
-            turn_range = {"from": int(parts[0]), "to": int(parts[0])}
+        from_source, _ = _resolve_source_for_link(db, args.bead)
+        if from_source:
+            resolved_from_id = from_source["id"]
+            resolved_from_type = from_source.get("type", "source")
+        elif args.bead.startswith("auto-"):
+            resolved_from_id = args.bead
+            resolved_from_type = "bead"
+        else:
+            print(
+                f"Cannot resolve '{args.bead}' as a source or bead ID. "
+                f"Use 'graph search' to find the right ID.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
-    # Resolve the first argument (from-node)
-    from_source, from_err = _resolve_source_for_link(db, args.bead)
-    if from_source:
-        resolved_from_id = from_source["id"]
-        resolved_from_type = from_source.get("type", "source")
-    elif args.bead.startswith("auto-"):
-        # Bead ID — use as-is
-        resolved_from_id = args.bead
-        resolved_from_type = "bead"
-    else:
-        print(f"Cannot resolve '{args.bead}' as a source or bead ID. "
-              f"Use 'graph search' to find the right ID.", file=sys.stderr)
+        target, err = _resolve_source_for_link(db, args.source)
+        if err:
+            print(err, file=sys.stderr)
+            sys.exit(1)
+        target_id = target["id"]
+    finally:
         db.close()
-        sys.exit(1)
 
-    # Strict source resolution for the second argument (target)
-    source, err = _resolve_source_for_link(db, args.source)
-    if err:
-        print(err, file=sys.stderr)
-        db.close()
-        sys.exit(1)
+    from . import ops as _ops
+    with _pin_db(args):
+        _ops.create_edge(
+            resolved_from_id,
+            target_id,
+            from_type=resolved_from_type,
+            to_type="source",
+            relation=args.relation,
+            turns=turn_range,
+            note=args.note,
+            org=getattr(args, "org", None),
+        )
 
-    metadata = {}
-    if turn_range:
-        metadata["turns"] = turn_range
-    if args.note:
-        metadata["note"] = args.note
-
-    db.insert_edge(Edge(
-        source_id=resolved_from_id,
-        source_type=resolved_from_type,
-        target_id=source["id"],
-        target_type="source",
-        relation=args.relation,
-        metadata=metadata,
-    ))
-    db.commit()
-
-    turns_str = f" turns {args.turns}" if args.turns else ""
-    from_label = resolved_from_id if resolved_from_type == "bead" else resolved_from_id[:12]
-    print(f"  ✓ {from_label} —[{args.relation}]→ {source['id'][:12]}{turns_str}")
-    # Echo linked turn content for verification
-    if turn_range:
-        turn_num = turn_range.get("from")
-        if turn_num is not None:
-            content = db.conn.execute(
-                "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = ? LIMIT 1",
-                (source["id"], turn_num),
-            ).fetchone()
-            if content:
-                snippet = content["content"][:120].replace("\n", " ")
-                print(f'  → "{snippet}..."')
-    db.close()
+        turns_str = f" turns {args.turns}" if args.turns else ""
+        from_label = (
+            resolved_from_id if resolved_from_type == "bead"
+            else resolved_from_id[:12]
+        )
+        print(
+            f"  ✓ {from_label} —[{args.relation}]→ {target_id[:12]}{turns_str}"
+        )
+        if turn_range:
+            snippet = _ops.get_turn_content(
+                target_id,
+                turn_range[0],
+                org=getattr(args, "org", None),
+            )
+            if snippet:
+                short = snippet[:120].replace("\n", " ")
+                print(f'  → "{short}..."')
 
 
 def _query_attention(db, since=None, search=None, last=None, session=None, context=0):
@@ -2668,94 +2704,60 @@ def cmd_note(args):
         print("Error: note text required", file=sys.stderr)
         sys.exit(1)
     _check_single_line_content(text, getattr(args, 'force', False))
-    db = GraphDB(args.db)
     tags = args.tags.split(",") if args.tags else []
-
     html_path = getattr(args, "html", None)
-    is_rich = bool(html_path)
-
-    from .models import Source, Thought, new_id, now_iso
-    source_key = f"note:{new_id()}"
-    meta = {"tags": tags, "author": args.author or os.environ.get("BD_ACTOR", "user")}
-    if is_rich:
-        meta["rich_content"] = True
-    source = Source(
-        type="note",
-        platform="local",
-        project=args.project or _get_scope(),
-        title=text[:80],
-        file_path=source_key,
-        metadata=meta,
-    )
-    db.insert_source(source)
-
-    # Handle --html: store HTML as version-paired attachment
-    if is_rich:
-        html_file = Path(html_path)
-        if not html_file.is_file():
-            print(f"Error: HTML file not found: {html_path}", file=sys.stderr)
-            db.close()
-            sys.exit(1)
-        # Version 1 — source_id = "<note-id>@1"
-        html_att = _store_attachment(db, html_path, source_id=f"{source.id}@1")
-        if html_att is None:
-            db.close()
-            sys.exit(1)
-        print(f"  ✓ HTML attachment ({html_att.id[:12]})")
-
-    # Handle --attach: store files and substitute placeholders
     attach_paths = getattr(args, "attach", None) or []
-    if attach_paths:
-        att_ids = []
-        for fp in attach_paths:
-            att = _store_attachment(db, fp, source_id=source.id)
-            if att is None:
-                db.close()
-                sys.exit(1)
-            att_ids.append(att.id)
-            print(f"  ✓ Attached {att.filename} ({att.id[:12]})")
-        # Substitute positional placeholders {1}, {2}, ...
-        for i, att_id in enumerate(att_ids, 1):
-            text = text.replace('{' + str(i) + '}', f'graph://{att_id[:12]}')
 
-    t = Thought(
-        source_id=source.id,
-        content=text,
-        role="user",
-        turn_number=1,
-        tags=tags,
+    # Auto-provenance runs in the CLI layer so the graph sessions refresh
+    # subprocess (which rereads the local JSONL feeds) is scoped to the
+    # interactive caller, not every API write.
+    auto_src_id: str | None = None
+    auto_turn: int | None = None
+    try:
+        own_db = GraphDB(args.db)
+        try:
+            auto_src, turn = _auto_provenance(own_db, title=text[:80])
+            if auto_src and turn:
+                auto_src_id = auto_src["id"]
+                auto_turn = turn
+        finally:
+            own_db.close()
+    except Exception:
+        pass
+
+    from . import ops as _ops
+    with _pin_db(args):
+        try:
+            result = _ops.create_note(
+                text,
+                tags=tags,
+                author=args.author,
+                project=args.project or _get_scope(),
+                attachments=attach_paths,
+                html_path=html_path,
+                auto_provenance_source_id=auto_src_id,
+                auto_provenance_turn=auto_turn,
+                org=getattr(args, "org", None),
+            )
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    for att in result.get("attachments") or []:
+        if att.get("kind") == "html":
+            print(f"  ✓ HTML attachment ({att['id'][:12]})")
+        else:
+            print(f"  ✓ Attached {att['filename']} ({att['id'][:12]})")
+
+    src_id = result["source_id"]
+    prov_info = f" turn {auto_turn}" if auto_src_id and auto_turn else ""
+    rc_label = " (rich-content)" if result.get("rich_content") else ""
+    print(
+        f"  ✓ Note saved (src:{src_id[:12]}{prov_info}){rc_label} — "
+        f"{result['lines']} lines, {result['chars']} chars"
     )
-    db.insert_thought(t)
-
-    # Store version 1 in note_versions
-    db.insert_note_version(source.id, 1, text)
-
-    from .ingest import extract_entities
-    for name, etype in extract_entities(text):
-        eid = db.upsert_entity(name, etype)
-        db.add_mention(eid, t.id, "thought")
-
-    # Auto-provenance: link note to the session turn that inspired it
-    from .models import Edge
-    auto_src, auto_turn = _auto_provenance(db, title=text[:80])
-    if auto_src and auto_turn:
-        db.insert_edge(Edge(
-            source_id=source.id,
-            source_type="source",
-            target_id=auto_src["id"],
-            target_type="source",
-            relation="conceived_at",
-            metadata={"turns": {"from": auto_turn, "to": auto_turn}},
-        ))
-
-    db.commit()
-    _lines = text.count("\n") + (1 if text else 0)
-    prov_info = f" turn {auto_turn}" if auto_src and auto_turn else ""
-    rc_label = " (rich-content)" if is_rich else ""
-    print(f"  ✓ Note saved (src:{source.id[:12]}{prov_info}){rc_label} — {_lines} lines, {len(text)} chars")
-    local_path = _auto_save_note(source.id, text)
+    local_path = _auto_save_note(src_id, result["content"])
     print(f"  Local copy: {local_path}")
-    db.close()
 
 
 def cmd_comment_router(args):
@@ -2782,9 +2784,6 @@ def cmd_comment_router(args):
 
 def cmd_comment_add(args):
     """Add a comment to a note source."""
-    db = GraphDB(args.db)
-
-    # Resolve content
     if getattr(args, 'content_stdin', None) == "-":
         content = sys.stdin.read().strip()
     else:
@@ -2798,44 +2797,64 @@ def cmd_comment_add(args):
         print("Error: source ID required", file=sys.stderr)
         sys.exit(1)
 
-    result = _resolve_source(db, args.source, first=True)
-    if result is None:
-        print(f"No source found matching '{args.source}'", file=sys.stderr)
-        db.close()
-        sys.exit(1)
-    source = result if isinstance(result, dict) else result[0]
+    from . import ops as _ops
+    org = getattr(args, "org", None)
 
-    if source.get("type") != "note":
-        print(f"Error: comments are only supported on notes (source is type '{source.get('type')}')", file=sys.stderr)
-        db.close()
-        sys.exit(1)
+    with _pin_db(args):
+        resolved = _ops.resolve_source_strict(args.source, org=org)
+        if resolved is None:
+            # Retry via get_source so own-org raw matches are visible.
+            resolved = _ops.get_source(args.source, org=org)
+        if resolved is None:
+            print(f"No source found matching '{args.source}'", file=sys.stderr)
+            sys.exit(1)
+        if isinstance(resolved, list):
+            print(
+                f"Multiple sources match '{args.source}' — use a longer prefix",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if resolved.get("type") != "note":
+            print(
+                f"Error: comments are only supported on notes "
+                f"(source is type '{resolved.get('type')}')",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
-    comment = db.insert_comment(source["id"], content, actor=args.actor)
-    print(f"  ✓ Comment added (id:{comment['id'][:12]}) on {source['id'][:12]}")
-    db.close()
+        try:
+            comment = _ops.add_comment(
+                resolved["id"], content, actor=args.actor, org=org,
+            )
+        except _ops.CrossOrgWriteError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
+    print(
+        f"  ✓ Comment added (id:{comment['id'][:12]}) on {resolved['id'][:12]}"
+    )
 
 
 def cmd_comment_integrate(args):
     """Mark a comment as integrated into the note body."""
-    db = GraphDB(args.db)
+    from . import ops as _ops
 
-    # Check if already integrated
-    row = db.conn.execute("SELECT * FROM note_comments WHERE id = ? OR id LIKE ?",
-                          (args.comment_id, f"{args.comment_id}%")).fetchone()
-    if not row:
-        print(f"Error: comment not found: {args.comment_id}", file=sys.stderr)
-        db.close()
-        sys.exit(1)
+    with _pin_db(args):
+        comment = _ops.get_comment(
+            args.comment_id, org=getattr(args, "org", None),
+        )
+        if not comment:
+            print(f"Error: comment not found: {args.comment_id}", file=sys.stderr)
+            sys.exit(1)
+        if comment.get("integrated"):
+            print(f"  Comment {comment['id'][:12]} is already integrated")
+            return
 
-    comment = dict(row)
-    if comment["integrated"]:
-        print(f"  Comment {comment['id'][:12]} is already integrated")
-        db.close()
-        return
-
-    db.integrate_comment(comment["id"])
+        try:
+            _ops.integrate_comment(comment["id"], org=getattr(args, "org", None))
+        except _ops.CrossOrgWriteError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
     print(f"  ✓ Comment {comment['id'][:12]} marked as integrated")
-    db.close()
 
 
 def cmd_note_update(args):
@@ -2843,9 +2862,7 @@ def cmd_note_update(args):
     if getattr(args, "html", None):
         _require_read("c62b0142", "Agents must read the Rich-Content Creation Guide before creating/updating rich-content notes.\n  See: graph://c62b0142-fb3")
     _require_read("843a8137", "Agents must read the Note Revision Protocol before updating notes.\n  See: graph://843a8137-3c7")
-    db = GraphDB(args.db)
 
-    # Resolve content
     if getattr(args, 'content_stdin', None) == "-":
         new_content = sys.stdin.read().strip()
     else:
@@ -2856,118 +2873,52 @@ def cmd_note_update(args):
         sys.exit(1)
     _check_single_line_content(new_content, getattr(args, 'force', False))
 
-    result = _resolve_source(db, args.source, first=True)
-    if result is None:
-        print(f"No source found matching '{args.source}'", file=sys.stderr)
-        db.close()
-        sys.exit(1)
-    source = result if isinstance(result, dict) else result[0]
-
-    if source.get("type") != "note":
-        print(f"Error: can only update notes (source is type '{source.get('type')}')", file=sys.stderr)
-        db.close()
-        sys.exit(1)
-
-    source_id = source["id"]
-
-    # Check if this is a rich-content note — enforce dual update
-    meta = source.get("metadata") or {}
-    if isinstance(meta, str):
-        try:
-            meta = json.loads(meta)
-        except (json.JSONDecodeError, TypeError):
-            meta = {}
-    is_rich = meta.get("rich_content", False)
     html_path = getattr(args, "html", None)
-
-    if is_rich and not html_path:
-        print("Error: rich-content note requires --html on update (both markdown and HTML must be updated together)", file=sys.stderr)
-        db.close()
-        sys.exit(1)
-
-    # Handle --attach: store files and substitute placeholders
     attach_paths = getattr(args, "attach", None) or []
-    if attach_paths:
-        att_ids = []
-        for fp in attach_paths:
-            att = _store_attachment(db, fp, source_id=source_id)
-            if att is None:
-                db.close()
-                sys.exit(1)
-            att_ids.append(att.id)
-            print(f"  ✓ Attached {att.filename} ({att.id[:12]})")
-        for i, att_id in enumerate(att_ids, 1):
-            new_content = new_content.replace('{' + str(i) + '}', f'graph://{att_id[:12]}')
+    integrate_ids = list(args.integrate_ids or [])
 
-    # Get current thought (turn 1)
-    thoughts = db.get_thoughts_by_source(source_id)
-    if not thoughts:
-        print(f"Error: no thought found for source {source_id[:12]}", file=sys.stderr)
-        db.close()
-        sys.exit(1)
-    thought = thoughts[0]
-
-    # Determine versioning
-    current_max = db.get_max_note_version(source_id)
-    if current_max == 0:
-        # Backfill version 1 with current content
-        db.insert_note_version(source_id, 1, thought["content"])
-        next_version = 2
-    else:
-        next_version = current_max + 1
-
-    # Insert new version
-    db.insert_note_version(source_id, next_version, new_content)
-
-    # Handle --html: store version-paired HTML attachment
-    if html_path:
-        html_file = Path(html_path)
-        if not html_file.is_file():
-            print(f"Error: HTML file not found: {html_path}", file=sys.stderr)
-            db.close()
+    from . import ops as _ops
+    with _pin_db(args):
+        try:
+            result = _ops.update_note(
+                args.source,
+                new_content,
+                integrate_comments=integrate_ids,
+                attachments=attach_paths,
+                html_path=html_path,
+                org=getattr(args, "org", None),
+            )
+        except _ops.CrossOrgWriteError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
+        except LookupError as e:
+            print(f"{e}", file=sys.stderr)
             sys.exit(1)
-        html_att = _store_attachment(db, html_path, source_id=f"{source_id}@{next_version}")
-        if html_att is None:
-            db.close()
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
-        print(f"  ✓ HTML attachment ({html_att.id[:12]}) for version {next_version}")
-        # If note wasn't already rich-content, mark it now
-        if not is_rich:
-            meta["rich_content"] = True
-            db.conn.execute("UPDATE sources SET metadata = ? WHERE id = ?",
-                            (json.dumps(meta), source_id))
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
-    # Update the live thought content (FTS trigger handles re-indexing)
-    db.update_thought_content(thought["id"], new_content)
-
-    # Update source title
-    db.conn.execute("UPDATE sources SET title = ? WHERE id = ?", (new_content[:80], source_id))
-
-    # Re-extract entities for the new content
-    from .ingest import extract_entities
-    for name, etype in extract_entities(new_content):
-        eid = db.upsert_entity(name, etype)
-        db.add_mention(eid, thought["id"], "thought")
-
-    db.commit()
-    _lines = new_content.count("\n") + (1 if new_content else 0)
-    print(f"  ✓ Note updated to version {next_version} (src:{source_id[:12]}) — {_lines} lines, {len(new_content)} chars")
-
-    # Integrate specified comments
-    for cid in (args.integrate_ids or []):
-        row = db.conn.execute(
-            "SELECT id FROM note_comments WHERE (id = ? OR id LIKE ?) AND source_id = ?",
-            (cid, f"{cid}%", source_id),
-        ).fetchone()
-        if row:
-            db.integrate_comment(row["id"])
-            print(f"  ✓ Comment {row['id'][:12]} integrated")
+    for att in result.get("attachments") or []:
+        if att.get("kind") == "html":
+            print(f"  ✓ HTML attachment ({att['id'][:12]}) for version {result['new_version']}")
         else:
-            print(f"  ⚠ Comment {cid} not found on this note", file=sys.stderr)
+            print(f"  ✓ Attached {att['filename']} ({att['id'][:12]})")
 
-    local_path = _auto_save_note(source_id, new_content)
+    src_id = result["source_id"]
+    print(
+        f"  ✓ Note updated to version {result['new_version']} (src:{src_id[:12]}) — "
+        f"{result['lines']} lines, {result['chars']} chars"
+    )
+    for cid in result.get("integrated") or []:
+        print(f"  ✓ Comment {cid[:12]} integrated")
+    for cid in result.get("not_found_comments") or []:
+        print(f"  ⚠ Comment {cid} not found on this note", file=sys.stderr)
+
+    local_path = _auto_save_note(src_id, result["content"])
     print(f"  Local copy: {local_path}")
-    db.close()
 
 
 def cmd_agent_runs(args):
@@ -3491,38 +3442,50 @@ def cmd_attach(args):
         api_attach(args)
         return
 
-    db = GraphDB(args.db)
-
-    # Resolve provenance
     source_id = getattr(args, "source", None)
     turn_number = getattr(args, "turn", None)
 
     if not source_id and not turn_number:
-        auto_src, auto_turn = _auto_provenance(db)
+        db = GraphDB(args.db)
+        try:
+            auto_src, auto_turn = _auto_provenance(db)
+        finally:
+            db.close()
         if auto_src:
             source_id = auto_src["id"]
             turn_number = auto_turn
 
-    # Resolve alt-text
     alt_text = getattr(args, "alt", None)
     alt_file = getattr(args, "alt_file", None)
     if alt_file:
         alt_path = Path(alt_file)
         if not alt_path.is_file():
             print(f"Error: alt-text file not found: {alt_file}", file=sys.stderr)
-            db.close()
             sys.exit(1)
         alt_text = alt_path.read_text().strip()
 
-    att = _store_attachment(db, args.file_path, source_id=source_id,
-                            turn_number=turn_number, alt_text=alt_text)
-    if att is None:
-        db.close()
-        sys.exit(1)
+    from . import ops as _ops
+    with _pin_db(args):
+        try:
+            att = _ops.attach_file(
+                args.file_path,
+                source_id=source_id,
+                turn_number=turn_number,
+                alt_text=alt_text,
+                org=getattr(args, "org", None),
+            )
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        except _ops.CrossOrgWriteError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
 
     src_label = f" src:{source_id[:12]}" if source_id else ""
-    print(f"  ✓ Attached {att.filename} ({att.id[:12]}{src_label}) — {att.size_bytes} bytes, {att.mime_type or 'unknown'}")
-    db.close()
+    print(
+        f"  ✓ Attached {att['filename']} ({att['id'][:12]}{src_label}) — "
+        f"{att['size_bytes']} bytes, {att['mime_type'] or 'unknown'}"
+    )
 
 
 def cmd_attachment(args):
