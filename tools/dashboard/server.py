@@ -3053,6 +3053,27 @@ async def api_session_tail(request):
         fallback = session_monitor.resolve_session_file(session_id)
         if fallback is not None:
             session_file = fallback
+            # Persist the resolved path so subsequent SSE tails don't pay the
+            # full-tree scan cost and the tailer picks this session up on
+            # the next inotify tick. Only makes sense when we have a DB row
+            # to associate the path with — raw UUID lookups without a row
+            # have nothing to update.
+            if db_row is not None and not db_row.get("jsonl_path"):
+                try:
+                    session_monitor._handle_jsonl_appeared(
+                        db_row["tmux_name"], fallback,
+                    )
+                    # Refresh db_row for the response so `resolved=True`
+                    # reflects the freshly-persisted state.
+                    refreshed = session_monitor.get_one(db_row["tmux_name"])
+                    if refreshed is not None:
+                        db_row = refreshed
+                except Exception:
+                    # Never let persistence failures break the tail response.
+                    logger.exception(
+                        "api_session_tail: failed to persist fallback jsonl_path for %s",
+                        db_row.get("tmux_name"),
+                    )
 
     if session_file is None:
         # Session file not resolved — check if it's a newly created session
