@@ -444,10 +444,16 @@ class _TailState:
 class SessionMonitor:
     """DB-backed session registry with background tailing and liveness checking."""
 
+    # Reconciliation backstop — how often to re-scan pending container
+    # sessions for JSONLs that scan-on-add and IN_CREATE both missed.
+    # 5 min matches the bead spec; tests can monkey-patch the interval.
+    _reconciliation_interval_seconds: float = 300.0
+
     def __init__(self) -> None:
         self._tail_states: dict[str, _TailState] = {}
         self._tailer_task: asyncio.Task | None = None
         self._liveness_task: asyncio.Task | None = None
+        self._reconciliation_task: asyncio.Task | None = None
         self._event_bus = None
         self._entry_parser = None
         self._entry_enricher = None
@@ -512,8 +518,14 @@ class SessionMonitor:
         if seed_message:
             update_tail_state(tmux_name, last_message=seed_message)
 
-        # Set up ephemeral tail state
-        ts = _TailState(needs_resolution=path_is_dir, resolution_dir=res_dir)
+        # Set up ephemeral tail state. ``needs_resolution`` flags "DB row has
+        # no jsonl_path yet" — covers both directory-only registrations
+        # (path_is_dir) and jsonl_path=None container registrations (run_dir
+        # provided but the JSONL hasn't landed).
+        ts = _TailState(
+            needs_resolution=(path_str is None and res_dir is not None),
+            resolution_dir=res_dir,
+        )
         self._tail_states[tmux_name] = ts
 
         # Add inotify watches if available
@@ -677,7 +689,10 @@ class SessionMonitor:
                 path_str = str(jsonl_path)
                 res_dir = jsonl_path.parent
 
-        ts = _TailState(needs_resolution=path_is_dir, resolution_dir=res_dir)
+        ts = _TailState(
+            needs_resolution=(path_str is None and res_dir is not None),
+            resolution_dir=res_dir,
+        )
         self._tail_states[tmux_name] = ts
 
         if self._use_inotify:
@@ -773,6 +788,7 @@ class SessionMonitor:
         self._init_inotify()
         self._tailer_task = asyncio.create_task(self._inotify_tailer_loop())
         self._liveness_task = asyncio.create_task(self._liveness_loop())
+        self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
         logger.info("session_monitor: background tasks started (mode=inotify)")
         # Re-scan unresolved container sessions from prior server lifetime
         self._recover_unresolved_sessions()
@@ -784,7 +800,11 @@ class SessionMonitor:
         """Cancel background tasks and reset state so start() can be called again."""
         if not self._started:
             return
-        tasks = [t for t in (self._tailer_task, self._liveness_task) if t and not t.done()]
+        tasks = [
+            t for t in (self._tailer_task, self._liveness_task,
+                        self._reconciliation_task)
+            if t and not t.done()
+        ]
         for t in tasks:
             try:
                 t.cancel()
@@ -797,6 +817,7 @@ class SessionMonitor:
             pass  # cross-loop gather — tasks will be GC'd with their loop
         self._tailer_task = None
         self._liveness_task = None
+        self._reconciliation_task = None
         self._started = False
         logger.info("session_monitor: background tasks stopped")
 
@@ -949,16 +970,29 @@ class SessionMonitor:
         self._wd_to_session[wd] = tmux_name
 
     def _add_dir_watch(self, tmux_name: str, dir_path: str) -> None:
-        """Add an IN_CREATE watch on a session directory (deduplicated)."""
+        """Add an IN_CREATE watch on a session directory (deduplicated).
+
+        After the watch is set up, scan the directory for pre-existing
+        JSONL files and subdirectories. Covers two races that IN_CREATE
+        events cannot close on their own:
+          (a) JSONL created in the same kernel batch as the subdir — the
+              inotify watch on the subdir lands *after* the write event,
+              so the event is never delivered.
+          (b) JSONL pre-existed at watch-add time (dashboard restart,
+              rescheduled watch, etc.) — no IN_CREATE will ever fire.
+        """
         if not self._inotify:
             return
         if dir_path in self._dir_path_to_wd:
-            # Directory already watched — just add this session to the refcount set
+            # Directory already watched — attach this session to the refcount
+            # set, then still scan: another session's initial scan may have
+            # pre-dated this session's registration.
             wd = self._dir_path_to_wd[dir_path]
             self._dir_wd_sessions.setdefault(wd, set()).add(tmux_name)
             ts = self._tail_states.get(tmux_name)
             if ts:
                 ts.dir_watch_descriptor = wd
+            self._scan_dir_for_existing_jsonls(tmux_name, dir_path)
             return
         try:
             wd = self._inotify.add_watch(dir_path, _iflags.CREATE)
@@ -971,6 +1005,98 @@ class SessionMonitor:
         ts = self._tail_states.get(tmux_name)
         if ts:
             ts.dir_watch_descriptor = wd
+        self._scan_dir_for_existing_jsonls(tmux_name, dir_path)
+
+    def _scan_dir_for_existing_jsonls(self, tmux_name: str, dir_path: str) -> None:
+        """Discover JSONLs that already exist in a newly-watched directory.
+
+        Also recurses into pre-existing subdirectories: Claude Code writes
+        JSONLs under ``sessions/<project-slug>/*.jsonl``, so a watch on
+        ``sessions/`` without a scan of its subdirs would miss every file
+        that appeared before watch-add.
+
+        Idempotent: ``_handle_jsonl_appeared`` no-ops when the session is
+        already resolved for the given UUID, so repeated calls (e.g. a real
+        IN_CREATE arriving after the scan already discovered the file) are
+        safe.
+        """
+        try:
+            dp = Path(dir_path)
+            if not dp.is_dir():
+                return
+            for p in sorted(dp.glob("*.jsonl")):
+                if "subagents" in p.parts:
+                    continue
+                self._handle_jsonl_appeared(tmux_name, p)
+            for sub in sorted(dp.iterdir()):
+                if sub.is_dir() and sub.name != "subagents":
+                    # Recurse — adds the subdir watch + scans its contents.
+                    self._add_dir_watch(tmux_name, str(sub))
+        except OSError:
+            pass
+
+    def _handle_jsonl_appeared(self, tmux_name: str, jsonl_path: Path) -> bool:
+        """Idempotently link a newly-discovered JSONL to an existing session.
+
+        Shared entry point used by:
+          - scan-on-watch-add (``_scan_dir_for_existing_jsonls``)
+          - tail-endpoint fallback persistence (``api_session_tail``)
+          - periodic reconciliation (``reconciliation_tick``)
+
+        Returns True if the call performed a new link (was_empty → resolved),
+        False if the session was already resolved or could not be resolved
+        from this path.
+        """
+        if "subagents" in jsonl_path.parts:
+            return False
+        if jsonl_path.suffix != ".jsonl":
+            return False
+        row = get_session(tmux_name)
+        if row is None:
+            return False
+        # Scan-on-add / fallback / reconciliation are first-resolution helpers
+        # only — they do not handle rollovers. If the session already has a
+        # jsonl_path linked, leave rollover logic to IN_CREATE events, which
+        # carry the timing needed to decide whether a new file is a rollover
+        # or a stray file for a different session sharing the directory.
+        if row.get("jsonl_path"):
+            return False
+
+        new_uuid = jsonl_path.stem
+
+        from tools.dashboard.dao.dashboard_db import link_and_enrich
+        link_and_enrich(
+            tmux_name,
+            session_uuid=new_uuid,
+            jsonl_path=str(jsonl_path),
+            project=jsonl_path.parent.name,
+        )
+
+        if self._use_inotify:
+            self._add_file_watch(tmux_name, str(jsonl_path))
+
+        # Reset file_offset: we've linked a (possibly non-empty) JSONL and
+        # the tailer should process it from byte 0 on its next tick.
+        update_tail_state(tmux_name, file_offset=0)
+
+        ts = self._tail_states.get(tmux_name)
+        old_resolution_dir = ts.resolution_dir if ts else None
+        self._tail_states[tmux_name] = _TailState(resolution_dir=old_resolution_dir)
+
+        logger.info(
+            "session_monitor: discovered %s → %s (first file — resolved)",
+            tmux_name, jsonl_path.name,
+        )
+
+        # Schedule a registry broadcast if we're inside a running loop.
+        # Sync startup paths (_init_inotify, _recover_unresolved_sessions)
+        # don't have a loop; their callers broadcast after they return.
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._broadcast_registry())
+        except RuntimeError:
+            pass
+        return True
 
     def _remove_watches(self, tmux_name: str) -> None:
         """Remove all inotify watches for a session."""
@@ -1658,6 +1784,77 @@ class SessionMonitor:
             await asyncio.sleep(10)
 
     _PAUSE_NAG_INTERVAL = 15 * 60  # 15 minutes between dispatch-pause nags
+
+    # ── Periodic reconciliation (backstop) ───────────────────────
+
+    async def _reconciliation_loop(self) -> None:
+        """Every ``_reconciliation_interval_seconds``, scan pending sessions.
+
+        Backstop for the case where both scan-on-watch-add and IN_CREATE
+        miss the JSONL. Primary path remains the inotify event + the
+        post-watch scan; this loop just makes the failure mode
+        eventual-consistent instead of permanent.
+        """
+        while True:
+            try:
+                await asyncio.sleep(self._reconciliation_interval_seconds)
+                await self.reconciliation_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("session_monitor: reconciliation loop error")
+
+    async def reconciliation_tick(self) -> int:
+        """Run one reconciliation pass. Returns count of newly-resolved sessions.
+
+        Iterates over pending sessions (``jsonl_path IS NULL`` in DB and/or
+        ``needs_resolution=True`` in the tail state), scans their
+        ``resolution_dir`` for JSONLs, and promotes them via the shared
+        ``_handle_jsonl_appeared`` path.
+
+        Exposed as a coroutine so tests can drive reconciliation directly
+        without waiting for the 5-minute loop.
+        """
+        resolved = 0
+        # DB-authoritative view: anything live with jsonl_path IS NULL.
+        from tools.dashboard.dao.dashboard_db import get_sessions_needing_resolution
+        pending_rows = get_sessions_needing_resolution()
+        for row in pending_rows:
+            tmux_name = row["tmux_name"]
+            res_dir = row.get("resolution_dir")
+            if not res_dir:
+                continue
+            # Ensure a TailState exists so _handle_jsonl_appeared can track it.
+            if tmux_name not in self._tail_states:
+                self._tail_states[tmux_name] = _TailState(
+                    needs_resolution=True,
+                    resolution_dir=Path(res_dir),
+                )
+            # Prefer a fresh directory scan over `resolve_session_file`
+            # because the pending session may not have a session_uuids
+            # entry yet to drive the by-uuid search.
+            try:
+                dp = Path(res_dir)
+                if not dp.is_dir():
+                    continue
+                for jsonl in sorted(dp.rglob("*.jsonl")):
+                    if "subagents" in jsonl.parts:
+                        continue
+                    if self._handle_jsonl_appeared(tmux_name, jsonl):
+                        resolved += 1
+                        logger.info(
+                            "session_monitor: reconciliation resolved %s → %s",
+                            tmux_name, jsonl.name,
+                        )
+                        break
+            except OSError as exc:
+                logger.warning(
+                    "session_monitor: reconciliation scan failed for %s: %s",
+                    tmux_name, exc,
+                )
+        if resolved:
+            await self._broadcast_registry()
+        return resolved
 
     async def _check_dispatch_pause_nag(self, now: float) -> None:
         """Send periodic nag to dispatch_nag subscribers when dispatch is paused."""
