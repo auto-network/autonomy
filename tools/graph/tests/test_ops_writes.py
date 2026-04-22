@@ -16,12 +16,14 @@ Covers:
 
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+from tools.graph import cli as graph_cli
 from tools.graph import db as graph_db_mod
 from tools.graph import ops
 from tools.graph.db import GraphDB
@@ -277,6 +279,145 @@ def test_attach_file_missing_raises(orgs_root):
     GraphDB.create_org_db("personal", type_="personal").close()
     with pytest.raises(FileNotFoundError):
         ops.attach_file("/nonexistent/path.png")
+
+
+def test_move_source_copies_live_row_and_leaves_origin_stub(orgs_root, tmp_path):
+    GraphDB.create_org_db("autonomy").close()
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    f = tmp_path / "move.txt"
+    f.write_text("move attachment payload")
+    moved = ops.create_note("move me {1}", attachments=[str(f)], org="personal")
+
+    target_id = _make_peer_note(
+        orgs_root / "personal.db", title="move target",
+    )
+    ops.create_edge(
+        moved["source_id"], target_id,
+        from_type="source", to_type="source", relation="conceived_at",
+        org="personal",
+    )
+    ops.create_edge(
+        "auto-move-bead", moved["source_id"],
+        from_type="bead", to_type="source", relation="informed_by",
+        org="personal",
+    )
+
+    result = ops.move_source(
+        moved["source_id"], "personal", "autonomy", reason="org transfer",
+    )
+
+    assert result["source_id"] == moved["source_id"]
+    assert result["from_org"] == "personal"
+    assert result["to_org"] == "autonomy"
+
+    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    ac = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    pc.row_factory = sqlite3.Row
+    ac.row_factory = sqlite3.Row
+    try:
+        prow = pc.execute(
+            "SELECT deprecated, moved_to_org, metadata FROM sources WHERE id = ?",
+            (moved["source_id"],),
+        ).fetchone()
+        assert prow is not None
+        assert prow["deprecated"] == 1
+        assert prow["moved_to_org"] == "autonomy"
+        pmeta = json.loads(prow["metadata"] or "{}")
+        assert pmeta["moved"]["at"]
+        assert pmeta["moved"]["reason"] == "org transfer"
+
+        arow = ac.execute(
+            "SELECT deprecated, moved_to_org FROM sources WHERE id = ?",
+            (moved["source_id"],),
+        ).fetchone()
+        assert arow is not None
+        assert arow["deprecated"] == 0
+        assert arow["moved_to_org"] is None
+
+        assert pc.execute(
+            "SELECT COUNT(*) FROM thoughts WHERE source_id = ?",
+            (moved["source_id"],),
+        ).fetchone()[0] == 0
+        assert ac.execute(
+            "SELECT COUNT(*) FROM thoughts WHERE source_id = ?",
+            (moved["source_id"],),
+        ).fetchone()[0] == 1
+
+        assert pc.execute(
+            "SELECT COUNT(*) FROM note_versions WHERE source_id = ?",
+            (moved["source_id"],),
+        ).fetchone()[0] == 0
+        assert ac.execute(
+            "SELECT COUNT(*) FROM note_versions WHERE source_id = ?",
+            (moved["source_id"],),
+        ).fetchone()[0] == 1
+
+        assert pc.execute(
+            "SELECT COUNT(*) FROM attachments WHERE source_id = ? OR source_id LIKE ?",
+            (moved["source_id"], f"{moved['source_id']}@%"),
+        ).fetchone()[0] == 0
+        assert ac.execute(
+            "SELECT COUNT(*) FROM attachments WHERE source_id = ? OR source_id LIKE ?",
+            (moved["source_id"], f"{moved['source_id']}@%"),
+        ).fetchone()[0] == 1
+
+        assert pc.execute(
+            "SELECT COUNT(*) FROM edges WHERE source_id = ?",
+            (moved["source_id"],),
+        ).fetchone()[0] == 0
+        assert ac.execute(
+            "SELECT COUNT(*) FROM edges WHERE source_id = ?",
+            (moved["source_id"],),
+        ).fetchone()[0] == 1
+        assert pc.execute(
+            "SELECT COUNT(*) FROM edges WHERE target_id = ? AND source_id = 'auto-move-bead'",
+            (moved["source_id"],),
+        ).fetchone()[0] == 1
+    finally:
+        pc.close()
+        ac.close()
+
+
+def test_cmd_move_uses_explicit_from_org_even_when_graph_org_differs(orgs_root):
+    GraphDB.create_org_db("anchore").close()
+    GraphDB.create_org_db("autonomy").close()
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    created = ops.create_note("cli move explicit from", org="personal")
+
+    args = argparse.Namespace(
+        db=graph_db_mod.resolve_caller_db_path(None),
+        source_id=created["source_id"][:12],
+        from_org="personal",
+        to_org="autonomy",
+        reason="explicit from test",
+    )
+
+    from pytest import MonkeyPatch
+    monkeypatch = MonkeyPatch()
+    monkeypatch.setenv("GRAPH_ORG", "anchore")
+    try:
+        graph_cli.cmd_move(args)
+    finally:
+        monkeypatch.undo()
+
+    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    ac = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    try:
+        prow = pc.execute(
+            "SELECT moved_to_org, deprecated FROM sources WHERE id = ?",
+            (created["source_id"],),
+        ).fetchone()
+        arow = ac.execute(
+            "SELECT moved_to_org, deprecated FROM sources WHERE id = ?",
+            (created["source_id"],),
+        ).fetchone()
+        assert prow == ("autonomy", 1)
+        assert arow == (None, 0)
+    finally:
+        pc.close()
+        ac.close()
 
 
 # ── create_edge ──────────────────────────────────────────────

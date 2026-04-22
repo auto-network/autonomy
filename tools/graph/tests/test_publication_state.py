@@ -8,13 +8,11 @@ graph://8cf067e3-ca3.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
-from pathlib import Path
 
 import pytest
 
-from tools.graph.db import SCHEMA_PATH, GraphDB
+from tools.graph.db import GraphDB
 from tools.graph.models import Source, Thought
 
 
@@ -29,26 +27,59 @@ def fresh_db(tmp_path):
 def legacy_db_path(tmp_path):
     """Create a DB with the schema as it existed before publication_state landed."""
     path = tmp_path / "legacy.db"
-    schema = SCHEMA_PATH.read_text()
-    # Drop the entire `settings` block — that primitive postdates publication_state
-    # and would not exist in a true legacy DB. Stripping its publication_state
-    # column would also corrupt downstream column delimiters.
-    schema = re.sub(
-        r"CREATE TABLE IF NOT EXISTS settings \([^;]*\);",
-        "",
-        schema,
-        flags=re.DOTALL,
-    )
-    # Strip publication_state / deprecated / successor_id from CREATE TABLE blocks.
-    schema_legacy = re.sub(
-        r",\s*\n\s*publication_state TEXT[^\n]*(\n\s*CHECK[^\n]*)?",
-        "",
-        schema,
-    )
-    schema_legacy = re.sub(r",\s*\n\s*deprecated INTEGER[^\n]*", "", schema_legacy)
-    schema_legacy = re.sub(r",\s*\n\s*successor_id[^\n]*", "", schema_legacy)
     conn = sqlite3.connect(path)
-    conn.executescript(schema_legacy)
+    conn.executescript(
+        """
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE sources (
+            id               TEXT PRIMARY KEY,
+            type             TEXT NOT NULL,
+            platform         TEXT,
+            project          TEXT,
+            title            TEXT,
+            url              TEXT,
+            file_path        TEXT UNIQUE,
+            metadata         TEXT DEFAULT '{}',
+            created_at       TEXT NOT NULL,
+            ingested_at      TEXT NOT NULL,
+            last_activity_at TEXT
+        );
+
+        CREATE TABLE thoughts (
+            id          TEXT PRIMARY KEY,
+            source_id   TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+            content     TEXT NOT NULL,
+            role        TEXT NOT NULL DEFAULT 'user',
+            turn_number INTEGER,
+            message_id  TEXT,
+            tags        TEXT DEFAULT '[]',
+            metadata    TEXT DEFAULT '{}',
+            created_at  TEXT NOT NULL
+        );
+
+        CREATE TABLE note_comments (
+            id         TEXT PRIMARY KEY,
+            source_id  TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+            content    TEXT NOT NULL,
+            actor      TEXT DEFAULT 'user',
+            integrated INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE captures (
+            id         TEXT PRIMARY KEY,
+            content    TEXT NOT NULL,
+            thread_id  TEXT,
+            source_id  TEXT,
+            turn_number INTEGER,
+            status     TEXT NOT NULL DEFAULT 'captured',
+            actor      TEXT DEFAULT 'user',
+            metadata   TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        """
+    )
     conn.execute(
         "INSERT INTO sources(id, type, platform, metadata, created_at, ingested_at)"
         " VALUES('legacy_note', 'note', 'local', '{\"tags\": [\"pitfall\"]}', '2026-01-01', '2026-01-01')"
@@ -74,7 +105,7 @@ def legacy_db_path(tmp_path):
 
 def test_fresh_db_has_publication_state_columns(fresh_db):
     cols = {r[1] for r in fresh_db.conn.execute("PRAGMA table_info(sources)").fetchall()}
-    assert {"publication_state", "deprecated", "successor_id"} <= cols
+    assert {"publication_state", "deprecated", "successor_id", "moved_to_org"} <= cols
 
     for table in ("thoughts", "note_comments", "captures"):
         tcols = {r[1] for r in fresh_db.conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -92,9 +123,9 @@ def test_legacy_db_migrates_on_open(legacy_db_path):
     db = GraphDB(legacy_db_path)
     try:
         cols = {r[1] for r in db.conn.execute("PRAGMA table_info(sources)").fetchall()}
-        assert {"publication_state", "deprecated", "successor_id"} <= cols
+        assert {"publication_state", "deprecated", "successor_id", "moved_to_org"} <= cols
         row = db.conn.execute(
-            "SELECT publication_state, deprecated, successor_id FROM sources WHERE id='legacy_note'"
+            "SELECT publication_state, deprecated, successor_id, moved_to_org FROM sources WHERE id='legacy_note'"
         ).fetchone()
         # Default flipped to 'curated' (graph://8cf067e3-ca3 follow-up): every
         # new/migrated source row lands cross-session-visible unless explicitly
@@ -103,6 +134,7 @@ def test_legacy_db_migrates_on_open(legacy_db_path):
         assert row["publication_state"] == "curated"
         assert row["deprecated"] == 0
         assert row["successor_id"] is None
+        assert row["moved_to_org"] is None
 
         # thoughts / comments / captures all get 'raw' default
         for table in ("thoughts", "note_comments", "captures"):

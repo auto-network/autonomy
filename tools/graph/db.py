@@ -198,6 +198,7 @@ class GraphDB:
         self._migrate_attachments_alt_text()
         self._migrate_sources_last_activity()
         self._migrate_publication_state()
+        self._migrate_source_moves()
         self._migrate_settings()
         self._migrate_orgs()
         self._seed_tags()
@@ -222,6 +223,10 @@ class GraphDB:
                 "ALTER TABLE sources ADD COLUMN publication_state TEXT NOT NULL DEFAULT 'raw' "
                 "CHECK (publication_state IN ('raw','curated','published','canonical'))"
             )
+            self.conn.execute(
+                "UPDATE sources SET publication_state = 'curated' "
+                "WHERE publication_state = 'raw'"
+            )
         if "deprecated" not in scols:
             self.conn.execute(
                 "ALTER TABLE sources ADD COLUMN deprecated INTEGER NOT NULL DEFAULT 0 "
@@ -244,6 +249,13 @@ class GraphDB:
             "ON sources(publication_state)"
         )
         self.conn.commit()
+
+    def _migrate_source_moves(self):
+        """Add ``moved_to_org`` to sources (idempotent)."""
+        scols = {r[1] for r in self.conn.execute("PRAGMA table_info(sources)").fetchall()}
+        if "moved_to_org" not in scols:
+            self.conn.execute("ALTER TABLE sources ADD COLUMN moved_to_org TEXT")
+            self.conn.commit()
 
     def _migrate_settings(self):
         """Create the settings table + indices if missing (idempotent).
@@ -461,12 +473,13 @@ class GraphDB:
         self.conn.execute(
             """INSERT INTO sources (id, type, platform, project, title, url, file_path, metadata,
                                     created_at, ingested_at, last_activity_at,
-                                    publication_state, deprecated, successor_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    publication_state, deprecated, successor_id, moved_to_org)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (src.id, src.type, src.platform, src.project, src.title, src.url,
              src.file_path, json.dumps(src.metadata), src.created_at, src.ingested_at,
              src.last_activity_at,
-             src.publication_state, int(bool(src.deprecated)), src.successor_id),
+             src.publication_state, int(bool(src.deprecated)), src.successor_id,
+             src.moved_to_org),
         )
         self.conn.commit()
         return src
