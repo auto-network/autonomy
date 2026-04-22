@@ -366,12 +366,6 @@ def get_recent_sessions(
         pass  # dashboard.db not initialised — skip overlay
 
     # ── Step 3: merge + filter live ───────────────────────────────
-    # resolve_session_org() reads load_org_overrides() + load_workspaces(),
-    # each of which iterates every per-org DB. Calling it per-row turned a
-    # millisecond loop into a multi-second hang once orgs landed. Cache the
-    # identity by (session_type, project_raw) — the only inputs the resolver
-    # consumes — so each unique combination resolves once per request.
-    identity_cache: dict[tuple, dict] = {}
     merged: dict[str, dict] = {}
     for row in graph_rows:
         # Filter out currently-live sessions
@@ -412,12 +406,7 @@ def get_recent_sessions(
         # date for backwards compat
         row["date"] = (row["last_activity_at"] or row["created_at"] or "")[:10]
         # Resolve org identity from the full row (carries session_type) BEFORE bracket-wrap
-        ident_key = (row.get("session_type"), row.get("project") or "")
-        cached = identity_cache.get(ident_key)
-        if cached is None:
-            cached = resolve_session_org(row)
-            identity_cache[ident_key] = cached
-        row["org"] = cached
+        row["org"] = resolve_session_org(row)
         # Wrap project in brackets for backwards-compat with the existing UI
         row["project"] = f"[{row['project']}]" if row["project"] else ""
 
