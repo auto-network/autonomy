@@ -1276,6 +1276,13 @@ def _send_dispatch_nag_crosstalk(targets: list[str], message: str) -> None:
     """Send a dispatch nag message to multiple sessions via tmux paste-buffer."""
     import secrets as _secrets
 
+    # Hard guard: never paste into real tmux sessions from a pytest process.
+    # The dispatcher mocks in test_dispatcher_nonblocking don't cover the
+    # nag path, so without this guard a unit-test run sprays MagicMock
+    # repr strings into every opted-in operator session.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+
     iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     envelope = (
         f'<crosstalk from="dispatcher"\n'
