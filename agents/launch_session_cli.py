@@ -105,6 +105,7 @@ def main() -> int:
         import subprocess
         from agents.session_launcher import (
             _resolve_credentials, _setup_auth_docker_args,
+            _resolve_optional_tool_mounts,
             _schedule_creds_cleanup,
         )
         from datetime import datetime, timezone
@@ -162,6 +163,7 @@ def main() -> int:
             "--network=host",
             "-e", f"BD_ACTOR={args.session_type}:{args.name}",
             "-e", "BD_READONLY=0",
+            "-e", "CODEX_HOME=/home/agent/.codex",
             *auth_args,
         ]
         if args.graph_project:
@@ -169,6 +171,8 @@ def main() -> int:
         if args.graph_tags:
             cmd.extend(["-e", f"GRAPH_TAGS={args.graph_tags}"])
         for host_path, container_spec in mounts.items():
+            cmd.extend(["-v", f"{host_path}:{container_spec}"])
+        for host_path, container_spec in _resolve_optional_tool_mounts().items():
             cmd.extend(["-v", f"{host_path}:{container_spec}"])
         cmd.extend(["-w", "/workspace/repo"])
 

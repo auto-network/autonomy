@@ -104,6 +104,35 @@ def _schedule_creds_cleanup(container_id: str, creds_copy: str) -> None:
     t.start()
 
 
+def _resolve_optional_tool_mounts() -> dict[str, str]:
+    """Return optional host mounts that make Codex usable inside containers.
+
+    Claude is already handled via dedicated credential resolution plus the
+    mounted sessions directory. Codex keeps its login/config under ~/.codex,
+    so mount only the durable control files and skill/rule directories rather
+    than the whole mutable state tree.
+    """
+
+    mounts: dict[str, str] = {}
+
+    host_codex_home = Path.home() / ".codex"
+    codex_mounts = {
+        host_codex_home / "auth.json": "/home/agent/.codex/auth.json:ro",
+        host_codex_home / "config.toml": "/home/agent/.codex/config.toml:ro",
+        host_codex_home / "skills": "/home/agent/.codex/skills:ro",
+        host_codex_home / "rules": "/home/agent/.codex/rules:ro",
+    }
+    for host_path, container_spec in codex_mounts.items():
+        if host_path.exists():
+            mounts[str(host_path)] = container_spec
+
+    agents_home = Path.home() / ".agents"
+    if agents_home.exists():
+        mounts[str(agents_home)] = "/home/agent/.agents:ro"
+
+    return mounts
+
+
 # ── Main Launch Function ──────────────────────────────────────────────────────
 
 def launch_session(
@@ -281,6 +310,7 @@ def launch_session(
         "-e", "BD_READONLY=0",
         "-e", f"GRAPH_API={graph_api}",
         "-e", f"CROSSTALK_TOKEN={raw_token}",
+        "-e", "CODEX_HOME=/home/agent/.codex",
         *auth_args,
     ]
 
@@ -305,6 +335,9 @@ def launch_session(
             cmd.extend(["-e", f"GRAPH_ORG={graph_org}"])
 
     for host_path, container_spec in default_mounts.items():
+        cmd.extend(["-v", f"{host_path}:{container_spec}"])
+
+    for host_path, container_spec in _resolve_optional_tool_mounts().items():
         cmd.extend(["-v", f"{host_path}:{container_spec}"])
 
     if global_claude_md is not None:
