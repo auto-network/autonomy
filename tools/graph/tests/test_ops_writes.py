@@ -248,6 +248,11 @@ def test_attach_file_lands_in_caller_org(orgs_root, tmp_path):
         assert pc.execute(
             "SELECT COUNT(*) FROM attachments WHERE id = ?", (att["id"],),
         ).fetchone()[0] == 0
+        row = ac.execute(
+            "SELECT file_path FROM attachments WHERE id = ?", (att["id"],),
+        ).fetchone()
+        assert row is not None
+        assert "/orgs/attachments/" not in row[0]
     finally:
         ac.close()
         pc.close()
