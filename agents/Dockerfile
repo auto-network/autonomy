@@ -1,6 +1,6 @@
 # Autonomy Agent Container
 # Bakes in all tools so agents start in <5s with zero downloads.
-# Includes bd, graph, claude, agent-browser (headless Chrome), and tmux.
+# Includes bd, graph, claude, codex, agent-browser (headless Chrome), and tmux.
 #
 # Build:  docker build -t autonomy-agent agents/
 # Run:    see agents/launch.sh
@@ -48,8 +48,9 @@ ENV PYTHONPATH=/workspace/repo
 # ── Workspace ──
 WORKDIR /workspace
 
-# Point bd at the mounted beads directory
+# Point bd at the mounted beads directory and codex at its container-local home.
 ENV BEADS_DIR=/data/.beads
+ENV CODEX_HOME=/home/agent/.codex
 
 # Verify tools are available
 RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cross-arch)" \
@@ -60,15 +61,18 @@ RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cro
 
 # Agent runs as non-root
 RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
-    && mkdir -p /home/agent/.claude /home/agent/.local/bin \
+    && mkdir -p /home/agent/.claude /home/agent/.codex /home/agent/.agents /home/agent/.local/bin \
     && echo '{"numStartups":1,"hasCompletedOnboarding":true,"hasSeenTasksHint":true,"hasSeenStashHint":true,"remoteDialogSeen":true,"installMethod":"native","autoUpdates":false,"projects":{"/workspace/repo":{"hasTrustDialogAccepted":true,"effortCalloutV2Dismissed":true}}}' \
        > /home/agent/.claude.json \
     && echo '{"skipDangerousModePermissionPrompt":true,"effortLevel":"high"}' \
        > /home/agent/.claude/settings.json \
-    && chown -R agent:agent /home/agent/.claude /home/agent/.claude.json /home/agent/.local
+    && chown -R agent:agent /home/agent/.claude /home/agent/.codex /home/agent/.agents /home/agent/.claude.json /home/agent/.local
 
-# ── agent-browser + Chrome binary (needs agent user to exist) ──
-RUN npm install -g agent-browser \
+# ── Codex CLI + agent-browser (needs node + agent user to exist) ──
+# Codex is an npm package plus platform-specific optional dependency, not a
+# standalone host ELF like Claude, so install it inside the image directly.
+ARG CODEX_VERSION=0.122.0
+RUN npm install -g "@openai/codex@${CODEX_VERSION}" agent-browser \
     && su agent -c "agent-browser install"
 
 # ── Pre-configure agent-browser for container use ──
@@ -77,7 +81,8 @@ RUN mkdir -p /home/agent/.agent-browser \
        > /home/agent/.agent-browser/config.json \
     && chown -R agent:agent /home/agent/.agent-browser
 
-RUN agent-browser --version > /dev/null 2>&1 || echo "WARN: agent-browser not functional"
+RUN codex --version > /dev/null 2>&1 || echo "WARN: codex not functional" \
+    && agent-browser --version > /dev/null 2>&1 || echo "WARN: agent-browser not functional"
 
 USER agent
 
