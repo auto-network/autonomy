@@ -600,6 +600,12 @@ class HttpClient:
         result = self._delete(f"/api/graph/tag/{source_id}/{tag}", org=org)
         return bool(result.get("removed"))
 
+    def move_source(self, source_id, from_org, to_org, *, reason=None, org=None):
+        body = {"from_org": from_org, "to_org": to_org}
+        if reason:
+            body["reason"] = reason
+        return self._post(f"/api/graph/source/{source_id}/move", body, org=org) or {}
+
     def tag_merge(self, from_tag, to_tag, *, reason="", force=False, org=None):
         body = {"from": from_tag, "to": to_tag, "reason": reason, "force": force}
         return self._post("/api/graph/tag/merge", body, org=org) or {}

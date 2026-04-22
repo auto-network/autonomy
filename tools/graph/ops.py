@@ -1140,7 +1140,11 @@ def _resolve_source_home(
     resolved_org = _resolve_org(org) or ""
     db = _open(org)
     try:
-        if db.get_source(source_id) is not None:
+        row = db.get_source(source_id)
+        if row is not None:
+            moved = row.get("moved_to_org")
+            if moved:
+                return moved
             return resolved_org
     finally:
         db.close()
@@ -1149,7 +1153,11 @@ def _resolve_source_home(
         peer_db = open_peer_db(peer)
         if peer_db is None:
             continue
-        if peer_db.get_source(source_id) is not None:
+        row = peer_db.get_source(source_id)
+        if row is not None:
+            moved = row.get("moved_to_org")
+            if moved:
+                return moved
             return peer
     return None
 
@@ -1644,6 +1652,307 @@ def promote_source(
                 "changed": True}
     finally:
         db.close()
+
+
+def move_source(
+    source_id: str,
+    from_org: str,
+    to_org: str,
+    *,
+    reason: str | None = None,
+    org: str | None = None,
+) -> dict:
+    """Move a source from one explicit org to another.
+
+    ``from_org`` and ``to_org`` are authoritative. This primitive does not
+    auto-discover the origin org from ``source_id`` because the CLI contract
+    is explicit about both ends of the transfer.
+    """
+    if not from_org:
+        raise ValueError("from_org required")
+    if not to_org:
+        raise ValueError("to_org required")
+    if from_org == to_org:
+        raise ValueError(f"source already lives in org {to_org!r}")
+
+    origin_path = resolve_caller_db_path(from_org)
+    target_path = resolve_caller_db_path(to_org)
+    if not Path(origin_path).exists():
+        raise ValueError(f"origin org not found: {from_org!r}")
+    if not Path(target_path).exists():
+        raise ValueError(f"target org not found: {to_org!r}")
+
+    origin_db = GraphDB(origin_path)
+    attached = False
+    try:
+        conn = origin_db.conn
+        conn.execute("ATTACH DATABASE ? AS target", (str(target_path),))
+        attached = True
+
+        row = conn.execute(
+            "SELECT * FROM main.sources WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(
+                f"source not found in org {from_org!r}: {source_id!r}"
+            )
+        if row["moved_to_org"]:
+            raise ValueError(
+                f"source {source_id!r} is already a moved stub to "
+                f"{row['moved_to_org']!r}"
+            )
+        if conn.execute(
+            "SELECT 1 FROM target.sources WHERE id = ?",
+            (source_id,),
+        ).fetchone() is not None:
+            raise ValueError(
+                f"target org {to_org!r} already has source {source_id!r}"
+            )
+        if row["file_path"] and conn.execute(
+            "SELECT 1 FROM target.sources WHERE file_path = ?",
+            (row["file_path"],),
+        ).fetchone() is not None:
+            raise ValueError(
+                f"target org {to_org!r} already has source file_path "
+                f"{row['file_path']!r}"
+            )
+
+        now = conn.execute(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+        ).fetchone()[0]
+
+        meta_raw = row["metadata"] or "{}"
+        if isinstance(meta_raw, str):
+            try:
+                src_meta = json.loads(meta_raw)
+            except (json.JSONDecodeError, TypeError):
+                src_meta = {}
+        elif isinstance(meta_raw, dict):
+            src_meta = dict(meta_raw)
+        else:
+            src_meta = {}
+
+        target_meta = dict(src_meta)
+        if isinstance(target_meta.get("moved"), dict):
+            target_meta.pop("moved", None)
+
+        origin_meta = dict(src_meta)
+        moved_meta = {"at": now}
+        if reason:
+            moved_meta["reason"] = reason
+        origin_meta["moved"] = moved_meta
+
+        moved_thought_ids = {
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM main.thoughts WHERE source_id = ?",
+                (source_id,),
+            ).fetchall()
+        }
+        moved_derivation_ids = {
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM main.derivations WHERE source_id = ?",
+                (source_id,),
+            ).fetchall()
+        }
+
+        target_attach_conflict = conn.execute(
+            "SELECT 1 FROM target.attachments "
+            "WHERE (source_id = ? OR source_id LIKE ?) "
+            "  AND file_path IN ("
+            "    SELECT file_path FROM main.attachments "
+            "    WHERE source_id = ? OR source_id LIKE ?"
+            "  ) LIMIT 1",
+            (source_id, f"{source_id}@%", source_id, f"{source_id}@%"),
+        ).fetchone()
+        if target_attach_conflict is not None:
+            raise ValueError(
+                "target org already has an attachment row for one of this "
+                "source's blob paths; cannot preserve attachment UUIDs safely"
+            )
+
+        entity_id_map: dict[str, str] = {}
+
+        def _ensure_target_entity(old_id: str) -> str:
+            mapped = entity_id_map.get(old_id)
+            if mapped:
+                return mapped
+            ent = conn.execute(
+                "SELECT * FROM main.entities WHERE id = ?",
+                (old_id,),
+            ).fetchone()
+            if ent is None:
+                entity_id_map[old_id] = old_id
+                return old_id
+            existing = conn.execute(
+                "SELECT id FROM target.entities WHERE canonical_name = ?",
+                (ent["canonical_name"],),
+            ).fetchone()
+            if existing is not None:
+                entity_id_map[old_id] = existing["id"]
+                return existing["id"]
+            conn.execute(
+                "INSERT INTO target.entities("
+                "id, name, canonical_name, type, description, metadata, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ent["id"], ent["name"], ent["canonical_name"], ent["type"],
+                    ent["description"], ent["metadata"], ent["created_at"],
+                ),
+            )
+            entity_id_map[old_id] = ent["id"]
+            return ent["id"]
+
+        def _map_maybe_entity(ref_id: str | None) -> str | None:
+            if not ref_id:
+                return ref_id
+            return _ensure_target_entity(ref_id)
+
+        conn.execute("BEGIN IMMEDIATE")
+
+        conn.execute(
+            "INSERT INTO target.sources("
+            "id, type, platform, project, title, url, file_path, metadata, "
+            "created_at, ingested_at, last_activity_at, publication_state, "
+            "deprecated, successor_id, moved_to_org"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+            (
+                row["id"], row["type"], row["platform"], row["project"],
+                row["title"], row["url"], row["file_path"],
+                json.dumps(target_meta), row["created_at"], row["ingested_at"],
+                row["last_activity_at"], row["publication_state"],
+                row["deprecated"], row["successor_id"],
+            ),
+        )
+
+        for table in ("thoughts", "derivations", "note_comments"):
+            conn.execute(
+                f"INSERT INTO target.{table} SELECT * FROM main.{table} WHERE source_id = ?",
+                (source_id,),
+            )
+        conn.execute(
+            "INSERT INTO target.note_versions(source_id, version, content, created_at) "
+            "SELECT source_id, version, content, created_at "
+            "FROM main.note_versions WHERE source_id = ?",
+            (source_id,),
+        )
+        conn.execute(
+            "INSERT INTO target.note_reads(source_id, actor, ts) "
+            "SELECT source_id, actor, ts FROM main.note_reads WHERE source_id = ?",
+            (source_id,),
+        )
+
+        conn.execute(
+            "INSERT INTO target.attachments "
+            "SELECT * FROM main.attachments WHERE source_id = ? OR source_id LIKE ?",
+            (source_id, f"{source_id}@%"),
+        )
+        conn.execute(
+            "INSERT INTO target.captures "
+            "SELECT * FROM main.captures WHERE source_id = ?",
+            (source_id,),
+        )
+        conn.execute(
+            "INSERT INTO target.edges "
+            "SELECT * FROM main.edges WHERE source_id = ?",
+            (source_id,),
+        )
+
+        claim_rows = conn.execute(
+            "SELECT * FROM main.claims WHERE source_id = ?",
+            (source_id,),
+        ).fetchall()
+        for claim in claim_rows:
+            subj = claim["subject_id"]
+            obj = claim["object_id"]
+            if subj not in moved_thought_ids and subj not in moved_derivation_ids:
+                subj = _map_maybe_entity(subj)
+            if obj not in moved_thought_ids and obj not in moved_derivation_ids:
+                obj = _map_maybe_entity(obj)
+            conn.execute(
+                "INSERT INTO target.claims("
+                "id, subject_id, predicate, object_id, object_val, source_id, "
+                "asserted_by, confidence, status, evidence, metadata, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    claim["id"], subj, claim["predicate"], obj,
+                    claim["object_val"], claim["source_id"], claim["asserted_by"],
+                    claim["confidence"], claim["status"], claim["evidence"],
+                    claim["metadata"], claim["created_at"],
+                ),
+            )
+
+        mention_rows = conn.execute(
+            "SELECT em.* FROM main.entity_mentions em "
+            "WHERE (em.content_type = 'thought' AND em.content_id IN ("
+            "         SELECT id FROM main.thoughts WHERE source_id = ?"
+            "      )) OR (em.content_type = 'derivation' AND em.content_id IN ("
+            "         SELECT id FROM main.derivations WHERE source_id = ?"
+            "      ))",
+            (source_id, source_id),
+        ).fetchall()
+        for mention in mention_rows:
+            new_entity_id = _ensure_target_entity(mention["entity_id"])
+            conn.execute(
+                "INSERT INTO target.entity_mentions(entity_id, content_id, content_type, count) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(entity_id, content_id) DO UPDATE SET count = excluded.count",
+                (
+                    new_entity_id,
+                    mention["content_id"],
+                    mention["content_type"],
+                    mention["count"],
+                ),
+            )
+
+        conn.execute(
+            "DELETE FROM main.entity_mentions "
+            "WHERE (content_type = 'thought' AND content_id IN ("
+            "         SELECT id FROM main.thoughts WHERE source_id = ?"
+            "      )) OR (content_type = 'derivation' AND content_id IN ("
+            "         SELECT id FROM main.derivations WHERE source_id = ?"
+            "      ))",
+            (source_id, source_id),
+        )
+        conn.execute("DELETE FROM main.claims WHERE source_id = ?", (source_id,))
+        conn.execute("DELETE FROM main.edges WHERE source_id = ?", (source_id,))
+        conn.execute("DELETE FROM main.captures WHERE source_id = ?", (source_id,))
+        conn.execute(
+            "DELETE FROM main.attachments WHERE source_id = ? OR source_id LIKE ?",
+            (source_id, f"{source_id}@%"),
+        )
+        for table in ("note_reads", "note_versions", "note_comments", "derivations", "thoughts"):
+            conn.execute(f"DELETE FROM main.{table} WHERE source_id = ?", (source_id,))
+
+        conn.execute(
+            "UPDATE main.sources SET deprecated = 1, moved_to_org = ?, metadata = ?, ingested_at = ? "
+            "WHERE id = ?",
+            (to_org, json.dumps(origin_meta), now, source_id),
+        )
+        conn.commit()
+        return {
+            "source_id": source_id,
+            "title": row["title"] or "",
+            "from_org": from_org,
+            "to_org": to_org,
+            "moved_at": now,
+            "reason": reason,
+        }
+    except Exception:
+        try:
+            origin_db.conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        if attached:
+            try:
+                origin_db.conn.execute("DETACH DATABASE target")
+            except Exception:
+                pass
+        origin_db.close()
 
 
 def checkpoint(

@@ -30,6 +30,7 @@ class Source:
     publication_state: str = "curated"    # raw | curated | published | canonical — see graph://8cf067e3-ca3
     deprecated: bool = False
     successor_id: str | None = None
+    moved_to_org: str | None = None
 
 
 @dataclass
