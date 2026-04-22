@@ -1727,7 +1727,7 @@ def _store_attachment_db(
 
     mime_type, _ = mimetypes.guess_type(filename)
     ext = file_path.suffix or ""
-    store_dir = db.db_path.parent / "attachments" / file_hash[:2]
+    store_dir = db.db_path.parent.parent / "attachments" / file_hash[:2]
     store_path = store_dir / f"{file_hash}{ext}"
     store_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(str(file_path), str(store_path))
