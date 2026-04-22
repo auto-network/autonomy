@@ -31,6 +31,7 @@ Spec refs: graph://0d3f750f-f9c (Setting primitive), graph://bcce359d-a1d
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,60 @@ ARTIFACT_PATH_SET_ID = "autonomy.artifact-path"
 ARTIFACT_PATH_REVISION = 1
 
 logger = logging.getLogger(__name__)
+
+
+# ── Per-org-state cache ──────────────────────────────────────
+#
+# load_workspaces() and load_org_overrides() each iterate every per-org
+# DB and run a Setting read against each one. On a 3-org installation
+# that's ~6 SQL fan-outs costing several seconds per call. They were
+# being invoked once per row from dashboard DAOs (get_recent_sessions:
+# 1000+ rows; session_monitor: ~50; etc.), turning routine endpoints
+# into multi-second hangs.
+#
+# These functions are pure reads of slow-changing Settings, so they're
+# safe to memoise process-wide. The cache key is the on-disk landscape:
+# orgs root path, GRAPH_DB env override, and the (filename, mtime_ns) of
+# every ``*.db`` and ``*.db-wal`` file under the orgs dir. Any Setting
+# write bumps a file's mtime (WAL writes touch ``*.db-wal``; checkpoints
+# touch ``*.db``), so the next read sees a fresh key and rebuilds.
+# Per-test ``AUTONOMY_ORGS_DIR`` overrides naturally produce distinct
+# keys without explicit invalidation.
+_workspaces_cache_key: tuple | None = None
+_workspaces_cache_value: "dict[str, WorkspaceV1]" = {}
+_overrides_cache_key: tuple | None = None
+_overrides_cache_value: "dict[str, OrgOverride]" = {}
+
+
+def _orgs_state_key() -> tuple:
+    """Cheap fingerprint of the per-org DB landscape for cache keying."""
+    from tools.graph.cross_org import _orgs_root
+    root = _orgs_root()
+    graph_db = os.environ.get("GRAPH_DB", "")
+    if not root.exists():
+        return ("missing", str(root), graph_db, ())
+    try:
+        files = tuple(sorted(
+            (p.name, p.stat().st_mtime_ns)
+            for p in root.iterdir()
+            if p.suffix in (".db",) or p.name.endswith(".db-wal")
+        ))
+    except OSError:
+        files = ()
+    return ("ok", str(root), graph_db, files)
+
+
+def invalidate_caches() -> None:
+    """Drop the in-process workspace + org-override caches.
+
+    Useful for tests that mutate Settings within a single process and
+    want the next read to round-trip through the DB unconditionally.
+    Production callers should not need this — mtime-keyed invalidation
+    already catches Setting writes that happen via ``ops.add_setting``.
+    """
+    global _workspaces_cache_key, _overrides_cache_key
+    _workspaces_cache_key = None
+    _overrides_cache_key = None
 
 
 class WorkspaceSettingsError(ValueError):
@@ -355,7 +410,20 @@ def load_workspaces() -> dict[str, WorkspaceV1]:
     the single-DB fallback (no ``data/orgs/*.db`` yet), reads from the
     default DB and uses the caller's default org slug for every workspace.
     Ops owns DB routing; consumers do not enumerate peers themselves.
+
+    Process-wide cached on the per-org DB landscape — see the cache block
+    near the top of this module.
     """
+    global _workspaces_cache_key, _workspaces_cache_value
+    key = _orgs_state_key()
+    if key == _workspaces_cache_key:
+        return _workspaces_cache_value
+    _workspaces_cache_value = _load_workspaces_uncached()
+    _workspaces_cache_key = key
+    return _workspaces_cache_value
+
+
+def _load_workspaces_uncached() -> dict[str, WorkspaceV1]:
     refs = org_ops.list_orgs()
     if not refs:
         # Pre-migration fallback: no per-org DBs exist. All Settings live in
@@ -395,7 +463,20 @@ def load_org_overrides() -> dict[str, OrgOverride]:
     Each org's identity Setting lives in its own DB, keyed by the org slug.
     Fields not present in the Setting payload remain ``None`` so the
     :mod:`tools.dashboard.org_identity` cascade can fall through per-field.
+
+    Process-wide cached on the per-org DB landscape — see the cache block
+    near the top of this module.
     """
+    global _overrides_cache_key, _overrides_cache_value
+    key = _orgs_state_key()
+    if key == _overrides_cache_key:
+        return _overrides_cache_value
+    _overrides_cache_value = _load_org_overrides_uncached()
+    _overrides_cache_key = key
+    return _overrides_cache_value
+
+
+def _load_org_overrides_uncached() -> dict[str, OrgOverride]:
     refs = org_ops.list_orgs()
     out: dict[str, OrgOverride] = {}
     if not refs:
