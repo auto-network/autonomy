@@ -265,9 +265,6 @@ def get_recent_sessions(
          quota using the requested sort column.
       6. Merge the buckets and sort the union by the same column.
     """
-    if not _GRAPH_DB.exists():
-        return []
-
     if sort not in _VALID_RECENT_SORTS:
         sort = "lastActivity"
 
@@ -285,17 +282,21 @@ def get_recent_sessions(
         except ValueError:
             since_cutoff = None
 
-    # ── Step 1: pull from graph.db ────────────────────────────────
+    # ── Step 1: pull from per-org DBs ─────────────────────────────
+    # Sessions live in data/orgs/<slug>.db post per-org migration; the
+    # legacy data/graph.db stub no longer carries them. Iterate every
+    # known org and union the rows.
+    from tools.graph.cross_org import list_org_slugs, open_peer_db
+
     graph_rows: list[dict] = []
-    try:
-        conn = sqlite3.connect(str(_GRAPH_DB))
-        conn.row_factory = sqlite3.Row
+    sample_limit = max(total_quota * 25, 1000) if sort in ("turns", "ctx") else max(total_quota * 15, 600)
+    for slug in sorted(list_org_slugs()):
+        slug_db = open_peer_db(slug)
+        if slug_db is None:
+            continue
+        # Pooled handle from open_peer_db — must NOT close.
+        conn = slug_db.conn
         has_la = _graph_sources_have_last_activity_column(conn)
-        # Oversample aggressively so each type bucket has enough candidates
-        # to fill its quota even when one group dominates the window. The
-        # total quota is ~40–50, so sampling several hundred rows covers
-        # realistic volumes without making the SQL expensive.
-        sample_limit = max(total_quota * 25, 1000) if sort in ("turns", "ctx") else max(total_quota * 15, 600)
         if has_la:
             sql = (
                 "SELECT id, type, project, title, created_at, last_activity_at,"
@@ -310,7 +311,6 @@ def get_recent_sessions(
                 " WHERE type = 'session' ORDER BY created_at DESC LIMIT ?"
             )
         rows = conn.execute(sql, (sample_limit,)).fetchall()
-        conn.close()
         for r in rows:
             meta: dict = {}
             if r["metadata"]:
@@ -342,8 +342,6 @@ def get_recent_sessions(
                 "_job_type": meta.get("job_type", ""),
                 "_source": "graph",
             })
-    except Exception:
-        return []
 
     # ── Step 2: overlay dashboard.db ──────────────────────────────
     # dashboard.db owns label, entry_count, context_tokens, role for any
@@ -368,6 +366,12 @@ def get_recent_sessions(
         pass  # dashboard.db not initialised — skip overlay
 
     # ── Step 3: merge + filter live ───────────────────────────────
+    # resolve_session_org() reads load_org_overrides() + load_workspaces(),
+    # each of which iterates every per-org DB. Calling it per-row turned a
+    # millisecond loop into a multi-second hang once orgs landed. Cache the
+    # identity by (session_type, project_raw) — the only inputs the resolver
+    # consumes — so each unique combination resolves once per request.
+    identity_cache: dict[tuple, dict] = {}
     merged: dict[str, dict] = {}
     for row in graph_rows:
         # Filter out currently-live sessions
@@ -408,7 +412,12 @@ def get_recent_sessions(
         # date for backwards compat
         row["date"] = (row["last_activity_at"] or row["created_at"] or "")[:10]
         # Resolve org identity from the full row (carries session_type) BEFORE bracket-wrap
-        row["org"] = resolve_session_org(row)
+        ident_key = (row.get("session_type"), row.get("project") or "")
+        cached = identity_cache.get(ident_key)
+        if cached is None:
+            cached = resolve_session_org(row)
+            identity_cache[ident_key] = cached
+        row["org"] = cached
         # Wrap project in brackets for backwards-compat with the existing UI
         row["project"] = f"[{row['project']}]" if row["project"] else ""
 
