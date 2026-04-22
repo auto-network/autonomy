@@ -13,6 +13,7 @@ PRAGMA foreign_keys = ON;
 --   'published'        — cross-org reference; visible to subscriber orgs.
 --   'canonical'        — authoritative, pinned top-rank.
 -- deprecated/successor_id: terminal modifiers orthogonal to state.
+-- moved_to_org: relocation marker for moved-from stubs kept in the origin org.
 CREATE TABLE IF NOT EXISTS sources (
     id                TEXT PRIMARY KEY,
     type              TEXT NOT NULL,          -- 'conversation', 'musing', 'document', 'url', 'session'
@@ -28,7 +29,8 @@ CREATE TABLE IF NOT EXISTS sources (
     publication_state TEXT NOT NULL DEFAULT 'curated'
         CHECK (publication_state IN ('raw','curated','published','canonical')),
     deprecated        INTEGER NOT NULL DEFAULT 0 CHECK (deprecated IN (0,1)),
-    successor_id      TEXT                    -- loose reference to another source (promotion succession)
+    successor_id      TEXT,                   -- loose reference to another source (promotion succession)
+    moved_to_org      TEXT
 );
 -- idx_sources_last_activity and idx_sources_publication_state are created via
 -- their _migrate_* methods, so legacy DBs that pre-date these columns don't

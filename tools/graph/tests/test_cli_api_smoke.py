@@ -234,6 +234,7 @@ def _cli_args(**kw) -> argparse.Namespace:
         "all_comments": False, "html_output": False, "save": None,
         "window": 3, "turn": "last", "limit": 50, "id": None,
         "source_id": None, "state": None, "include": None,
+        "from_org": None,
         "only_org": None, "org_mode": None, "project": None, "type": None,
         "since": None, "until": None, "author": None, "verbose": False,
         "tags": None, "text": None, "content_stdin": None, "html": None,
@@ -527,6 +528,37 @@ def test_http_client_translates_cross_org_409_to_exception(
     with pytest.raises(SystemExit) as exc_info:
         graph_cli.cmd_note_update(args)
     assert exc_info.value.code == 2
+
+
+def test_cmd_move_routes_through_api(
+    api_client, forbid_cli_sqlite, seeded_source_id, capsys, monkeypatch, orgs_root,
+):
+    """``graph move`` hits the dashboard API and performs a cross-org transfer."""
+    GraphDB.create_org_db("anchore").close()
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        source_id=seeded_source_id, from_org="autonomy", to_org="anchore", reason="rehome",
+    )
+    graph_cli.cmd_move(args)
+    out = capsys.readouterr().out
+    assert "Moved" in out
+
+    ac = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    nc = sqlite3.connect(str(orgs_root / "anchore.db"))
+    try:
+        row = ac.execute(
+            "SELECT moved_to_org, deprecated FROM sources WHERE id = ?",
+            (seeded_source_id,),
+        ).fetchone()
+        assert row == ("anchore", 1)
+        row = nc.execute(
+            "SELECT moved_to_org, deprecated FROM sources WHERE id = ?",
+            (seeded_source_id,),
+        ).fetchone()
+        assert row == (None, 0)
+    finally:
+        ac.close()
+        nc.close()
 
 
 # ── Read-command smoke for previously-bypassed commands ──────

@@ -2176,6 +2176,61 @@ def cmd_tag_remove(args):
                 print(f"  Not tagged: {resolved_id[:12]} \"{title[:50]}\" ✗ {tag}")
 
 
+def cmd_move(args):
+    """Move a source to another org, leaving a moved stub behind."""
+    client = get_client()
+    if isinstance(client, HttpClient):
+        resolved_id = args.source_id
+        title = args.source_id
+    else:
+        db = GraphDB(_get_db_path(args.from_org))
+        try:
+            src = db.resolve_source_strict(args.source_id)
+        finally:
+            db.close()
+        if src is None:
+            print(
+                f"Error: no source found in org {args.from_org!r} matching "
+                f"{args.source_id!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if isinstance(src, list):
+            print(
+                f"Error: multiple sources in org {args.from_org!r} match "
+                f"{args.source_id!r}; use a longer prefix",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        resolved_id = src["id"]
+        title = src.get("title") or resolved_id
+    from . import ops as _ops
+    try:
+        moved = client.move_source(
+            resolved_id,
+            args.from_org,
+            args.to_org,
+            reason=args.reason,
+            org=None,
+        )
+    except _ops.CrossOrgWriteError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    from_org = moved.get("from_org") or "?"
+    to_org = moved.get("to_org") or args.to_org
+    msg = f"  ✓ Moved {resolved_id[:12]} \"{title[:50]}\" {from_org} → {to_org}"
+    if moved.get("reason"):
+        msg += f" ({moved['reason']})"
+    print(msg)
+
+
 def _resolve_source_for_tag(client, sid: str) -> tuple[str | None, str]:
     """Resolve a source id/prefix to ``(full_id, title)`` via the client.
 
@@ -3790,6 +3845,14 @@ def main():
         help="Pin the listing to a single org (own slug or peer).",
     )
     p.set_defaults(func=cmd_sources)
+
+    # move
+    p = sub.add_parser("move", help="Move a source to another org")
+    p.add_argument("source_id", help="Source ID or prefix")
+    p.add_argument("--from", dest="from_org", required=True, help="Origin org slug")
+    p.add_argument("--to", dest="to_org", required=True, help="Destination org slug")
+    p.add_argument("--reason", help="Optional move reason recorded in metadata")
+    p.set_defaults(func=cmd_move)
 
     # context
     p = sub.add_parser("context", help="Show turns around a search hit")

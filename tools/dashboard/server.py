@@ -6270,6 +6270,36 @@ async def api_graph_setting_promote(request):
     return JSONResponse({"ok": True})
 
 
+async def api_graph_source_move(request):
+    """POST /api/graph/source/<id>/move — body: {from_org, to_org, reason?}."""
+    source_id = request.path_params["id"]
+    if not _GRAPH_SOURCE_ID_RE.match(source_id):
+        return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
+    body = await request.json()
+    from_org = body.get("from_org") or body.get("from")
+    if not from_org:
+        return JSONResponse({"error": "from_org required"}, status_code=400)
+    to_org = body.get("to_org") or body.get("to")
+    if not to_org:
+        return JSONResponse({"error": "to_org required"}, status_code=400)
+    try:
+        moved = await asyncio.to_thread(
+            graph_ops.move_source,
+            source_id,
+            str(from_org),
+            str(to_org),
+            reason=body.get("reason"),
+        )
+    except graph_ops.CrossOrgWriteError as e:
+        return _cross_org_error_response(e)
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    _checkpoint_graph()
+    return JSONResponse({"ok": True, **moved})
+
+
 async def api_graph_setting_deprecate(request):
     """POST /api/graph/setting/<id>/deprecate — body: {successor_id?}."""
     sid = request.path_params["id"]
@@ -6976,6 +7006,7 @@ routes = [
     Route("/api/graph/setting/{id}/override", api_graph_setting_override, methods=["POST"]),
     Route("/api/graph/setting/{id}/exclude", api_graph_setting_exclude, methods=["POST"]),
     Route("/api/graph/setting/{id}/promote", api_graph_setting_promote, methods=["POST"]),
+    Route("/api/graph/source/{id}/move", api_graph_source_move, methods=["POST"]),
     Route("/api/graph/setting/{id}/deprecate", api_graph_setting_deprecate, methods=["POST"]),
     Route("/api/graph/setting/{id}", api_graph_setting_get, methods=["GET"]),
     Route("/api/graph/setting/{id}", api_graph_setting_delete, methods=["DELETE"]),
