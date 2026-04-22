@@ -18,8 +18,12 @@ def test_loads_bundled_autonomy_allowlist():
     loaded = al.load(al.DEFAULT_AUTONOMY_PATH)
     assert loaded.org == "autonomy"
     assert loaded.version == 1
-    # Canonical is a strictly larger set than published; both non-empty.
-    assert len(loaded.canonical) >= 20
+    # Both tiers non-empty after the auto-gzvji bootstrap promotion (commit
+    # 261429f intentionally downgraded 14 entries canonical → published to
+    # unblock auto-hbgow while their pending comments are integrated, so
+    # the lower bound here is set well below the post-downgrade count to
+    # avoid future drift on either side).
+    assert len(loaded.canonical) >= 5
     assert len(loaded.published) >= 5
     # No prefix may appear in both tiers.
     assert set(loaded.canonical).isdisjoint(set(loaded.published))
