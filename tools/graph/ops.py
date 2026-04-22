@@ -207,6 +207,44 @@ def _iter_org_dbs() -> "list[tuple[str, GraphDB]]":
     return out
 
 
+def _scan_orgs_for_row(fn) -> "dict | None":
+    """Scan every org DB for the first ID-lookup hit (scopeless callers).
+
+    ``fn`` is a ``(GraphDB) -> dict | None`` that runs a single-row lookup
+    against one org DB. The first non-None hit is annotated with ``org``
+    and returned; no state filter is applied because the caller has no
+    org seat (operator UI, host terminal). See user directive 2026-04-22:
+    scopeless = see all orgs equally.
+    """
+    for slug, slug_db in _iter_org_dbs():
+        row = fn(slug_db)
+        if row is None:
+            continue
+        if isinstance(row, dict):
+            row.setdefault("org", slug)
+        return row
+    return None
+
+
+def _union_across_orgs(fn) -> list[dict]:
+    """Union a list query across every org DB (scopeless callers).
+
+    ``fn`` is a ``(GraphDB) -> list[dict]`` that runs the listing against
+    one org DB. Rows are concatenated in the order orgs are iterated
+    (alphabetical by slug); callers that need a specific ordering are
+    responsible for re-sorting the union. Every row is annotated with
+    ``org`` unless it already carries one.
+    """
+    out: list[dict] = []
+    for slug, slug_db in _iter_org_dbs():
+        rows = fn(slug_db) or []
+        for r in rows:
+            if isinstance(r, dict):
+                r.setdefault("org", slug)
+        out.extend(rows)
+    return out
+
+
 # ── Read paths ───────────────────────────────────────────────
 
 
@@ -389,8 +427,17 @@ def resolve_source_strict(
     prefix on one scope). Ambiguity is resolved per-scope: an exact hit
     in own-org wins over a peer prefix match; ambiguity within a single
     scope surfaces as a list like in the single-DB world.
+
+    Scopeless callers (dashboard operator UI, host terminal — no org
+    kwarg / contextvar / GRAPH_ORG / GRAPH_DB) scan every org as
+    own-surface, no publication_state filter. Scoped callers keep the
+    peer-public-surface contract.
     """
     resolved_org = _resolve_org(org)
+
+    if _global_scope_active(resolved_org, None):
+        return _scan_orgs_for_row(lambda d: d.resolve_source_strict(source_id))
+
     db = _open(org)
     try:
         own = db.resolve_source_strict(source_id)
@@ -444,8 +491,15 @@ def get_attachment(
     only visible when their parent source's ``publication_state`` is in
     :data:`PEER_VISIBLE_STATES` (orphan attachments with no ``source_id``
     are skipped cross-org — their visibility can't be derived).
+
+    Scopeless callers scan every org as own-surface; no parent-state
+    filter (operator UI sees all).
     """
     resolved_org = _resolve_org(org)
+
+    if _global_scope_active(resolved_org, None):
+        return _scan_orgs_for_row(lambda d: d.get_attachment(attachment_id))
+
     db = _open(org)
     try:
         att = db.get_attachment(attachment_id)
@@ -483,7 +537,15 @@ def list_attachments(
     peers: list[str] | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    """List attachments, optionally filtered by source_id."""
+    """List attachments, optionally filtered by source_id.
+
+    Scopeless callers union across every org DB.
+    """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _union_across_orgs(
+            lambda d: d.list_attachments(source_id=source_id, limit=limit)
+        )
     db = _open(org)
     try:
         return db.list_attachments(source_id=source_id, limit=limit)
@@ -630,7 +692,13 @@ def list_collab_sources(
     org: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    """List collab-tagged sources ranked by activity."""
+    """List collab-tagged sources ranked by activity.
+
+    Scopeless callers union across every org DB.
+    """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _union_across_orgs(lambda d: d.list_collab_sources(limit=limit))
     db = _open(org)
     try:
         return db.list_collab_sources(limit=limit)
@@ -645,7 +713,11 @@ def list_collab_topics(
     """List tag taxonomy entries (name + description + counts).
 
     Today returns rows from the ``tags`` table. Empty list if table absent.
+    Scopeless callers union across every org DB.
     """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _union_across_orgs(lambda d: d.list_tags(limit=200))
     db = _open(org)
     try:
         return db.list_tags(limit=200)
@@ -662,10 +734,19 @@ def list_attention(
     session: str | None = None,
     context: int = 0,
 ) -> list[dict]:
-    """List human input ('attention') across sessions. Always own-org.
+    """List human input ('attention') across sessions.
 
-    Mirrors ``cli._query_attention`` so callers can drop the inline SQL.
+    Scopeless callers union across every org DB. Scoped callers read
+    only their own org.
     """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _union_across_orgs(
+            lambda d: _query_attention(
+                d, since=since, search=search, last=last,
+                session=session, context=context,
+            )
+        )
     db = _open(org)
     try:
         return _query_attention(
@@ -686,7 +767,17 @@ def get_recent_turns(
     org: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    """Get recent turns of a source. Used by primer/context flows."""
+    """Get recent turns of a source. Used by primer/context flows.
+
+    Scopeless callers scan every org DB for the source.
+    """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        # Unique source IDs live in one org; scan and return the first hit's turns.
+        for _slug, slug_db in _iter_org_dbs():
+            if slug_db.get_source(source_id) is not None:
+                return slug_db.get_recent_turns(source_id, limit=limit)
+        return []
     db = _open(org)
     try:
         return db.get_recent_turns(source_id, limit=limit)
@@ -699,7 +790,28 @@ def get_session(
     *,
     org: str | None = None,
 ) -> dict | None:
-    """Get a session-type source by id or session_id metadata. Always own-org."""
+    """Get a session-type source by id or session_id metadata.
+
+    Scopeless callers scan every org. ``session_id`` may be the source
+    id, a tmux name, or a session_uuid.
+    """
+    def _probe(db: GraphDB) -> dict | None:
+        src = db.get_source(session_id)
+        if src and src.get("type") == "session":
+            return src
+        row = db.conn.execute(
+            "SELECT * FROM sources WHERE type = 'session' AND ("
+            "  json_extract(metadata, '$.session_id') = ?"
+            "  OR json_extract(metadata, '$.session_uuid') = ?"
+            "  OR json_extract(metadata, '$.tmux_session') = ?"
+            ") LIMIT 1",
+            (session_id, session_id, session_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _scan_orgs_for_row(_probe)
     db = _open(org)
     try:
         # session_id may be the source id, a tmux name, or a session_uuid.
@@ -764,15 +876,29 @@ def count_active_streams(
     *,
     org: str | None = None,
 ) -> int:
-    """Return the count of distinct tags across all notes."""
+    """Return the count of distinct tags across all notes.
+
+    Scopeless callers union the tag set across every org (counting
+    distinct tags post-union, not summing per-org).
+    """
+    sql = (
+        "SELECT DISTINCT value AS tag "
+        "FROM sources, json_each(json_extract(sources.metadata, '$.tags')) "
+        "WHERE sources.type = 'note'"
+    )
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        tags: set[str] = set()
+        for _slug, slug_db in _iter_org_dbs():
+            for r in slug_db.conn.execute(sql):
+                t = r["tag"]
+                if t:
+                    tags.add(t)
+        return len(tags)
     db = _open(org)
     try:
-        row = db.conn.execute(
-            "SELECT COUNT(DISTINCT value) AS cnt "
-            "FROM sources, json_each(json_extract(sources.metadata, '$.tags')) "
-            "WHERE sources.type = 'note'"
-        ).fetchone()
-        return row["cnt"] if row else 0
+        rows = db.conn.execute(sql).fetchall()
+        return len({r["tag"] for r in rows if r["tag"]})
     finally:
         db.close()
 
@@ -782,21 +908,40 @@ def streams_summary(
     org: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    """Summarize active tag streams: tag, count, description, last_active."""
-    db = _open(org)
-    try:
+    """Summarize active tag streams: tag, count, description, last_active.
+
+    Scopeless callers aggregate across every org (count and last_active
+    are summed / taken-as-max over all orgs; description wins by
+    first-seen).
+    """
+    def _collect(db: GraphDB) -> tuple[list, dict[str, str]]:
         rows = db.conn.execute(
             """SELECT metadata, created_at FROM sources
                WHERE type = 'note' AND json_extract(metadata, '$.tags') IS NOT NULL"""
         ).fetchall()
-        tag_desc: dict[str, str] = {}
+        descs: dict[str, str] = {}
         try:
             for r2 in db.conn.execute("SELECT name, description FROM tags"):
-                tag_desc[r2["name"]] = r2["description"] or ""
+                descs[r2["name"]] = r2["description"] or ""
         except Exception:
             pass
-    finally:
-        db.close()
+        return [dict(r) for r in rows], descs
+
+    resolved_org = _resolve_org(org)
+    tag_desc: dict[str, str] = {}
+    rows: list = []
+    if _global_scope_active(resolved_org, None):
+        for _slug, slug_db in _iter_org_dbs():
+            r_rows, r_desc = _collect(slug_db)
+            rows.extend(r_rows)
+            for k, v in r_desc.items():
+                tag_desc.setdefault(k, v)
+    else:
+        db = _open(org)
+        try:
+            rows, tag_desc = _collect(db)
+        finally:
+            db.close()
 
     tag_counts: dict[str, int] = {}
     tag_last: dict[str, str] = {}
@@ -829,7 +974,19 @@ def resolve_embed(
     Returns a dict describing the embed (rich-content note, plain note, or
     attachment), or ``None`` if not found. See ``api_resolve_embed`` for the
     response shape.
+
+    Scopeless callers scan every org DB; embed IDs are UUIDs so the
+    first hit wins.
     """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        # Find which org owns the source or attachment; then call ourselves
+        # pinned to that org so the rich-content / version lookup runs
+        # against the correct DB.
+        for slug, slug_db in _iter_org_dbs():
+            if slug_db.get_source(embed_id) is not None or slug_db.get_attachment(embed_id) is not None:
+                return resolve_embed(embed_id, org=slug, version=version)
+        return None
     db = _open(org)
     try:
         source = db.get_source(embed_id)
@@ -896,11 +1053,13 @@ def list_journal_entries(
     since: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    """List journal-type sources with the dashboard's three-zoom-level shape."""
-    db = _open(org)
-    try:
+    """List journal-type sources with the dashboard's three-zoom-level shape.
+
+    Scopeless callers union across every org DB.
+    """
+    def _entries(db: GraphDB) -> list[dict]:
         sources = db.list_sources(source_type="journal", since=since, limit=limit)
-        entries = []
+        out = []
         for s in sources:
             meta = s.get("metadata") or {}
             if isinstance(meta, str):
@@ -915,7 +1074,7 @@ def list_journal_entries(
                 (s["id"],),
             ).fetchall()
             normal = rows[0]["content"] if rows else ""
-            entries.append({
+            out.append({
                 "id": s["id"],
                 "compact": s.get("title", ""),
                 "normal": normal,
@@ -925,7 +1084,14 @@ def list_journal_entries(
                 "entry_type": meta.get("entry_type", ""),
                 "created_at": s.get("created_at", ""),
             })
-        return entries
+        return out
+
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _union_across_orgs(_entries)
+    db = _open(org)
+    try:
+        return _entries(db)
     finally:
         db.close()
 
@@ -935,14 +1101,23 @@ def get_comment(
     *,
     org: str | None = None,
 ) -> dict | None:
-    """Look up a note comment by id (or id prefix)."""
-    db = _open(org)
-    try:
+    """Look up a note comment by id (or id prefix).
+
+    Scopeless callers scan every org DB.
+    """
+    def _probe(db: GraphDB) -> dict | None:
         row = db.conn.execute(
             "SELECT * FROM note_comments WHERE id = ? OR id LIKE ?",
             (comment_id, f"{comment_id}%"),
         ).fetchone()
         return dict(row) if row else None
+
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _scan_orgs_for_row(_probe)
+    db = _open(org)
+    try:
+        return _probe(db)
     finally:
         db.close()
 
@@ -1291,7 +1466,13 @@ def get_thread(
     *,
     org: str | None = None,
 ) -> dict | None:
-    """Get a thread by id (or id prefix)."""
+    """Get a thread by id (or id prefix).
+
+    Scopeless callers scan every org DB.
+    """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _scan_orgs_for_row(lambda d: d.get_thread(thread_id))
     db = _open(org)
     try:
         return db.get_thread(thread_id)
@@ -1332,17 +1513,24 @@ def list_captures(
     since: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    """List thought captures with optional filters."""
+    """List thought captures with optional filters.
+
+    Scopeless callers union across every org DB.
+    """
+    def _query(db: GraphDB) -> list[dict]:
+        try:
+            return db.list_captures(
+                thread_id=thread_id, status=status, since=since, limit=limit,
+            )
+        except Exception:
+            return []  # captures table may not exist on older DBs
+
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _union_across_orgs(_query)
     db = _open(org)
     try:
-        return db.list_captures(
-            thread_id=thread_id,
-            status=status,
-            since=since,
-            limit=limit,
-        )
-    except Exception:
-        return []  # captures table may not exist on older DBs
+        return _query(db)
     finally:
         db.close()
 
@@ -1355,14 +1543,25 @@ def list_threads(
     limit: int = 20,
 ) -> list[dict]:
     """List threads with optional status filter. ``include_all=True``
-    overrides ``status`` and returns every status."""
+    overrides ``status`` and returns every status.
+
+    Scopeless callers union across every org DB.
+    """
     if include_all:
         status = None
+
+    def _query(db: GraphDB) -> list[dict]:
+        try:
+            return db.list_threads(status=status, limit=limit)
+        except Exception:
+            return []  # threads table may not exist on older DBs
+
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _union_across_orgs(_query)
     db = _open(org)
     try:
-        return db.list_threads(status=status, limit=limit)
-    except Exception:
-        return []  # threads table may not exist on older DBs
+        return _query(db)
     finally:
         db.close()
 
@@ -1960,7 +2159,23 @@ def get_turn_content(
     *,
     org: str | None = None,
 ) -> str | None:
-    """Return the content of a single turn of ``source_id`` (or None)."""
+    """Return the content of a single turn of ``source_id`` (or None).
+
+    Scopeless callers scan every org DB for the source.
+    """
+    def _probe(db: GraphDB) -> dict | None:
+        row = db.conn.execute(
+            "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = ? "
+            "LIMIT 1",
+            (source_id, turn_number),
+        ).fetchone()
+        # Return as a dict so _scan_orgs_for_row can annotate + return it.
+        return {"content": row["content"]} if row else None
+
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        hit = _scan_orgs_for_row(_probe)
+        return hit["content"] if hit else None
     db = _open(org)
     try:
         row = db.conn.execute(
@@ -1977,7 +2192,20 @@ def stats(
     *,
     org: str | None = None,
 ) -> dict:
-    """Return DB statistics (table counts). Always own-org."""
+    """Return DB statistics (table counts).
+
+    Scopeless callers sum counts across every org DB.
+    """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        merged: dict[str, int] = {}
+        for _slug, slug_db in _iter_org_dbs():
+            for k, v in slug_db.stats().items():
+                if isinstance(v, int):
+                    merged[k] = merged.get(k, 0) + v
+                else:
+                    merged.setdefault(k, v)
+        return merged
     db = _open(org)
     try:
         return db.stats()
@@ -1991,7 +2219,15 @@ def get_tree(
     depth: int = 3,
     org: str | None = None,
 ) -> list[dict]:
-    """Return hierarchy tree nodes rooted at ``root`` (or full tree)."""
+    """Return hierarchy tree nodes rooted at ``root`` (or full tree).
+
+    Scopeless callers union across every org DB (trees are org-local, so
+    the union preserves per-org structure with each node carrying its
+    origin slug).
+    """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        return _union_across_orgs(lambda d: d.get_tree(root, depth=depth))
     db = _open(org)
     try:
         return db.get_tree(root, depth=depth)
@@ -2005,7 +2241,16 @@ def search_entities(
     limit: int = 20,
     org: str | None = None,
 ) -> list[dict]:
-    """Full-text search entities by name."""
+    """Full-text search entities by name.
+
+    Scopeless callers union across every org DB, then truncate to limit.
+    """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        rows = _union_across_orgs(
+            lambda d: d.search_entities(query, limit=limit)
+        )
+        return rows[:limit]
     db = _open(org)
     try:
         return db.search_entities(query, limit=limit)
@@ -2019,7 +2264,16 @@ def list_entities(
     limit: int = 20,
     org: str | None = None,
 ) -> list[dict]:
-    """List entities, optionally filtered by type."""
+    """List entities, optionally filtered by type.
+
+    Scopeless callers union across every org DB, then truncate to limit.
+    """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        rows = _union_across_orgs(
+            lambda d: d.list_entities(entity_type=entity_type, limit=limit)
+        )
+        return rows[:limit]
     db = _open(org)
     try:
         return db.list_entities(entity_type=entity_type, limit=limit)
@@ -2033,7 +2287,14 @@ def entity_thoughts(
     limit: int = 20,
     org: str | None = None,
 ) -> list[dict]:
-    """Thoughts mentioning a given entity id."""
+    """Thoughts mentioning a given entity id.
+
+    Scopeless callers union across every org DB.
+    """
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        rows = _union_across_orgs(lambda d: d.entity_thoughts(entity_id))
+        return rows[:limit]
     db = _open(org)
     try:
         return db.entity_thoughts(entity_id)[:limit]
@@ -2046,13 +2307,22 @@ def entity_mention_count(
     *,
     org: str | None = None,
 ) -> int:
-    """Total mentions of an entity across all sources."""
+    """Total mentions of an entity across all sources.
+
+    Scopeless callers sum counts across every org DB.
+    """
+    sql = "SELECT SUM(count) AS total FROM entity_mentions WHERE entity_id = ?"
+    resolved_org = _resolve_org(org)
+    if _global_scope_active(resolved_org, None):
+        total = 0
+        for _slug, slug_db in _iter_org_dbs():
+            row = slug_db.conn.execute(sql, (entity_id,)).fetchone()
+            if row and row["total"]:
+                total += int(row["total"])
+        return total
     db = _open(org)
     try:
-        row = db.conn.execute(
-            "SELECT SUM(count) AS total FROM entity_mentions WHERE entity_id = ?",
-            (entity_id,),
-        ).fetchone()
+        row = db.conn.execute(sql, (entity_id,)).fetchone()
         return int(row["total"] or 0) if row else 0
     finally:
         db.close()
