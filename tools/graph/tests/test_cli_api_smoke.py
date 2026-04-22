@@ -635,6 +635,129 @@ def test_cmd_read_routes_through_api(
     assert "Dispatch Lifecycle" in out
 
 
+# ── Global-org default for scopeless reads (dashboard URLs) ───
+
+
+def _seed_curated_note(org: str, *, content: str, tags: list[str] | None = None) -> str:
+    GraphDB.close_all_pooled()
+    db = GraphDB.open_org_db(org, mode="rw")
+    try:
+        sid = str(uuid.uuid4())
+        src = Source(
+            id=sid, type="note", platform="local", project=org,
+            title=content[:80], file_path=f"note:{sid}",
+            metadata={"tags": tags or [], "author": "test"},
+            publication_state="curated",
+        )
+        db.insert_source(src)
+        db.insert_thought(Thought(
+            source_id=sid, content=content, role="user",
+            turn_number=1, tags=tags or [],
+        ))
+        db.commit()
+    finally:
+        db.close()
+    GraphDB.close_all_pooled()
+    return sid
+
+
+def test_scopeless_search_returns_curated_results_from_every_org(
+    api_client, monkeypatch,
+):
+    """``GET /api/graph/search`` with no X-Graph-Org should return curated
+    rows from every org, not just published+canonical peer surface."""
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    needle = f"global-search-probe-{uuid.uuid4().hex[:8]}"
+    a_id = _seed_curated_note("autonomy", content=needle + " from autonomy")
+    p_id = _seed_curated_note("personal", content=needle + " from personal")
+    resp = api_client.get(f"/api/graph/search?q={needle}&limit=10")
+    assert resp.status_code == 200
+    rows = resp.json()
+    # ``search`` returns thought rows; the *source* id lives on each row's
+    # ``source_id`` (the ``id`` column is the thought's own UUID).
+    source_ids = {r.get("source_id") for r in rows}
+    assert a_id in source_ids and p_id in source_ids, (
+        f"global search should include curated rows from autonomy AND "
+        f"personal; got source_ids={source_ids}"
+    )
+
+
+def test_scopeless_list_sources_returns_curated_from_every_org(
+    api_client, monkeypatch,
+):
+    """``GET /api/graph/sources`` scopeless should merge curated rows
+    from every org without filtering to peer-public-surface."""
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    a_id = _seed_curated_note("autonomy", content=f"global-list-probe-autonomy-{uuid.uuid4().hex[:8]}")
+    p_id = _seed_curated_note("personal", content=f"global-list-probe-personal-{uuid.uuid4().hex[:8]}")
+    resp = api_client.get("/api/graph/sources?type=note&limit=50")
+    assert resp.status_code == 200
+    body = resp.json()
+    rows = body.get("sources") if isinstance(body, dict) else body
+    ids = {r.get("id") for r in (rows or [])}
+    assert a_id in ids and p_id in ids, (
+        f"global list_sources should merge curated from every org; "
+        f"got {len(ids)} ids, missing {{a={a_id}, p={p_id}}} ∩ {ids}"
+    )
+
+
+def test_scopeless_resolve_finds_curated_note_in_any_org(
+    api_client, monkeypatch,
+):
+    """A scopeless ``/api/graph/{id}`` request (no X-Graph-Org header) must
+    resolve a ``curated`` note that lives in any org's DB.
+
+    Models the dashboard URL case: a browser opens ``/graph/<id>`` and the
+    page JS fetches ``/api/graph/<id>`` with no auth header. The dashboard
+    is operator UI — it should see every org's full surface, not be
+    restricted to peer-public-surface (published+canonical only).
+
+    Today this returns 404 because:
+      1. ``_resolve_org(None)`` drops to scopeless personal default.
+      2. ``_open(None)`` opens personal.db, doesn't find the curated note.
+      3. Peer fallback scans autonomy/anchore but filters to
+         PEER_VISIBLE_STATES = ("published", "canonical").
+      4. The curated row in autonomy is dropped → 404.
+
+    The fix is a "global" semantic for scopeless callers — scan every
+    org's own surface, no peer filter. ``graph note`` writes default to
+    ``curated``, so without this fix every newly-created note 404s on
+    dashboard URLs.
+    """
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    # Seed a curated note in autonomy.db via the host ops layer.
+    GraphDB.close_all_pooled()
+    autonomy_db = GraphDB.open_org_db("autonomy", mode="rw")
+    try:
+        seed_id = str(uuid.uuid4())
+        seed = Source(
+            id=seed_id, type="note", platform="local", project="autonomy",
+            title="global-resolve probe",
+            file_path=f"note:{seed_id}",
+            metadata={"tags": ["probe"], "author": "test"},
+            publication_state="curated",
+        )
+        autonomy_db.insert_source(seed)
+        autonomy_db.insert_thought(Thought(
+            source_id=seed_id, content="global resolve target",
+            role="user", turn_number=1, tags=["probe"],
+        ))
+    finally:
+        autonomy_db.close()
+    GraphDB.close_all_pooled()
+
+    # Request with no X-Graph-Org header — like a browser hitting /graph/<id>.
+    resp = api_client.get(f"/api/graph/{seed_id}")
+    assert resp.status_code == 200, (
+        f"scopeless resolve should find a curated note in any org, "
+        f"got HTTP {resp.status_code}: {resp.text[:200]}"
+    )
+    body = resp.json()
+    assert body.get("source", {}).get("id") == seed_id, (
+        f"scopeless resolve should return the seeded note id; got {body!r}"
+    )
+
+
 # ── Response-shape regressions (client ↔ server contract) ─────
 
 

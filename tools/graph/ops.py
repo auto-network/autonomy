@@ -131,8 +131,9 @@ def _resolve_org(org: str | None) -> str | None:
          dashboard from ``X-Graph-Org``. Handlers don't need to thread
          ``org=`` through; the ops layer picks it up automatically.
       3. ``GRAPH_ORG`` env — host CLI (no middleware in play).
-      4. ``None`` — scopeless default (``personal.db`` via
-         :func:`resolve_caller_db_path`).
+      4. ``None`` — scopeless default (callers iterate every per-org DB
+         in :func:`_iter_org_dbs`, except when ``GRAPH_DB`` pinning is
+         active — see :func:`_global_scope_active`).
     """
     if org is not None:
         return org
@@ -143,6 +144,22 @@ def _resolve_org(org: str | None) -> str | None:
     if env_org:
         return env_org
     return None
+
+
+def _global_scope_active(resolved_org: str | None, only_org: str | None) -> bool:
+    """Return True when reads should fan out across every per-org DB.
+
+    Global scope fires only when no caller is set anywhere AND ``GRAPH_DB``
+    pinning is inactive. ``GRAPH_DB`` is the test/legacy override that
+    collapses the entire stack to a single DB; when it's set we route as
+    if the caller were that single DB's only org (peers already shrink
+    to ``[]`` via :func:`cross_org.resolve_peers`).
+    """
+    if resolved_org is not None or only_org is not None:
+        return False
+    if os.environ.get("GRAPH_DB"):
+        return False
+    return True
 
 
 def _db_path(org: str | None = None) -> str | None:
@@ -169,6 +186,25 @@ def _open(org: str | None = None) -> GraphDB:
     cost across requests.
     """
     return GraphDB(_db_path(org))
+
+
+def _iter_org_dbs() -> "list[tuple[str, GraphDB]]":
+    """Pooled read handles for every known org DB. Used by global-scope
+    read paths — when no caller_org is set (no explicit kwarg, no
+    contextvar, no env), reads sweep every org's full surface as if each
+    were the caller's own DB. See graph://bcce359d-a1d § Global scope.
+
+    The handles come from :func:`cross_org.open_peer_db` which uses the
+    process-lifetime pool — **callers MUST NOT close them.**
+    """
+    from .cross_org import list_org_slugs
+    out: list[tuple[str, GraphDB]] = []
+    for slug in sorted(list_org_slugs()):
+        db = open_peer_db(slug)
+        if db is None:
+            continue
+        out.append((slug, db))
+    return out
 
 
 # ── Read paths ───────────────────────────────────────────────
@@ -207,6 +243,23 @@ def search(
     None = default from subscription Setting or every sibling DB).
     """
     resolved_org = _resolve_org(org)
+
+    if _global_scope_active(resolved_org, only_org):
+        # GLOBAL caller: search every org as own-surface, no peer filter.
+        # Annotate each row with origin slug; merge with org-agnostic RRF.
+        # Handles from _iter_org_dbs are pooled — must NOT close them.
+        org_lists: list[tuple[str, list[dict]]] = []
+        for slug, slug_db in _iter_org_dbs():
+            rows = slug_db.search(
+                q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+                states=states, include_raw=include_raw,
+            )
+            for r in rows:
+                r["org"] = slug
+            org_lists.append((slug, rows))
+        if not org_lists:
+            return []
+        return rrf_merge(org_lists, limit=limit, own_org=None, key="id")
 
     # Single-org pin: skip peer resolution entirely.
     if only_org is not None:
@@ -282,6 +335,25 @@ def get_source(
     the returned dict carries an ``org`` field identifying the origin.
     """
     resolved_org = _resolve_org(org)
+
+    if _global_scope_active(resolved_org, None):
+        # GLOBAL caller (no explicit org, no contextvar, no env, no
+        # GRAPH_DB pin). Treat every org as own-surface — scan all org
+        # DBs without applying the peer-visible-states filter. Used by
+        # dashboard URL handlers and any operator UI where the caller
+        # isn't acting from an org seat.
+        from .cross_org import list_org_slugs
+        for slug in sorted(list_org_slugs()):
+            slug_db = open_peer_db(slug)
+            if slug_db is None:
+                continue
+            src = slug_db.get_source(source_id)
+            if src is None:
+                continue
+            src["org"] = slug
+            return src
+        return None
+
     db = _open(org)
     try:
         src = db.get_source(source_id)
@@ -450,6 +522,25 @@ def list_sources(
     """
     resolved_org = _resolve_org(org)
     per_db_limit = limit + _CROSS_ORG_LIST_SLOP
+
+    if _global_scope_active(resolved_org, only_org):
+        # GLOBAL caller: list every org as own-surface, no peer filter,
+        # chronological merge across all of them. Pooled handles — don't
+        # close them.
+        merged: list[dict] = []
+        for slug, slug_db in _iter_org_dbs():
+            rows = slug_db.list_sources(
+                project=project, source_type=source_type, limit=per_db_limit,
+                since=since, until=until, author=author, tags=tags,
+                states=states, include_raw=include_raw,
+                session_source_ids=session_source_ids,
+                session_author_pattern=session_author_pattern,
+            )
+            for r in rows:
+                r["org"] = slug
+            merged.extend(rows)
+        merged.sort(key=lambda r: (r.get("created_at") or ""), reverse=True)
+        return merged[:limit]
 
     if only_org is not None:
         if only_org == resolved_org:
