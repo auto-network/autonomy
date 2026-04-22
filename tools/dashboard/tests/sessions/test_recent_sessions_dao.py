@@ -27,10 +27,28 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _evict_pooled_orgs():
+    """Evict per-org connection pool between tests.
+
+    GraphDB.for_org caches connections by slug for the process lifetime,
+    so two tests using the same slug ('autonomy') with different per-test
+    orgs dirs would share the first test's connection. Drop the pool
+    after every test to keep AUTONOMY_ORGS_DIR overrides honoured.
+    """
+    from tools.graph.db import GraphDB
+    GraphDB.close_all_pooled()
+    yield
+    GraphDB.close_all_pooled()
+
+
 @pytest.fixture
 def isolated_dao(tmp_path, monkeypatch):
     """Build a graph.db + dashboard.db pair and reload the sessions DAO against them."""
-    graph_db_path = tmp_path / "graph.db"
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    graph_db_path = orgs_dir / "autonomy.db"
     dashboard_db_path = tmp_path / "dashboard.db"
 
     # ── Build graph.db with the new schema ──
@@ -285,7 +303,10 @@ class TestSortMode:
 @pytest.fixture
 def duration_dao(tmp_path, monkeypatch):
     """graph.db seeded with sessions that have distinct durations."""
-    graph_db_path = tmp_path / "graph.db"
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    graph_db_path = orgs_dir / "autonomy.db"
     dashboard_db_path = tmp_path / "dashboard.db"
 
     from tools.graph.db import GraphDB
@@ -365,7 +386,10 @@ class TestSortDuration:
 @pytest.fixture
 def librarian_dao(tmp_path, monkeypatch):
     """graph.db with a librarian session + dispatch.db with matching job row."""
-    graph_db_path = tmp_path / "graph.db"
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    graph_db_path = orgs_dir / "autonomy.db"
     dashboard_db_path = tmp_path / "dashboard.db"
     dispatch_db_path = tmp_path / "dispatch.db"
 
@@ -483,7 +507,10 @@ class TestLibrarianTitleFields:
     def test_unresolvable_target_leaves_bead_id_none(self, tmp_path, monkeypatch):
         """When librarian_jobs has no matching row, target stays None but
         librarian_type is still populated from the metadata."""
-        graph_db_path = tmp_path / "graph.db"
+        orgs_dir = tmp_path / "orgs"
+        orgs_dir.mkdir()
+        monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+        graph_db_path = orgs_dir / "autonomy.db"
         dashboard_db_path = tmp_path / "dashboard.db"
         dispatch_db_path = tmp_path / "dispatch.db"
 
@@ -572,7 +599,10 @@ class TestSinceWindow:
 @pytest.fixture
 def quota_dao(tmp_path, monkeypatch):
     """graph.db seeded with many dispatch + librarian rows + a few interactive."""
-    graph_db_path = tmp_path / "graph.db"
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    graph_db_path = orgs_dir / "autonomy.db"
     dashboard_db_path = tmp_path / "dashboard.db"
 
     from tools.graph.db import GraphDB
