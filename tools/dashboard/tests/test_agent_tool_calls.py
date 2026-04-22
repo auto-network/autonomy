@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from tools.dashboard.session_monitor import SessionState, count_tool_uses
-from tools.dashboard.server import _enrich_entries
+from tools.dashboard.session_harness import enrich_claude_entries as _enrich_entries
 
 
 # ── Fixture helpers ──────────────────────────────────────────────

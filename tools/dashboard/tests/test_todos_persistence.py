@@ -244,7 +244,7 @@ class TestWarmupPopulatesDb:
 
         # Build a fresh monitor + tracker (simulating a new process).
         from tools.dashboard.session_monitor import SessionMonitor, TaskStateTracker, _TailState
-        from tools.dashboard.server import _parse_jsonl_entry
+        from tools.dashboard.session_harness import parse_claude_log_line as _parse_jsonl_entry
         monitor = SessionMonitor()
         tracker = TaskStateTracker()
         monitor._entry_parser = _parse_jsonl_entry
@@ -288,7 +288,7 @@ class TestWarmupPopulatesDb:
         fresh_db.update_tail_state("auto-cold", file_offset=jsonl.stat().st_size)
 
         from tools.dashboard.session_monitor import SessionMonitor, TaskStateTracker, _TailState
-        from tools.dashboard.server import _parse_jsonl_entry
+        from tools.dashboard.session_harness import parse_claude_log_line as _parse_jsonl_entry
         monitor = SessionMonitor()
         tracker = TaskStateTracker()
         monitor._entry_parser = _parse_jsonl_entry

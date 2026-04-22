@@ -64,6 +64,15 @@ logging.basicConfig(
 )
 
 from tools.dashboard.event_bus import event_bus, _SERVER_EPOCH
+from tools.dashboard.session_harness import (
+    CLAUDE_HARNESS,
+    dedup_claude_entries,
+    enrich_claude_entries,
+    parse_claude_log_line,
+    postprocess_claude_entries,
+    resolve_harness_for_path,
+    resolve_harness_for_session_row,
+)
 from tools.dashboard.session_monitor import count_tool_uses, session_monitor, TaskStateTracker
 from tools.dashboard.dao import auth_db, dashboard_db
 if os.environ.get("DASHBOARD_MOCK"):
@@ -2410,332 +2419,18 @@ def _classify_system_message(text: str) -> dict | None:
 
 def _parse_jsonl_entry(line: str) -> dict | None:
     """Parse a single JSONL line into a display entry."""
-    try:
-        raw = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-
-    entry_type = raw.get("type")
-    timestamp = raw.get("timestamp", "")
-    is_sidechain = raw.get("isSidechain", False)
-
-    # Compact-summary turns: Claude's continuation boilerplate written after a
-    # context compaction. Emit a distinct entry kind (not a user bubble) so the
-    # viewer can render it as a boundary marker.
-    if raw.get("isCompactSummary") or raw.get("isVisibleInTranscriptOnly"):
-        message = raw.get("message", {})
-        content_raw = message.get("content", "")
-        text = ""
-        if isinstance(content_raw, str):
-            text = content_raw
-        elif isinstance(content_raw, list):
-            text = "".join(
-                b.get("text", "") for b in content_raw
-                if isinstance(b, dict) and b.get("type") == "text"
-            )
-        if not text:
-            return None
-        return {
-            "type": "compact_summary",
-            "role": "compact_summary",
-            "content": text,
-            "timestamp": timestamp,
-        }
-
-    # Queued user messages: sent while agent was working, logged as queue-operation
-    # instead of user. Render enqueue entries with content as user messages.
-    # Track content so we can dedup if the same text also appears as a user entry.
-    if entry_type == "queue-operation":
-        op = raw.get("operation")
-        content = raw.get("content", "")
-        if op == "enqueue" and content and not content.startswith("<task-notification"):
-            # Check for CrossTalk envelope before treating as user message
-            ct = _classify_crosstalk(content)
-            if ct:
-                return {
-                    "type": "crosstalk",
-                    "role": "crosstalk",
-                    "content": ct["message"],
-                    "sender": ct["from"],
-                    "sender_label": ct["label"],
-                    "source_id": ct["source"],
-                    "turn": ct["turn"],
-                    "timestamp": timestamp,
-                    "queued": True,
-                }
-            return {"type": "user", "content": content, "timestamp": timestamp, "queued": True}
-        return None
-
-    # Skip non-content entries
-    if entry_type in ("progress", "system"):
-        return None
-    if is_sidechain:
-        return None
-
-    message = raw.get("message", {})
-    role = message.get("role", entry_type)
-    content_raw = message.get("content", "")
-
-    if entry_type == "user":
-        text = ""
-        tool_results = []
-        if isinstance(content_raw, str):
-            text = content_raw
-        elif isinstance(content_raw, list):
-            for block in content_raw:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type", "")
-                if btype == "text":
-                    text += block.get("text", "")
-                elif btype == "tool_result":
-                    result_content = block.get("content", "")
-                    if isinstance(result_content, list):
-                        result_content = "".join(
-                            b.get("text", "") for b in result_content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        )
-                    tool_use_id = block.get("tool_use_id", "")
-                    # Always emit the tool_result for tracking (_resultMap,
-                    # pending_tool_ids).  Optionally ALSO emit a semantic
-                    # tile for display — augment, don't replace.
-                    tool_results.append({
-                        "type": "tool_result",
-                        "role": "tool",
-                        "tool_id": tool_use_id,
-                        "content": result_content,
-                        "is_error": block.get("is_error", False),
-                        "timestamp": timestamp,
-                    })
-                    sem = _upconvert_graph_result(result_content, timestamp,
-                                                  tool_id=tool_use_id)
-                    if sem:
-                        _enrich_semantic_tile(sem)
-                        tool_results.append(sem)
-
-        entries = []
-
-        if text:
-            # Detect CrossTalk peer messages before system message check
-            ct = _classify_crosstalk(text)
-            if ct:
-                entries.append({
-                    "type": "crosstalk",
-                    "role": "crosstalk",
-                    "content": ct["message"],
-                    "sender": ct["from"],
-                    "sender_label": ct["label"],
-                    "source_id": ct["source"],
-                    "turn": ct["turn"],
-                    "timestamp": timestamp,
-                })
-            # Detect harness-injected system messages masquerading as user entries
-            elif (sys_info := _classify_system_message(text)):
-                sys_entry = {
-                    "type": "system",
-                    "role": "system",
-                    "content": sys_info["summary"],
-                    "tag": sys_info["tag"],
-                    "timestamp": timestamp,
-                }
-                if sys_info.get("body"):
-                    sys_entry["body"] = sys_info["body"]
-                entries.append(sys_entry)
-            else:
-                entries.append({
-                    "type": "user",
-                    "role": "user",
-                    "content": text,
-                    "timestamp": timestamp,
-                })
-
-        entries.extend(tool_results)
-
-        if not entries:
-            return None
-        return entries if len(entries) > 1 else entries[0]
-
-    if entry_type == "assistant" and isinstance(content_raw, list):
-        # Expand assistant content blocks into sub-entries
-        blocks = []
-        for block in content_raw:
-            btype = block.get("type", "")
-            if btype == "text":
-                text = block.get("text", "").strip()
-                if text:
-                    blocks.append({
-                        "type": "assistant_text",
-                        "role": "assistant",
-                        "content": text,
-                        "timestamp": timestamp,
-                    })
-            elif btype == "tool_use":
-                tool_input = block.get("input", {})
-                tool_name = block.get("name", "?")
-                # Semantic Bash: detect outbound CrossTalk sends
-                if tool_name == "Bash":
-                    cmd = (tool_input.get("command") or "")
-                    if "crosstalk/send" in cmd:
-                        ct_entry = _parse_crosstalk_send(cmd, timestamp)
-                        if ct_entry:
-                            blocks.append(ct_entry)
-                            continue
-                    # Semantic Bash: graph comment
-                    if "graph comment" in cmd and "integrate" not in cmd:
-                        parsed = _parse_graph_comment_cmd(cmd, timestamp)
-                        if parsed:
-                            blocks.append(parsed)
-                            continue
-                    # Semantic Bash: graph dispatch approve
-                    if "graph dispatch approve" in cmd:
-                        parsed = _parse_dispatch_approve_cmd(cmd, timestamp)
-                        if parsed:
-                            blocks.append(parsed)
-                            continue
-                    # Semantic Bash: bd set-state
-                    if "bd set-state" in cmd:
-                        parsed = _parse_bd_setstate_cmd(cmd, timestamp)
-                        if parsed:
-                            blocks.append(parsed)
-                            continue
-                blocks.append({
-                    "type": "tool_use",
-                    "role": "assistant",
-                    "tool_name": tool_name,
-                    "tool_id": block.get("id", ""),
-                    "input": tool_input,
-                    "timestamp": timestamp,
-                })
-            elif btype == "thinking":
-                thinking = block.get("thinking", "").strip()
-                if thinking:
-                    blocks.append({
-                        "type": "thinking",
-                        "role": "assistant",
-                        "content": thinking,
-                        "timestamp": timestamp,
-                    })
-        return blocks if blocks else None
-
-    if entry_type == "tool_result":
-        # Tool results can be large; extract just the summary
-        tool_id = raw.get("toolUseId", "")
-        result_content = ""
-        if isinstance(content_raw, str):
-            result_content = content_raw
-        elif isinstance(content_raw, list):
-            for block in content_raw:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    result_content += block.get("text", "")
-        if not result_content:
-            return {
-                "type": "tool_result",
-                "role": "tool",
-                "tool_id": tool_id,
-                "content": "",
-                "is_error": raw.get("is_error", False),
-                "timestamp": timestamp,
-            }
-        # Always emit tool_result for tracking; optionally also a semantic tile
-        base_result = {
-            "type": "tool_result",
-            "role": "tool",
-            "tool_id": tool_id,
-            "content": result_content,
-            "is_error": raw.get("is_error", False),
-            "timestamp": timestamp,
-        }
-        sem = _upconvert_graph_result(result_content, timestamp, tool_id=tool_id)
-        if sem:
-            _enrich_semantic_tile(sem)
-            return [base_result, sem]
-        return base_result
-
-    return None
+    return parse_claude_log_line(line)
 
 
 
 def _enrich_entries(entries: list[dict], session_dir: Path | None = None) -> None:
-    """Post-process parsed entries: enrich Agent tool_results with subagent info.
-
-    Enriches Agent tool_results with subagent tool call counts by reading the
-    actual subagent JSONL files.  Mutates entries in place.
-
-    Args:
-        entries: Parsed JSONL entries (tool_use and tool_result dicts).
-        session_dir: Path to the session directory (parent of the JSONL file).
-            When provided, subagent files are discovered at
-            ``session_dir/{session_id}/subagents/*.meta.json``.
-    """
-    if session_dir is None:
-        return
-
-    agent_descriptions: dict[str, str] = {}  # tool_id -> description
-    claimed: set[str] = set()
-
-    for entry in entries:
-        if entry.get("type") == "tool_use" and entry.get("tool_name") == "Agent":
-            tool_id = entry.get("tool_id", "")
-            desc = entry.get("input", {}).get("description", "")
-            if tool_id and desc:
-                agent_descriptions[tool_id] = desc
-
-        elif entry.get("type") == "tool_result" and entry.get("tool_id"):
-            tool_id = entry["tool_id"]
-            if tool_id not in agent_descriptions:
-                continue
-            target_desc = agent_descriptions[tool_id]
-
-            # Find the subagents directory — try multiple session ID patterns
-            # Container: session_dir/{uuid}/subagents/
-            # The session_dir is the parent of the JSONL file
-            subagents_dir = session_dir / "subagents"
-            if not subagents_dir.is_dir():
-                continue
-
-            for meta_path in sorted(subagents_dir.glob("*.meta.json")):
-                if str(meta_path) in claimed:
-                    continue
-                try:
-                    meta = json.loads(meta_path.read_text())
-                except (json.JSONDecodeError, OSError):
-                    continue
-                if meta.get("description") == target_desc:
-                    claimed.add(str(meta_path))
-                    jsonl_path = meta_path.with_suffix("").with_suffix(".jsonl")
-                    if jsonl_path.exists():
-                        count = count_tool_uses(jsonl_path)
-                        if count > 0:
-                            entry["tool_calls"] = count
-                    break
+    """Post-process parsed entries: enrich Agent tool_results with subagent info."""
+    enrich_claude_entries(entries, session_dir=session_dir)
 
 
 def _dedup_queued_entries(entries: list[dict]) -> list[dict]:
-    """Remove duplicate user/crosstalk entries that follow a queued version.
-
-    When a user sends a message while the agent is working, Claude Code writes
-    two JSONL entries: a queue-operation (enqueue) and a subsequent user entry
-    with identical content.  _parse_jsonl_entry renders both, causing duplicates.
-    This helper keeps the queued version and drops the duplicate that follows.
-    """
-    result = []
-    last_enqueue_content = None
-    for entry in entries:
-        if entry.get("queued"):
-            last_enqueue_content = entry.get("content", "").strip()
-            result.append(entry)
-        elif (entry.get("type") in ("user", "crosstalk")
-              and last_enqueue_content
-              and entry.get("content", "").strip() == last_enqueue_content):
-            last_enqueue_content = None  # consumed — skip duplicate
-        else:
-            # Don't reset the tracker on unrelated intervening entries
-            # (assistant turns, tool_result, etc.).  The duplicate user/
-            # crosstalk that mirrors the queued content typically arrives
-            # AFTER the agent's assistant turn, not immediately after the
-            # queue-operation.
-            result.append(entry)
-    return result
+    """Remove duplicate user/crosstalk entries that follow a queued version."""
+    return dedup_claude_entries(entries)
 
 
 def _find_session_files(run_name: str) -> list[Path]:
@@ -2835,7 +2530,7 @@ async def api_dispatch_tail(request):
             line = line.strip()
             if not line:
                 continue
-            parsed = _parse_jsonl_entry(line)
+            parsed = CLAUDE_HARNESS.parse_line(line)
             if parsed is None:
                 continue
             if isinstance(parsed, list):
@@ -2843,8 +2538,10 @@ async def api_dispatch_tail(request):
             else:
                 entries.append(parsed)
 
-    entries = _dedup_queued_entries(entries)
-    _enrich_entries(entries, session_dir=session_file.parent / session_file.stem)
+    entries = resolve_harness_for_path(session_file).postprocess_entries(
+        entries,
+        session_dir=session_file.parent / session_file.stem,
+    )
     return JSONResponse({
         "entries": entries,
         "offset": new_offset,
@@ -2916,7 +2613,7 @@ async def _tail_from_container(run_name: str, after: int) -> tuple:
         line = line.strip()
         if not line:
             continue
-        parsed = _parse_jsonl_entry(line)
+        parsed = CLAUDE_HARNESS.parse_line(line)
         if parsed is None:
             continue
         if isinstance(parsed, list):
@@ -2924,7 +2621,7 @@ async def _tail_from_container(run_name: str, after: int) -> tuple:
         else:
             entries.append(parsed)
 
-    entries = _dedup_queued_entries(entries)
+    entries = CLAUDE_HARNESS.postprocess_entries(entries)
     return entries, new_offset, True
 
 
@@ -2976,7 +2673,7 @@ async def _latest_from_container(run_name: str) -> dict | None:
         line = line.strip()
         if not line:
             continue
-        parsed = _parse_jsonl_entry(line)
+        parsed = CLAUDE_HARNESS.parse_line(line)
         if parsed is None:
             continue
         entries = parsed if isinstance(parsed, list) else [parsed]
@@ -3026,7 +2723,7 @@ async def api_dispatch_latest(request):
         line = line.strip()
         if not line:
             continue
-        parsed = _parse_jsonl_entry(line)
+        parsed = CLAUDE_HARNESS.parse_line(line)
         if parsed is None:
             continue
         if isinstance(parsed, list):
@@ -3195,6 +2892,7 @@ async def api_session_tail(request):
     role = db_row.get("role", "") if db_row else ""
     activity_state = db_row.get("activity_state", "idle") if db_row else "idle"
     session_uuid = db_row.get("session_uuid", "") if db_row else ""
+    harness = resolve_harness_for_session_row(db_row)
     base_resp = {"entries": [], "offset": file_size, "is_live": is_live,
                  "type": session_type, "role": role,
                  "activity_state": activity_state,
@@ -3218,7 +2916,7 @@ async def api_session_tail(request):
             line = line.strip()
             if not line:
                 continue
-            parsed = _parse_jsonl_entry(line)
+            parsed = harness.parse_line(line)
             if parsed is None:
                 continue
             if isinstance(parsed, list):
@@ -3226,8 +2924,10 @@ async def api_session_tail(request):
             else:
                 entries.append(parsed)
 
-    entries = _dedup_queued_entries(entries)
-    _enrich_entries(entries, session_dir=session_file.parent / session_file.stem)
+    entries = harness.postprocess_entries(
+        entries,
+        session_dir=session_file.parent / session_file.stem,
+    )
     # Task* tile annotations need full-history context to resolve taskId→subject.
     # Partial polls (after>0) miss earlier TaskCreates, so replay from offset 0.
     if after > 0:
@@ -3238,7 +2938,7 @@ async def api_session_tail(request):
             line = line.strip()
             if not line:
                 continue
-            parsed = _parse_jsonl_entry(line)
+            parsed = harness.parse_line(line)
             if parsed is None:
                 continue
             if isinstance(parsed, list):
@@ -7149,8 +6849,9 @@ async def _on_startup():
     await session_monitor.seed_from_filesystem()
     await session_monitor.start(
         event_bus=event_bus,
-        entry_parser=_parse_jsonl_entry,
+        entry_parser=CLAUDE_HARNESS.parse_line,
         entry_enricher=_task_state_tracker.enrich,
+        harness=CLAUDE_HARNESS,
         todo_snapshot=_task_state_tracker.snapshot,
     )
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())

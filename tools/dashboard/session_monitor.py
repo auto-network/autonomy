@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tools.dashboard.session_harness import CLAUDE_HARNESS, SessionHarness
+
 from tools.dashboard.dao.dashboard_db import (
     get_conn,
     get_dispatch_nag_sessions,
@@ -457,6 +459,7 @@ class SessionMonitor:
         self._event_bus = None
         self._entry_parser = None
         self._entry_enricher = None
+        self._harness: SessionHarness = CLAUDE_HARNESS
         self._todo_snapshot = None
         self._started = False
         self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
@@ -769,6 +772,7 @@ class SessionMonitor:
 
     async def start(
         self, event_bus=None, entry_parser=None, entry_enricher=None,
+        harness: SessionHarness | None = None,
         todo_snapshot=None,
     ) -> None:
         """Start background tailer and liveness tasks.
@@ -784,6 +788,8 @@ class SessionMonitor:
         self._event_bus = event_bus
         self._entry_parser = entry_parser
         self._entry_enricher = entry_enricher
+        if harness is not None:
+            self._harness = harness
         self._todo_snapshot = todo_snapshot
         self._init_inotify()
         self._tailer_task = asyncio.create_task(self._inotify_tailer_loop())
@@ -1628,19 +1634,11 @@ class SessionMonitor:
                 continue
 
             new_entry_count += 1
-            text = _extract_message_text(entry)
+            text = self._harness.extract_message_text(entry)
             if text:
                 last_message = text
 
-            # Extract context_tokens from assistant usage
-            if entry.get("type") == "assistant":
-                usage = entry.get("message", {}).get("usage", {})
-                if usage:
-                    ctx = (usage.get("input_tokens", 0)
-                           + usage.get("cache_creation_input_tokens", 0)
-                           + usage.get("cache_read_input_tokens", 0))
-                    if ctx > 0:
-                        context_tokens = ctx
+            context_tokens = self._harness.extract_context_tokens(entry, context_tokens)
 
             # Parse full entry for SSE broadcast
             if self._entry_parser:
