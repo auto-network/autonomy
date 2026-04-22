@@ -24,7 +24,7 @@ import pytest
 pytest.importorskip("inotify_simple")
 pytest.importorskip("pytest_asyncio")
 
-from tools.dashboard.server import _parse_jsonl_entry
+from tools.dashboard.session_harness import parse_claude_log_line as _parse_jsonl_entry
 
 
 # ── Helpers ────────────────────────────────────────────────────────────

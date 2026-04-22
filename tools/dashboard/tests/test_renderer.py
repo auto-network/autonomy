@@ -19,7 +19,10 @@ import json
 
 import pytest
 
-from tools.dashboard.server import _parse_jsonl_entry, _dedup_queued_entries
+from tools.dashboard.session_harness import (
+    dedup_claude_entries as _dedup_queued_entries,
+    parse_claude_log_line as _parse_jsonl_entry,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
