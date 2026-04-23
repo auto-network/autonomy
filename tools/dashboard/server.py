@@ -48,11 +48,19 @@ from agents.session_launcher import launch_session
 from agents import workspace_settings
 from agents.primer_renderer import render_workspace_primer
 from agents.workspace_manager import (
+    GitFileChange,
+    WorktreeCommit,
+    WorktreeDirtyDetail,
     WorktreeState,
     WorkspaceError,
+    cleanup_session_worktree,
     cleanup_session_worktrees,
+    get_session_worktree_commit_detail,
+    get_session_worktree_dirty_detail,
     merge_session_worktree,
+    merge_session_worktree_commit,
     prepare_session_mounts,
+    worktree_target_branch_name,
 )
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao.mock import (
@@ -4643,6 +4651,42 @@ async def page_worktrees_fragment(request):
     """Return the Worktrees page as an HTML fragment for SPA injection."""
     return templates.TemplateResponse(request, "pages/worktrees.html")
 
+def _worktree_file_json(file: GitFileChange) -> dict:
+    return {
+        "status": file.status,
+        "path": file.path,
+        "additions": file.additions,
+        "deletions": file.deletions,
+    }
+
+def _worktree_commit_json(commit: WorktreeCommit, *, include_patch: bool = False) -> dict:
+    additions = sum(file.additions for file in commit.files)
+    deletions = sum(file.deletions for file in commit.files)
+    data = {
+        "sha": commit.sha,
+        "short_sha": commit.short_sha,
+        "subject": commit.subject,
+        "author": commit.author,
+        "date": commit.date,
+        "body": commit.body,
+        "files": [_worktree_file_json(file) for file in commit.files],
+        "stats": {
+            "files": len(commit.files),
+            "additions": additions,
+            "deletions": deletions,
+        },
+    }
+    if include_patch:
+        data["patch"] = commit.patch or ""
+    return data
+
+
+def _worktree_dirty_detail_json(detail: WorktreeDirtyDetail) -> dict:
+    return {
+        "files": [_worktree_file_json(file) for file in detail.files],
+        "patch": detail.patch or "",
+    }
+
 def _worktree_state_json(row: WorktreeState) -> dict:
     return {
         "session_name": row.session_name,
@@ -4654,6 +4698,13 @@ def _worktree_state_json(row: WorktreeState) -> dict:
         "is_dirty": row.is_dirty,
         "ff_eligible": row.ff_eligible,
         "session_live": row.session_live,
+        "target_branch": worktree_target_branch_name(
+            row.session_name,
+            row.repo_name,
+            row.branch,
+        ),
+        "commits": [_worktree_commit_json(commit) for commit in row.commits],
+        "dirty_files": [_worktree_file_json(file) for file in row.dirty_files],
     }
 
 def _cleanup_result_json(result) -> dict:
@@ -4674,6 +4725,69 @@ async def api_worktrees(request):
         _worktree_state_json(row)
         for row in worktree_monitor.get_all()
     ])
+
+
+async def api_worktrees_refresh(request):
+    rows = await worktree_monitor.refresh()
+    return JSONResponse([
+        _worktree_state_json(row)
+        for row in rows
+    ])
+
+async def api_worktree_commit(request):
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+    sha = request.path_params["sha"]
+
+    try:
+        commit = await asyncio.to_thread(
+            get_session_worktree_commit_detail,
+            session_name,
+            repo_name,
+            sha,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+
+    return JSONResponse(_worktree_commit_json(commit, include_patch=True))
+
+
+async def api_worktree_changes(request):
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+
+    try:
+        detail = await asyncio.to_thread(
+            get_session_worktree_dirty_detail,
+            session_name,
+            repo_name,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+
+    return JSONResponse(_worktree_dirty_detail_json(detail))
+
+async def api_worktree_commit_merge(request):
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+    sha = request.path_params["sha"]
+
+    try:
+        result = await asyncio.to_thread(
+            merge_session_worktree_commit,
+            session_name,
+            repo_name,
+            sha,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    await worktree_monitor.refresh()
+    return JSONResponse({
+        "ok": True,
+        "commit": result.get("commit", ""),
+        "message": result.get("message", ""),
+    })
 
 async def api_worktree_merge(request):
     session_name = request.path_params["session"]
@@ -4730,6 +4844,24 @@ async def api_worktree_cleanup(request):
         )
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+    await worktree_monitor.refresh()
+    return JSONResponse({"ok": True, **_cleanup_result_json(result)})
+
+
+async def api_worktree_discard(request):
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+
+    try:
+        result = await asyncio.to_thread(
+            cleanup_session_worktree,
+            session_name,
+            repo_name,
+            force=True,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
 
     await worktree_monitor.refresh()
     return JSONResponse({"ok": True, **_cleanup_result_json(result)})
@@ -4897,7 +5029,7 @@ _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
 _WATCHER_HELPERS = [
     "collect_dispatch_data", "get_bead_counts", "count_active_sessions",
     "count_terminals", "count_today_done", "get_dispatcher_state", "get_pinned_beads",
-    "count_streams",
+    "count_worktrees", "count_streams",
 ]
 _watcher_errors: dict[str, str] = {}  # helper_name -> last error string
 
@@ -5028,6 +5160,15 @@ def _count_streams() -> int:
     return graph_ops.count_active_streams()
 
 
+def _count_worktrees() -> dict[str, int]:
+    """Count pending worktree stacks and dirty worktrees from the cached monitor."""
+    rows = worktree_monitor.get_all()
+    return {
+        "with_commits": sum(1 for row in rows if row.commits),
+        "with_changes": sum(1 for row in rows if row.is_dirty),
+    }
+
+
 async def _dispatch_watcher():
     """Background task: poll dispatch state and broadcast to SSE topics.
 
@@ -5044,6 +5185,7 @@ async def _dispatch_watcher():
                 asyncio.to_thread(_count_today_done),
                 asyncio.to_thread(_get_dispatcher_state),
                 asyncio.to_thread(dao_beads.get_beads_by_label, "pinned"),
+                asyncio.to_thread(_count_worktrees),
                 asyncio.to_thread(_count_streams),
                 return_exceptions=True,
             )
@@ -5068,7 +5210,8 @@ async def _dispatch_watcher():
             today_done = results[4] if not isinstance(results[4], BaseException) else 0
             dispatcher_state = results[5] if not isinstance(results[5], BaseException) else {"paused": False, "reason": None}
             pinned_beads = results[6] if not isinstance(results[6], BaseException) else []
-            stream_count = results[7] if not isinstance(results[7], BaseException) else 0
+            worktree_counts = results[7] if not isinstance(results[7], BaseException) else {"with_commits": 0, "with_changes": 0}
+            stream_count = results[8] if not isinstance(results[8], BaseException) else 0
 
             nav_data = {
                 "open_beads": counts.get("open_count", 0),
@@ -5079,6 +5222,8 @@ async def _dispatch_watcher():
                 "terminal_count": terminal_count,
                 "today_done": today_done,
                 "pinned": pinned_beads,
+                "worktrees_with_commits": worktree_counts.get("with_commits", 0),
+                "worktrees_with_changes": worktree_counts.get("with_changes", 0),
                 "stream_count": stream_count,
             }
             await event_bus.broadcast("dispatch", dispatch_data)
@@ -6832,7 +6977,12 @@ routes = [
     Route("/api/dao/active_sessions", api_dao_active_sessions),
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
     Route("/api/worktrees", api_worktrees),
+    Route("/api/worktrees/refresh", api_worktrees_refresh, methods=["POST"]),
+    Route("/api/worktrees/{session}/{repo}/commits/{sha}", api_worktree_commit, methods=["GET"]),
+    Route("/api/worktrees/{session}/{repo}/changes", api_worktree_changes, methods=["GET"]),
+    Route("/api/worktrees/{session}/{repo}/commits/{sha}/merge", api_worktree_commit_merge, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/merge", api_worktree_merge, methods=["POST"]),
+    Route("/api/worktrees/{session}/{repo}/discard", api_worktree_discard, methods=["POST"]),
     Route("/api/worktrees/{session}/cleanup", api_worktree_cleanup, methods=["POST"]),
     Route("/api/dao/bead/{id}", api_dao_bead),
     Route("/api/terminals", api_terminals),
