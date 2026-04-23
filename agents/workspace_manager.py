@@ -237,6 +237,21 @@ class CleanupResult:
         return bool(self.removed or self.preserved or self.errors)
 
 
+@dataclass(frozen=True)
+class WorktreeState:
+    """Current state of a session worktree for dashboard inspection."""
+
+    session_name: str
+    repo_name: str
+    worktree_path: Path
+    managed_clone: Path | None
+    branch: str | None
+    commits_ahead: int
+    is_dirty: bool
+    ff_eligible: bool
+    session_live: bool
+
+
 def _git_output(args: list[str], cwd: Path, *, timeout: int = 15) -> tuple[int, str, str]:
     """Run git and return (rc, stdout, stderr); never raises on non-zero exit."""
     try:
@@ -270,11 +285,135 @@ def _find_managed_clone_for_worktree(worktree: Path) -> Path | None:
     if not content.startswith("gitdir:"):
         return None
     gitdir = Path(content.split(":", 1)[1].strip())
-    # e.g. <clone>/worktrees/<name>  →  <clone>
+    # e.g. <clone>/.git/worktrees/<name>  →  <clone>
+    # Older/bare layouts may omit ".git"; in that case the parent is already
+    # the clone root.
     parts = gitdir.parts
     if len(parts) >= 2 and parts[-2] == "worktrees":
-        return gitdir.parent.parent
+        clone_git_dir = gitdir.parent.parent
+        if clone_git_dir.name == ".git":
+            return clone_git_dir.parent
+        return clone_git_dir
     return None
+
+
+def _worktree_branch_name(worktree: Path) -> str | None:
+    """Return the current branch name, or None for detached / unreadable HEAD."""
+    rc, out, _ = _git_output(["rev-parse", "--abbrev-ref", "HEAD"], worktree, timeout=15)
+    if rc != 0:
+        return None
+    branch = out.strip()
+    if not branch or branch == "HEAD":
+        return None
+    return branch
+
+
+def _worktree_merge_base_ref(worktree: Path) -> str | None:
+    """Return the preferred base ref for ahead/ff checks.
+
+    The dashboard feature targets ``master`` per bead spec, but tests and
+    some local clones still default to ``main`` with only ``origin/HEAD``
+    available. Prefer ``master`` when present and fall back to ``origin/HEAD``.
+    """
+    for ref in ("master", "origin/HEAD"):
+        rc, _, _ = _git_output(["rev-parse", "--verify", ref], worktree, timeout=15)
+        if rc == 0:
+            return ref
+    return None
+
+
+def _worktree_commits_ahead(worktree: Path) -> int:
+    """Count commits reachable from HEAD but not from the merge base ref."""
+    base_ref = _worktree_merge_base_ref(worktree)
+    if base_ref is None:
+        return 0
+    rc, out, _ = _git_output(["rev-list", "--count", f"{base_ref}..HEAD"], worktree, timeout=15)
+    if rc != 0:
+        return 0
+    try:
+        return int(out.strip() or "0")
+    except ValueError:
+        return 0
+
+
+def _worktree_ff_only_safe(worktree: Path) -> bool:
+    """Return True when the merge base ref is an ancestor of HEAD."""
+    base_ref = _worktree_merge_base_ref(worktree)
+    if base_ref is None:
+        return False
+    rc, _, _ = _git_output(["merge-base", "--is-ancestor", base_ref, "HEAD"], worktree, timeout=15)
+    return rc == 0
+
+
+def _live_session_names() -> set[str]:
+    """Return live dashboard session names.
+
+    Imported lazily so workspace-manager tests can run without importing the
+    dashboard stack unless the scanner is actually used.
+    """
+    try:
+        from tools.dashboard.dao.dashboard_db import get_live_sessions
+    except Exception:
+        return set()
+    try:
+        return {str(row["tmux_name"]) for row in get_live_sessions()}
+    except Exception:
+        logger.exception("workspace scan: failed to enumerate live sessions")
+        return set()
+
+
+def scan_all_worktrees(
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+    live_session_names: Iterable[str] | None = None,
+) -> list[WorktreeState]:
+    """Scan ``data/worktrees`` and return one state row per session/repo worktree."""
+    if not worktrees_dir.exists():
+        return []
+
+    live = set(live_session_names) if live_session_names is not None else _live_session_names()
+    out: list[WorktreeState] = []
+
+    try:
+        session_dirs = sorted(worktrees_dir.iterdir())
+    except OSError:
+        logger.exception("workspace scan: failed to enumerate %s", worktrees_dir)
+        return []
+
+    for session_dir in session_dirs:
+        if not session_dir.is_dir():
+            continue
+        try:
+            repo_dirs = sorted(session_dir.iterdir())
+        except OSError:
+            logger.exception("workspace scan: failed to enumerate %s", session_dir)
+            continue
+        for repo_dir in repo_dirs:
+            if not repo_dir.is_dir():
+                continue
+            clone = _find_managed_clone_for_worktree(repo_dir)
+            branch = _worktree_branch_name(repo_dir)
+            is_dirty = _worktree_has_uncommitted_changes(repo_dir)
+            commits_ahead = _worktree_commits_ahead(repo_dir)
+            ff_eligible = (
+                branch is not None
+                and commits_ahead > 0
+                and not is_dirty
+                and _worktree_ff_only_safe(repo_dir)
+            )
+            out.append(WorktreeState(
+                session_name=session_dir.name,
+                repo_name=repo_dir.name,
+                worktree_path=repo_dir,
+                managed_clone=clone,
+                branch=branch,
+                commits_ahead=commits_ahead,
+                is_dirty=is_dirty,
+                ff_eligible=ff_eligible,
+                session_live=session_dir.name in live,
+            ))
+
+    return out
 
 
 def _worktree_has_uncommitted_changes(worktree: Path) -> bool:
@@ -456,3 +595,52 @@ def prune_orphan_worktrees(
             entry.name, force=force, worktrees_dir=worktrees_dir,
         )
     return results
+
+
+def merge_session_worktree(
+    session_name: str,
+    repo_name: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> dict[str, str]:
+    """Fast-forward a local checkout from a session worktree's branch."""
+    worktree = worktrees_dir / session_name / repo_name
+    if not worktree.exists() or not worktree.is_dir():
+        raise WorkspaceError(f"worktree not found: {worktree}")
+
+    clone = _find_managed_clone_for_worktree(worktree)
+    if clone is None:
+        raise WorkspaceError(f"managed clone not found for worktree: {worktree}")
+
+    branch = _worktree_branch_name(worktree)
+    if branch is None:
+        raise WorkspaceError(f"worktree is detached or unreadable: {worktree}")
+
+    is_dirty = _worktree_has_uncommitted_changes(worktree)
+    commits_ahead = _worktree_commits_ahead(worktree)
+    ff_eligible = commits_ahead > 0 and not is_dirty and _worktree_ff_only_safe(worktree)
+    if not ff_eligible:
+        raise WorkspaceError(
+            f"worktree {session_name}/{repo_name} is not ff-eligible "
+            f"(ahead={commits_ahead}, dirty={is_dirty}, branch={branch!r})"
+        )
+
+    # Only the autonomy repo has a known local checkout in this process: the
+    # dashboard's own repository. Cross-repo merge targets need explicit
+    # workspace metadata before they can be made safe.
+    if repo_name != "autonomy":
+        raise WorkspaceError(
+            f"merge target unsupported for repo {repo_name!r}; "
+            "only 'autonomy' can be merged from the dashboard today"
+        )
+
+    target_repo = REPO_ROOT
+    _run_git(["fetch", str(clone), branch], cwd=target_repo)
+    _run_git(["merge", "--ff-only", "FETCH_HEAD"], cwd=target_repo)
+    commit = _run_git(["rev-parse", "HEAD"], cwd=target_repo).strip()
+    message = _run_git(["log", "-1", "--pretty=%s"], cwd=target_repo).strip()
+    return {
+        "commit": commit,
+        "message": message,
+        "target_repo": str(target_repo),
+    }

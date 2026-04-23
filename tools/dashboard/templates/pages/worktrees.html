@@ -1,0 +1,118 @@
+<div x-data="worktreesPage()" class="pb-safe" data-testid="worktrees-page">
+  <div class="flex items-start gap-4 pb-3 mb-4 border-b border-gray-800 flex-wrap">
+    <div>
+      <h2 class="text-lg font-semibold text-cyan-300 leading-none">Worktrees</h2>
+      <p class="text-xs text-gray-500 mt-1">Session checkouts under data/worktrees, refreshed every 30s.</p>
+    </div>
+    <div class="flex-grow"></div>
+    <div class="flex items-center gap-2 text-xs text-gray-500">
+      <span x-show="lastUpdated" x-text="'Updated ' + lastUpdated"></span>
+      <button @click="refresh(true)"
+              :disabled="refreshing"
+              class="px-3 py-1.5 rounded-lg bg-gray-800 border border-gray-700
+                     text-gray-200 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-wait"
+              data-testid="worktrees-refresh-button">
+        <span x-show="!refreshing">Refresh</span>
+        <span x-show="refreshing">Refreshing...</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4" data-testid="worktrees-summary">
+    <div class="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+      <div class="text-[10px] uppercase tracking-wider text-gray-500">Live</div>
+      <div class="text-2xl font-semibold text-green-300" x-text="liveCount"></div>
+    </div>
+    <div class="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+      <div class="text-[10px] uppercase tracking-wider text-gray-500">Mergeable</div>
+      <div class="text-2xl font-semibold text-cyan-300" x-text="mergeableCount"></div>
+    </div>
+    <div class="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+      <div class="text-[10px] uppercase tracking-wider text-gray-500">Orphaned</div>
+      <div class="text-2xl font-semibold text-amber-300" x-text="orphanedCount"></div>
+    </div>
+  </div>
+
+  <template x-if="error">
+    <div class="mb-4 rounded-lg border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-200"
+         x-text="error"
+         data-testid="worktrees-error"></div>
+  </template>
+
+  <div class="rounded-xl border border-gray-800 bg-gray-900/70 overflow-hidden" data-testid="worktrees-table-card">
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm" data-testid="worktrees-table">
+        <thead class="bg-gray-950/80 text-[10px] uppercase tracking-wider text-gray-500">
+          <tr>
+            <th class="text-left px-3 py-2 font-semibold">Session</th>
+            <th class="text-left px-3 py-2 font-semibold">Repo</th>
+            <th class="text-left px-3 py-2 font-semibold">Branch</th>
+            <th class="text-right px-3 py-2 font-semibold">Ahead</th>
+            <th class="text-left px-3 py-2 font-semibold">Dirty</th>
+            <th class="text-left px-3 py-2 font-semibold">Status</th>
+            <th class="text-right px-3 py-2 font-semibold">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-800">
+          <template x-for="row in sortedRows" :key="rowKey(row)">
+            <tr class="hover:bg-gray-800/40" data-testid="worktree-row">
+              <td class="px-3 py-2 font-mono text-xs text-gray-200" x-text="row.session_name"></td>
+              <td class="px-3 py-2 text-gray-200" x-text="row.repo_name"></td>
+              <td class="px-3 py-2 font-mono text-xs text-gray-400" x-text="row.branch || 'detached'"></td>
+              <td class="px-3 py-2 text-right tabular-nums"
+                  :class="row.commits_ahead > 0 ? 'text-cyan-300 font-semibold' : 'text-gray-500'"
+                  x-text="row.commits_ahead"></td>
+              <td class="px-3 py-2">
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold"
+                      :class="row.is_dirty ? 'bg-amber-900/70 text-amber-200' : 'bg-gray-800 text-gray-400'"
+                      x-text="row.is_dirty ? 'YES' : 'NO'"
+                      data-testid="worktree-dirty"></span>
+              </td>
+              <td class="px-3 py-2">
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold"
+                      :class="statusClass(row)"
+                      x-text="statusLabel(row)"
+                      data-testid="worktree-status"></span>
+              </td>
+              <td class="px-3 py-2">
+                <div class="flex items-center justify-end gap-2">
+                  <button @click="merge(row)"
+                          :disabled="!canMerge(row) || isBusy(row)"
+                          :title="mergeTitle(row)"
+                          class="px-2.5 py-1 rounded-md text-xs font-medium
+                                 bg-cyan-700 hover:bg-cyan-600 text-white
+                                 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed"
+                          data-testid="worktree-merge-button">
+                    <span x-show="!isMerging(row)">Merge</span>
+                    <span x-show="isMerging(row)">Merging...</span>
+                  </button>
+                  <button x-show="!row.session_live"
+                          @click="cleanup(row)"
+                          :disabled="isBusy(row)"
+                          class="px-2.5 py-1 rounded-md text-xs font-medium
+                                 bg-gray-800 hover:bg-gray-700 text-gray-200
+                                 disabled:opacity-50 disabled:cursor-wait"
+                          data-testid="worktree-cleanup-button">
+                    <span x-show="!isCleaning(row)">Cleanup</span>
+                    <span x-show="isCleaning(row)">Cleaning...</span>
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+
+    <template x-if="!loading && rows.length === 0">
+      <div class="px-4 py-8 text-center text-sm text-gray-500" data-testid="worktrees-empty">
+        No session worktrees found.
+      </div>
+    </template>
+    <template x-if="loading">
+      <div class="px-4 py-8 text-center text-sm text-gray-500" data-testid="worktrees-loading">
+        Loading worktrees...
+      </div>
+    </template>
+  </div>
+</div>
