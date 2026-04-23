@@ -448,6 +448,10 @@ def test_scan_all_worktrees_reports_state_per_session(tmp_path, monkeypatch):
     assert live_row.is_dirty is False
     assert live_row.ff_eligible is True
     assert live_row.session_live is True
+    assert len(live_row.commits) == 1
+    assert live_row.commits[0].subject == "ready"
+    assert live_row.commits[0].files[0].path == "merged.txt"
+    assert live_row.commits[0].files[0].additions == 1
 
     dirty_row = by_session[session_dirty]
     assert dirty_row.branch == f"session/{session_dirty}"
@@ -455,6 +459,8 @@ def test_scan_all_worktrees_reports_state_per_session(tmp_path, monkeypatch):
     assert dirty_row.is_dirty is True
     assert dirty_row.ff_eligible is False
     assert dirty_row.session_live is False
+    assert dirty_row.dirty_files[0].status == "M"
+    assert dirty_row.dirty_files[0].path == "README.md"
 
     clean_row = by_session[session_clean]
     assert clean_row.branch == f"session/{session_clean}"
@@ -505,6 +511,71 @@ def test_merge_session_worktree_fast_forwards_matching_checkout(tmp_path, monkey
     assert result["commit"] == worktree_head
     assert result["message"] == "ff-only merge"
     assert result["target_repo"] == str(target_repo)
+
+
+def test_merge_session_worktree_commit_fast_forwards_to_selected_commit(tmp_path, monkeypatch):
+    session = "sess-merge-commit"
+    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch, repo_name="autonomy",
+    )
+    upstream = next(tmp_path.glob("upstream.git"))
+    target_repo = tmp_path / "autonomy"
+    subprocess.run(
+        ["git", "clone", "-q", str(upstream), str(target_repo)],
+        check=True,
+    )
+    monkeypatch.setattr(wm, "REPO_ROOT", target_repo)
+
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
+
+    (worktree / "first.txt").write_text("first\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "first.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "first commit",
+        ],
+        check=True,
+    )
+    first_sha = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    (worktree / "second.txt").write_text("second\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "second.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "second commit",
+        ],
+        check=True,
+    )
+
+    # Dirty files should be visible to the scanner but not part of the
+    # selected commit merge operation.
+    (worktree / "scratch.txt").write_text("uncommitted\n")
+
+    detail = wm.get_session_worktree_commit_detail(
+        session, "autonomy", first_sha[:7], worktrees_dir=worktrees_dir,
+    )
+    assert detail.subject == "first commit"
+    assert "first.txt" in (detail.patch or "")
+
+    result = wm.merge_session_worktree_commit(
+        session, "autonomy", first_sha[:7], worktrees_dir=worktrees_dir,
+    )
+
+    target_head = subprocess.run(
+        ["git", "-C", str(target_repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert target_head == first_sha
+    assert result["commit"] == first_sha
+    assert result["message"] == "first commit"
+    assert (target_repo / "first.txt").exists()
+    assert not (target_repo / "second.txt").exists()
 
 
 def test_merge_session_worktree_rejects_non_autonomy_repo(tmp_path, monkeypatch):

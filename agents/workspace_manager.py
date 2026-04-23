@@ -238,6 +238,30 @@ class CleanupResult:
 
 
 @dataclass(frozen=True)
+class GitFileChange:
+    """A file-level git change surfaced in the worktree dashboard."""
+
+    status: str
+    path: str
+    additions: int = 0
+    deletions: int = 0
+
+
+@dataclass(frozen=True)
+class WorktreeCommit:
+    """A committed change waiting on a session worktree branch."""
+
+    sha: str
+    short_sha: str
+    subject: str
+    author: str
+    date: str
+    body: str
+    files: list[GitFileChange] = field(default_factory=list)
+    patch: str | None = None
+
+
+@dataclass(frozen=True)
 class WorktreeState:
     """Current state of a session worktree for dashboard inspection."""
 
@@ -250,6 +274,16 @@ class WorktreeState:
     is_dirty: bool
     ff_eligible: bool
     session_live: bool
+    commits: list[WorktreeCommit] = field(default_factory=list)
+    dirty_files: list[GitFileChange] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class WorktreeDirtyDetail:
+    """Uncommitted file detail for a worktree review screen."""
+
+    files: list[GitFileChange] = field(default_factory=list)
+    patch: str | None = None
 
 
 def _git_output(args: list[str], cwd: Path, *, timeout: int = 15) -> tuple[int, str, str]:
@@ -322,9 +356,66 @@ def _worktree_merge_base_ref(worktree: Path) -> str | None:
     return None
 
 
-def _worktree_commits_ahead(worktree: Path) -> int:
+def _repo_default_branch(repo: Path) -> str | None:
+    """Return the preferred local integration branch name for ``repo``."""
+    for branch in ("main", "master"):
+        rc, _, _ = _git_output(["rev-parse", "--verify", f"refs/heads/{branch}"], repo, timeout=15)
+        if rc == 0:
+            return branch
+
+    rc, out, _ = _git_output(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], repo, timeout=15)
+    if rc == 0:
+        ref = out.strip()
+        if ref:
+            return ref.rsplit("/", 1)[-1]
+    return None
+
+
+def _autonomy_target_branch_and_head() -> tuple[str | None, str | None]:
+    """Return the host-side autonomy integration branch and current HEAD SHA."""
+    branch = _repo_default_branch(REPO_ROOT)
+    if branch is None:
+        return None, None
+    rc, out, _ = _git_output(["rev-parse", "--verify", f"refs/heads/{branch}"], REPO_ROOT, timeout=15)
+    if rc != 0:
+        return branch, None
+    return branch, out.strip()
+
+
+def worktree_target_branch_name(
+    session_name: str,
+    repo_name: str,
+    branch: str | None,
+) -> str:
+    """Return the dashboard target-branch label for a worktree."""
+    target_branch, _target_head = _autonomy_target_branch_and_head()
+    default_branch = target_branch or "main"
+    if repo_name == "autonomy":
+        return default_branch
+    if branch and branch != f"{SESSION_BRANCH_PREFIX}{session_name}":
+        return branch
+    return default_branch
+
+
+def _worktree_dashboard_base_ref(worktree: Path, repo_name: str) -> str | None:
+    """Return the review base ref used by the dashboard for a worktree."""
+    fallback = _worktree_merge_base_ref(worktree)
+    if repo_name != "autonomy":
+        return fallback
+
+    _target_branch, target_head = _autonomy_target_branch_and_head()
+    if not target_head:
+        return fallback
+
+    rc, _, _ = _git_output(["merge-base", "--is-ancestor", target_head, "HEAD"], worktree, timeout=15)
+    if rc == 0:
+        return target_head
+    return fallback
+
+
+def _worktree_commits_ahead(worktree: Path, *, base_ref: str | None = None) -> int:
     """Count commits reachable from HEAD but not from the merge base ref."""
-    base_ref = _worktree_merge_base_ref(worktree)
+    base_ref = base_ref or _worktree_merge_base_ref(worktree)
     if base_ref is None:
         return 0
     rc, out, _ = _git_output(["rev-list", "--count", f"{base_ref}..HEAD"], worktree, timeout=15)
@@ -336,12 +427,224 @@ def _worktree_commits_ahead(worktree: Path) -> int:
         return 0
 
 
-def _worktree_ff_only_safe(worktree: Path) -> bool:
+def _worktree_ff_only_safe(worktree: Path, *, base_ref: str | None = None) -> bool:
     """Return True when the merge base ref is an ancestor of HEAD."""
-    base_ref = _worktree_merge_base_ref(worktree)
+    base_ref = base_ref or _worktree_merge_base_ref(worktree)
     if base_ref is None:
         return False
     rc, _, _ = _git_output(["merge-base", "--is-ancestor", base_ref, "HEAD"], worktree, timeout=15)
+    return rc == 0
+
+
+def _parse_numstat(value: str) -> int:
+    """Parse git numstat integers, treating binary markers as zero."""
+    try:
+        return int(value)
+    except ValueError:
+        return 0
+
+
+def _worktree_dirty_files(worktree: Path) -> list[GitFileChange] | None:
+    """Return ``git status --porcelain`` paths for uncommitted worktree files."""
+    rc, out, _ = _git_output(["status", "--porcelain"], worktree, timeout=15)
+    if rc != 0:
+        return None
+
+    files: list[GitFileChange] = []
+    for line in out.splitlines():
+        if not line:
+            continue
+        status = line[:2].strip() or line[:2]
+        path = line[3:].strip() if len(line) > 3 else ""
+        if path:
+            files.append(GitFileChange(status=status, path=path))
+    return files
+
+
+def _worktree_dirty_numstats(worktree: Path) -> dict[str, tuple[int, int]]:
+    """Return numstat details for dirty tracked files relative to ``HEAD``."""
+    rc, out, _ = _git_output(
+        ["diff", "--numstat", "--find-renames", "HEAD"],
+        worktree,
+        timeout=30,
+    )
+    if rc != 0:
+        return {}
+
+    numstats: dict[str, tuple[int, int]] = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        path = parts[-1].strip()
+        if not path:
+            continue
+        numstats[path] = (_parse_numstat(parts[0]), _parse_numstat(parts[1]))
+    return numstats
+
+
+def _worktree_dirty_patch(worktree: Path) -> str | None:
+    """Return a unified diff for dirty tracked files relative to ``HEAD``."""
+    rc, out, _ = _git_output(
+        ["diff", "--patch", "--find-renames", "HEAD"],
+        worktree,
+        timeout=30,
+    )
+    if rc != 0:
+        return None
+    return out.strip()
+
+
+def _worktree_commit_shas(worktree: Path, *, base_ref: str | None = None) -> list[str]:
+    """List commit SHAs reachable from HEAD but not from the merge base ref."""
+    base_ref = base_ref or _worktree_merge_base_ref(worktree)
+    if base_ref is None:
+        return []
+    rc, out, _ = _git_output(["rev-list", "--reverse", f"{base_ref}..HEAD"], worktree, timeout=30)
+    if rc != 0:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _commit_file_changes(worktree: Path, sha: str) -> list[GitFileChange]:
+    """Return file-level status and numstat details for one commit."""
+    numstats: dict[str, tuple[int, int]] = {}
+    rc, out, _ = _git_output(
+        ["show", "--numstat", "--format=", "--find-renames", sha],
+        worktree,
+        timeout=30,
+    )
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            path = parts[-1].strip()
+            if not path:
+                continue
+            numstats[path] = (_parse_numstat(parts[0]), _parse_numstat(parts[1]))
+
+    rc, out, _ = _git_output(
+        ["show", "--name-status", "--format=", "--find-renames", sha],
+        worktree,
+        timeout=30,
+    )
+    if rc != 0:
+        return [
+            GitFileChange(status="?", path=path, additions=adds, deletions=dels)
+            for path, (adds, dels) in sorted(numstats.items())
+        ]
+
+    files: list[GitFileChange] = []
+    seen: set[str] = set()
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        raw_status = parts[0].strip()
+        path = parts[-1].strip()
+        if not raw_status or not path:
+            continue
+        status = raw_status[0]
+        additions, deletions = numstats.get(path, (0, 0))
+        files.append(GitFileChange(
+            status=status,
+            path=path,
+            additions=additions,
+            deletions=deletions,
+        ))
+        seen.add(path)
+
+    for path, (additions, deletions) in sorted(numstats.items()):
+        if path not in seen:
+            files.append(GitFileChange(
+                status="?",
+                path=path,
+                additions=additions,
+                deletions=deletions,
+            ))
+
+    return files
+
+
+def _read_worktree_commit(
+    worktree: Path,
+    sha: str,
+    *,
+    include_patch: bool = False,
+) -> WorktreeCommit | None:
+    """Read one commit from a worktree branch."""
+    fmt = "%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%b"
+    rc, out, _ = _git_output(
+        ["show", "-s", f"--format={fmt}", "--date=format:%Y-%m-%d %H:%M", sha],
+        worktree,
+        timeout=15,
+    )
+    if rc != 0:
+        return None
+    parts = out.rstrip("\n").split("\x1f", 5)
+    if len(parts) != 6:
+        return None
+
+    patch = None
+    if include_patch:
+        rc, patch_out, _ = _git_output(
+            ["show", "--format=", "--patch", "--find-renames", sha],
+            worktree,
+            timeout=30,
+        )
+        if rc == 0:
+            patch = patch_out.strip()
+
+    return WorktreeCommit(
+        sha=parts[0].strip(),
+        short_sha=parts[1].strip(),
+        author=parts[2].strip(),
+        date=parts[3].strip(),
+        subject=parts[4].strip(),
+        body=parts[5].strip(),
+        files=_commit_file_changes(worktree, parts[0].strip()),
+        patch=patch,
+    )
+
+
+def _worktree_commits(worktree: Path, *, base_ref: str | None = None) -> list[WorktreeCommit]:
+    """Return commit details for commits ahead of the merge base ref."""
+    commits: list[WorktreeCommit] = []
+    for sha in _worktree_commit_shas(worktree, base_ref=base_ref):
+        commit = _read_worktree_commit(worktree, sha)
+        if commit is not None:
+            commits.append(commit)
+    return commits
+
+
+def _resolve_worktree_commit(worktree: Path, sha: str) -> str:
+    """Resolve a user-supplied SHA/prefix to a full commit SHA in ``worktree``."""
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+        raise WorkspaceError(f"invalid commit SHA: {sha!r}")
+    rc, out, err = _git_output(["rev-parse", "--verify", f"{sha}^{{commit}}"], worktree, timeout=15)
+    if rc != 0:
+        raise WorkspaceError(f"commit not found in worktree: {sha} ({err.strip()})")
+    return out.strip()
+
+
+def _commit_is_ahead_of_base(worktree: Path, sha: str, *, base_ref: str | None = None) -> bool:
+    """Return True when ``sha`` is in the worktree's base..HEAD commit range."""
+    base_ref = base_ref or _worktree_merge_base_ref(worktree)
+    if base_ref is None:
+        return False
+    rc, _, _ = _git_output(["merge-base", "--is-ancestor", base_ref, sha], worktree, timeout=15)
+    if rc != 0:
+        return False
+    rc, out, _ = _git_output(["rev-list", "--count", f"{base_ref}..{sha}"], worktree, timeout=15)
+    if rc != 0:
+        return False
+    try:
+        if int(out.strip() or "0") <= 0:
+            return False
+    except ValueError:
+        return False
+    rc, _, _ = _git_output(["merge-base", "--is-ancestor", sha, "HEAD"], worktree, timeout=15)
     return rc == 0
 
 
@@ -393,13 +696,19 @@ def scan_all_worktrees(
                 continue
             clone = _find_managed_clone_for_worktree(repo_dir)
             branch = _worktree_branch_name(repo_dir)
-            is_dirty = _worktree_has_uncommitted_changes(repo_dir)
-            commits_ahead = _worktree_commits_ahead(repo_dir)
+            base_ref = _worktree_dashboard_base_ref(repo_dir, repo_dir.name)
+            dirty_files_or_none = _worktree_dirty_files(repo_dir)
+            dirty_files = dirty_files_or_none or []
+            # Preserve the previous safety behavior: if git status fails,
+            # treat the worktree as dirty even though paths are unavailable.
+            is_dirty = True if dirty_files_or_none is None else bool(dirty_files)
+            commits = _worktree_commits(repo_dir, base_ref=base_ref)
+            commits_ahead = len(commits)
             ff_eligible = (
                 branch is not None
                 and commits_ahead > 0
                 and not is_dirty
-                and _worktree_ff_only_safe(repo_dir)
+                and _worktree_ff_only_safe(repo_dir, base_ref=base_ref)
             )
             out.append(WorktreeState(
                 session_name=session_dir.name,
@@ -411,6 +720,8 @@ def scan_all_worktrees(
                 is_dirty=is_dirty,
                 ff_eligible=ff_eligible,
                 session_live=session_dir.name in live,
+                commits=commits,
+                dirty_files=dirty_files,
             ))
 
     return out
@@ -570,6 +881,80 @@ def cleanup_session_worktrees(
     return result
 
 
+def cleanup_session_worktree(
+    session_name: str,
+    repo_name: str,
+    *,
+    force: bool = False,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> CleanupResult:
+    """Remove one repo worktree for ``session_name`` while preserving others."""
+    result = CleanupResult()
+    session_dir = worktrees_dir / session_name
+    entry = session_dir / repo_name
+    if not entry.exists():
+        return result
+    if not entry.is_dir():
+        result.errors.append((str(entry), "not a directory"))
+        return result
+
+    branch = f"{SESSION_BRANCH_PREFIX}{session_name}"
+    clone = _find_managed_clone_for_worktree(entry)
+
+    if not force:
+        reasons: list[str] = []
+        if _worktree_has_uncommitted_changes(entry):
+            reasons.append("uncommitted changes")
+        elif _worktree_has_unpushed_commits(entry):
+            reasons.append("unpushed commits")
+        if reasons:
+            result.preserved.append((str(entry), ", ".join(reasons)))
+            logger.warning(
+                "workspace cleanup: preserving %s (%s)",
+                entry, ", ".join(reasons),
+            )
+            return result
+
+    if clone is None:
+        try:
+            shutil.rmtree(entry)
+            result.removed.append(str(entry))
+        except OSError as e:
+            result.errors.append((str(entry), f"rmtree: {e}"))
+            return result
+    else:
+        ok, err = _worktree_remove(clone, entry)
+        if not ok:
+            if entry.exists():
+                try:
+                    shutil.rmtree(entry)
+                except OSError as e:
+                    result.errors.append((str(entry), f"remove failed: {err}; rmtree: {e}"))
+                    return result
+            logger.info(
+                "workspace cleanup: 'worktree remove' failed for %s (%s); "
+                "fell back to rmtree",
+                entry, err,
+            )
+
+        result.removed.append(str(entry))
+        _delete_branch(clone, branch)
+        _worktree_prune(clone)
+
+    if session_dir.exists():
+        try:
+            remaining = [p for p in session_dir.iterdir()]
+        except OSError:
+            remaining = []
+        if not remaining:
+            try:
+                session_dir.rmdir()
+            except OSError as e:
+                result.errors.append((str(session_dir), f"rmdir: {e}"))
+
+    return result
+
+
 def prune_orphan_worktrees(
     live_session_names: Iterable[str],
     *,
@@ -617,8 +1002,9 @@ def merge_session_worktree(
         raise WorkspaceError(f"worktree is detached or unreadable: {worktree}")
 
     is_dirty = _worktree_has_uncommitted_changes(worktree)
-    commits_ahead = _worktree_commits_ahead(worktree)
-    ff_eligible = commits_ahead > 0 and not is_dirty and _worktree_ff_only_safe(worktree)
+    base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
+    commits_ahead = _worktree_commits_ahead(worktree, base_ref=base_ref)
+    ff_eligible = commits_ahead > 0 and not is_dirty and _worktree_ff_only_safe(worktree, base_ref=base_ref)
     if not ff_eligible:
         raise WorkspaceError(
             f"worktree {session_name}/{repo_name} is not ff-eligible "
@@ -634,13 +1020,206 @@ def merge_session_worktree(
             "only 'autonomy' can be merged from the dashboard today"
         )
 
+    target_branch, _target_head = _autonomy_target_branch_and_head()
+    if target_branch is None:
+        raise WorkspaceError("could not determine autonomy integration branch")
+
     target_repo = REPO_ROOT
     _run_git(["fetch", str(clone), branch], cwd=target_repo)
-    _run_git(["merge", "--ff-only", "FETCH_HEAD"], cwd=target_repo)
-    commit = _run_git(["rev-parse", "HEAD"], cwd=target_repo).strip()
-    message = _run_git(["log", "-1", "--pretty=%s"], cwd=target_repo).strip()
+    target_sha = _run_git(["rev-parse", "FETCH_HEAD"], cwd=target_repo).strip()
+    rc, current_head, _ = _git_output(
+        ["rev-parse", "--verify", f"refs/heads/{target_branch}"],
+        target_repo,
+        timeout=15,
+    )
+    if rc != 0:
+        raise WorkspaceError(f"target branch not found: {target_branch}")
+    current_head = current_head.strip()
+
+    rc, _, _ = _git_output(["merge-base", "--is-ancestor", current_head, target_sha], target_repo, timeout=15)
+    if rc != 0:
+        raise WorkspaceError(
+            f"selected branch tip is not fast-forward eligible from {target_branch}"
+        )
+
+    rc, head_branch, _ = _git_output(["symbolic-ref", "--quiet", "--short", "HEAD"], target_repo, timeout=15)
+    if rc == 0 and head_branch.strip() == target_branch:
+        _run_git(["merge", "--ff-only", target_sha], cwd=target_repo)
+    else:
+        _run_git(
+            ["update-ref", f"refs/heads/{target_branch}", target_sha, current_head],
+            cwd=target_repo,
+        )
+
+    commit = _run_git(["rev-parse", target_sha], cwd=target_repo).strip()
+    message = _run_git(["log", "-1", "--pretty=%s", target_sha], cwd=target_repo).strip()
     return {
         "commit": commit,
         "message": message,
         "target_repo": str(target_repo),
+        "target_branch": target_branch,
+    }
+
+
+def _session_worktree_path(
+    session_name: str,
+    repo_name: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> Path:
+    worktree = worktrees_dir / session_name / repo_name
+    if not worktree.exists() or not worktree.is_dir():
+        raise WorkspaceError(f"worktree not found: {worktree}")
+    return worktree
+
+
+def _session_worktree_context(
+    session_name: str,
+    repo_name: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> tuple[Path, Path, str]:
+    """Resolve a session/repo pair to worktree, managed clone, and branch."""
+    worktree = _session_worktree_path(
+        session_name,
+        repo_name,
+        worktrees_dir=worktrees_dir,
+    )
+
+    clone = _find_managed_clone_for_worktree(worktree)
+    if clone is None:
+        raise WorkspaceError(f"managed clone not found for worktree: {worktree}")
+
+    branch = _worktree_branch_name(worktree)
+    if branch is None:
+        raise WorkspaceError(f"worktree is detached or unreadable: {worktree}")
+
+    return worktree, clone, branch
+
+
+def get_session_worktree_commit_detail(
+    session_name: str,
+    repo_name: str,
+    sha: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> WorktreeCommit:
+    """Return one ahead commit, including its patch, for API review."""
+    worktree, _clone, _branch = _session_worktree_context(
+        session_name,
+        repo_name,
+        worktrees_dir=worktrees_dir,
+    )
+    base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
+    resolved = _resolve_worktree_commit(worktree, sha)
+    if not _commit_is_ahead_of_base(worktree, resolved, base_ref=base_ref):
+        raise WorkspaceError(f"commit is not in worktree ahead range: {sha}")
+    commit = _read_worktree_commit(worktree, resolved, include_patch=True)
+    if commit is None:
+        raise WorkspaceError(f"commit could not be read: {sha}")
+    return commit
+
+
+def get_session_worktree_dirty_detail(
+    session_name: str,
+    repo_name: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> WorktreeDirtyDetail:
+    """Return dirty file metadata and unified diff for one worktree."""
+    worktree = _session_worktree_path(
+        session_name,
+        repo_name,
+        worktrees_dir=worktrees_dir,
+    )
+    dirty_files = _worktree_dirty_files(worktree)
+    if dirty_files is None:
+        raise WorkspaceError(f"could not read dirty file state for worktree: {worktree}")
+
+    numstats = _worktree_dirty_numstats(worktree)
+    files = [
+        GitFileChange(
+            status=file.status,
+            path=file.path,
+            additions=numstats.get(file.path, (0, 0))[0],
+            deletions=numstats.get(file.path, (0, 0))[1],
+        )
+        for file in dirty_files
+    ]
+    return WorktreeDirtyDetail(
+        files=files,
+        patch=_worktree_dirty_patch(worktree),
+    )
+
+
+def merge_session_worktree_commit(
+    session_name: str,
+    repo_name: str,
+    sha: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> dict[str, str]:
+    """Fast-forward the local checkout to a selected session commit."""
+    worktree, clone, branch = _session_worktree_context(
+        session_name,
+        repo_name,
+        worktrees_dir=worktrees_dir,
+    )
+
+    if repo_name != "autonomy":
+        raise WorkspaceError(
+            f"merge target unsupported for repo {repo_name!r}; "
+            "only 'autonomy' can be merged from the dashboard today"
+        )
+
+    base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
+    resolved = _resolve_worktree_commit(worktree, sha)
+    if not _commit_is_ahead_of_base(worktree, resolved, base_ref=base_ref):
+        raise WorkspaceError(f"commit is not in worktree ahead range: {sha}")
+
+    pending = _worktree_commit_shas(worktree, base_ref=base_ref)
+    if not pending or pending[0] != resolved:
+        raise WorkspaceError(
+            f"selected commit {resolved[:7]} is not the next pending commit for this worktree"
+        )
+
+    target_branch, _target_head = _autonomy_target_branch_and_head()
+    if target_branch is None:
+        raise WorkspaceError("could not determine autonomy integration branch")
+
+    target_repo = REPO_ROOT
+    _run_git(["fetch", str(clone), branch], cwd=target_repo)
+
+    rc, current_head, _ = _git_output(
+        ["rev-parse", "--verify", f"refs/heads/{target_branch}"],
+        target_repo,
+        timeout=15,
+    )
+    if rc != 0:
+        raise WorkspaceError(f"target branch not found: {target_branch}")
+    current_head = current_head.strip()
+
+    rc, _, _ = _git_output(["merge-base", "--is-ancestor", current_head, resolved], target_repo, timeout=15)
+    if rc != 0:
+        raise WorkspaceError(
+            f"selected commit {resolved[:7]} is not fast-forward eligible "
+            f"from target branch {target_branch}"
+        )
+
+    rc, head_branch, _ = _git_output(["symbolic-ref", "--quiet", "--short", "HEAD"], target_repo, timeout=15)
+    if rc == 0 and head_branch.strip() == target_branch:
+        _run_git(["merge", "--ff-only", resolved], cwd=target_repo)
+    else:
+        _run_git(
+            ["update-ref", f"refs/heads/{target_branch}", resolved, current_head],
+            cwd=target_repo,
+        )
+
+    commit = _run_git(["rev-parse", resolved], cwd=target_repo).strip()
+    message = _run_git(["log", "-1", "--pretty=%s", resolved], cwd=target_repo).strip()
+    return {
+        "commit": commit,
+        "message": message,
+        "target_repo": str(target_repo),
+        "target_branch": target_branch,
     }
