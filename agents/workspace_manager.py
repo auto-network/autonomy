@@ -57,6 +57,25 @@ class WorkspaceError(RuntimeError):
     """Raised when repo clone, fetch, or worktree operations fail."""
 
 
+class RebaseRequiredError(WorkspaceError):
+    """Raised when a selected commit requires rebase before dashboard merge."""
+
+    def __init__(
+        self,
+        *,
+        target_branch: str,
+        commits_behind: int,
+        fork_sha: str,
+        session_live: bool,
+    ) -> None:
+        noun = "commit" if commits_behind == 1 else "commits"
+        super().__init__(f"Parent has advanced {commits_behind} {noun}, rebase required before merge.")
+        self.target_branch = target_branch
+        self.commits_behind = commits_behind
+        self.fork_sha = fork_sha
+        self.session_live = session_live
+
+
 _SSH_RE = re.compile(r"^(?P<user>[\w.-]+)@(?P<host>[\w.-]+):(?P<path>.+?)/?$")
 _URL_RE = re.compile(r"^(?:https?|ssh|git)://(?:[\w.-]+@)?(?P<host>[\w.-]+)(?::\d+)?/(?P<path>.+?)/?$")
 
@@ -273,6 +292,7 @@ class WorktreeState:
     commits_ahead: int
     is_dirty: bool
     ff_eligible: bool
+    clone_stale: bool
     session_live: bool
     commits: list[WorktreeCommit] = field(default_factory=list)
     dirty_files: list[GitFileChange] = field(default_factory=list)
@@ -371,15 +391,21 @@ def _repo_default_branch(repo: Path) -> str | None:
     return None
 
 
+def _repo_branch_head(repo: Path, branch: str) -> str | None:
+    """Return the local branch SHA for ``repo``/``branch`` or None."""
+    rc, out, _ = _git_output(["rev-parse", "--verify", f"refs/heads/{branch}"], repo, timeout=15)
+    if rc != 0:
+        return None
+    head = out.strip()
+    return head or None
+
+
 def _autonomy_target_branch_and_head() -> tuple[str | None, str | None]:
     """Return the host-side autonomy integration branch and current HEAD SHA."""
     branch = _repo_default_branch(REPO_ROOT)
     if branch is None:
         return None, None
-    rc, out, _ = _git_output(["rev-parse", "--verify", f"refs/heads/{branch}"], REPO_ROOT, timeout=15)
-    if rc != 0:
-        return branch, None
-    return branch, out.strip()
+    return branch, _repo_branch_head(REPO_ROOT, branch)
 
 
 def _sync_managed_clone_branch_ref(clone: Path, source_repo: Path, branch: str) -> None:
@@ -557,6 +583,21 @@ def _dashboard_pending_commit_shas(
     ]
 
 
+def _worktree_clone_stale(repo_name: str, clone: Path | None) -> bool:
+    """Return True when the managed clone lags the host integration branch."""
+    if repo_name != "autonomy" or clone is None:
+        return False
+
+    target_branch, target_head = _autonomy_target_branch_and_head()
+    if target_branch is None or target_head is None:
+        return False
+
+    clone_head = _repo_branch_head(clone, target_branch)
+    if clone_head is None:
+        return True
+    return clone_head != target_head
+
+
 def _commit_file_changes(worktree: Path, sha: str) -> list[GitFileChange]:
     """Return file-level status and numstat details for one commit."""
     numstats: dict[str, tuple[int, int]] = {}
@@ -701,6 +742,11 @@ def _live_session_names() -> set[str]:
         return set()
 
 
+def _session_is_live(session_name: str) -> bool:
+    """Return True when the dashboard currently marks ``session_name`` live."""
+    return session_name in _live_session_names()
+
+
 def scan_all_worktrees(
     *,
     worktrees_dir: Path = WORKTREES_DIR,
@@ -733,6 +779,7 @@ def scan_all_worktrees(
             clone = _find_managed_clone_for_worktree(repo_dir)
             branch = _worktree_branch_name(repo_dir)
             base_ref = _worktree_dashboard_base_ref(repo_dir, repo_dir.name)
+            clone_stale = _worktree_clone_stale(repo_dir.name, clone)
             dirty_files_or_none = _worktree_dirty_files(repo_dir)
             dirty_files = dirty_files_or_none or []
             # Preserve the previous safety behavior: if git status fails,
@@ -743,6 +790,7 @@ def scan_all_worktrees(
             ff_eligible = (
                 branch is not None
                 and bool(commits)
+                and not clone_stale
                 and not is_dirty
                 and _worktree_ff_only_safe(repo_dir, base_ref=base_ref)
             )
@@ -755,6 +803,7 @@ def scan_all_worktrees(
                 commits_ahead=commits_ahead,
                 is_dirty=is_dirty,
                 ff_eligible=ff_eligible,
+                clone_stale=clone_stale,
                 session_live=session_dir.name in live,
                 commits=commits,
                 dirty_files=dirty_files,
@@ -1139,6 +1188,122 @@ def _session_worktree_context(
     return worktree, clone, branch
 
 
+def _rebase_required_info(
+    session_name: str,
+    target_repo: Path,
+    target_branch: str,
+    commit_sha: str,
+) -> dict[str, str | int | bool]:
+    """Return structured rebase metadata for ``commit_sha`` against ``target_branch``."""
+    rc, out, err = _git_output(
+        ["merge-base", f"refs/heads/{target_branch}", commit_sha],
+        target_repo,
+        timeout=15,
+    )
+    if rc != 0:
+        raise WorkspaceError(
+            f"could not determine fork point for {commit_sha[:7]} against {target_branch}: {err.strip()}"
+        )
+    fork_sha = out.strip()
+    rc, out, err = _git_output(
+        ["rev-list", "--count", f"{fork_sha}..refs/heads/{target_branch}"],
+        target_repo,
+        timeout=15,
+    )
+    if rc != 0:
+        raise WorkspaceError(
+            f"could not determine commits behind for {commit_sha[:7]} against {target_branch}: {err.strip()}"
+        )
+    try:
+        commits_behind = int(out.strip() or "0")
+    except ValueError as exc:
+        raise WorkspaceError(
+            f"could not parse commits-behind count for {commit_sha[:7]} against {target_branch}"
+        ) from exc
+    return {
+        "target_branch": target_branch,
+        "commits_behind": commits_behind,
+        "fork_sha": fork_sha,
+        "session_live": _session_is_live(session_name),
+    }
+
+
+def get_session_worktree_rebase_info(
+    session_name: str,
+    repo_name: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+    sync_managed_clone_target: bool = False,
+) -> dict[str, str | int | bool]:
+    """Return rebase guidance for the next pending dashboard commit."""
+    worktree, clone, branch = _session_worktree_context(
+        session_name,
+        repo_name,
+        worktrees_dir=worktrees_dir,
+    )
+
+    if repo_name != "autonomy":
+        raise WorkspaceError(
+            f"merge target unsupported for repo {repo_name!r}; "
+            "only 'autonomy' can be merged from the dashboard today"
+        )
+
+    target_branch, _target_head = _autonomy_target_branch_and_head()
+    if target_branch is None:
+        raise WorkspaceError("could not determine autonomy integration branch")
+
+    if sync_managed_clone_target:
+        _sync_managed_clone_branch_ref(clone, REPO_ROOT, target_branch)
+
+    # Ensure the target repo can resolve the selected commit SHA when we
+    # compute fork-point / behind counts for request-rebase and merge errors.
+    _run_git(["fetch", str(clone), branch], cwd=REPO_ROOT)
+
+    base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
+    pending = _dashboard_pending_commit_shas(worktree, repo_name, base_ref=base_ref)
+    if not pending:
+        raise WorkspaceError("no pending commits for this worktree")
+
+    info = _rebase_required_info(
+        session_name,
+        REPO_ROOT,
+        target_branch,
+        pending[0],
+    )
+    info["commit"] = pending[0]
+    return info
+
+
+def sync_session_worktree_base(
+    session_name: str,
+    repo_name: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> dict[str, str]:
+    """Sync the managed clone integration branch from the host checkout."""
+    _worktree, clone, _branch = _session_worktree_context(
+        session_name,
+        repo_name,
+        worktrees_dir=worktrees_dir,
+    )
+
+    if repo_name != "autonomy":
+        raise WorkspaceError(
+            f"merge target unsupported for repo {repo_name!r}; "
+            "only 'autonomy' can be merged from the dashboard today"
+        )
+
+    target_branch, _target_head = _autonomy_target_branch_and_head()
+    if target_branch is None:
+        raise WorkspaceError("could not determine autonomy integration branch")
+
+    _sync_managed_clone_branch_ref(clone, REPO_ROOT, target_branch)
+    return {
+        "target_branch": target_branch,
+        "managed_clone": str(clone),
+    }
+
+
 def get_session_worktree_commit_detail(
     session_name: str,
     repo_name: str,
@@ -1227,6 +1392,8 @@ def merge_session_worktree_commit(
     target_branch, _target_head = _autonomy_target_branch_and_head()
     if target_branch is None:
         raise WorkspaceError("could not determine autonomy integration branch")
+    if _worktree_clone_stale(repo_name, clone):
+        raise WorkspaceError("managed clone base is stale; sync worktree to latest before merge")
 
     target_repo = REPO_ROOT
     _run_git(["fetch", str(clone), branch], cwd=target_repo)
@@ -1242,9 +1409,12 @@ def merge_session_worktree_commit(
 
     rc, _, _ = _git_output(["merge-base", "--is-ancestor", current_head, resolved], target_repo, timeout=15)
     if rc != 0:
-        raise WorkspaceError(
-            f"selected commit {resolved[:7]} is not fast-forward eligible "
-            f"from target branch {target_branch}"
+        info = _rebase_required_info(session_name, target_repo, target_branch, resolved)
+        raise RebaseRequiredError(
+            target_branch=target_branch,
+            commits_behind=int(info["commits_behind"]),
+            fork_sha=str(info["fork_sha"]),
+            session_live=bool(info["session_live"]),
         )
 
     rc, head_branch, _ = _git_output(["symbolic-ref", "--quiet", "--short", "HEAD"], target_repo, timeout=15)

@@ -298,6 +298,11 @@
               </div>
             </div>
 
+            <template x-if="row.session_title">
+              <h3 class="min-w-0 overflow-hidden break-words text-lg font-semibold leading-7 text-white md:text-xl"
+                  x-text="row.session_title"></h3>
+            </template>
+
             <div class="mt-4 min-w-0">
               <div class="mb-2 flex items-center justify-between gap-3">
                 <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Changed in working tree</div>
@@ -346,6 +351,32 @@
               <button type="button"
                       class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300"
                       @click="confirmDiscardRow = null">Cancel</button>
+            </div>
+          </section>
+        </div>
+      </template>
+
+      <template x-if="rebaseRequiredDialog">
+        <div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 px-4"
+             data-testid="rebase-required-dialog">
+          <section class="w-full max-w-md rounded-3xl border border-indigo-500/20 bg-gray-950 p-5 shadow-2xl shadow-black/50">
+            <div class="text-sm font-semibold text-indigo-300">Rebase required</div>
+            <p class="mt-3 text-sm leading-6 text-slate-300"
+               x-text="rebaseRequiredDialog.message"></p>
+            <div class="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_auto]">
+              <template x-if="rebaseRequiredDialog.session_live">
+                <button type="button"
+                        class="h-11 rounded-2xl bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-50"
+                        :disabled="rebaseRequesting"
+                        @click="requestRebase(rebaseRequiredDialog.row)">
+                  <span x-show="!rebaseRequesting">Request Rebase</span>
+                  <span x-show="rebaseRequesting">Requesting...</span>
+                </button>
+              </template>
+              <button type="button"
+                      class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300 sm:col-start-3"
+                      :disabled="rebaseRequesting"
+                      @click="rebaseRequiredDialog = null">OK</button>
             </div>
           </section>
         </div>
@@ -494,7 +525,7 @@
 
               <div class="relative mt-6">
                 <template x-if="supportsDashboardMerge(selectedCommit.row)">
-                  <div class="mx-auto grid max-w-6xl grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
+                  <div class="mx-auto flex max-w-6xl flex-col gap-2 md:flex-row md:items-center">
                     <template x-if="mergeBurstActive">
                       <div class="pointer-events-none absolute inset-x-0 -top-16 z-10 flex justify-center overflow-visible">
                         <div class="relative h-24 w-72 max-w-full">
@@ -506,30 +537,57 @@
                         </div>
                       </div>
                     </template>
-                    <button type="button"
-                            class="h-11 rounded-2xl px-4 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:bg-gray-800 disabled:text-gray-500"
-                            :class="mergeState === 'success' ? 'bg-emerald-500 hover:bg-emerald-500' : 'bg-indigo-600 hover:bg-indigo-500'"
-                            :disabled="!canMergeCommit(selectedCommit) || mergeState === 'working' || mergeState === 'success'"
-                            @click="startMergeCommit()"
-                            data-testid="worktree-commit-merge-button">
-                      <span class="inline-flex items-center justify-center gap-2">
-                        <template x-if="mergeState === 'working'">
-                          <span class="inline-flex items-center gap-2">
-                            <span class="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white"></span>
+                    <template x-if="cloneStale(selectedCommit.row)">
+                      <button type="button"
+                              class="h-11 rounded-2xl bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-50 md:flex-1"
+                              :disabled="isSyncingBase(selectedCommit.row)"
+                              @click="syncBase(selectedCommit.row)"
+                              data-testid="worktree-sync-base-button">
+                        <span x-show="!isSyncingBase(selectedCommit.row)">Sync Worktree to Latest</span>
+                        <span x-show="isSyncingBase(selectedCommit.row)">Syncing...</span>
+                      </button>
+                    </template>
+                    <template x-if="!cloneStale(selectedCommit.row)">
+                      <button type="button"
+                              class="h-11 rounded-2xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed md:flex-1"
+                              :class="mergeState === 'success'
+                                ? 'bg-emerald-500 text-white hover:bg-emerald-500'
+                                : (canMergeCommit(selectedCommit)
+                                  ? 'bg-indigo-600 text-white hover:bg-indigo-500'
+                                  : 'bg-gray-800 text-gray-500')"
+                              :disabled="!canMergeCommit(selectedCommit) || mergeState === 'working' || mergeState === 'success'"
+                              :title="mergeDisabledReason(selectedCommit)"
+                              @click="startMergeCommit()"
+                              data-testid="worktree-commit-merge-button">
+                        <span class="inline-flex items-center justify-center gap-2">
+                          <template x-if="mergeState === 'working'">
+                            <span class="inline-flex items-center gap-2">
+                              <span class="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white"></span>
+                              <span x-text="mergeCommitLabel(selectedCommit)"></span>
+                            </span>
+                          </template>
+                          <template x-if="mergeState === 'success'">
+                            <span class="inline-flex items-center gap-2">
+                              <span class="text-base leading-none">✓</span>
+                              <span>Merged</span>
+                            </span>
+                          </template>
+                          <template x-if="mergeState !== 'working' && mergeState !== 'success'">
                             <span x-text="mergeCommitLabel(selectedCommit)"></span>
-                          </span>
-                        </template>
-                        <template x-if="mergeState === 'success'">
-                          <span class="inline-flex items-center gap-2">
-                            <span class="text-base leading-none">✓</span>
-                            <span>Merged</span>
-                          </span>
-                        </template>
-                        <template x-if="mergeState !== 'working' && mergeState !== 'success'">
-                          <span x-text="mergeCommitLabel(selectedCommit)"></span>
-                        </template>
-                      </span>
-                    </button>
+                          </template>
+                        </span>
+                      </button>
+                    </template>
+                    <template x-if="canRequestRebase(selectedCommit)">
+                      <button type="button"
+                              class="h-11 rounded-2xl border border-indigo-500/30 px-4 text-sm font-semibold text-indigo-200 transition hover:bg-indigo-500/10 disabled:cursor-wait disabled:opacity-50"
+                              :disabled="rebaseRequesting"
+                              @click="requestRebase(selectedCommit.row)"
+                              data-testid="worktree-request-rebase-button">
+                        <span x-show="!rebaseRequesting">Request Rebase</span>
+                        <span x-show="rebaseRequesting">Requesting...</span>
+                      </button>
+                    </template>
                     <button type="button"
                             class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300"
                             @click="selectedCommit = null">Close</button>
@@ -551,14 +609,15 @@
 
       <template x-if="selectedDirtyRow">
         <div class="fixed inset-0 z-50 overflow-y-auto bg-gray-950"
+             x-ref="dirtyDetailScroller"
+             @scroll.passive="syncReviewHeaderState()"
              data-testid="worktree-dirty-detail">
           <section class="min-h-screen bg-gray-950">
             <div class="mx-auto max-w-6xl px-4 pb-8 pt-4 sm:px-6 lg:px-8">
-              <div class="sticky top-0 z-10 -mx-4 mb-6 border-b border-white/10 bg-gray-950/95 px-4 pb-4 pt-1 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+              <div class="-mx-4 mb-4 px-4 pt-1 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
                 <div class="mx-auto max-w-6xl">
-                  <div class="mb-2 flex items-start justify-between gap-4">
-                    <div class="min-w-0">
-                      <div class="mb-2 flex flex-wrap items-center gap-2">
+                  <div class="relative mb-2 pr-12">
+                    <div class="flex min-w-0 flex-wrap items-center gap-2">
                         <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                               x-text="selectedDirtyRow.session_name"></span>
                         <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
@@ -569,19 +628,28 @@
                         <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
                               :class="statusClass(selectedDirtyRow)"
                               x-text="statusLabel(selectedDirtyRow)"></span>
-                      </div>
-                      <h3 class="mt-1 max-w-4xl text-2xl font-semibold leading-8 text-white sm:text-3xl">Working tree changes</h3>
                     </div>
                     <button type="button"
-                            class="h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
+                            class="absolute right-0 top-0 h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
                             @click="selectedDirtyRow = null">×</button>
                   </div>
                 </div>
               </div>
 
+              <div x-ref="dirtyTitleBar"
+                   class="sticky top-0 z-10 -mx-4 border-y border-white/10 bg-gray-950/95 px-4 backdrop-blur transition-all duration-200 ease-out sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8"
+                   :class="reviewTitlePinned ? 'py-2' : 'py-3'">
+                <div class="mx-auto max-w-6xl">
+                  <h3 class="max-w-4xl font-semibold text-white transition-all duration-200 ease-out"
+                      :class="reviewTitlePinned ? 'text-base leading-5 sm:text-3xl sm:leading-9' : 'text-2xl leading-8 sm:text-3xl sm:leading-9'">Working tree changes</h3>
+                </div>
+              </div>
+
               <div>
                 <div class="mb-6">
-                  <div class="mb-2 flex items-center justify-between gap-3">
+                  <div x-ref="dirtyFilesHeader"
+                       class="sticky z-[8] -mx-2 mb-2 flex items-center justify-between gap-3 border-y border-white/10 bg-gray-950/95 px-2 py-2 backdrop-blur"
+                       :style="'top:' + commitStickyTop + 'px'">
                     <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Files in working tree</div>
                     <div class="flex items-center gap-3">
                       <div class="flex shrink-0 items-center gap-2 font-mono text-[10px] text-slate-500">
@@ -596,7 +664,9 @@
                   <div class="divide-y divide-white/10 border-y border-white/10">
                     <template x-for="file in selectedDirtyRow.files" :key="rowKey(selectedDirtyRow) + file.status + file.path">
                       <div :class="showDiff ? 'py-3' : 'py-1.5'">
-                        <div class="grid grid-cols-[0.85rem_minmax(0,1fr)] items-center gap-1.5">
+                        <div class="grid grid-cols-[0.85rem_minmax(0,1fr)] items-center gap-1.5"
+                             :class="showDiff ? 'sticky z-[7] -mx-2 border-b border-white/10 bg-gray-950/95 px-2 py-1.5 backdrop-blur' : ''"
+                             :style="showDiff ? 'top:' + commitFileRowStickyTop + 'px' : ''">
                           <span class="text-center font-mono text-[10px] font-bold text-amber-200"
                                 :title="statusTitle(file.status)"
                                 x-text="displayStatus(file.status)"></span>

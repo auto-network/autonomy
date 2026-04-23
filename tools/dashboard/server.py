@@ -49,6 +49,7 @@ from agents import workspace_settings
 from agents.primer_renderer import render_workspace_primer
 from agents.workspace_manager import (
     GitFileChange,
+    RebaseRequiredError,
     WorktreeCommit,
     WorktreeDirtyDetail,
     WorktreeState,
@@ -57,9 +58,11 @@ from agents.workspace_manager import (
     cleanup_session_worktrees,
     get_session_worktree_commit_detail,
     get_session_worktree_dirty_detail,
+    get_session_worktree_rebase_info,
     merge_session_worktree,
     merge_session_worktree_commit,
     prepare_session_mounts,
+    sync_session_worktree_base,
     worktree_target_branch_name,
 )
 if os.environ.get("DASHBOARD_MOCK"):
@@ -4689,9 +4692,56 @@ def _worktree_dirty_detail_json(detail: WorktreeDirtyDetail) -> dict:
         "patch": detail.patch or "",
     }
 
+
+def _find_worktree_row(rows: list[WorktreeState], session_name: str, repo_name: str) -> WorktreeState | None:
+    return next(
+        (
+            item for item in rows
+            if item.session_name == session_name and item.repo_name == repo_name
+        ),
+        None,
+    )
+
+
+async def _send_dashboard_ui_crosstalk(target_session: str, message: str) -> None:
+    """Deliver a dashboard-authored CrossTalk message to one live session."""
+    if not _tmux_session_exists(target_session):
+        raise WorkspaceError(f"target session not found: {target_session}")
+
+    sender = "dashboard-ui"
+    label = "Dashboard UI"
+    iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    envelope = (
+        f'<crosstalk from="{sender}"\n'
+        f'           label="{label}"\n'
+        f'           source="" turn="0"\n'
+        f'           timestamp="{iso_now}">\n'
+        f'{message}\n'
+        f'</crosstalk>'
+    )
+
+    await tmux_send(target_session, envelope)
+    await asyncio.to_thread(
+        auth_db.insert_message,
+        sender,
+        label,
+        target_session,
+        None,
+        None,
+        message,
+        time.time(),
+    )
+
+
+def _session_title_for_tmux(tmux_name: str) -> str:
+    row = dashboard_db.get_session(tmux_name)
+    return ((row or {}).get("label", "") or "").strip()
+
+
 def _worktree_state_json(row: WorktreeState) -> dict:
     return {
         "session_name": row.session_name,
+        "session_title": _session_title_for_tmux(row.session_name),
         "repo_name": row.repo_name,
         "worktree_path": str(row.worktree_path),
         "managed_clone": str(row.managed_clone) if row.managed_clone else None,
@@ -4699,6 +4749,7 @@ def _worktree_state_json(row: WorktreeState) -> dict:
         "commits_ahead": row.commits_ahead,
         "is_dirty": row.is_dirty,
         "ff_eligible": row.ff_eligible,
+        "clone_stale": row.clone_stale,
         "session_live": row.session_live,
         "target_branch": worktree_target_branch_name(
             row.session_name,
@@ -4781,6 +4832,18 @@ async def api_worktree_commit_merge(request):
             repo_name,
             sha,
         )
+    except RebaseRequiredError as exc:
+        return JSONResponse(
+            {
+                "error": "rebase_required",
+                "message": str(exc),
+                "commits_behind": exc.commits_behind,
+                "session_live": exc.session_live,
+                "target_branch": exc.target_branch,
+                "fork_sha": exc.fork_sha,
+            },
+            status_code=409,
+        )
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
@@ -4794,13 +4857,7 @@ async def api_worktree_commit_merge(request):
 async def api_worktree_merge(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
-    row = next(
-        (
-            item for item in worktree_monitor.get_all()
-            if item.session_name == session_name and item.repo_name == repo_name
-        ),
-        None,
-    )
+    row = _find_worktree_row(worktree_monitor.get_all(), session_name, repo_name)
     if row is None:
         return JSONResponse({"error": "worktree not found"}, status_code=404)
     if not row.ff_eligible:
@@ -4827,6 +4884,64 @@ async def api_worktree_merge(request):
         "commit": result.get("commit", ""),
         "message": result.get("message", ""),
     })
+
+
+async def api_worktree_sync_base(request):
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+
+    try:
+        await asyncio.to_thread(
+            sync_session_worktree_base,
+            session_name,
+            repo_name,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    rows = await worktree_monitor.refresh()
+    row = _find_worktree_row(rows, session_name, repo_name)
+    if row is None:
+        return JSONResponse({"error": "worktree not found"}, status_code=404)
+    return JSONResponse({"ok": True, "state": _worktree_state_json(row)})
+
+
+async def api_worktree_request_rebase(request):
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+
+    try:
+        info = await asyncio.to_thread(
+            get_session_worktree_rebase_info,
+            session_name,
+            repo_name,
+            sync_managed_clone_target=True,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    if not info.get("session_live"):
+        return JSONResponse({"error": f"session is not live: {session_name}"}, status_code=409)
+
+    target_branch = str(info["target_branch"])
+    commits_behind = int(info["commits_behind"])
+    fork_sha = str(info["fork_sha"])[:7]
+    noun = "commit" if commits_behind == 1 else "commits"
+    message = (
+        "Rebase required before your commit can be merged via the dashboard.\n"
+        f"{target_branch} has advanced {commits_behind} {noun} beyond your fork point ({fork_sha}).\n\n"
+        "Run in your worktree:\n"
+        f"git rebase {target_branch}\n\n"
+        "Then refresh the Worktrees page — the updated commit will be ff-eligible."
+    )
+
+    try:
+        await _send_dashboard_ui_crosstalk(session_name, message)
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    await worktree_monitor.refresh()
+    return JSONResponse({"ok": True, "session": session_name})
 
 async def api_worktree_cleanup(request):
     session_name = request.path_params["session"]
@@ -6983,6 +7098,8 @@ routes = [
     Route("/api/worktrees/{session}/{repo}/commits/{sha}", api_worktree_commit, methods=["GET"]),
     Route("/api/worktrees/{session}/{repo}/changes", api_worktree_changes, methods=["GET"]),
     Route("/api/worktrees/{session}/{repo}/commits/{sha}/merge", api_worktree_commit_merge, methods=["POST"]),
+    Route("/api/worktrees/{session}/{repo}/sync-base", api_worktree_sync_base, methods=["POST"]),
+    Route("/api/worktrees/{session}/{repo}/request-rebase", api_worktree_request_rebase, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/merge", api_worktree_merge, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/discard", api_worktree_discard, methods=["POST"]),
     Route("/api/worktrees/{session}/cleanup", api_worktree_cleanup, methods=["POST"]),

@@ -5,6 +5,7 @@ from pathlib import Path
 from agents.workspace_manager import (
     CleanupResult,
     GitFileChange,
+    RebaseRequiredError,
     WorktreeCommit,
     WorktreeState,
     WorkspaceError,
@@ -35,6 +36,7 @@ def _row(
     ahead=1,
     dirty=False,
     ff=True,
+    clone_stale=False,
     live=False,
     commits=None,
     dirty_files=None,
@@ -50,6 +52,7 @@ def _row(
         commits_ahead=ahead,
         is_dirty=dirty,
         ff_eligible=ff,
+        clone_stale=clone_stale,
         session_live=live,
         commits=commits or [],
         dirty_files=dirty_files or [],
@@ -108,6 +111,7 @@ class TestWorktreeAPI:
         assert len(data) == 1
         row = data[0]
         assert row["session_name"] == "auto-test"
+        assert row["session_title"] == ""
         assert row["repo_name"] == "autonomy"
         assert row["worktree_path"] == "/tmp/worktrees/auto-test/autonomy"
         assert row["managed_clone"] == "/tmp/repos/autonomy.git"
@@ -116,6 +120,7 @@ class TestWorktreeAPI:
         assert row["commits_ahead"] == 1
         assert row["is_dirty"] is False
         assert row["ff_eligible"] is True
+        assert row["clone_stale"] is False
         assert row["session_live"] is False
         assert row["dirty_files"] == []
         assert row["commits"] == [{
@@ -145,6 +150,24 @@ class TestWorktreeAPI:
 
         assert resp.status_code == 200
         assert len(resp.json()) == 1
+        assert fake.refresh_count == 1
+
+    def test_sync_base_endpoint_refreshes_and_returns_updated_state(self, test_client, monkeypatch):
+        server, fake = _install_fake_monitor(monkeypatch, [_row(clone_stale=False)])
+        called = {}
+
+        def fake_sync(session_name, repo_name):
+            called["args"] = (session_name, repo_name)
+            return {"target_branch": "master", "managed_clone": "/tmp/repos/autonomy.git"}
+
+        monkeypatch.setattr(server, "sync_session_worktree_base", fake_sync)
+
+        resp = test_client.post("/api/worktrees/auto-test/autonomy/sync-base")
+
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert resp.json()["state"]["clone_stale"] is False
+        assert called["args"] == ("auto-test", "autonomy")
         assert fake.refresh_count == 1
 
     def test_merge_endpoint_fast_forwards_and_refreshes_cache(self, test_client, monkeypatch):
@@ -269,6 +292,62 @@ class TestWorktreeAPI:
         assert called["args"] == ("auto-test", "autonomy", "abcdef1")
         assert fake.refresh_count == 1
 
+    def test_commit_merge_endpoint_returns_structured_rebase_required_payload(self, test_client, monkeypatch):
+        server, fake = _install_fake_monitor(monkeypatch, [_row(ff=False, live=True)])
+
+        def fake_merge(_session_name, _repo_name, _sha):
+            raise RebaseRequiredError(
+                target_branch="master",
+                commits_behind=3,
+                fork_sha="2d10a47deadbeef",
+                session_live=True,
+            )
+
+        monkeypatch.setattr(server, "merge_session_worktree_commit", fake_merge)
+
+        resp = test_client.post("/api/worktrees/auto-test/autonomy/commits/abcdef1/merge")
+
+        assert resp.status_code == 409
+        assert resp.json() == {
+            "error": "rebase_required",
+            "message": "Parent has advanced 3 commits, rebase required before merge.",
+            "commits_behind": 3,
+            "session_live": True,
+            "target_branch": "master",
+            "fork_sha": "2d10a47deadbeef",
+        }
+        assert fake.refresh_count == 0
+
+    def test_request_rebase_endpoint_syncs_clone_then_sends_dashboard_ui_crosstalk(self, test_client, monkeypatch):
+        server, fake = _install_fake_monitor(monkeypatch, [_row(ff=False, live=True)])
+        called = {}
+
+        def fake_info(session_name, repo_name, *, sync_managed_clone_target=False):
+            called["info"] = (session_name, repo_name, sync_managed_clone_target)
+            return {
+                "target_branch": "master",
+                "commits_behind": 2,
+                "fork_sha": "2d10a47deadbeef",
+                "session_live": True,
+                "commit": "abcdef1234567890",
+            }
+
+        async def fake_send(target_session, message):
+            called["send"] = (target_session, message)
+
+        monkeypatch.setattr(server, "get_session_worktree_rebase_info", fake_info)
+        monkeypatch.setattr(server, "_send_dashboard_ui_crosstalk", fake_send)
+
+        resp = test_client.post("/api/worktrees/auto-test/autonomy/request-rebase")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "session": "auto-test"}
+        assert called["info"] == ("auto-test", "autonomy", True)
+        assert called["send"][0] == "auto-test"
+        assert "Dashboard UI" not in called["send"][1]
+        assert "git rebase master" in called["send"][1]
+        assert fake.refresh_count == 1
+
     def test_cleanup_endpoint_calls_workspace_cleanup_and_refreshes(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row()])
         called = {}
@@ -362,6 +441,9 @@ class TestWorktreePage:
         assert "fetch('/api/worktrees')" in js
         assert "fetch('/api/worktrees/refresh', { method: 'POST' })" in js
         assert "'/api/worktrees/' + encodeURIComponent(row.session_name)" in js
+        assert "'/sync-base'" in js
+        assert "'/request-rebase'" in js
+        assert "rebase_required" in js
         assert "canDiscardDirtyRow(row)" in js
         assert "fitPath(path, el)" in js
         assert "repoName(row)" in js
@@ -388,10 +470,17 @@ class TestWorktreePage:
         assert "Worktrees" in template
         assert "Commits" in template
         assert "Changes" in template
+        assert "Sync Worktree to Latest" in template
+        assert "Request Rebase" in template
+        assert 'data-testid="rebase-required-dialog"' in template
         assert 'x-markdown="selectedCommit.commit.body"' in template
         assert 'x-text="fitPath(file.path, $el)"' in template
         assert 'x-text="repoName(item.row)"' in template
+        assert 'x-text="row.session_title"' in template
         assert "changesCompanionCommitLabel(row)" in template
         assert "1 commit also present" in js
         assert 'x-show="canDiscardDirtyRow(row)"' in template
         assert "Are you sure you want to delete this Worktree?" in template
+        assert 'x-ref="dirtyDetailScroller"' in template
+        assert 'x-ref="dirtyTitleBar"' in template
+        assert 'x-ref="dirtyFilesHeader"' in template
