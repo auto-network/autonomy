@@ -2535,6 +2535,7 @@ async def api_dispatch_tail(request):
         })
 
     entries = []
+    harness = resolve_harness_for_path(session_file)
     with open(session_file, "rb") as f:
         f.seek(after)
         data = f.read()
@@ -2545,7 +2546,7 @@ async def api_dispatch_tail(request):
             line = line.strip()
             if not line:
                 continue
-            parsed = CLAUDE_HARNESS.parse_line(line)
+            parsed = harness.parse_line(line)
             if parsed is None:
                 continue
             if isinstance(parsed, list):
@@ -2553,7 +2554,7 @@ async def api_dispatch_tail(request):
             else:
                 entries.append(parsed)
 
-    entries = resolve_harness_for_path(session_file).postprocess_entries(
+    entries = harness.postprocess_entries(
         entries,
         session_dir=session_file.parent / session_file.stem,
     )
@@ -2725,6 +2726,7 @@ async def api_dispatch_latest(request):
 
     session_file = session_files[-1]
     is_live = (import_time() - session_file.stat().st_mtime) < 120
+    harness = resolve_harness_for_path(session_file)
 
     # Read last ~4KB to find latest assistant text
     file_size = session_file.stat().st_size
@@ -2738,7 +2740,7 @@ async def api_dispatch_latest(request):
         line = line.strip()
         if not line:
             continue
-        parsed = CLAUDE_HARNESS.parse_line(line)
+        parsed = harness.parse_line(line)
         if parsed is None:
             continue
         if isinstance(parsed, list):

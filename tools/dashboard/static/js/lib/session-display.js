@@ -13,7 +13,7 @@
 (function () {
   'use strict';
 
-  var GROUPABLE = { Bash: 1, Read: 1, Edit: 1, Grep: 1, Glob: 1 };
+  var GROUPABLE = { Bash: 1, exec_command: 1, Read: 1, Edit: 1, Grep: 1, Glob: 1 };
 
   function isGroupable(entry) {
     return entry.type === 'tool_use' && GROUPABLE[entry.tool_name] === 1;

@@ -861,7 +861,10 @@
             store.toolMap[entry.tool_id] = { tool_name: entry.tool_name || '?' };
           }
           if (entry.type === 'tool_result' && entry.tool_id) {
-            store.resultMap[entry.tool_id] = entry;
+            var existing = store.resultMap[entry.tool_id];
+            if (!existing || existing.result_kind !== 'exec_command' || entry.result_kind === 'exec_command') {
+              store.resultMap[entry.tool_id] = entry;
+            }
           }
         }
       },
