@@ -37,6 +37,7 @@ def _row(
     dirty=False,
     ff=True,
     clone_stale=False,
+    rebase_required=False,
     live=False,
     commits=None,
     dirty_files=None,
@@ -53,6 +54,7 @@ def _row(
         is_dirty=dirty,
         ff_eligible=ff,
         clone_stale=clone_stale,
+        rebase_required=rebase_required,
         session_live=live,
         commits=commits or [],
         dirty_files=dirty_files or [],
@@ -121,6 +123,7 @@ class TestWorktreeAPI:
         assert row["is_dirty"] is False
         assert row["ff_eligible"] is True
         assert row["clone_stale"] is False
+        assert row["rebase_required"] is False
         assert row["session_live"] is False
         assert row["dirty_files"] == []
         assert row["commits"] == [{
@@ -330,6 +333,7 @@ class TestWorktreeAPI:
                 "fork_sha": "2d10a47deadbeef",
                 "session_live": True,
                 "commit": "abcdef1234567890",
+                "is_dirty": False,
             }
 
         async def fake_send(target_session, message):

@@ -293,6 +293,7 @@ class WorktreeState:
     is_dirty: bool
     ff_eligible: bool
     clone_stale: bool
+    rebase_required: bool
     session_live: bool
     commits: list[WorktreeCommit] = field(default_factory=list)
     dirty_files: list[GitFileChange] = field(default_factory=list)
@@ -598,6 +599,25 @@ def _worktree_clone_stale(repo_name: str, clone: Path | None) -> bool:
     return clone_head != target_head
 
 
+def _worktree_rebase_required(
+    worktree: Path,
+    repo_name: str,
+    *,
+    has_pending_commits: bool,
+    clone_stale: bool,
+) -> bool:
+    """Return True when the target branch has advanced past the worktree fork point."""
+    if repo_name != "autonomy" or not has_pending_commits or clone_stale:
+        return False
+
+    _target_branch, target_head = _autonomy_target_branch_and_head()
+    if not target_head:
+        return False
+
+    rc, _, _ = _git_output(["merge-base", "--is-ancestor", target_head, "HEAD"], worktree, timeout=15)
+    return rc != 0
+
+
 def _commit_file_changes(worktree: Path, sha: str) -> list[GitFileChange]:
     """Return file-level status and numstat details for one commit."""
     numstats: dict[str, tuple[int, int]] = {}
@@ -787,10 +807,17 @@ def scan_all_worktrees(
             is_dirty = True if dirty_files_or_none is None else bool(dirty_files)
             commits = _worktree_commits(repo_dir, repo_dir.name, base_ref=base_ref)
             commits_ahead = _worktree_commits_ahead(repo_dir, base_ref=base_ref)
+            rebase_required = _worktree_rebase_required(
+                repo_dir,
+                repo_dir.name,
+                has_pending_commits=bool(commits),
+                clone_stale=clone_stale,
+            )
             ff_eligible = (
                 branch is not None
                 and bool(commits)
                 and not clone_stale
+                and not rebase_required
                 and not is_dirty
                 and _worktree_ff_only_safe(repo_dir, base_ref=base_ref)
             )
@@ -804,6 +831,7 @@ def scan_all_worktrees(
                 is_dirty=is_dirty,
                 ff_eligible=ff_eligible,
                 clone_stale=clone_stale,
+                rebase_required=rebase_required,
                 session_live=session_dir.name in live,
                 commits=commits,
                 dirty_files=dirty_files,
@@ -1271,6 +1299,7 @@ def get_session_worktree_rebase_info(
         pending[0],
     )
     info["commit"] = pending[0]
+    info["is_dirty"] = _worktree_has_uncommitted_changes(worktree)
     return info
 
 

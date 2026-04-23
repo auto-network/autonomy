@@ -41,6 +41,7 @@
     return (rows || []).map(row => ({
       ...row,
       clone_stale: !!row.clone_stale,
+      rebase_required: !!row.rebase_required,
       commits: (row.commits || []).map(commit => ({
         ...commit,
         files: commit.files || [],
@@ -424,8 +425,7 @@
           this.supportsDashboardMerge(item.row) &&
           !this.cloneStale(item.row) &&
           item.position === 1 &&
-          !item.row.ff_eligible &&
-          !item.row.is_dirty &&
+          !!item.row.rebase_required &&
           !!item.row.session_live;
       },
 
@@ -434,8 +434,11 @@
         if (!this.supportsDashboardMerge(item.row)) return 'Review only for this repo';
         if (this.cloneStale(item.row)) return 'Sync Worktree to Latest before merging';
         if (item.position !== 1) return 'Merge earlier commit first';
+        if (item.row.rebase_required && item.row.is_dirty) {
+          return 'Parent has advanced; stash or commit uncommitted changes before rebasing';
+        }
+        if (item.row.rebase_required) return 'Parent has advanced; rebase required before merge';
         if (item.row.is_dirty) return 'Uncommitted changes are present in this worktree';
-        if (!item.row.ff_eligible) return 'Parent has advanced; rebase required before merge';
         return '';
       },
 
@@ -917,6 +920,7 @@
                 row.commits = commits;
                 row.commits_ahead = commits.length;
                 row.ff_eligible = commits.length > 0 && !row.is_dirty;
+                row.rebase_required = false;
                 this.rows = this.rows.slice();
                 this.queueBranchLayouts();
                 this.queuePathMeasurements();
