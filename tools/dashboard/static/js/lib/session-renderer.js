@@ -17,6 +17,7 @@
   // ── Tool color tables ────────────────────────────────────────
   const TOOL_CHIPS = {
     Bash:  'sc-chip-bash',
+    exec_command: 'sc-chip-exec',
     Read:  'sc-chip-read',
     Write: 'sc-chip-write',
     Edit:  'sc-chip-edit',
@@ -26,6 +27,7 @@
   };
   const TOOL_BORDERS = {
     Bash:  'sc-border-bash',
+    exec_command: 'sc-border-exec',
     Read:  'sc-border-read',
     Write: 'sc-border-write',
     Edit:  'sc-border-edit',
@@ -73,6 +75,8 @@
       switch (name) {
         case 'Bash':
           return inp.description || inp.command || '';
+        case 'exec_command':
+          return inp.description || inp.command || inp.cmd || '';
         case 'Read':
           return this._smartPath(inp.file_path || '');
         case 'Write':
@@ -190,6 +194,24 @@
           else if (result && !result.is_error) badges.push({ text: '\u2713', cls: 'sc-meta-green' });
           break;
         }
+        case 'exec_command': {
+          const dur = (result && result.duration_seconds != null)
+            ? result.duration_seconds
+            : this._duration(entry, result);
+          if (dur != null) badges.push({ text: this.fmtDuration(dur), cls: 'sc-meta-gray' });
+          if (result && result.exit_code !== undefined && result.exit_code !== null) {
+            badges.push({
+              text: 'exit ' + result.exit_code,
+              cls: result.exit_code === 0 ? 'sc-meta-green' : 'sc-meta-red',
+            });
+          } else if (result && result.status) {
+            badges.push({ text: result.status, cls: 'sc-meta-gray' });
+          }
+          if (result && result.content) {
+            badges.push({ text: this._countLines(result.content) + ' lines', cls: 'sc-meta-gray' });
+          }
+          break;
+        }
         case 'Read': {
           if (result && result.content) {
             const n = this._countLines(result.content);
@@ -283,6 +305,14 @@
       switch (name) {
         case 'Bash':
           return inp.command || '';
+        case 'exec_command': {
+          const cmd = inp.command || inp.cmd || '';
+          const cwd = inp.cwd || inp.workdir || '';
+          const parts = [];
+          if (cwd) parts.push('cwd: ' + cwd);
+          if (cmd) parts.push('$ ' + cmd);
+          return parts.join('\n');
+        }
         case 'Edit': {
           const parts = [];
           if (inp.old_string) parts.push('--- old\n' + inp.old_string);
@@ -367,6 +397,20 @@
             if (dur != null) { total += dur; has = true; }
           }
           if (has) badges.push({ text: this.fmtDuration(total), cls: 'sc-meta-gray' });
+          break;
+        }
+        case 'exec_command': {
+          let total = 0, has = false, failures = 0;
+          for (const item of group.items) {
+            const result = this._resultMap[item.tool_id];
+            const dur = result && result.duration_seconds != null
+              ? result.duration_seconds
+              : this._duration(item, result);
+            if (dur != null) { total += dur; has = true; }
+            if (result && result.exit_code !== undefined && result.exit_code !== null && result.exit_code !== 0) failures++;
+          }
+          if (has) badges.push({ text: this.fmtDuration(total), cls: 'sc-meta-gray' });
+          if (failures) badges.push({ text: failures + ' failed', cls: 'sc-meta-red' });
           break;
         }
         case 'Read': {

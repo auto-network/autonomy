@@ -1,9 +1,7 @@
 """Session harness adapter seam for live transcript parsing.
 
-The current production path is still Claude-only, but the rest of the
-dashboard should stop depending on Claude helpers directly.  This module
-provides a minimal adapter boundary that can keep delegating to the
-existing Claude implementation while we carve out a parallel Codex path.
+Harnesses own raw transcript parsing.  The dashboard above this module owns
+shared normalized entries, activity state, SSE delivery, and rendering.
 """
 
 from __future__ import annotations
@@ -832,7 +830,6 @@ def postprocess_claude_entries(
     processed = dedup_claude_entries(entries)
     enrich_claude_entries(processed, session_dir=session_dir)
     return processed
-
 def parse_plan_snapshot(arguments: str) -> list[dict] | None:
     """Best-effort parser for Codex-style ``update_plan`` arguments.
 
@@ -860,13 +857,15 @@ def parse_plan_snapshot(arguments: str) -> list[dict] | None:
 
 
 def _extract_codex_text_blocks(blocks: Any) -> str:
+    if isinstance(blocks, str):
+        return blocks.strip()
     if not isinstance(blocks, list):
         return ""
     parts: list[str] = []
     for block in blocks:
         if not isinstance(block, dict):
             continue
-        if block.get("type") in {"input_text", "output_text"}:
+        if block.get("type") in {"input_text", "output_text", "text"}:
             text = str(block.get("text") or "")
             if text:
                 parts.append(text)
@@ -884,6 +883,78 @@ def _is_codex_visible_message(role: str, text: str) -> bool:
     return True
 
 
+def _parse_codex_call_args(arguments: Any) -> dict:
+    if isinstance(arguments, dict):
+        return arguments
+    if not isinstance(arguments, str) or not arguments:
+        return {}
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return {"arguments": arguments}
+    return parsed if isinstance(parsed, dict) else {"arguments": arguments}
+
+
+def _codex_command_text(payload: dict, inp: dict | None = None) -> str:
+    if inp and inp.get("cmd"):
+        return str(inp["cmd"])
+    command = payload.get("command")
+    if isinstance(command, list):
+        if len(command) >= 3 and str(command[0]).endswith("bash") and command[1] == "-lc":
+            return str(command[2])
+        return " ".join(str(part) for part in command)
+    if isinstance(command, str):
+        return command
+    return ""
+
+
+def _codex_duration_seconds(duration: Any) -> float | None:
+    if not isinstance(duration, dict):
+        return None
+    try:
+        secs = float(duration.get("secs") or 0)
+        nanos = float(duration.get("nanos") or 0)
+    except (TypeError, ValueError):
+        return None
+    return secs + nanos / 1_000_000_000
+
+
+def _parse_codex_exec_end(payload: dict, timestamp: str) -> dict | list[dict] | None:
+    tool_id = payload.get("call_id") or ""
+    output = (
+        payload.get("aggregated_output")
+        or payload.get("formatted_output")
+        or payload.get("stdout")
+        or payload.get("stderr")
+        or ""
+    )
+    command = _codex_command_text(payload)
+    exit_code = payload.get("exit_code")
+    result = {
+        "type": "tool_result",
+        "role": "tool",
+        "tool_id": tool_id,
+        "content": output,
+        "is_error": bool(exit_code not in (None, 0)),
+        "timestamp": timestamp,
+        "result_kind": "exec_command",
+        "exit_code": exit_code,
+        "status": payload.get("status") or "",
+        "cwd": payload.get("cwd") or "",
+        "command": command,
+        "parsed_cmd": payload.get("parsed_cmd") or [],
+        "duration_seconds": _codex_duration_seconds(payload.get("duration")),
+        "stdout": payload.get("stdout") or "",
+        "stderr": payload.get("stderr") or "",
+        "process_id": payload.get("process_id") or "",
+    }
+    sem = _upconvert_graph_result(output, timestamp, tool_id=tool_id)
+    if sem:
+        _enrich_semantic_tile(sem)
+        return [result, sem]
+    return result
+
+
 def parse_codex_log_line(line: str) -> dict | list[dict] | None:
     try:
         raw = json.loads(line)
@@ -891,88 +962,120 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
         return None
 
     timestamp = raw.get("timestamp", "")
-    entry_type = raw.get("type")
     payload = raw.get("payload") or {}
+    if not isinstance(payload, dict):
+        return None
+    entry_type = raw.get("type")
 
-    if entry_type == "response_item":
-        item_type = payload.get("type")
-        if item_type == "message":
-            role = str(payload.get("role") or "")
-            text = _extract_codex_text_blocks(payload.get("content"))
-            if not _is_codex_visible_message(role, text):
-                return None
-            out_type = "assistant_text" if role == "assistant" else "user"
+    if entry_type == "event_msg":
+        event_type = payload.get("type")
+        if event_type == "user_message":
+            text = str(payload.get("message") or "")
+            if text:
+                return {
+                    "type": "user",
+                    "role": "user",
+                    "content": text,
+                    "timestamp": timestamp,
+                }
+        if event_type == "agent_message":
+            text = str(payload.get("message") or "")
+            if text:
+                return {
+                    "type": "assistant_text",
+                    "role": "assistant",
+                    "content": text,
+                    "timestamp": timestamp,
+                }
+        if event_type == "exec_command_end":
+            return _parse_codex_exec_end(payload, timestamp)
+        if event_type == "task_started":
             return {
-                "type": out_type,
-                "role": role,
+                "type": "system",
+                "role": "system",
+                "content": "Task started",
+                "tag": "task-started",
+                "timestamp": timestamp,
+            }
+        if event_type == "task_complete":
+            return {
+                "type": "system",
+                "role": "system",
+                "content": "Task complete",
+                "tag": "task-complete",
+                "timestamp": timestamp,
+            }
+        return None
+
+    if entry_type != "response_item":
+        return None
+
+    item_type = payload.get("type")
+    if item_type == "function_call":
+        arguments = payload.get("arguments") or ""
+        tool_name = payload.get("name") or "?"
+        tool_input = _parse_codex_call_args(arguments)
+        if tool_name == "exec_command":
+            tool_input.setdefault("command", tool_input.get("cmd") or _codex_command_text(payload, tool_input))
+            if tool_input.get("workdir") and "cwd" not in tool_input:
+                tool_input["cwd"] = tool_input["workdir"]
+        entry = {
+            "type": "tool_use",
+            "role": "assistant",
+            "tool_name": tool_name,
+            "tool_id": payload.get("call_id") or "",
+            "input": tool_input,
+            "timestamp": timestamp,
+        }
+        todos = None
+        if tool_name == "update_plan":
+            todos = parse_plan_snapshot(arguments)
+        if todos:
+            return [
+                entry,
+                {
+                    "type": "todo_plan",
+                    "role": "assistant",
+                    "todos": todos,
+                    "timestamp": timestamp,
+                },
+            ]
+        return entry
+
+    if item_type == "function_call_output":
+        return {
+            "type": "tool_result",
+            "role": "tool",
+            "tool_id": payload.get("call_id") or "",
+            "content": str(payload.get("output") or ""),
+            "is_error": False,
+            "timestamp": timestamp,
+            "result_kind": "function_call_output",
+        }
+
+    if item_type == "reasoning":
+        text = _extract_codex_text_blocks(payload.get("summary"))
+        if text:
+            entry = {
+                "type": "thinking",
+                "role": "assistant",
                 "content": text,
                 "timestamp": timestamp,
             }
-        if item_type == "function_call":
-            arguments = payload.get("arguments") or ""
-            tool_input: Any = arguments
-            if isinstance(arguments, str):
-                try:
-                    tool_input = json.loads(arguments)
-                except json.JSONDecodeError:
-                    tool_input = arguments
-            entry = {
-                "type": "tool_use",
-                "role": "assistant",
-                "tool_name": payload.get("name") or "?",
-                "tool_id": payload.get("call_id") or "",
-                "input": tool_input,
-                "timestamp": timestamp,
-            }
-            todos = None
-            if payload.get("name") == "update_plan":
-                todos = parse_plan_snapshot(arguments)
-            if todos:
-                return [
-                    entry,
-                    {
-                        "type": "todo_plan",
-                        "role": "assistant",
-                        "todos": todos,
-                        "timestamp": timestamp,
-                    },
-                ]
             return entry
-        if item_type == "function_call_output":
-            return {
-                "type": "tool_result",
-                "role": "tool",
-                "tool_id": payload.get("call_id") or "",
-                "content": str(payload.get("output") or ""),
-                "is_error": False,
-                "timestamp": timestamp,
-            }
-        return None
 
-    if entry_type != "event_msg":
-        return None
-
-    event_type = payload.get("type")
-    if event_type == "task_started":
-        return {
-            "type": "system",
-            "role": "system",
-            "content": "Task started",
-            "tag": "task-started",
-            "timestamp": timestamp,
-        }
-    if event_type == "task_complete":
-        return {
-            "type": "system",
-            "role": "system",
-            "content": "Task complete",
-            "tag": "task-complete",
-            "timestamp": timestamp,
-        }
+    # Skip response_item.message to avoid duplicating the operator-visible
+    # stream already emitted by event_msg.user_message/agent_message.
     return None
 
 
 def extract_codex_message_text(raw_entry: dict) -> str:
+    if raw_entry.get("type") == "event_msg":
+        payload = raw_entry.get("payload") or {}
+        if payload.get("type") != "agent_message":
+            return ""
+        text = str(payload.get("message") or "")
+        return text[:150] if len(text) > 5 else ""
     if raw_entry.get("type") != "response_item":
         return ""
     payload = raw_entry.get("payload") or {}
@@ -986,15 +1089,25 @@ def extract_codex_message_text(raw_entry: dict) -> str:
 
 
 def extract_codex_context_tokens(raw_entry: dict, current_tokens: int) -> int:
+    """Use Codex's current-turn input usage, not cumulative session totals."""
+
     if raw_entry.get("type") != "event_msg":
         return current_tokens
     payload = raw_entry.get("payload") or {}
     if payload.get("type") != "token_count":
         return current_tokens
     info = payload.get("info") or {}
-    usage = info.get("total_token_usage") or info.get("last_token_usage") or {}
-    ctx = int(usage.get("input_tokens", 0) or 0) + int(usage.get("cached_input_tokens", 0) or 0)
-    return ctx if ctx > 0 else current_tokens
+    for usage in (info.get("last_token_usage") or {}, info.get("total_token_usage") or {}):
+        if not isinstance(usage, dict):
+            continue
+        for key in ("input_tokens", "total_tokens"):
+            try:
+                val = int(usage.get(key) or 0)
+            except (TypeError, ValueError):
+                val = 0
+            if val > 0:
+                return val
+    return current_tokens
 
 
 HARNESSES: dict[str, SessionHarness] = {
@@ -1051,8 +1164,13 @@ def resolve_harness_for_path(path: str | Path | None) -> SessionHarness:
 def resolve_harness_for_session_row(row: dict | None) -> SessionHarness:
     """Resolve the harness for a dashboard session row."""
 
-    if row and row.get("harness"):
-        return get_session_harness(row.get("harness"))
+    if row:
+        harness_name = row.get("harness") or row.get("provider")
+        if harness_name:
+            return get_session_harness(harness_name)
+        session_uuid = str(row.get("session_uuid") or "")
+        if session_uuid.startswith("rollout-"):
+            return CODEX_HARNESS
     if row and row.get("jsonl_path"):
         return resolve_harness_for_path(row["jsonl_path"])
     return CLAUDE_HARNESS

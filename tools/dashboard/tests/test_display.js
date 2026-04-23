@@ -99,7 +99,7 @@ describe('buildAll', () => {
   });
 
   it('all groupable tools are recognized', () => {
-    const tools = ['Bash', 'Read', 'Edit', 'Grep', 'Glob'];
+    const tools = ['Bash', 'exec_command', 'Read', 'Edit', 'Grep', 'Glob'];
     for (const t of tools) {
       const entries = [tool(t, t + '1'), tool(t, t + '2')];
       const d = buildAll(entries);

@@ -40,7 +40,7 @@
           <template x-for="(item, subIdx) in resolveEntry(dEntry).items" :key="subIdx">
             <div>
               <div class="sc-group-item" @click="toggleGroupItem(dIdx, subIdx)">
-                <template x-if="resolveEntry(dEntry).tool_name === 'Bash'">
+                <template x-if="resolveEntry(dEntry).tool_name === 'Bash' || resolveEntry(dEntry).tool_name === 'exec_command'">
                   <span class="sc-group-status" :style="bashStatusColor(item)" x-text="bashStatus(item)"></span>
                 </template>
                 <span class="sc-group-item-text" x-text="headline(item)"></span>
