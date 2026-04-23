@@ -768,6 +768,7 @@ def test_merge_session_worktree_commit_reports_rebase_required_details(tmp_path,
         ["git", "-C", str(worktree), "rev-parse", "HEAD"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
+    (worktree / "scratch.txt").write_text("dirty\n")
 
     subprocess.run(["git", "-C", str(target_repo), "config", "user.email", "t@t"], check=True)
     subprocess.run(["git", "-C", str(target_repo), "config", "user.name", "t"], check=True)
@@ -782,11 +783,17 @@ def test_merge_session_worktree_commit_reports_rebase_required_details(tmp_path,
     )
 
     wm.sync_session_worktree_base(session, "autonomy", worktrees_dir=worktrees_dir)
+    rows = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names={session})
+    row = next(item for item in rows if item.session_name == session and item.repo_name == "autonomy")
+    assert row.rebase_required is True
+    assert row.ff_eligible is False
+    assert row.is_dirty is True
     info = wm.get_session_worktree_rebase_info(session, "autonomy", worktrees_dir=worktrees_dir)
     assert info["target_branch"] in {"main", "master"}
     assert info["commits_behind"] == 1
     assert info["session_live"] is True
     assert info["commit"] == feature_sha
+    assert info["is_dirty"] is True
 
     with pytest.raises(wm.RebaseRequiredError) as excinfo:
         wm.merge_session_worktree_commit(

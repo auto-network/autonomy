@@ -4750,6 +4750,7 @@ def _worktree_state_json(row: WorktreeState) -> dict:
         "is_dirty": row.is_dirty,
         "ff_eligible": row.ff_eligible,
         "clone_stale": row.clone_stale,
+        "rebase_required": row.rebase_required,
         "session_live": row.session_live,
         "target_branch": worktree_target_branch_name(
             row.session_name,
@@ -4931,9 +4932,11 @@ async def api_worktree_request_rebase(request):
         "Rebase required before your commit can be merged via the dashboard.\n"
         f"{target_branch} has advanced {commits_behind} {noun} beyond your fork point ({fork_sha}).\n\n"
         "Run in your worktree:\n"
-        f"git rebase {target_branch}\n\n"
-        "Then refresh the Worktrees page — the updated commit will be ff-eligible."
+        f"git rebase {target_branch}\n"
     )
+    if info.get("is_dirty"):
+        message += "\nIf you have uncommitted changes, stash or commit them before rebasing.\n"
+    message += "\nThen refresh the Worktrees page — the updated commit will be ff-eligible."
 
     try:
         await _send_dashboard_ui_crosstalk(session_name, message)
