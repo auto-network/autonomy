@@ -223,8 +223,7 @@
 
             // Populate store from dispatch tail
             if (data.entries && data.entries.length > 0) {
-              this._ingestEntries(store, data.entries);
-              store.entries = data.entries;
+              this._ingestEntries(store, data);
             }
             store.isLive = isLiveHint !== undefined ? !!isLiveHint : !!data.is_live;
             if (data.resolved !== undefined) store.resolved = !!data.resolved;
@@ -483,10 +482,12 @@
             return s ? s.entries.length : 0;
           },
           function(newLen) {
+            var s = Alpine.store('sessions')[sid];
             if (newLen > lastLen) {
-              // Incremental: append each new entry (O(1) per entry)
-              var s = Alpine.store('sessions')[sid];
-              if (s) {
+              if (s && s._displayDirty) {
+                self._rebuildDisplay();
+              } else if (s) {
+                // Incremental: append each new entry (O(1) per entry)
                 for (var i = lastLen; i < newLen; i++) {
                   window.SessionDisplay.appendOne(self.displayEntries, s.entries, i);
                 }
@@ -845,28 +846,16 @@
         if (data.seq !== undefined) store.seq = data.seq;
 
         if (data.entries && data.entries.length > 0) {
-          this._ingestEntries(store, data.entries);
-          store.entries = data.entries;
+          this._ingestEntries(store, data);
         }
 
         this._rebuildDisplay();
       },
 
-      // ── Ingest entries into store (toolMap + resultMap + enrichment init) ──
+      // ── Ingest entries through the shared session store path ──
 
-      _ingestEntries(store, entries) {
-        for (var i = 0; i < entries.length; i++) {
-          var entry = entries[i];
-          if (entry.type === 'tool_use' && entry.tool_id) {
-            store.toolMap[entry.tool_id] = { tool_name: entry.tool_name || '?' };
-          }
-          if (entry.type === 'tool_result' && entry.tool_id) {
-            var existing = store.resultMap[entry.tool_id];
-            if (!existing || existing.result_kind !== 'exec_command' || entry.result_kind === 'exec_command') {
-              store.resultMap[entry.tool_id] = entry;
-            }
-          }
-        }
+      _ingestEntries(store, payload) {
+        return window.appendSessionEntries(store, payload || {});
       },
 
       // ── Overlay: dispatch tail polling ──────────────────────────
@@ -884,10 +873,7 @@
           store.isLive = !!data.is_live;
 
           if (data.entries && data.entries.length > 0) {
-            this._ingestEntries(store, data.entries);
-            for (var i = 0; i < data.entries.length; i++) {
-              store.entries.push(data.entries[i]);
-            }
+            this._ingestEntries(store, data);
             this._rebuildDisplay();
             if (this.autoScroll) this._scrollToBottom();
           }

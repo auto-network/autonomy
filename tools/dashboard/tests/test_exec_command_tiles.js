@@ -1,0 +1,297 @@
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const REPO_ROOT = process.env.REPO_ROOT || path.resolve(__dirname, '../../..');
+const STORE_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-store.js');
+const RENDERER_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-renderer.js');
+
+function makeHarness() {
+  const docListeners = {};
+  const doc = {
+    addEventListener(name, cb) {
+      (docListeners[name] ||= []).push(cb);
+    },
+  };
+
+  const stores = {};
+  const alpine = {
+    store(name, obj) {
+      if (obj !== undefined) {
+        stores[name] = obj;
+        return obj;
+      }
+      return stores[name];
+    },
+  };
+
+  const fetchFn = (url) => {
+    if (url === '/api/dao/active_sessions') {
+      return Promise.resolve({ json: () => Promise.resolve([]) });
+    }
+    return Promise.resolve({ json: () => Promise.resolve({}) });
+  };
+
+  const sandbox = {
+    window: {},
+    document: doc,
+    Alpine: alpine,
+    fetch: fetchFn,
+    console,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    Promise,
+    JSON,
+    Object,
+    Array,
+    Map,
+    Set,
+    Date,
+    Error,
+    parseInt,
+    parseFloat,
+  };
+  sandbox.window.document = doc;
+  sandbox.window.Alpine = alpine;
+  sandbox.window.fetch = fetchFn;
+  sandbox.window.registerHandler = function() {};
+  sandbox.window.unregisterHandler = function() {};
+  sandbox.registerHandler = sandbox.window.registerHandler;
+  sandbox.unregisterHandler = sandbox.window.unregisterHandler;
+  vm.createContext(sandbox);
+
+  let storeSrc = fs.readFileSync(STORE_JS, 'utf8');
+  storeSrc = storeSrc.replace(
+    'setTimeout(ensureSessionMessages, 0);',
+    'setTimeout(window.ensureSessionMessages, 0);'
+  );
+  vm.runInContext(storeSrc, sandbox, { filename: 'session-store.js' });
+  vm.runInContext(fs.readFileSync(RENDERER_JS, 'utf8'), sandbox, { filename: 'session-renderer.js' });
+  for (const cb of (docListeners['alpine:init'] || [])) cb();
+
+  return {
+    win: sandbox.window,
+    alpine,
+  };
+}
+
+function makeExecUse(toolId, cmd) {
+  return {
+    type: 'tool_use',
+    role: 'assistant',
+    tool_name: 'exec_command',
+    tool_id: toolId,
+    input: {
+      cmd,
+      command: cmd,
+      cwd: REPO_ROOT,
+    },
+    timestamp: '2026-04-23T20:00:00Z',
+  };
+}
+
+function makeExecResult(toolId, parsedCmd, content, extras = {}) {
+  return {
+    type: 'tool_result',
+    role: 'tool',
+    tool_id: toolId,
+    result_kind: 'exec_command',
+    content,
+    parsed_cmd: parsedCmd,
+    timestamp: '2026-04-23T20:00:01Z',
+    exit_code: extras.exit_code === undefined ? 0 : extras.exit_code,
+    status: extras.status || 'completed',
+    duration_seconds: extras.duration_seconds === undefined ? 1.2 : extras.duration_seconds,
+    command: extras.command || '',
+    cwd: extras.cwd || REPO_ROOT,
+    is_error: extras.is_error === undefined ? false : extras.is_error,
+  };
+}
+
+function makeSemanticUse(toolId, toolName, input, extras = {}) {
+  return {
+    type: 'tool_use',
+    role: 'assistant',
+    tool_name: toolName,
+    tool_id: toolId,
+    input,
+    timestamp: extras.timestamp || '',
+    semantic_from_exec: true,
+  };
+}
+
+function makeSemanticResult(toolId, content, extras = {}) {
+  return {
+    type: 'tool_result',
+    role: 'tool',
+    tool_id: toolId,
+    result_kind: 'exec_command',
+    content,
+    timestamp: extras.timestamp || '2026-04-23T20:00:01Z',
+    line_count: extras.line_count,
+    semantic_from_exec: true,
+  };
+}
+
+function makeRendererContext(win, entry, result) {
+  const sessionId = 'session-test';
+  win.getSessionStore(sessionId);
+  return Object.assign({
+    sessionKey: sessionId,
+    entries: [],
+    displayEntries: [],
+    autoScroll: true,
+    attachments: [],
+    _expanded: {},
+    _expandView: {},
+    _groupExpanded: {},
+    _groupExpandView: {},
+    _resultMap: { [entry.tool_id]: result },
+  }, win.SessionRenderer);
+}
+
+function plain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+describe('semantic tool entry updates', () => {
+  it('merges a duplicate tool_use update in place and marks display dirty when tool_name changes', () => {
+    const h = makeHarness();
+    const store = h.win.getSessionStore('sess-read-single');
+
+    h.win.appendSessionEntries(store, {
+      seq: 1,
+      entries: [
+        makeExecUse('call_read', "sed -n '1,2p' tools/dashboard/server.py"),
+      ],
+    });
+
+    h.win.appendSessionEntries(store, {
+      seq: 2,
+      entries: [
+        makeSemanticUse('call_read', 'Read', { file_path: 'tools/dashboard/server.py' }),
+        makeSemanticResult('call_read', 'line1\nline2\n', { line_count: 2 }),
+      ],
+    });
+
+    assert.equal(store.entries.length, 2);
+    assert.equal(store.entries[0].tool_name, 'Read');
+    assert.deepStrictEqual(plain(store.entries[0].input), { file_path: 'tools/dashboard/server.py' });
+    assert.equal(store.resultMap.call_read.line_count, 2);
+    assert.equal(store._displayDirty, true);
+  });
+
+  it('appends extra semantic tool entries after an in-place update', () => {
+    const h = makeHarness();
+    const store = h.win.getSessionStore('sess-read-multi');
+
+    h.win.appendSessionEntries(store, {
+      seq: 1,
+      entries: [
+        makeExecUse('call_multi', "sed -n '1,2p' tools/a.py && sed -n '5,7p' tools/b.py"),
+      ],
+    });
+
+    h.win.appendSessionEntries(store, {
+      seq: 2,
+      entries: [
+        makeSemanticUse('call_multi', 'Read', { file_path: 'tools/a.py' }),
+        makeSemanticUse('call_multi#2', 'Read', { file_path: 'tools/b.py' }, { timestamp: '2026-04-23T20:00:00Z' }),
+        makeSemanticResult('call_multi', 'a1\na2\n', { line_count: 2 }),
+        makeSemanticResult('call_multi#2', 'b1\nb2\nb3\n', { line_count: 3 }),
+      ],
+    });
+
+    const toolUses = store.entries.filter((entry) => entry.type === 'tool_use');
+    const toolResults = store.entries.filter((entry) => entry.type === 'tool_result');
+
+    assert.equal(toolUses.length, 2);
+    assert.deepStrictEqual(Array.from(toolUses, (entry) => entry.tool_name), ['Read', 'Read']);
+    assert.deepStrictEqual(Array.from(toolUses, (entry) => entry.input.file_path), ['tools/a.py', 'tools/b.py']);
+    assert.equal(toolResults.length, 2);
+    assert.equal(store.resultMap.call_multi.content, 'a1\na2\n');
+    assert.equal(store.resultMap['call_multi#2'].content, 'b1\nb2\nb3\n');
+    assert.equal(store.resultMap['call_multi#2'].line_count, 3);
+    assert.equal(store.entries[0].timestamp, '2026-04-23T20:00:00Z');
+  });
+
+  it('updates an existing exec tile into Grep without adding a duplicate tool_use', () => {
+    const h = makeHarness();
+    const store = h.win.getSessionStore('sess-grep');
+
+    h.win.appendSessionEntries(store, {
+      seq: 1,
+      entries: [
+        makeExecUse('call_rg', "rg -n 'context_tokens' tools/dashboard -S"),
+      ],
+    });
+
+    h.win.appendSessionEntries(store, {
+      seq: 2,
+      entries: [
+        makeSemanticUse('call_rg', 'Grep', {
+          pattern: 'context_tokens',
+          path: 'tools/dashboard',
+        }),
+        makeSemanticResult('call_rg', 'tools/dashboard/server.py:1:context_tokens\n'),
+      ],
+    });
+
+    assert.equal(store.entries.filter((entry) => entry.type === 'tool_use').length, 1);
+    assert.equal(store.entries[0].tool_name, 'Grep');
+    assert.deepStrictEqual(plain(store.entries[0].input), {
+      pattern: 'context_tokens',
+      path: 'tools/dashboard',
+    });
+  });
+});
+
+describe('exec_command meta badges', () => {
+  it('shows a checkmark for exit code 0 instead of exit text', () => {
+    const h = makeHarness();
+    const entry = makeExecUse('call_ok', 'git status --short');
+    const result = makeExecResult('call_ok', [], '', { exit_code: 0 });
+    const ctx = makeRendererContext(h.win, entry, result);
+
+    const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
+    assert.equal(badges.some((badge) => badge.text === '\u2713'), true);
+    assert.equal(badges.some((badge) => String(badge.text).includes('exit 0')), false);
+  });
+
+  it('shows a red x for non-zero exit codes', () => {
+    const h = makeHarness();
+    const entry = makeExecUse('call_fail', 'git diff --quiet');
+    const result = makeExecResult('call_fail', [], '', { exit_code: 7, is_error: true });
+    const ctx = makeRendererContext(h.win, entry, result);
+
+    const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
+    assert.equal(badges.some((badge) => badge.text === '\u2717'), true);
+    assert.equal(badges.some((badge) => String(badge.text).includes('exit 7')), false);
+  });
+
+  it('uses explicit line_count for Read badges when semantic expansion has no output body', () => {
+    const h = makeHarness();
+    const entry = {
+      type: 'tool_use',
+      tool_id: 'read_empty',
+      tool_name: 'Read',
+      input: { file_path: 'tools/dashboard/server.py' },
+      timestamp: '2026-04-23T20:00:00Z',
+    };
+    const result = {
+      type: 'tool_result',
+      tool_id: 'read_empty',
+      content: '',
+      line_count: 31,
+      timestamp: '2026-04-23T20:00:01Z',
+    };
+    const ctx = makeRendererContext(h.win, entry, result);
+
+    const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
+    assert.deepStrictEqual(plain(badges), [{ text: '+31', cls: 'sc-meta-green' }]);
+  });
+});

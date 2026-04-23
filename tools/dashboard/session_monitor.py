@@ -1154,6 +1154,16 @@ class SessionMonitor:
                 deduped.append(entry)
         new_entries = deduped
 
+        harness = resolve_harness_for_session_row(row)
+        session_dir = None
+        if row.get("jsonl_path"):
+            jsonl_path = Path(row["jsonl_path"])
+            session_dir = jsonl_path.parent / jsonl_path.stem
+        new_entries = harness.postprocess_entries(
+            new_entries,
+            session_dir=session_dir,
+        )
+
         # Track pending_tool_ids and last_entry_type for activity_state
         for entry in new_entries:
             etype = entry.get("type", "")

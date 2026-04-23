@@ -201,7 +201,7 @@
           if (dur != null) badges.push({ text: this.fmtDuration(dur), cls: 'sc-meta-gray' });
           if (result && result.exit_code !== undefined && result.exit_code !== null) {
             badges.push({
-              text: 'exit ' + result.exit_code,
+              text: result.exit_code === 0 ? '\u2713' : '\u2717',
               cls: result.exit_code === 0 ? 'sc-meta-green' : 'sc-meta-red',
             });
           } else if (result && result.status) {
@@ -213,8 +213,9 @@
           break;
         }
         case 'Read': {
-          if (result && result.content) {
-            const n = this._countLines(result.content);
+          if (result) {
+            const n = this._resultLineCount(result);
+            if (n == null) break;
             badges.push({ text: '+' + n, cls: 'sc-meta-green' });
           }
           break;
@@ -417,7 +418,8 @@
           let total = 0, has = false;
           for (const item of group.items) {
             const r = this._resultMap[item.tool_id];
-            if (r && r.content) { total += this._countLines(r.content); has = true; }
+            const n = this._resultLineCount(r);
+            if (n != null) { total += n; has = true; }
           }
           if (has) badges.push({ text: '+' + total, cls: 'sc-meta-green' });
           break;
@@ -490,6 +492,9 @@
 
     _rebuildDisplay() {
       this.displayEntries = window.SessionDisplay.buildAll(this.entries);
+      const sessions = Alpine.store('sessions');
+      const store = sessions && this.sessionKey ? sessions[this.sessionKey] : null;
+      if (store) store._displayDirty = false;
     },
 
     _smartPath(path) {
@@ -548,6 +553,13 @@
         if (str.charCodeAt(i) === 10) n++;
       }
       return n;
+    },
+
+    _resultLineCount(result) {
+      if (!result) return null;
+      if (typeof result.line_count === 'number') return result.line_count;
+      if (result.content) return this._countLines(result.content);
+      return null;
     },
 
     onScroll() {
