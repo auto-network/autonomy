@@ -429,6 +429,8 @@ class TestWorktreePage:
         shell = test_client.get("/worktrees")
         assert shell.status_code == 200
         assert "/static/js/pages/worktrees.js" in shell.text
+        assert "/static/vendor/highlightjs/highlight.min.js" in shell.text
+        assert "/static/vendor/highlightjs/github-dark.min.css" in shell.text
         assert 'href="/worktrees"' in shell.text
 
         fragment = test_client.get("/pages/worktrees")
@@ -444,6 +446,10 @@ class TestWorktreePage:
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
         assert "fetch('/api/worktrees')" in js
         assert "fetch('/api/worktrees/refresh', { method: 'POST' })" in js
+        assert "_highlightDiffText(path, text)" in js
+        assert "hljs.highlight(source, { language, ignoreIllegals: true })" in js
+        assert "get uncommittedChangesCount()" in js
+        assert "return this.rows.filter(row => row.is_dirty).length;" in js
         assert "'/api/worktrees/' + encodeURIComponent(row.session_name)" in js
         assert "'/sync-base'" in js
         assert "'/request-rebase'" in js
@@ -483,8 +489,11 @@ class TestWorktreePage:
         assert 'x-text="row.session_title"' in template
         assert "changesCompanionCommitLabel(row)" in template
         assert "1 commit also present" in js
+        assert 'x-text="uncommittedChangesCount"' in template
         assert 'x-show="canDiscardDirtyRow(row)"' in template
         assert "Are you sure you want to delete this Worktree?" in template
         assert 'x-ref="dirtyDetailScroller"' in template
         assert 'x-ref="dirtyTitleBar"' in template
         assert 'x-ref="dirtyFilesHeader"' in template
+        assert 'class="worktree-diff-code hljs whitespace-pre px-2 pr-3"' in template
+        assert 'x-html="line.html || \'&nbsp;\'"' in template

@@ -493,7 +493,11 @@ def _parse_numstat(value: str) -> int:
 
 def _worktree_dirty_files(worktree: Path) -> list[GitFileChange] | None:
     """Return ``git status --porcelain`` paths for uncommitted worktree files."""
-    rc, out, _ = _git_output(["status", "--porcelain"], worktree, timeout=15)
+    rc, out, _ = _git_output(
+        ["status", "--porcelain", "--untracked-files=all"],
+        worktree,
+        timeout=15,
+    )
     if rc != 0:
         return None
 
