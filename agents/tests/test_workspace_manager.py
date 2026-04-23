@@ -473,6 +473,32 @@ def test_scan_all_worktrees_reports_state_per_session(tmp_path, monkeypatch):
     assert clean_row.session_live is False
 
 
+def test_scan_all_worktrees_lists_nested_untracked_files_individually(tmp_path, monkeypatch):
+    session = "sess-untracked"
+    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch,
+    )
+
+    vendor_dir = worktree / "tools" / "dashboard" / "static" / "vendor" / "highlightjs"
+    vendor_dir.mkdir(parents=True)
+    (vendor_dir / "highlight.min.js").write_text("hljs\n")
+    (vendor_dir / "github-dark.min.css").write_text("css\n")
+    (vendor_dir / "LICENSE").write_text("license\n")
+
+    rows = wm.scan_all_worktrees(
+        worktrees_dir=worktrees_dir,
+        live_session_names=set(),
+    )
+
+    row = next(item for item in rows if item.session_name == session)
+    assert row.is_dirty is True
+    assert sorted(file.path for file in row.dirty_files) == [
+        "tools/dashboard/static/vendor/highlightjs/LICENSE",
+        "tools/dashboard/static/vendor/highlightjs/github-dark.min.css",
+        "tools/dashboard/static/vendor/highlightjs/highlight.min.js",
+    ]
+
+
 def test_merge_session_worktree_fast_forwards_matching_checkout(tmp_path, monkeypatch):
     session = "sess-merge"
     worktrees_dir, clone, worktree = _make_writable_session_worktree(

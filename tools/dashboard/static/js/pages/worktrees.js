@@ -151,10 +151,105 @@
     return files.filter(file => file.path);
   }
 
+  function _escapeHtml(value) {
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function _diffLanguageForPath(path) {
+    if (!path) return '';
+    const name = String(path).split('/').pop().toLowerCase();
+    const basenameMap = {
+      'dockerfile': 'dockerfile',
+      'makefile': 'makefile',
+      'gnumakefile': 'makefile',
+      'cmakelists.txt': 'cmake',
+      'jenkinsfile': 'groovy',
+    };
+    if (basenameMap[name]) return basenameMap[name];
+
+    const extensionMap = {
+      'bash': 'bash',
+      'c': 'c',
+      'cc': 'cpp',
+      'cpp': 'cpp',
+      'cs': 'csharp',
+      'css': 'css',
+      'cxx': 'cpp',
+      'go': 'go',
+      'gradle': 'groovy',
+      'groovy': 'groovy',
+      'h': 'c',
+      'hh': 'cpp',
+      'hpp': 'cpp',
+      'htm': 'xml',
+      'html': 'xml',
+      'ini': 'ini',
+      'java': 'java',
+      'js': 'javascript',
+      'json': 'json',
+      'jsx': 'javascript',
+      'kt': 'kotlin',
+      'kts': 'kotlin',
+      'less': 'less',
+      'lua': 'lua',
+      'mjs': 'javascript',
+      'md': 'markdown',
+      'php': 'php',
+      'properties': 'properties',
+      'py': 'python',
+      'rb': 'ruby',
+      'rs': 'rust',
+      'scss': 'scss',
+      'sh': 'bash',
+      'sql': 'sql',
+      'svg': 'xml',
+      'svelte': 'svelte',
+      'toml': 'toml',
+      'ts': 'typescript',
+      'tsx': 'typescript',
+      'txt': 'plaintext',
+      'vue': 'xml',
+      'xml': 'xml',
+      'yaml': 'yaml',
+      'yml': 'yaml',
+      'zsh': 'bash',
+    };
+    const parts = name.split('.');
+    for (let idx = parts.length - 1; idx >= 1; idx -= 1) {
+      const language = extensionMap[parts[idx]];
+      if (language) return language;
+    }
+    return '';
+  }
+
+  function _highlightDiffText(path, text) {
+    if (text == null || text === '') return '&nbsp;';
+    const source = String(text);
+    const hljs = window.hljs;
+    if (!hljs) return _escapeHtml(source);
+    const language = _diffLanguageForPath(path);
+    try {
+      if (language && hljs.getLanguage(language)) {
+        return hljs.highlight(source, { language, ignoreIllegals: true }).value || '&nbsp;';
+      }
+    } catch (_) {
+      // Fall through to escaped plaintext below.
+    }
+    return _escapeHtml(source);
+  }
+
   function _patchIndex(patch) {
     const index = {};
     _parseUnifiedPatch(patch).forEach(file => {
-      index[file.path] = file.lines || [];
+      index[file.path] = (file.lines || []).map(line => ({
+        ...line,
+        html: _highlightDiffText(file.path, line.text),
+      }));
     });
     return index;
   }
@@ -295,8 +390,8 @@
         return this.commitItems.filter(item => this.supportsDashboardMerge(item.row)).length;
       },
 
-      get uncommittedOnlyCount() {
-        return this.rows.filter(row => row.is_dirty && this.commitList(row).length === 0).length;
+      get uncommittedChangesCount() {
+        return this.rows.filter(row => row.is_dirty).length;
       },
 
       rowKey(row) {

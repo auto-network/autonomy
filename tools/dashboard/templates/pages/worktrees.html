@@ -75,6 +75,13 @@
     -webkit-overflow-scrolling: touch;
   }
 
+  .worktree-diff-code.hljs {
+    display: block;
+    min-width: 100%;
+    background: transparent;
+    color: inherit;
+  }
+
   @supports (padding-top: env(safe-area-inset-top)) {
     .worktree-review-overlay {
       padding-top: env(safe-area-inset-top);
@@ -131,7 +138,7 @@
             <div>Uncommitted</div>
             <div class="whitespace-nowrap">Changes</div>
           </div>
-          <div class="mt-1 text-3xl font-semibold text-slate-300" x-text="uncommittedOnlyCount"></div>
+          <div class="mt-1 text-3xl font-semibold text-slate-300" x-text="uncommittedChangesCount"></div>
         </div>
       </div>
 
@@ -532,9 +539,9 @@
                                   <span class="border-r border-white/10 text-center"
                                         :class="line.kind === 'add' ? 'text-emerald-300' : (line.kind === 'del' ? 'text-rose-300' : 'text-slate-600')"
                                         x-text="diffMarker(line.kind)"></span>
-                                  <span class="whitespace-pre px-2 pr-3"
+                                  <span class="worktree-diff-code hljs whitespace-pre px-2 pr-3"
                                         :class="line.kind === 'add' ? 'text-emerald-100' : (line.kind === 'del' ? 'text-rose-100' : 'text-slate-300')"
-                                        x-text="line.text"></span>
+                                        x-html="line.html || '&nbsp;'"></span>
                                 </div>
                               </template>
                             </div>
@@ -711,9 +718,9 @@
                                   <span class="border-r border-white/10 text-center"
                                         :class="line.kind === 'add' ? 'text-emerald-300' : (line.kind === 'del' ? 'text-rose-300' : 'text-slate-600')"
                                         x-text="diffMarker(line.kind)"></span>
-                                  <span class="whitespace-pre px-2 pr-3"
+                                  <span class="worktree-diff-code hljs whitespace-pre px-2 pr-3"
                                         :class="line.kind === 'add' ? 'text-emerald-100' : (line.kind === 'del' ? 'text-rose-100' : 'text-slate-300')"
-                                        x-text="line.text"></span>
+                                        x-html="line.html || '&nbsp;'"></span>
                                 </div>
                               </template>
                             </div>
