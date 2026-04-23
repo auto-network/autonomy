@@ -648,26 +648,6 @@ def _resolve_worktree_commit(worktree: Path, sha: str) -> str:
     return out.strip()
 
 
-def _commit_is_ahead_of_base(worktree: Path, sha: str, *, base_ref: str | None = None) -> bool:
-    """Return True when ``sha`` is in the worktree's base..HEAD commit range."""
-    base_ref = base_ref or _worktree_merge_base_ref(worktree)
-    if base_ref is None:
-        return False
-    rc, _, _ = _git_output(["merge-base", "--is-ancestor", base_ref, sha], worktree, timeout=15)
-    if rc != 0:
-        return False
-    rc, out, _ = _git_output(["rev-list", "--count", f"{base_ref}..{sha}"], worktree, timeout=15)
-    if rc != 0:
-        return False
-    try:
-        if int(out.strip() or "0") <= 0:
-            return False
-    except ValueError:
-        return False
-    rc, _, _ = _git_output(["merge-base", "--is-ancestor", sha, "HEAD"], worktree, timeout=15)
-    return rc == 0
-
-
 def _live_session_names() -> set[str]:
     """Return live dashboard session names.
 
@@ -1138,7 +1118,8 @@ def get_session_worktree_commit_detail(
     )
     base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
     resolved = _resolve_worktree_commit(worktree, sha)
-    if not _commit_is_ahead_of_base(worktree, resolved, base_ref=base_ref):
+    pending = _worktree_commit_shas(worktree, base_ref=base_ref)
+    if resolved not in pending:
         raise WorkspaceError(f"commit is not in worktree ahead range: {sha}")
     commit = _read_worktree_commit(worktree, resolved, include_patch=True)
     if commit is None:
@@ -1200,10 +1181,9 @@ def merge_session_worktree_commit(
 
     base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
     resolved = _resolve_worktree_commit(worktree, sha)
-    if not _commit_is_ahead_of_base(worktree, resolved, base_ref=base_ref):
-        raise WorkspaceError(f"commit is not in worktree ahead range: {sha}")
-
     pending = _worktree_commit_shas(worktree, base_ref=base_ref)
+    if resolved not in pending:
+        raise WorkspaceError(f"commit is not in worktree ahead range: {sha}")
     if not pending or pending[0] != resolved:
         raise WorkspaceError(
             f"selected commit {resolved[:7]} is not the next pending commit for this worktree"

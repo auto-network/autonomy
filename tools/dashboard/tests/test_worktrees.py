@@ -86,7 +86,7 @@ def _install_fake_monitor(monkeypatch, rows):
 
 
 class TestWorktreeAPI:
-    def test_count_worktrees_counts_dirty_only_rows_separately(self, monkeypatch):
+    def test_count_worktrees_counts_all_dirty_rows_for_changes_badge(self, monkeypatch):
         from tools.dashboard import server
 
         rows = [
@@ -96,7 +96,7 @@ class TestWorktreeAPI:
         ]
         monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: list(rows))
 
-        assert server._count_worktrees() == {"with_commits": 1, "with_changes": 1}
+        assert server._count_worktrees() == {"with_commits": 1, "with_changes": 2}
 
     def test_get_worktrees_serializes_cached_rows(self, test_client, monkeypatch):
         _server, _fake = _install_fake_monitor(monkeypatch, [_row()])
