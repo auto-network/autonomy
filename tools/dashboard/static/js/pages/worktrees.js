@@ -19,7 +19,10 @@
   async function _jsonOrError(resp) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      throw new Error(data.error || ('HTTP ' + resp.status));
+      const err = new Error(data.message || data.error || ('HTTP ' + resp.status));
+      err.status = resp.status;
+      err.payload = data;
+      throw err;
     }
     return data;
   }
@@ -37,6 +40,7 @@
   function _normalizeRows(rows) {
     return (rows || []).map(row => ({
       ...row,
+      clone_stale: !!row.clone_stale,
       commits: (row.commits || []).map(commit => ({
         ...commit,
         files: commit.files || [],
@@ -212,11 +216,14 @@
       mergeBurstActive: false,
       mergeBurstSeed: 0,
       poofingRowKey: '',
+      rebaseRequiredDialog: null,
+      rebaseRequesting: false,
       commitStickyTop: 0,
       commitFileRowStickyTop: 0,
       reviewTitlePinned: false,
       pathMeasureTick: 0,
       cleaning: {},
+      syncingBase: {},
       _timer: null,
       _resizeHandler: null,
       _commitStickyResizeObserver: null,
@@ -391,6 +398,10 @@
         return source;
       },
 
+      cloneStale(row) {
+        return !!(row && row.clone_stale);
+      },
+
       canDiscardDirtyRow(row) {
         return !!row && !row.session_live;
       },
@@ -400,7 +411,36 @@
       },
 
       canMergeCommit(item) {
-        return !!item && !!item.commit && this.supportsDashboardMerge(item.row) && item.position === 1;
+        return !!item &&
+          !!item.commit &&
+          this.supportsDashboardMerge(item.row) &&
+          !this.cloneStale(item.row) &&
+          item.position === 1 &&
+          !!item.row.ff_eligible;
+      },
+
+      canRequestRebase(item) {
+        return !!item &&
+          this.supportsDashboardMerge(item.row) &&
+          !this.cloneStale(item.row) &&
+          item.position === 1 &&
+          !item.row.ff_eligible &&
+          !item.row.is_dirty &&
+          !!item.row.session_live;
+      },
+
+      mergeDisabledReason(item) {
+        if (!item || !item.commit) return 'No commit selected';
+        if (!this.supportsDashboardMerge(item.row)) return 'Review only for this repo';
+        if (this.cloneStale(item.row)) return 'Sync Worktree to Latest before merging';
+        if (item.position !== 1) return 'Merge earlier commit first';
+        if (item.row.is_dirty) return 'Uncommitted changes are present in this worktree';
+        if (!item.row.ff_eligible) return 'Parent has advanced; rebase required before merge';
+        return '';
+      },
+
+      isSyncingBase(row) {
+        return !!(row && this.syncingBase[this.rowKey(row)]);
       },
 
       mergeCommitLabel(item) {
@@ -435,6 +475,58 @@
           total: commits.length,
           patchFiles: {},
         };
+      },
+
+      syncOverlayRows() {
+        if (this.selectedCommit) {
+          const row = this.rows.find(item => this.rowKey(item) === this.rowKey(this.selectedCommit.row));
+          if (!row) {
+            this.selectedCommit = null;
+          } else {
+            const commits = this.commitList(row);
+            if (!commits.length) {
+              this.selectedCommit = null;
+            } else {
+              const nextIndex = Math.max(0, Math.min(this.selectedCommit.commitIndex || 0, commits.length - 1));
+              const nextCommit = commits[nextIndex];
+              const sameCommit = this.selectedCommit.commit && this.selectedCommit.commit.sha === nextCommit.sha;
+              this.selectedCommit = {
+                ...this.selectedCommit,
+                row,
+                commit: sameCommit
+                  ? {
+                    ...nextCommit,
+                    patch: this.selectedCommit.commit.patch,
+                    files: this.selectedCommit.commit.files || nextCommit.files,
+                    body: this.selectedCommit.commit.body || nextCommit.body,
+                  }
+                  : nextCommit,
+                commitIndex: nextIndex,
+                position: nextIndex + 1,
+                total: commits.length,
+                patchFiles: sameCommit ? this.selectedCommit.patchFiles : {},
+              };
+            }
+          }
+        }
+
+        if (this.selectedDirtyRow) {
+          const row = this.rows.find(item => this.rowKey(item) === this.rowKey(this.selectedDirtyRow));
+          if (!row || !row.is_dirty) {
+            this.selectedDirtyRow = null;
+          } else {
+            this.selectedDirtyRow = {
+              ...row,
+              files: this.selectedDirtyRow.files || this.dirtyFiles(row),
+              patchFiles: this.selectedDirtyRow.patchFiles || {},
+            };
+          }
+        }
+
+        if (this.confirmDiscardRow) {
+          const row = this.rows.find(item => this.rowKey(item) === this.rowKey(this.confirmDiscardRow));
+          this.confirmDiscardRow = row || null;
+        }
       },
 
       patchLinesForFile(view, file) {
@@ -481,8 +573,8 @@
       },
 
       updateCommitStickyOffsets() {
-        const titleBar = this.$refs.commitTitleBar;
-        const filesHeader = this.$refs.commitFilesHeader;
+        const titleBar = this.$refs.commitTitleBar || this.$refs.dirtyTitleBar;
+        const filesHeader = this.$refs.commitFilesHeader || this.$refs.dirtyFilesHeader;
         this.commitStickyTop = titleBar ? Math.max(0, Math.round(titleBar.getBoundingClientRect().height)) : 0;
         this.commitFileRowStickyTop = this.commitStickyTop + (filesHeader ? filesHeader.getBoundingClientRect().height : 0);
       },
@@ -501,8 +593,8 @@
       },
 
       syncReviewHeaderState() {
-        const scroller = this.$refs.commitDetailScroller;
-        const titleBar = this.$refs.commitTitleBar;
+        const scroller = this.$refs.commitDetailScroller || this.$refs.dirtyDetailScroller;
+        const titleBar = this.$refs.commitTitleBar || this.$refs.dirtyTitleBar;
         if (!scroller || !titleBar) return;
         const isMobile = window.matchMedia('(max-width: 639px)').matches;
         const enterCompactAt = titleBar.offsetTop - 1;
@@ -532,8 +624,8 @@
       observeCommitStickyElements() {
         this.disconnectCommitStickyObserver();
         if (typeof window.ResizeObserver !== 'function') return;
-        const titleBar = this.$refs.commitTitleBar;
-        const filesHeader = this.$refs.commitFilesHeader;
+        const titleBar = this.$refs.commitTitleBar || this.$refs.dirtyTitleBar;
+        const filesHeader = this.$refs.commitFilesHeader || this.$refs.dirtyFilesHeader;
         if (!titleBar && !filesHeader) return;
         this._commitStickyResizeObserver = new window.ResizeObserver(() => {
           this.scheduleCommitStickyOffsetUpdate();
@@ -554,7 +646,7 @@
       },
 
       hasOverlayOpen() {
-        return !!(this.selectedCommit || this.selectedDirtyRow || this.confirmDiscardRow);
+        return !!(this.selectedCommit || this.selectedDirtyRow || this.confirmDiscardRow || this.rebaseRequiredDialog);
       },
 
       syncScrollLock() {
@@ -577,9 +669,12 @@
             ? await fetch('/api/worktrees/refresh', { method: 'POST' })
             : await fetch('/api/worktrees');
           this.rows = _normalizeRows(await _jsonOrError(resp));
+          this.syncOverlayRows();
           this.lastUpdated = new Date().toLocaleTimeString();
           this.queueBranchLayouts();
           this.queuePathMeasurements();
+          this.queueCommitStickyOffsets();
+          this.queueReviewHeaderState();
         } catch (err) {
           this.error = err.message || String(err);
           _toast('Worktree refresh failed: ' + this.error, 'error');
@@ -673,6 +768,7 @@
         this.confirmDiscardRow = null;
         this.mergeState = 'idle';
         this.mergeBurstActive = false;
+        this.reviewTitlePinned = false;
         this.showDiff = true;
         this.dirtyDetailLoading = true;
         this.selectedDirtyRow = {
@@ -680,7 +776,9 @@
           files: this.dirtyFiles(row),
           patchFiles: {},
         };
+        this.queueCommitStickyOffsets();
         this.queuePathMeasurements();
+        this.queueReviewHeaderState();
         const requestKey = this.rowKey(row);
         try {
           const resp = await fetch(
@@ -694,7 +792,9 @@
             files: detail.files || this.dirtyFiles(row),
             patchFiles: _patchIndex(detail.patch || ''),
           };
+          this.queueCommitStickyOffsets();
           this.queuePathMeasurements();
+          this.queueReviewHeaderState();
         } catch (err) {
           _toast('Dirty diff detail failed: ' + (err.message || String(err)), 'error');
         } finally {
@@ -708,7 +808,58 @@
         if (!row) return;
         this.selectedCommit = null;
         this.selectedDirtyRow = null;
+        this.rebaseRequiredDialog = null;
         this.confirmDiscardRow = row;
+      },
+
+      async syncBase(row) {
+        if (!row || this.isSyncingBase(row)) return;
+        const key = this.rowKey(row);
+        this.syncingBase = { ...this.syncingBase, [key]: true };
+        try {
+          const resp = await fetch(
+            '/api/worktrees/' + encodeURIComponent(row.session_name) + '/' +
+              encodeURIComponent(row.repo_name) + '/sync-base',
+            { method: 'POST' },
+          );
+          await _jsonOrError(resp);
+          _toast('Worktree base synced to latest ' + this.targetBranch(row), 'warning');
+          await this.refresh(false);
+        } catch (err) {
+          _toast('Sync failed: ' + (err.message || String(err)), 'error');
+        } finally {
+          const next = { ...this.syncingBase };
+          delete next[key];
+          this.syncingBase = next;
+        }
+      },
+
+      openRebaseRequiredDialog(item, payload) {
+        this.rebaseRequiredDialog = {
+          row: item.row,
+          message: payload.message || 'Rebase required before merge.',
+          session_live: !!payload.session_live,
+        };
+      },
+
+      async requestRebase(row) {
+        if (!row || this.rebaseRequesting) return;
+        this.rebaseRequesting = true;
+        try {
+          const resp = await fetch(
+            '/api/worktrees/' + encodeURIComponent(row.session_name) + '/' +
+              encodeURIComponent(row.repo_name) + '/request-rebase',
+            { method: 'POST' },
+          );
+          await _jsonOrError(resp);
+          _toast('Rebase request sent to ' + row.session_name, 'warning');
+          this.rebaseRequiredDialog = null;
+          await this.refresh(false);
+        } catch (err) {
+          _toast('Request Rebase failed: ' + (err.message || String(err)), 'error');
+        } finally {
+          this.rebaseRequesting = false;
+        }
       },
 
       async confirmDiscard() {
@@ -785,7 +936,11 @@
         } catch (err) {
           this.mergeState = 'idle';
           this.mergeBurstActive = false;
-          _toast('Merge failed: ' + (err.message || String(err)), 'error');
+          if (err && err.payload && err.payload.error === 'rebase_required') {
+            this.openRebaseRequiredDialog(item, err.payload);
+          } else {
+            _toast('Merge failed: ' + (err.message || String(err)), 'error');
+          }
           try {
             await this.refresh(false);
           } catch (_ignored) {
@@ -803,14 +958,21 @@
           }
           this.syncScrollLock();
         });
-        this.$watch('selectedDirtyRow', () => {
+        this.$watch('selectedDirtyRow', (value) => {
+          if (!value) {
+            this.reviewTitlePinned = false;
+            this.disconnectCommitStickyObserver();
+          }
           this.syncScrollLock();
         });
         this.$watch('confirmDiscardRow', () => {
           this.syncScrollLock();
         });
+        this.$watch('rebaseRequiredDialog', () => {
+          this.syncScrollLock();
+        });
         this._resizeHandler = () => {
-          if (this.selectedCommit) this.queueCommitStickyOffsets();
+          if (this.selectedCommit || this.selectedDirtyRow) this.queueCommitStickyOffsets();
           this.queueBranchLayouts();
           this.queuePathMeasurements();
           this.queueReviewHeaderState();
