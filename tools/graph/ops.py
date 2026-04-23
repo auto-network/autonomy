@@ -2810,9 +2810,29 @@ def read_source_full(
 
     try:
         entries_src = db.get_source_content(source["id"])
+        comments_src = (
+            db.get_comments(source["id"], include_integrated=True)
+            if source.get("type") == "note"
+            else []
+        )
     finally:
         if own:
             db.close()
+
+    # Sweep peer DBs for comments that landed outside the note's home org.
+    # Comments are written to the caller's effective org, which may differ
+    # from the note's home when GRAPH_DB is pinned or org context is set.
+    extra_comments: list[dict] = []
+    if source.get("type") == "note":
+        seen_ids = {c["id"] for c in comments_src}
+        home_slug = origin or resolved or ""
+        for slug, peer_db in _iter_org_dbs():
+            if slug == home_slug:
+                continue
+            for c in peer_db.get_comments(source["id"], include_integrated=True):
+                if c["id"] not in seen_ids:
+                    extra_comments.append(dict(c))
+                    seen_ids.add(c["id"])
 
     total_chars = 0
     truncated = False
@@ -2839,6 +2859,10 @@ def read_source_full(
         "entries": out_entries,
         "truncated": truncated,
         "total_chars": total_chars,
+        "comments": sorted(
+            [dict(c) for c in comments_src] + extra_comments,
+            key=lambda c: c.get("created_at") or "",
+        ),
     }
 
 
