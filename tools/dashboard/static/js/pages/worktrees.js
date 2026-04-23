@@ -2,6 +2,10 @@
 // Finalized commit-first review queue with full-screen commit/change review.
 
 (function () {
+  const _pathMeasureCanvas =
+    typeof document !== 'undefined' ? document.createElement('canvas') : null;
+  const _pathMeasureContext = _pathMeasureCanvas ? _pathMeasureCanvas.getContext('2d') : null;
+
   function _shortSha(sha) {
     return sha ? sha.slice(0, 7) : '';
   }
@@ -150,6 +154,46 @@
     return index;
   }
 
+  function _fontForElement(el) {
+    const style = window.getComputedStyle(el);
+    return (
+      style.font ||
+      [
+        style.fontStyle,
+        style.fontVariant,
+        style.fontWeight,
+        style.fontSize,
+        style.fontFamily,
+      ].join(' ')
+    );
+  }
+
+  function _fitPathToWidth(path, width, el) {
+    if (!path || !_pathMeasureContext || !width) return path || '';
+    _pathMeasureContext.font = _fontForElement(el);
+    if (_pathMeasureContext.measureText(path).width <= width) return path;
+
+    const ellipsis = '...';
+    if (_pathMeasureContext.measureText(ellipsis).width >= width) return ellipsis;
+
+    let low = 0;
+    let high = path.length;
+    let best = ellipsis;
+
+    while (low <= high) {
+      const keep = Math.floor((low + high) / 2);
+      const candidate = ellipsis + path.slice(path.length - keep);
+      if (_pathMeasureContext.measureText(candidate).width <= width) {
+        best = candidate;
+        low = keep + 1;
+      } else {
+        high = keep - 1;
+      }
+    }
+
+    return best;
+  }
+
   document.addEventListener('alpine:init', () => {
     Alpine.data('worktreesPage', () => ({
       rows: [],
@@ -168,8 +212,15 @@
       mergeBurstActive: false,
       mergeBurstSeed: 0,
       poofingRowKey: '',
+      commitStickyTop: 0,
+      commitFileRowStickyTop: 0,
+      reviewTitlePinned: false,
+      pathMeasureTick: 0,
       cleaning: {},
       _timer: null,
+      _resizeHandler: null,
+      _commitStickyResizeObserver: null,
+      _commitStickyRaf: 0,
       confettiPieces: [
         { id: 1, dx: -108, dy: -78, rot: -180, delay: 0, color: '#818cf8' },
         { id: 2, dx: -86, dy: -104, rot: -120, delay: 18, color: '#34d399' },
@@ -278,6 +329,16 @@
         return { name: repo || 'Unknown', initial, color: '#64748b' };
       },
 
+      repoName(row) {
+        return (row && row.repo_name) || 'unknown';
+      },
+
+      changesCompanionCommitLabel(row) {
+        const count = this.commitList(row).length;
+        if (!count) return 'changes only';
+        return count === 1 ? '1 commit also present' : count + ' commits also present';
+      },
+
       statusLabel(row) {
         if (row.session_live) return 'LIVE';
         if (row.is_dirty || row.commits_ahead > 0 || this.commitList(row).length > 0) return 'ORPHANED';
@@ -304,17 +365,18 @@
         return status || '';
       },
 
-      displayPath(path) {
-        if (!path) return '';
-        if (path.length <= 44) return path;
-        const parts = path.split('/');
-        const file = parts.pop() || path;
-        if (file.length >= 40) return '.../' + file.slice(-40);
-        let suffix = file;
-        while (parts.length && (parts[parts.length - 1] + '/' + suffix).length <= 40) {
-          suffix = parts.pop() + '/' + suffix;
-        }
-        return '.../' + suffix;
+      fitPath(path, el) {
+        void this.pathMeasureTick;
+        if (!path || !el) return path || '';
+        const width = Math.floor(el.getBoundingClientRect().width);
+        if (!width) return path;
+        return _fitPathToWidth(path, width, el);
+      },
+
+      queuePathMeasurements() {
+        this.$nextTick(() => {
+          this.pathMeasureTick += 1;
+        });
       },
 
       sourceBranch(row) {
@@ -327,6 +389,10 @@
         const source = this.sourceBranch(row);
         if (source === 'session/' + row.session_name) return 'main';
         return source;
+      },
+
+      canDiscardDirtyRow(row) {
+        return !!row && !row.session_live;
       },
 
       supportsDashboardMerge(row) {
@@ -376,6 +442,127 @@
         return view.patchFiles[file.path] || [];
       },
 
+      queueBranchLayouts() {
+        this.$nextTick(() => {
+          const root = this.$root;
+          if (!root) return;
+          root.querySelectorAll('[data-branch-row]').forEach((el) => {
+            this.syncBranchLayout(el);
+          });
+        });
+      },
+
+      syncBranchLayout(el) {
+        if (!el) return;
+        const src = el.querySelector('[data-branch-part="src"]');
+        const dst = el.querySelector('[data-branch-part="dst"]');
+        const arrow = el.querySelector('[data-branch-part="arrow"]');
+        if (!src || !dst) return;
+        const available = el.clientWidth;
+        if (!available) return;
+        const forceStacked = window.matchMedia('(max-width: 639px)').matches;
+
+        const styles = window.getComputedStyle(el);
+        const gap = Number.parseFloat(styles.columnGap || styles.gap || '0') || 0;
+        const totalWidth =
+          src.getBoundingClientRect().width +
+          dst.getBoundingClientRect().width +
+          (arrow ? arrow.getBoundingClientRect().width : 0) +
+          gap * (arrow ? 2 : 1);
+        const inlineFits = !forceStacked && totalWidth <= (available + 1);
+
+        el.dataset.branchLayout = inlineFits ? 'inline' : 'stacked';
+        el.style.flexDirection = inlineFits ? 'row' : 'column';
+        el.style.alignItems = inlineFits ? 'center' : 'flex-start';
+        el.style.flexWrap = 'nowrap';
+        if (arrow) {
+          arrow.style.display = inlineFits ? 'inline' : 'none';
+        }
+      },
+
+      updateCommitStickyOffsets() {
+        const titleBar = this.$refs.commitTitleBar;
+        const filesHeader = this.$refs.commitFilesHeader;
+        this.commitStickyTop = titleBar ? Math.max(0, Math.round(titleBar.getBoundingClientRect().height)) : 0;
+        this.commitFileRowStickyTop = this.commitStickyTop + (filesHeader ? filesHeader.getBoundingClientRect().height : 0);
+      },
+
+      queueCommitStickyOffsets() {
+        this.$nextTick(() => {
+          this.updateCommitStickyOffsets();
+          this.observeCommitStickyElements();
+        });
+      },
+
+      queueReviewHeaderState() {
+        this.$nextTick(() => {
+          this.syncReviewHeaderState();
+        });
+      },
+
+      syncReviewHeaderState() {
+        const scroller = this.$refs.commitDetailScroller;
+        const titleBar = this.$refs.commitTitleBar;
+        if (!scroller || !titleBar) return;
+        const isMobile = window.matchMedia('(max-width: 639px)').matches;
+        const enterCompactAt = titleBar.offsetTop - 1;
+        const exitCompactAt = enterCompactAt - 48;
+        let compact = false;
+        if (isMobile) {
+          compact = this.reviewTitlePinned
+            ? scroller.scrollTop >= exitCompactAt
+            : scroller.scrollTop >= enterCompactAt;
+        }
+        if (this.reviewTitlePinned !== compact) {
+          this.reviewTitlePinned = compact;
+          this.queueCommitStickyOffsets();
+          return;
+        }
+        this.updateCommitStickyOffsets();
+      },
+
+      scheduleCommitStickyOffsetUpdate() {
+        if (this._commitStickyRaf) return;
+        this._commitStickyRaf = window.requestAnimationFrame(() => {
+          this._commitStickyRaf = 0;
+          this.updateCommitStickyOffsets();
+        });
+      },
+
+      observeCommitStickyElements() {
+        this.disconnectCommitStickyObserver();
+        if (typeof window.ResizeObserver !== 'function') return;
+        const titleBar = this.$refs.commitTitleBar;
+        const filesHeader = this.$refs.commitFilesHeader;
+        if (!titleBar && !filesHeader) return;
+        this._commitStickyResizeObserver = new window.ResizeObserver(() => {
+          this.scheduleCommitStickyOffsetUpdate();
+        });
+        if (titleBar) this._commitStickyResizeObserver.observe(titleBar);
+        if (filesHeader) this._commitStickyResizeObserver.observe(filesHeader);
+      },
+
+      disconnectCommitStickyObserver() {
+        if (this._commitStickyResizeObserver) {
+          this._commitStickyResizeObserver.disconnect();
+          this._commitStickyResizeObserver = null;
+        }
+        if (this._commitStickyRaf) {
+          window.cancelAnimationFrame(this._commitStickyRaf);
+          this._commitStickyRaf = 0;
+        }
+      },
+
+      hasOverlayOpen() {
+        return !!(this.selectedCommit || this.selectedDirtyRow || this.confirmDiscardRow);
+      },
+
+      syncScrollLock() {
+        const locked = this.hasOverlayOpen();
+        document.documentElement.style.overflow = locked ? 'hidden' : '';
+        document.body.style.overflow = locked ? 'hidden' : '';
+      },
+
       diffMarker(kind) {
         if (kind === 'add') return '+';
         if (kind === 'del') return '-';
@@ -386,9 +573,13 @@
         if (manual) this.refreshing = true;
         this.error = '';
         try {
-          const resp = await fetch('/api/worktrees');
+          const resp = manual
+            ? await fetch('/api/worktrees/refresh', { method: 'POST' })
+            : await fetch('/api/worktrees');
           this.rows = _normalizeRows(await _jsonOrError(resp));
           this.lastUpdated = new Date().toLocaleTimeString();
+          this.queueBranchLayouts();
+          this.queuePathMeasurements();
         } catch (err) {
           this.error = err.message || String(err);
           _toast('Worktree refresh failed: ' + this.error, 'error');
@@ -412,9 +603,14 @@
         this.detailLoading = true;
         this.mergeState = 'idle';
         this.mergeBurstActive = false;
+        this.reviewTitlePinned = false;
         if (!preserveShowDiff) this.showDiff = false;
 
         this.selectedCommit = next;
+        this.queueCommitStickyOffsets();
+        this.queueBranchLayouts();
+        this.queuePathMeasurements();
+        this.queueReviewHeaderState();
         const requestKey = this.commitKey(next);
 
         try {
@@ -435,6 +631,10 @@
             },
             patchFiles: _patchIndex(detail.patch || ''),
           };
+          this.queueCommitStickyOffsets();
+          this.queueBranchLayouts();
+          this.queuePathMeasurements();
+          this.queueReviewHeaderState();
         } catch (err) {
           _toast('Commit detail failed: ' + (err.message || String(err)), 'error');
         } finally {
@@ -480,6 +680,7 @@
           files: this.dirtyFiles(row),
           patchFiles: {},
         };
+        this.queuePathMeasurements();
         const requestKey = this.rowKey(row);
         try {
           const resp = await fetch(
@@ -493,6 +694,7 @@
             files: detail.files || this.dirtyFiles(row),
             patchFiles: _patchIndex(detail.patch || ''),
           };
+          this.queuePathMeasurements();
         } catch (err) {
           _toast('Dirty diff detail failed: ' + (err.message || String(err)), 'error');
         } finally {
@@ -565,6 +767,8 @@
                 row.commits_ahead = commits.length;
                 row.ff_eligible = commits.length > 0 && !row.is_dirty;
                 this.rows = this.rows.slice();
+                this.queueBranchLayouts();
+                this.queuePathMeasurements();
               }
 
               this.poofingRowKey = '';
@@ -592,6 +796,26 @@
 
       init() {
         this.refresh(false);
+        this.$watch('selectedCommit', (value) => {
+          if (!value) {
+            this.reviewTitlePinned = false;
+            this.disconnectCommitStickyObserver();
+          }
+          this.syncScrollLock();
+        });
+        this.$watch('selectedDirtyRow', () => {
+          this.syncScrollLock();
+        });
+        this.$watch('confirmDiscardRow', () => {
+          this.syncScrollLock();
+        });
+        this._resizeHandler = () => {
+          if (this.selectedCommit) this.queueCommitStickyOffsets();
+          this.queueBranchLayouts();
+          this.queuePathMeasurements();
+          this.queueReviewHeaderState();
+        };
+        window.addEventListener('resize', this._resizeHandler);
         this._timer = setInterval(() => {
           if (this.selectedCommit || this.selectedDirtyRow || this.confirmDiscardRow || this.mergeState !== 'idle') {
             return;
@@ -601,9 +825,16 @@
       },
 
       destroy() {
+        this.disconnectCommitStickyObserver();
+        document.documentElement.style.overflow = '';
+        document.body.style.overflow = '';
         if (this._timer) {
           clearInterval(this._timer);
           this._timer = null;
+        }
+        if (this._resizeHandler) {
+          window.removeEventListener('resize', this._resizeHandler);
+          this._resizeHandler = null;
         }
       },
     }));

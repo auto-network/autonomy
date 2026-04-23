@@ -382,6 +382,26 @@ def _autonomy_target_branch_and_head() -> tuple[str | None, str | None]:
     return branch, out.strip()
 
 
+def _sync_managed_clone_branch_ref(clone: Path, source_repo: Path, branch: str) -> None:
+    """Sync ``clone``'s local branch ref from ``source_repo`` using a temp ref.
+
+    The managed clone can have the destination branch checked out, so fetch into
+    a temporary ref first and then advance the local branch with ``update-ref``.
+    """
+    temp_ref = "refs/tmp_sync"
+    try:
+        _run_git(
+            ["fetch", str(source_repo), f"refs/heads/{branch}:{temp_ref}"],
+            cwd=clone,
+        )
+        _run_git(
+            ["update-ref", f"refs/heads/{branch}", temp_ref],
+            cwd=clone,
+        )
+    finally:
+        _git_output(["update-ref", "-d", temp_ref], clone, timeout=15)
+
+
 def worktree_target_branch_name(
     session_name: str,
     repo_name: str,
@@ -897,6 +917,8 @@ def cleanup_session_worktree(
     if not entry.is_dir():
         result.errors.append((str(entry), "not a directory"))
         return result
+    if session_name in _live_session_names():
+        raise WorkspaceError(f"cannot discard live worktree for session {session_name}")
 
     branch = f"{SESSION_BRANCH_PREFIX}{session_name}"
     clone = _find_managed_clone_for_worktree(entry)
@@ -1051,8 +1073,12 @@ def merge_session_worktree(
             cwd=target_repo,
         )
 
-    commit = _run_git(["rev-parse", target_sha], cwd=target_repo).strip()
-    message = _run_git(["log", "-1", "--pretty=%s", target_sha], cwd=target_repo).strip()
+    commit = _run_git(
+        ["rev-parse", "--verify", f"refs/heads/{target_branch}"],
+        cwd=target_repo,
+    ).strip()
+    _sync_managed_clone_branch_ref(clone, target_repo, target_branch)
+    message = _run_git(["log", "-1", "--pretty=%s", commit], cwd=target_repo).strip()
     return {
         "commit": commit,
         "message": message,
@@ -1215,8 +1241,12 @@ def merge_session_worktree_commit(
             cwd=target_repo,
         )
 
-    commit = _run_git(["rev-parse", resolved], cwd=target_repo).strip()
-    message = _run_git(["log", "-1", "--pretty=%s", resolved], cwd=target_repo).strip()
+    commit = _run_git(
+        ["rev-parse", "--verify", f"refs/heads/{target_branch}"],
+        cwd=target_repo,
+    ).strip()
+    _sync_managed_clone_branch_ref(clone, target_repo, target_branch)
+    message = _run_git(["log", "-1", "--pretty=%s", commit], cwd=target_repo).strip()
     return {
         "commit": commit,
         "message": message,

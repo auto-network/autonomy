@@ -82,7 +82,6 @@ from tools.dashboard.session_harness import (
     CLAUDE_HARNESS,
     dedup_claude_entries,
     enrich_claude_entries,
-    get_session_harness,
     parse_claude_log_line,
     postprocess_claude_entries,
     resolve_harness_for_path,
@@ -3144,28 +3143,56 @@ async def api_session_confirm_link(request):
     if not tmux_session:
         return JSONResponse({"error": "tmux_session required"}, status_code=400)
 
-    row = dashboard_db.get_session(tmux_session)
-    harness = resolve_harness_for_session_row(row)
-    linked = harness.resolve_session(
-        tmux_name=tmux_session,
-        row=row,
-        handshake_text=handshake_text,
-    )
-    if linked is None:
-        return JSONResponse({"error": "handshake not found in any recent JSONL"}, status_code=404)
+    # Scan all project directories for newest JSONL containing handshake
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return JSONResponse({"error": "no projects directory"}, status_code=404)
 
-    harness.attach_live_monitoring(
-        monitor=session_monitor,
-        tmux_name=tmux_session,
-        jsonl_path=linked["jsonl_path"],
-        resolution_dir=linked["resolution_dir"],
-    )
-    await session_monitor._broadcast_registry()
-    return JSONResponse({
-        "ok": True,
-        "project": linked["project"],
-        "session_id": linked["session_uuid"],
-    })
+    # Collect all JSONL files across all projects, sorted by mtime descending
+    all_jsonls = []
+    for project_dir in claude_projects.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for jf in project_dir.glob("*.jsonl"):
+            all_jsonls.append(jf)
+
+    all_jsonls.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    # Check newest files first — read last 5 entries for handshake text
+    for jf in all_jsonls[:5]:  # only check 5 newest files
+        try:
+            lines = jf.read_text(encoding="utf-8", errors="replace").strip().split("\n")
+            tail = lines[-5:] if len(lines) > 5 else lines
+            for line in tail:
+                if handshake_text and handshake_text in line:
+                    # Found it — this is our file
+                    project = jf.parent.name
+                    session_id = jf.stem
+                    logger.info("confirm-link: FOUND handshake in %s/%s", project, session_id[:12])
+                    dashboard_db.link_and_enrich(
+                        tmux_session,
+                        session_uuid=session_id,
+                        jsonl_path=str(jf),
+                        project=project,
+                    )
+                    # Install inotify watches so the tailer starts broadcasting
+                    # session:messages as new entries arrive. Without this, the
+                    # link is persisted in the DB but no live SSE flows —
+                    # the viewer only sees new content on /tail?after=0 fetches
+                    # (nav or force refresh). See signpost d931649b-413 §2/§7c.
+                    from tools.dashboard.session_monitor import _TailState
+                    if tmux_session not in session_monitor._tail_states:
+                        session_monitor._tail_states[tmux_session] = _TailState(
+                            resolution_dir=jf.parent,
+                        )
+                    session_monitor._add_file_watch(tmux_session, str(jf))
+                    session_monitor._add_dir_watch(tmux_session, str(jf.parent))
+                    await session_monitor._broadcast_registry()
+                    return JSONResponse({"ok": True, "project": project, "session_id": session_id})
+        except Exception:
+            continue
+
+    return JSONResponse({"error": "handshake not found in any recent JSONL"}, status_code=404)
 
 
 async def api_session_get(request):
@@ -3387,12 +3414,12 @@ async def api_session_create(request):
       • `project` set → load workspace config, prepare mounts/worktrees,
         launch image with DinD/graph scoping via project registry.
       • `type == "host"` → start `claude --dangerously-skip-permissions` on
-        the host, then let the Claude harness resolve and attach its JSONL.
+        the host, then watch for its JSONL to appear.
       • neither → default `autonomy-agent:dashboard` container session.
 
     Container sessions block up to 30s for the monitor to mark them live with
-    a resolved JSONL path.  Host sessions return immediately and complete
-    linking asynchronously through the active harness.
+    a resolved JSONL path.  Host sessions return immediately — their JSONL is
+    discovered asynchronously by `_watch_for_host_session_jsonl`.
     """
     body = {}
     try:
@@ -3423,7 +3450,6 @@ async def api_session_create(request):
 
     # ── Build the command to run inside tmux ───────────────────
     proj = None
-    run_dir: Path | None = None
     if project_name:
         try:
             proj = workspace_settings.get_workspace(project_name)
@@ -3490,7 +3516,7 @@ async def api_session_create(request):
         run_dir.mkdir(parents=True, exist_ok=True)
         primer_path = run_dir / ".claude_md"
         primer_path.write_text(render_workspace_primer(proj))
-        global_claude_md = primer_path if proj.harness == "claude" else None
+        global_claude_md = primer_path
         startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
         working_dir = proj.working_dir or "/workspace/repo"
         cmd_str = launch_session(
@@ -3507,7 +3533,6 @@ async def api_session_create(request):
             startup_script=startup_script,
             privileged=proj.dind,
             working_dir=working_dir,
-            harness=proj.harness,
             network_host=proj.network_host,
         )
         if not cmd_str:
@@ -3561,33 +3586,32 @@ async def api_session_create(request):
     subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"], capture_output=True)
 
     # ── Register with session monitor ───────────────────────────
-    active_harness = get_session_harness(proj.harness if proj else "claude")
     if is_container:
-        if run_dir is None:
-            agent_runs = _REPO_ROOT / "data" / "agent-runs"
-            run_dirs = sorted(
-                agent_runs.glob(f"{tmux_name}-*"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            ) if agent_runs.exists() else []
-            run_dir = run_dirs[0] if run_dirs else agent_runs
-        sessions_dir = run_dir / "sessions"
-        monitor_project = proj.id if proj else sessions_dir.name
-        await active_harness.register_session(
-            monitor=session_monitor,
+        agent_runs = _REPO_ROOT / "data" / "agent-runs"
+        run_dirs = sorted(
+            agent_runs.glob(f"{tmux_name}-*"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ) if agent_runs.exists() else []
+        sess_dir = run_dirs[0] / "sessions" if run_dirs else agent_runs
+        monitor_project = proj.id if proj else sess_dir.name
+        await session_monitor.register(
             tmux_name=tmux_name,
             session_type="container",
             project=monitor_project,
-            run_dir=run_dir,
+            jsonl_path=sess_dir,
             seed_message="Starting..." if not primer_url else "",
         )
     else:
         project_folder = str(_REPO_ROOT).replace("/", "-")
-        await CLAUDE_HARNESS.register_session(
-            monitor=session_monitor,
+        projects_dir = Path.home() / ".claude" / "projects" / project_folder
+        await session_monitor.register(
             tmux_name=tmux_name,
             session_type="host",
             project=project_folder,
+        )
+        asyncio.create_task(
+            _watch_for_host_session_jsonl(projects_dir, tmux_name),
         )
 
     # ── Resolve primer (container only) ─────────────────────────
@@ -3835,7 +3859,7 @@ async def api_session_resume(request):
             run_dir.mkdir(parents=True, exist_ok=True)
             primer_path = run_dir / ".claude_md"
             primer_path.write_text(render_workspace_primer(proj_for_resume))
-            global_claude_md = primer_path if proj_for_resume.harness == "claude" else None
+            global_claude_md = primer_path
             startup_script = (
                 _REPO_ROOT / proj_for_resume.startup
                 if proj_for_resume.startup else None
@@ -3854,7 +3878,6 @@ async def api_session_resume(request):
                 startup_script=startup_script,
                 privileged=proj_for_resume.dind,
                 working_dir=working_dir,
-                harness=proj_for_resume.harness,
                 output_dir=output_dir,
                 model=model,
                 resume_uuid=session_uuid,
@@ -4013,6 +4036,68 @@ async def api_upload(request):
 
 
 # ── WebSocket Terminal ─────────────────────────────────────────
+
+# Per-project locks to serialise host session JSONL watchers
+_host_launch_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_host_launch_lock(project_folder: str) -> asyncio.Lock:
+    if project_folder not in _host_launch_locks:
+        _host_launch_locks[project_folder] = asyncio.Lock()
+    return _host_launch_locks[project_folder]
+
+
+async def _watch_for_host_session_jsonl(
+    projects_dir: Path, tmux_name: str, timeout: float = 10.0
+) -> None:
+    """Watch for a new JSONL to appear after a host Claude session starts.
+
+    Polls every 500ms for up to `timeout` seconds. Updates dashboard.db with
+    the discovered JSONL path — the ONLY code that sets jsonl_path for host sessions.
+    """
+    lock = _get_host_launch_lock(projects_dir.name)
+    async with lock:
+        existing = set(projects_dir.glob("*.jsonl")) if projects_dir.exists() else set()
+        logger.info("JSONL watcher started  tmux=%s  existing=%d", tmux_name, len(existing))
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            if not projects_dir.exists():
+                continue
+            current = set(projects_dir.glob("*.jsonl"))
+            new_files = current - existing
+            if new_files:
+                new_jsonl = min(new_files, key=lambda p: p.stat().st_mtime)
+                logger.info("JSONL watcher found new session  uuid=%s  tmux=%s", new_jsonl.stem, tmux_name)
+                # LINK + ENRICH: set session_uuid, jsonl_path, and graph_source_id
+                dashboard_db.link_and_enrich(
+                    tmux_name,
+                    session_uuid=new_jsonl.stem,
+                    jsonl_path=str(new_jsonl),
+                    project=projects_dir.name,
+                )
+
+                # Set up tail state with resolution_dir FIRST — _add_file_watch
+                # constructs a default _TailState (no resolution_dir) on first
+                # call, so the prior "if not in _tail_states" guard was always
+                # false here and resolution_dir never got assigned.
+                from tools.dashboard.session_monitor import _TailState
+                ts = session_monitor._tail_states.get(tmux_name)
+                if ts is None:
+                    session_monitor._tail_states[tmux_name] = _TailState(
+                        resolution_dir=projects_dir)
+                else:
+                    ts.resolution_dir = projects_dir
+
+                # Now add the inotify watches
+                session_monitor._add_file_watch(tmux_name, str(new_jsonl))
+                session_monitor._add_dir_watch(tmux_name, str(projects_dir))
+
+                # Broadcast registry so clients see resolved=true
+                await session_monitor._broadcast_registry()
+                return
+        logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
+
 
 def _tmux_session_exists(name: str) -> bool:
     return subprocess.run(["tmux", "has-session", "-t", name],
@@ -4641,6 +4726,14 @@ async def api_worktrees(request):
         for row in worktree_monitor.get_all()
     ])
 
+
+async def api_worktrees_refresh(request):
+    rows = await worktree_monitor.refresh()
+    return JSONResponse([
+        _worktree_state_json(row)
+        for row in rows
+    ])
+
 async def api_worktree_commit(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
@@ -4768,7 +4861,7 @@ async def api_worktree_discard(request):
             force=True,
         )
     except WorkspaceError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"error": str(exc)}, status_code=409)
 
     await worktree_monitor.refresh()
     return JSONResponse({"ok": True, **_cleanup_result_json(result)})
@@ -5072,7 +5165,7 @@ def _count_worktrees() -> dict[str, int]:
     rows = worktree_monitor.get_all()
     return {
         "with_commits": sum(1 for row in rows if row.commits),
-        "with_changes": sum(1 for row in rows if row.is_dirty),
+        "with_changes": sum(1 for row in rows if row.is_dirty and not row.commits),
     }
 
 
@@ -6884,6 +6977,7 @@ routes = [
     Route("/api/dao/active_sessions", api_dao_active_sessions),
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
     Route("/api/worktrees", api_worktrees),
+    Route("/api/worktrees/refresh", api_worktrees_refresh, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/commits/{sha}", api_worktree_commit, methods=["GET"]),
     Route("/api/worktrees/{session}/{repo}/changes", api_worktree_changes, methods=["GET"]),
     Route("/api/worktrees/{session}/{repo}/commits/{sha}/merge", api_worktree_commit_merge, methods=["POST"]),
