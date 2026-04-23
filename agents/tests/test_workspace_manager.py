@@ -588,6 +588,51 @@ def test_merge_session_worktree_commit_fast_forwards_to_selected_commit(tmp_path
     assert clone_head == first_sha
 
 
+def test_get_session_worktree_commit_detail_accepts_commit_ahead_of_divergent_master(tmp_path, monkeypatch):
+    session = "sess-divergent-master"
+    worktrees_dir, clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch, repo_name="autonomy",
+    )
+
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
+    (worktree / "first.txt").write_text("first\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "first.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "first commit",
+        ],
+        check=True,
+    )
+    first_sha = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    subprocess.run(["git", "-C", str(clone), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.name", "t"], check=True)
+    subprocess.run(["git", "-C", str(clone), "checkout", "-q", "-B", "master", "origin/HEAD"], check=True)
+    (clone / "README.md").write_text("divergent master\n")
+    subprocess.run(["git", "-C", str(clone), "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(clone), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "master diverged",
+        ],
+        check=True,
+    )
+
+    monkeypatch.setattr(wm, "_worktree_dashboard_base_ref", lambda _worktree, _repo_name: "master")
+
+    detail = wm.get_session_worktree_commit_detail(
+        session, "autonomy", first_sha[:7], worktrees_dir=worktrees_dir,
+    )
+
+    assert detail.sha == first_sha
+    assert detail.subject == "first commit"
+
+
 def test_cleanup_session_worktree_rejects_live_session(tmp_path, monkeypatch):
     session = "sess-live"
     worktrees_dir, _clone, _worktree = _make_writable_session_worktree(

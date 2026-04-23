@@ -5165,7 +5165,7 @@ def _count_worktrees() -> dict[str, int]:
     rows = worktree_monitor.get_all()
     return {
         "with_commits": sum(1 for row in rows if row.commits),
-        "with_changes": sum(1 for row in rows if row.is_dirty and not row.commits),
+        "with_changes": sum(1 for row in rows if row.is_dirty),
     }
 
 
