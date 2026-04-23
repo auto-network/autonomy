@@ -35,6 +35,16 @@ def _isolate_db(tmp_path, monkeypatch):
 class TestNewColumnsExist:
     """New columns must exist after init_db()."""
 
+    def test_harness_column(self, _isolate_db):
+        db = _isolate_db
+        row = db.get_conn().execute("SELECT harness FROM tmux_sessions LIMIT 0").description
+        assert row is not None
+
+    def test_harness_state_column(self, _isolate_db):
+        db = _isolate_db
+        row = db.get_conn().execute("SELECT harness_state FROM tmux_sessions LIMIT 0").description
+        assert row is not None
+
     def test_resolution_dir_column(self, _isolate_db):
         db = _isolate_db
         row = db.get_conn().execute("SELECT resolution_dir FROM tmux_sessions LIMIT 0").description
@@ -156,6 +166,8 @@ class TestInsertSession:
         row = db.get_session("test-1")
         assert json.loads(row["session_uuids"]) == []
         assert row["curr_jsonl_file"] is None
+        assert row["harness"] == "claude"
+        assert row["harness_state"] == "{}"
 
 
 class TestUpdateJsonlLink:

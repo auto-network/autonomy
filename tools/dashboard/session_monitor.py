@@ -33,7 +33,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tools.dashboard.session_harness import CLAUDE_HARNESS, SessionHarness
+from tools.dashboard.session_harness import (
+    CLAUDE_HARNESS,
+    SessionHarness,
+    resolve_harness_for_path,
+    resolve_harness_for_session_row,
+)
 
 from tools.dashboard.dao.dashboard_db import (
     get_conn,
@@ -106,10 +111,11 @@ def _read_latest_msg_from_tail(jsonl: Path) -> str:
             chunk = f.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
+    harness = resolve_harness_for_path(jsonl)
     for line in reversed(chunk.strip().split("\n")):
         try:
             e = json.loads(line)
-            text = _extract_message_text(e)
+            text = harness.extract_message_text(e)
             if text:
                 return text
         except json.JSONDecodeError:
@@ -485,6 +491,8 @@ class SessionMonitor:
         seed_message: str = "",
         session_uuid: str | None = None,
         resolution_dir: Path | None = None,
+        harness: str = "claude",
+        harness_state: str = "{}",
     ) -> None:
         """Register a new session — INSERT into dashboard.db."""
         path_is_dir = False
@@ -509,6 +517,8 @@ class SessionMonitor:
                 tmux_name=tmux_name,
                 session_type=session_type,
                 project=project,
+                harness=harness,
+                harness_state=harness_state,
                 bead_id=bead_id,
                 jsonl_path=path_str,
                 session_uuid=session_uuid,
@@ -759,6 +769,7 @@ class SessionMonitor:
                 "nag_message": s.get("nag_message") or "",
                 "dispatch_nag_enabled": bool(s.get("dispatch_nag")),
                 "activity_state": s.get("activity_state", "idle"),
+                "harness": s.get("harness", "claude"),
                 # jsonl_path is the legacy bridge; session_uuids is canonical after Phase 4
                 "resolved": bool(s.get("jsonl_path")) or (
                     bool(s.get("session_uuids")) and s["session_uuids"] != "[]"
@@ -797,7 +808,7 @@ class SessionMonitor:
         self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
         logger.info("session_monitor: background tasks started (mode=inotify)")
         # Re-scan unresolved container sessions from prior server lifetime
-        self._recover_unresolved_sessions()
+        await self._recover_unresolved_sessions()
         # Broadcast registry for any sessions that exist in DB
         if count_live() > 0:
             await self._broadcast_registry()
@@ -827,7 +838,7 @@ class SessionMonitor:
         self._started = False
         logger.info("session_monitor: background tasks stopped")
 
-    def _recover_unresolved_sessions(self) -> None:
+    async def _recover_unresolved_sessions(self) -> None:
         """On startup, recreate TailState for live sessions with NULL jsonl_path.
 
         For container sessions: derive resolution_dir from agent-runs, set needs_resolution.
@@ -850,21 +861,20 @@ class SessionMonitor:
                     self._add_dir_watch(tmux_name, res_dir)
                 continue
             if row.get("type") == "host":
-                # Host resolution: scan Claude projects dirs for .meta.json matching tmux_name
-                jsonl = self._resolve_host_jsonl(tmux_name)
-                if jsonl:
-                    from tools.dashboard.dao.dashboard_db import link_and_enrich
-                    link_and_enrich(
-                        tmux_name,
-                        session_uuid=jsonl.stem,
-                        jsonl_path=str(jsonl),
-                        project=jsonl.parent.name,
+                harness = resolve_harness_for_session_row(row)
+                linked = harness.resolve_session(tmux_name=tmux_name, row=row)
+                if linked:
+                    harness.attach_live_monitoring(
+                        monitor=self,
+                        tmux_name=tmux_name,
+                        jsonl_path=linked["jsonl_path"],
+                        resolution_dir=Path(row["resolution_dir"]) if row.get("resolution_dir") else linked["resolution_dir"],
                     )
                     recovered += 1
-                    logger.info("session_monitor: recovered host %s → %s", tmux_name, jsonl.name)
-                    # Add dir watch for future rollovers
-                    if self._use_inotify:
-                        self._add_dir_watch(tmux_name, str(jsonl.parent))
+                    logger.info(
+                        "session_monitor: recovered host %s → %s",
+                        tmux_name, linked["jsonl_path"].name,
+                    )
                 else:
                     # Unresolved host — add dir watch on resolution_dir if known
                     res_dir = row.get("resolution_dir")
@@ -902,24 +912,10 @@ class SessionMonitor:
             logger.info("session_monitor: recovered %d unresolved sessions on startup", recovered)
 
     def _resolve_host_jsonl(self, tmux_name: str) -> Path | None:
-        """Find JSONL for a host session by scanning .meta.json files."""
-        claude_projects = Path.home() / ".claude" / "projects"
-        if not claude_projects.exists():
-            return None
-        for meta_path in sorted(
-            claude_projects.rglob("*.meta.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        ):
-            try:
-                data = json.loads(meta_path.read_text())
-                if data.get("tmux_session") == tmux_name:
-                    jsonl = meta_path.parent / (meta_path.stem.removesuffix(".meta") + ".jsonl")
-                    if jsonl.exists():
-                        return jsonl
-            except (json.JSONDecodeError, OSError):
-                continue
-        return None
+        """Compatibility shim for tests; host resolution now lives in the harness."""
+        from tools.dashboard.session_harness import _resolve_claude_host_jsonl
+
+        return _resolve_claude_host_jsonl(tmux_name)
 
     async def _broadcast_registry(self) -> None:
         """Push session registry to SSE subscribers."""
@@ -1068,26 +1064,23 @@ class SessionMonitor:
         if row.get("jsonl_path"):
             return False
 
-        new_uuid = jsonl_path.stem
-
-        from tools.dashboard.dao.dashboard_db import link_and_enrich
-        link_and_enrich(
-            tmux_name,
-            session_uuid=new_uuid,
-            jsonl_path=str(jsonl_path),
-            project=jsonl_path.parent.name,
+        harness = resolve_harness_for_session_row(row)
+        linked = harness.resolve_session(
+            tmux_name=tmux_name,
+            row=row,
+            jsonl_path=jsonl_path,
         )
+        if linked is None:
+            return False
 
-        if self._use_inotify:
-            self._add_file_watch(tmux_name, str(jsonl_path))
-
-        # Reset file_offset: we've linked a (possibly non-empty) JSONL and
-        # the tailer should process it from byte 0 on its next tick.
-        update_tail_state(tmux_name, file_offset=0)
-
-        ts = self._tail_states.get(tmux_name)
-        old_resolution_dir = ts.resolution_dir if ts else None
-        self._tail_states[tmux_name] = _TailState(resolution_dir=old_resolution_dir)
+        harness.attach_live_monitoring(
+            monitor=self,
+            tmux_name=tmux_name,
+            jsonl_path=linked["jsonl_path"],
+            resolution_dir=Path(row["resolution_dir"]) if row.get("resolution_dir") else linked["resolution_dir"],
+            reset_offset=True,
+            reset_state=True,
+        )
 
         logger.info(
             "session_monitor: discovered %s → %s (first file — resolved)",
@@ -1311,33 +1304,31 @@ class SessionMonitor:
 
         Any new JSONL in a container's resolution_dir belongs to this session.
         """
-        new_uuid = new_file.stem
         uuids = json.loads(row.get("session_uuids") or "[]")
         was_empty = len(uuids) == 0
 
-        from tools.dashboard.dao.dashboard_db import link_and_enrich
-        link_and_enrich(
-            tmux_name,
-            session_uuid=new_uuid,
-            jsonl_path=str(new_file),
-            project=new_file.parent.name,
+        harness = resolve_harness_for_session_row(row)
+        linked = harness.resolve_session(
+            tmux_name=tmux_name,
+            row=row,
+            jsonl_path=new_file,
         )
+        if linked is None:
+            return
         logger.info(
             "session_monitor: IN_CREATE container %s → %s%s",
             tmux_name, new_file.name,
             " (first file — resolved)" if was_empty else " (rollover)",
         )
 
-        # Swap IN_MODIFY watch to new file
-        self._add_file_watch(tmux_name, str(new_file))
-
-        # Reset file_offset for new file
-        update_tail_state(tmux_name, file_offset=0)
-
-        # Reset ephemeral tail state, preserving resolution_dir
-        ts = self._tail_states.get(tmux_name)
-        old_resolution_dir = ts.resolution_dir if ts else None
-        self._tail_states[tmux_name] = _TailState(resolution_dir=old_resolution_dir)
+        harness.attach_live_monitoring(
+            monitor=self,
+            tmux_name=tmux_name,
+            jsonl_path=linked["jsonl_path"],
+            resolution_dir=Path(row["resolution_dir"]) if row.get("resolution_dir") else linked["resolution_dir"],
+            reset_offset=True,
+            reset_state=True,
+        )
 
         if was_empty:
             await self._broadcast_registry()
@@ -1468,7 +1459,7 @@ class SessionMonitor:
         if ts.task_tracker_warmed:
             return
         ts.task_tracker_warmed = True  # set first — retry loops would double-warm
-        if self._entry_enricher is None or self._entry_parser is None:
+        if self._entry_enricher is None:
             return
         jsonl_path_str = row.get("jsonl_path")
         if not jsonl_path_str:
@@ -1485,12 +1476,13 @@ class SessionMonitor:
                 data = fh.read(file_offset)
         except OSError:
             return
+        harness = resolve_harness_for_session_row(row)
         prior: list = []
         for raw_line in data.splitlines():
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
-            parsed = self._entry_parser(line)
+            parsed = harness.parse_line(line)
             if parsed is None:
                 continue
             if isinstance(parsed, list):
@@ -1623,6 +1615,7 @@ class SessionMonitor:
         parsed_entries: list = []
         last_message = row.get("last_message", "")
         context_tokens = row.get("context_tokens", 0)
+        harness = resolve_harness_for_session_row(row)
 
         for raw_line in complete.splitlines():
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1634,22 +1627,21 @@ class SessionMonitor:
                 continue
 
             new_entry_count += 1
-            text = self._harness.extract_message_text(entry)
+            text = harness.extract_message_text(entry)
             if text:
                 last_message = text
 
-            context_tokens = self._harness.extract_context_tokens(entry, context_tokens)
+            context_tokens = harness.extract_context_tokens(entry, context_tokens)
 
             # Parse full entry for SSE broadcast
-            if self._entry_parser:
-                try:
-                    parsed = self._entry_parser(line)
-                except Exception:
-                    parsed = None
-                if isinstance(parsed, list):
-                    parsed_entries.extend(parsed)
-                elif parsed is not None:
-                    parsed_entries.append(parsed)
+            try:
+                parsed = harness.parse_line(line)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                parsed_entries.extend(parsed)
+            elif parsed is not None:
+                parsed_entries.append(parsed)
 
         tmux_name = row["tmux_name"]
         if new_entry_count > 0:
@@ -1961,7 +1953,8 @@ class SessionMonitor:
                 upsert_session(
                     tmux_name=tmux_name,
                     session_type=stype,
-                    project=jsonl.parent.name,
+                    project=str(meta.get("project") or jsonl.parent.name),
+                    harness=str(meta.get("harness") or "claude"),
                     bead_id=meta.get("bead_id"),
                     jsonl_path=str(jsonl),
                     session_uuid=jsonl.stem,
@@ -2003,6 +1996,7 @@ class SessionMonitor:
                     tmux_name=tmux_name,
                     session_type=stype,
                     project=jsonl.parent.name,
+                    harness="claude",
                     jsonl_path=str(jsonl),
                     session_uuid=jsonl.stem,
                     resolution_dir=str(jsonl.parent),

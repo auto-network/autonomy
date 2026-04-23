@@ -134,6 +134,50 @@ def test_no_graph_env_without_metadata(tmp_path, fake_creds, fake_crosstalk, cap
     assert not any(s.startswith("GRAPH_TAGS=") for s in cmd)
 
 
+# ── Codex interactive harness ───────────────────────────────────────
+
+def test_codex_interactive_uses_codex_entrypoint(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    _run(
+        output_dir=str(tmp_path / "run"),
+        harness="codex",
+        image="autonomy-agent:dashboard",
+    )
+    cmd = captured_run[0]
+    assert "--entrypoint" in cmd
+    assert "codex" in cmd
+    assert "--no-alt-screen" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "--dangerously-skip-permissions" not in cmd
+
+
+def test_codex_interactive_does_not_require_claude_credentials(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch,
+):
+    monkeypatch.setattr(session_launcher, "_resolve_credentials", lambda: None)
+    out = _run(
+        output_dir=str(tmp_path / "run"),
+        harness="codex",
+        image="autonomy-agent:dashboard",
+    )
+    assert out == "fake-container-id"
+    cmd = captured_run[0]
+    assert "codex" in cmd
+
+
+def test_codex_resume_not_supported_yet(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    out = _run(
+        output_dir=str(tmp_path / "run"),
+        harness="codex",
+        resume_uuid="session-123",
+    )
+    assert out is None
+    assert captured_run == []
+
+
 # ── Hardcoded license overlay removed (replaced by artifacts mechanism) ──────
 
 def test_no_hardcoded_license_mount(tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch):

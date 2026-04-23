@@ -35,6 +35,7 @@ WORKSPACE_REVISION = 1
 
 _REPO_REQUIRED = ("url", "mount")
 _REPO_OPTIONAL = {"writable": bool}
+_VALID_HARNESSES = {"claude", "codex"}
 
 
 def _validate_repo(repo: Any, idx: int) -> None:
@@ -80,6 +81,7 @@ class WorkspaceV1(SettingSchema):
     _required = ("name", "image")
     _optional_types: dict[str, type | tuple[type, ...]] = {
         "description": str,
+        "harness": str,
         "working_dir": str,
         "startup": str,
         "dind": bool,
@@ -142,6 +144,13 @@ class WorkspaceV1(SettingSchema):
         if "repos" in payload:
             for i, repo in enumerate(payload["repos"]):
                 _validate_repo(repo, i)
+        if "harness" in payload:
+            harness = payload["harness"]
+            if harness not in _VALID_HARNESSES:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: 'harness' must be one of "
+                    f"{sorted(_VALID_HARNESSES)}, got {harness!r}"
+                )
 
 
 register_schema(WORKSPACE_SET_ID, WORKSPACE_REVISION, WorkspaceV1)

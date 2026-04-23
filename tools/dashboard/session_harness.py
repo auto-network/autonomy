@@ -8,7 +8,9 @@ existing Claude implementation while we carve out a parallel Codex path.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -16,10 +18,51 @@ import sqlite3
 from typing import Protocol, Any
 
 
+logger = logging.getLogger(__name__)
+
+
 class SessionHarness(Protocol):
     """Contract for a session transcript harness."""
 
     name: str
+
+    async def register_session(
+        self,
+        *,
+        monitor: Any,
+        tmux_name: str,
+        session_type: str,
+        project: str,
+        run_dir: Path | None = None,
+        seed_message: str = "",
+        session_uuid: str | None = None,
+        jsonl_path: Path | None = None,
+        resolution_dir: Path | None = None,
+        bead_id: str | None = None,
+    ) -> None:
+        """Register a new session with the shared monitor."""
+
+    def resolve_session(
+        self,
+        *,
+        tmux_name: str,
+        row: dict | None = None,
+        jsonl_path: Path | None = None,
+        handshake_text: str | None = None,
+    ) -> dict | None:
+        """Resolve a session onto its backing transcript and persist the link."""
+
+    def attach_live_monitoring(
+        self,
+        *,
+        monitor: Any,
+        tmux_name: str,
+        jsonl_path: Path,
+        resolution_dir: Path | None = None,
+        reset_offset: bool = False,
+        reset_state: bool = False,
+    ) -> None:
+        """Attach live tailing for an already-linked session."""
 
     def parse_line(self, line: str) -> dict | list[dict] | None:
         """Parse one raw transcript line into normalized viewer entries."""
@@ -43,6 +86,93 @@ class ClaudeSessionHarness:
     """Adapter over the current Claude-only implementation."""
 
     name = "claude"
+
+    async def register_session(
+        self,
+        *,
+        monitor: Any,
+        tmux_name: str,
+        session_type: str,
+        project: str,
+        run_dir: Path | None = None,
+        seed_message: str = "",
+        session_uuid: str | None = None,
+        jsonl_path: Path | None = None,
+        resolution_dir: Path | None = None,
+        bead_id: str | None = None,
+    ) -> None:
+        if session_type == "host":
+            projects_dir = Path.home() / ".claude" / "projects" / project
+            await monitor.register(
+                tmux_name=tmux_name,
+                session_type="host",
+                project=project,
+                harness=self.name,
+                resolution_dir=projects_dir,
+            )
+            asyncio.create_task(
+                _watch_for_claude_host_jsonl(monitor, projects_dir, tmux_name),
+            )
+            return
+
+        sess_dir = resolution_dir
+        if sess_dir is None:
+            if run_dir is not None:
+                sess_dir = run_dir / "sessions"
+            elif jsonl_path is not None:
+                sess_dir = jsonl_path if jsonl_path.is_dir() else jsonl_path.parent
+        await monitor.register(
+            tmux_name=tmux_name,
+            session_type=session_type,
+            project=project,
+            jsonl_path=sess_dir,
+            bead_id=bead_id,
+            seed_message=seed_message,
+            session_uuid=session_uuid,
+            resolution_dir=sess_dir,
+            harness=self.name,
+        )
+
+    def resolve_session(
+        self,
+        *,
+        tmux_name: str,
+        row: dict | None = None,
+        jsonl_path: Path | None = None,
+        handshake_text: str | None = None,
+    ) -> dict | None:
+        if handshake_text:
+            return _resolve_claude_handshake_link(tmux_name, handshake_text)
+
+        if jsonl_path is not None:
+            if row and row.get("type") == "host":
+                return None
+            return _link_session_file(tmux_name, jsonl_path)
+
+        if row and row.get("type") == "host":
+            found = _resolve_claude_host_jsonl(tmux_name)
+            if found is not None:
+                return _link_session_file(tmux_name, found)
+        return None
+
+    def attach_live_monitoring(
+        self,
+        *,
+        monitor: Any,
+        tmux_name: str,
+        jsonl_path: Path,
+        resolution_dir: Path | None = None,
+        reset_offset: bool = False,
+        reset_state: bool = False,
+    ) -> None:
+        _attach_live_monitoring(
+            monitor,
+            tmux_name=tmux_name,
+            jsonl_path=jsonl_path,
+            resolution_dir=resolution_dir,
+            reset_offset=reset_offset,
+            reset_state=reset_state,
+        )
 
     def parse_line(self, line: str) -> dict | list[dict] | None:
         return parse_claude_log_line(line)
@@ -90,6 +220,101 @@ class ClaudeSessionHarness:
 
 
 CLAUDE_HARNESS = ClaudeSessionHarness()
+
+
+class CodexSessionHarness:
+    """Codex rollout JSONL adapter."""
+
+    name = "codex"
+
+    async def register_session(
+        self,
+        *,
+        monitor: Any,
+        tmux_name: str,
+        session_type: str,
+        project: str,
+        run_dir: Path | None = None,
+        seed_message: str = "",
+        session_uuid: str | None = None,
+        jsonl_path: Path | None = None,
+        resolution_dir: Path | None = None,
+        bead_id: str | None = None,
+    ) -> None:
+        sess_dir = resolution_dir
+        if sess_dir is None:
+            if run_dir is not None:
+                sess_dir = run_dir / "sessions"
+            elif jsonl_path is not None:
+                sess_dir = jsonl_path if jsonl_path.is_dir() else jsonl_path.parent
+        await monitor.register(
+            tmux_name=tmux_name,
+            session_type=session_type,
+            project=project,
+            jsonl_path=sess_dir,
+            bead_id=bead_id,
+            seed_message=seed_message,
+            session_uuid=session_uuid,
+            resolution_dir=sess_dir,
+            harness=self.name,
+        )
+
+    def resolve_session(
+        self,
+        *,
+        tmux_name: str,
+        row: dict | None = None,
+        jsonl_path: Path | None = None,
+        handshake_text: str | None = None,
+    ) -> dict | None:
+        _ = row, handshake_text
+        if jsonl_path is None:
+            return None
+        return _link_session_file(
+            tmux_name,
+            jsonl_path,
+            project=(row or {}).get("project"),
+        )
+
+    def attach_live_monitoring(
+        self,
+        *,
+        monitor: Any,
+        tmux_name: str,
+        jsonl_path: Path,
+        resolution_dir: Path | None = None,
+        reset_offset: bool = False,
+        reset_state: bool = False,
+    ) -> None:
+        _attach_live_monitoring(
+            monitor,
+            tmux_name=tmux_name,
+            jsonl_path=jsonl_path,
+            resolution_dir=resolution_dir,
+            reset_offset=reset_offset,
+            reset_state=reset_state,
+        )
+
+    def parse_line(self, line: str) -> dict | list[dict] | None:
+        return parse_codex_log_line(line)
+
+    def postprocess_entries(
+        self,
+        entries: list[dict],
+        *,
+        session_dir: Path | None = None,
+    ) -> list[dict]:
+        _ = session_dir
+        return entries
+
+    def extract_message_text(self, raw_entry: dict) -> str:
+        return extract_codex_message_text(raw_entry)
+
+    def extract_context_tokens(self, raw_entry: dict, current_tokens: int) -> int:
+        return extract_codex_context_tokens(raw_entry, current_tokens)
+
+
+CODEX_HARNESS = CodexSessionHarness()
 
 
 _CROSSTALK_RE = re.compile(
@@ -608,27 +833,6 @@ def postprocess_claude_entries(
     enrich_claude_entries(processed, session_dir=session_dir)
     return processed
 
-
-def resolve_harness_for_path(path: str | Path | None) -> SessionHarness:
-    """Resolve the harness for a transcript path.
-
-    Only Claude-backed sessions exist today, so this always returns the
-    Claude adapter. The path argument is accepted now so callers can route
-    through this helper without another API change when Codex lands.
-    """
-
-    _ = Path(path) if path else None
-    return CLAUDE_HARNESS
-
-
-def resolve_harness_for_session_row(row: dict | None) -> SessionHarness:
-    """Resolve the harness for a dashboard session row."""
-
-    if row and row.get("jsonl_path"):
-        return resolve_harness_for_path(row["jsonl_path"])
-    return CLAUDE_HARNESS
-
-
 def parse_plan_snapshot(arguments: str) -> list[dict] | None:
     """Best-effort parser for Codex-style ``update_plan`` arguments.
 
@@ -653,3 +857,342 @@ def parse_plan_snapshot(arguments: str) -> list[dict] | None:
             continue
         out.append({"subject": step, "status": status or "pending"})
     return out or None
+
+
+def _extract_codex_text_blocks(blocks: Any) -> str:
+    if not isinstance(blocks, list):
+        return ""
+    parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in {"input_text", "output_text"}:
+            text = str(block.get("text") or "")
+            if text:
+                parts.append(text)
+    return "".join(parts).strip()
+
+
+def _is_codex_visible_message(role: str, text: str) -> bool:
+    if role not in {"user", "assistant"}:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("<environment_context>") and stripped.endswith("</environment_context>"):
+        return False
+    return True
+
+
+def parse_codex_log_line(line: str) -> dict | list[dict] | None:
+    try:
+        raw = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+    timestamp = raw.get("timestamp", "")
+    entry_type = raw.get("type")
+    payload = raw.get("payload") or {}
+
+    if entry_type == "response_item":
+        item_type = payload.get("type")
+        if item_type == "message":
+            role = str(payload.get("role") or "")
+            text = _extract_codex_text_blocks(payload.get("content"))
+            if not _is_codex_visible_message(role, text):
+                return None
+            out_type = "assistant_text" if role == "assistant" else "user"
+            return {
+                "type": out_type,
+                "role": role,
+                "content": text,
+                "timestamp": timestamp,
+            }
+        if item_type == "function_call":
+            arguments = payload.get("arguments") or ""
+            tool_input: Any = arguments
+            if isinstance(arguments, str):
+                try:
+                    tool_input = json.loads(arguments)
+                except json.JSONDecodeError:
+                    tool_input = arguments
+            entry = {
+                "type": "tool_use",
+                "role": "assistant",
+                "tool_name": payload.get("name") or "?",
+                "tool_id": payload.get("call_id") or "",
+                "input": tool_input,
+                "timestamp": timestamp,
+            }
+            todos = None
+            if payload.get("name") == "update_plan":
+                todos = parse_plan_snapshot(arguments)
+            if todos:
+                return [
+                    entry,
+                    {
+                        "type": "todo_plan",
+                        "role": "assistant",
+                        "todos": todos,
+                        "timestamp": timestamp,
+                    },
+                ]
+            return entry
+        if item_type == "function_call_output":
+            return {
+                "type": "tool_result",
+                "role": "tool",
+                "tool_id": payload.get("call_id") or "",
+                "content": str(payload.get("output") or ""),
+                "is_error": False,
+                "timestamp": timestamp,
+            }
+        return None
+
+    if entry_type != "event_msg":
+        return None
+
+    event_type = payload.get("type")
+    if event_type == "task_started":
+        return {
+            "type": "system",
+            "role": "system",
+            "content": "Task started",
+            "tag": "task-started",
+            "timestamp": timestamp,
+        }
+    if event_type == "task_complete":
+        return {
+            "type": "system",
+            "role": "system",
+            "content": "Task complete",
+            "tag": "task-complete",
+            "timestamp": timestamp,
+        }
+    return None
+
+
+def extract_codex_message_text(raw_entry: dict) -> str:
+    if raw_entry.get("type") != "response_item":
+        return ""
+    payload = raw_entry.get("payload") or {}
+    if payload.get("type") != "message":
+        return ""
+    role = str(payload.get("role") or "")
+    text = _extract_codex_text_blocks(payload.get("content"))
+    if not _is_codex_visible_message(role, text):
+        return ""
+    return text[:150]
+
+
+def extract_codex_context_tokens(raw_entry: dict, current_tokens: int) -> int:
+    if raw_entry.get("type") != "event_msg":
+        return current_tokens
+    payload = raw_entry.get("payload") or {}
+    if payload.get("type") != "token_count":
+        return current_tokens
+    info = payload.get("info") or {}
+    usage = info.get("total_token_usage") or info.get("last_token_usage") or {}
+    ctx = int(usage.get("input_tokens", 0) or 0) + int(usage.get("cached_input_tokens", 0) or 0)
+    return ctx if ctx > 0 else current_tokens
+
+
+HARNESSES: dict[str, SessionHarness] = {
+    "claude": CLAUDE_HARNESS,
+    "codex": CODEX_HARNESS,
+}
+
+_HOST_LAUNCH_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def get_session_harness(name: str | None) -> SessionHarness:
+    return HARNESSES.get((name or "").strip().lower(), CLAUDE_HARNESS)
+
+
+def _read_session_meta(path: Path) -> dict[str, Any]:
+    for parent in (path.parent, *path.parents):
+        meta_path = parent / ".session_meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            payload = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def resolve_harness_for_path(path: str | Path | None) -> SessionHarness:
+    """Resolve the harness for a transcript path."""
+
+    if not path:
+        return CLAUDE_HARNESS
+    p = Path(path)
+    meta = _read_session_meta(p)
+    if meta.get("harness"):
+        return get_session_harness(str(meta["harness"]))
+    if ".codex" in p.parts or p.name.startswith("rollout-"):
+        return CODEX_HARNESS
+    if ".claude" in p.parts:
+        return CLAUDE_HARNESS
+    try:
+        if p.is_file():
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                first_line = fh.readline().strip()
+            if first_line:
+                raw = json.loads(first_line)
+                if raw.get("type") == "session_meta" and (raw.get("payload") or {}).get("originator") == "codex-tui":
+                    return CODEX_HARNESS
+    except (OSError, json.JSONDecodeError):
+        pass
+    return CLAUDE_HARNESS
+
+
+def resolve_harness_for_session_row(row: dict | None) -> SessionHarness:
+    """Resolve the harness for a dashboard session row."""
+
+    if row and row.get("harness"):
+        return get_session_harness(row.get("harness"))
+    if row and row.get("jsonl_path"):
+        return resolve_harness_for_path(row["jsonl_path"])
+    return CLAUDE_HARNESS
+
+
+def _get_host_launch_lock(project_folder: str) -> asyncio.Lock:
+    return _HOST_LAUNCH_LOCKS.setdefault(project_folder, asyncio.Lock())
+
+
+def _link_session_file(
+    tmux_name: str,
+    jsonl_path: Path,
+    *,
+    project: str | None = None,
+) -> dict | None:
+    if not jsonl_path.exists() or jsonl_path.suffix != ".jsonl":
+        return None
+    from tools.dashboard.dao import dashboard_db
+
+    project = project or jsonl_path.parent.name
+    session_uuid = jsonl_path.stem
+    dashboard_db.link_and_enrich(
+        tmux_name,
+        session_uuid=session_uuid,
+        jsonl_path=str(jsonl_path),
+        project=project,
+    )
+    return {
+        "tmux_name": tmux_name,
+        "project": project,
+        "session_uuid": session_uuid,
+        "jsonl_path": jsonl_path,
+        "resolution_dir": jsonl_path.parent,
+    }
+
+
+def _resolve_claude_host_jsonl(tmux_name: str) -> Path | None:
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return None
+    for meta_path in sorted(
+        claude_projects.rglob("*.meta.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    ):
+        try:
+            data = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("tmux_session") != tmux_name:
+            continue
+        jsonl = meta_path.parent / (meta_path.stem.removesuffix(".meta") + ".jsonl")
+        if jsonl.exists():
+            return jsonl
+    return None
+
+
+def _resolve_claude_handshake_link(tmux_name: str, handshake_text: str) -> dict | None:
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return None
+
+    all_jsonls: list[Path] = []
+    for project_dir in claude_projects.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for jsonl in project_dir.glob("*.jsonl"):
+            all_jsonls.append(jsonl)
+    all_jsonls.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    for jsonl in all_jsonls[:5]:
+        try:
+            lines = jsonl.read_text(encoding="utf-8", errors="replace").strip().split("\n")
+        except OSError:
+            continue
+        tail = lines[-5:] if len(lines) > 5 else lines
+        if any(handshake_text in line for line in tail):
+            return _link_session_file(tmux_name, jsonl)
+    return None
+
+
+def _attach_live_monitoring(
+    monitor: Any,
+    *,
+    tmux_name: str,
+    jsonl_path: Path,
+    resolution_dir: Path | None = None,
+    reset_offset: bool = False,
+    reset_state: bool = False,
+) -> None:
+    from tools.dashboard.dao.dashboard_db import update_tail_state
+    from tools.dashboard.session_monitor import _TailState
+
+    res_dir = resolution_dir or jsonl_path.parent
+    current = monitor._tail_states.get(tmux_name)
+    if current is None or reset_state:
+        monitor._tail_states[tmux_name] = _TailState(
+            resolution_dir=res_dir,
+            needs_resolution=False,
+        )
+    else:
+        current.resolution_dir = res_dir
+        current.needs_resolution = False
+
+    if getattr(monitor, "_use_inotify", False):
+        monitor._add_file_watch(tmux_name, str(jsonl_path))
+        monitor._add_dir_watch(tmux_name, str(res_dir))
+
+    if reset_offset:
+        update_tail_state(tmux_name, file_offset=0)
+
+
+async def _watch_for_claude_host_jsonl(
+    monitor: Any,
+    projects_dir: Path,
+    tmux_name: str,
+    timeout: float = 10.0,
+) -> None:
+    lock = _get_host_launch_lock(projects_dir.name)
+    async with lock:
+        existing = set(projects_dir.glob("*.jsonl")) if projects_dir.exists() else set()
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            if not projects_dir.exists():
+                continue
+            current = set(projects_dir.glob("*.jsonl"))
+            new_files = current - existing
+            if not new_files:
+                continue
+            new_jsonl = min(new_files, key=lambda p: p.stat().st_mtime)
+            linked = _link_session_file(tmux_name, new_jsonl)
+            if linked is None:
+                return
+            CLAUDE_HARNESS.attach_live_monitoring(
+                monitor=monitor,
+                tmux_name=tmux_name,
+                jsonl_path=new_jsonl,
+                resolution_dir=projects_dir,
+            )
+            await monitor._broadcast_registry()
+            return
+        logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
