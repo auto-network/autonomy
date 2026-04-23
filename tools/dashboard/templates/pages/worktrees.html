@@ -529,7 +529,7 @@
                                      :class="line.kind === 'add' ? 'bg-emerald-300/[0.08]' : (line.kind === 'del' ? 'bg-rose-300/[0.08]' : 'bg-transparent')">
                                   <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.oldNo"></span>
                                   <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.newNo"></span>
-                                  <span class="border-r border-white/10 px-1 text-center"
+                                  <span class="border-r border-white/10 text-center"
                                         :class="line.kind === 'add' ? 'text-emerald-300' : (line.kind === 'del' ? 'text-rose-300' : 'text-slate-600')"
                                         x-text="diffMarker(line.kind)"></span>
                                   <span class="whitespace-pre px-2 pr-3"
@@ -708,7 +708,7 @@
                                      :class="line.kind === 'add' ? 'bg-emerald-300/[0.08]' : (line.kind === 'del' ? 'bg-rose-300/[0.08]' : 'bg-transparent')">
                                   <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.oldNo"></span>
                                   <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.newNo"></span>
-                                  <span class="border-r border-white/10 px-1 text-center"
+                                  <span class="border-r border-white/10 text-center"
                                         :class="line.kind === 'add' ? 'text-emerald-300' : (line.kind === 'del' ? 'text-rose-300' : 'text-slate-600')"
                                         x-text="diffMarker(line.kind)"></span>
                                   <span class="whitespace-pre px-2 pr-3"
