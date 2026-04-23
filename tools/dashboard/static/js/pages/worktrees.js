@@ -81,7 +81,12 @@
         return this.isMerging(row) || this.isCleaning(row);
       },
 
+      canMerge(row) {
+        return row.repo_name === 'autonomy' && row.ff_eligible;
+      },
+
       mergeTitle(row) {
+        if (row.repo_name !== 'autonomy') return 'Only autonomy worktrees can be merged from the dashboard today';
         if (row.ff_eligible) return 'Fast-forward merge from managed clone';
         if (row.is_dirty) return 'Dirty worktree cannot be merged';
         if (!row.commits_ahead) return 'No commits ahead of base';
@@ -105,7 +110,7 @@
       },
 
       async merge(row) {
-        if (!row.ff_eligible || this.isBusy(row)) return;
+        if (!this.canMerge(row) || this.isBusy(row)) return;
         const key = this.rowKey(row);
         this.merging = { ...this.merging, [key]: true };
         try {
