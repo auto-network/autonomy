@@ -217,6 +217,23 @@ async function renderSessionsFragment() {
   }
 }
 
+async function renderWorktreesFragment() {
+  pageTitle.textContent = 'Worktrees';
+  let html;
+  if (_fragmentCache.has('/pages/worktrees')) {
+    html = _fragmentCache.get('/pages/worktrees');
+  } else {
+    const res = await fetch('/pages/worktrees');
+    html = await res.text();
+    _fragmentCache.set('/pages/worktrees', html);
+  }
+  content.innerHTML = html;
+
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
+}
+
 async function renderSessionViewFragment() {
   pageTitle.textContent = 'Session';
   let html;
@@ -1420,6 +1437,7 @@ function route() {
   // Update global search placeholder based on page
   globalSearch.placeholder = (path === '/' || path === '/beads') ? 'Search beads...'
     : path === '/sessions' ? 'Search sessions...'
+    : path === '/worktrees' ? 'Search worktrees...'
     : path === '/streams' ? 'Search streams...'
     : 'Search graph...';
 
@@ -1435,6 +1453,8 @@ function route() {
     renderTimelineFragment();
   } else if (path === '/sessions') {
     renderSessionsFragment();
+  } else if (path === '/worktrees') {
+    renderWorktreesFragment();
   } else if (path.match(/^\/session\/[^/]+\/.+$/)) {
     renderSessionViewFragment();
   } else if (path === '/collab') {

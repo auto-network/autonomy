@@ -53,7 +53,10 @@ def _make_upstream(tmp_path: Path) -> Path:
     subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
     (src / "README.md").write_text("hi\n")
     subprocess.run(["git", "-C", str(src), "add", "README.md"], check=True)
-    subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "init"], check=True)
+    subprocess.run([
+        "git", "-C", str(src), "-c", "commit.gpgsign=false",
+        "commit", "-q", "-m", "init",
+    ], check=True)
 
     bare = tmp_path / "upstream.git"
     subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
@@ -180,7 +183,10 @@ def test_git_add_and_commit_succeed_in_session_worktree(tmp_path, monkeypatch):
         "Check that the managed clone mount is not read-only."
     )
     commit = subprocess.run(
-        ["git", "-C", str(worktree), "commit", "-q", "-m", "smoke"],
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "smoke",
+        ],
         capture_output=True, text=True,
     )
     assert commit.returncode == 0, f"git commit failed: {commit.stderr!r}"
@@ -213,7 +219,13 @@ def test_prepare_session_mounts_empty_for_repoless_project(tmp_path):
 # ── Session cleanup ───────────────────────────────────────────────
 
 
-def _make_writable_session_worktree(tmp_path: Path, session: str, monkeypatch):
+def _make_writable_session_worktree(
+    tmp_path: Path,
+    session: str,
+    monkeypatch,
+    *,
+    repo_name: str = "upstream",
+):
     """Build an upstream + managed clone + session worktree for cleanup tests."""
     upstream = _make_upstream(tmp_path)
     url = str(upstream)
@@ -224,7 +236,7 @@ def _make_writable_session_worktree(tmp_path: Path, session: str, monkeypatch):
         wm, "managed_clone_path",
         lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
     )
-    monkeypatch.setattr(wm, "_worktree_basename", lambda u: "upstream")
+    monkeypatch.setattr(wm, "_worktree_basename", lambda u: repo_name)
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
@@ -234,7 +246,7 @@ def _make_writable_session_worktree(tmp_path: Path, session: str, monkeypatch):
         proj, session, repos_dir=repos_dir, worktrees_dir=worktrees_dir,
     )
     clone = repos_dir / "local" / "upstream.git"
-    worktree = worktrees_dir / session / "upstream"
+    worktree = worktrees_dir / session / repo_name
     return worktrees_dir, clone, worktree
 
 
@@ -298,7 +310,11 @@ def test_cleanup_preserves_worktree_with_unpushed_commits(tmp_path, monkeypatch)
     (worktree / "new.txt").write_text("new file\n")
     subprocess.run(["git", "-C", str(worktree), "add", "new.txt"], check=True)
     subprocess.run(
-        ["git", "-C", str(worktree), "commit", "-q", "-m", "ahead"], check=True,
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "ahead",
+        ],
+        check=True,
     )
 
     result = wm.cleanup_session_worktrees(session, worktrees_dir=worktrees_dir)
@@ -377,3 +393,139 @@ def test_prune_orphan_worktrees_empty_dir(tmp_path):
         [], worktrees_dir=tmp_path / "missing",
     )
     assert results == {}
+
+
+def test_scan_all_worktrees_reports_state_per_session(tmp_path, monkeypatch):
+    session_live = "sess-live"
+    session_dirty = "sess-dirty"
+    session_clean = "sess-clean"
+    worktrees_dir, clone, wt_live = _make_writable_session_worktree(
+        tmp_path, session_live, monkeypatch,
+    )
+
+    url = str(next(tmp_path.glob("upstream.git")))
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    wm.prepare_session_mounts(
+        proj, session_dirty,
+        repos_dir=tmp_path / "repos", worktrees_dir=worktrees_dir,
+    )
+    wm.prepare_session_mounts(
+        proj, session_clean,
+        repos_dir=tmp_path / "repos", worktrees_dir=worktrees_dir,
+    )
+    wt_dirty = worktrees_dir / session_dirty / "upstream"
+    wt_clean = worktrees_dir / session_clean / "upstream"
+
+    subprocess.run(["git", "-C", str(wt_live), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wt_live), "config", "user.name", "t"], check=True)
+    (wt_live / "merged.txt").write_text("ready to merge\n")
+    subprocess.run(["git", "-C", str(wt_live), "add", "merged.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(wt_live), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "ready",
+        ],
+        check=True,
+    )
+
+    (wt_dirty / "README.md").write_text("still editing\n")
+
+    rows = wm.scan_all_worktrees(
+        worktrees_dir=worktrees_dir,
+        live_session_names={session_live},
+    )
+    by_session = {row.session_name: row for row in rows}
+
+    live_row = by_session[session_live]
+    assert live_row.repo_name == "upstream"
+    assert live_row.worktree_path == wt_live
+    assert live_row.managed_clone == clone
+    assert live_row.branch == f"session/{session_live}"
+    assert live_row.commits_ahead == 1
+    assert live_row.is_dirty is False
+    assert live_row.ff_eligible is True
+    assert live_row.session_live is True
+
+    dirty_row = by_session[session_dirty]
+    assert dirty_row.branch == f"session/{session_dirty}"
+    assert dirty_row.commits_ahead == 0
+    assert dirty_row.is_dirty is True
+    assert dirty_row.ff_eligible is False
+    assert dirty_row.session_live is False
+
+    clean_row = by_session[session_clean]
+    assert clean_row.branch == f"session/{session_clean}"
+    assert clean_row.commits_ahead == 0
+    assert clean_row.is_dirty is False
+    assert clean_row.ff_eligible is False
+    assert clean_row.session_live is False
+
+
+def test_merge_session_worktree_fast_forwards_matching_checkout(tmp_path, monkeypatch):
+    session = "sess-merge"
+    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch, repo_name="autonomy",
+    )
+    upstream = next(tmp_path.glob("upstream.git"))
+    target_repo = tmp_path / "autonomy"
+    subprocess.run(
+        ["git", "clone", "-q", str(upstream), str(target_repo)],
+        check=True,
+    )
+    monkeypatch.setattr(wm, "REPO_ROOT", target_repo)
+
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
+    (worktree / "ff.txt").write_text("ff-only\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "ff.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "ff-only merge",
+        ],
+        check=True,
+    )
+    worktree_head = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    result = wm.merge_session_worktree(
+        session, "autonomy", worktrees_dir=worktrees_dir,
+    )
+
+    target_head = subprocess.run(
+        ["git", "-C", str(target_repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert target_head == worktree_head
+    assert result["commit"] == worktree_head
+    assert result["message"] == "ff-only merge"
+    assert result["target_repo"] == str(target_repo)
+
+
+def test_merge_session_worktree_rejects_non_autonomy_repo(tmp_path, monkeypatch):
+    session = "sess-merge-unsupported"
+    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch,
+    )
+
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
+    (worktree / "ff.txt").write_text("ff-only\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "ff.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "ff-only unsupported",
+        ],
+        check=True,
+    )
+
+    with pytest.raises(wm.WorkspaceError, match="only 'autonomy'"):
+        wm.merge_session_worktree(
+            session, "upstream", worktrees_dir=worktrees_dir,
+        )

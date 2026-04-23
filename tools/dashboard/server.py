@@ -47,7 +47,13 @@ from agents.dispatch_db import (
 from agents.session_launcher import launch_session
 from agents import workspace_settings
 from agents.primer_renderer import render_workspace_primer
-from agents.workspace_manager import WorkspaceError, prepare_session_mounts
+from agents.workspace_manager import (
+    WorktreeState,
+    WorkspaceError,
+    cleanup_session_worktrees,
+    merge_session_worktree,
+    prepare_session_mounts,
+)
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao.mock import (
         create_design, get_design, submit_results,
@@ -75,6 +81,7 @@ from tools.dashboard.session_harness import (
     resolve_harness_for_session_row,
 )
 from tools.dashboard.session_monitor import count_tool_uses, session_monitor, TaskStateTracker
+from tools.dashboard.worktree_monitor import worktree_monitor
 from tools.dashboard.dao import auth_db, dashboard_db
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
@@ -4544,6 +4551,104 @@ async def page_sessions_fragment(request):
     """Return the Sessions page as an HTML fragment for SPA injection."""
     return templates.TemplateResponse(request, "pages/sessions.html")
 
+async def page_worktrees(request):
+    return HTMLResponse(_load_template("base.html"))
+
+async def page_worktrees_fragment(request):
+    """Return the Worktrees page as an HTML fragment for SPA injection."""
+    return templates.TemplateResponse(request, "pages/worktrees.html")
+
+def _worktree_state_json(row: WorktreeState) -> dict:
+    return {
+        "session_name": row.session_name,
+        "repo_name": row.repo_name,
+        "worktree_path": str(row.worktree_path),
+        "managed_clone": str(row.managed_clone) if row.managed_clone else None,
+        "branch": row.branch,
+        "commits_ahead": row.commits_ahead,
+        "is_dirty": row.is_dirty,
+        "ff_eligible": row.ff_eligible,
+        "session_live": row.session_live,
+    }
+
+def _cleanup_result_json(result) -> dict:
+    return {
+        "removed": list(result.removed),
+        "preserved": [
+            {"path": path, "reason": reason}
+            for path, reason in result.preserved
+        ],
+        "errors": [
+            {"path": path, "error": error}
+            for path, error in result.errors
+        ],
+    }
+
+async def api_worktrees(request):
+    return JSONResponse([
+        _worktree_state_json(row)
+        for row in worktree_monitor.get_all()
+    ])
+
+async def api_worktree_merge(request):
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+    row = next(
+        (
+            item for item in worktree_monitor.get_all()
+            if item.session_name == session_name and item.repo_name == repo_name
+        ),
+        None,
+    )
+    if row is None:
+        return JSONResponse({"error": "worktree not found"}, status_code=404)
+    if not row.ff_eligible:
+        return JSONResponse(
+            {
+                "error": "worktree is not ff-eligible",
+                "state": _worktree_state_json(row),
+            },
+            status_code=409,
+        )
+
+    try:
+        result = await asyncio.to_thread(
+            merge_session_worktree,
+            session_name,
+            repo_name,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    await worktree_monitor.refresh()
+    return JSONResponse({
+        "ok": True,
+        "commit": result.get("commit", ""),
+        "message": result.get("message", ""),
+    })
+
+async def api_worktree_cleanup(request):
+    session_name = request.path_params["session"]
+    force = False
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            force = bool(body.get("force"))
+    except Exception:
+        force = False
+
+    try:
+        result = await asyncio.to_thread(
+            cleanup_session_worktrees,
+            session_name,
+            force=force,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    await worktree_monitor.refresh()
+    return JSONResponse({"ok": True, **_cleanup_result_json(result)})
+
 async def api_dao_active_sessions(request):
     if os.environ.get("DASHBOARD_MOCK"):
         sessions = dao_sessions.get_active_sessions()
@@ -6529,6 +6634,8 @@ routes = [
     Route("/pages/dispatch", page_dispatch_fragment),
     Route("/sessions", page_sessions),
     Route("/pages/sessions", page_sessions_fragment),
+    Route("/worktrees", page_worktrees),
+    Route("/pages/worktrees", page_worktrees_fragment),
     Route("/pages/bead", page_bead_fragment),
     Route("/pages/timeline", page_timeline_fragment),
     Route("/pages/trace", page_trace_fragment),
@@ -6639,6 +6746,9 @@ routes = [
     Route("/api/active", api_active_sessions),
     Route("/api/dao/active_sessions", api_dao_active_sessions),
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
+    Route("/api/worktrees", api_worktrees),
+    Route("/api/worktrees/{session}/{repo}/merge", api_worktree_merge, methods=["POST"]),
+    Route("/api/worktrees/{session}/cleanup", api_worktree_cleanup, methods=["POST"]),
     Route("/api/dao/bead/{id}", api_dao_bead),
     Route("/api/terminals", api_terminals),
     Route("/api/terminal/{id}/kill", api_terminal_kill, methods=["POST"]),
@@ -6725,6 +6835,7 @@ _task_state_tracker = TaskStateTracker()
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task
     if os.environ.get("DASHBOARD_MOCK"):
+        await worktree_monitor.start()
         # Mock mode: skip real database init and session monitor.
         # Broadcast initial SSE events from fixture data so SSE-dependent
         # pages (dispatch) render without waiting.
@@ -6769,6 +6880,7 @@ async def _on_startup():
         harness=CLAUDE_HARNESS,
         todo_snapshot=_task_state_tracker.snapshot,
     )
+    await worktree_monitor.start()
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
@@ -6787,6 +6899,10 @@ async def _on_shutdown():
         await session_monitor.stop()
     except Exception:
         logger.exception("error during session_monitor.stop()")
+    try:
+        await worktree_monitor.stop()
+    except Exception:
+        logger.exception("error during worktree_monitor.stop()")
 
 @asynccontextmanager
 async def _lifespan(app):
