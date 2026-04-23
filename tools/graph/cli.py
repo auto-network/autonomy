@@ -733,6 +733,36 @@ def cmd_read(args):
             db.close()
 
 
+def _save_read_entries(
+    entries,
+    *,
+    source_type: str,
+    save_path: str,
+    max_chars: int = 0,
+    resolve_note_content=None,
+) -> None:
+    """Write `graph read --save` output to disk.
+
+    The HTTP read path receives already-rendered entry content from the API,
+    while the local DB path still needs note embed resolution before writing.
+    """
+    parts = []
+    for entry in entries:
+        content = entry.get("content") or ""
+        if source_type == "note" and resolve_note_content is not None:
+            content = resolve_note_content(content)
+        if max_chars and len(content) > max_chars:
+            content = content[:max_chars]
+        parts.append(content)
+
+    raw = "\n\n".join(parts)
+    save_file = Path(save_path)
+    save_file.parent.mkdir(parents=True, exist_ok=True)
+    save_file.write_text(raw)
+    _lines = raw.count("\n") + (1 if raw else 0)
+    print(f"  ✓ Saved to {save_path} ({_lines} lines, {len(raw)} chars)")
+
+
 def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") -> None:
     """Container path: fetch the source + content via /api/graph/{id}.
 
@@ -758,6 +788,15 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") 
         print(
             "Error: @version reads are only available on the host today",
             file=sys.stderr,
+        )
+        return
+    save_path = getattr(args, "save", None)
+    if save_path:
+        _save_read_entries(
+            entries,
+            source_type=source.get("type", ""),
+            save_path=save_path,
+            max_chars=args.max_chars,
         )
         return
     proj = f" [{source.get('project')}]" if source.get("project") else ""
@@ -853,20 +892,13 @@ def _cmd_read_body(args, source, db, version_req, _json):
     # --save: export raw content to file (no turn headers, no JSON)
     save_path = getattr(args, "save", None)
     if save_path:
-        parts = []
-        for e in entries:
-            content = e["content"]
-            if source.get("type") == "note":
-                content = _resolve_embeds_in_text(db, content)
-            if args.max_chars and len(content) > args.max_chars:
-                content = content[:args.max_chars]
-            parts.append(content)
-        raw = "\n\n".join(parts)
-        save_file = Path(save_path)
-        save_file.parent.mkdir(parents=True, exist_ok=True)
-        save_file.write_text(raw)
-        _lines = raw.count("\n") + (1 if raw else 0)
-        print(f"  ✓ Saved to {save_path} ({_lines} lines, {len(raw)} chars)")
+        _save_read_entries(
+            entries,
+            source_type=source.get("type", ""),
+            save_path=save_path,
+            max_chars=args.max_chars,
+            resolve_note_content=lambda content: _resolve_embeds_in_text(db, content),
+        )
         return
 
     # Get edges for this source

@@ -667,6 +667,23 @@ def test_cmd_read_routes_through_api(
     assert "Dispatch Lifecycle" in out
 
 
+def test_cmd_read_save_routes_through_api_and_writes_file(
+    api_client, forbid_cli_sqlite, seeded_source_id, capsys, monkeypatch, tmp_path,
+):
+    """``graph read --save`` should work in HTTP mode, not just local mode."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    save_path = tmp_path / "dispatch-lifecycle.md"
+    args = _cli_args(
+        source=seeded_source_id, first=False, max_chars=0, json=False,
+        all_comments=False, html_output=False, save=str(save_path),
+    )
+    graph_cli.cmd_read(args)
+    out = capsys.readouterr().out
+
+    assert f"Saved to {save_path}" in out
+    assert save_path.read_text() == "canonical signpost content"
+
+
 # ── Global-org default for scopeless reads (dashboard URLs) ───
 
 
