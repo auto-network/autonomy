@@ -472,7 +472,7 @@ def test_scan_all_worktrees_reports_state_per_session(tmp_path, monkeypatch):
 
 def test_merge_session_worktree_fast_forwards_matching_checkout(tmp_path, monkeypatch):
     session = "sess-merge"
-    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+    worktrees_dir, clone, worktree = _make_writable_session_worktree(
         tmp_path, session, monkeypatch, repo_name="autonomy",
     )
     upstream = next(tmp_path.glob("upstream.git"))
@@ -511,11 +511,16 @@ def test_merge_session_worktree_fast_forwards_matching_checkout(tmp_path, monkey
     assert result["commit"] == worktree_head
     assert result["message"] == "ff-only merge"
     assert result["target_repo"] == str(target_repo)
+    clone_head = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", f"refs/heads/{result['target_branch']}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert clone_head == worktree_head
 
 
 def test_merge_session_worktree_commit_fast_forwards_to_selected_commit(tmp_path, monkeypatch):
     session = "sess-merge-commit"
-    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+    worktrees_dir, clone, worktree = _make_writable_session_worktree(
         tmp_path, session, monkeypatch, repo_name="autonomy",
     )
     upstream = next(tmp_path.glob("upstream.git"))
@@ -576,6 +581,24 @@ def test_merge_session_worktree_commit_fast_forwards_to_selected_commit(tmp_path
     assert result["message"] == "first commit"
     assert (target_repo / "first.txt").exists()
     assert not (target_repo / "second.txt").exists()
+    clone_head = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", f"refs/heads/{result['target_branch']}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert clone_head == first_sha
+
+
+def test_cleanup_session_worktree_rejects_live_session(tmp_path, monkeypatch):
+    session = "sess-live"
+    worktrees_dir, _clone, _worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch,
+    )
+    monkeypatch.setattr(wm, "_live_session_names", lambda: {session})
+
+    with pytest.raises(wm.WorkspaceError, match="cannot discard live worktree"):
+        wm.cleanup_session_worktree(
+            session, "upstream", worktrees_dir=worktrees_dir, force=True,
+        )
 
 
 def test_merge_session_worktree_rejects_non_autonomy_repo(tmp_path, monkeypatch):

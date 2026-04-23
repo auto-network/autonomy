@@ -86,6 +86,18 @@ def _install_fake_monitor(monkeypatch, rows):
 
 
 class TestWorktreeAPI:
+    def test_count_worktrees_counts_dirty_only_rows_separately(self, monkeypatch):
+        from tools.dashboard import server
+
+        rows = [
+            _row(session="auto-commit", ahead=1, dirty=True),
+            _row(session="auto-dirty", ahead=0, dirty=True, commits=[]),
+            _row(session="auto-clean", ahead=0, dirty=False, commits=[]),
+        ]
+        monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: list(rows))
+
+        assert server._count_worktrees() == {"with_commits": 1, "with_changes": 1}
+
     def test_get_worktrees_serializes_cached_rows(self, test_client, monkeypatch):
         _server, _fake = _install_fake_monitor(monkeypatch, [_row()])
 
@@ -125,6 +137,15 @@ class TestWorktreeAPI:
                 "deletions": 3,
             },
         }]
+
+    def test_post_worktrees_refresh_forces_live_rescan(self, test_client, monkeypatch):
+        _server, fake = _install_fake_monitor(monkeypatch, [_row()])
+
+        resp = test_client.post("/api/worktrees/refresh")
+
+        assert resp.status_code == 200
+        assert len(resp.json()) == 1
+        assert fake.refresh_count == 1
 
     def test_merge_endpoint_fast_forwards_and_refreshes_cache(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row()])
@@ -305,6 +326,20 @@ class TestWorktreeAPI:
         assert called["args"] == ("auto-test", "autonomy", True)
         assert fake.refresh_count == 1
 
+    def test_discard_endpoint_surfaces_live_worktree_rejection(self, test_client, monkeypatch):
+        server, _fake = _install_fake_monitor(monkeypatch, [_row(dirty=True, live=True)])
+
+        def fake_cleanup(_session_name, _repo_name, *, force=False):
+            assert force is True
+            raise WorkspaceError("cannot discard live worktree for session auto-test")
+
+        monkeypatch.setattr(server, "cleanup_session_worktree", fake_cleanup)
+
+        resp = test_client.post("/api/worktrees/auto-test/autonomy/discard")
+
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "cannot discard live worktree for session auto-test"
+
 
 class TestWorktreePage:
     def test_worktrees_page_shell_and_fragment_render(self, test_client):
@@ -325,7 +360,11 @@ class TestWorktreePage:
     def test_static_js_wires_polling_and_actions(self):
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
         assert "fetch('/api/worktrees')" in js
+        assert "fetch('/api/worktrees/refresh', { method: 'POST' })" in js
         assert "'/api/worktrees/' + encodeURIComponent(row.session_name)" in js
+        assert "canDiscardDirtyRow(row)" in js
+        assert "fitPath(path, el)" in js
+        assert "repoName(row)" in js
         assert "row.repo_name === 'autonomy'" in js
         assert "'/commits/'" in js
         assert "'/merge'" in js
@@ -342,10 +381,17 @@ class TestWorktreePage:
 
     def test_template_uses_required_status_labels(self):
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
-        assert "LIVE" in (JS_DIR / "pages" / "worktrees.js").read_text()
-        assert "ORPHANED" in (JS_DIR / "pages" / "worktrees.js").read_text()
-        assert "DEAD-CLEAN" in (JS_DIR / "pages" / "worktrees.js").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+        assert "LIVE" in js
+        assert "ORPHANED" in js
+        assert "DEAD-CLEAN" in js
         assert "Worktrees" in template
         assert "Commits" in template
         assert "Changes" in template
+        assert 'x-markdown="selectedCommit.commit.body"' in template
+        assert 'x-text="fitPath(file.path, $el)"' in template
+        assert 'x-text="repoName(item.row)"' in template
+        assert "changesCompanionCommitLabel(row)" in template
+        assert "1 commit also present" in js
+        assert 'x-show="canDiscardDirtyRow(row)"' in template
         assert "Are you sure you want to delete this Worktree?" in template

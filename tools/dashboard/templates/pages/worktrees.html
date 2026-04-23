@@ -62,6 +62,7 @@
 <div x-data="worktreesPage()" class="pb-safe text-gray-100" data-testid="worktrees-page">
   <section class="px-4 py-4 md:px-6 md:py-6">
     <div class="mx-auto max-w-7xl">
+      <div x-show="!hasOverlayOpen()">
       <div class="mb-5 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 border-b border-white/10 pb-5">
         <div class="min-w-0 pr-1 md:pr-6">
           <h2 class="text-3xl font-semibold tracking-tight text-white md:text-5xl">Worktrees</h2>
@@ -86,15 +87,24 @@
 
       <div class="mb-5 grid grid-cols-3 gap-2 md:gap-4" data-testid="worktrees-summary">
         <div class="rounded-2xl border border-white/10 bg-slate-950/70 p-3 md:p-5">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Commits (All Repos)</div>
+          <div class="min-h-[2.25rem] text-[9px] font-semibold leading-4 tracking-[0.08em] text-slate-500 sm:min-h-0 sm:text-[10px] sm:tracking-[0.18em]">
+            <div>Commits</div>
+            <div class="whitespace-nowrap">(All Repos)</div>
+          </div>
           <div class="mt-1 text-3xl font-semibold text-white" x-text="commitItems.length"></div>
         </div>
         <div class="rounded-2xl border border-indigo-500/20 bg-indigo-500/[0.08] p-3 md:p-5">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Commits (Autonomy)</div>
+          <div class="min-h-[2.25rem] text-[9px] font-semibold leading-4 tracking-[0.08em] text-slate-500 sm:min-h-0 sm:text-[10px] sm:tracking-[0.18em]">
+            <div>Commits</div>
+            <div class="whitespace-nowrap">(Autonomy)</div>
+          </div>
           <div class="mt-1 text-3xl font-semibold text-indigo-300" x-text="autonomyCommitCount"></div>
         </div>
         <div class="rounded-2xl border border-white/10 bg-slate-950/45 p-3 md:p-5">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Uncommitted Changes</div>
+          <div class="min-h-[2.25rem] text-[9px] font-semibold leading-4 tracking-[0.06em] text-slate-500 sm:min-h-0 sm:text-[10px] sm:tracking-[0.18em]">
+            <div>Uncommitted</div>
+            <div class="whitespace-nowrap">Changes</div>
+          </div>
           <div class="mt-1 text-3xl font-semibold text-slate-300" x-text="uncommittedOnlyCount"></div>
         </div>
       </div>
@@ -104,7 +114,7 @@
           <button type="button"
                   class="rounded-xl px-3 py-2 transition"
                   :class="viewMode === 'commits' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'"
-                  @click="viewMode = 'commits'">Commits</button>
+                  @click="viewMode = 'commits'; queueBranchLayouts()">Commits</button>
           <button type="button"
                   class="rounded-xl px-3 py-2 transition"
                   :class="viewMode === 'changes' ? 'bg-amber-300 text-slate-950' : 'text-slate-400 hover:text-slate-200'"
@@ -158,24 +168,41 @@
                 <button type="button"
                         class="h-10 shrink-0 rounded-2xl bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500"
                         @click="selectCommit(item)"
-                        data-testid="review-commit-button">Review commit</button>
+                        data-testid="review-commit-button">Review</button>
               </div>
 
               <div class="min-w-0">
-                <button type="button" class="block max-w-4xl text-left" @click="selectCommit(item)">
-                  <div class="mt-1 flex flex-wrap items-center gap-2">
-                    <span class="rounded-full bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-300">
-                      <span class="mr-1 uppercase tracking-wider text-slate-500">src</span>
-                      <span x-text="sourceBranch(item.row)"></span>
+                <button type="button" class="block w-full min-w-0 text-left" @click="selectCommit(item)">
+                  <div class="mt-1 flex flex-col items-start gap-1.5"
+                       data-branch-row>
+                    <span class="inline-flex min-w-0 items-center gap-2"
+                          data-branch-part="src">
+                      <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
+                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                              x-text="repoName(item.row)"></span>
+                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                              x-text="sourceBranch(item.row)"></span>
+                      </span>
                     </span>
-                    <span class="text-xs text-slate-600">→</span>
-                    <span class="rounded-full bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-200">
-                      <span class="mr-1 uppercase tracking-wider text-slate-500">dst</span>
-                      <span x-text="targetBranch(item.row)"></span>
+                    <span class="text-xs text-slate-600"
+                          data-branch-part="arrow"
+                          aria-hidden="true">→</span>
+                    <span class="inline-flex min-w-0 items-center gap-2"
+                          data-branch-part="dst">
+                      <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
+                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                              x-text="repoName(item.row)"></span>
+                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                              x-text="targetBranch(item.row)"></span>
+                      </span>
                     </span>
                   </div>
-                  <h3 class="mt-3 text-xl font-semibold leading-7 text-white md:text-2xl" x-text="item.commit.subject"></h3>
-                  <p class="mt-3 line-clamp-3 text-sm leading-6 text-slate-400" x-text="item.commit.body || 'No commit body.'"></p>
+                  <h3 class="mt-3 min-w-0 overflow-hidden break-words text-xl font-semibold leading-7 text-white md:text-2xl"
+                      x-text="item.commit.subject"></h3>
+                  <p class="mt-3 line-clamp-3 min-w-0 overflow-hidden whitespace-pre-wrap break-words text-sm leading-6 text-slate-400"
+                     x-text="item.commit.body || 'No commit body.'"></p>
                 </button>
               </div>
 
@@ -194,7 +221,7 @@
                       <span class="text-center font-mono text-[10px] font-bold text-indigo-200" x-text="file.status"></span>
                       <span class="min-w-0 overflow-hidden whitespace-nowrap font-mono text-[11px] leading-4 text-slate-300"
                             :title="file.path"
-                            x-text="displayPath(file.path)"></span>
+                            x-text="fitPath(file.path, $el)"></span>
                       <span class="inline-flex shrink-0 items-center gap-1 font-mono text-[10px]">
                         <span class="text-emerald-300" x-text="'+' + file.additions"></span>
                         <span class="text-rose-300" x-text="'-' + file.deletions"></span>
@@ -243,18 +270,24 @@
                 </span>
                 <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                       x-text="row.session_name"></span>
+                <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
+                  <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
+                  <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
+                        x-text="repoName(row)"></span>
+                </span>
                 <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
                       :class="statusClass(row)"
                       x-text="statusLabel(row)"></span>
-                <span class="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
-                      x-text="commitList(row).length ? commitList(row).length + ' commits also present' : 'changes only'"></span>
+                <span class="hidden rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400 sm:inline-flex"
+                      x-text="changesCompanionCommitLabel(row)"></span>
               </div>
               <div class="flex shrink-0 items-center gap-2">
                 <button type="button"
                         class="h-10 rounded-2xl bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500"
                         @click="selectDirtyRow(row)"
                         data-testid="review-dirty-button">View Diffs</button>
-                <button type="button"
+                <button x-show="canDiscardDirtyRow(row)"
+                        type="button"
                         class="h-10 rounded-2xl border border-rose-500/40 px-4 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/10 disabled:cursor-wait disabled:opacity-50"
                         :disabled="isCleaningRow(row)"
                         @click="openDiscardConfirm(row)"
@@ -280,7 +313,7 @@
                           x-text="displayStatus(file.status)"></span>
                     <span class="min-w-0 overflow-hidden whitespace-nowrap font-mono text-[11px] leading-4 text-slate-300"
                           :title="file.path"
-                          x-text="displayPath(file.path)"></span>
+                          x-text="fitPath(file.path, $el)"></span>
                   </div>
                 </template>
               </div>
@@ -290,6 +323,7 @@
             </div>
           </article>
         </template>
+      </div>
       </div>
 
       <template x-if="confirmDiscardRow">
@@ -319,60 +353,89 @@
 
       <template x-if="selectedCommit">
         <div class="fixed inset-0 z-50 overflow-y-auto bg-gray-950"
+             x-ref="commitDetailScroller"
+             @scroll.passive="syncReviewHeaderState()"
              data-testid="worktree-commit-detail">
           <section class="min-h-screen bg-gray-950">
             <div class="mx-auto max-w-6xl px-4 pb-8 pt-4 sm:px-6 lg:px-8">
-              <div class="sticky top-0 z-10 -mx-4 mb-6 border-b border-white/10 bg-gray-950/95 px-4 pb-4 pt-1 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+              <div class="-mx-4 mb-4 px-4 pt-1 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
                 <div class="mx-auto max-w-6xl">
-                  <div class="mb-2 grid items-start gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:gap-3">
+                  <div class="relative mb-2 pr-12">
                     <div class="flex min-w-0 flex-wrap items-center gap-2">
                       <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                             x-text="selectedCommit.commit.short_sha || shortSha(selectedCommit.commit.sha)"></span>
                       <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                             x-text="selectedCommit.row.session_name"></span>
-                      <span class="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-300"
-                            x-text="selectedCommit.row.repo_name"></span>
                       <span class="rounded-full bg-slate-800 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-400"
                             x-text="selectedCommit.commit.date"></span>
+                      <template x-if="selectedCommit.total > 1">
+                        <div class="flex items-center gap-1">
+                          <button type="button"
+                                  class="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-sm font-semibold text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
+                                  :disabled="!hasEarlierCommit()"
+                                  @click="viewEarlierCommit()">&lt;</button>
+                          <span class="rounded-full bg-slate-800 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-300"
+                                x-text="'commit ' + selectedCommit.position + ' of ' + selectedCommit.total"></span>
+                          <button type="button"
+                                  class="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-sm font-semibold text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
+                                  :disabled="!hasLaterCommit()"
+                                  @click="viewLaterCommit()">&gt;</button>
+                        </div>
+                      </template>
                     </div>
-                    <template x-if="selectedCommit.total > 1">
-                      <div class="flex items-center justify-start gap-1 sm:justify-center">
-                        <button type="button"
-                                class="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-sm font-semibold text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
-                                :disabled="!hasEarlierCommit()"
-                                @click="viewEarlierCommit()">&lt;</button>
-                        <span class="rounded-full bg-slate-800 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-300"
-                              x-text="'commit ' + selectedCommit.position + ' of ' + selectedCommit.total"></span>
-                        <button type="button"
-                                class="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-sm font-semibold text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
-                                :disabled="!hasLaterCommit()"
-                                @click="viewLaterCommit()">&gt;</button>
-                      </div>
-                    </template>
                     <button type="button"
-                            class="h-10 w-10 shrink-0 justify-self-end rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
+                            class="absolute right-0 top-0 h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
                             @click="selectedCommit = null">×</button>
                   </div>
-                  <div class="mt-1 flex max-w-4xl flex-wrap items-center gap-2">
-                    <span class="rounded-full bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-300">
-                      <span class="mr-1 uppercase tracking-wider text-slate-500">Source</span>
-                      <span x-text="sourceBranch(selectedCommit.row)"></span>
+                  <div class="mt-1 flex max-w-4xl flex-col items-start gap-1.5"
+                       data-branch-row>
+                    <span class="inline-flex min-w-0 items-center gap-2"
+                          data-branch-part="src">
+                      <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
+                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                              x-text="repoName(selectedCommit.row)"></span>
+                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                              x-text="sourceBranch(selectedCommit.row)"></span>
+                      </span>
                     </span>
-                    <span class="text-sm text-slate-600">→</span>
-                    <span class="rounded-full bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-200">
-                      <span class="mr-1 uppercase tracking-wider text-slate-500">Target</span>
-                      <span x-text="targetBranch(selectedCommit.row)"></span>
+                    <span class="text-sm text-slate-600"
+                          data-branch-part="arrow"
+                          aria-hidden="true">→</span>
+                    <span class="inline-flex min-w-0 items-center gap-2"
+                          data-branch-part="dst">
+                      <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
+                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                              x-text="repoName(selectedCommit.row)"></span>
+                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                              x-text="targetBranch(selectedCommit.row)"></span>
+                      </span>
                     </span>
                   </div>
-                  <h3 class="mt-3 max-w-4xl text-2xl font-semibold leading-8 text-white sm:text-3xl" x-text="selectedCommit.commit.subject"></h3>
+                </div>
+              </div>
+
+              <div x-ref="commitTitleBar"
+                   class="sticky top-0 z-10 -mx-4 border-y border-white/10 bg-gray-950/95 px-4 backdrop-blur transition-all duration-200 ease-out sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8"
+                   :class="reviewTitlePinned ? 'py-2' : 'py-3'">
+                <div class="mx-auto max-w-6xl">
+                  <h3 class="max-w-4xl font-semibold text-white transition-all duration-200 ease-out"
+                      :class="reviewTitlePinned ? 'text-base leading-5 sm:text-3xl sm:leading-9' : 'text-2xl leading-8 sm:text-3xl sm:leading-9'"
+                      x-text="selectedCommit.commit.subject"></h3>
                 </div>
               </div>
 
               <div>
-                <div class="mb-6 max-w-4xl text-sm leading-6 text-slate-300" x-text="selectedCommit.commit.body || 'No commit body.'"></div>
+                <template x-if="(selectedCommit.commit.body || '').trim()">
+                  <div class="mb-6 max-w-4xl text-sm leading-6 text-slate-300"
+                       x-markdown="selectedCommit.commit.body"></div>
+                </template>
 
                 <div class="mb-6">
-                  <div class="mb-2 flex items-center justify-between gap-3">
+                  <div x-ref="commitFilesHeader"
+                       class="sticky z-[8] -mx-2 mb-2 flex items-center justify-between gap-3 border-y border-white/10 bg-gray-950/95 px-2 py-2 backdrop-blur"
+                       :style="'top:' + commitStickyTop + 'px'">
                     <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Files in this commit</div>
                     <div class="flex items-center gap-3">
                       <div class="flex shrink-0 items-center gap-2 font-mono text-[10px] text-slate-500">
@@ -389,11 +452,13 @@
                   <div class="divide-y divide-white/10 border-y border-white/10">
                     <template x-for="file in selectedCommit.commit.files" :key="selectedCommit.commit.sha + file.status + file.path">
                       <div :class="showDiff ? 'py-3' : 'py-1.5'">
-                        <div class="grid grid-cols-[0.85rem_minmax(0,1fr)_auto] items-center gap-1.5">
+                        <div class="grid grid-cols-[0.85rem_minmax(0,1fr)_auto] items-center gap-1.5"
+                             :class="showDiff ? 'sticky z-[7] -mx-2 border-b border-white/10 bg-gray-950/95 px-2 py-1.5 backdrop-blur' : ''"
+                             :style="showDiff ? 'top:' + commitFileRowStickyTop + 'px' : ''">
                           <span class="text-center font-mono text-[10px] font-bold text-indigo-200" x-text="file.status"></span>
                           <span class="min-w-0 overflow-hidden whitespace-nowrap font-mono text-[11px] leading-4 text-slate-300"
                                 :title="file.path"
-                                x-text="displayPath(file.path)"></span>
+                                x-text="fitPath(file.path, $el)"></span>
                           <span class="inline-flex shrink-0 items-center gap-1 font-mono text-[11px]">
                             <span class="text-emerald-300" x-text="'+' + file.additions"></span>
                             <span class="text-rose-300" x-text="'-' + file.deletions"></span>
@@ -496,8 +561,11 @@
                       <div class="mb-2 flex flex-wrap items-center gap-2">
                         <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                               x-text="selectedDirtyRow.session_name"></span>
-                        <span class="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-300"
-                              x-text="selectedDirtyRow.repo_name"></span>
+                        <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
+                          <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
+                          <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
+                                x-text="repoName(selectedDirtyRow)"></span>
+                        </span>
                         <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
                               :class="statusClass(selectedDirtyRow)"
                               x-text="statusLabel(selectedDirtyRow)"></span>
@@ -534,7 +602,7 @@
                                 x-text="displayStatus(file.status)"></span>
                           <span class="min-w-0 overflow-hidden whitespace-nowrap font-mono text-[11px] leading-4 text-slate-300"
                                 :title="file.path"
-                                x-text="displayPath(file.path)"></span>
+                                x-text="fitPath(file.path, $el)"></span>
                         </div>
                         <template x-if="showDiff && patchLinesForFile(selectedDirtyRow, file).length">
                           <div class="mt-2 overflow-x-auto">
