@@ -225,6 +225,7 @@ class WorkspaceV1:
     description: str
     image: str
     graph_project: str
+    harness: str = "claude"
     repos: tuple[RepoMount, ...] = ()
     working_dir: str | None = None
     startup: str | None = None
@@ -282,12 +283,18 @@ def _workspace_from_setting(
     )
     env_raw = setting_payload.get("env") or {}
     env = {str(k): str(v) for k, v in env_raw.items()}
+    harness = setting_payload.get("harness") or "claude"
+    if not isinstance(harness, str) or harness not in {"claude", "codex"}:
+        raise WorkspaceSettingsError(
+            f"workspace {workspace_id!r}: invalid harness {harness!r}"
+        )
     return WorkspaceV1(
         id=workspace_id,
         name=str(setting_payload.get("name") or workspace_id),
         description=str(setting_payload.get("description") or ""),
         image=image,
         graph_project=graph_project,
+        harness=harness,
         repos=repos,
         working_dir=(setting_payload.get("working_dir") or None),
         startup=(setting_payload.get("startup") or None),

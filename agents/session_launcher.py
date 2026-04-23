@@ -144,6 +144,7 @@ def launch_session(
     detach: bool = True,
     image: str = DEFAULT_IMAGE,
     working_dir: str = "/workspace/repo",
+    harness: str = "claude",
     extra_env: dict | None = None,
     output_dir: str | None = None,
     model: str = DEFAULT_OPUS_MODEL,
@@ -153,7 +154,7 @@ def launch_session(
     startup_script: str | Path | None = None,
     network_host: bool = True,
 ) -> str | None:
-    """Launch a Claude agent container session.
+    """Launch an agent container session.
 
     Handles credential resolution, session directory creation, .session_meta.json
     writing, default volume mounts, and docker command building/execution.
@@ -171,6 +172,9 @@ def launch_session(
                         shell-safe string for the caller to pass to tmux.
         image: Docker image to use.
         working_dir: Working directory inside the container.
+        harness: Interactive CLI to launch inside the container. ``claude``
+                    remains the default; ``codex`` is currently supported
+                    only for prompt-less interactive sessions.
         extra_env: Additional environment variables {key: value}.
         output_dir: Pre-created output directory. If None, a new directory under
                     data/agent-runs/ is created using name + UTC timestamp.
@@ -202,14 +206,27 @@ def launch_session(
         detach=True:  container_id string on success, None on failure.
         detach=False: docker command string on success, None on failure.
     """
-    # ── Credentials ───────────────────────────────────────────
-    creds = _resolve_credentials()
-    if creds is None:
+    if harness not in {"claude", "codex"}:
         print(
-            f"  ERROR: No Claude credentials found for {session_type} session '{name}'",
+            f"  ERROR: unsupported harness {harness!r} for session '{name}'",
             file=sys.stderr,
         )
         return None
+
+    # ── Credentials ───────────────────────────────────────────
+    # Claude sessions need host auth injected into the container. Codex
+    # sessions use the optional ~/.codex mounts instead, so they must not
+    # hard-fail on missing Claude credentials.
+    auth_args: list[str] = []
+    creds: dict | None = None
+    if harness == "claude":
+        creds = _resolve_credentials()
+        if creds is None:
+            print(
+                f"  ERROR: No Claude credentials found for {session_type} session '{name}'",
+                file=sys.stderr,
+            )
+            return None
 
     # ── Session directory setup ────────────────────────────────
     if resume_uuid and not output_dir:
@@ -243,6 +260,7 @@ def launch_session(
             "type": session_type,
             "container_name": name,
             "launched_at": datetime.now(timezone.utc).isoformat(),
+            "harness": harness,
         }
         if metadata:
             meta_doc.update(metadata)
@@ -253,23 +271,29 @@ def launch_session(
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
 
     # ── Auth args (may copy creds file into run_dir) ───────────
-    auth_args = _setup_auth_docker_args(creds, run_dir)
-    if auth_args is None:
-        print(
-            f"  ERROR: Unrecognised credential type for {session_type} session '{name}'",
-            file=sys.stderr,
-        )
-        return None
+    if creds is not None:
+        auth_args = _setup_auth_docker_args(creds, run_dir)
+        if auth_args is None:
+            print(
+                f"  ERROR: Unrecognised credential type for {session_type} session '{name}'",
+                file=sys.stderr,
+            )
+            return None
 
     # ── Build default volume mount table ──────────────────────
     # Key: host path.  Value: container_path[:mode]
     # The table is ordered; callers can override any entry by matching container path.
+    transcript_mount = (
+        "/home/agent/.codex/sessions"
+        if harness == "codex"
+        else "/home/agent/.claude/projects"
+    )
     default_mounts: dict[str, str] = {
         str(REPO_ROOT): "/workspace/repo:ro",
         str(REPO_ROOT / "data" / "graph.db"): "/home/agent/graph.db:ro",
         str(REPO_ROOT / ".beads"): "/data/.beads",
         str(run_dir): "/workspace/output",
-        str(sessions_dir): "/home/agent/.claude/projects",
+        str(sessions_dir): transcript_mount,
     }
 
     # Apply caller overrides: if a caller mount targets the same container path
@@ -371,6 +395,13 @@ def launch_session(
     # Write prompt to file instead of passing on command line — avoids the
     # prompt text appearing in /proc/cmdline where pkill -f can match it.
     if prompt is not None:
+        if harness != "claude":
+            print(
+                f"  ERROR: prompt mode is only implemented for Claude sessions "
+                f"('{name}')",
+                file=sys.stderr,
+            )
+            return None
         prompt_file = run_dir / ".prompt.md"
         prompt_file.write_text(prompt)
         resume_flag = f" --resume {resume_uuid}" if resume_uuid else ""
@@ -381,12 +412,29 @@ def launch_session(
         else:
             cmd += ["--entrypoint", "sh", image, "-c", shell_cmd]
     else:
-        if privileged:
-            cmd += [image, "claude", "--dangerously-skip-permissions", "--model", model]
+        if harness == "claude":
+            if privileged:
+                cmd += [image, "claude", "--dangerously-skip-permissions", "--model", model]
+            else:
+                cmd += [image, "--dangerously-skip-permissions", "--model", model]
+            if resume_uuid:
+                cmd += ["--resume", resume_uuid]
         else:
-            cmd += [image, "--dangerously-skip-permissions", "--model", model]
-        if resume_uuid:
-            cmd += ["--resume", resume_uuid]
+            if resume_uuid:
+                print(
+                    f"  ERROR: Codex resume is not implemented yet for '{name}'",
+                    file=sys.stderr,
+                )
+                return None
+            codex_args = [
+                "codex",
+                "--no-alt-screen",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ]
+            if privileged:
+                cmd += [image, *codex_args]
+            else:
+                cmd += ["--entrypoint", "codex", image, *codex_args[1:]]
 
     # ── Execute or return ──────────────────────────────────────
     if detach:
@@ -415,7 +463,7 @@ def launch_session(
             return None
 
         # Schedule credential cleanup after container exits
-        creds_copy = creds.get("creds_copy")
+        creds_copy = creds.get("creds_copy") if creds else None
         if creds_copy:
             _schedule_creds_cleanup(container_id, creds_copy)
 

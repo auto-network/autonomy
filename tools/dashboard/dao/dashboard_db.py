@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     tmux_name       TEXT PRIMARY KEY,
     session_uuid    TEXT,
     graph_source_id TEXT,
+    harness         TEXT NOT NULL DEFAULT 'claude',
+    harness_state   TEXT NOT NULL DEFAULT '{}',
     type            TEXT NOT NULL,
     project         TEXT NOT NULL,
     jsonl_path      TEXT,
@@ -156,6 +158,17 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN role TEXT DEFAULT ''")
         _conn.commit()
+    # Migrate: add harness routing columns if missing
+    try:
+        _conn.execute("SELECT harness FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude'")
+        _conn.commit()
+    try:
+        _conn.execute("SELECT harness_state FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN harness_state TEXT NOT NULL DEFAULT '{}'")
+        _conn.commit()
     # Migrate: add resolution_dir, session_uuids, curr_jsonl_file columns (Phase 0)
     try:
         _conn.execute("SELECT resolution_dir FROM tmux_sessions LIMIT 0")
@@ -196,6 +209,8 @@ def insert_session(
     session_type: str,
     project: str,
     *,
+    harness: str = "claude",
+    harness_state: str = "{}",
     bead_id: str | None = None,
     jsonl_path: str | None = None,
     session_uuid: str | None = None,
@@ -210,10 +225,12 @@ def insert_session(
     curr_jsonl_file = jsonl_path  # initially same as jsonl_path
     conn.execute(
         "INSERT INTO tmux_sessions"
-        " (tmux_name, type, project, bead_id, jsonl_path, session_uuid,"
+        " (tmux_name, type, project, harness, harness_state,"
+        "  bead_id, jsonl_path, session_uuid,"
         "  resolution_dir, session_uuids, curr_jsonl_file, created_at, is_live)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
-        (tmux_name, session_type, project, bead_id, jsonl_path, session_uuid,
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+        (tmux_name, session_type, project, harness, harness_state,
+         bead_id, jsonl_path, session_uuid,
          resolution_dir, session_uuids, curr_jsonl_file, time.time()),
     )
     conn.commit()
@@ -609,6 +626,8 @@ def upsert_session(
     session_type: str,
     project: str,
     *,
+    harness: str = "claude",
+    harness_state: str = "{}",
     bead_id: str | None = None,
     jsonl_path: str | None = None,
     session_uuid: str | None = None,
@@ -629,11 +648,14 @@ def upsert_session(
     conn = get_conn()
     conn.execute(
         "INSERT INTO tmux_sessions"
-        " (tmux_name, type, project, bead_id, jsonl_path, session_uuid,"
+        " (tmux_name, type, project, harness, harness_state,"
+        "  bead_id, jsonl_path, session_uuid,"
         "  resolution_dir, session_uuids, curr_jsonl_file,"
         "  created_at, is_live, file_offset, last_message, label)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(tmux_name) DO UPDATE SET"
+        "  harness = excluded.harness,"
+        "  harness_state = excluded.harness_state,"
         "  jsonl_path = excluded.jsonl_path,"
         "  session_uuid = excluded.session_uuid,"
         "  resolution_dir = COALESCE(excluded.resolution_dir, resolution_dir),"
@@ -651,7 +673,8 @@ def upsert_session(
         "    WHEN excluded.is_live=1 AND activity_state='dead' THEN 'idle'"
         "    ELSE activity_state END",
         (
-            tmux_name, session_type, project, bead_id, jsonl_path, session_uuid,
+            tmux_name, session_type, project, harness, harness_state,
+            bead_id, jsonl_path, session_uuid,
             resolution_dir, session_uuids, curr_jsonl_file,
             created_at or time.time(), 1 if is_live else 0, file_offset, last_message,
             label,
