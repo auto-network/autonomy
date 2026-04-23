@@ -57,6 +57,32 @@
   .merge-confetti-glow {
     animation: mergeConfettiGlow 760ms ease-out forwards;
   }
+
+  .worktree-review-overlay {
+    overflow-x: hidden;
+    overscroll-behavior-x: none;
+  }
+
+  .worktree-review-shell {
+    overflow-x: hidden;
+  }
+
+  .worktree-diff-scroller {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  @supports (padding-top: env(safe-area-inset-top)) {
+    .worktree-review-overlay {
+      padding-top: env(safe-area-inset-top);
+      padding-right: env(safe-area-inset-right);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+    }
+  }
 </style>
 
 <div x-data="worktreesPage()" class="pb-safe text-gray-100" data-testid="worktrees-page">
@@ -383,11 +409,11 @@
       </template>
 
       <template x-if="selectedCommit">
-        <div class="fixed inset-0 z-50 overflow-y-auto bg-gray-950"
+        <div class="worktree-review-overlay fixed inset-0 z-50 overflow-y-auto bg-gray-950"
              x-ref="commitDetailScroller"
              @scroll.passive="syncReviewHeaderState()"
              data-testid="worktree-commit-detail">
-          <section class="min-h-screen bg-gray-950">
+          <section class="worktree-review-shell min-h-screen bg-gray-950">
             <div class="mx-auto max-w-6xl px-4 pb-8 pt-4 sm:px-6 lg:px-8">
               <div class="-mx-4 mb-4 px-4 pt-1 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
                 <div class="mx-auto max-w-6xl">
@@ -496,7 +522,7 @@
                           </span>
                         </div>
                         <template x-if="showDiff && patchLinesForFile(selectedCommit, file).length">
-                          <div class="mt-2 overflow-x-auto">
+                          <div class="worktree-diff-scroller mt-2">
                             <div class="min-w-full w-max">
                               <template x-for="(line, idx) in patchLinesForFile(selectedCommit, file)" :key="file.path + '-' + idx">
                                 <div class="grid min-w-full w-max grid-cols-[2rem_2rem_0.75rem_max-content] items-start gap-0 font-mono text-[11px] leading-5"
@@ -608,11 +634,11 @@
       </template>
 
       <template x-if="selectedDirtyRow">
-        <div class="fixed inset-0 z-50 overflow-y-auto bg-gray-950"
+        <div class="worktree-review-overlay fixed inset-0 z-50 overflow-y-auto bg-gray-950"
              x-ref="dirtyDetailScroller"
              @scroll.passive="syncReviewHeaderState()"
              data-testid="worktree-dirty-detail">
-          <section class="min-h-screen bg-gray-950">
+          <section class="worktree-review-shell min-h-screen bg-gray-950">
             <div class="mx-auto max-w-6xl px-4 pb-8 pt-4 sm:px-6 lg:px-8">
               <div class="-mx-4 mb-4 px-4 pt-1 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
                 <div class="mx-auto max-w-6xl">
@@ -675,7 +701,7 @@
                                 x-text="fitPath(file.path, $el)"></span>
                         </div>
                         <template x-if="showDiff && patchLinesForFile(selectedDirtyRow, file).length">
-                          <div class="mt-2 overflow-x-auto">
+                          <div class="worktree-diff-scroller mt-2">
                             <div class="min-w-full w-max">
                               <template x-for="(line, idx) in patchLinesForFile(selectedDirtyRow, file)" :key="file.path + '-' + idx">
                                 <div class="grid min-w-full w-max grid-cols-[2rem_2rem_0.75rem_max-content] items-start gap-0 font-mono text-[11px] leading-5"
