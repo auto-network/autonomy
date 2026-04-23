@@ -526,6 +526,37 @@ def _worktree_commit_shas(worktree: Path, *, base_ref: str | None = None) -> lis
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def _target_branch_contains_commit(repo: Path, branch: str, sha: str) -> bool:
+    """Return True when ``sha`` is already reachable from ``repo``'s ``branch``."""
+    rc, _, _ = _git_output(
+        ["merge-base", "--is-ancestor", sha, f"refs/heads/{branch}"],
+        repo,
+        timeout=15,
+    )
+    return rc == 0
+
+
+def _dashboard_pending_commit_shas(
+    worktree: Path,
+    repo_name: str,
+    *,
+    base_ref: str | None = None,
+) -> list[str]:
+    """Return worktree ahead SHAs that are not already merged into the target repo."""
+    pending = _worktree_commit_shas(worktree, base_ref=base_ref)
+    if repo_name != "autonomy":
+        return pending
+
+    target_branch, _target_head = _autonomy_target_branch_and_head()
+    if target_branch is None:
+        return pending
+
+    return [
+        sha for sha in pending
+        if not _target_branch_contains_commit(REPO_ROOT, target_branch, sha)
+    ]
+
+
 def _commit_file_changes(worktree: Path, sha: str) -> list[GitFileChange]:
     """Return file-level status and numstat details for one commit."""
     numstats: dict[str, tuple[int, int]] = {}
@@ -628,10 +659,15 @@ def _read_worktree_commit(
     )
 
 
-def _worktree_commits(worktree: Path, *, base_ref: str | None = None) -> list[WorktreeCommit]:
-    """Return commit details for commits ahead of the merge base ref."""
+def _worktree_commits(
+    worktree: Path,
+    repo_name: str,
+    *,
+    base_ref: str | None = None,
+) -> list[WorktreeCommit]:
+    """Return dashboard-pending commit details for one worktree."""
     commits: list[WorktreeCommit] = []
-    for sha in _worktree_commit_shas(worktree, base_ref=base_ref):
+    for sha in _dashboard_pending_commit_shas(worktree, repo_name, base_ref=base_ref):
         commit = _read_worktree_commit(worktree, sha)
         if commit is not None:
             commits.append(commit)
@@ -702,11 +738,11 @@ def scan_all_worktrees(
             # Preserve the previous safety behavior: if git status fails,
             # treat the worktree as dirty even though paths are unavailable.
             is_dirty = True if dirty_files_or_none is None else bool(dirty_files)
-            commits = _worktree_commits(repo_dir, base_ref=base_ref)
-            commits_ahead = len(commits)
+            commits = _worktree_commits(repo_dir, repo_dir.name, base_ref=base_ref)
+            commits_ahead = _worktree_commits_ahead(repo_dir, base_ref=base_ref)
             ff_eligible = (
                 branch is not None
-                and commits_ahead > 0
+                and bool(commits)
                 and not is_dirty
                 and _worktree_ff_only_safe(repo_dir, base_ref=base_ref)
             )
@@ -1118,7 +1154,7 @@ def get_session_worktree_commit_detail(
     )
     base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
     resolved = _resolve_worktree_commit(worktree, sha)
-    pending = _worktree_commit_shas(worktree, base_ref=base_ref)
+    pending = _dashboard_pending_commit_shas(worktree, repo_name, base_ref=base_ref)
     if resolved not in pending:
         raise WorkspaceError(f"commit is not in worktree ahead range: {sha}")
     commit = _read_worktree_commit(worktree, resolved, include_patch=True)
@@ -1158,7 +1194,6 @@ def get_session_worktree_dirty_detail(
         patch=_worktree_dirty_patch(worktree),
     )
 
-
 def merge_session_worktree_commit(
     session_name: str,
     repo_name: str,
@@ -1181,7 +1216,7 @@ def merge_session_worktree_commit(
 
     base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
     resolved = _resolve_worktree_commit(worktree, sha)
-    pending = _worktree_commit_shas(worktree, base_ref=base_ref)
+    pending = _dashboard_pending_commit_shas(worktree, repo_name, base_ref=base_ref)
     if resolved not in pending:
         raise WorkspaceError(f"commit is not in worktree ahead range: {sha}")
     if not pending or pending[0] != resolved:
