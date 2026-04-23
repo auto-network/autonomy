@@ -597,78 +597,6 @@ def prune_orphan_worktrees(
     return results
 
 
-def _git_remote_url(repo: Path) -> str | None:
-    rc, out, _ = _git_output(["config", "--get", "remote.origin.url"], repo, timeout=15)
-    if rc != 0:
-        return None
-    raw = out.strip()
-    return raw or None
-
-
-def _normalize_remote(remote: str) -> str:
-    remote = remote.strip()
-    if not remote:
-        return ""
-    if remote.startswith("file://"):
-        remote = remote[7:]
-    if "://" not in remote and "@" not in remote and Path(remote).exists():
-        try:
-            return str(Path(remote).resolve())
-        except OSError:
-            return str(Path(remote))
-    try:
-        host, path = parse_repo_url(remote)
-        return f"{host}:{path}"
-    except WorkspaceError:
-        return remote.removesuffix(".git").rstrip("/")
-
-
-def _candidate_merge_target_repos(repo_name: str) -> list[Path]:
-    """Best-effort list of local working clones that could accept a merge."""
-    candidates: list[Path] = []
-    seen: set[Path] = set()
-
-    def _add(path: Path) -> None:
-        if path in seen:
-            return
-        git_dir = path / ".git"
-        if path.is_dir() and git_dir.exists():
-            candidates.append(path)
-            seen.add(path)
-
-    _add(REPO_ROOT)
-
-    try:
-        for entry in sorted(REPO_ROOT.parent.iterdir()):
-            _add(entry)
-    except OSError:
-        pass
-
-    workspace_root = Path("/workspace")
-    if workspace_root.exists():
-        try:
-            for entry in sorted(workspace_root.iterdir()):
-                _add(entry)
-        except OSError:
-            pass
-
-    # Prefer exact-name matches if they exist (e.g. sibling checkout "enterprise").
-    exact = [p for p in candidates if p.name == repo_name]
-    return exact + [p for p in candidates if p.name != repo_name]
-
-
-def _find_merge_target_repo(managed_clone: Path, repo_name: str) -> Path | None:
-    """Best-effort local checkout to fast-forward from a managed clone."""
-    clone_remote = _normalize_remote(_git_remote_url(managed_clone) or str(managed_clone))
-    for candidate in _candidate_merge_target_repos(repo_name):
-        cand_remote = _git_remote_url(candidate)
-        if cand_remote and _normalize_remote(cand_remote) == clone_remote:
-            return candidate
-    if repo_name == "autonomy" and (REPO_ROOT / ".git").exists():
-        return REPO_ROOT
-    return None
-
-
 def merge_session_worktree(
     session_name: str,
     repo_name: str,
@@ -697,13 +625,16 @@ def merge_session_worktree(
             f"(ahead={commits_ahead}, dirty={is_dirty}, branch={branch!r})"
         )
 
-    target_repo = _find_merge_target_repo(clone, repo_name)
-    if target_repo is None:
+    # Only the autonomy repo has a known local checkout in this process: the
+    # dashboard's own repository. Cross-repo merge targets need explicit
+    # workspace metadata before they can be made safe.
+    if repo_name != "autonomy":
         raise WorkspaceError(
-            f"no merge target checkout found for repo {repo_name!r} "
-            f"(clone={clone})"
+            f"merge target unsupported for repo {repo_name!r}; "
+            "only 'autonomy' can be merged from the dashboard today"
         )
 
+    target_repo = REPO_ROOT
     _run_git(["fetch", str(clone), branch], cwd=target_repo)
     _run_git(["merge", "--ff-only", "FETCH_HEAD"], cwd=target_repo)
     commit = _run_git(["rev-parse", "HEAD"], cwd=target_repo).strip()

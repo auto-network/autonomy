@@ -181,6 +181,7 @@ class TestWorktreePage:
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
         assert "fetch('/api/worktrees')" in js
         assert "'/api/worktrees/' + encodeURIComponent(row.session_name)" in js
+        assert "row.repo_name === 'autonomy' && row.ff_eligible" in js
         assert "setInterval(() => this.refresh(false), 30000)" in js
         assert "window.showToast" in js
 
