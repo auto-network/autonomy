@@ -168,6 +168,36 @@ def test_postprocess_codex_exec_into_read_tiles():
     assert entries[1]["content"] == "line1\nline2\n"
 
 
+def test_postprocess_codex_exec_tool_use_defaults_to_bash_tile():
+    entries = CODEX_HARNESS.postprocess_entries([
+        {
+            "type": "tool_use",
+            "role": "assistant",
+            "tool_name": "exec_command",
+            "tool_id": "call_bash",
+            "input": {
+                "cmd": "git status --short",
+                "command": "git status --short",
+                "cwd": "/workspace/repo",
+            },
+            "timestamp": TS,
+        },
+    ])
+
+    assert entries == [{
+        "type": "tool_use",
+        "role": "assistant",
+        "tool_name": "Bash",
+        "tool_id": "call_bash",
+        "input": {
+            "cmd": "git status --short",
+            "command": "git status --short",
+            "cwd": "/workspace/repo",
+        },
+        "timestamp": TS,
+    }]
+
+
 def test_postprocess_codex_exec_chunk_can_update_prior_tool_use_and_expand_stacked_reads():
     entries = CODEX_HARNESS.postprocess_entries([
         {
@@ -260,6 +290,123 @@ def test_parse_codex_user_and_agent_event_messages():
     }
 
 
+def test_parse_codex_inbound_crosstalk_user_message():
+    entry = parse_codex_log_line(_line({
+        "timestamp": TS,
+        "type": "event_msg",
+        "payload": {
+            "type": "user_message",
+            "message": (
+                '<crosstalk from="host-0422-201533" label="Dashboard UI" '
+                'source="5706c4cc-6570-4acd-a457-a8907bdb54f5" turn="1774" '
+                'timestamp="2026-04-23T21:41:16Z">\n'
+                'Rebase required before your commit can be merged.\n'
+                '</crosstalk>'
+            ),
+        },
+    }))
+
+    assert entry == {
+        "type": "crosstalk",
+        "role": "crosstalk",
+        "content": "Rebase required before your commit can be merged.",
+        "sender": "host-0422-201533",
+        "sender_label": "Dashboard UI",
+        "source_id": "5706c4cc-6570-4acd-a457-a8907bdb54f5",
+        "turn": "1774",
+        "timestamp": TS,
+    }
+
+
+def test_parse_codex_compacted_history_as_compact_summary():
+    entry = parse_codex_log_line(_line({
+        "timestamp": TS,
+        "type": "compacted",
+        "payload": {
+            "message": "",
+            "replacement_history": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Hello"}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": (
+                            '<crosstalk from="dashboard-ui" label="Dashboard UI" source="" turn="0" '
+                            'timestamp="2026-04-23T21:43:41Z">\n'
+                            'Rebase required.\n'
+                            '</crosstalk>'
+                        ),
+                    }],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Rebased onto master."}],
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "hidden"}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": (
+                            "<environment_context>\n"
+                            "  <cwd>/workspace/repo</cwd>\n"
+                            "</environment_context>"
+                        ),
+                    }],
+                },
+            ],
+        },
+    }))
+
+    assert entry["type"] == "compact_summary"
+    assert entry["role"] == "compact_summary"
+    assert entry["timestamp"] == TS
+    assert "User: Hello" in entry["content"]
+    assert "Crosstalk from Dashboard UI: Rebase required." in entry["content"]
+    assert "Assistant: Rebased onto master." in entry["content"]
+    assert "hidden" not in entry["content"]
+    assert "<environment_context>" not in entry["content"]
+
+
+def test_parse_codex_task_lifecycle_events_are_suppressed():
+    started = parse_codex_log_line(_line({
+        "timestamp": TS,
+        "type": "event_msg",
+        "payload": {
+            "type": "task_started",
+            "turn_id": "turn_123",
+            "started_at": 1776905065,
+            "model_context_window": 258400,
+            "collaboration_mode_kind": "default",
+        },
+    }))
+    complete = parse_codex_log_line(_line({
+        "timestamp": TS,
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "turn_id": "turn_123",
+            "completed_at": 1776905067,
+            "duration_ms": 2390,
+            "last_agent_message": "Hello. How can I help?",
+        },
+    }))
+
+    assert started is None
+    assert complete is None
+
+
 # ── Tests from local scaffolding (complementary coverage) ────────────
 
 
@@ -339,5 +486,3 @@ def test_parse_codex_log_line_parses_update_plan_and_function_call_output():
     assert result is not None
     assert result["type"] == "tool_result"
     assert result["tool_id"] == "call_exec_1"
-
-

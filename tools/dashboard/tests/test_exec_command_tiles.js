@@ -83,7 +83,7 @@ function makeExecUse(toolId, cmd) {
   return {
     type: 'tool_use',
     role: 'assistant',
-    tool_name: 'exec_command',
+    tool_name: 'Bash',
     tool_id: toolId,
     input: {
       cmd,
@@ -219,7 +219,7 @@ describe('semantic tool entry updates', () => {
     assert.equal(store.entries[0].timestamp, '2026-04-23T20:00:00Z');
   });
 
-  it('updates an existing exec tile into Grep without adding a duplicate tool_use', () => {
+  it('updates an existing Bash tile into Grep without adding a duplicate tool_use', () => {
     const h = makeHarness();
     const store = h.win.getSessionStore('sess-grep');
 
@@ -251,7 +251,7 @@ describe('semantic tool entry updates', () => {
 });
 
 describe('exec_command meta badges', () => {
-  it('shows a checkmark for exit code 0 instead of exit text', () => {
+  it('shows a checkmark for Bash success', () => {
     const h = makeHarness();
     const entry = makeExecUse('call_ok', 'git status --short');
     const result = makeExecResult('call_ok', [], '', { exit_code: 0 });
@@ -259,10 +259,9 @@ describe('exec_command meta badges', () => {
 
     const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
     assert.equal(badges.some((badge) => badge.text === '\u2713'), true);
-    assert.equal(badges.some((badge) => String(badge.text).includes('exit 0')), false);
   });
 
-  it('shows a red x for non-zero exit codes', () => {
+  it('shows a red x for Bash failure', () => {
     const h = makeHarness();
     const entry = makeExecUse('call_fail', 'git diff --quiet');
     const result = makeExecResult('call_fail', [], '', { exit_code: 7, is_error: true });
@@ -270,7 +269,17 @@ describe('exec_command meta badges', () => {
 
     const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
     assert.equal(badges.some((badge) => badge.text === '\u2717'), true);
-    assert.equal(badges.some((badge) => String(badge.text).includes('exit 7')), false);
+  });
+
+  it('suppresses meaningless 0ms Bash durations', () => {
+    const h = makeHarness();
+    const entry = makeExecUse('call_zero', 'pwd');
+    const result = makeExecResult('call_zero', [], '');
+    result.timestamp = entry.timestamp;
+    const ctx = makeRendererContext(h.win, entry, result);
+
+    const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
+    assert.equal(badges.some((badge) => badge.text === '0ms'), false);
   });
 
   it('uses explicit line_count for Read badges when semantic expansion has no output body', () => {
