@@ -303,7 +303,7 @@ class CodexSessionHarness:
         session_dir: Path | None = None,
     ) -> list[dict]:
         _ = session_dir
-        return entries
+        return postprocess_codex_entries(entries)
 
     def extract_message_text(self, raw_entry: dict) -> str:
         return extract_codex_message_text(raw_entry)
@@ -830,6 +830,8 @@ def postprocess_claude_entries(
     processed = dedup_claude_entries(entries)
     enrich_claude_entries(processed, session_dir=session_dir)
     return processed
+
+
 def parse_plan_snapshot(arguments: str) -> list[dict] | None:
     """Best-effort parser for Codex-style ``update_plan`` arguments.
 
@@ -854,6 +856,255 @@ def parse_plan_snapshot(arguments: str) -> list[dict] | None:
             continue
         out.append({"subject": step, "status": status or "pending"})
     return out or None
+
+
+def _codex_infer_read_line_count(command: str) -> int | None:
+    if not command:
+        return None
+    range_match = re.search(r"\bsed\s+-n\s+['\"]?(\d+)\s*,\s*(\d+)p['\"]?", command)
+    if range_match:
+        start = int(range_match.group(1))
+        end = int(range_match.group(2))
+        return (end - start + 1) if end >= start else None
+    single_match = re.search(r"\bsed\s+-n\s+['\"]?(\d+)p['\"]?", command)
+    if single_match:
+        return 1
+    return None
+
+
+def _codex_is_ripgrep_search(command: str) -> bool:
+    return bool(re.match(r"^\s*rg(?:\s|$)", command))
+
+
+def _codex_semantic_op_from_parsed(parsed: dict) -> dict | None:
+    if not isinstance(parsed, dict):
+        return None
+    parsed_type = parsed.get("type")
+    if parsed_type == "read":
+        return {
+            "tool_name": "Read",
+            "input": {"file_path": parsed.get("path") or parsed.get("name") or ""},
+            "line_count": _codex_infer_read_line_count(str(parsed.get("cmd") or "")),
+        }
+    if parsed_type == "search" and _codex_is_ripgrep_search(str(parsed.get("cmd") or "")):
+        return {
+            "tool_name": "Grep",
+            "input": {
+                "pattern": parsed.get("query") or parsed.get("cmd") or "",
+                "path": parsed.get("path") or "",
+            },
+            "line_count": None,
+        }
+    return None
+
+
+def _codex_take_leading_lines(text: str, line_count: int) -> tuple[str, str] | None:
+    if line_count < 0:
+        return None
+    if line_count == 0:
+        return "", text
+    idx = 0
+    seen = 0
+    while seen < line_count:
+        nl = text.find("\n", idx)
+        if nl == -1:
+            if idx >= len(text):
+                return None
+            idx = len(text)
+            seen += 1
+            break
+        idx = nl + 1
+        seen += 1
+    return text[:idx], text[idx:]
+
+
+def _codex_split_semantic_output(content: str, ops: list[dict]) -> list[str] | None:
+    if not content:
+        return None
+    if len(ops) == 1:
+        return [content]
+
+    if all(op.get("tool_name") == "Read" and op.get("line_count") is not None for op in ops):
+        parts: list[str] = []
+        rest = content
+        for op in ops:
+            chunk = _codex_take_leading_lines(rest, int(op["line_count"]))
+            if chunk is None:
+                return None
+            head, rest = chunk
+            parts.append(head)
+        if rest.strip():
+            return None
+        return parts
+
+    read_prefix = 0
+    while (
+        read_prefix < len(ops)
+        and ops[read_prefix].get("tool_name") == "Read"
+        and ops[read_prefix].get("line_count") is not None
+    ):
+        read_prefix += 1
+    if read_prefix > 0 and read_prefix == len(ops) - 1 and ops[-1].get("tool_name") == "Grep":
+        parts = []
+        rest = content
+        for idx in range(read_prefix):
+            chunk = _codex_take_leading_lines(rest, int(ops[idx]["line_count"]))
+            if chunk is None:
+                return None
+            head, rest = chunk
+            parts.append(head)
+        parts.append(rest)
+        return parts
+
+    return None
+
+
+def _build_codex_semantic_tool_use(
+    entry: dict,
+    op: dict,
+    tool_id: str,
+    *,
+    preserve_timestamp: bool,
+) -> dict:
+    timestamp = entry.get("timestamp", "") if preserve_timestamp else ""
+    role = entry.get("role") or "assistant"
+    return {
+        "type": "tool_use",
+        "role": role,
+        "tool_name": op["tool_name"],
+        "tool_id": tool_id,
+        "input": dict(op["input"]),
+        "timestamp": timestamp,
+        "semantic_from_exec": True,
+    }
+
+
+def _build_codex_semantic_result(
+    entry: dict,
+    op: dict,
+    tool_id: str,
+    parsed: dict,
+    content: str,
+) -> dict:
+    result = dict(entry)
+    result["tool_id"] = tool_id
+    result["content"] = content
+    result["parsed_cmd"] = [parsed]
+    result["semantic_from_exec"] = True
+    line_count = op.get("line_count")
+    if line_count is not None:
+        result["line_count"] = line_count
+    else:
+        result.pop("line_count", None)
+    return result
+
+
+def _codex_semantic_transform(entry: dict) -> dict | None:
+    parsed_cmd = entry.get("parsed_cmd")
+    if not isinstance(parsed_cmd, list) or not parsed_cmd:
+        return None
+    ops: list[dict] = []
+    for parsed in parsed_cmd:
+        op = _codex_semantic_op_from_parsed(parsed)
+        if op is None:
+            return None
+        ops.append(op)
+    split_content = _codex_split_semantic_output(str(entry.get("content") or ""), ops)
+    if len(ops) > 1 and split_content is None:
+        return None
+    if split_content is None:
+        split_content = [str(entry.get("content") or "")]
+    results = [
+        _build_codex_semantic_result(
+            entry,
+            ops[idx],
+            entry["tool_id"] if idx == 0 else f'{entry["tool_id"]}#{idx + 1}',
+            parsed_cmd[idx],
+            split_content[idx],
+        )
+        for idx in range(len(ops))
+    ]
+    return {"ops": ops, "results": results}
+
+
+def postprocess_codex_entries(entries: list[dict]) -> list[dict]:
+    use_ids = {
+        entry.get("tool_id")
+        for entry in entries
+        if entry.get("type") == "tool_use" and entry.get("tool_name") == "exec_command" and entry.get("tool_id")
+    }
+    transforms: dict[str, dict] = {}
+    for entry in entries:
+        if entry.get("type") != "tool_result" or entry.get("result_kind") != "exec_command":
+            continue
+        tool_id = entry.get("tool_id") or ""
+        if not tool_id:
+            continue
+        transform = _codex_semantic_transform(entry)
+        if transform is None:
+            continue
+        transform["use_in_entries"] = tool_id in use_ids
+        transforms[tool_id] = transform
+
+    if not transforms:
+        return entries
+
+    out: list[dict] = []
+    for entry in entries:
+        tool_id = entry.get("tool_id") or ""
+        transform = transforms.get(tool_id)
+        if (
+            entry.get("type") == "tool_use"
+            and entry.get("tool_name") == "exec_command"
+            and transform is not None
+        ):
+            ops = transform["ops"]
+            out.append(
+                _build_codex_semantic_tool_use(
+                    entry,
+                    ops[0],
+                    tool_id,
+                    preserve_timestamp=True,
+                ),
+            )
+            for idx, op in enumerate(ops[1:], start=2):
+                out.append(
+                    _build_codex_semantic_tool_use(
+                        entry,
+                        op,
+                        f"{tool_id}#{idx}",
+                        preserve_timestamp=True,
+                    ),
+                )
+            continue
+        if (
+            entry.get("type") == "tool_result"
+            and entry.get("result_kind") == "exec_command"
+            and transform is not None
+        ):
+            if not transform["use_in_entries"]:
+                ops = transform["ops"]
+                out.append(
+                    _build_codex_semantic_tool_use(
+                        entry,
+                        ops[0],
+                        tool_id,
+                        preserve_timestamp=False,
+                    ),
+                )
+                for idx, op in enumerate(ops[1:], start=2):
+                    out.append(
+                        _build_codex_semantic_tool_use(
+                            entry,
+                            op,
+                            f"{tool_id}#{idx}",
+                            preserve_timestamp=False,
+                        ),
+                    )
+            out.extend(transform["results"])
+            continue
+        out.append(entry)
+    return out
 
 
 def _extract_codex_text_blocks(blocks: Any) -> str:

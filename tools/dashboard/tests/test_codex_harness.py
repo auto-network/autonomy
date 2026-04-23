@@ -125,6 +125,115 @@ def test_parse_codex_exec_command_end_as_rich_tool_result():
     assert entry["duration_seconds"] == 1.5
 
 
+def test_postprocess_codex_exec_into_read_tiles():
+    entries = CODEX_HARNESS.postprocess_entries([
+        {
+            "type": "tool_use",
+            "role": "assistant",
+            "tool_name": "exec_command",
+            "tool_id": "call_read",
+            "input": {
+                "cmd": "sed -n '1,2p' tools/dashboard/server.py",
+                "command": "sed -n '1,2p' tools/dashboard/server.py",
+                "cwd": "/workspace/repo",
+            },
+            "timestamp": TS,
+        },
+        {
+            "type": "tool_result",
+            "role": "tool",
+            "tool_id": "call_read",
+            "content": "line1\nline2\n",
+            "is_error": False,
+            "timestamp": TS,
+            "result_kind": "exec_command",
+            "exit_code": 0,
+            "status": "completed",
+            "cwd": "/workspace/repo",
+            "command": "sed -n '1,2p' tools/dashboard/server.py",
+            "parsed_cmd": [{
+                "type": "read",
+                "cmd": "sed -n '1,2p' tools/dashboard/server.py",
+                "name": "server.py",
+                "path": "tools/dashboard/server.py",
+            }],
+            "duration_seconds": 1.0,
+        },
+    ])
+
+    assert entries[0]["tool_name"] == "Read"
+    assert entries[0]["input"] == {"file_path": "tools/dashboard/server.py"}
+    assert entries[1]["tool_id"] == "call_read"
+    assert entries[1]["line_count"] == 2
+    assert entries[1]["content"] == "line1\nline2\n"
+
+
+def test_postprocess_codex_exec_chunk_can_update_prior_tool_use_and_expand_stacked_reads():
+    entries = CODEX_HARNESS.postprocess_entries([
+        {
+            "type": "tool_result",
+            "role": "tool",
+            "tool_id": "call_multi",
+            "content": "a1\na2\nb1\nb2\nb3\n",
+            "is_error": False,
+            "timestamp": TS,
+            "result_kind": "exec_command",
+            "exit_code": 0,
+            "status": "completed",
+            "cwd": "/workspace/repo",
+            "command": "sed -n '1,2p' tools/a.py && sed -n '5,7p' tools/b.py",
+            "parsed_cmd": [
+                {"type": "read", "cmd": "sed -n '1,2p' tools/a.py", "name": "a.py", "path": "tools/a.py"},
+                {"type": "read", "cmd": "sed -n '5,7p' tools/b.py", "name": "b.py", "path": "tools/b.py"},
+            ],
+            "duration_seconds": 1.0,
+        },
+    ])
+
+    assert [entry["type"] for entry in entries] == ["tool_use", "tool_use", "tool_result", "tool_result"]
+    assert [entry["tool_name"] for entry in entries[:2]] == ["Read", "Read"]
+    assert entries[0]["tool_id"] == "call_multi"
+    assert entries[1]["tool_id"] == "call_multi#2"
+    assert entries[2]["content"] == "a1\na2\n"
+    assert entries[2]["line_count"] == 2
+    assert entries[3]["content"] == "b1\nb2\nb3\n"
+    assert entries[3]["line_count"] == 3
+
+
+def test_postprocess_codex_exec_into_grep_tile():
+    entries = CODEX_HARNESS.postprocess_entries([
+        {
+            "type": "tool_result",
+            "role": "tool",
+            "tool_id": "call_rg",
+            "content": "tools/dashboard/server.py:1:context_tokens\n",
+            "is_error": False,
+            "timestamp": TS,
+            "result_kind": "exec_command",
+            "exit_code": 0,
+            "status": "completed",
+            "cwd": "/workspace/repo",
+            "command": "rg -n 'context_tokens' tools/dashboard -S",
+            "parsed_cmd": [{
+                "type": "search",
+                "cmd": "rg -n 'context_tokens' tools/dashboard -S",
+                "query": "context_tokens",
+                "path": "tools/dashboard",
+            }],
+            "duration_seconds": 1.0,
+        },
+    ])
+
+    assert entries[0]["type"] == "tool_use"
+    assert entries[0]["tool_name"] == "Grep"
+    assert entries[0]["input"] == {
+        "pattern": "context_tokens",
+        "path": "tools/dashboard",
+    }
+    assert entries[1]["type"] == "tool_result"
+    assert entries[1]["tool_id"] == "call_rg"
+
+
 def test_parse_codex_user_and_agent_event_messages():
     user = parse_codex_log_line(_line({
         "timestamp": TS,

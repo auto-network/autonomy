@@ -84,6 +84,7 @@ window.getSessionStore = function(sessionId) {
       loaded: false,
       _loading: false,   // true during initial fetch — buffers SSE
       _pendingSSE: [],
+      _displayDirty: false,
     };
   }
   return sessions[sessionId];
@@ -114,6 +115,99 @@ function _entryIdentity(entry) {
   return t + ':' + ts + ':' + c;
 }
 
+function _ensureSeenIdentities(store) {
+  if (store._seenIdentities) return;
+  store._seenIdentities = {};
+  for (var i = 0; i < store.entries.length; i++) {
+    var seedKey = _entryIdentity(store.entries[i]);
+    if (seedKey) store._seenIdentities[seedKey] = true;
+  }
+}
+
+function _registerToolUse(store, entry) {
+  store.toolMap[entry.tool_id] = {
+    tool_name: entry.tool_name || '?',
+    entry: entry,
+  };
+}
+
+function _registerToolResult(store, entry) {
+  var existing = store.resultMap[entry.tool_id];
+  if (!existing || existing.result_kind !== 'exec_command' || entry.result_kind === 'exec_command') {
+    store.resultMap[entry.tool_id] = entry;
+  }
+}
+
+function _findToolUseEntry(store, toolId) {
+  var mapped = store.toolMap[toolId];
+  if (mapped && mapped.entry) return mapped.entry;
+  for (var i = store.entries.length - 1; i >= 0; i--) {
+    var entry = store.entries[i];
+    if (entry.type === 'tool_use' && entry.tool_id === toolId) return entry;
+  }
+  return null;
+}
+
+function _findToolResultEntry(store, toolId) {
+  var mapped = store.resultMap[toolId];
+  if (mapped) return mapped;
+  for (var i = store.entries.length - 1; i >= 0; i--) {
+    var entry = store.entries[i];
+    if (entry.type === 'tool_result' && entry.tool_id === toolId) return entry;
+  }
+  return null;
+}
+
+function _mergeExistingEntry(store, existing, incoming) {
+  if (!existing || !incoming) return false;
+  var displayChanged = false;
+  if (existing.type === 'tool_use' && incoming.type === 'tool_use') {
+    if ((existing.tool_name || '') !== (incoming.tool_name || '')) displayChanged = true;
+  }
+  for (var key in incoming) {
+    if (!Object.prototype.hasOwnProperty.call(incoming, key)) continue;
+    if (
+      incoming.semantic_from_exec &&
+      key === 'timestamp' &&
+      existing.type === 'tool_use' &&
+      existing.timestamp
+    ) {
+      continue;
+    }
+    existing[key] = incoming[key];
+  }
+  if (existing.type === 'tool_use' && existing.tool_id) _registerToolUse(store, existing);
+  if (existing.type === 'tool_result' && existing.tool_id) _registerToolResult(store, existing);
+  if (displayChanged) store._displayDirty = true;
+  return displayChanged;
+}
+
+function _appendUniqueEntry(store, entry, insertAt) {
+  _ensureSeenIdentities(store);
+  var key = _entryIdentity(entry);
+  if (key && store._seenIdentities[key]) {
+    var existing = null;
+    if (entry.type === 'tool_use' && entry.tool_id) existing = _findToolUseEntry(store, entry.tool_id);
+    if (entry.type === 'tool_result' && entry.tool_id) existing = _findToolResultEntry(store, entry.tool_id);
+    if (existing) {
+      _mergeExistingEntry(store, existing, entry);
+      return false;
+    }
+    if (entry.type === 'tool_use' && entry.tool_id) _registerToolUse(store, entry);
+    if (entry.type === 'tool_result' && entry.tool_id) _registerToolResult(store, entry);
+    return false;
+  }
+  if (key) store._seenIdentities[key] = true;
+  if (entry.type === 'tool_use' && entry.tool_id) _registerToolUse(store, entry);
+  if (entry.type === 'tool_result' && entry.tool_id) _registerToolResult(store, entry);
+  if (insertAt === undefined || insertAt === null || insertAt >= store.entries.length) {
+    store.entries.push(entry);
+  } else {
+    store.entries.splice(insertAt, 0, entry);
+  }
+  return true;
+}
+
 /**
  * Append entries to store with entry-identity dedup.
  *
@@ -140,33 +234,10 @@ window.appendSessionEntries = function(store, data) {
 
   if (!data.entries || data.entries.length === 0) return 0;
 
-  // Lazily build the identity index from existing entries on first use.
-  if (!store._seenIdentities) {
-    store._seenIdentities = {};
-    for (var k = 0; k < store.entries.length; k++) {
-      var seedKey = _entryIdentity(store.entries[k]);
-      if (seedKey) store._seenIdentities[seedKey] = true;
-    }
-  }
-
   var added = 0;
   for (var i = 0; i < data.entries.length; i++) {
     var entry = data.entries[i];
-    var key = _entryIdentity(entry);
-    if (key && store._seenIdentities[key]) continue;
-    if (key) store._seenIdentities[key] = true;
-
-    if (entry.type === 'tool_use' && entry.tool_id) {
-      store.toolMap[entry.tool_id] = { tool_name: entry.tool_name || '?' };
-    }
-    if (entry.type === 'tool_result' && entry.tool_id) {
-      var existing = store.resultMap[entry.tool_id];
-      if (!existing || existing.result_kind !== 'exec_command' || entry.result_kind === 'exec_command') {
-        store.resultMap[entry.tool_id] = entry;
-      }
-    }
-    store.entries.push(entry);
-    added++;
+    if (_appendUniqueEntry(store, entry)) added++;
   }
   return added;
 };
