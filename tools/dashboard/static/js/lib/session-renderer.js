@@ -52,6 +52,11 @@
       return Math.floor(seconds / 60) + 'm ' + Math.round(seconds % 60) + 's';
     },
 
+    durationText(seconds) {
+      const text = this.fmtDuration(seconds);
+      return text === '0ms' ? '' : text;
+    },
+
     chipClass(toolName) {
       return TOOL_CHIPS[toolName] || 'sc-chip-default';
     },
@@ -181,7 +186,8 @@
       if (!result) {
         void this._tick;
         const elapsed = this._elapsed(entry);
-        if (elapsed != null) badges.push({ text: this.fmtDuration(elapsed), cls: 'sc-meta-running' });
+        const elapsedText = this.durationText(elapsed);
+        if (elapsedText) badges.push({ text: elapsedText, cls: 'sc-meta-running' });
         badges.push({ text: 'Running', cls: 'sc-meta-running' });
         return badges;
       }
@@ -189,7 +195,8 @@
       switch (name) {
         case 'Bash': {
           const dur = this._duration(entry, result);
-          if (dur != null) badges.push({ text: this.fmtDuration(dur), cls: 'sc-meta-gray' });
+          const durText = this.durationText(dur);
+          if (durText) badges.push({ text: durText, cls: 'sc-meta-gray' });
           if (result && result.is_error) badges.push({ text: '\u2717', cls: 'sc-meta-red' });
           else if (result && !result.is_error) badges.push({ text: '\u2713', cls: 'sc-meta-green' });
           break;
@@ -198,7 +205,8 @@
           const dur = (result && result.duration_seconds != null)
             ? result.duration_seconds
             : this._duration(entry, result);
-          if (dur != null) badges.push({ text: this.fmtDuration(dur), cls: 'sc-meta-gray' });
+          const durText = this.durationText(dur);
+          if (durText) badges.push({ text: durText, cls: 'sc-meta-gray' });
           if (result && result.exit_code !== undefined && result.exit_code !== null) {
             badges.push({
               text: result.exit_code === 0 ? '\u2713' : '\u2717',
@@ -397,7 +405,8 @@
             const dur = this._duration(item, this._resultMap[item.tool_id]);
             if (dur != null) { total += dur; has = true; }
           }
-          if (has) badges.push({ text: this.fmtDuration(total), cls: 'sc-meta-gray' });
+          const totalText = this.durationText(total);
+          if (has && totalText) badges.push({ text: totalText, cls: 'sc-meta-gray' });
           break;
         }
         case 'exec_command': {
@@ -410,7 +419,8 @@
             if (dur != null) { total += dur; has = true; }
             if (result && result.exit_code !== undefined && result.exit_code !== null && result.exit_code !== 0) failures++;
           }
-          if (has) badges.push({ text: this.fmtDuration(total), cls: 'sc-meta-gray' });
+          const totalText = this.durationText(total);
+          if (has && totalText) badges.push({ text: totalText, cls: 'sc-meta-gray' });
           if (failures) badges.push({ text: failures + ' failed', cls: 'sc-meta-red' });
           break;
         }

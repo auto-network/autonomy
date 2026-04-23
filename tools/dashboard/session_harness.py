@@ -979,6 +979,12 @@ def _build_codex_semantic_tool_use(
     }
 
 
+def _build_codex_bash_tool_use(entry: dict) -> dict:
+    tool_use = dict(entry)
+    tool_use["tool_name"] = "Bash"
+    return tool_use
+
+
 def _build_codex_semantic_result(
     entry: dict,
     op: dict,
@@ -1046,9 +1052,6 @@ def postprocess_codex_entries(entries: list[dict]) -> list[dict]:
         transform["use_in_entries"] = tool_id in use_ids
         transforms[tool_id] = transform
 
-    if not transforms:
-        return entries
-
     out: list[dict] = []
     for entry in entries:
         tool_id = entry.get("tool_id") or ""
@@ -1056,8 +1059,10 @@ def postprocess_codex_entries(entries: list[dict]) -> list[dict]:
         if (
             entry.get("type") == "tool_use"
             and entry.get("tool_name") == "exec_command"
-            and transform is not None
         ):
+            if transform is None:
+                out.append(_build_codex_bash_tool_use(entry))
+                continue
             ops = transform["ops"]
             out.append(
                 _build_codex_semantic_tool_use(
@@ -1132,6 +1137,57 @@ def _is_codex_visible_message(role: str, text: str) -> bool:
     if stripped.startswith("<environment_context>") and stripped.endswith("</environment_context>"):
         return False
     return True
+
+
+def _extract_codex_compaction_message(message: Any) -> str:
+    if isinstance(message, str):
+        return message.strip()
+    return _extract_codex_text_blocks(message)
+
+
+def _format_codex_compaction_history_item(item: Any) -> str | None:
+    if not isinstance(item, dict) or item.get("type") != "message":
+        return None
+    role = str(item.get("role") or "")
+    text = _extract_codex_text_blocks(item.get("content"))
+    if not _is_codex_visible_message(role, text):
+        return None
+    if role == "user":
+        ct = _classify_crosstalk(text)
+        if ct:
+            source = ct.get("label") or ct.get("from") or "crosstalk"
+            message = str(ct.get("message") or "").strip()
+            return f"Crosstalk from {source}: {message}" if message else f"Crosstalk from {source}"
+        sys_info = _classify_system_message(text)
+        if sys_info:
+            body = str(sys_info.get("body") or "").strip()
+            summary = str(sys_info.get("summary") or "System").strip()
+            return f"System: {summary}\n{body}" if body else f"System: {summary}"
+        return f"User: {text}"
+    if role == "assistant":
+        return f"Assistant: {text}"
+    return None
+
+
+def _build_codex_compact_summary(payload: dict, timestamp: str) -> dict:
+    summary = _extract_codex_compaction_message(payload.get("message"))
+    if not summary:
+        history = payload.get("replacement_history")
+        if isinstance(history, list):
+            parts = []
+            for item in history:
+                rendered = _format_codex_compaction_history_item(item)
+                if rendered:
+                    parts.append(rendered)
+            summary = "\n\n".join(parts).strip()
+    if not summary:
+        summary = "Context compacted."
+    return {
+        "type": "compact_summary",
+        "role": "compact_summary",
+        "content": summary,
+        "timestamp": timestamp,
+    }
 
 
 def _parse_codex_call_args(arguments: Any) -> dict:
@@ -1218,11 +1274,38 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
         return None
     entry_type = raw.get("type")
 
+    if entry_type == "compacted":
+        return _build_codex_compact_summary(payload, timestamp)
+
     if entry_type == "event_msg":
         event_type = payload.get("type")
         if event_type == "user_message":
             text = str(payload.get("message") or "")
             if text:
+                ct = _classify_crosstalk(text)
+                if ct:
+                    return {
+                        "type": "crosstalk",
+                        "role": "crosstalk",
+                        "content": ct["message"],
+                        "sender": ct["from"],
+                        "sender_label": ct["label"],
+                        "source_id": ct["source"],
+                        "turn": ct["turn"],
+                        "timestamp": timestamp,
+                    }
+                sys_info = _classify_system_message(text)
+                if sys_info:
+                    entry = {
+                        "type": "system",
+                        "role": "system",
+                        "content": sys_info["summary"],
+                        "tag": sys_info["tag"],
+                        "timestamp": timestamp,
+                    }
+                    if sys_info.get("body"):
+                        entry["body"] = sys_info["body"]
+                    return entry
                 return {
                     "type": "user",
                     "role": "user",
@@ -1241,21 +1324,9 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
         if event_type == "exec_command_end":
             return _parse_codex_exec_end(payload, timestamp)
         if event_type == "task_started":
-            return {
-                "type": "system",
-                "role": "system",
-                "content": "Task started",
-                "tag": "task-started",
-                "timestamp": timestamp,
-            }
+            return None
         if event_type == "task_complete":
-            return {
-                "type": "system",
-                "role": "system",
-                "content": "Task complete",
-                "tag": "task-complete",
-                "timestamp": timestamp,
-            }
+            return None
         return None
 
     if entry_type != "response_item":
