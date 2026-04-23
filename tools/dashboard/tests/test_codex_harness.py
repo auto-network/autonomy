@@ -7,10 +7,17 @@ viewer, without promoting cumulative usage into the context-token stat.
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import json
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
 
 from tools.dashboard.session_harness import (
     CODEX_HARNESS,
+    extract_codex_context_tokens,
     parse_codex_log_line,
     resolve_harness_for_path,
     resolve_harness_for_session_row,
@@ -142,3 +149,86 @@ def test_parse_codex_user_and_agent_event_messages():
         "content": "Hello. How can I help?",
         "timestamp": TS,
     }
+
+
+# ── Tests from local scaffolding (complementary coverage) ────────────
+
+
+def test_codex_register_session_uses_run_sessions_dir(tmp_path):
+    run_dir = tmp_path / "run"
+    sessions_dir = run_dir / "sessions"
+    sessions_dir.mkdir(parents=True)
+
+    monitor = AsyncMock()
+    asyncio.run(
+        CODEX_HARNESS.register_session(
+            monitor=monitor,
+            tmux_name="auto-codex-1",
+            session_type="container",
+            project="autonomy-codex",
+            run_dir=run_dir,
+            seed_message="Starting...",
+        ),
+    )
+
+    monitor.register.assert_awaited_once()
+    kwargs = monitor.register.await_args.kwargs
+    assert kwargs["jsonl_path"] == sessions_dir
+    assert kwargs["resolution_dir"] == sessions_dir
+    assert kwargs["harness"] == "codex"
+
+
+def test_resolve_harness_for_path_reads_session_meta(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / ".session_meta.json").write_text(json.dumps({"harness": "codex"}))
+    nested = sessions_dir / "2026" / "04" / "22"
+    nested.mkdir(parents=True)
+    rollout = nested / "rollout-2026-04-22T22-40-19-uuid.jsonl"
+    rollout.write_text("")
+
+    harness = resolve_harness_for_path(rollout)
+    assert harness.name == "codex"
+
+
+
+def test_parse_codex_log_line_parses_update_plan_and_function_call_output():
+    parsed = parse_codex_log_line(json.dumps({
+        "timestamp": "2026-04-22T22:48:14.033Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "update_plan",
+            "arguments": json.dumps({
+                "plan": [
+                    {"step": "Trace current code", "status": "in_progress"},
+                    {"step": "Add parser", "status": "pending"},
+                ],
+            }),
+            "call_id": "call_plan_1",
+        },
+    }))
+    assert isinstance(parsed, list)
+    assert parsed[0]["type"] == "tool_use"
+    assert parsed[0]["tool_name"] == "update_plan"
+    assert parsed[0]["tool_id"] == "call_plan_1"
+    assert parsed[1]["type"] == "todo_plan"
+    assert parsed[1]["todos"] == [
+        {"subject": "Trace current code", "status": "in_progress"},
+        {"subject": "Add parser", "status": "pending"},
+    ]
+
+    result = parse_codex_log_line(json.dumps({
+        "timestamp": "2026-04-22T22:54:03.009Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": "call_exec_1",
+            "output": "Chunk ID: 123\nOutput:\n/workspace/repo\n",
+        },
+    }))
+    assert result is not None
+    assert result["type"] == "tool_result"
+    assert result["tool_id"] == "call_exec_1"
+
+
