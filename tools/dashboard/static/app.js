@@ -1529,6 +1529,16 @@ connectEvents(['nav', 'dispatch'], {
       dispatchEl.innerHTML = html;
     }
 
+    const worktreesEl = document.getElementById('badge-worktrees');
+    if (worktreesEl) {
+      const withCommits = data.worktrees_with_commits || 0;
+      const withChanges = data.worktrees_with_changes || 0;
+      let html = '';
+      if (withCommits) html += `<span class="nav-badge nav-badge-green">${withCommits}</span>`;
+      if (withChanges) html += `<span class="nav-badge nav-badge-amber">${withChanges}</span>`;
+      worktreesEl.innerHTML = html;
+    }
+
     const beadsEl = document.getElementById('badge-beads');
     if (beadsEl && data.open_beads != null) beadsEl.textContent = data.open_beads || '';
 
