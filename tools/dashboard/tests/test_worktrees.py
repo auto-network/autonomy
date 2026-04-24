@@ -477,6 +477,9 @@ class TestWorktreePage:
         assert "await _checkVersion();" in app_js
         assert "data-hard-reload" in app_js
         assert "_watchWorktreesBoot(root);" in app_js
+        assert "_WORKTREES_BOOT_RECOVERY_KEY" in app_js
+        assert "sessionStorage.getItem(_WORKTREES_BOOT_RECOVERY_KEY) === 'pending'" in app_js
+        assert "sessionStorage.setItem(_WORKTREES_BOOT_RECOVERY_KEY, 'pending')" in app_js
         assert "window.location.reload();" in app_js
 
     def test_template_uses_required_status_labels(self):
@@ -505,6 +508,7 @@ class TestWorktreePage:
         assert 'data-hard-reload' in template
         assert '@click.prevent="refresh(true)"' in template
         assert "dataset.worktreesBooted = '1'" in js
+        assert "sessionStorage.removeItem('worktrees:boot-recovery')" in js
         assert 'x-show="!refreshing"' not in template
         assert 'x-show="refreshing"' not in template
         assert "Are you sure you want to delete this Worktree?" in template
