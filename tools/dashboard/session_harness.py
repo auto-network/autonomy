@@ -19,6 +19,14 @@ from typing import Protocol, Any
 logger = logging.getLogger(__name__)
 
 
+_CODEX_PATCH_FILE_RE = re.compile(r"^\*\*\* (Update|Add|Delete) File: (.+)$", re.MULTILINE)
+_CODEX_TOOL_OUTPUT_SESSION_RE = re.compile(r"Process running with session ID (\d+)")
+_CODEX_TOOL_OUTPUT_EXIT_RE = re.compile(r"Process exited with code (-?\d+)")
+_CODEX_TOOL_OUTPUT_TIME_RE = re.compile(r"Wall time:\s*([0-9.]+)\s*seconds?")
+_CODEX_TOOL_OUTPUT_BODY_RE = re.compile(r"\nOutput:\n", re.MULTILINE)
+_CODEX_SESSION_PROGRESS_STATE: dict[str, dict[str, dict[str, str] | set[str]]] = {}
+
+
 class SessionHarness(Protocol):
     """Contract for a session transcript harness."""
 
@@ -302,8 +310,7 @@ class CodexSessionHarness:
         *,
         session_dir: Path | None = None,
     ) -> list[dict]:
-        _ = session_dir
-        return postprocess_codex_entries(entries)
+        return postprocess_codex_entries(entries, session_dir=session_dir)
 
     def extract_message_text(self, raw_entry: dict) -> str:
         return extract_codex_message_text(raw_entry)
@@ -1033,14 +1040,102 @@ def _codex_semantic_transform(entry: dict) -> dict | None:
     return {"ops": ops, "results": results}
 
 
-def postprocess_codex_entries(entries: list[dict]) -> list[dict]:
+def postprocess_codex_entries(
+    entries: list[dict],
+    *,
+    session_dir: Path | None = None,
+) -> list[dict]:
+    state = _codex_session_progress_state(session_dir)
+    tool_names = state["tool_names"]
+    exec_sessions = state["exec_sessions"]
+    write_calls = state["write_calls"]
+    completed_tools = state["completed_tools"]
+
+    normalized: list[dict] = []
+    patch_results: dict[str, dict] = {}
+
+    for entry in entries:
+        if entry.get("type") == "tool_use" and entry.get("tool_id"):
+            tool_id = entry.get("tool_id") or ""
+            tool_name = str(entry.get("tool_name") or "")
+            tool_names[tool_id] = tool_name
+            if tool_name == "write_stdin":
+                session_id = (entry.get("input") or {}).get("session_id")
+                if session_id not in (None, ""):
+                    write_calls[tool_id] = str(session_id)
+                continue
+            normalized.append(entry)
+            continue
+
+        if entry.get("type") == "tool_result" and entry.get("tool_id"):
+            tool_id = entry.get("tool_id") or ""
+            result_kind = entry.get("result_kind")
+
+            if result_kind == "patch_apply_end":
+                patch_results[tool_id] = entry
+                normalized.append(entry)
+                continue
+
+            if result_kind == "custom_tool_call_output":
+                normalized.append(entry)
+                continue
+
+            if result_kind == "exec_command":
+                process_id = str(entry.get("process_id") or "")
+                if process_id:
+                    exec_sessions[process_id] = tool_id
+                if entry.get("status") != "running":
+                    completed_tools.add(tool_id)
+                normalized.append(entry)
+                continue
+
+            if result_kind == "function_call_output":
+                tool_name = str(tool_names.get(tool_id) or "")
+                if tool_name == "exec_command":
+                    process_id = str(entry.get("process_id") or "")
+                    if process_id:
+                        exec_sessions[process_id] = tool_id
+                    progress = _build_codex_exec_progress_result(
+                        entry,
+                        tool_id=tool_id,
+                        process_id=process_id,
+                    )
+                    if progress:
+                        normalized.append(progress)
+                    continue
+                write_session_id = str(write_calls.get(tool_id) or "")
+                if write_session_id:
+                    parent_tool_id = str(exec_sessions.get(write_session_id) or "")
+                    if parent_tool_id and parent_tool_id not in completed_tools:
+                        progress = _build_codex_exec_progress_result(
+                            entry,
+                            tool_id=parent_tool_id,
+                            process_id=write_session_id,
+                        )
+                        if progress:
+                            normalized.append(progress)
+                        continue
+                    continue
+
+        normalized.append(entry)
+
+    if patch_results:
+        normalized = [
+            entry for entry in normalized
+            if not (
+                entry.get("type") == "tool_result"
+                and entry.get("result_kind") == "custom_tool_call_output"
+                and entry.get("tool_id") in patch_results
+            )
+        ]
+
     use_ids = {
         entry.get("tool_id")
-        for entry in entries
+        for entry in normalized
         if entry.get("type") == "tool_use" and entry.get("tool_name") == "exec_command" and entry.get("tool_id")
     }
     transforms: dict[str, dict] = {}
-    for entry in entries:
+    for entry in normalized:
         if entry.get("type") != "tool_result" or entry.get("result_kind") != "exec_command":
             continue
         tool_id = entry.get("tool_id") or ""
@@ -1053,7 +1148,7 @@ def postprocess_codex_entries(entries: list[dict]) -> list[dict]:
         transforms[tool_id] = transform
 
     out: list[dict] = []
-    for entry in entries:
+    for entry in normalized:
         tool_id = entry.get("tool_id") or ""
         transform = transforms.get(tool_id)
         if (
@@ -1202,6 +1297,182 @@ def _parse_codex_call_args(arguments: Any) -> dict:
     return parsed if isinstance(parsed, dict) else {"arguments": arguments}
 
 
+def _codex_relpath(path: str) -> str:
+    text = str(path or "")
+    prefix = "/workspace/repo/"
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
+
+
+def _parse_codex_patch_input(text: str) -> dict:
+    if not text:
+        return {"description": "Patch"}
+    matches = list(_CODEX_PATCH_FILE_RE.finditer(text))
+    files = [_codex_relpath(match.group(2).strip()) for match in matches if match.group(2).strip()]
+    unique_files: list[str] = []
+    seen: set[str] = set()
+    for file_path in files:
+        if file_path in seen:
+            continue
+        seen.add(file_path)
+        unique_files.append(file_path)
+    result: dict[str, Any] = {}
+    if len(unique_files) == 1:
+        result["description"] = unique_files[0]
+        result["file_path"] = unique_files[0]
+    elif unique_files:
+        result["description"] = f"Patched {len(unique_files)} files"
+    else:
+        result["description"] = "Patch"
+    result["files"] = unique_files
+    result["patch"] = text
+    return result
+
+
+def _parse_codex_tool_output_metadata(output: str) -> dict:
+    text = str(output or "")
+    data: dict[str, Any] = {}
+    if not text:
+        return data
+    session_match = _CODEX_TOOL_OUTPUT_SESSION_RE.search(text)
+    if session_match:
+        data["process_id"] = session_match.group(1)
+        data["status"] = "running"
+    exit_match = _CODEX_TOOL_OUTPUT_EXIT_RE.search(text)
+    if exit_match:
+        try:
+            data["exit_code"] = int(exit_match.group(1))
+        except ValueError:
+            pass
+        data["status"] = "completed"
+    time_match = _CODEX_TOOL_OUTPUT_TIME_RE.search(text)
+    if time_match:
+        try:
+            data["duration_seconds"] = float(time_match.group(1))
+        except ValueError:
+            pass
+    body = text
+    body_split = _CODEX_TOOL_OUTPUT_BODY_RE.split(text, maxsplit=1)
+    if len(body_split) == 2:
+        body = body_split[1]
+    data["stdout"] = body
+    return data
+
+
+def _parse_codex_custom_tool_output(payload: dict, timestamp: str) -> dict:
+    output_text = str(payload.get("output") or "")
+    content = output_text
+    is_error = False
+    duration_seconds = None
+    try:
+        parsed = json.loads(output_text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        content = str(parsed.get("output") or "")
+        metadata = parsed.get("metadata") or {}
+        if isinstance(metadata, dict):
+            exit_code = metadata.get("exit_code")
+            is_error = bool(exit_code not in (None, 0))
+            try:
+                duration_seconds = float(metadata.get("duration_seconds"))
+            except (TypeError, ValueError):
+                duration_seconds = None
+    return {
+        "type": "tool_result",
+        "role": "tool",
+        "tool_id": payload.get("call_id") or "",
+        "content": content,
+        "is_error": is_error,
+        "timestamp": timestamp,
+        "result_kind": "custom_tool_call_output",
+        "duration_seconds": duration_seconds,
+    }
+
+
+def _parse_codex_patch_apply_end(payload: dict, timestamp: str) -> dict:
+    stdout = str(payload.get("stdout") or "")
+    stderr = str(payload.get("stderr") or "")
+    changes = payload.get("changes") or {}
+    changed_files = []
+    if isinstance(changes, dict):
+        for path in changes.keys():
+            changed_files.append(_codex_relpath(str(path)))
+    return {
+        "type": "tool_result",
+        "role": "tool",
+        "tool_id": payload.get("call_id") or "",
+        "content": stdout or stderr,
+        "is_error": not bool(payload.get("success")),
+        "timestamp": timestamp,
+        "result_kind": "patch_apply_end",
+        "status": str(payload.get("status") or ""),
+        "stdout": stdout,
+        "stderr": stderr,
+        "changed_files": changed_files,
+    }
+
+
+def _codex_session_scope(session_dir: Path | None) -> str:
+    if session_dir is None:
+        return "__default__"
+    try:
+        return str(session_dir.resolve())
+    except OSError:
+        return str(session_dir)
+
+
+def _codex_session_progress_state(session_dir: Path | None) -> dict[str, dict[str, str] | set[str]]:
+    if session_dir is None:
+        return {
+            "tool_names": {},
+            "exec_sessions": {},
+            "write_calls": {},
+            "completed_tools": set(),
+        }
+    scope = _codex_session_scope(session_dir)
+    state = _CODEX_SESSION_PROGRESS_STATE.get(scope)
+    if state is None:
+        state = {
+            "tool_names": {},
+            "exec_sessions": {},
+            "write_calls": {},
+            "completed_tools": set(),
+        }
+        _CODEX_SESSION_PROGRESS_STATE[scope] = state
+    return state
+
+
+def _build_codex_exec_progress_result(
+    entry: dict,
+    *,
+    tool_id: str,
+    process_id: str,
+) -> dict | None:
+    stdout = str(entry.get("stdout") or "")
+    if not stdout and not process_id:
+        return None
+    return {
+        "type": "tool_result",
+        "role": "tool",
+        "tool_id": tool_id,
+        "content": stdout,
+        "is_error": False,
+        "timestamp": entry.get("timestamp") or "",
+        "result_kind": "exec_command",
+        "status": "running",
+        "exit_code": None,
+        "cwd": entry.get("cwd") or "",
+        "command": entry.get("command") or "",
+        "parsed_cmd": entry.get("parsed_cmd") or [],
+        "duration_seconds": entry.get("duration_seconds"),
+        "stdout": stdout,
+        "stderr": "",
+        "process_id": process_id,
+    }
+
+
 def _codex_command_text(payload: dict, inp: dict | None = None) -> str:
     if inp and inp.get("cmd"):
         return str(inp["cmd"])
@@ -1323,6 +1594,8 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
                 }
         if event_type == "exec_command_end":
             return _parse_codex_exec_end(payload, timestamp)
+        if event_type == "patch_apply_end":
+            return _parse_codex_patch_apply_end(payload, timestamp)
         if event_type == "task_started":
             return None
         if event_type == "task_complete":
@@ -1341,6 +1614,8 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
             tool_input.setdefault("command", tool_input.get("cmd") or _codex_command_text(payload, tool_input))
             if tool_input.get("workdir") and "cwd" not in tool_input:
                 tool_input["cwd"] = tool_input["workdir"]
+        elif tool_name == "write_stdin":
+            tool_input.setdefault("session_id", tool_input.get("session_id"))
         entry = {
             "type": "tool_use",
             "role": "assistant",
@@ -1364,8 +1639,24 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
             ]
         return entry
 
-    if item_type == "function_call_output":
+    if item_type == "custom_tool_call":
+        tool_name = payload.get("name") or "?"
+        tool_input = {"input": str(payload.get("input") or "")}
+        normalized_tool_name = tool_name
+        if tool_name == "apply_patch":
+            normalized_tool_name = "Patch"
+            tool_input = _parse_codex_patch_input(str(payload.get("input") or ""))
         return {
+            "type": "tool_use",
+            "role": "assistant",
+            "tool_name": normalized_tool_name,
+            "tool_id": payload.get("call_id") or "",
+            "input": tool_input,
+            "timestamp": timestamp,
+        }
+
+    if item_type == "function_call_output":
+        entry = {
             "type": "tool_result",
             "role": "tool",
             "tool_id": payload.get("call_id") or "",
@@ -1374,6 +1665,11 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
             "timestamp": timestamp,
             "result_kind": "function_call_output",
         }
+        entry.update(_parse_codex_tool_output_metadata(entry["content"]))
+        return entry
+
+    if item_type == "custom_tool_call_output":
+        return _parse_codex_custom_tool_output(payload, timestamp)
 
     if item_type == "reasoning":
         text = _extract_codex_text_blocks(payload.get("summary"))
