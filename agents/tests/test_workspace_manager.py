@@ -473,6 +473,38 @@ def test_scan_all_worktrees_reports_state_per_session(tmp_path, monkeypatch):
     assert clean_row.session_live is False
 
 
+def test_scan_all_worktrees_keeps_dirty_worktree_ff_eligible_when_commit_is_linear(tmp_path, monkeypatch):
+    session = "sess-dirty-mergeable"
+    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch, repo_name="autonomy",
+    )
+    upstream = next(tmp_path.glob("upstream.git"))
+    target_repo = tmp_path / "autonomy"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(target_repo)], check=True)
+    monkeypatch.setattr(wm, "REPO_ROOT", target_repo)
+
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
+    (worktree / "mergeable.txt").write_text("ready\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "mergeable.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "mergeable commit",
+        ],
+        check=True,
+    )
+    (worktree / "runtime.log").write_text("local byproduct\n")
+
+    rows = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names={session})
+    row = next(item for item in rows if item.session_name == session and item.repo_name == "autonomy")
+
+    assert row.commits_ahead == 1
+    assert row.is_dirty is True
+    assert row.ff_eligible is True
+    assert row.rebase_required is False
+
+
 def test_scan_all_worktrees_lists_nested_untracked_files_individually(tmp_path, monkeypatch):
     session = "sess-untracked"
     worktrees_dir, _clone, worktree = _make_writable_session_worktree(
@@ -540,6 +572,50 @@ def test_merge_session_worktree_fast_forwards_matching_checkout(tmp_path, monkey
     assert result["commit"] == worktree_head
     assert result["message"] == "ff-only merge"
     assert result["target_repo"] == str(target_repo)
+    clone_head = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", f"refs/heads/{result['target_branch']}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert clone_head == worktree_head
+
+
+def test_merge_session_worktree_ignores_dirty_files_when_commit_is_ff_eligible(tmp_path, monkeypatch):
+    session = "sess-merge-dirty"
+    worktrees_dir, clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch, repo_name="autonomy",
+    )
+    upstream = next(tmp_path.glob("upstream.git"))
+    target_repo = tmp_path / "autonomy"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(target_repo)], check=True)
+    monkeypatch.setattr(wm, "REPO_ROOT", target_repo)
+
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
+    (worktree / "ff.txt").write_text("ff-only\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "ff.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "ff-only merge",
+        ],
+        check=True,
+    )
+    worktree_head = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    (worktree / "dashboard.log").write_text("runtime byproduct\n")
+
+    result = wm.merge_session_worktree(
+        session, "autonomy", worktrees_dir=worktrees_dir,
+    )
+
+    target_head = subprocess.run(
+        ["git", "-C", str(target_repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert target_head == worktree_head
+    assert result["commit"] == worktree_head
     clone_head = subprocess.run(
         ["git", "-C", str(clone), "rev-parse", f"refs/heads/{result['target_branch']}"],
         capture_output=True, text=True, check=True,
