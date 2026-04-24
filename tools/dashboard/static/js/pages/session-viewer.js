@@ -640,8 +640,6 @@
         if (data.type !== undefined) store.sessionType = data.type || '';
         if (data.role !== undefined) store.role = data.role || '';
         if (data.activity_state !== undefined) store.activityState = data.activity_state || 'idle';
-        if (data.context_tokens !== undefined) store.contextTokens = data.context_tokens;
-        if (data.last_activity !== undefined) store.lastActivity = data.last_activity || 0;
         if (data.seq !== undefined && (!data.entries || data.entries.length === 0)) {
           store.seq = data.seq;
         }
