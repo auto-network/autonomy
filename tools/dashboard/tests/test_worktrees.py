@@ -450,6 +450,7 @@ class TestWorktreePage:
         assert "hljs.highlight(source, { language, ignoreIllegals: true })" in js
         assert "get uncommittedChangesCount()" in js
         assert "return this.rows.filter(row => row.is_dirty).length;" in js
+        assert "if (item.row.is_dirty) return 'Uncommitted changes are present in this worktree';" not in js
         assert "'/api/worktrees/' + encodeURIComponent(row.session_name)" in js
         assert "'/sync-base'" in js
         assert "'/request-rebase'" in js
@@ -490,7 +491,13 @@ class TestWorktreePage:
         assert "changesCompanionCommitLabel(row)" in template
         assert "1 commit also present" in js
         assert 'x-text="uncommittedChangesCount"' in template
+        assert 'data-testid="worktree-merge-disabled-reason"' in template
         assert 'x-show="canDiscardDirtyRow(row)"' in template
+        assert 'x-text="refreshing ? \'Refreshing...\' : \'Refresh\'"' in template
+        assert 'href="/worktrees"' in template
+        assert '@click.prevent="refresh(true)"' in template
+        assert 'x-show="!refreshing"' not in template
+        assert 'x-show="refreshing"' not in template
         assert "Are you sure you want to delete this Worktree?" in template
         assert 'x-ref="dirtyDetailScroller"' in template
         assert 'x-ref="dirtyTitleBar"' in template

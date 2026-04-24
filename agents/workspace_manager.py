@@ -822,7 +822,6 @@ def scan_all_worktrees(
                 and bool(commits)
                 and not clone_stale
                 and not rebase_required
-                and not is_dirty
                 and _worktree_ff_only_safe(repo_dir, base_ref=base_ref)
             )
             out.append(WorktreeState(
@@ -1123,7 +1122,7 @@ def merge_session_worktree(
     is_dirty = _worktree_has_uncommitted_changes(worktree)
     base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
     commits_ahead = _worktree_commits_ahead(worktree, base_ref=base_ref)
-    ff_eligible = commits_ahead > 0 and not is_dirty and _worktree_ff_only_safe(worktree, base_ref=base_ref)
+    ff_eligible = commits_ahead > 0 and _worktree_ff_only_safe(worktree, base_ref=base_ref)
     if not ff_eligible:
         raise WorkspaceError(
             f"worktree {session_name}/{repo_name} is not ff-eligible "

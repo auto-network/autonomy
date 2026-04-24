@@ -533,7 +533,6 @@
           return 'Parent has advanced; stash or commit uncommitted changes before rebasing';
         }
         if (item.row.rebase_required) return 'Parent has advanced; rebase required before merge';
-        if (item.row.is_dirty) return 'Uncommitted changes are present in this worktree';
         return '';
       },
 
@@ -1014,7 +1013,7 @@
                 commits.shift();
                 row.commits = commits;
                 row.commits_ahead = commits.length;
-                row.ff_eligible = commits.length > 0 && !row.is_dirty;
+                row.ff_eligible = commits.length > 0;
                 row.rebase_required = false;
                 this.rows = this.rows.slice();
                 this.queueBranchLayouts();
