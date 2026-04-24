@@ -783,6 +783,7 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") 
     if not source:
         print(f"No source found matching '{source_arg}'")
         return
+    _mark_read(source.get("id", ""))
     entries = payload.get("entries") or []
     if version_req is not None:
         print(
