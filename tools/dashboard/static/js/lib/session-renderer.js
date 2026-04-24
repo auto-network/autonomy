@@ -18,6 +18,7 @@
   const TOOL_CHIPS = {
     Bash:  'sc-chip-bash',
     exec_command: 'sc-chip-exec',
+    Patch: 'sc-chip-edit',
     Read:  'sc-chip-read',
     Write: 'sc-chip-write',
     Edit:  'sc-chip-edit',
@@ -28,6 +29,7 @@
   const TOOL_BORDERS = {
     Bash:  'sc-border-bash',
     exec_command: 'sc-border-exec',
+    Patch: 'sc-border-edit',
     Read:  'sc-border-read',
     Write: 'sc-border-write',
     Edit:  'sc-border-edit',
@@ -154,7 +156,9 @@
         }
       }
       // Fallback to local resultMap (history, initial load, non-tool_running states)
-      return !this._resultMap[entry.tool_id];
+      var result = this._resultMap[entry.tool_id];
+      if (result && result.status === 'running') return true;
+      return !result;
     },
 
     /** Elapsed seconds since entry.timestamp (for running tools). */
@@ -183,12 +187,15 @@
 
       // Running tool: show elapsed time + "Running" badge
       // Touch _tick to force Alpine re-evaluation every second
-      if (!result) {
+      if (!result || result.status === 'running') {
         void this._tick;
         const elapsed = this._elapsed(entry);
         const elapsedText = this.durationText(elapsed);
         if (elapsedText) badges.push({ text: elapsedText, cls: 'sc-meta-running' });
         badges.push({ text: 'Running', cls: 'sc-meta-running' });
+        if (result && result.content) {
+          badges.push({ text: this._countLines(result.content) + ' lines', cls: 'sc-meta-gray' });
+        }
         return badges;
       }
 

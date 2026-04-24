@@ -449,6 +449,32 @@ class _TailState:
     last_todos_json: str | None = None
 
 
+def _apply_activity_entries(ts: _TailState, entries: list[dict]) -> str:
+    """Update pending/completed tool tracking and return the derived state."""
+    for entry in entries:
+        etype = entry.get("type", "")
+        if etype == "tool_use" and entry.get("tool_id"):
+            tid = entry["tool_id"]
+            if tid not in ts.completed_tool_ids:
+                ts.pending_tool_ids.add(tid)
+        elif etype in ("tool_result", "semantic_bash") and entry.get("tool_id"):
+            tid = entry["tool_id"]
+            if entry.get("status") == "running":
+                if tid not in ts.completed_tool_ids:
+                    ts.pending_tool_ids.add(tid)
+            else:
+                ts.pending_tool_ids.discard(tid)
+                ts.completed_tool_ids.add(tid)
+        if etype:
+            ts.last_entry_type = etype
+
+    if ts.pending_tool_ids:
+        return "tool_running"
+    if ts.last_entry_type in ("user", "tool_result", "crosstalk"):
+        return "thinking"
+    return "idle"
+
+
 class SessionMonitor:
     """DB-backed session registry with background tailing and liveness checking."""
 
@@ -1164,27 +1190,7 @@ class SessionMonitor:
             session_dir=session_dir,
         )
 
-        # Track pending_tool_ids and last_entry_type for activity_state
-        for entry in new_entries:
-            etype = entry.get("type", "")
-            if etype == "tool_use" and entry.get("tool_id"):
-                tid = entry["tool_id"]
-                if tid not in ts.completed_tool_ids:
-                    ts.pending_tool_ids.add(tid)
-            elif etype in ("tool_result", "semantic_bash") and entry.get("tool_id"):
-                tid = entry["tool_id"]
-                ts.pending_tool_ids.discard(tid)
-                ts.completed_tool_ids.add(tid)
-            if etype:
-                ts.last_entry_type = etype
-
-        # Derive activity_state from pending_tool_ids and last_entry_type
-        if ts.pending_tool_ids:
-            activity_state = "tool_running"
-        elif ts.last_entry_type in ("user", "tool_result", "crosstalk"):
-            activity_state = "thinking"
-        else:
-            activity_state = "idle"
+        activity_state = _apply_activity_entries(ts, new_entries)
         update_activity_state(tmux_name, activity_state)
 
         # Soft-update the registry cache so new SSE connections get fresh

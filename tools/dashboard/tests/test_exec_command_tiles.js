@@ -303,4 +303,20 @@ describe('exec_command meta badges', () => {
     const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
     assert.deepStrictEqual(plain(badges), [{ text: '+31', cls: 'sc-meta-green' }]);
   });
+
+  it('treats a running result as still running even after a progress update lands', () => {
+    const h = makeHarness();
+    const entry = makeExecUse('call_progress', 'pytest tools/dashboard/tests/test_worktrees.py -q');
+    const result = makeExecResult('call_progress', [], 'bringing up nodes...\n.......', {
+      status: 'running',
+      duration_seconds: 5,
+      exit_code: null,
+    });
+    const ctx = makeRendererContext(h.win, entry, result);
+
+    assert.equal(h.win.SessionRenderer.isToolRunning.call(ctx, entry), true);
+    const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
+    assert.equal(badges.some((badge) => badge.text === 'Running'), true);
+    assert.equal(badges.some((badge) => badge.text === '2 lines'), true);
+  });
 });

@@ -125,6 +125,78 @@ def test_parse_codex_exec_command_end_as_rich_tool_result():
     assert entry["duration_seconds"] == 1.5
 
 
+def test_parse_codex_apply_patch_custom_tool_call_as_patch_tile():
+    entry = parse_codex_log_line(_line({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": "call_patch_1",
+            "name": "apply_patch",
+            "input": (
+                "*** Begin Patch\n"
+                "*** Update File: tools/dashboard/session_harness.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        },
+    }))
+
+    assert entry == {
+        "type": "tool_use",
+        "role": "assistant",
+        "tool_name": "Patch",
+        "tool_id": "call_patch_1",
+        "input": {
+            "description": "tools/dashboard/session_harness.py",
+            "file_path": "tools/dashboard/session_harness.py",
+            "files": ["tools/dashboard/session_harness.py"],
+            "patch": (
+                "*** Begin Patch\n"
+                "*** Update File: tools/dashboard/session_harness.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        },
+        "timestamp": TS,
+    }
+
+
+def test_parse_codex_patch_apply_end_as_tool_result():
+    entry = parse_codex_log_line(_line({
+        "timestamp": TS,
+        "type": "event_msg",
+        "payload": {
+            "type": "patch_apply_end",
+            "call_id": "call_patch_1",
+            "stdout": "Success. Updated the following files:\nM tools/dashboard/session_harness.py\n",
+            "stderr": "",
+            "success": True,
+            "status": "completed",
+            "changes": {
+                "/workspace/repo/tools/dashboard/session_harness.py": {
+                    "type": "update",
+                    "unified_diff": "@@ -1 +1 @@\n-old\n+new\n",
+                    "move_path": None,
+                },
+            },
+        },
+    }))
+
+    assert entry["type"] == "tool_result"
+    assert entry["tool_id"] == "call_patch_1"
+    assert entry["result_kind"] == "patch_apply_end"
+    assert entry["content"] == "Success. Updated the following files:\nM tools/dashboard/session_harness.py\n"
+    assert entry["changed_files"] == ["tools/dashboard/session_harness.py"]
+    assert entry["status"] == "completed"
+    assert entry["is_error"] is False
+
+
 def test_postprocess_codex_exec_into_read_tiles():
     entries = CODEX_HARNESS.postprocess_entries([
         {
@@ -262,6 +334,255 @@ def test_postprocess_codex_exec_into_grep_tile():
     }
     assert entries[1]["type"] == "tool_result"
     assert entries[1]["tool_id"] == "call_rg"
+
+
+def test_postprocess_codex_prefers_patch_apply_end_over_custom_tool_output(tmp_path):
+    session_dir = tmp_path / "patch-session"
+    session_dir.mkdir()
+    parsed = []
+    for raw in (
+        {
+            "timestamp": TS,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_patch_1",
+                "name": "apply_patch",
+                "input": (
+                    "*** Begin Patch\n"
+                    "*** Update File: tools/dashboard/session_harness.py\n"
+                    "*** End Patch\n"
+                ),
+            },
+        },
+        {
+            "timestamp": TS,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_patch_1",
+                "output": json.dumps({
+                    "output": "fallback result",
+                    "metadata": {"exit_code": 0, "duration_seconds": 0.0},
+                }),
+            },
+        },
+        {
+            "timestamp": TS,
+            "type": "event_msg",
+            "payload": {
+                "type": "patch_apply_end",
+                "call_id": "call_patch_1",
+                "stdout": "Success. Updated the following files:\nM tools/dashboard/session_harness.py\n",
+                "stderr": "",
+                "success": True,
+                "status": "completed",
+                "changes": {
+                    "/workspace/repo/tools/dashboard/session_harness.py": {
+                        "type": "update",
+                        "unified_diff": "@@ -1 +1 @@\n-old\n+new\n",
+                        "move_path": None,
+                    },
+                },
+            },
+        },
+    ):
+        parsed_entry = parse_codex_log_line(_line(raw))
+        if isinstance(parsed_entry, list):
+            parsed.extend(parsed_entry)
+        elif parsed_entry:
+            parsed.append(parsed_entry)
+
+    entries = CODEX_HARNESS.postprocess_entries(parsed, session_dir=session_dir)
+
+    assert [entry["type"] for entry in entries] == ["tool_use", "tool_result"]
+    assert entries[0]["tool_name"] == "Patch"
+    assert entries[1]["result_kind"] == "patch_apply_end"
+    assert entries[1]["content"] == "Success. Updated the following files:\nM tools/dashboard/session_harness.py\n"
+
+
+def test_postprocess_codex_folds_write_stdin_progress_into_parent_exec_tile(tmp_path):
+    session_dir = tmp_path / "progress-session"
+    session_dir.mkdir()
+    parsed = []
+    for raw in (
+        {
+            "timestamp": "2026-04-24T01:16:23.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({
+                    "cmd": "pytest tools/dashboard/tests/test_worktrees.py -q",
+                    "workdir": "/workspace/repo",
+                    "yield_time_ms": 1000,
+                }),
+                "call_id": "call_exec_1",
+            },
+        },
+        {
+            "timestamp": "2026-04-24T01:16:24.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_exec_1",
+                "output": (
+                    "Chunk ID: start\n"
+                    "Wall time: 1.0017 seconds\n"
+                    "Process running with session ID 27299\n"
+                    "Original token count: 12\n"
+                    "Output:\n"
+                    "bringing up nodes...\n"
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-24T01:16:27.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "write_stdin",
+                "arguments": json.dumps({
+                    "session_id": 27299,
+                    "chars": "",
+                    "yield_time_ms": 1000,
+                    "max_output_tokens": 3000,
+                }),
+                "call_id": "call_write_1",
+            },
+        },
+        {
+            "timestamp": "2026-04-24T01:16:32.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_write_1",
+                "output": (
+                    "Chunk ID: poll\n"
+                    "Wall time: 5.0007 seconds\n"
+                    "Process running with session ID 27299\n"
+                    "Original token count: 2\n"
+                    "Output:\n"
+                    "......."
+                ),
+            },
+        },
+    ):
+        parsed_entry = parse_codex_log_line(_line(raw))
+        if isinstance(parsed_entry, list):
+            parsed.extend(parsed_entry)
+        elif parsed_entry:
+            parsed.append(parsed_entry)
+
+    entries = CODEX_HARNESS.postprocess_entries(parsed, session_dir=session_dir)
+
+    tool_uses = [entry for entry in entries if entry["type"] == "tool_use"]
+    tool_results = [entry for entry in entries if entry["type"] == "tool_result"]
+
+    assert len(tool_uses) == 1
+    assert tool_uses[0]["tool_name"] == "Bash"
+    assert tool_uses[0]["tool_id"] == "call_exec_1"
+    assert all(entry["tool_id"] == "call_exec_1" for entry in tool_results)
+    assert all(entry["status"] == "running" for entry in tool_results)
+    assert tool_results[-1]["content"] == "......."
+
+
+def test_postprocess_codex_drops_late_write_stdin_after_exec_completion(tmp_path):
+    session_dir = tmp_path / "complete-session"
+    session_dir.mkdir()
+    parsed = []
+    for raw in (
+        {
+            "timestamp": "2026-04-24T01:16:23.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({
+                    "cmd": "pytest tools/dashboard/tests/test_worktrees.py -q",
+                    "workdir": "/workspace/repo",
+                }),
+                "call_id": "call_exec_1",
+            },
+        },
+        {
+            "timestamp": "2026-04-24T01:16:24.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_exec_1",
+                "output": (
+                    "Chunk ID: start\n"
+                    "Wall time: 1.0017 seconds\n"
+                    "Process running with session ID 27299\n"
+                    "Original token count: 12\n"
+                    "Output:\n"
+                    "bringing up nodes...\n"
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-24T01:16:41.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "exec_command_end",
+                "call_id": "call_exec_1",
+                "process_id": "27299",
+                "command": ["/bin/bash", "-lc", "pytest tools/dashboard/tests/test_worktrees.py -q"],
+                "cwd": "/workspace/repo",
+                "parsed_cmd": [{"type": "unknown", "cmd": "pytest tools/dashboard/tests/test_worktrees.py -q"}],
+                "aggregated_output": "....................\n20 passed in 18.06s\n",
+                "exit_code": 0,
+                "duration": {"secs": 18, "nanos": 0},
+                "status": "completed",
+            },
+        },
+        {
+            "timestamp": "2026-04-24T01:16:43.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "write_stdin",
+                "arguments": json.dumps({
+                    "session_id": 27299,
+                    "chars": "",
+                    "yield_time_ms": 1000,
+                    "max_output_tokens": 3000,
+                }),
+                "call_id": "call_write_1",
+            },
+        },
+        {
+            "timestamp": "2026-04-24T01:16:44.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_write_1",
+                "output": (
+                    "Chunk ID: done\n"
+                    "Wall time: 0.0000 seconds\n"
+                    "Process exited with code 0\n"
+                    "Original token count: 21\n"
+                    "Output:\n"
+                    "... [100%]\n"
+                    "20 passed in 18.06s\n"
+                ),
+            },
+        },
+    ):
+        parsed_entry = parse_codex_log_line(_line(raw))
+        if isinstance(parsed_entry, list):
+            parsed.extend(parsed_entry)
+        elif parsed_entry:
+            parsed.append(parsed_entry)
+
+    entries = CODEX_HARNESS.postprocess_entries(parsed, session_dir=session_dir)
+    tool_results = [entry for entry in entries if entry["type"] == "tool_result" and entry["tool_id"] == "call_exec_1"]
+
+    assert tool_results[-1]["status"] == "completed"
+    assert tool_results[-1]["exit_code"] == 0
+    assert tool_results[-1]["content"] == "....................\n20 passed in 18.06s\n"
 
 
 def test_parse_codex_user_and_agent_event_messages():

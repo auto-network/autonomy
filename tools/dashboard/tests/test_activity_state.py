@@ -21,6 +21,7 @@ pytest.importorskip("inotify_simple")
 pytest.importorskip("pytest_asyncio")
 
 from tools.dashboard.server import _parse_jsonl_entry
+from tools.dashboard.session_monitor import _TailState, _apply_activity_entries
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -771,6 +772,18 @@ class TestActivityStateBroadcast:
             assert data["pending_tool_ids"] == []
         finally:
             await _stop_monitor(mon, patcher)
+
+    def test_running_progress_result_keeps_tool_pending(self):
+        """A progress update should not clear pending_tool_ids before completion."""
+        ts = _TailState()
+        state = _apply_activity_entries(ts, [
+            {"type": "tool_use", "tool_id": "call_exec_progress"},
+            {"type": "tool_result", "tool_id": "call_exec_progress", "status": "running"},
+        ])
+
+        assert state == "tool_running"
+        assert "call_exec_progress" in ts.pending_tool_ids
+        assert "call_exec_progress" not in ts.completed_tool_ids
 
     @pytest.mark.asyncio
     async def test_registry_includes_activity_state(self, setup_env):
