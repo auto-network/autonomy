@@ -374,6 +374,15 @@ SYSTEM_NOISE = re.compile(
     re.DOTALL,
 )
 REQUEST_INTERRUPTED = re.compile(r"\[Request interrupted by user.*?\]")
+_CODEX_NOISE_PREFIXES = (
+    "<crosstalk ",
+    "<system-",
+    "<local-command",
+    "<task-notification",
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+)
 
 
 def parse_claude_code_session(file_path: Path) -> tuple[dict, list[dict]]:
@@ -536,6 +545,126 @@ def parse_claude_code_session(file_path: Path) -> tuple[dict, list[dict]]:
                 "parent_uuid": entry.get("parentUuid"),
                 "timestamp": ts,
             })
+
+    meta["started_at"] = first_ts
+    meta["ended_at"] = last_ts
+    meta["model"] = model
+    meta["total_input_tokens"] = total_input_tokens
+    meta["total_output_tokens"] = total_output_tokens
+    meta["total_turns"] = len(turns)
+
+    return meta, turns
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clean_codex_text(text: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", str(text or "")).strip()
+
+
+def _is_codex_noise_text(text: str) -> bool:
+    stripped = str(text or "").strip()
+    return stripped.startswith(_CODEX_NOISE_PREFIXES)
+
+
+def parse_codex_session(file_path: Path) -> tuple[dict, list[dict]]:
+    """Parse a Codex rollout JSONL session into metadata and content turns.
+
+    Keeps only operator-visible text from ``event_msg.user_message`` and
+    ``event_msg.agent_message``. Tool use/results, progress items, and
+    compaction metadata are excluded from graph content ingest.
+    """
+    meta = {
+        "session_id": file_path.stem,
+        "platform": "codex-cli",
+    }
+    turns = []
+    turn_number = 0
+    first_ts = None
+    last_ts = None
+    model = None
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            ts = entry.get("timestamp", "")
+            if ts:
+                if first_ts is None:
+                    first_ts = ts
+                last_ts = ts
+
+            etype = entry.get("type")
+            payload = entry.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+
+            if etype == "session_meta":
+                if payload.get("originator"):
+                    meta["originator"] = payload["originator"]
+                if payload.get("model_provider"):
+                    meta["model_provider"] = payload["model_provider"]
+                if payload.get("model"):
+                    model = str(payload["model"])
+                continue
+
+            if etype == "compacted":
+                continue
+
+            if etype != "event_msg":
+                continue
+
+            event_type = payload.get("type")
+            if event_type == "token_count":
+                info = payload.get("info") or {}
+                total_usage = info.get("total_token_usage") or {}
+                total_input_tokens = _safe_int(
+                    total_usage.get("input_tokens"), total_input_tokens
+                )
+                total_output_tokens = _safe_int(
+                    total_usage.get("output_tokens"), total_output_tokens
+                )
+                continue
+
+            if event_type == "user_message":
+                text = _clean_codex_text(str(payload.get("message") or ""))
+                if len(text) < 5 or _is_codex_noise_text(text):
+                    continue
+                turn_number += 1
+                turns.append({
+                    "turn_number": turn_number,
+                    "role": "user",
+                    "content": text,
+                    "message_id": entry.get("uuid"),
+                    "timestamp": ts,
+                })
+                continue
+
+            if event_type == "agent_message":
+                text = _clean_codex_text(str(payload.get("message") or ""))
+                if len(text) < 5:
+                    continue
+                turn_number += 1
+                turns.append({
+                    "turn_number": turn_number,
+                    "role": "assistant",
+                    "content": text,
+                    "message_id": entry.get("uuid"),
+                    "timestamp": ts,
+                })
 
     meta["started_at"] = first_ts
     meta["ended_at"] = last_ts
@@ -716,32 +845,61 @@ def _build_summary_meta(existing_meta: dict, parsed_meta: dict, file_path: Path,
     return out
 
 
-def ingest_claude_code_session(
-    db: GraphDB, file_path: str | Path, force: bool = False, project: str | None = None,
-) -> dict:
-    """Ingest a Claude Code JSONL session into the graph.
-
-    Supports incremental ingestion: if a source already exists and force=False,
-    only new turns (beyond the highest turn_number already stored) are added.
-    Uses file size tracking to skip unchanged files without parsing.
-    """
-    file_path = Path(file_path)
+def _normalize_session_path(file_path: Path) -> str:
     abs_path = str(file_path.resolve())
-    # Normalize container paths to host paths to prevent duplicates
     abs_path = abs_path.replace("/home/agent/", "/home/jeremy/")
     abs_path = abs_path.replace("/workspace/repo/", "/home/jeremy/workspace/autonomy/")
+    return abs_path
 
-    # Project + tags are sourced from .session_meta.json. Sessions launched via
-    # session_launcher.launch_session() always write graph_project (and
-    # graph_tags) into the meta file. Legacy sessions without meta are left
-    # with whatever project the existing source row already carries.
+
+def detect_session_format(file_path: Path) -> str:
+    """Return the JSONL harness format for *file_path*."""
+    session_meta = _load_session_meta(file_path)
+    harness = str(session_meta.get("harness") or "").strip().lower()
+    if harness == "codex":
+        return "codex"
+    if harness == "claude":
+        return "claude"
+    if file_path.name.startswith("rollout-"):
+        return "codex"
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+    except OSError:
+        return "claude"
+    if not first_line:
+        return "claude"
+    try:
+        raw = json.loads(first_line)
+    except json.JSONDecodeError:
+        return "claude"
+    payload = raw.get("payload") or {}
+    if raw.get("type") == "session_meta" and isinstance(payload, dict):
+        if payload.get("originator") == "codex-tui":
+            return "codex"
+    return "claude"
+
+
+def _ingest_text_session(
+    db: GraphDB,
+    file_path: str | Path,
+    *,
+    parser,
+    platform: str,
+    default_model: str,
+    force: bool = False,
+    project: str | None = None,
+) -> dict:
+    """Shared ingest path for text-only JSONL session harnesses."""
+    file_path = Path(file_path)
+    abs_path = _normalize_session_path(file_path)
+
     session_meta = _load_session_meta(file_path)
     if project is None:
         project = session_meta.get("graph_project")
 
     existing = db.get_source_by_path(abs_path)
 
-    # Fast path: check file size before parsing
     current_size = file_path.stat().st_size
     if existing and not force:
         existing_meta = json.loads(existing["metadata"]) if existing["metadata"] else {}
@@ -749,7 +907,7 @@ def ingest_claude_code_session(
         if last_size and current_size == last_size:
             return {"status": "skipped", "source_id": existing["id"], "reason": "already up to date"}
 
-    meta, turns = parse_claude_code_session(file_path)
+    meta, turns = parser(file_path)
 
     if not turns:
         return {"status": "skipped", "source_id": existing["id"] if existing else None, "reason": "no content turns found"}
@@ -759,7 +917,6 @@ def ingest_claude_code_session(
         existing = None
 
     if existing:
-        # Incremental: only ingest turns beyond what we already have
         max_turn = db.get_max_turn(existing["id"])
         new_turns = [t for t in turns if t["turn_number"] > max_turn]
 
@@ -769,7 +926,6 @@ def ingest_claude_code_session(
         all_entities = {}
 
         if new_turns:
-            # Find the last thought from existing data to link new derivations
             last_thought_row = db.conn.execute(
                 "SELECT id FROM thoughts WHERE source_id = ? ORDER BY turn_number DESC LIMIT 1",
                 (source_id,)
@@ -778,9 +934,6 @@ def ingest_claude_code_session(
 
             for turn in new_turns:
                 if turn["role"] == "compact_summary":
-                    # Compaction boundary summary: index content for FTS but
-                    # skip entity extraction and don't update last_thought_id —
-                    # subsequent assistant responses shouldn't responds_to it.
                     t_meta = {"timestamp": turn.get("timestamp", "")}
                     if turn.get("compact_metadata"):
                         t_meta["compact_metadata"] = turn["compact_metadata"]
@@ -825,7 +978,7 @@ def ingest_claude_code_session(
                         source_id=source_id,
                         thought_id=last_thought_id,
                         content=turn["content"],
-                        model=meta.get("model", "claude-code"),
+                        model=meta.get("model", default_model),
                         turn_number=turn["turn_number"],
                         message_id=turn.get("message_id"),
                         metadata={"timestamp": turn.get("timestamp", "")},
@@ -845,12 +998,8 @@ def ingest_claude_code_session(
                             relation="responds_to",
                         ))
 
-        # Refresh summary fields on every incremental pass — even when no new
-        # content turns landed (file may have grown via tool_use/tool_result
-        # entries that bump file_size and ended_at without producing new turns).
         existing_meta = json.loads(existing["metadata"]) if existing["metadata"] else {}
         new_meta = _build_summary_meta(existing_meta, meta, file_path, session_meta, current_size)
-        # Re-derive title in case set-label fired or bead linkage appeared after first ingest.
         new_title = _derive_session_title(meta, file_path, session_meta, turns) or existing.get("title")
         db.update_source_summary(
             source_id,
@@ -874,13 +1023,12 @@ def ingest_claude_code_session(
             "to_turn": turns[-1]["turn_number"],
         }
 
-    # Fresh ingestion
     title = _derive_session_title(meta, file_path, session_meta, turns)
     source_meta = _build_summary_meta({}, meta, file_path, session_meta, current_size)
 
     source = Source(
         type="session",
-        platform="claude-code",
+        platform=platform,
         project=project,
         title=title,
         file_path=abs_path,
@@ -941,7 +1089,7 @@ def ingest_claude_code_session(
                 source_id=source.id,
                 thought_id=last_thought_id,
                 content=turn["content"],
-                model=meta.get("model", "claude-code"),
+                model=meta.get("model", default_model),
                 turn_number=turn["turn_number"],
                 message_id=turn.get("message_id"),
                 metadata={"timestamp": turn.get("timestamp", "")},
@@ -975,6 +1123,46 @@ def ingest_claude_code_session(
     }
 
 
+def ingest_claude_code_session(
+    db: GraphDB, file_path: str | Path, force: bool = False, project: str | None = None,
+) -> dict:
+    """Ingest a Claude Code JSONL session into the graph."""
+    return _ingest_text_session(
+        db,
+        file_path,
+        parser=parse_claude_code_session,
+        platform="claude-code",
+        default_model="claude-code",
+        force=force,
+        project=project,
+    )
+
+
+def ingest_codex_session(
+    db: GraphDB, file_path: str | Path, force: bool = False, project: str | None = None,
+) -> dict:
+    """Ingest a Codex rollout JSONL session into the graph."""
+    return _ingest_text_session(
+        db,
+        file_path,
+        parser=parse_codex_session,
+        platform="codex-cli",
+        default_model="codex-cli",
+        force=force,
+        project=project,
+    )
+
+
+def ingest_session_file(
+    db: GraphDB, file_path: str | Path, force: bool = False, project: str | None = None,
+) -> dict:
+    """Ingest a JSONL session file, routing by detected harness format."""
+    path = Path(file_path)
+    if detect_session_format(path) == "codex":
+        return ingest_codex_session(db, path, force=force, project=project)
+    return ingest_claude_code_session(db, path, force=force, project=project)
+
+
 def _ingest_session_routed(jsonl_file: Path, force: bool) -> dict:
     """Open the right per-org DB for *jsonl_file* and ingest.
 
@@ -985,7 +1173,7 @@ def _ingest_session_routed(jsonl_file: Path, force: bool) -> dict:
     """
     db = _open_db_for_session(jsonl_file)
     try:
-        return ingest_claude_code_session(db, jsonl_file, force=force)
+        return ingest_session_file(db, jsonl_file, force=force)
     finally:
         db.close()
 
@@ -1011,7 +1199,7 @@ def ingest_claude_code_project(
         if db is None:
             result = _ingest_session_routed(jsonl_file, force)
         else:
-            result = ingest_claude_code_session(db, jsonl_file, force)
+            result = ingest_session_file(db, jsonl_file, force)
         result["file"] = str(jsonl_file)
         results.append(result)
 
@@ -1046,7 +1234,7 @@ def ingest_all_claude_code(
                 if db is None:
                     result = _ingest_session_routed(jsonl_file, force)
                 else:
-                    result = ingest_claude_code_session(db, jsonl_file, force)
+                    result = ingest_session_file(db, jsonl_file, force)
                 result["file"] = str(jsonl_file)
                 results.append(result)
 
@@ -1059,16 +1247,13 @@ def ingest_all_claude_code(
             sessions_dir = run_dir / "sessions"
             if not sessions_dir.is_dir():
                 continue
-            for project_dir in sorted(sessions_dir.iterdir()):
-                if not project_dir.is_dir():
-                    continue
-                for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-                    if db is None:
-                        result = _ingest_session_routed(jsonl_file, force)
-                    else:
-                        result = ingest_claude_code_session(db, jsonl_file, force)
-                    result["file"] = str(jsonl_file)
-                    results.append(result)
+            for jsonl_file in sorted(sessions_dir.rglob("*.jsonl")):
+                if db is None:
+                    result = _ingest_session_routed(jsonl_file, force)
+                else:
+                    result = ingest_session_file(db, jsonl_file, force)
+                result["file"] = str(jsonl_file)
+                results.append(result)
 
     return results
 
