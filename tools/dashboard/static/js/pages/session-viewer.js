@@ -172,6 +172,10 @@
       // Overlay mode state
       _runDir: '',
       _pollInterval: null,
+      _resumeRecoveryInstalled: false,
+      _resumeHeartbeatAt: 0,
+      _resumeRefreshInFlight: null,
+      _resumeHeartbeatInterval: null,
 
       // API path
       _tailUrl: '',
@@ -456,6 +460,10 @@
           clearInterval(this._tickInterval);
           this._tickInterval = null;
         }
+        if (this._resumeHeartbeatInterval) {
+          clearInterval(this._resumeHeartbeatInterval);
+          this._resumeHeartbeatInterval = null;
+        }
         // Dispose terminal WS + xterm if the toggle was active. Leaking these
         // holds a server-side tmux attach and exhausts WebSocket slots.
         this._disposeTerminal();
@@ -533,6 +541,113 @@
             }
           }
         ));
+
+        this._setupResumeRecovery();
+      },
+
+      _setupResumeRecovery() {
+        if (this._resumeRecoveryInstalled || !this.sessionKey || !this._tailUrl) return;
+        this._resumeRecoveryInstalled = true;
+        this._resumeHeartbeatAt = Date.now();
+
+        var self = this;
+        function onVisibility() {
+          if (document.visibilityState === 'visible') {
+            self._recoverSessionSync('visibility');
+          }
+        }
+        function onPageShow(ev) {
+          if (ev && ev.persisted) {
+            self._recoverSessionSync('pageshow');
+          }
+        }
+        function onFocus() {
+          self._recoverSessionSync('focus');
+        }
+        function onOnline() {
+          self._recoverSessionSync('online');
+        }
+
+        document.addEventListener('visibilitychange', onVisibility);
+        window.addEventListener('pageshow', onPageShow);
+        window.addEventListener('focus', onFocus);
+        window.addEventListener('online', onOnline);
+        this._storeCleanups.push(function() {
+          document.removeEventListener('visibilitychange', onVisibility);
+          window.removeEventListener('pageshow', onPageShow);
+          window.removeEventListener('focus', onFocus);
+          window.removeEventListener('online', onOnline);
+          self._resumeRecoveryInstalled = false;
+        });
+
+        if (!this._resumeHeartbeatInterval) {
+          this._resumeHeartbeatInterval = setInterval(function() {
+            self._checkResumeHeartbeat(Date.now());
+          }, 5000);
+          this._storeCleanups.push(function() {
+            if (self._resumeHeartbeatInterval) {
+              clearInterval(self._resumeHeartbeatInterval);
+              self._resumeHeartbeatInterval = null;
+            }
+          });
+        }
+      },
+
+      _checkResumeHeartbeat(now) {
+        var current = now || Date.now();
+        if (!this._resumeHeartbeatAt) {
+          this._resumeHeartbeatAt = current;
+          return;
+        }
+        var elapsed = current - this._resumeHeartbeatAt;
+        this._resumeHeartbeatAt = current;
+        if (elapsed > 15000) {
+          this._recoverSessionSync('heartbeat');
+        }
+      },
+
+      async _recoverSessionSync(reason) {
+        if (!this.sessionKey || !this._tailUrl || this.state === 'error') return;
+        var store = Alpine.store('sessions')[this.sessionKey];
+        if (!store) return;
+        if (this._resumeRefreshInFlight) return this._resumeRefreshInFlight;
+
+        var self = this;
+        this._resumeRefreshInFlight = (async function() {
+          try {
+            if (
+              typeof window.reconnectEvents === 'function' &&
+              window._es &&
+              window._es.readyState === 2
+            ) {
+              window.reconnectEvents();
+            }
+            await self._fetchDelta(store);
+          } catch (e) {
+            console.warn('[sessionViewer] resume catch-up failed (' + reason + ')', e);
+          } finally {
+            self._resumeRefreshInFlight = null;
+          }
+        })();
+        return this._resumeRefreshInFlight;
+      },
+
+      _applyTailPayload(store, data) {
+        if (!store || !data) return;
+        if (data.offset !== undefined) store.offset = data.offset || 0;
+        if (data.is_live !== undefined) store.isLive = !!data.is_live;
+        if (data.resolved !== undefined) store.resolved = !!data.resolved;
+        if (data.type !== undefined) store.sessionType = data.type || '';
+        if (data.role !== undefined) store.role = data.role || '';
+        if (data.activity_state !== undefined) store.activityState = data.activity_state || 'idle';
+        if (data.context_tokens !== undefined) store.contextTokens = data.context_tokens;
+        if (data.last_activity !== undefined) store.lastActivity = data.last_activity || 0;
+        if (data.seq !== undefined && (!data.entries || data.entries.length === 0)) {
+          store.seq = data.seq;
+        }
+        if (data.entries && data.entries.length > 0) {
+          this._ingestEntries(store, data);
+        }
       },
 
       // ── Scroll helpers ──────────────────────────────────────────
@@ -836,20 +951,21 @@
 
         if (data.error) throw new Error(data.error);
 
-        store.offset = data.offset || 0;
-        store.isLive = !!data.is_live;
-        if (data.resolved !== undefined) store.resolved = !!data.resolved;
-        store.sessionType = data.type || '';
-        store.role = data.role || '';
-        store.activityState = data.activity_state || 'idle';
-        // tmux_session from response is for reference only; sessionKey is authoritative
-        if (data.seq !== undefined) store.seq = data.seq;
-
-        if (data.entries && data.entries.length > 0) {
-          this._ingestEntries(store, data);
-        }
+        this._applyTailPayload(store, data);
 
         this._rebuildDisplay();
+      },
+
+      async _fetchDelta(store) {
+        var after = (store && store.offset) || 0;
+        var res = await fetch(this._tailUrl + '?after=' + after);
+        if (!res.ok) {
+          throw new Error('Tail request failed (' + res.status + ')');
+        }
+        var data = await res.json();
+        if (data.error) throw new Error(data.error);
+        this._applyTailPayload(store, data);
+        return data;
       },
 
       // ── Ingest entries through the shared session store path ──
@@ -925,6 +1041,9 @@
         this._runDir = '';
         this._tailUrl = '';
         this._tick = 0;
+        this._resumeRecoveryInstalled = false;
+        this._resumeHeartbeatAt = 0;
+        this._resumeRefreshInFlight = null;
       },
 
       // ── Overlay: header sync (imperative — outside Alpine scope) ──

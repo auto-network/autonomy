@@ -161,6 +161,15 @@
     };
   }
 
+  function reconnectEvents() {
+    try {
+      if (_es) _es.close();
+    } catch (e) {
+      console.warn('[EventBus] close before reconnect failed', e);
+    }
+    _connect();
+  }
+
   function registerHandler(topic, fn) {
     if (!_handlers[topic]) _handlers[topic] = new Set();
     _handlers[topic].add(fn);
@@ -211,6 +220,7 @@
   window.connectEvents = connectEvents;
   window.registerHandler = registerHandler;
   window.unregisterHandler = unregisterHandler;
+  window.reconnectEvents = reconnectEvents;
   window._connect = _connect;
   Object.defineProperty(window, '_lastSeq', {
     get: function() { return _lastSeq; },
