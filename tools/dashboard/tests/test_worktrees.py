@@ -476,11 +476,8 @@ class TestWorktreePage:
         assert "async function route()" in app_js
         assert "await _checkVersion();" in app_js
         assert "data-hard-reload" in app_js
-        assert "_watchWorktreesBoot(root);" in app_js
-        assert "_WORKTREES_BOOT_RECOVERY_KEY" in app_js
-        assert "sessionStorage.getItem(_WORKTREES_BOOT_RECOVERY_KEY) === 'pending'" in app_js
-        assert "sessionStorage.setItem(_WORKTREES_BOOT_RECOVERY_KEY, 'pending')" in app_js
-        assert "window.location.reload();" in app_js
+        assert "_watchWorktreesBoot" not in app_js
+        assert "window.location.reload();" not in app_js
 
     def test_template_uses_required_status_labels(self):
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
@@ -507,8 +504,10 @@ class TestWorktreePage:
         assert 'href="/worktrees"' in template
         assert 'data-hard-reload' in template
         assert '@click.prevent="refresh(true)"' in template
-        assert "dataset.worktreesBooted = '1'" in js
-        assert "sessionStorage.removeItem('worktrees:boot-recovery')" in js
+        assert template.lstrip().startswith('<div data-testid="worktrees-fragment-root">')
+        assert '<style>' in template
+        assert '<div x-data="worktreesPage()"' in template
+        assert "worktreesBooted" not in js
         assert 'x-show="!refreshing"' not in template
         assert 'x-show="refreshing"' not in template
         assert "Are you sure you want to delete this Worktree?" in template
@@ -519,3 +518,12 @@ class TestWorktreePage:
         assert 'x-ref="dirtyFilesHeader"' in template
         assert 'class="worktree-diff-code hljs whitespace-pre px-2 pr-3"' in template
         assert 'x-html="line.html || \'&nbsp;\'"' in template
+
+    def test_style_first_fragments_have_wrapper_root(self):
+        worktrees = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text().lstrip()
+        collab = (TEMPLATE_DIR / "pages" / "collab.html").read_text().lstrip()
+        design = (TEMPLATE_DIR / "pages" / "design.html").read_text().lstrip()
+
+        assert worktrees.startswith('<div data-testid="worktrees-fragment-root">')
+        assert collab.startswith('<div data-testid="collab-fragment-root">')
+        assert design.startswith('<div data-testid="design-fragment-root">')
