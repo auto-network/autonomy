@@ -605,6 +605,219 @@ SWEEP_GRAPH_ATTACHMENTS = {
     },
 }
 
+SWEEP_WORKTREE_ALPHA_COMMITS = [
+    {
+        "sha": "1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "short_sha": "1111111",
+        "subject": "Fix worktree review sticky headers",
+        "author": "Alpha Agent",
+        "date": "2026-04-24 03:12",
+        "body": "Makes the title/files/file sticky stack stable on mobile.",
+        "files": [
+            {
+                "status": "M",
+                "path": "tools/dashboard/templates/pages/worktrees.html",
+                "additions": 28,
+                "deletions": 8,
+            },
+            {
+                "status": "M",
+                "path": "tools/dashboard/static/js/pages/worktrees.js",
+                "additions": 14,
+                "deletions": 5,
+            },
+        ],
+    },
+    {
+        "sha": "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "short_sha": "2222222",
+        "subject": "Tighten diff marker alignment on mobile",
+        "author": "Alpha Agent",
+        "date": "2026-04-24 03:45",
+        "body": "Removes extra padding from the +/- marker column.",
+        "files": [
+            {
+                "status": "M",
+                "path": "tools/dashboard/templates/pages/worktrees.html",
+                "additions": 4,
+                "deletions": 4,
+            },
+        ],
+    },
+]
+
+SWEEP_WORKTREE_BETA_COMMITS = [
+    {
+        "sha": "3333333ccccccccccccccccccccccccccccccccc",
+        "short_sha": "3333333",
+        "subject": "Refine ENTERPRISE-7644 release branch plumbing",
+        "author": "Beta Agent",
+        "date": "2026-04-24 02:24",
+        "body": "Keeps enterprise branch metadata visible in review mode.",
+        "files": [
+            {
+                "status": "M",
+                "path": "enterprise/release_dashboard.py",
+                "additions": 11,
+                "deletions": 2,
+            },
+        ],
+    },
+]
+
+SWEEP_WORKTREE_ROWS = [
+    {
+        "session_name": "auto-sweep-alpha",
+        "session_title": "Alpha — card redesign",
+        "repo_name": "autonomy",
+        "worktree_path": "/tmp/worktrees/auto-sweep-alpha/autonomy",
+        "managed_clone": "/tmp/repos/autonomy.git",
+        "branch": "session/auto-sweep-alpha",
+        "target_branch": "main",
+        "commits_ahead": 2,
+        "is_dirty": True,
+        "ff_eligible": True,
+        "clone_stale": False,
+        "rebase_required": False,
+        "session_live": True,
+        "commits": SWEEP_WORKTREE_ALPHA_COMMITS,
+        "dirty_files": [
+            {
+                "status": "M",
+                "path": "tools/dashboard/static/js/pages/worktrees.js",
+                "additions": 0,
+                "deletions": 0,
+            },
+            {
+                "status": "??",
+                "path": "tools/dashboard/static/vendor/highlightjs/highlight.min.js",
+                "additions": 0,
+                "deletions": 0,
+            },
+        ],
+    },
+    {
+        "session_name": "auto-sweep-beta",
+        "session_title": "Beta Builder",
+        "repo_name": "enterprise",
+        "worktree_path": "/tmp/worktrees/auto-sweep-beta/enterprise",
+        "managed_clone": "/tmp/repos/enterprise.git",
+        "branch": "ENTERPRISE-7644",
+        "target_branch": "ENTERPRISE-7644",
+        "commits_ahead": 1,
+        "is_dirty": False,
+        "ff_eligible": False,
+        "clone_stale": False,
+        "rebase_required": False,
+        "session_live": True,
+        "commits": SWEEP_WORKTREE_BETA_COMMITS,
+        "dirty_files": [],
+    },
+    {
+        "session_name": "auto-sweep-gamma",
+        "session_title": "Gamma Reviewer",
+        "repo_name": "autonomy",
+        "worktree_path": "/tmp/worktrees/auto-sweep-gamma/autonomy",
+        "managed_clone": "/tmp/repos/autonomy.git",
+        "branch": "session/auto-sweep-gamma",
+        "target_branch": "main",
+        "commits_ahead": 0,
+        "is_dirty": True,
+        "ff_eligible": False,
+        "clone_stale": False,
+        "rebase_required": False,
+        "session_live": False,
+        "commits": [],
+        "dirty_files": [
+            {
+                "status": "M",
+                "path": "agents/session_launcher.py",
+                "additions": 0,
+                "deletions": 0,
+            },
+        ],
+    },
+]
+
+SWEEP_WORKTREE_COMMIT_DETAILS = {
+    "auto-sweep-alpha/autonomy/1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+        **SWEEP_WORKTREE_ALPHA_COMMITS[0],
+        "patch": """diff --git a/tools/dashboard/templates/pages/worktrees.html b/tools/dashboard/templates/pages/worktrees.html
+index abc1234..def5678 100644
+--- a/tools/dashboard/templates/pages/worktrees.html
++++ b/tools/dashboard/templates/pages/worktrees.html
+@@ -420,7 +420,7 @@
+-<div class=\"worktree-review-shell min-h-screen bg-gray-950 overflow-x-hidden\">
++<div class=\"worktree-review-shell min-h-screen bg-gray-950\">
+@@ -488,6 +488,7 @@
+ <div x-ref=\"commitTitleBar\" class=\"sticky top-0\">
++  <div class=\"text-slate-400\">Pinned cleanly</div>
+ </div>
+diff --git a/tools/dashboard/static/js/pages/worktrees.js b/tools/dashboard/static/js/pages/worktrees.js
+index aaa1111..bbb2222 100644
+--- a/tools/dashboard/static/js/pages/worktrees.js
++++ b/tools/dashboard/static/js/pages/worktrees.js
+@@ -792,6 +792,8 @@
+       syncScrollLock() {
+         const locked = this.hasOverlayOpen();
++        document.documentElement.style.overscrollBehaviorX = locked ? 'none' : '';
++        document.body.style.overscrollBehaviorX = locked ? 'none' : '';
+         document.documentElement.style.overflow = locked ? 'hidden' : '';
+       }""",
+    },
+    "auto-sweep-alpha/autonomy/2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+        **SWEEP_WORKTREE_ALPHA_COMMITS[1],
+        "patch": """diff --git a/tools/dashboard/templates/pages/worktrees.html b/tools/dashboard/templates/pages/worktrees.html
+index def5678..fedcba9 100644
+--- a/tools/dashboard/templates/pages/worktrees.html
++++ b/tools/dashboard/templates/pages/worktrees.html
+@@ -548,7 +548,7 @@
+-<span class=\"border-r border-white/10 px-1 text-center\"
++<span class=\"border-r border-white/10 text-center\"
+       x-text=\"diffMarker(line.kind)\"></span>""",
+    },
+    "auto-sweep-beta/enterprise/3333333ccccccccccccccccccccccccccccccccc": {
+        **SWEEP_WORKTREE_BETA_COMMITS[0],
+        "patch": """diff --git a/enterprise/release_dashboard.py b/enterprise/release_dashboard.py
+index 1234567..89abcde 100644
+--- a/enterprise/release_dashboard.py
++++ b/enterprise/release_dashboard.py
+@@ -18,6 +18,9 @@
+def branch_title(branch_name):
++    if branch_name.startswith("ENTERPRISE-"):
++        return f"Release branch {branch_name}"
++
+     return branch_name""",
+    },
+}
+
+SWEEP_WORKTREE_CHANGES_DETAILS = {
+    "auto-sweep-alpha/autonomy": {
+        "files": SWEEP_WORKTREE_ROWS[0]["dirty_files"],
+        "patch": """diff --git a/tools/dashboard/static/js/pages/worktrees.js b/tools/dashboard/static/js/pages/worktrees.js
+index 9999999..8888888 100644
+--- a/tools/dashboard/static/js/pages/worktrees.js
++++ b/tools/dashboard/static/js/pages/worktrees.js
+@@ -805,6 +805,8 @@
+       async refresh(manual) {
++        const endpoint = manual ? '/api/worktrees/refresh' : '/api/worktrees';
++        await fetch(endpoint);
+         this.error = '';
+       }""",
+    },
+    "auto-sweep-gamma/autonomy": {
+        "files": SWEEP_WORKTREE_ROWS[2]["dirty_files"],
+        "patch": """diff --git a/agents/session_launcher.py b/agents/session_launcher.py
+index 7654321..1234567 100644
+--- a/agents/session_launcher.py
++++ b/agents/session_launcher.py
+@@ -44,6 +44,7 @@
+ def launch():
++    print("gamma dirty change")
+     return True""",
+    },
+}
+
 
 def _build_fixture() -> dict:
     """Build the complete fixture dict for behavioral sweep tests."""
@@ -615,6 +828,9 @@ def _build_fixture() -> dict:
         "active_sessions": SWEEP_SESSIONS,
         "session_entries": entries,
         "recent_sessions": SWEEP_RECENT_SESSIONS,
+        "worktrees": SWEEP_WORKTREE_ROWS,
+        "worktree_commit_details": SWEEP_WORKTREE_COMMIT_DETAILS,
+        "worktree_changes_details": SWEEP_WORKTREE_CHANGES_DETAILS,
         "beads": SWEEP_BEADS + [SWEEP_BEAD_DISPATCHED],
         "runs": SWEEP_RUNS + [SWEEP_DISPATCH_RUN],
         "experiments": [SWEEP_EXPERIMENT],
@@ -1311,6 +1527,95 @@ STREAMS_PAGE_CHECKS = """
     r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
 """
 
+# ── Worktrees page JS check bundle ───────────────────────────────────
+
+WORKTREES_PAGE_CHECKS = """(async () => {
+    var r = {};
+    var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
+    var waitFor = async function(predicate, timeoutMs) {
+        var deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (predicate()) return true;
+            await sleep(50);
+        }
+        return false;
+    };
+    var findButtonByText = function(root, text) {
+        var buttons = Array.from((root || document).querySelectorAll('button'));
+        return buttons.find(function(btn) { return btn.textContent.trim() === text; }) || null;
+    };
+
+    r.has_page = !!document.querySelector('[data-testid="worktrees-page"]');
+    await waitFor(function() {
+        return document.querySelectorAll('[data-testid="worktree-commit-card"]').length >= 2;
+    }, 3000);
+
+    var bodyText = document.body.innerText;
+    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+    r.refresh_label = (document.querySelector('[data-testid="worktrees-refresh-button"]') || {}).textContent?.replace(/\\s+/g, ' ').trim() || '';
+    r.commit_card_count = document.querySelectorAll('[data-testid="worktree-commit-card"]').length;
+    r.dirty_card_count_initial = document.querySelectorAll('[data-testid="worktree-dirty-card"]').length;
+    r.commit_titles = Array.from(document.querySelectorAll('[data-testid="worktree-commit-card"] h3')).map(function(el) {
+        return el.textContent.trim();
+    });
+    r.summary_counts = Array.from(document.querySelectorAll('[data-testid="worktrees-summary"] > div')).map(function(tile) {
+        var values = tile.querySelectorAll('div');
+        var last = values.length ? values[values.length - 1] : null;
+        return last ? last.textContent.trim() : '';
+    });
+
+    var firstReview = document.querySelector('[data-testid="review-commit-button"]');
+    if (firstReview) firstReview.click();
+    await waitFor(function() {
+        return !!document.querySelector('[data-testid="worktree-commit-detail"]');
+    }, 3000);
+    await sleep(250);
+
+    var commitDetail = document.querySelector('[data-testid="worktree-commit-detail"]');
+    r.commit_detail_open = !!commitDetail;
+    r.commit_detail_title = commitDetail ? (commitDetail.querySelector('h3') || {}).textContent?.trim() || '' : '';
+    r.commit_merge_label = commitDetail
+        ? ((commitDetail.querySelector('[data-testid="worktree-commit-merge-button"]') || {}).textContent || '').replace(/\\s+/g, ' ').trim()
+        : '';
+    await sleep(1200);
+    r.commit_detail_stable = !!document.querySelector('[data-testid="worktree-commit-detail"]');
+    var commitClose = commitDetail ? findButtonByText(commitDetail, 'Close') : null;
+    if (commitClose) commitClose.click();
+    await waitFor(function() {
+        return !document.querySelector('[data-testid="worktree-commit-detail"]');
+    }, 2000);
+
+    var toggle = document.querySelector('[data-testid="worktree-view-toggle"]');
+    var changesButton = findButtonByText(toggle, 'Changes');
+    if (changesButton) changesButton.click();
+    await waitFor(function() {
+        return document.querySelectorAll('[data-testid="worktree-dirty-card"]').length >= 2;
+    }, 3000);
+
+    var dirtyCards = Array.from(document.querySelectorAll('[data-testid="worktree-dirty-card"]'));
+    r.dirty_card_count = dirtyCards.length;
+    var discardBtn = dirtyCards.length ? dirtyCards[0].querySelector('[data-testid="discard-dirty-button"]') : null;
+    r.live_dirty_has_no_discard = !discardBtn || discardBtn.offsetParent === null;
+    r.dirty_title_visible = dirtyCards.length
+        ? dirtyCards[0].textContent.indexOf('Alpha — card redesign') !== -1
+        : false;
+
+    var dirtyReview = document.querySelector('[data-testid="review-dirty-button"]');
+    if (dirtyReview) dirtyReview.click();
+    await waitFor(function() {
+        return !!document.querySelector('[data-testid="worktree-dirty-detail"]');
+    }, 3000);
+    await sleep(250);
+
+    var dirtyDetail = document.querySelector('[data-testid="worktree-dirty-detail"]');
+    r.dirty_detail_open = !!dirtyDetail;
+    r.dirty_detail_heading = dirtyDetail ? (dirtyDetail.querySelector('h3') || {}).textContent?.trim() || '' : '';
+    await sleep(1200);
+    r.dirty_detail_stable = !!document.querySelector('[data-testid="worktree-dirty-detail"]');
+
+    return JSON.stringify(r);
+})()"""
+
 # ── Bead detail page JS check bundle ─────────────────────────────────
 
 BEAD_DETAIL_CHECKS = """
@@ -1950,6 +2255,73 @@ class TestStreamsPageBehavior:
         """No raw Jinja template syntax visible."""
         c = self._checks
         assert c.get("no_jinja"), "Raw Jinja template syntax visible on streams page"
+
+
+class TestWorktreesPageBehavior:
+    """Worktrees page behavioral sweep — stable mount and review overlays."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async("/worktrees", WORKTREES_PAGE_CHECKS, wait_ms=1200)
+        request.cls._checks = result
+
+    def test_page_mounts_with_real_data(self):
+        """User sees populated worktree cards instead of the empty pre-init shell."""
+        c = self._checks
+        assert c.get("has_page"), "No worktrees page root found"
+        assert c.get("commit_card_count") == 2, (
+            f"Expected 2 commit-stack cards, got {c.get('commit_card_count')}"
+        )
+        assert c.get("refresh_label") == "Refresh", (
+            f"Refresh button rendered oddly: {c.get('refresh_label')!r}"
+        )
+        assert c.get("summary_counts") == ["3", "2", "2"], (
+            f"Unexpected summary counts: {c.get('summary_counts')}"
+        )
+
+    def test_commit_cards_show_fixture_titles(self):
+        """User sees the stacked commit headlines from the fixture rows."""
+        titles = " ".join(self._checks.get("commit_titles", []))
+        assert "Fix worktree review sticky headers" in titles, (
+            f"Missing alpha commit title in {self._checks.get('commit_titles')}"
+        )
+        assert "Refine ENTERPRISE-7644 release branch plumbing" in titles, (
+            f"Missing beta commit title in {self._checks.get('commit_titles')}"
+        )
+
+    def test_commit_review_opens_and_stays_open(self):
+        """Opening Review shows the full-screen commit view and it remains mounted."""
+        c = self._checks
+        assert c.get("commit_detail_open"), "Commit review overlay never opened"
+        assert c.get("commit_detail_stable"), "Commit review overlay did not stay open"
+        assert c.get("commit_detail_title") == "Fix worktree review sticky headers", (
+            f"Unexpected commit review title: {c.get('commit_detail_title')!r}"
+        )
+        assert "Merge 1111111 into main" in c.get("commit_merge_label", ""), (
+            f"Unexpected merge label: {c.get('commit_merge_label')!r}"
+        )
+
+    def test_changes_mode_shows_dirty_cards(self):
+        """Switching to Changes shows dirty rows and keeps Discard hidden for live worktrees."""
+        c = self._checks
+        assert c.get("dirty_card_count") == 2, (
+            f"Expected 2 dirty cards, got {c.get('dirty_card_count')}"
+        )
+        assert c.get("live_dirty_has_no_discard"), "Live dirty card should not show Discard"
+        assert c.get("dirty_title_visible"), "Changes card did not show the session title"
+
+    def test_dirty_review_opens_and_stays_open(self):
+        """View Diffs opens the dirty review overlay and it remains mounted."""
+        c = self._checks
+        assert c.get("dirty_detail_open"), "Dirty review overlay never opened"
+        assert c.get("dirty_detail_stable"), "Dirty review overlay did not stay open"
+        assert c.get("dirty_detail_heading") == "Working tree changes", (
+            f"Unexpected dirty review heading: {c.get('dirty_detail_heading')!r}"
+        )
+
+    def test_no_template_artifacts(self):
+        """No raw template syntax leaks into the worktrees page."""
+        assert self._checks.get("no_jinja"), "Raw template syntax visible on worktrees page"
 
 
 class TestBeadDetailPageBehavior:
