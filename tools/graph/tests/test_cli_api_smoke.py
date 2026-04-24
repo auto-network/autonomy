@@ -667,6 +667,26 @@ def test_cmd_read_routes_through_api(
     assert "Dispatch Lifecycle" in out
 
 
+def test_cmd_read_routes_through_api_creates_read_marker(
+    api_client, forbid_cli_sqlite, seeded_source_id, capsys, monkeypatch, tmp_path,
+):
+    """API-backed ``graph read`` should drop the same read marker as local reads."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(graph_cli, "_in_container", lambda: True)
+    args = _cli_args(
+        source=seeded_source_id, first=False, max_chars=0, json=False,
+        all_comments=False, html_output=False, save=None,
+    )
+
+    graph_cli.cmd_read(args)
+    capsys.readouterr()
+
+    marker = tmp_path / ".graph" / "reads" / seeded_source_id
+    assert marker.exists(), f"Expected read marker at {marker}"
+    graph_cli._require_read(seeded_source_id[:8], "seeded note marker check")
+
+
 def test_cmd_read_save_routes_through_api_and_writes_file(
     api_client, forbid_cli_sqlite, seeded_source_id, capsys, monkeypatch, tmp_path,
 ):
