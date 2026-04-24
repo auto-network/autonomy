@@ -132,6 +132,7 @@ async function renderBeadDetailFragment(id) {
 
 const _fragmentCache = new Map();
 let _serverVersion = null;
+const _WORKTREES_BOOT_RECOVERY_KEY = 'worktrees:boot-recovery';
 
 async function _checkVersion() {
   try {
@@ -149,7 +150,16 @@ function _watchWorktreesBoot(root) {
     if (window.location.pathname !== '/worktrees') return;
     if (!content.contains(root)) return;
     if (root.dataset && root.dataset.worktreesBooted === '1') return;
+    let shouldReload = true;
+    try {
+      if (window.sessionStorage.getItem(_WORKTREES_BOOT_RECOVERY_KEY) === 'pending') {
+        shouldReload = false;
+      } else {
+        window.sessionStorage.setItem(_WORKTREES_BOOT_RECOVERY_KEY, 'pending');
+      }
+    } catch (_) {}
     _fragmentCache.delete('/pages/worktrees');
+    if (!shouldReload) return;
     window.location.reload();
   }, 1500);
 }

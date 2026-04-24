@@ -1095,6 +1095,9 @@
         if (this.$el && this.$el.dataset) {
           this.$el.dataset.worktreesBooted = '1';
         }
+        try {
+          window.sessionStorage.removeItem('worktrees:boot-recovery');
+        } catch (_err) {}
         this.refresh(false);
         this.$watch('selectedCommit', (value) => {
           if (!value) {
