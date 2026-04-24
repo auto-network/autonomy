@@ -319,4 +319,53 @@ describe('exec_command meta badges', () => {
     assert.equal(badges.some((badge) => badge.text === 'Running'), true);
     assert.equal(badges.some((badge) => badge.text === '2 lines'), true);
   });
+
+  it('does not allow a completed exec result to regress back to running', () => {
+    const h = makeHarness();
+    const store = h.win.getSessionStore('sess-exec-regression');
+
+    h.win.appendSessionEntries(store, {
+      seq: 1,
+      entries: [
+        makeExecUse('call_exec_done', 'git status --short'),
+        makeExecResult('call_exec_done', [], 'M tools/dashboard/session_harness.py\n', {
+          status: 'completed',
+          exit_code: 0,
+        }),
+      ],
+    });
+
+    h.win.appendSessionEntries(store, {
+      seq: 2,
+      entries: [
+        makeExecResult('call_exec_done', [], 'bringing up nodes...\n', {
+          status: 'running',
+          exit_code: null,
+          duration_seconds: 5,
+        }),
+      ],
+    });
+
+    assert.equal(store.resultMap.call_exec_done.status, 'completed');
+    assert.equal(store.resultMap.call_exec_done.exit_code, 0);
+    const ctx = makeRendererContext(h.win, store.entries[0], store.resultMap.call_exec_done);
+    assert.equal(h.win.SessionRenderer.isToolRunning.call(ctx, store.entries[0]), false);
+  });
+
+  it('shows detached instead of running for a dead session with a lingering running result', () => {
+    const h = makeHarness();
+    const entry = makeExecUse('call_detached', 'python3 -m uvicorn tools.dashboard.server:app');
+    const result = makeExecResult('call_detached', [], 'Uvicorn running\n', {
+      status: 'running',
+      exit_code: null,
+      duration_seconds: 30,
+    });
+    const ctx = makeRendererContext(h.win, entry, result);
+    h.win.getSessionStore(ctx.sessionKey).activityState = 'dead';
+
+    assert.equal(h.win.SessionRenderer.isToolRunning.call(ctx, entry), false);
+    const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
+    assert.equal(badges.some((badge) => badge.text === 'Detached'), true);
+    assert.equal(badges.some((badge) => badge.text === 'Running'), false);
+  });
 });

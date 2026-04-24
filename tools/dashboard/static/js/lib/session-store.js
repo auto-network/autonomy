@@ -133,6 +133,9 @@ function _registerToolUse(store, entry) {
 
 function _registerToolResult(store, entry) {
   var existing = store.resultMap[entry.tool_id];
+  if (existing && existing.status === 'completed' && entry.status === 'running') {
+    return;
+  }
   if (!existing || existing.result_kind !== 'exec_command' || entry.result_kind === 'exec_command') {
     store.resultMap[entry.tool_id] = entry;
   }
@@ -160,6 +163,15 @@ function _findToolResultEntry(store, toolId) {
 
 function _mergeExistingEntry(store, existing, incoming) {
   if (!existing || !incoming) return false;
+  if (
+    existing.type === 'tool_result' &&
+    incoming.type === 'tool_result' &&
+    existing.status &&
+    existing.status !== 'running' &&
+    incoming.status === 'running'
+  ) {
+    return false;
+  }
   var displayChanged = false;
   if (existing.type === 'tool_use' && incoming.type === 'tool_use') {
     if ((existing.tool_name || '') !== (incoming.tool_name || '')) displayChanged = true;

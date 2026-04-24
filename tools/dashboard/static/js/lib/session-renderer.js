@@ -175,14 +175,15 @@
       const name = entry.tool_name || '';
       const result = this._resultMap[entry.tool_id];
       const badges = [];
+      var store = Alpine.store('sessions')[this.sessionKey];
 
-      // Dead session: unmatched tools show "Killed" instead of "Running"
-      if (!result) {
-        var store = Alpine.store('sessions')[this.sessionKey];
-        if (store && store.activityState === 'dead') {
-          badges.push({ text: 'Killed', cls: 'sc-meta-error' });
-          return badges;
+      // Dead session: incomplete tools should render as detached, not running.
+      if (store && store.activityState === 'dead' && (!result || result.status === 'running')) {
+        badges.push({ text: 'Detached', cls: 'sc-meta-gray' });
+        if (result && result.content) {
+          badges.push({ text: this._countLines(result.content) + ' lines', cls: 'sc-meta-gray' });
         }
+        return badges;
       }
 
       // Running tool: show elapsed time + "Running" badge
