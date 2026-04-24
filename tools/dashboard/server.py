@@ -4775,6 +4775,8 @@ def _cleanup_result_json(result) -> dict:
     }
 
 async def api_worktrees(request):
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse(dao_sessions.get_worktrees())
     return JSONResponse([
         _worktree_state_json(row)
         for row in worktree_monitor.get_all()
@@ -4782,6 +4784,8 @@ async def api_worktrees(request):
 
 
 async def api_worktrees_refresh(request):
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse(dao_sessions.get_worktrees())
     rows = await worktree_monitor.refresh()
     return JSONResponse([
         _worktree_state_json(row)
@@ -4792,6 +4796,12 @@ async def api_worktree_commit(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
     sha = request.path_params["sha"]
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        commit = dao_sessions.get_worktree_commit_detail(session_name, repo_name, sha)
+        if not commit:
+            return JSONResponse({"error": "worktree commit not found"}, status_code=404)
+        return JSONResponse(commit)
 
     try:
         commit = await asyncio.to_thread(
@@ -4809,6 +4819,12 @@ async def api_worktree_commit(request):
 async def api_worktree_changes(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        detail = dao_sessions.get_worktree_changes_detail(session_name, repo_name)
+        if not detail:
+            return JSONResponse({"error": "worktree changes not found"}, status_code=404)
+        return JSONResponse(detail)
 
     try:
         detail = await asyncio.to_thread(

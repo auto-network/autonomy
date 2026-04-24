@@ -11,6 +11,9 @@ Fixture file format:
   "active_sessions": [ {session dict}, ... ],
   "session_entries": { "session_id": [ {entry}, ... ] },
   "recent_sessions": [ {session dict}, ... ],
+  "worktrees": [ {worktree row dict}, ... ],
+  "worktree_commit_details": { "session/repo/sha": {commit detail dict} },
+  "worktree_changes_details": { "session/repo": {dirty detail dict} },
   "experiments": [ {experiment dict with "variants": [{...}]} ],
   "bead_counts": { "open_count": 5, ... },  // optional override
   "dispatch_beads": { "approved_waiting": [...] },  // optional override
@@ -122,6 +125,48 @@ RECENT_SESSION_DEFAULTS: dict[str, Any] = {
     "librarian_type": None,
     "librarian_target_bead_id": None,
     "librarian_target_bead_title": "",
+}
+
+WORKTREE_FILE_DEFAULTS: dict[str, Any] = {
+    "status": "M",
+    "path": "mock/file.txt",
+    "additions": 0,
+    "deletions": 0,
+}
+
+WORKTREE_COMMIT_DEFAULTS: dict[str, Any] = {
+    "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    "short_sha": "deadbee",
+    "subject": "Mock worktree commit",
+    "author": "Mock Agent",
+    "date": "2026-01-01 00:00",
+    "body": "",
+    "files": [],
+    "stats": None,
+    "patch": "",
+}
+
+WORKTREE_ROW_DEFAULTS: dict[str, Any] = {
+    "session_name": "auto-mock-worktree",
+    "session_title": "",
+    "repo_name": "autonomy",
+    "worktree_path": "/tmp/worktrees/auto-mock-worktree/autonomy",
+    "managed_clone": "/tmp/repos/autonomy.git",
+    "branch": "session/auto-mock-worktree",
+    "commits_ahead": 0,
+    "is_dirty": False,
+    "ff_eligible": False,
+    "clone_stale": False,
+    "rebase_required": False,
+    "session_live": False,
+    "target_branch": "main",
+    "commits": [],
+    "dirty_files": [],
+}
+
+WORKTREE_DIRTY_DETAIL_DEFAULTS: dict[str, Any] = {
+    "files": [],
+    "patch": "",
 }
 
 RUN_DEFAULTS: dict[str, Any] = {
@@ -448,6 +493,59 @@ def get_recent_sessions(
     trimmed.sort(key=_sort_key, reverse=True)
     out = trimmed if limit is None else trimmed[:limit]
     return _attach_org(out)
+
+
+# ── worktrees DAO interface ─────────────────────────────────────────
+
+def _worktree_file(file: dict) -> dict:
+    return _fill(file, WORKTREE_FILE_DEFAULTS)
+
+
+def _worktree_commit(commit: dict) -> dict:
+    data = _fill(commit, WORKTREE_COMMIT_DEFAULTS)
+    files = [_worktree_file(file) for file in data.get("files", [])]
+    data["files"] = files
+    stats = data.get("stats")
+    if not stats:
+        data["stats"] = {
+            "files": len(files),
+            "additions": sum(file.get("additions", 0) or 0 for file in files),
+            "deletions": sum(file.get("deletions", 0) or 0 for file in files),
+        }
+    return data
+
+
+def get_worktrees() -> list[dict]:
+    data = _load()
+    rows = []
+    for row in data.get("worktrees", []):
+        item = _fill(row, WORKTREE_ROW_DEFAULTS)
+        item["commits"] = [_worktree_commit(commit) for commit in item.get("commits", [])]
+        item["dirty_files"] = [_worktree_file(file) for file in item.get("dirty_files", [])]
+        rows.append(item)
+    return rows
+
+
+def get_worktree_commit_detail(session_name: str, repo_name: str, sha: str) -> dict | None:
+    data = _load()
+    details = data.get("worktree_commit_details", {})
+    key = f"{session_name}/{repo_name}/{sha}"
+    detail = details.get(key)
+    if detail is None:
+        return None
+    return _worktree_commit(detail)
+
+
+def get_worktree_changes_detail(session_name: str, repo_name: str) -> dict | None:
+    data = _load()
+    details = data.get("worktree_changes_details", {})
+    key = f"{session_name}/{repo_name}"
+    detail = details.get(key)
+    if detail is None:
+        return None
+    item = _fill(detail, WORKTREE_DIRTY_DETAIL_DEFAULTS)
+    item["files"] = [_worktree_file(file) for file in item.get("files", [])]
+    return item
 
 
 # ── dispatch DAO interface ───────────────────────────────────────────
