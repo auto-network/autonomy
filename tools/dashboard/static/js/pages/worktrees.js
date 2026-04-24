@@ -323,6 +323,7 @@
       _timer: null,
       _resizeHandler: null,
       _commitStickyResizeObserver: null,
+      _reviewTitleObserver: null,
       _commitStickyRaf: 0,
       confettiPieces: [
         { id: 1, dx: -108, dy: -78, rot: -180, delay: 0, color: '#818cf8' },
@@ -685,6 +686,7 @@
 
       queueReviewHeaderState() {
         this.$nextTick(() => {
+          this.observeReviewTitleSentinel();
           this.syncReviewHeaderState();
         });
       },
@@ -693,6 +695,10 @@
         const scroller = this.$refs.commitDetailScroller || this.$refs.dirtyDetailScroller;
         const titleBar = this.$refs.commitTitleBar || this.$refs.dirtyTitleBar;
         if (!scroller || !titleBar) return;
+        if (this._reviewTitleObserver) {
+          this.updateCommitStickyOffsets();
+          return;
+        }
         const isMobile = window.matchMedia('(max-width: 639px)').matches;
         const enterCompactAt = titleBar.offsetTop - 1;
         const exitCompactAt = enterCompactAt - 48;
@@ -708,6 +714,37 @@
           return;
         }
         this.updateCommitStickyOffsets();
+      },
+
+      observeReviewTitleSentinel() {
+        this.disconnectReviewTitleObserver();
+        if (typeof window.IntersectionObserver !== 'function') return;
+        const isMobile = window.matchMedia('(max-width: 639px)').matches;
+        if (!isMobile) {
+          this.reviewTitlePinned = false;
+          return;
+        }
+
+        const scroller = this.$refs.commitDetailScroller || this.$refs.dirtyDetailScroller;
+        const sentinel = this.$refs.commitTitleSentinel || this.$refs.dirtyTitleSentinel;
+        if (!scroller || !sentinel) return;
+
+        this._reviewTitleObserver = new window.IntersectionObserver((entries) => {
+          const entry = entries && entries[0];
+          if (!entry) return;
+          const rootTop = entry.rootBounds ? entry.rootBounds.top : 0;
+          const compact = !entry.isIntersecting && entry.boundingClientRect.top < rootTop;
+          if (this.reviewTitlePinned !== compact) {
+            this.reviewTitlePinned = compact;
+            this.queueCommitStickyOffsets();
+            return;
+          }
+          this.updateCommitStickyOffsets();
+        }, {
+          root: scroller,
+          threshold: [0, 1],
+        });
+        this._reviewTitleObserver.observe(sentinel);
       },
 
       scheduleCommitStickyOffsetUpdate() {
@@ -739,6 +776,13 @@
         if (this._commitStickyRaf) {
           window.cancelAnimationFrame(this._commitStickyRaf);
           this._commitStickyRaf = 0;
+        }
+      },
+
+      disconnectReviewTitleObserver() {
+        if (this._reviewTitleObserver) {
+          this._reviewTitleObserver.disconnect();
+          this._reviewTitleObserver = null;
         }
       },
 
@@ -1048,11 +1092,15 @@
       },
 
       init() {
+        if (this.$el && this.$el.dataset) {
+          this.$el.dataset.worktreesBooted = '1';
+        }
         this.refresh(false);
         this.$watch('selectedCommit', (value) => {
           if (!value) {
             this.reviewTitlePinned = false;
             this.disconnectCommitStickyObserver();
+            this.disconnectReviewTitleObserver();
           }
           this.syncScrollLock();
         });
@@ -1060,6 +1108,7 @@
           if (!value) {
             this.reviewTitlePinned = false;
             this.disconnectCommitStickyObserver();
+            this.disconnectReviewTitleObserver();
           }
           this.syncScrollLock();
         });
@@ -1086,6 +1135,7 @@
 
       destroy() {
         this.disconnectCommitStickyObserver();
+        this.disconnectReviewTitleObserver();
         document.documentElement.style.overflow = '';
         document.body.style.overflow = '';
         if (this._timer) {

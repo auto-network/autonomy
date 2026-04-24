@@ -459,6 +459,8 @@ class TestWorktreePage:
         assert "fitPath(path, el)" in js
         assert "repoName(row)" in js
         assert "row.repo_name === 'autonomy'" in js
+        assert "IntersectionObserver" in js
+        assert "observeReviewTitleSentinel()" in js
         assert "'/commits/'" in js
         assert "'/merge'" in js
         assert "'/changes'" in js
@@ -471,6 +473,11 @@ class TestWorktreePage:
         assert "renderWorktreesFragment" in app_js
         assert "fetch('/pages/worktrees')" in app_js
         assert "path === '/worktrees'" in app_js
+        assert "async function route()" in app_js
+        assert "await _checkVersion();" in app_js
+        assert "data-hard-reload" in app_js
+        assert "_watchWorktreesBoot(root);" in app_js
+        assert "window.location.reload();" in app_js
 
     def test_template_uses_required_status_labels(self):
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
@@ -495,11 +502,15 @@ class TestWorktreePage:
         assert 'x-show="canDiscardDirtyRow(row)"' in template
         assert 'x-text="refreshing ? \'Refreshing...\' : \'Refresh\'"' in template
         assert 'href="/worktrees"' in template
+        assert 'data-hard-reload' in template
         assert '@click.prevent="refresh(true)"' in template
+        assert "dataset.worktreesBooted = '1'" in js
         assert 'x-show="!refreshing"' not in template
         assert 'x-show="refreshing"' not in template
         assert "Are you sure you want to delete this Worktree?" in template
         assert 'x-ref="dirtyDetailScroller"' in template
+        assert 'x-ref="commitTitleSentinel"' in template
+        assert 'x-ref="dirtyTitleSentinel"' in template
         assert 'x-ref="dirtyTitleBar"' in template
         assert 'x-ref="dirtyFilesHeader"' in template
         assert 'class="worktree-diff-code hljs whitespace-pre px-2 pr-3"' in template
