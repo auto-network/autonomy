@@ -203,4 +203,33 @@ describe('session viewer resume catch-up', () => {
     assert.equal(store.entries.length, 1);
     viewer.destroy();
   });
+
+  it('deduplicates near-simultaneous resume triggers into one catch-up fetch and one reconnect', async () => {
+    const h = makeHarness();
+    const viewer = h.makeViewer();
+    viewer.sessionKey = 'auto-test';
+    viewer.project = 'autonomy';
+    viewer.sessionId = 'auto-test';
+    viewer._tailUrl = '/api/session/autonomy/auto-test/tail';
+    viewer.state = 'ready';
+
+    const store = h.window.getSessionStore('auto-test');
+    store.offset = 12;
+
+    viewer._setupResumeRecovery();
+    h.window._es.readyState = 2;
+    h.document.visibilityState = 'visible';
+    h.emitDocument('visibilitychange');
+    h.emitWindow('focus');
+    await flush();
+
+    const tailCalls = h.fetchCalls.filter((url) => (
+      url === '/api/session/autonomy/auto-test/tail?after=12'
+    ));
+    assert.equal(tailCalls.length, 1);
+    assert.equal(h.getReconnectCount(), 1);
+    assert.equal(store.offset, 20);
+    assert.equal(store.entries.length, 1);
+    viewer.destroy();
+  });
 });
