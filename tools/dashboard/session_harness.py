@@ -1092,6 +1092,8 @@ def postprocess_codex_entries(
             if result_kind == "function_call_output":
                 tool_name = str(tool_names.get(tool_id) or "")
                 if tool_name == "exec_command":
+                    if tool_id in completed_tools:
+                        continue
                     process_id = str(entry.get("process_id") or "")
                     if process_id:
                         exec_sessions[process_id] = tool_id
@@ -1101,6 +1103,8 @@ def postprocess_codex_entries(
                         process_id=process_id,
                     )
                     if progress:
+                        if progress.get("status") != "running":
+                            completed_tools.add(tool_id)
                         normalized.append(progress)
                     continue
                 write_session_id = str(write_calls.get(tool_id) or "")
@@ -1113,6 +1117,8 @@ def postprocess_codex_entries(
                             process_id=write_session_id,
                         )
                         if progress:
+                            if progress.get("status") != "running":
+                                completed_tools.add(parent_tool_id)
                             normalized.append(progress)
                         continue
                     continue
@@ -1336,10 +1342,11 @@ def _parse_codex_tool_output_metadata(output: str) -> dict:
     if not text:
         return data
     session_match = _CODEX_TOOL_OUTPUT_SESSION_RE.search(text)
+    exit_match = _CODEX_TOOL_OUTPUT_EXIT_RE.search(text)
     if session_match:
         data["process_id"] = session_match.group(1)
-        data["status"] = "running"
-    exit_match = _CODEX_TOOL_OUTPUT_EXIT_RE.search(text)
+        if not exit_match:
+            data["status"] = "running"
     if exit_match:
         try:
             data["exit_code"] = int(exit_match.group(1))
@@ -1453,16 +1460,30 @@ def _build_codex_exec_progress_result(
     stdout = str(entry.get("stdout") or "")
     if not stdout and not process_id:
         return None
+    status = str(entry.get("status") or "")
+    exit_code = entry.get("exit_code")
+    if status in ("completed", "failed") or exit_code is not None:
+        result_status = status if status in ("completed", "failed") else "completed"
+    elif process_id:
+        result_status = "running"
+    else:
+        result_status = "completed"
+    is_error = bool(entry.get("is_error"))
+    if exit_code not in (None, ""):
+        try:
+            is_error = int(exit_code) != 0
+        except (TypeError, ValueError):
+            is_error = bool(exit_code)
     return {
         "type": "tool_result",
         "role": "tool",
         "tool_id": tool_id,
         "content": stdout,
-        "is_error": False,
+        "is_error": is_error,
         "timestamp": entry.get("timestamp") or "",
         "result_kind": "exec_command",
-        "status": "running",
-        "exit_code": None,
+        "status": result_status,
+        "exit_code": exit_code,
         "cwd": entry.get("cwd") or "",
         "command": entry.get("command") or "",
         "parsed_cmd": entry.get("parsed_cmd") or [],

@@ -585,6 +585,124 @@ def test_postprocess_codex_drops_late_write_stdin_after_exec_completion(tmp_path
     assert tool_results[-1]["content"] == "....................\n20 passed in 18.06s\n"
 
 
+def test_postprocess_codex_drops_late_exec_function_call_output_after_completion(tmp_path):
+    session_dir = tmp_path / "late-exec-output"
+    session_dir.mkdir()
+    parsed = []
+    for raw in (
+        {
+            "timestamp": "2026-04-24T01:16:23.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({
+                    "cmd": "git status --short",
+                    "workdir": "/workspace/repo",
+                }),
+                "call_id": "call_exec_1",
+            },
+        },
+        {
+            "timestamp": "2026-04-24T01:16:24.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "exec_command_end",
+                "call_id": "call_exec_1",
+                "process_id": "27299",
+                "command": ["/bin/bash", "-lc", "git status --short"],
+                "cwd": "/workspace/repo",
+                "parsed_cmd": [{"type": "unknown", "cmd": "git status --short"}],
+                "aggregated_output": "M tools/dashboard/session_harness.py\n",
+                "exit_code": 0,
+                "duration": {"secs": 1, "nanos": 0},
+                "status": "completed",
+            },
+        },
+        {
+            "timestamp": "2026-04-24T01:16:25.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_exec_1",
+                "output": (
+                    "Chunk ID: done\n"
+                    "Wall time: 0.0000 seconds\n"
+                    "Process exited with code 0\n"
+                    "Original token count: 4\n"
+                    "Output:\n"
+                    "M tools/dashboard/session_harness.py\n"
+                ),
+            },
+        },
+    ):
+        parsed_entry = parse_codex_log_line(_line(raw))
+        if isinstance(parsed_entry, list):
+            parsed.extend(parsed_entry)
+        elif parsed_entry:
+            parsed.append(parsed_entry)
+
+    entries = CODEX_HARNESS.postprocess_entries(parsed, session_dir=session_dir)
+
+    tool_results = [entry for entry in entries if entry["type"] == "tool_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0]["result_kind"] == "exec_command"
+    assert tool_results[0]["status"] == "completed"
+    assert tool_results[0]["exit_code"] == 0
+    assert tool_results[0]["content"] == "M tools/dashboard/session_harness.py\n"
+
+
+def test_postprocess_codex_exec_completion_from_function_call_output_is_completed(tmp_path):
+    session_dir = tmp_path / "exec-output-complete"
+    session_dir.mkdir()
+    parsed = []
+    for raw in (
+        {
+            "timestamp": "2026-04-24T01:16:23.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({
+                    "cmd": "git status --short",
+                    "workdir": "/workspace/repo",
+                }),
+                "call_id": "call_exec_1",
+            },
+        },
+        {
+            "timestamp": "2026-04-24T01:16:24.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_exec_1",
+                "output": (
+                    "Chunk ID: done\n"
+                    "Wall time: 0.0000 seconds\n"
+                    "Process exited with code 0\n"
+                    "Original token count: 4\n"
+                    "Output:\n"
+                    "M tools/dashboard/session_harness.py\n"
+                ),
+            },
+        },
+    ):
+        parsed_entry = parse_codex_log_line(_line(raw))
+        if isinstance(parsed_entry, list):
+            parsed.extend(parsed_entry)
+        elif parsed_entry:
+            parsed.append(parsed_entry)
+
+    entries = CODEX_HARNESS.postprocess_entries(parsed, session_dir=session_dir)
+
+    tool_results = [entry for entry in entries if entry["type"] == "tool_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0]["result_kind"] == "exec_command"
+    assert tool_results[0]["status"] == "completed"
+    assert tool_results[0]["exit_code"] == 0
+    assert tool_results[0]["is_error"] is False
+
+
 def test_parse_codex_user_and_agent_event_messages():
     user = parse_codex_log_line(_line({
         "timestamp": TS,
