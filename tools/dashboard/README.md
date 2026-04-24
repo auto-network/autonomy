@@ -92,6 +92,7 @@ Each of these will get its own specification document as we build them:
 | [Server Skeleton](spec/server.md) | Server, routes, static files, base layout | auto-5kj | planned |
 | [Bead Board](spec/bead-board.md) | Ready queue, kanban, dependency DAG | auto-gmn | planned |
 | [Session Monitor](spec/session-monitor.md) | Live/recent sessions, token burn | auto-wrh | planned |
+| [Worktrees Dashboard](spec/worktrees.md) | Commit-first review, dirty-change inspection, merge/rebase flow | auto-bm8e9 | implemented |
 | [Knowledge Explorer](spec/knowledge-explorer.md) | Search, entity browser, project filter | auto-6jf | planned |
 | [Markdown Viewer](spec/markdown-viewer.md) | Source reader, syntax highlighting | auto-10s | planned |
 | [Trace View](spec/trace-view.md) | Bead lifecycle chain | auto-fb1 | planned |
