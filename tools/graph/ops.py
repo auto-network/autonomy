@@ -2881,7 +2881,7 @@ def _query_attention(
     """Internal: scan thoughts for human input across sessions."""
     conditions = [
         "s.type = 'session'",
-        "s.platform = 'claude-code'",
+        "s.platform IN ('claude-code', 'codex-cli', 'codex-tui')",
         "t.role = 'user'",
         """(json_extract(s.metadata, '$.session_type') IN ('terminal', 'chatwith')
             OR json_extract(s.metadata, '$.session_type') IS NULL)""",

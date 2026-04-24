@@ -209,7 +209,8 @@ def _parse_state_args(args) -> tuple[list[str] | None, bool]:
     return states, include_raw
 from .ingest import (
     ingest_conversation, ingest_musing, ingest_directory,
-    ingest_claude_code_session, ingest_claude_code_project, ingest_all_claude_code,
+    ingest_claude_code_project, ingest_all_claude_code,
+    ingest_session_file,
     ingest_status_file, ingest_status_dir, ingest_git_commits,
     ingest_doc_file, ingest_docs_dir,
 )
@@ -257,11 +258,11 @@ def cmd_ingest(args):
             # unless GRAPH_DB is pinned — args.db is ignored for JSONL.
             from .ingest import _open_db_for_session
             if os.environ.get("GRAPH_DB"):
-                result = ingest_claude_code_session(db, path, force=args.force)
+                result = ingest_session_file(db, path, force=args.force)
             else:
                 session_db = _open_db_for_session(path)
                 try:
-                    result = ingest_claude_code_session(
+                    result = ingest_session_file(
                         session_db, path, force=args.force,
                     )
                 finally:
@@ -1625,7 +1626,7 @@ def cmd_ingest_session(args):
     else:
         db = _open_db_for_session(file_path)
     try:
-        result = ingest_claude_code_session(db, file_path, project=args.project)
+        result = ingest_session_file(db, file_path, project=args.project)
     finally:
         db.close()
     source_id = result.get("source_id")
@@ -1956,7 +1957,7 @@ def _query_attention(db, since=None, search=None, last=None, session=None, conte
     """
     conditions = [
         "s.type = 'session'",
-        "s.platform = 'claude-code'",
+        "s.platform IN ('claude-code', 'codex-cli', 'codex-tui')",
         "t.role = 'user'",
         # Human-present session types (terminal, chatwith, or host/pre-container NULL)
         """(json_extract(s.metadata, '$.session_type') IN ('terminal', 'chatwith')
