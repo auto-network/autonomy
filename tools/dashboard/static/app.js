@@ -143,6 +143,17 @@ async function _checkVersion() {
   } catch (_) {}
 }
 
+function _watchWorktreesBoot(root) {
+  if (!root) return;
+  window.setTimeout(() => {
+    if (window.location.pathname !== '/worktrees') return;
+    if (!content.contains(root)) return;
+    if (root.dataset && root.dataset.worktreesBooted === '1') return;
+    _fragmentCache.delete('/pages/worktrees');
+    window.location.reload();
+  }, 1500);
+}
+
 async function renderDispatchFragment() {
   pageTitle.textContent = 'Dispatch';
   let html;
@@ -227,11 +238,13 @@ async function renderWorktreesFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/worktrees', html);
   }
+  if (window.location.pathname !== '/worktrees') return;
   content.innerHTML = html;
-
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
+  const root = content.firstElementChild;
+  if (window.Alpine && root) {
+    Alpine.initTree(root);
   }
+  _watchWorktreesBoot(root);
 }
 
 async function renderSessionViewFragment() {
@@ -1395,8 +1408,8 @@ function navigateTo(path) {
   route();
 }
 
-function route() {
-  _checkVersion();
+async function route() {
+  await _checkVersion();
   const path = window.location.pathname;
   const isTerminalPage = path === '/terminal' || path.startsWith('/terminal/');
   const isSessionViewPage = /^\/session\/[^/]+\/.+$/.test(path);
@@ -1497,6 +1510,9 @@ globalSearch.addEventListener('keydown', (e) => {
 document.addEventListener('click', (e) => {
   if (e.defaultPrevented) return;        // another handler already handled this click
   const link = e.target.closest('a[href]');
+  if (link && link.hasAttribute('data-hard-reload')) {
+    return;
+  }
   if (link && link.origin === window.location.origin && !link.pathname.startsWith('/api/') && !link.hasAttribute('download')) {
     e.preventDefault();
     navigateTo(link.pathname + link.search);
