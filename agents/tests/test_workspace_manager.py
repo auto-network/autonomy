@@ -216,6 +216,49 @@ def test_prepare_session_mounts_empty_for_repoless_project(tmp_path):
     assert mounts == {}
 
 
+def test_create_worktree_prefers_local_default_branch_when_ahead_of_origin(tmp_path, monkeypatch):
+    upstream = _make_upstream(tmp_path)
+    url = str(upstream)
+    repos_dir = tmp_path / "repos"
+
+    monkeypatch.setattr(
+        wm, "managed_clone_path",
+        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
+    )
+
+    clone = wm.ensure_managed_clone(url, repos_dir=repos_dir)
+    subprocess.run(["git", "-C", str(clone), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.name", "t"], check=True)
+    (clone / "local-base.txt").write_text("local base\n")
+    subprocess.run(["git", "-C", str(clone), "add", "local-base.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(clone), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "local base ahead",
+        ],
+        check=True,
+    )
+    local_head = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "main"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    origin_head = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "origin/HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert local_head != origin_head
+
+    worktree = tmp_path / "worktrees" / "sess-local-base" / "upstream"
+    wm.create_worktree(clone, worktree, "session/sess-local-base")
+
+    worktree_head = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert worktree_head == local_head
+    assert (worktree / "local-base.txt").exists()
+
+
 def test_prepare_session_mounts_refreshes_existing_clean_worktree_on_fresh_launch(tmp_path, monkeypatch):
     session = "sess-refresh"
     worktrees_dir, _clone, worktree = _make_writable_session_worktree(
@@ -252,6 +295,41 @@ def test_prepare_session_mounts_refreshes_existing_clean_worktree_on_fresh_launc
     )
 
     assert (worktree / "latest.txt").exists(), "fresh launch should advance reused clean worktree"
+
+
+def test_prepare_session_mounts_refreshes_existing_clean_worktree_to_local_base_when_ahead_of_origin(tmp_path, monkeypatch):
+    session = "sess-refresh-local-base"
+    worktrees_dir, clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch,
+    )
+    upstream = next(tmp_path.glob("upstream.git"))
+    url = str(upstream)
+
+    subprocess.run(["git", "-C", str(clone), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.name", "t"], check=True)
+    (clone / "local-base.txt").write_text("local base\n")
+    subprocess.run(["git", "-C", str(clone), "add", "local-base.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(clone), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "local base ahead",
+        ],
+        check=True,
+    )
+
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    wm.prepare_session_mounts(
+        proj,
+        session,
+        repos_dir=tmp_path / "repos",
+        worktrees_dir=worktrees_dir,
+        refresh_existing_worktree=True,
+    )
+
+    assert (worktree / "local-base.txt").exists(), "fresh launch should sync reused worktree to local base branch"
 
 
 def test_prepare_session_mounts_preserves_existing_worktree_with_local_commits(tmp_path, monkeypatch):
@@ -311,6 +389,50 @@ def test_prepare_session_mounts_preserves_existing_worktree_with_local_commits(t
     ).stdout.strip()
     assert head_after == local_head, "refresh path must preserve existing local commits"
     assert (worktree / "mine.txt").exists()
+
+
+def test_prepare_session_mounts_readonly_prefers_local_default_branch_when_ahead_of_origin(tmp_path, monkeypatch):
+    upstream = _make_upstream(tmp_path)
+    url = str(upstream)
+    repos_dir = tmp_path / "repos"
+
+    monkeypatch.setattr(
+        wm, "managed_clone_path",
+        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
+    )
+
+    clone = wm.ensure_managed_clone(url, repos_dir=repos_dir)
+    subprocess.run(["git", "-C", str(clone), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.name", "t"], check=True)
+    (clone / "readonly-local.txt").write_text("readonly local\n")
+    subprocess.run(["git", "-C", str(clone), "add", "readonly-local.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(clone), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "readonly local base ahead",
+        ],
+        check=True,
+    )
+    local_head = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "main"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    proj = ProjectConfig(
+        id="ro", name="ro", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/ro", writable=False),),
+    )
+    mounts = wm.prepare_session_mounts(
+        proj, "sess-ro-local", repos_dir=repos_dir, worktrees_dir=tmp_path / "worktrees",
+    )
+
+    clone_head = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert clone_head == local_head
+    assert (clone / "readonly-local.txt").exists()
+    assert mounts[str(clone)] == "/workspace/ro:ro"
 
 
 # ── Session cleanup ───────────────────────────────────────────────
@@ -392,12 +514,12 @@ def test_cleanup_preserves_worktree_with_uncommitted_changes(tmp_path, monkeypat
     assert worktree.exists()
 
 
-def test_cleanup_preserves_worktree_with_unpushed_commits(tmp_path, monkeypatch):
-    session = "sess-unpushed"
+def test_cleanup_preserves_worktree_with_local_commits(tmp_path, monkeypatch):
+    session = "sess-local-commits"
     worktrees_dir, _clone, worktree = _make_writable_session_worktree(
         tmp_path, session, monkeypatch,
     )
-    # Commit a new change — ahead of origin/HEAD.
+    # Commit a new change — ahead of the current integration base.
     subprocess.run(
         ["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True,
     )
@@ -418,7 +540,7 @@ def test_cleanup_preserves_worktree_with_unpushed_commits(tmp_path, monkeypatch)
     assert not result.removed
     assert len(result.preserved) == 1
     _path, reason = result.preserved[0]
-    assert "unpushed" in reason
+    assert "local commits" == reason
 
 
 def test_cleanup_force_removes_dirty_worktree(tmp_path, monkeypatch):

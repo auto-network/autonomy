@@ -360,7 +360,7 @@ class TestWorktreeAPI:
             called["args"] = (session_name, force)
             return CleanupResult(
                 removed=["/tmp/worktrees/auto-test/autonomy"],
-                preserved=[("/tmp/worktrees/auto-test/enterprise", "unpushed commits")],
+                preserved=[("/tmp/worktrees/auto-test/enterprise", "local commits")],
                 errors=[],
             )
 
@@ -375,7 +375,7 @@ class TestWorktreeAPI:
             "preserved": [
                 {
                     "path": "/tmp/worktrees/auto-test/enterprise",
-                    "reason": "unpushed commits",
+                    "reason": "local commits",
                 },
             ],
             "errors": [],
