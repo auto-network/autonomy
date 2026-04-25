@@ -216,6 +216,103 @@ def test_prepare_session_mounts_empty_for_repoless_project(tmp_path):
     assert mounts == {}
 
 
+def test_prepare_session_mounts_refreshes_existing_clean_worktree_on_fresh_launch(tmp_path, monkeypatch):
+    session = "sess-refresh"
+    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch,
+    )
+    upstream = next(tmp_path.glob("upstream.git"))
+    url = str(upstream)
+
+    dev = tmp_path / "dev-refresh"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(dev)], check=True)
+    subprocess.run(["git", "-C", str(dev), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(dev), "config", "user.name", "t"], check=True)
+    (dev / "latest.txt").write_text("latest\n")
+    subprocess.run(["git", "-C", str(dev), "add", "latest.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(dev), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "latest upstream",
+        ],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(dev), "push", "-q", "origin", "main"], check=True)
+
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    wm.prepare_session_mounts(
+        proj,
+        session,
+        repos_dir=tmp_path / "repos",
+        worktrees_dir=worktrees_dir,
+        refresh_existing_worktree=True,
+    )
+
+    assert (worktree / "latest.txt").exists(), "fresh launch should advance reused clean worktree"
+
+
+def test_prepare_session_mounts_preserves_existing_worktree_with_local_commits(tmp_path, monkeypatch):
+    session = "sess-preserve"
+    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch,
+    )
+    upstream = next(tmp_path.glob("upstream.git"))
+    url = str(upstream)
+
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
+    (worktree / "mine.txt").write_text("keep me\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "mine.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "local work",
+        ],
+        check=True,
+    )
+    local_head = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    dev = tmp_path / "dev-preserve"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(dev)], check=True)
+    subprocess.run(["git", "-C", str(dev), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(dev), "config", "user.name", "t"], check=True)
+    (dev / "latest.txt").write_text("latest\n")
+    subprocess.run(["git", "-C", str(dev), "add", "latest.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(dev), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "latest upstream",
+        ],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(dev), "push", "-q", "origin", "main"], check=True)
+
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    wm.prepare_session_mounts(
+        proj,
+        session,
+        repos_dir=tmp_path / "repos",
+        worktrees_dir=worktrees_dir,
+        refresh_existing_worktree=True,
+    )
+
+    head_after = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head_after == local_head, "refresh path must preserve existing local commits"
+    assert (worktree / "mine.txt").exists()
+
+
 # ── Session cleanup ───────────────────────────────────────────────
 
 

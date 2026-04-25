@@ -13,8 +13,9 @@ Tests:
 - Workspace primer is rendered into the run_dir on resume
 """
 from pathlib import Path
-
 import pytest
+
+from agents.workspace_settings import WorkspaceV1, RepoMount
 
 
 class TestResumeWithSourceId:
@@ -383,6 +384,112 @@ class TestWorkspacePrimerRendering:
         content = primer_path.read_text()
         assert "Workspace Environment" in content
         assert "autonomy-agent:dashboard" in content
+
+
+class TestWorkspaceHarnessPassthrough:
+    """Workspace create/resume must honor the workspace harness setting."""
+
+    def test_workspace_create_passes_codex_harness_and_refreshes_stale_worktree(
+        self, test_client, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        launch_kwargs = {}
+        prep_kwargs = {}
+        workspace = WorkspaceV1(
+            id="autonomy",
+            name="Autonomy Codex",
+            description="",
+            image="autonomy-agent:dashboard",
+            graph_project="autonomy",
+            harness="codex",
+            repos=(RepoMount(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
+            working_dir="/workspace/repo",
+        )
+
+        monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
+        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
+        monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
+        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+
+        def fake_prepare(_proj, _tmux_name, **kwargs):
+            prep_kwargs.update(kwargs)
+            return {}
+
+        def fake_launch_session(**kwargs):
+            launch_kwargs.update(kwargs)
+            return "docker run codex"
+
+        monkeypatch.setattr(server, "prepare_session_mounts", fake_prepare)
+        monkeypatch.setattr(server, "launch_session", fake_launch_session)
+        monkeypatch.setattr(
+            server.dashboard_db,
+            "get_session",
+            lambda tmux_name: {
+                "tmux_name": tmux_name,
+                "is_live": 1,
+                "jsonl_path": "/tmp/fake/sessions",
+                "type": "container",
+                "label": "",
+            },
+        )
+
+        resp = test_client.post("/api/session/create", json={"project": "autonomy"})
+        assert resp.status_code == 200
+        assert launch_kwargs["harness"] == "codex"
+        assert prep_kwargs["refresh_existing_worktree"] is True
+
+    def test_workspace_resume_passes_codex_harness_without_refreshing_existing_worktree(
+        self, test_client, resume_env, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        launch_kwargs = {}
+        prep_kwargs = {}
+        workspace = WorkspaceV1(
+            id="autonomy",
+            name="Autonomy Codex",
+            description="",
+            image="autonomy-agent:dashboard",
+            graph_project="autonomy",
+            harness="codex",
+            repos=(RepoMount(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
+            working_dir="/workspace/repo",
+        )
+
+        test_client._dead_sessions["abc123-def456"] = {
+            "tmux_name": "auto-0326-142603",
+            "is_live": 0,
+            "label": "Workspace session",
+            "jsonl_path": resume_env["jsonl_file"],
+            "session_uuid": "abc123-def456",
+            "type": "container",
+            "project": "autonomy",
+        }
+
+        monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
+        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
+        monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
+        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+
+        def fake_prepare(_proj, _tmux_name, **kwargs):
+            prep_kwargs.update(kwargs)
+            return {}
+
+        def fake_launch_session(**kwargs):
+            launch_kwargs.update(kwargs)
+            return "docker run codex"
+
+        monkeypatch.setattr(server, "prepare_session_mounts", fake_prepare)
+        monkeypatch.setattr(server, "launch_session", fake_launch_session)
+
+        resp = test_client.post(
+            "/api/session/resume",
+            json={"source_id": resume_env["container_source_id"]},
+        )
+        assert resp.status_code == 200
+        assert launch_kwargs["harness"] == "codex"
+        assert prep_kwargs["refresh_existing_worktree"] is False
 
 
 class TestRecentSessionsEnriched:

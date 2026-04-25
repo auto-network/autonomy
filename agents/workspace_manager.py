@@ -146,12 +146,59 @@ def _worktree_basename(url: str) -> str:
     return path.rsplit("/", 1)[-1]
 
 
-def create_worktree(managed_clone: Path, worktree_dir: Path, branch: str) -> Path:
+def _refresh_existing_worktree(
+    managed_clone: Path,
+    worktree_dir: Path,
+    branch: str,
+) -> None:
+    """Refresh a reused worktree to ``origin/HEAD`` when it is safe to do so.
+
+    Fresh workspace launches may reuse an old per-session worktree directory if a
+    prior attempt with the same tmux name already created it. In that case we
+    want a current checkout, not a stale branch from some earlier origin state.
+
+    Safety rule:
+    - only refresh when the worktree is still on the expected session branch
+    - only refresh when there are no local commits ahead of ``origin/HEAD``
+
+    Uncommitted changes/untracked files are discarded in this path on purpose:
+    they are stale byproducts from the earlier failed launch, not resume state.
+    Resume flows call ``prepare_session_mounts(..., refresh_existing_worktree=False)``
+    and therefore bypass this reset entirely.
+    """
+    current_branch = _worktree_branch_name(worktree_dir)
+    if current_branch != branch:
+        logger.info(
+            "workspace: preserving existing worktree %s (branch=%s expected=%s)",
+            worktree_dir, current_branch, branch,
+        )
+        return
+    if _worktree_has_unpushed_commits(worktree_dir):
+        logger.info(
+            "workspace: preserving existing worktree %s (local commits ahead of origin/HEAD)",
+            worktree_dir,
+        )
+        return
+    logger.info("workspace: refreshing existing worktree %s to origin/HEAD", worktree_dir)
+    _run_git(["reset", "--hard", "origin/HEAD"], cwd=worktree_dir)
+    _run_git(["clean", "-fd"], cwd=worktree_dir)
+
+
+def create_worktree(
+    managed_clone: Path,
+    worktree_dir: Path,
+    branch: str,
+    *,
+    refresh_existing: bool = False,
+) -> Path:
     """Create a new worktree at ``worktree_dir`` on ``branch`` from ``origin/HEAD``.
 
-    If the worktree already exists it is reused as-is.
+    If the worktree already exists it is reused. Callers can request a safe
+    refresh of stale launch leftovers via ``refresh_existing=True``.
     """
     if worktree_dir.exists():
+        if refresh_existing:
+            _refresh_existing_worktree(managed_clone, worktree_dir, branch)
         return worktree_dir
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
     _run_git(
@@ -177,6 +224,7 @@ def prepare_session_mounts(
     *,
     repos_dir: Path = REPOS_DIR,
     worktrees_dir: Path = WORKTREES_DIR,
+    refresh_existing_worktree: bool = False,
 ) -> dict[str, str]:
     """Prepare clones + worktrees for ``workspace`` and return launch_session mounts.
 
@@ -188,7 +236,12 @@ def prepare_session_mounts(
         clone = ensure_managed_clone(repo.url, repos_dir=repos_dir)
         if repo.writable:
             worktree = worktrees_dir / session_name / _worktree_basename(repo.url)
-            create_worktree(clone, worktree, f"session/{session_name}")
+            create_worktree(
+                clone,
+                worktree,
+                f"session/{session_name}",
+                refresh_existing=refresh_existing_worktree,
+            )
             mounts[str(worktree)] = repo.mount
             # Worktree's .git file points at an absolute host path inside the
             # managed clone — mount the clone at that same path (rw) so the
