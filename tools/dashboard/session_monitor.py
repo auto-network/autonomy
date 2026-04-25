@@ -1720,7 +1720,7 @@ class SessionMonitor:
                         self._tail_states.pop(tmux_name, None)
                         # Clean up the session's workspace worktrees (no-op
                         # if the session had none). Uncommitted changes or
-                        # unpushed commits are preserved with a warning.
+                        # local commits are preserved with a warning.
                         await asyncio.to_thread(
                             _cleanup_worktrees_for_dead_session, tmux_name,
                         )

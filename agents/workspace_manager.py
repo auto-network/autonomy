@@ -6,7 +6,9 @@ Given a WorkspaceV1 and a session name, this module:
 2. Runs ``git fetch origin --prune`` on every clone.
 3. For writable repos, creates a per-session worktree under
    ``data/worktrees/{session_name}/`` on a fresh ``session/{session_name}``
-   branch based on ``origin/HEAD``.
+   branch based on the managed clone's current integration base
+   (local ``main``/``master`` when that contains newer unpushed work,
+   otherwise the freshest remote-tracking default branch).
 4. Returns a mount spec dict for ``agents.session_launcher.launch_session``.
 
 Mount layout for a writable repo:
@@ -17,8 +19,8 @@ Mount layout for a writable repo:
       writes into ``<clone>/.git/worktrees/<name>/`` (index, HEAD, refs) and
       into the clone's shared object store.
 
-Read-only repos are checked out to ``origin/HEAD`` in the managed clone itself
-and mounted directly at the container mount path.
+Read-only repos are checked out to that same current integration base in the
+managed clone itself and mounted directly at the container mount path.
 
 SSH credentials for ``git clone``/``git fetch`` come from the host user's
 environment (SSH agent or ~/.ssh keys) — the dashboard server runs on the
@@ -151,7 +153,7 @@ def _refresh_existing_worktree(
     worktree_dir: Path,
     branch: str,
 ) -> None:
-    """Refresh a reused worktree to ``origin/HEAD`` when it is safe to do so.
+    """Refresh a reused worktree to the current integration base when safe.
 
     Fresh workspace launches may reuse an old per-session worktree directory if a
     prior attempt with the same tmux name already created it. In that case we
@@ -159,7 +161,8 @@ def _refresh_existing_worktree(
 
     Safety rule:
     - only refresh when the worktree is still on the expected session branch
-    - only refresh when there are no local commits ahead of ``origin/HEAD``
+    - only refresh when there are no local session commits ahead of the
+      managed clone's current integration base
 
     Uncommitted changes/untracked files are discarded in this path on purpose:
     they are stale byproducts from the earlier failed launch, not resume state.
@@ -173,14 +176,19 @@ def _refresh_existing_worktree(
             worktree_dir, current_branch, branch,
         )
         return
-    if _worktree_has_unpushed_commits(worktree_dir):
+    if _worktree_has_commits_ahead_of_base(worktree_dir):
         logger.info(
-            "workspace: preserving existing worktree %s (local commits ahead of origin/HEAD)",
+            "workspace: preserving existing worktree %s (local session commits ahead of base)",
             worktree_dir,
         )
         return
-    logger.info("workspace: refreshing existing worktree %s to origin/HEAD", worktree_dir)
-    _run_git(["reset", "--hard", "origin/HEAD"], cwd=worktree_dir)
+    base_ref = _repo_integration_base_ref(managed_clone)
+    logger.info(
+        "workspace: refreshing existing worktree %s to %s",
+        worktree_dir,
+        base_ref,
+    )
+    _run_git(["reset", "--hard", base_ref], cwd=worktree_dir)
     _run_git(["clean", "-fd"], cwd=worktree_dir)
 
 
@@ -191,7 +199,8 @@ def create_worktree(
     *,
     refresh_existing: bool = False,
 ) -> Path:
-    """Create a new worktree at ``worktree_dir`` on ``branch`` from ``origin/HEAD``.
+    """Create a new worktree at ``worktree_dir`` on ``branch`` from the
+    managed clone's current integration base.
 
     If the worktree already exists it is reused. Callers can request a safe
     refresh of stale launch leftovers via ``refresh_existing=True``.
@@ -201,21 +210,22 @@ def create_worktree(
             _refresh_existing_worktree(managed_clone, worktree_dir, branch)
         return worktree_dir
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+    base_ref = _repo_integration_base_ref(managed_clone)
     _run_git(
-        ["worktree", "add", "-b", branch, str(worktree_dir), "origin/HEAD"],
+        ["worktree", "add", "-b", branch, str(worktree_dir), base_ref],
         cwd=managed_clone,
     )
     return worktree_dir
 
 
 def _update_readonly_clone(clone: Path) -> None:
-    """Fast-forward the managed clone's working tree to ``origin/HEAD``.
+    """Fast-forward the managed clone's working tree to the current base ref.
 
     Read-only repos are mounted directly from the managed clone, so the
     clone's own checkout must be current. We use ``checkout --detach`` so
     the clone stays on a detached HEAD and never conflicts with worktrees.
     """
-    _run_git(["checkout", "--detach", "origin/HEAD"], cwd=clone)
+    _run_git(["checkout", "--detach", _repo_integration_base_ref(clone)], cwd=clone)
 
 
 def prepare_session_mounts(
@@ -443,6 +453,35 @@ def _repo_default_branch(repo: Path) -> str | None:
         if ref:
             return ref.rsplit("/", 1)[-1]
     return None
+
+
+def _repo_integration_base_ref(repo: Path) -> str:
+    """Return the best base ref for fresh worktrees and cleanup checks.
+
+    Preference order:
+    - local default branch when it contains local-only integration work
+    - remote-tracking default branch when local is simply behind upstream
+    - ``origin/HEAD`` as a final fallback
+    """
+    branch = _repo_default_branch(repo)
+    if branch:
+        local_ref = f"refs/heads/{branch}"
+        remote_ref = f"refs/remotes/origin/{branch}"
+        local_ok = _git_output(["rev-parse", "--verify", local_ref], repo, timeout=15)[0] == 0
+        remote_ok = _git_output(["rev-parse", "--verify", remote_ref], repo, timeout=15)[0] == 0
+        if local_ok and remote_ok:
+            local_head = _git_output(["rev-parse", "--verify", local_ref], repo, timeout=15)[1].strip()
+            remote_head = _git_output(["rev-parse", "--verify", remote_ref], repo, timeout=15)[1].strip()
+            if local_head and remote_head and local_head != remote_head:
+                rc, _, _ = _git_output(["merge-base", "--is-ancestor", local_ref, remote_ref], repo, timeout=15)
+                if rc == 0:
+                    return f"origin/{branch}"
+            return branch
+        if local_ok:
+            return branch
+        if remote_ok:
+            return f"origin/{branch}"
+    return "origin/HEAD"
 
 
 def _repo_branch_head(repo: Path, branch: str) -> str | None:
@@ -904,14 +943,15 @@ def _worktree_has_uncommitted_changes(worktree: Path) -> bool:
     return bool(out.strip())
 
 
-def _worktree_has_unpushed_commits(worktree: Path) -> bool:
-    """Return True if HEAD has commits not reachable from ``origin/HEAD``.
+def _worktree_has_commits_ahead_of_base(worktree: Path) -> bool:
+    """Return True if HEAD has commits not reachable from the current base ref.
 
-    If the comparison can't be made (missing upstream), returns True so
+    If the comparison can't be made (missing base ref), returns True so
     we preserve by default.
     """
+    base_ref = _repo_integration_base_ref(worktree)
     rc, out, _ = _git_output(
-        ["rev-list", "--count", "origin/HEAD..HEAD"],
+        ["rev-list", "--count", f"{base_ref}..HEAD"],
         worktree,
         timeout=15,
     )
@@ -958,7 +998,7 @@ def cleanup_session_worktrees(
 
     Walks ``data/worktrees/{session_name}/`` and, for each repo subdirectory:
 
-    - If the worktree has uncommitted changes or unpushed commits on its
+    - If the worktree has uncommitted changes or local commits on its
       ``session/{session_name}`` branch, preserve it (unless ``force=True``)
       and record the reason.
     - Otherwise run ``git worktree remove --force`` against the managed
@@ -988,10 +1028,10 @@ def cleanup_session_worktrees(
             reasons: list[str] = []
             if _worktree_has_uncommitted_changes(entry):
                 reasons.append("uncommitted changes")
-            elif _worktree_has_unpushed_commits(entry):
+            elif _worktree_has_commits_ahead_of_base(entry):
                 # Only check commits when the tree is clean — avoids
-                # treating a mid-edit worktree as "unpushed".
-                reasons.append("unpushed commits")
+                # treating a mid-edit worktree as "local commits".
+                reasons.append("local commits")
             if reasons:
                 result.preserved.append((str(entry), ", ".join(reasons)))
                 logger.warning(
@@ -1076,8 +1116,8 @@ def cleanup_session_worktree(
         reasons: list[str] = []
         if _worktree_has_uncommitted_changes(entry):
             reasons.append("uncommitted changes")
-        elif _worktree_has_unpushed_commits(entry):
-            reasons.append("unpushed commits")
+        elif _worktree_has_commits_ahead_of_base(entry):
+            reasons.append("local commits")
         if reasons:
             result.preserved.append((str(entry), ", ".join(reasons)))
             logger.warning(

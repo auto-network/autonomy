@@ -68,7 +68,7 @@ def cmd_worktree_prune(args) -> None:
 
     With ``--session NAME``, only clean that session's worktrees.
     With ``--force``, also clean worktrees that have uncommitted changes
-    or unpushed commits (otherwise those are preserved with a warning).
+    or local commits (otherwise those are preserved with a warning).
     """
     worktrees_dir = Path(args.worktrees_dir) if args.worktrees_dir else WORKTREES_DIR
     force = bool(args.force)

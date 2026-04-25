@@ -4196,7 +4196,7 @@ def main():
     )
     p_wt_prune.add_argument(
         "--force", action="store_true",
-        help="Also remove worktrees with uncommitted changes or unpushed commits",
+        help="Also remove worktrees with uncommitted changes or local commits",
     )
     p_wt_prune.add_argument(
         "--force-all", action="store_true",
