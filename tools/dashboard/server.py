@@ -3490,7 +3490,11 @@ async def api_session_create(request):
                 status_code=400,
             )
         try:
-            project_mounts = prepare_session_mounts(proj, tmux_name)
+            project_mounts = prepare_session_mounts(
+                proj,
+                tmux_name,
+                refresh_existing_worktree=True,
+            )
         except WorkspaceError as e:
             logger.error(
                 "api_session_create: workspace prep failed  project=%s  err=%s",
@@ -3532,6 +3536,7 @@ async def api_session_create(request):
             image=proj.image,
             mounts=project_mounts or None,
             metadata=meta,
+            harness=proj.harness,
             extra_env=extra_env,
             output_dir=str(run_dir),
             global_claude_md=global_claude_md,
@@ -3837,7 +3842,11 @@ async def api_session_resume(request):
                     status_code=400,
                 )
             try:
-                resume_mounts = prepare_session_mounts(proj_for_resume, tmux_name)
+                resume_mounts = prepare_session_mounts(
+                    proj_for_resume,
+                    tmux_name,
+                    refresh_existing_worktree=False,
+                )
             except WorkspaceError as e:
                 logger.error(
                     "api_session_resume: workspace prep failed  project=%s  err=%s",
@@ -3878,6 +3887,7 @@ async def api_session_resume(request):
                 image=proj_for_resume.image,
                 mounts=resume_mounts or None,
                 metadata=meta,
+                harness=proj_for_resume.harness,
                 extra_env=extra_env,
                 global_claude_md=global_claude_md,
                 startup_script=startup_script,
