@@ -20,7 +20,12 @@ from unittest.mock import patch
 
 import pytest
 
-from tools.dashboard.session_monitor import SessionMonitor, _TailState, _find_primary_jsonls
+from tools.dashboard.session_monitor import (
+    SessionMonitor,
+    _TailState,
+    _find_primary_jsonls,
+    _is_codex_subagent_rollout,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -166,3 +171,38 @@ class TestSubagentExclusion:
         names = {p.name for p in primaries}
         assert "aaaa-1111.jsonl" in names
         assert "bbbb-2222.jsonl" in names
+
+    def test_codex_parent_rollout_not_classified_as_subagent(self, tmp_path):
+        """Parent rollout lacks the fork markers and must not be skipped."""
+        path = tmp_path / "rollout-parent.jsonl"
+        path.write_text(json.dumps({
+            "type": "session_meta",
+            "payload": {
+                "originator": "codex-tui",
+                "agent_nickname": "Parent",
+            },
+        }) + "\n")
+
+        assert _is_codex_subagent_rollout(path) is False
+
+    def test_codex_forked_rollout_classified_as_subagent(self, tmp_path):
+        """Forked Codex rollouts carry explicit parent/subagent markers."""
+        path = tmp_path / "rollout-forked.jsonl"
+        path.write_text(json.dumps({
+            "type": "session_meta",
+            "payload": {
+                "originator": "codex-tui",
+                "forked_from_id": "019dc805-parent",
+                "agent_nickname": "Aristotle",
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "parent_thread_id": "019dc805-parent",
+                            "depth": 1,
+                        },
+                    },
+                },
+            },
+        }) + "\n")
+
+        assert _is_codex_subagent_rollout(path) is True
