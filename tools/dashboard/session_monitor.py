@@ -79,6 +79,35 @@ def _find_primary_jsonls(directory: Path) -> list[Path]:
             if "subagents" not in f.parts]
 
 
+def _is_codex_subagent_rollout(jsonl_path: Path) -> bool:
+    """True when *jsonl_path* is a forked Codex subagent rollout.
+
+    Forked subagents write sibling ``rollout-*.jsonl`` files in the same
+    directory as the parent rollout. Those files must never be treated as
+    parent-session rollovers by the session monitor.
+    """
+    try:
+        with open(jsonl_path, encoding="utf-8") as f:
+            line = f.readline().strip()
+    except OSError:
+        return False
+    if not line:
+        return False
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    if entry.get("type") != "session_meta":
+        return False
+    payload = entry.get("payload") or {}
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("forked_from_id"):
+        return True
+    source = payload.get("source")
+    return isinstance(source, dict) and "subagent" in source
+
+
 def _extract_message_text(entry: dict) -> str:
     """Extract meaningful text from a JSONL entry (user or assistant)."""
     if entry.get("isSidechain"):
@@ -1320,6 +1349,14 @@ class SessionMonitor:
 
         Any new JSONL in a container's resolution_dir belongs to this session.
         """
+        if _is_codex_subagent_rollout(new_file):
+            logger.info(
+                "session_monitor: IN_CREATE container %s → %s "
+                "(skipped — codex subagent fork)",
+                tmux_name, new_file.name,
+            )
+            return
+
         uuids = json.loads(row.get("session_uuids") or "[]")
         was_empty = len(uuids) == 0
 
