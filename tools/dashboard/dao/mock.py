@@ -9,6 +9,7 @@ Fixture file format:
   "beads": [ {bead dict}, ... ],
   "runs": [ {dispatch run dict}, ... ],
   "active_sessions": [ {session dict}, ... ],
+  "session_status": [ {dashboard tmux_session row dict}, ... ],  // optional
   "session_entries": { "session_id": [ {entry}, ... ] },
   "recent_sessions": [ {session dict}, ... ],
   "worktrees": [ {worktree row dict}, ... ],
@@ -493,6 +494,87 @@ def get_recent_sessions(
     trimmed.sort(key=_sort_key, reverse=True)
     out = trimmed if limit is None else trimmed[:limit]
     return _attach_org(out)
+
+
+def get_session_status_rows(since: str | None = None) -> list[dict]:
+    """Mirror of dashboard session-status rows for CLI/API tests."""
+    import time as _time
+    from datetime import datetime as _dt
+
+    from tools.graph.duration import parse_duration
+
+    data = _load()
+    explicit = data.get("session_status")
+    if isinstance(explicit, list):
+        rows = [dict(r) for r in explicit]
+    else:
+        rows: list[dict] = []
+        for sess in [_fill(s, SESSION_DEFAULTS) for s in data.get("active_sessions", [])]:
+            last_activity = sess.get("last_activity")
+            if not isinstance(last_activity, (int, float)):
+                last_activity = _time.time()
+            rows.append(
+                {
+                    "tmux_name": sess.get("tmux_session") or sess.get("session_id") or "",
+                    "is_live": 1 if sess.get("is_live", True) else 0,
+                    "activity_state": sess.get("activity_state") or "idle",
+                    "last_activity": float(last_activity),
+                    "created_at": float(last_activity),
+                    "context_tokens": int(sess.get("context_tokens") or 0),
+                    "label": sess.get("label") or "",
+                }
+            )
+
+        if since is None:
+            rows.sort(
+                key=lambda row: float(row.get("last_activity") or row.get("created_at") or 0.0),
+                reverse=True,
+            )
+            return rows
+
+        seen = {row["tmux_name"] for row in rows if row.get("tmux_name")}
+
+        def _epoch(ts):
+            if not ts:
+                return 0.0
+            if isinstance(ts, (int, float)):
+                return float(ts)
+            try:
+                return _dt.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                return 0.0
+
+        for sess in [_fill(s, RECENT_SESSION_DEFAULTS) for s in data.get("recent_sessions", [])]:
+            tmux_name = sess.get("tmux_session") or sess.get("session_uuid") or sess.get("id") or ""
+            if tmux_name in seen:
+                continue
+            last_activity = _epoch(
+                sess.get("last_activity_at") or sess.get("ended_at") or sess.get("created_at")
+            )
+            rows.append(
+                {
+                    "tmux_name": tmux_name,
+                    "is_live": 0,
+                    "activity_state": "dead",
+                    "last_activity": last_activity,
+                    "created_at": _epoch(sess.get("created_at")),
+                    "context_tokens": int(sess.get("context_tokens") or 0),
+                    "label": sess.get("title") or "",
+                }
+            )
+
+    if since is not None:
+        cutoff = _time.time() - parse_duration(since)
+        rows = [
+            row for row in rows
+            if float(row.get("last_activity") or row.get("created_at") or 0.0) > cutoff
+        ]
+
+    rows.sort(
+        key=lambda row: float(row.get("last_activity") or row.get("created_at") or 0.0),
+        reverse=True,
+    )
+    return rows
 
 
 # ── worktrees DAO interface ─────────────────────────────────────────

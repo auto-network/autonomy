@@ -12,6 +12,7 @@ from pathlib import Path
 from tools.dashboard.dao.dashboard_db import get_live_sessions as _db_live_sessions
 from tools.dashboard.dao.dashboard_db import find_live_session as _db_find_live
 from tools.dashboard.dao.dashboard_db import get_all_sessions as _db_all_sessions
+from tools.dashboard.dao.dashboard_db import get_session_status_rows as _db_session_status_rows
 from tools.dashboard.org_identity import resolve_session_org
 from tools.graph.duration import parse_duration
 
@@ -109,6 +110,17 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
         sessions.append(entry)
     sessions.sort(key=lambda s: s["age_seconds"])
     return sessions
+
+
+def get_session_status_rows(since: str | None = None) -> list[dict]:
+    """Return dashboard session-status rows for ``graph sessions --status``.
+
+    Without ``since`` this mirrors the long-standing live-only behavior.
+    With ``since`` it includes both live and dead rows whose most recent
+    activity falls within the requested window.
+    """
+    cutoff = (time.time() - parse_duration(since)) if since is not None else None
+    return _db_session_status_rows(live_only=(since is None), since_cutoff=cutoff)
 
 
 def _librarian_targets_by_job_id(job_ids: list[str]) -> dict[str, dict]:

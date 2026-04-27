@@ -128,3 +128,22 @@ def test_list_attachments_requires_source_id():
     client = _make_client()
     with pytest.raises(NotImplementedError):
         client.list_attachments()
+
+
+def test_list_session_status_calls_dashboard_endpoint():
+    """Session status routes to the dashboard DAO endpoint with optional since."""
+    client = _make_client()
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        return _FakeResponse([{"tmux_name": "auto-test", "is_live": 1}])
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        rows = client.list_session_status(since="24h")
+
+    assert "/api/dao/session_status" in captured["url"]
+    assert "since=24h" in captured["url"]
+    assert captured["method"] == "GET"
+    assert rows == [{"tmux_name": "auto-test", "is_live": 1}]

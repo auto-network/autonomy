@@ -514,6 +514,37 @@ def get_all_sessions() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_session_status_rows(*, live_only: bool, since_cutoff: float | None = None) -> list[dict]:
+    """Return rows for ``graph sessions --status`` directly from SQL."""
+    conn = get_conn()
+    if since_cutoff is None:
+        if live_only:
+            rows = conn.execute(
+                "SELECT * FROM tmux_sessions"
+                " WHERE is_live=1 ORDER BY COALESCE(last_activity, created_at) DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM tmux_sessions ORDER BY COALESCE(last_activity, created_at) DESC"
+            ).fetchall()
+    else:
+        if live_only:
+            rows = conn.execute(
+                "SELECT * FROM tmux_sessions"
+                " WHERE is_live=1 AND COALESCE(last_activity, created_at) > ?"
+                " ORDER BY COALESCE(last_activity, created_at) DESC",
+                (since_cutoff,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM tmux_sessions"
+                " WHERE COALESCE(last_activity, created_at) > ?"
+                " ORDER BY COALESCE(last_activity, created_at) DESC",
+                (since_cutoff,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_session(tmux_name: str) -> dict | None:
     """Return a single session by tmux_name, or None."""
     conn = get_conn()
