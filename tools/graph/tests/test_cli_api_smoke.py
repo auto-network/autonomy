@@ -576,6 +576,40 @@ def test_cmd_attention_routes_through_api(
     capsys.readouterr()  # just make sure no sqlite3.connect fired
 
 
+def test_cmd_sessions_status_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph sessions --status`` must route through the dashboard API."""
+    rows = [
+        {
+            "tmux_name": "auto-live",
+            "is_live": 1,
+            "activity_state": "busy",
+            "last_activity": 1_700_000_000.0,
+            "created_at": 1_700_000_000.0,
+            "context_tokens": 4200,
+            "label": "live label",
+        },
+        {
+            "tmux_name": "auto-dead",
+            "is_live": 0,
+            "activity_state": "idle",
+            "last_activity": 1_699_999_000.0,
+            "created_at": 1_699_999_000.0,
+            "context_tokens": 800,
+            "label": "dead label",
+        },
+    ]
+    monkeypatch.setattr("tools.dashboard.server.dao_sessions.get_session_status_rows", lambda since=None: rows)
+    args = _cli_args(status=True, since="24h")
+    graph_cli.cmd_sessions(args)
+    out = capsys.readouterr().out
+    assert "auto-live" in out
+    assert "auto-dead" in out
+    assert "busy" in out
+    assert "dead" in out
+
+
 def test_cmd_collab_topics_routes_through_api(
     api_client, forbid_cli_sqlite, capsys, monkeypatch,
 ):

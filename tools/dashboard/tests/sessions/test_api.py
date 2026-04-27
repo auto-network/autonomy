@@ -113,6 +113,28 @@ class TestRecentSessionsAPI:
             f"limit=2 changed row count ({len(no_limit)} vs {len(with_limit)})"
 
 
+class TestSessionStatusAPI:
+    """GET /api/dao/session_status powers ``graph sessions --status``."""
+
+    def test_returns_live_rows_without_since(self, test_client):
+        resp = test_client.get("/api/dao/session_status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == len(SESSIONS_PAGE_SESSIONS)
+        assert all(row["is_live"] == 1 for row in data)
+
+    def test_since_includes_recent_dead_rows(self, test_client):
+        data = test_client.get("/api/dao/session_status?since=24h").json()
+        tmux_names = {row["tmux_name"] for row in data}
+        assert "auto-test-alpha" in tmux_names
+        assert "auto-recent-alpha" in tmux_names
+
+    def test_invalid_since_returns_400(self, test_client):
+        resp = test_client.get("/api/dao/session_status?since=bogus")
+        assert resp.status_code == 400
+        assert "Invalid duration" in resp.json()["error"]
+
+
 # ── Sessions Page HTML ──────────────────────────────────────────────
 
 

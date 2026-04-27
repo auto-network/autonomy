@@ -285,6 +285,15 @@ class HttpClient:
             return result["notes"]
         return result if isinstance(result, list) else []
 
+    def list_session_status(self, *, since=None):
+        params: dict[str, Any] = {}
+        if since:
+            params["since"] = since
+        result = self._get("/api/dao/session_status", params or None)
+        if isinstance(result, dict) and "rows" in result:
+            return result["rows"]
+        return result if isinstance(result, list) else []
+
     def resolve_source_strict(self, source_id, *, org=None, peers=None):
         # Server's GET /api/graph/source/{id} already does own-first +
         # peer-public-surface resolve. The dashboard never returns

@@ -1250,19 +1250,43 @@ def cmd_seed(args):
     db.close()
 
 
-def _print_session_status(since: str | None = None):
-    """Print compact status table of sessions from dashboard.db.
+def _render_session_status_rows(rows: list[dict], since: str | None = None) -> None:
+    """Render compact session-status rows for local or API-backed callers."""
+    from datetime import datetime
 
-    Without ``since``: only live sessions (is_live=1), preserving existing behavior.
-    With ``since``: all sessions (live or dead) whose last_activity is within the window.
-    """
+    if not rows:
+        print("No sessions found" if since is not None else "No live sessions")
+        return
+
+    print(f"{'TMUX':<28} {'STATE':<8} {'LAST':<14} {'TOKENS':>7} {'LABEL'}")
+    print("\u2500" * 100)
+    for row in rows:
+        tmux = str(row.get("tmux_name") or "")[:27]
+        if row.get("is_live") == 0:
+            state = "dead"
+        else:
+            state = str(row.get("activity_state") or "idle")
+        state = state[:7]
+        last_act = row.get("last_activity") or row.get("created_at")
+        if last_act:
+            last = datetime.fromtimestamp(float(last_act)).strftime("%m-%d %H:%M:%S")
+        else:
+            last = ""
+        ctx = int(row.get("context_tokens") or 0)
+        ctx_str = f"{ctx // 1000}K" if ctx >= 1000 else str(ctx)
+        label = str(row.get("label") or "")[:40].replace("\n", " ")
+        print(f"{tmux:<28} {state:<8} {last:<14} {ctx_str:>7} {label}")
+
+
+def _load_local_session_status_rows(since: str | None = None) -> list[dict]:
+    """Load compact status rows from the local dashboard DB."""
     import sqlite3
     from datetime import datetime
 
     db_path = Path(__file__).parents[2] / "data" / "dashboard.db"
     if not db_path.exists():
         print("dashboard.db not found", file=sys.stderr)
-        return
+        return []
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
 
@@ -1282,35 +1306,28 @@ def _print_session_status(since: str | None = None):
             "SELECT * FROM tmux_sessions WHERE is_live=1 ORDER BY last_activity DESC"
         ).fetchall()
     conn.close()
-    if not rows:
-        print("No sessions found" if since is not None else "No live sessions")
-        return
+    return [dict(r) for r in rows]
 
-    print(f"{'TMUX':<28} {'STATE':<8} {'LAST':<14} {'TOKENS':>7} {'LABEL'}")
-    print("\u2500" * 100)
-    for r in rows:
-        row = dict(r)
-        tmux = (row.get("tmux_name") or "")[:27]
-        if row.get("is_live") == 0:
-            state = "dead"
-        else:
-            state = row.get("activity_state") or "idle"
-        state = state[:7]
-        last_act = row.get("last_activity") or row.get("created_at")
-        if last_act:
-            last = datetime.fromtimestamp(last_act).strftime("%m-%d %H:%M:%S")
-        else:
-            last = ""
-        ctx = row.get("context_tokens") or 0
-        ctx_str = f"{ctx // 1000}K" if ctx >= 1000 else str(ctx)
-        label = (row.get("label") or "")[:40].replace("\n", " ")
-        print(f"{tmux:<28} {state:<8} {last:<14} {ctx_str:>7} {label}")
+
+def _print_session_status(since: str | None = None):
+    """Print compact status table of sessions from dashboard.db."""
+    _render_session_status_rows(_load_local_session_status_rows(since), since=since)
 
 
 def cmd_sessions(args):
     """Ingest Claude Code sessions."""
     if args.status:
-        _print_session_status(since=getattr(args, "since", None))
+        since = getattr(args, "since", None)
+        client = get_client()
+        if isinstance(client, HttpClient):
+            try:
+                rows = client.list_session_status(since=since)
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+            _render_session_status_rows(rows, since=since)
+        else:
+            _print_session_status(since=since)
         return
     client = get_client()
     if isinstance(client, HttpClient):

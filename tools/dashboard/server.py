@@ -5044,6 +5044,15 @@ async def api_dao_recent_sessions(request):
     )
     return JSONResponse(sessions)
 
+
+async def api_dao_session_status(request):
+    since = request.query_params.get("since")
+    try:
+        rows = await asyncio.to_thread(dao_sessions.get_session_status_rows, since)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(rows)
+
 async def page_search(request):
     """Serve the search results page (full HTML shell for direct navigation)."""
     return HTMLResponse(_load_template("base.html"))
@@ -7122,6 +7131,7 @@ routes = [
     Route("/api/active", api_active_sessions),
     Route("/api/dao/active_sessions", api_dao_active_sessions),
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
+    Route("/api/dao/session_status", api_dao_session_status),
     Route("/api/worktrees", api_worktrees),
     Route("/api/worktrees/refresh", api_worktrees_refresh, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/commits/{sha}", api_worktree_commit, methods=["GET"]),
