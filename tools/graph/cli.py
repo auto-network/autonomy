@@ -3265,11 +3265,101 @@ def _cmd_primer(args):
     return format_for_agent(data)
 
 
+def _emit_wait_report(bead_id: str, run: dict) -> int:
+    """Print the final wait report. Returns the process exit code."""
+    status = run.get("status", "UNKNOWN")
+    duration = run.get("duration_secs")
+    duration_str = f"{duration}s" if duration is not None else "?"
+
+    if status == "DONE":
+        commit = (run.get("commit_hash") or "")[:7] or "none"
+        added = run.get("lines_added") or 0
+        removed = run.get("lines_removed") or 0
+        files = run.get("files_changed") or 0
+        message = run.get("commit_message") or ""
+        reason = run.get("reason") or ""
+        discovered = run.get("discovered_beads_count") or 0
+
+        score_t = run.get("score_tooling")
+        score_cl = run.get("score_clarity")
+        score_co = run.get("score_confidence")
+
+        print(f"\u2713 {bead_id} DONE ({duration_str})")
+        if commit != "none":
+            print(f"  Commit: {commit} (+{added} -{removed}, {files} files)")
+        if message:
+            print(f"  Message: {message}")
+        if score_t is not None or score_cl is not None or score_co is not None:
+            parts = []
+            if score_t is not None:
+                parts.append(f"tooling={score_t}")
+            if score_cl is not None:
+                parts.append(f"clarity={score_cl}")
+            if score_co is not None:
+                parts.append(f"confidence={score_co}")
+            print(f"  Scores: {' '.join(parts)}")
+        if discovered:
+            print(f"  Discovered: {discovered} beads")
+        if reason:
+            print(f"  Decision: {reason}")
+        return 0
+
+    exit_code = run.get("exit_code")
+    failure_cat = run.get("failure_category") or ""
+    reason = run.get("reason") or ""
+
+    print(f"\u2717 {bead_id} {status} ({duration_str})")
+    if exit_code is not None:
+        print(f"  Exit: {exit_code}")
+    if failure_cat:
+        print(f"  Category: {failure_cat}")
+    if reason:
+        print(f"  Decision: {reason}")
+    return 1
+
+
 def cmd_wait(args):
     """Block until a dispatched bead completes, then print a compact report."""
     bead_id = args.bead_id
     timeout = args.timeout
     poll_interval = 2.0
+    client = get_client()
+
+    if isinstance(client, HttpClient):
+        last_status = None
+        start_time = time.monotonic()
+
+        while True:
+            elapsed = time.monotonic() - start_time
+            if elapsed > timeout:
+                print(f"\nError: Timeout after {timeout}s waiting for {bead_id}", file=sys.stderr)
+                if last_status:
+                    print(f"  Last known state: {last_status}", file=sys.stderr)
+                sys.exit(1)
+
+            try:
+                status = client.get_dispatch_wait_status(bead_id)
+            except LookupError:
+                print(f"Error: Bead '{bead_id}' not found. Check the ID and try again.", file=sys.stderr)
+                sys.exit(1)
+
+            state = status.get("state") or "waiting"
+            readiness = status.get("readiness") or "idea"
+            if state == "unapproved":
+                print(
+                    f"Error: Bead {bead_id} is not approved for dispatch "
+                    f"(current: readiness:{readiness})",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if state == "completed":
+                sys.exit(_emit_wait_report(bead_id, status.get("run") or {}))
+
+            current_status = "Running..." if state == "running" else "Waiting for dispatch..."
+            if current_status != last_status:
+                print(current_status, file=sys.stderr)
+                last_status = current_status
+            time.sleep(poll_interval)
 
     repo_root = Path(__file__).resolve().parent.parent.parent
     dispatch_db = repo_root / "data" / "dispatch.db"
@@ -3365,59 +3455,7 @@ def cmd_wait(args):
             row = None
 
         if row:
-            # ── Step 5: Print report ──
-            run = dict(row)
-            status = run.get("status", "UNKNOWN")
-            duration = run.get("duration_secs")
-            duration_str = f"{duration}s" if duration is not None else "?"
-
-            if status == "DONE":
-                # Success report
-                commit = (run.get("commit_hash") or "")[:7] or "none"
-                added = run.get("lines_added") or 0
-                removed = run.get("lines_removed") or 0
-                files = run.get("files_changed") or 0
-                message = run.get("commit_message") or ""
-                reason = run.get("reason") or ""
-                discovered = run.get("discovered_beads_count") or 0
-
-                score_t = run.get("score_tooling")
-                score_cl = run.get("score_clarity")
-                score_co = run.get("score_confidence")
-
-                print(f"\u2713 {bead_id} DONE ({duration_str})")
-                if commit != "none":
-                    print(f"  Commit: {commit} (+{added} -{removed}, {files} files)")
-                if message:
-                    print(f"  Message: {message}")
-                if score_t is not None or score_cl is not None or score_co is not None:
-                    parts = []
-                    if score_t is not None:
-                        parts.append(f"tooling={score_t}")
-                    if score_cl is not None:
-                        parts.append(f"clarity={score_cl}")
-                    if score_co is not None:
-                        parts.append(f"confidence={score_co}")
-                    print(f"  Scores: {' '.join(parts)}")
-                if discovered:
-                    print(f"  Discovered: {discovered} beads")
-                if reason:
-                    print(f"  Decision: {reason}")
-            else:
-                # Failure report (FAILED, BLOCKED, UNKNOWN)
-                exit_code = run.get("exit_code")
-                failure_cat = run.get("failure_category") or ""
-                reason = run.get("reason") or ""
-
-                print(f"\u2717 {bead_id} {status} ({duration_str})")
-                if exit_code is not None:
-                    print(f"  Exit: {exit_code}")
-                if failure_cat:
-                    print(f"  Category: {failure_cat}")
-                if reason:
-                    print(f"  Decision: {reason}")
-
-            sys.exit(0 if status == "DONE" else 1)
+            sys.exit(_emit_wait_report(bead_id, dict(row)))
 
         # Neither running nor completed — waiting for dispatch
         current_status = "Waiting for dispatch..."

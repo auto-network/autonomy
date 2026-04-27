@@ -799,6 +799,77 @@ async def api_dispatch_runs(request):
     return JSONResponse(runs)
 
 
+def _normalize_bead_show_payload(payload):
+    """Normalize ``bd show --json`` / mock bead payloads to one dict or None."""
+    if isinstance(payload, list):
+        return payload[0] if payload else None
+    return payload if isinstance(payload, dict) else None
+
+
+def _bead_readiness(bead: dict | None) -> str:
+    if not bead:
+        return "idea"
+    labels = bead.get("labels") or []
+    for label in labels:
+        if isinstance(label, str) and label.startswith("readiness:"):
+            return label.split(":", 1)[1]
+    return "idea"
+
+
+async def api_dispatch_wait(request):
+    """Return poll status for ``graph wait``."""
+    bead_id = request.path_params["bead_id"]
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        bead = dao_beads.get_bead(bead_id)
+        runs = dao_dispatch.get_runs_for_bead(bead_id)
+    else:
+        bead = _normalize_bead_show_payload(await run_cli_json(["bd", "show", bead_id, "--json"]))
+        runs = await asyncio.to_thread(get_runs_for_bead, bead_id)
+
+    if not bead or bead.get("error"):
+        return JSONResponse({"error": "bead not found"}, status_code=404)
+
+    readiness = _bead_readiness(bead)
+    if readiness != "approved":
+        return JSONResponse(
+            {
+                "bead_id": bead_id,
+                "readiness": readiness,
+                "state": "unapproved",
+            }
+        )
+
+    running = next((run for run in runs if run.get("status") == "RUNNING"), None)
+    if running is not None:
+        return JSONResponse(
+            {
+                "bead_id": bead_id,
+                "readiness": readiness,
+                "state": "running",
+            }
+        )
+
+    completed = next((run for run in runs if run.get("completed_at")), None)
+    if completed is not None:
+        return JSONResponse(
+            {
+                "bead_id": bead_id,
+                "readiness": readiness,
+                "state": "completed",
+                "run": completed,
+            }
+        )
+
+    return JSONResponse(
+        {
+            "bead_id": bead_id,
+            "readiness": readiness,
+            "state": "waiting",
+        }
+    )
+
+
 # ── Timeline API ─────────────────────────────────────────────
 
 _RANGE_MAP = {
@@ -8494,6 +8565,7 @@ routes = [
     Route("/api/dispatch/status", api_dispatch_status),
     Route("/api/dispatch/approved", api_dispatch_approved),
     Route("/api/dispatch/runs", api_dispatch_runs),
+    Route("/api/dispatch/wait/{bead_id}", api_dispatch_wait),
     Route("/api/dispatch/trace/{run}", api_dispatch_trace),
     Route("/dispatch/trace/{run}", page_dispatch),
     Route("/api/search", api_search),

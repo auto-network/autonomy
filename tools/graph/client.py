@@ -739,6 +739,9 @@ class HttpClient:
             body["force"] = True
         return self._post("/api/graph/sessions", body, org=org) or {}
 
+    def get_dispatch_wait_status(self, bead_id):
+        return self._get(f"/api/dispatch/wait/{bead_id}") or {}
+
     # ── stats / tree / entities ────────────────────────────
 
     def stats(self, *, org=None):
