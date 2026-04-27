@@ -147,3 +147,21 @@ def test_list_session_status_calls_dashboard_endpoint():
     assert "since=24h" in captured["url"]
     assert captured["method"] == "GET"
     assert rows == [{"tmux_name": "auto-test", "is_live": 1}]
+
+
+def test_get_dispatch_wait_status_calls_dashboard_endpoint():
+    """Dispatch wait status routes to the dedicated dashboard endpoint."""
+    client = _make_client()
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        return _FakeResponse({"state": "waiting", "bead_id": "auto-test"})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        status = client.get_dispatch_wait_status("auto-test")
+
+    assert "/api/dispatch/wait/auto-test" in captured["url"]
+    assert captured["method"] == "GET"
+    assert status == {"state": "waiting", "bead_id": "auto-test"}

@@ -610,6 +610,56 @@ def test_cmd_sessions_status_routes_through_api(
     assert "dead" in out
 
 
+def test_cmd_wait_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph wait`` must use the dashboard API in container mode."""
+    from tools.dashboard import server as dashboard_server
+
+    async def _fake_run_cli_json(cmd, timeout=30):
+        if cmd[:2] == ["bd", "show"]:
+            return {"id": cmd[2], "labels": ["readiness:approved"]}
+        raise AssertionError(f"unexpected run_cli_json call: {cmd!r}")
+
+    monkeypatch.setattr(
+        dashboard_server,
+        "run_cli_json",
+        _fake_run_cli_json,
+    )
+    monkeypatch.setattr(
+        dashboard_server,
+        "get_runs_for_bead",
+        lambda bead_id: [
+            {
+                "bead_id": bead_id,
+                "status": "DONE",
+                "completed_at": "2026-01-01T00:05:00Z",
+                "duration_secs": 5,
+                "commit_hash": "abcdef123456",
+                "lines_added": 3,
+                "lines_removed": 1,
+                "files_changed": 2,
+                "commit_message": "Ship it",
+                "reason": "approved",
+            }
+        ],
+    )
+
+    def _should_not_run(*args, **kwargs):
+        raise AssertionError("cmd_wait should not call subprocess.run in API mode")
+
+    monkeypatch.setattr(graph_cli.subprocess, "run", _should_not_run)
+
+    args = _cli_args(bead_id="auto-wait", timeout=1)
+    with pytest.raises(SystemExit) as exc_info:
+        graph_cli.cmd_wait(args)
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "✓ auto-wait DONE (5s)" in out
+    assert "Commit: abcdef1 (+3 -1, 2 files)" in out
+    assert "Message: Ship it" in out
+
+
 def test_cmd_collab_topics_routes_through_api(
     api_client, forbid_cli_sqlite, capsys, monkeypatch,
 ):
