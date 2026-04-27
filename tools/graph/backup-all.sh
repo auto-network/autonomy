@@ -40,6 +40,14 @@ backup_sqlite "experiments.db" "${ROOT}/data/experiments.db"
 backup_sqlite "dashboard.db"   "${ROOT}/data/dashboard.db"
 backup_sqlite "auth.db"        "${ROOT}/data/auth.db"
 
+# ── Org databases (post cross-org migration; real graph content) ──
+mkdir -p "${DEST}/orgs"
+shopt -s nullglob
+for org_db in "${ROOT}/data/orgs"/*.db; do
+    backup_sqlite "orgs/$(basename "$org_db")" "$org_db"
+done
+shopt -u nullglob
+
 # ── Beads (dolt — mysqldump via docker against running sql-server) ─
 DOLT_PORT=3306
 if docker run --rm --network host mysql:8 mysqldump \
