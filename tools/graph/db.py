@@ -200,6 +200,7 @@ class GraphDB:
         self._migrate_publication_state()
         self._migrate_source_moves()
         self._migrate_source_short_description()
+        self._migrate_sources_type_index()
         self._migrate_settings()
         self._migrate_orgs()
         self._seed_tags()
@@ -270,6 +271,13 @@ class GraphDB:
         if "short_description" not in scols:
             self.conn.execute("ALTER TABLE sources ADD COLUMN short_description TEXT")
             self.conn.commit()
+
+    def _migrate_sources_type_index(self):
+        """Index sources.type so type-based filters (notes, agentic runs, etc.) stay cheap."""
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sources_type ON sources(type)"
+        )
+        self.conn.commit()
 
     def _migrate_settings(self):
         """Create the settings table + indices if missing (idempotent).
@@ -865,19 +873,47 @@ class GraphDB:
 
     # ── Search ───────────────────────────────────────────────
 
+    _DEFAULT_EXCLUDED_SOURCE_TYPES: tuple[str, ...] = ("agentic",)
+
+    def _build_excluded_types_clause(
+        self, excluded_source_types: list[str] | None
+    ) -> tuple[str, list[str]]:
+        """Build a ``AND s.type NOT IN (...)`` clause excluding auxiliary source types.
+
+        Defaults to ``['agentic']`` so dashboard-spawned agent-action runs
+        don't pollute the global search surface. Pass an empty list to
+        disable the filter entirely (e.g. for an "Auxiliary runs" tab).
+        """
+        if excluded_source_types is None:
+            excluded = list(self._DEFAULT_EXCLUDED_SOURCE_TYPES)
+        else:
+            excluded = list(excluded_source_types)
+        if not excluded:
+            return "", []
+        placeholders = ",".join("?" * len(excluded))
+        return f" AND s.type NOT IN ({placeholders})", excluded
+
     def search(self, query: str, limit: int = 20, project: str | None = None, or_mode: bool = False, tag: str | None = None,
                states: list[str] | None = None, include_raw: bool = False,
                session_source_ids: list[str] | None = None,
-               session_author_pattern: str | None = None) -> list[dict]:
+               session_author_pattern: str | None = None,
+               excluded_source_types: list[str] | None = None) -> list[dict]:
         """Full-text search across thoughts and derivations. Optionally filter by project.
 
         If *query* looks like a hex source ID (6+ hex chars), resolves it
         directly via prefix lookup and returns the source plus linked sources
         before falling back to FTS for content mentions.
+
+        ``excluded_source_types`` defaults to ``['agentic']`` — auxiliary
+        agent-action rows are kept out of the global search surface. Pass
+        ``[]`` to disable the filter entirely.
         """
         if _is_source_id(query):
             # Explicit ID lookup — user asked for this specific source, do not filter by state.
-            return self._search_source_id(query.strip(), limit=limit, project=project, tag=tag)
+            return self._search_source_id(
+                query.strip(), limit=limit, project=project, tag=tag,
+                excluded_source_types=excluded_source_types,
+            )
 
         results = []
         fts_query = _sanitize_fts_query(query, or_mode=or_mode)
@@ -891,6 +927,8 @@ class GraphDB:
         state_clause, state_params = self._build_state_filter(
             states, include_raw, session_source_ids, session_author_pattern,
         )
+
+        excl_clause, excl_params = self._build_excluded_types_clause(excluded_source_types)
 
         if project:
             # Project-scoped search
@@ -906,10 +944,10 @@ class GraphDB:
                    FROM thoughts_fts fts
                    JOIN thoughts t ON t.rowid = fts.rowid
                    JOIN sources s ON s.id = t.source_id
-                   WHERE thoughts_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}
+                   WHERE thoughts_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, project, *tag_params, *state_params, limit),
+                (fts_query, project, *tag_params, *state_params, *excl_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -925,10 +963,10 @@ class GraphDB:
                    FROM derivations_fts fts
                    JOIN derivations d ON d.rowid = fts.rowid
                    JOIN sources s ON s.id = d.source_id
-                   WHERE derivations_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}
+                   WHERE derivations_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, project, *tag_params, *state_params, limit),
+                (fts_query, project, *tag_params, *state_params, *excl_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
         else:
@@ -945,10 +983,10 @@ class GraphDB:
                    FROM thoughts_fts fts
                    JOIN thoughts t ON t.rowid = fts.rowid
                    JOIN sources s ON s.id = t.source_id
-                   WHERE thoughts_fts MATCH ?{tag_clause}{state_clause}
+                   WHERE thoughts_fts MATCH ?{tag_clause}{state_clause}{excl_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, *tag_params, *state_params, limit),
+                (fts_query, *tag_params, *state_params, *excl_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -964,10 +1002,10 @@ class GraphDB:
                    FROM derivations_fts fts
                    JOIN derivations d ON d.rowid = fts.rowid
                    JOIN sources s ON s.id = d.source_id
-                   WHERE derivations_fts MATCH ?{tag_clause}{state_clause}
+                   WHERE derivations_fts MATCH ?{tag_clause}{state_clause}{excl_clause}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, *tag_params, *state_params, limit),
+                (fts_query, *tag_params, *state_params, *excl_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -975,7 +1013,8 @@ class GraphDB:
         results.sort(key=lambda r: r.get("rank", 0))
         return results[:limit]
 
-    def _search_source_id(self, query: str, limit: int = 20, project: str | None = None, tag: str | None = None) -> list[dict]:
+    def _search_source_id(self, query: str, limit: int = 20, project: str | None = None, tag: str | None = None,
+                          excluded_source_types: list[str] | None = None) -> list[dict]:
         """Resolve a source-ID-shaped query directly.
 
         Returns:
@@ -983,6 +1022,11 @@ class GraphDB:
             2. Sources linked TO it (edges where target_id matches)
             3. Sources linked FROM it (edges where source_id matches)
             4. FTS fallback — thoughts/derivations whose content mentions the ID
+
+        ``excluded_source_types`` is forwarded to the FTS fallback so that
+        agentic rows mentioning an ID don't pollute results. The direct
+        prefix lookup is NOT filtered — when a user asks for an exact ID
+        the agentic source itself should still be returned.
         """
         results: list[dict] = []
         seen_source_ids: set[str] = set()
@@ -1101,6 +1145,7 @@ class GraphDB:
                 if tag:
                     tag_clause = " AND json_extract(s.metadata, '$.tags') LIKE ?"
                     tag_params = [f'%"{tag}"%']
+                excl_clause, excl_params = self._build_excluded_types_clause(excluded_source_types)
                 for table, content_table, rtype in [
                     ("thoughts_fts", "thoughts", "thought"),
                     ("derivations_fts", "derivations", "derivation"),
@@ -1117,9 +1162,9 @@ class GraphDB:
                                 FROM {table} fts
                                 JOIN {content_table} t ON t.rowid = fts.rowid
                                 JOIN sources s ON s.id = t.source_id
-                                WHERE {table} MATCH ? AND s.project = ?{tag_clause}
+                                WHERE {table} MATCH ? AND s.project = ?{tag_clause}{excl_clause}
                                 ORDER BY rank LIMIT ?""",
-                            (fts_query, project, *tag_params, remaining),
+                            (fts_query, project, *tag_params, *excl_params, remaining),
                         ).fetchall()
                     else:
                         rows = self.conn.execute(
@@ -1133,9 +1178,9 @@ class GraphDB:
                                 FROM {table} fts
                                 JOIN {content_table} t ON t.rowid = fts.rowid
                                 JOIN sources s ON s.id = t.source_id
-                                WHERE {table} MATCH ?{tag_clause}
+                                WHERE {table} MATCH ?{tag_clause}{excl_clause}
                                 ORDER BY rank LIMIT ?""",
-                            (fts_query, *tag_params, remaining),
+                            (fts_query, *tag_params, *excl_params, remaining),
                         ).fetchall()
                     for r in rows:
                         rd = dict(r)

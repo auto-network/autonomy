@@ -284,6 +284,7 @@ def search(
     include_raw: bool = False,
     session_source_ids: list[str] | None = None,
     session_author_pattern: str | None = None,
+    excluded_source_types: list[str] | None = None,
 ) -> list[dict]:
     """Full-text search across the graph with cross-org RRF merge.
 
@@ -313,6 +314,7 @@ def search(
             rows = slug_db.search(
                 q, limit=limit, project=project, or_mode=or_mode, tag=tag,
                 states=states, include_raw=include_raw,
+                excluded_source_types=excluded_source_types,
             )
             for r in rows:
                 r["org"] = slug
@@ -331,6 +333,7 @@ def search(
                     states=states, include_raw=include_raw,
                     session_source_ids=session_source_ids,
                     session_author_pattern=session_author_pattern,
+                    excluded_source_types=excluded_source_types,
                 )
             finally:
                 db.close()
@@ -344,6 +347,7 @@ def search(
         rows = peer_db.search(
             q, limit=limit, project=project, or_mode=or_mode, tag=tag,
             states=list(PEER_VISIBLE_STATES), include_raw=False,
+            excluded_source_types=excluded_source_types,
         )
         for r in rows:
             r.setdefault("org", only_org)
@@ -357,12 +361,14 @@ def search(
             states=states, include_raw=include_raw,
             session_source_ids=session_source_ids,
             session_author_pattern=session_author_pattern,
+            excluded_source_types=excluded_source_types,
         )
 
     def fetch_peer(db: GraphDB, _slug: str) -> list[dict]:
         return db.search(
             q, limit=limit, project=project, or_mode=or_mode, tag=tag,
             states=list(PEER_VISIBLE_STATES), include_raw=False,
+            excluded_source_types=excluded_source_types,
         )
 
     org_lists = run_across_orgs(
@@ -1613,6 +1619,80 @@ def update_source_title(
         db.update_source_title(source_id, title)
     finally:
         db.close()
+
+
+def insert_agentic_session(
+    *,
+    org: str,
+    set_id: str,
+    set_revision: int,
+    member_key: str,
+    model: str,
+    target_source_id: str,
+    target_org: str,
+    dispatched_by_session: str,
+    title: str,
+) -> dict:
+    """Eager-create an ``agentic`` source row at agent-action dispatch time.
+
+    Returns the new source as a dict. The session-ingest pipeline appends
+    turns to it later via the normal session ingest path (type-agnostic).
+
+    The slug used by ingest to match JSONL → source is derived from the
+    ``member_key`` plus a short uuid suffix and stored as ``file_path``;
+    ingest matches on ``file_path`` for new agent-action runs the same
+    way it matches other session sources.
+    """
+    from .models import Source, new_id, now_iso
+
+    suffix = new_id().replace("-", "")[:4]
+    slug_key = (member_key or "agent-action").split(".")[-1].replace("_", "-")
+    slug = f"agentic-{slug_key}-{suffix}"
+
+    metadata = {
+        "kind": "agent-action",
+        "set_id": set_id,
+        "set_revision": set_revision,
+        "member_key": member_key,
+        "model": model,
+        "target_source_id": target_source_id,
+        "target_org": target_org,
+        "dispatched_by_session": dispatched_by_session,
+        "dispatched_at": now_iso(),
+        "session_type": "agentic",
+        "slug": slug,
+    }
+
+    source = Source(
+        type="agentic",
+        platform="local",
+        project=target_org or org,
+        title=title,
+        file_path=f"agentic:{slug}",
+        metadata=metadata,
+        publication_state="raw",
+    )
+
+    db = _open(org)
+    try:
+        db.insert_source(source)
+    finally:
+        db.close()
+
+    return {
+        "id": source.id,
+        "type": source.type,
+        "platform": source.platform,
+        "project": source.project,
+        "title": source.title,
+        "file_path": source.file_path,
+        "metadata": metadata,
+        "created_at": source.created_at,
+        "ingested_at": source.ingested_at,
+        "publication_state": source.publication_state,
+        "org": org,
+        "slug": slug,
+    }
 
 
 # ── Publication state transitions ────────────────────────────
