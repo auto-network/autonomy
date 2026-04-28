@@ -554,6 +554,74 @@ SWEEP_LEGACY_ATT_ID = "ff000000-0000-0000-0000-000000000006"
 SWEEP_NO_ALT_ATT_ID = "aa100000-0000-0000-0000-000000000007"
 SWEEP_LEGACY_NOTE_ID = "bb100000-0000-0000-0000-000000000008"
 
+# Fixtures for TestAgentActionsDropdown (auto-aia85). Two notes — one in
+# the autonomy org (which has the seeded action set) and one in an org
+# with no seeded actions. The dropdown must render for the first and
+# stay hidden for the second.
+SWEEP_AGENT_ACTIONS_AUTONOMY_NOTE_ID = "a2000a00-0000-0000-0000-000000000010"
+SWEEP_AGENT_ACTIONS_EMPTY_NOTE_ID = "a2000e00-0000-0000-0000-000000000011"
+
+SWEEP_AGENT_ACTIONS_SOURCE_AUTONOMY = {
+    "id": SWEEP_AGENT_ACTIONS_AUTONOMY_NOTE_ID,
+    "title": "Agent-actions sweep — autonomy note",
+    "type": "note",
+    "project": "autonomy",
+    "created_at": "2026-04-28T12:00:00Z",
+    "metadata": "{}",
+    "content": "Test note for the agentic-actions dropdown.",
+}
+
+SWEEP_AGENT_ACTIONS_SOURCE_EMPTY_ORG = {
+    "id": SWEEP_AGENT_ACTIONS_EMPTY_NOTE_ID,
+    "title": "Agent-actions sweep — empty-org note",
+    "type": "note",
+    "project": "emptyorg",
+    "created_at": "2026-04-28T12:00:00Z",
+    "metadata": "{}",
+    "content": "Test note in an org with no seeded actions.",
+}
+
+# Same payload shape as tools/graph/migrations/seed_agent_actions.py SEEDS.
+# The mock settings endpoint returns these verbatim as the dropdown's
+# resolved member list for the autonomy org. Other orgs return an empty
+# list, simulating a freshly-bootstrapped org awaiting promotion.
+SWEEP_AGENT_ACTIONS = [
+    {"key": "universal.send-to", "payload": {
+        "asset_type": "*",
+        "label": "Send To…",
+        "icon": "↗",
+        "universal": True,
+        "writes": [],
+    }},
+    {"key": "note.update-summary", "payload": {
+        "asset_type": "note",
+        "label": "Update Title & Summary",
+        "icon": "✏",
+        "model": "claude-haiku-4-5-20251001",
+        "estimated_seconds": 10,
+        "writes": ["source.title", "source.short_description"],
+        "prompt_template": "Update the title and short description of this note.",
+    }},
+    {"key": "note.consolidate-comments", "payload": {
+        "asset_type": "note",
+        "label": "Consolidate Comments",
+        "icon": "⊞",
+        "model": "claude-sonnet-4-6",
+        "estimated_seconds": 30,
+        "writes": ["note-version"],
+        "prompt_template": "Consolidate this note's comments into the body.",
+    }},
+    {"key": "note.review-accuracy", "payload": {
+        "asset_type": "note",
+        "label": "Review for Accuracy",
+        "icon": "✓",
+        "model": "claude-sonnet-4-6",
+        "estimated_seconds": 60,
+        "writes": ["comment"],
+        "prompt_template": "Review this note for factual accuracy.",
+    }},
+]
+
 SWEEP_GRAPH_SOURCES = {
     SWEEP_PLAIN_NOTE_ID: {
         "id": SWEEP_PLAIN_NOTE_ID,
@@ -591,6 +659,8 @@ SWEEP_GRAPH_SOURCES = {
         "metadata": "{}",
         "content": f"# Legacy\n\n![old screenshot](graph://{SWEEP_LEGACY_ATT_ID[:12]})",
     },
+    SWEEP_AGENT_ACTIONS_AUTONOMY_NOTE_ID: SWEEP_AGENT_ACTIONS_SOURCE_AUTONOMY,
+    SWEEP_AGENT_ACTIONS_EMPTY_NOTE_ID: SWEEP_AGENT_ACTIONS_SOURCE_EMPTY_ORG,
 }
 
 SWEEP_GRAPH_ATTACHMENTS = {
@@ -874,6 +944,11 @@ def _build_fixture() -> dict:
         "bead_deps": SWEEP_BEAD_DEPS,
         "graph_sources": SWEEP_GRAPH_SOURCES,
         "graph_attachments": SWEEP_GRAPH_ATTACHMENTS,
+        "settings": {
+            "dashboard.agent-actions": {
+                "_orgs": {"autonomy": SWEEP_AGENT_ACTIONS},
+            },
+        },
     }
 
 
@@ -3425,3 +3500,279 @@ class TestRichContentNarrowViewport:
         """User can scroll horizontally to see the full diagram at narrow width."""
         assert self._checks.get("is_scrollable"), \
             "Diagram is not scrollable at narrow viewport — content is clipped"
+
+
+# ── Agent-actions dropdown JS check bundle ──────────────────────────
+
+AGENT_ACTIONS_AUTONOMY_CHECKS = """(async () => {
+  const r = {};
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+
+  // The agent-actions root mounts on initial page load (its host slot is
+  // never cleared by the router). After SPA-navigation, the component
+  // refetches on the 'app:navigated' event. Wait for refresh to settle.
+  await sleep(800);
+
+  const root = document.querySelector('.agent-actions-root');
+  r.root_in_dom = !!root;
+  r.root_inside_slot = !!(root && root.parentElement && root.parentElement.id === 'agent-actions-slot');
+  r.root_not_inside_header_actions = !!(
+    root && !root.closest('#header-actions')
+  );
+
+  const btn = document.querySelector('[data-testid=agent-actions-button]');
+  r.btn_exists = !!btn;
+  r.btn_visible = !!(btn && getComputedStyle(btn).display !== 'none');
+
+  // Open the panel
+  if (btn) btn.click();
+  await sleep(150);
+  const panel = document.querySelector('[data-testid=agent-actions-panel]');
+  r.panel_exists = !!panel;
+  r.panel_visible = !!(panel && getComputedStyle(panel).display !== 'none');
+  const items = panel ? panel.querySelectorAll('[data-testid^="agent-action-item-"]') : [];
+  r.action_item_count = items.length;
+  r.action_item_keys = Array.from(items).map(el => el.getAttribute('data-testid'));
+  r.has_send_to = r.action_item_keys.includes('agent-action-item-universal.send-to');
+  r.has_update = r.action_item_keys.includes('agent-action-item-note.update-summary');
+  r.has_consolidate = r.action_item_keys.includes('agent-action-item-note.consolidate-comments');
+  r.has_review = r.action_item_keys.includes('agent-action-item-note.review-accuracy');
+
+  // Element is visible iff it's in the DOM AND its computed display
+  // isn't 'none'. offsetParent is unreliable for position:fixed nodes
+  // (the modal backdrop), so use computed style instead.
+  const isShown = (el) => !!(el && getComputedStyle(el).display !== 'none');
+
+  // Click the Send-To universal action — opens the modal
+  const sendTo = panel ? panel.querySelector('[data-testid="agent-action-item-universal.send-to"]') : null;
+  if (sendTo) sendTo.click();
+  // Modal opens immediately on click; the active_sessions fetch runs
+  // afterward so we wait long enough for the rows to render.
+  await sleep(700);
+  const modal = document.querySelector('[data-testid=agent-actions-send-to-modal]');
+  r.modal_in_dom = !!modal;
+  r.modal_visible = isShown(modal);
+  r.session_card_count = modal ? modal.querySelectorAll('.session-card').length : 0;
+  r.bespoke_row_count = modal ? modal.querySelectorAll('.send-to-session-row, .send-to-session-glyph, .send-to-session-state').length : 0;
+  r.session_button_count = modal ? modal.querySelectorAll('.send-to-session-button').length : 0;
+
+  // Click the first session button to dispatch via the universal endpoint
+  const firstButton = modal ? modal.querySelector('.send-to-session-button') : null;
+  r.first_button_testid = firstButton ? firstButton.getAttribute('data-testid') : '';
+  if (firstButton) firstButton.click();
+  await sleep(700);
+  r.modal_open_after_send = isShown(modal);
+
+  return JSON.stringify(r);
+})()"""
+
+
+AGENT_ACTIONS_HIDDEN_CHECKS = """(async () => {
+  const r = {};
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+  await sleep(800);
+
+  const btn = document.querySelector('[data-testid=agent-actions-button]');
+  r.btn_in_dom = !!btn;
+  r.btn_hidden = !btn || getComputedStyle(btn).display === 'none';
+  r.member_count = (function () {
+    const root = document.querySelector('.agent-actions-root');
+    if (!root || typeof Alpine === 'undefined') return -1;
+    const scope = Alpine.$data(root);
+    return scope && scope.members ? scope.members.length : -1;
+  })();
+  return JSON.stringify(r);
+})()"""
+
+
+class TestAgentActionsDropdown:
+    """Verify the agentic-actions dropdown mounts on a page where its
+    asset's org has applicable members, opens with action items, and
+    renders Send-To using the shared partials/session-card.html — not
+    bespoke markup. Closes the L2.B gap left open by Round 5 (auto-pqgrl).
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            f"/graph/{SWEEP_AGENT_ACTIONS_AUTONOMY_NOTE_ID[:12]}",
+            AGENT_ACTIONS_AUTONOMY_CHECKS,
+            wait_ms=1500,
+        )
+        request.cls._checks = result
+
+    def test_dropdown_lives_in_persistent_slot(self):
+        """The dropdown's Alpine root is inside #agent-actions-slot, not
+        inside #header-actions (which the SPA router clears per nav).
+        """
+        c = self._checks
+        assert c.get("root_in_dom"), "agent-actions-root not in DOM after navigation"
+        assert c.get("root_inside_slot"), \
+            "agent-actions-root must live inside #agent-actions-slot"
+        assert c.get("root_not_inside_header_actions"), \
+            "agent-actions-root must not live inside #header-actions (cleared on every nav)"
+
+    def test_dropdown_visible_on_note_page(self):
+        c = self._checks
+        assert c.get("btn_exists"), "Actions button must be in the DOM"
+        assert c.get("btn_visible"), "Actions button must be visible"
+
+    def test_panel_opens_with_action_items(self):
+        c = self._checks
+        assert c.get("panel_visible"), "Panel did not become visible after click"
+        assert c.get("action_item_count") == 4, \
+            f"Expected 4 action items, got {c.get('action_item_count')}: {c.get('action_item_keys')}"
+        assert c.get("has_send_to"), "Missing universal.send-to action item"
+        assert c.get("has_update"), "Missing note.update-summary action item"
+        assert c.get("has_consolidate"), "Missing note.consolidate-comments action item"
+        assert c.get("has_review"), "Missing note.review-accuracy action item"
+
+    def test_send_to_modal_uses_shared_session_card(self):
+        c = self._checks
+        assert c.get("modal_visible"), "Send-To modal did not open"
+        assert c.get("session_card_count", 0) >= 1, (
+            "Modal must use the shared .session-card partial — got "
+            f"{c.get('session_card_count')} cards"
+        )
+        assert c.get("bespoke_row_count") == 0, (
+            "Modal must not use the bespoke send-to-session-* markup — "
+            f"found {c.get('bespoke_row_count')} bespoke nodes"
+        )
+        assert c.get("session_button_count", 0) >= 1, (
+            f"Modal must wrap rows in .send-to-session-button (count={c.get('session_button_count')})"
+        )
+
+    def test_send_to_dispatches_and_closes(self):
+        """Clicking a session in the Send-To modal POSTs to the dispatch
+        endpoint and the modal closes on a successful response.
+        """
+        c = self._checks
+        assert c.get("first_button_testid", "").startswith("agent-actions-send-to-session-"), (
+            f"First session button must carry the dispatch testid, got {c.get('first_button_testid')!r}"
+        )
+        assert not c.get("modal_open_after_send"), \
+            "Modal must close after a successful Send-To dispatch"
+
+
+class TestAgentActionsDropdownHiddenForEmptyOrg:
+    """The button must stay hidden on a note whose org has no seeded
+    actions — the universal Send-To is also gated by canonical promotion
+    into the asset's own org, so a freshly-bootstrapped org renders nothing.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            f"/graph/{SWEEP_AGENT_ACTIONS_EMPTY_NOTE_ID[:12]}",
+            AGENT_ACTIONS_HIDDEN_CHECKS,
+            wait_ms=1500,
+        )
+        request.cls._checks = result
+
+    def test_dropdown_hidden_when_no_actions_for_org(self):
+        c = self._checks
+        assert c.get("btn_hidden"), \
+            "Actions button must be hidden when the asset's org has no seeded actions"
+        assert c.get("member_count") == 0, (
+            f"Expected zero resolved members for empty-org note, got {c.get('member_count')}"
+        )
+
+
+class TestAgentActionsDropdownLiveRefresh:
+    """Adding a Setting member via the test API must update the dropdown
+    without a manual page reload (Round 1b live-update via setting.changed).
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, sweep_server, request):
+        fixture_path = Path(sweep_server["fixture_path"])
+        events_path = Path(sweep_server["events_path"])
+        original_text = fixture_path.read_text()
+        try:
+            data = json.loads(original_text)
+            members = list(data["settings"]["dashboard.agent-actions"]["_orgs"]["autonomy"])
+            members.append({
+                "key": "note.live-refresh-probe",
+                "payload": {
+                    "asset_type": "note",
+                    "label": "Live-Refresh Probe",
+                    "icon": "★",
+                    "model": "claude-haiku-4-5-20251001",
+                    "estimated_seconds": 5,
+                    "writes": ["comment"],
+                    "prompt_template": "probe",
+                },
+            })
+            data["settings"]["dashboard.agent-actions"]["_orgs"]["autonomy"] = members
+            fixture_path.write_text(json.dumps(data, indent=2))
+
+            # Navigate first so the dropdown mounts and we can later
+            # measure the post-event member count.
+            _navigate_and_eval_async(
+                f"/graph/{SWEEP_AGENT_ACTIONS_AUTONOMY_NOTE_ID[:12]}",
+                "(async () => { return JSON.stringify({ok: true}); })()",
+                wait_ms=1500,
+            )
+
+            with open(events_path, "a") as f:
+                f.write(json.dumps({"topic": "setting.changed", "data": {
+                    "set_id": "dashboard.agent-actions",
+                    "schema_revision": 1,
+                    "key": "note.live-refresh-probe",
+                    "org": "autonomy",
+                    "publication_state": "canonical",
+                    "deprecated": False,
+                    "operation": "write",
+                }}) + "\n")
+
+            # Poll for the new member to appear via the SSE-driven refresh.
+            probe_js = """(async () => {
+                const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+                const readKeys = () => {
+                    const root = document.querySelector('.agent-actions-root');
+                    if (!root || typeof Alpine === 'undefined') return [];
+                    const scope = Alpine.$data(root);
+                    return (scope && scope.members ? scope.members : []).map(m => m.key);
+                };
+                for (var i = 0; i < 30; i++) {
+                    const keys = readKeys();
+                    if (keys.includes('note.live-refresh-probe')) {
+                        return JSON.stringify({ok: true, count: keys.length, keys: keys});
+                    }
+                    await sleep(200);
+                }
+                const keys = readKeys();
+                return JSON.stringify({ok: false, count: keys.length, keys: keys});
+            })()"""
+            result = subprocess.run(
+                ["agent-browser", "--json", "eval", probe_js],
+                capture_output=True, text=True, timeout=15,
+            )
+            parsed = {}
+            for line in reversed(result.stdout.strip().split("\n")):
+                try:
+                    j = json.loads(line)
+                    if isinstance(j, dict) and "data" in j:
+                        d = j["data"]
+                        if isinstance(d, dict) and "result" in d:
+                            v = d["result"]
+                            if isinstance(v, str):
+                                parsed = json.loads(v)
+                            elif isinstance(v, dict):
+                                parsed = v
+                            break
+                except json.JSONDecodeError:
+                    continue
+            request.cls._checks = parsed
+        finally:
+            fixture_path.write_text(original_text)
+
+    def test_dropdown_refreshes_on_setting_changed_event(self):
+        c = self._checks
+        assert c.get("ok"), (
+            "Dropdown did not pick up the new member after setting.changed event "
+            f"(keys={c.get('keys')})"
+        )
+        assert "note.live-refresh-probe" in (c.get("keys") or []), (
+            f"New member missing from refreshed dropdown, keys={c.get('keys')}"
+        )

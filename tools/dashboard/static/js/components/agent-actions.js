@@ -38,16 +38,47 @@
     return { id: '', type: '' };
   }
 
+  function _orgSlug(org) {
+    if (!org) return '';
+    if (typeof org === 'string') return org;
+    return org.slug || '';
+  }
+
   async function fetchSourceOrg(assetId) {
     if (!assetId) return '';
     try {
       var resp = await fetch('/api/source/' + encodeURIComponent(assetId));
       if (!resp.ok) return '';
       var body = await resp.json();
-      return body.org || (body.source && body.source.org) || '';
+      var direct = _orgSlug(body.org);
+      if (direct) return direct;
+      return _orgSlug(body.source && body.source.org);
     } catch (e) {
       return '';
     }
+  }
+
+  // Map an active-session row (from /api/dao/active_sessions) to the shape
+  // that templates/partials/session-card.html expects. Mirrors the field
+  // remapping that sessions.js does in _updateFromStore — kept here as a
+  // pure function so the dropdown can present the same canonical card
+  // without mounting the sessions Alpine component.
+  function _sessionForCard(row) {
+    var t = row.type || '';
+    var sessionType = t === 'host' ? 'host'
+      : t === 'chatwith' ? 'chatwith'
+      : t === 'container' && row.bead_id ? 'dispatch'
+      : 'interactive';
+    var topics = row.topics;
+    if (typeof topics === 'string') {
+      try { topics = JSON.parse(topics); } catch (e) { topics = []; }
+    }
+    return Object.assign({}, row, {
+      id: row.session_id || row.tmux_session,
+      session_type: sessionType,
+      topics: Array.isArray(topics) ? topics : [],
+      latest: row.latest || row.last_message || '',
+    });
   }
 
   async function fetchActionsForOrg(org) {
@@ -128,6 +159,7 @@
   }
 
   function agentActionsComponent() {
+    var helpers = window.sessionCardHelpers || {};
     return {
       visible: false,
       panelOpen: false,
@@ -139,6 +171,22 @@
       pendingDispatch: false,
       lastError: '',
 
+      // Shared session-card helpers (from /static/js/lib/session-card-helpers.js
+      // via window.sessionCardHelpers). The Send-To modal embeds the
+      // partials/session-card.html partial, which references these by name
+      // on the Alpine scope.
+      borderCls: helpers.borderCls || function () { return ''; },
+      typeBadge: helpers.typeBadge || function () { return ''; },
+      typeCls: helpers.typeCls || function () { return ''; },
+      turnsStr: helpers.turnsStr || function () { return ''; },
+      ctxStr: helpers.ctxStr || function () { return ''; },
+      idleStr: helpers.idleStr || function () { return ''; },
+      ctxWarn: helpers.ctxWarn || function () { return false; },
+      recencyColor: helpers.recencyColor || function () { return ''; },
+      endedOrIdleLabel: helpers.endedOrIdleLabel || function () { return ''; },
+      endedOrIdleValue: helpers.endedOrIdleValue || function () { return ''; },
+      showTmuxColumn: helpers.showTmuxColumn || function () { return false; },
+
       async init() {
         var self = this;
         await this.refresh();
@@ -149,7 +197,12 @@
             self.refresh();
           });
         }
-        // Refresh on navigation — single-page app routes don't reload.
+        // Refresh on every SPA navigation. The component's Alpine root
+        // lives in #agent-actions-slot (outside the per-page fragment),
+        // so x-init only fires once on initial load. We refetch on the
+        // app:navigated event emitted by the router and on popstate
+        // (back/forward), since pushState does not fire popstate.
+        window.addEventListener('app:navigated', function () { self.refresh(); });
         window.addEventListener('popstate', function () { self.refresh(); });
       },
 
@@ -235,9 +288,9 @@
           var resp = await fetch('/api/dao/active_sessions');
           if (resp.ok) {
             var rows = await resp.json();
-            this.liveSessions = (rows || []).filter(function (r) {
-              return r && r.is_live;
-            });
+            this.liveSessions = (rows || [])
+              .filter(function (r) { return r && r.is_live; })
+              .map(_sessionForCard);
           }
         } catch (e) {
           this.liveSessions = [];
@@ -248,26 +301,9 @@
         this.modalOpen = false;
       },
 
-      stateClass(session) {
-        if (!session) return 'state-idle';
-        var act = session.last_activity || 0;
-        var now = Date.now() / 1000;
-        if (act && (now - act) < 120) return 'state-thinking';
-        return 'state-idle';
-      },
-
-      stateLabel(session) {
-        var c = this.stateClass(session);
-        return c === 'state-thinking' ? 'Thinking' : 'Idle';
-      },
-
-      sessionGlyph(session) {
-        var name = (session && session.tmux_name) || '';
-        return (name[0] || '?').toUpperCase();
-      },
-
       async sendToSession(session) {
-        if (!session || !session.tmux_name) return;
+        var target = session && (session.tmux_session || session.tmux_name);
+        if (!target) return;
         this.pendingDispatch = true;
         this.lastError = '';
         try {
@@ -276,7 +312,7 @@
             member_key: 'universal.send-to',
             asset_id: this.asset.id,
             page_context: pageContext(this.asset),
-            target_session_name: session.tmux_name,
+            target_session_name: target,
             dispatched_by_session: dispatchedBySession(),
           };
           var resp = await fetch('/api/agent-actions/dispatch', {

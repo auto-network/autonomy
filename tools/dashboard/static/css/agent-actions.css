@@ -142,70 +142,36 @@
   margin-bottom: 12px;
 }
 .send-to-session-list {
-  max-height: 240px;
+  max-height: 320px;
   overflow-y: auto;
   border: 1px solid #1e293b;
   border-radius: 6px;
   background: #0f1623;
-}
-.send-to-session-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  border-bottom: 1px solid #1e293b;
-  font-size: 13px;
-  color: #e5e7eb;
-  cursor: pointer;
-  background: transparent;
-  border-left: none;
-  border-right: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+}
+/* The Send-To rows are full-width buttons that wrap a shared
+   partials/session-card.html. Reset button defaults so the embedded
+   .session-card carries the visual weight on its own. */
+.send-to-session-button {
+  display: block;
   width: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
   text-align: left;
+  cursor: pointer;
 }
-.send-to-session-row:last-child { border-bottom: none; }
-.send-to-session-row:hover { background: #1e293b; }
+.send-to-session-button:hover .session-card { background: #1e293b; }
 
-.send-to-session-glyph {
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  background: #6c63ff;
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.send-to-session-info { flex: 1; min-width: 0; }
-.send-to-session-name {
+.send-to-empty-row {
+  padding: 12px;
   font-size: 13px;
-  font-weight: 500;
-  color: #e5e7eb;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: #9ca3af;
+  text-align: center;
 }
-.send-to-session-label {
-  font-size: 10px;
-  color: #6b7280;
-  font-family: ui-monospace, monospace;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.send-to-session-state {
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: 3px;
-  flex-shrink: 0;
-}
-.send-to-session-state.state-thinking { background: #14532d; color: #6ee7b7; }
-.send-to-session-state.state-idle { background: #1e3a8a; color: #93c5fd; }
 
 .send-to-modal-actions {
   display: flex;
