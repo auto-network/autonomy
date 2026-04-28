@@ -1751,7 +1751,11 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
         session_type="librarian",
         name=container_name,
         prompt=prompt,
-        metadata={"job_id": job_id, "job_type": job_type},
+        metadata={
+            "job_id": job_id,
+            "job_type": job_type,
+            "graph_project": "autonomy",
+        },
         detach=True,
         image=_rig_image,
         output_dir=output_dir,
@@ -2250,11 +2254,21 @@ def dispatch_cycle(
             print("  [DRY RUN] Would dispatch this bead")
             continue
 
-        # Launch agent container (blocks until container starts)
+        # Launch agent container (blocks until container starts).
+        # When the bead's labels match no project (rig default beads),
+        # fall back to the rig's owning org slug so the dispatched
+        # session's .session_meta.json carries graph_org=autonomy and
+        # ingest routes it to the autonomy DB. Without this, the meta
+        # ships without a graph_org and downstream ingest passes that
+        # cannot resolve a routing target end up filing the session in
+        # personal.db (or, in fail-closed mode, skipping it entirely).
+        graph_project = (
+            project.graph_project if project is not None else "autonomy"
+        )
         agent = start_agent(
             bead_id,
             image=image,
-            graph_project=project.graph_project if project is not None else None,
+            graph_project=graph_project,
             graph_tags=project.default_tags if project is not None else (),
         )
         if agent:

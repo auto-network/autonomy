@@ -404,9 +404,14 @@ class TestUnlabeledBeadFallback:
         assert dispatcher.image_for_bead({"labels": []}) == "autonomy-agent:rig-default"
 
     @patch("agents.dispatcher.subprocess.run")
-    def test_unlabeled_bead_launch_has_no_scope_flags(self, mock_run, test_projects,
-                                                      monkeypatch):
-        """Dispatching an unlabeled bead mimics the call shape dispatch_cycle uses."""
+    def test_unlabeled_bead_launch_defaults_graph_project_to_autonomy(
+        self, mock_run, test_projects, monkeypatch,
+    ):
+        """Unlabeled beads still ship ``--graph-project=autonomy`` so the
+        session's ``.session_meta.json`` carries a routing slug. Without
+        this default, ingest cannot resolve a target org and (under the
+        fail-closed policy) skips the session entirely — leaving live
+        rig dispatches invisible to consumers."""
         monkeypatch.setattr(dispatcher, "_rig_image", "autonomy-agent:rig-default")
         mock_run.return_value = _completed_process(
             stdout=(
@@ -419,16 +424,20 @@ class TestUnlabeledBeadFallback:
         project: ProjectConfig | None = dispatcher.project_for_bead(bead)
         assert project is None
 
-        # Reproduce the argument shape that dispatch_cycle uses:
+        # Reproduce the argument shape that dispatch_cycle uses post-fix.
         image = project.image if project is not None else dispatcher._rig_image
+        graph_project = (
+            project.graph_project if project is not None else "autonomy"
+        )
         dispatcher.start_agent(
             bead["id"],
             image=image,
-            graph_project=project.graph_project if project is not None else None,
+            graph_project=graph_project,
             graph_tags=project.default_tags if project is not None else (),
         )
 
         argv = mock_run.call_args[0][0]
         assert "--image=autonomy-agent:rig-default" in argv
-        assert not any(a.startswith("--graph-project") for a in argv)
+        assert "--graph-project=autonomy" in argv
+        # No tags for an unlabeled bead — only the routing slug.
         assert not any(a.startswith("--graph-tags") for a in argv)
