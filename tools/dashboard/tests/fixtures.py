@@ -16,7 +16,6 @@ def make_session(
 ):
     return {
         "session_id": session_id,
-        "tmux_session": session_id,
         "label": label,
         "role": role,
         "type": type,

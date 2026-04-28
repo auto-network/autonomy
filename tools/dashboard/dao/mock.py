@@ -76,7 +76,6 @@ BEAD_DEFAULTS: dict[str, Any] = {
 
 SESSION_DEFAULTS: dict[str, Any] = {
     "session_id": "session000000",
-    "tmux_session": "session000000",
     "project": "default",
     "type": "container",
     "is_live": True,
