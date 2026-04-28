@@ -418,7 +418,7 @@ def full_fixture():
             "auto-test2": {"blockers": [{"id": "auto-test1", "title": "Test bead one"}], "dependents": []},
         },
         "search_results": [
-            {"id": "src-001", "source_id": "src-001", "title": "Auth design doc", "type": "note", "rank": 1.0, "snippet": "Passkey authentication"},
+            {"id": "src-001", "source_id": "src-001", "source_title": "Auth design doc", "source_type": "note", "result_type": "thought", "rank": 1.0, "content": "Passkey authentication"},
         ],
         "graph_sources": {
             "src-001": {"id": "src-001", "title": "Auth design doc", "type": "note", "content": "Full auth design document content"},

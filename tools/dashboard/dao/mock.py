@@ -904,12 +904,14 @@ def get_bead_deps(bead_id: str) -> dict:
 SEARCH_RESULT_DEFAULTS: dict[str, Any] = {
     "id": "src-mock-001",
     "source_id": "src-mock-001",
-    "title": "Mock result",
-    "type": "note",
+    "source_title": "Mock result",
+    "source_type": "note",
+    "result_type": "thought",
     "project": "",
     "rank": 1.0,
-    "snippet": "",
+    "content": "",
     "turn_number": None,
+    "source_created_at": "",
 }
 
 
