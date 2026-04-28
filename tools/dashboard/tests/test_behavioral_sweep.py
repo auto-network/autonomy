@@ -658,7 +658,7 @@ SWEEP_AGENT_ACTIONS_SOURCE_EMPTY_ORG = {
 # resolved member list for the autonomy org. Other orgs return an empty
 # list, simulating a freshly-bootstrapped org awaiting promotion.
 SWEEP_AGENT_ACTIONS = [
-    {"key": "universal.send-to", "payload": {
+    {"key": "session.send-to", "payload": {
         "asset_type": "*",
         "label": "Send To…",
         "icon": "↗",
@@ -3919,15 +3919,27 @@ AGENT_ACTIONS_AUTONOMY_CHECKS = """(async () => {
   };
   const isShown = (el) => !!(el && getComputedStyle(el).display !== 'none');
 
-  // Spy on fetch so we can prove sendToSession actually POSTs the dispatch.
+  // Spy on fetch so we can prove sendToSession actually POSTs the dispatch
+  // and capture the server response (primer body) for shape assertions.
   // Round 5's downstream "modal closed" assertion was satisfied by a no-op
   // handler that short-circuited on a missing field but still closed the
-  // modal — we now assert on the actual network call.
+  // modal — we now assert on the actual network call. The wrapper stays
+  // synchronous-return so callers using `.then(...)` on the raw fetch
+  // promise see the same control flow; the response body is captured via
+  // a side-channel `.then` on the promise.
   const origFetch = window.fetch;
   let dispatchSeen = null;
+  let dispatchResponse = null;
   window.fetch = function (url, opts) {
     if (typeof url === 'string' && url.includes('/api/agent-actions/dispatch')) {
       dispatchSeen = { url: url, body: opts && opts.body };
+      const p = origFetch.apply(this, arguments);
+      p.then(function (resp) {
+        return resp.clone().json().then(function (body) {
+          dispatchResponse = body;
+        });
+      }).catch(function () { dispatchResponse = {}; });
+      return p;
     }
     return origFetch.apply(this, arguments);
   };
@@ -3962,14 +3974,14 @@ AGENT_ACTIONS_AUTONOMY_CHECKS = """(async () => {
     const items = panel ? panel.querySelectorAll('[data-testid^="agent-action-item-"]') : [];
     r.action_item_count = items.length;
     r.action_item_keys = Array.from(items).map(el => el.getAttribute('data-testid'));
-    r.has_send_to = r.action_item_keys.includes('agent-action-item-universal.send-to');
+    r.has_send_to = r.action_item_keys.includes('agent-action-item-session.send-to');
     r.has_update = r.action_item_keys.includes('agent-action-item-note.update-summary');
     r.has_consolidate = r.action_item_keys.includes('agent-action-item-note.consolidate-comments');
     r.has_review = r.action_item_keys.includes('agent-action-item-note.review-accuracy');
 
     // Open the Send-To modal. The active_sessions fetch is async, so wait
     // for at least one session button to render rather than sleeping.
-    const sendTo = panel ? panel.querySelector('[data-testid="agent-action-item-universal.send-to"]') : null;
+    const sendTo = panel ? panel.querySelector('[data-testid="agent-action-item-session.send-to"]') : null;
     if (sendTo) sendTo.click();
     const modal = await waitFor(() => {
       const m = document.querySelector('[data-testid=agent-actions-send-to-modal]');
@@ -3991,6 +4003,8 @@ AGENT_ACTIONS_AUTONOMY_CHECKS = """(async () => {
     // working handler. If the handler short-circuits, neither happens.
     if (firstButton) firstButton.click();
     await waitFor(() => dispatchSeen, 1000);
+    // Also wait for the response side-channel to capture the body.
+    await waitFor(() => dispatchResponse, 1000);
     await waitFor(() => !isShown(modal), 1000);
     r.modal_open_after_send = isShown(modal);
 
@@ -4008,6 +4022,23 @@ AGENT_ACTIONS_AUTONOMY_CHECKS = """(async () => {
       r.dispatch_target = '';
       r.dispatch_member_key = '';
     }
+
+    // Parse the server-built primer body into a {field: value} map so the
+    // Python side can assert the new shape (Round 7g): full UUID asset_id,
+    // asset_org, real asset_title, action=session.send-to, no asset_url,
+    // no sender_session line, no parenthesised id duplication.
+    const primerBody = (dispatchResponse && dispatchResponse.primer_body) || '';
+    r.primer_body = primerBody;
+    const fields = {};
+    const lines = primerBody.split('\\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const idx = line.indexOf(':');
+      if (idx > 0) {
+        fields[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+      }
+    }
+    r.primer_fields = fields;
   } finally {
     window.fetch = origFetch;
   }
@@ -4071,7 +4102,7 @@ class TestAgentActionsDropdown:
         assert c.get("panel_visible"), "Panel did not become visible after click"
         assert c.get("action_item_count") == 4, \
             f"Expected 4 action items, got {c.get('action_item_count')}: {c.get('action_item_keys')}"
-        assert c.get("has_send_to"), "Missing universal.send-to action item"
+        assert c.get("has_send_to"), "Missing session.send-to action item"
         assert c.get("has_update"), "Missing note.update-summary action item"
         assert c.get("has_consolidate"), "Missing note.consolidate-comments action item"
         assert c.get("has_review"), "Missing note.review-accuracy action item"
@@ -4114,8 +4145,39 @@ class TestAgentActionsDropdown:
         )
         assert c.get("dispatch_target"), \
             "Dispatch payload must include target_session_name"
-        assert c.get("dispatch_member_key") == "universal.send-to", (
-            f"Dispatch must be universal.send-to, got {c.get('dispatch_member_key')!r}"
+        assert c.get("dispatch_member_key") == "session.send-to", (
+            f"Dispatch must be session.send-to, got {c.get('dispatch_member_key')!r}"
+        )
+
+    def test_send_to_primer_has_new_shape(self):
+        """The Send-To primer body must carry asset_id (full UUID), asset_type,
+        asset_org, asset_title (real source title), action: session.send-to.
+        No asset_url, no sender_session, no parenthesized id duplication
+        (Round 7g cleanup of the Round 5 spec).
+        """
+        c = self._checks
+        fields = c.get("primer_fields") or {}
+        body = c.get("primer_body") or ""
+        assert fields, f"primer fields not captured; primer_body={body!r}"
+        assert fields.get("action") == "session.send-to", (
+            f"action must be session.send-to, got {fields.get('action')!r}"
+        )
+        asset_id = fields.get("asset_id", "")
+        assert asset_id and len(asset_id) == 36, (
+            f"asset_id must be the full UUID (36 chars), got {asset_id!r}"
+        )
+        assert "(" not in asset_id, (
+            f"asset_id must not contain parenthesised duplication, got {asset_id!r}"
+        )
+        assert fields.get("asset_org"), "asset_org missing from primer"
+        title = fields.get("asset_title", "")
+        assert title and not title.startswith("Source:"), (
+            f"asset_title must be the real source title, not a placeholder; got {title!r}"
+        )
+        assert "asset_url" not in fields, "asset_url field must be removed"
+        assert "sender_session" not in fields, "sender_session field must be removed"
+        assert "action_key" not in fields, (
+            "field name should be 'action', not 'action_key'"
         )
 
 

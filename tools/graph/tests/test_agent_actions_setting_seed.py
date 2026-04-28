@@ -154,8 +154,8 @@ def test_seed_inserts_universal_send_to(orgs_dir, prompts_dir):
     )
     rows = _settings_rows(orgs_dir / "autonomy.db")
     keys = {r["key"]: r for r in rows}
-    assert "universal.send-to" in keys
-    payload = keys["universal.send-to"]["payload"]
+    assert "session.send-to" in keys
+    payload = keys["session.send-to"]["payload"]
     assert payload["universal"] is True
     assert payload["asset_type"] == "*"
 

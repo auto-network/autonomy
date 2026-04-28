@@ -44,7 +44,7 @@ DEFAULT_TARGET_ORG = "autonomy"
 # endpoint and does not spawn an agent).
 SEEDS: tuple[tuple[str, dict], ...] = (
     (
-        "universal.send-to",
+        "session.send-to",
         {
             "asset_type": "*",
             "label": "Send To…",
@@ -141,6 +141,29 @@ def _setting_exists(
     return row is not None
 
 
+# Pre-rename keys whose payload moved to a new key in the same set. The
+# seed loop is idempotent on the new key; the old row needs explicit
+# retirement so the dropdown stops surfacing it. Deprecating (rather than
+# deleting) preserves any provenance that referred to the legacy id.
+LEGACY_RETIREMENTS: tuple[tuple[str, int, str], ...] = (
+    ("dashboard.agent-actions", 1, "universal.send-to"),
+)
+
+
+def _retire_legacy_members(db: GraphDB, *, log) -> None:
+    for set_id, revision, key in LEGACY_RETIREMENTS:
+        cur = db.conn.execute(
+            "UPDATE settings SET deprecated = 1, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+            "WHERE set_id = ? AND schema_revision = ? AND key = ? "
+            "AND deprecated = 0",
+            (set_id, int(revision), key),
+        )
+        if cur.rowcount:
+            db.conn.commit()
+            log(f"  retired legacy {key!r} ({cur.rowcount} row)")
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -198,6 +221,7 @@ def apply_plan(
     """
     db = GraphDB(org_db)
     try:
+        _retire_legacy_members(db, log=log)
         for entry in plan:
             if entry["action"] != "insert":
                 log(f"  {entry['key']}: skip ({entry['action']})")
