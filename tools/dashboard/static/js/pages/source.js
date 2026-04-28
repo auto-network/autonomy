@@ -75,19 +75,17 @@
         return TYPE_BADGES[type] || 'bg-gray-700';
       },
 
-      // Display title: extract first # heading from content for notes, strip markdown prefix
+      // Display title: notes now store a clean (no leading `#`) title at write
+      // time, so we trust src.title verbatim and only fall back to "Untitled".
       get displayTitle() {
-        if (!this.isNote) return this.src?.title || 'Untitled';
-        // For notes, title field may contain raw markdown heading
-        const title = this.src?.title || '';
-        const match = title.match(/^#+\s+(.+)/);
-        if (match) return match[1];
-        // Fallback: try first line of content
-        if (!title && this.noteContent) {
-          const contentMatch = this.noteContent.match(/^#+\s+(.+)/m);
-          if (contentMatch) return contentMatch[1];
-        }
-        return title || 'Untitled';
+        return this.src?.title || 'Untitled';
+      },
+
+      // One- or two-sentence purpose of the note. Set explicitly on write
+      // (via --short-description on the CLI / payload) or backfilled by the
+      // Update Title & Summary action; null when neither has run.
+      get shortDescription() {
+        return this.src?.short_description || '';
       },
 
       // Border color by source type

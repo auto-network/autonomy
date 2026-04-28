@@ -199,6 +199,7 @@ class GraphDB:
         self._migrate_sources_last_activity()
         self._migrate_publication_state()
         self._migrate_source_moves()
+        self._migrate_source_short_description()
         self._migrate_settings()
         self._migrate_orgs()
         self._seed_tags()
@@ -255,6 +256,19 @@ class GraphDB:
         scols = {r[1] for r in self.conn.execute("PRAGMA table_info(sources)").fetchall()}
         if "moved_to_org" not in scols:
             self.conn.execute("ALTER TABLE sources ADD COLUMN moved_to_org TEXT")
+            self.conn.commit()
+
+    def _migrate_source_short_description(self):
+        """Add ``short_description`` column to sources (idempotent).
+
+        First-class column (not metadata JSON) so SQL can sort/filter and
+        the API has a stable shape for card previews / hover tooltips /
+        search summaries. NULL by default; populated by the writer or by
+        the forthcoming "Update Title & Summary" Haiku action.
+        """
+        scols = {r[1] for r in self.conn.execute("PRAGMA table_info(sources)").fetchall()}
+        if "short_description" not in scols:
+            self.conn.execute("ALTER TABLE sources ADD COLUMN short_description TEXT")
             self.conn.commit()
 
     def _migrate_settings(self):
@@ -473,13 +487,14 @@ class GraphDB:
         self.conn.execute(
             """INSERT INTO sources (id, type, platform, project, title, url, file_path, metadata,
                                     created_at, ingested_at, last_activity_at,
-                                    publication_state, deprecated, successor_id, moved_to_org)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    publication_state, deprecated, successor_id, moved_to_org,
+                                    short_description)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (src.id, src.type, src.platform, src.project, src.title, src.url,
              src.file_path, json.dumps(src.metadata), src.created_at, src.ingested_at,
              src.last_activity_at,
              src.publication_state, int(bool(src.deprecated)), src.successor_id,
-             src.moved_to_org),
+             src.moved_to_org, src.short_description),
         )
         self.conn.commit()
         return src
@@ -488,6 +503,14 @@ class GraphDB:
         """Update the title of a source. Last write wins."""
         self.conn.execute(
             "UPDATE sources SET title = ? WHERE id = ?", (title, source_id)
+        )
+        self.conn.commit()
+
+    def update_source_short_description(self, source_id: str, short_description: str | None):
+        """Update the short_description of a source. Last write wins."""
+        self.conn.execute(
+            "UPDATE sources SET short_description = ? WHERE id = ?",
+            (short_description, source_id),
         )
         self.conn.commit()
 
@@ -876,6 +899,7 @@ class GraphDB:
                           s.title as source_title, s.platform, s.project,
                           s.type as source_type,
                           s.created_at as source_created_at,
+                          s.short_description,
                           s.metadata as source_metadata,
                           'thought' as result_type,
                           rank
@@ -894,6 +918,7 @@ class GraphDB:
                           s.title as source_title, s.platform, s.project,
                           s.type as source_type,
                           s.created_at as source_created_at,
+                          s.short_description,
                           s.metadata as source_metadata,
                           'derivation' as result_type,
                           rank
@@ -913,6 +938,7 @@ class GraphDB:
                           s.title as source_title, s.platform, s.project,
                           s.type as source_type,
                           s.created_at as source_created_at,
+                          s.short_description,
                           s.metadata as source_metadata,
                           'thought' as result_type,
                           rank
@@ -931,6 +957,7 @@ class GraphDB:
                           s.title as source_title, s.platform, s.project,
                           s.type as source_type,
                           s.created_at as source_created_at,
+                          s.short_description,
                           s.metadata as source_metadata,
                           'derivation' as result_type,
                           rank
@@ -990,6 +1017,7 @@ class GraphDB:
                 "turn_number": None,
                 "source_id": sid,
                 "source_title": source.get("title") or sid,
+                "short_description": source.get("short_description"),
                 "platform": source.get("platform"),
                 "project": source.get("project"),
                 "result_type": "source",
@@ -1083,6 +1111,7 @@ class GraphDB:
                                        s.title as source_title, s.platform, s.project,
                                        s.type as source_type,
                                        s.created_at as source_created_at,
+                                       s.short_description,
                                        s.metadata as source_metadata,
                                        '{rtype}' as result_type, rank
                                 FROM {table} fts
@@ -1098,6 +1127,7 @@ class GraphDB:
                                        s.title as source_title, s.platform, s.project,
                                        s.type as source_type,
                                        s.created_at as source_created_at,
+                                       s.short_description,
                                        s.metadata as source_metadata,
                                        '{rtype}' as result_type, rank
                                 FROM {table} fts

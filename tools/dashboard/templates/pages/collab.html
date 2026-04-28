@@ -212,7 +212,7 @@
             <span class="note-author" x-text="formatAuthor(item.author)"></span>
           </div>
           <div class="note-title" x-text="item.title"></div>
-          <div class="note-preview" x-text="item.preview"></div>
+          <div class="note-preview" x-text="previewText(item)"></div>
           <div class="note-tags">
             <template x-for="tag in (item.tags || [])" :key="tag">
               <span class="note-tag" x-text="tag"></span>
@@ -236,7 +236,7 @@
             <span class="note-author" x-text="formatAuthor(item.author)"></span>
           </div>
           <div class="note-title" x-text="item.title"></div>
-          <div class="note-preview" x-text="item.preview"></div>
+          <div class="note-preview" x-text="previewText(item)"></div>
           <div class="note-tags">
             <template x-for="tag in (item.tags || [])" :key="tag">
               <span class="note-tag" x-text="tag"></span>

@@ -1483,6 +1483,7 @@ def _group_search_results(rows: list) -> list:
     SOURCE_FIELDS = (
         "source_id", "source_title", "source_type", "project", "platform",
         "org", "source_created_at", "source_metadata", "rrf_score",
+        "short_description",
     )
     EXCERPT_FIELDS = ("turn_number", "content", "result_type", "rank")
     groups: dict = {}
@@ -5586,6 +5587,7 @@ async def api_graph_note(request):
             return JSONResponse({"error": f"invalid tags: {tags_raw!r}"}, status_code=400)
         project = str(form["project"]) if form.get("project") else None
         author = str(form["author"]) if form.get("author") else None
+        short_description = str(form["short_description"]) if form.get("short_description") else None
         tmp_paths, err = await _materialize_uploads(form)
         if err is not None:
             return err
@@ -5600,6 +5602,7 @@ async def api_graph_note(request):
             return JSONResponse({"error": f"invalid tags: {tags_raw!r}"}, status_code=400)
         project = body.get("project")
         author = body.get("author")
+        short_description = body.get("short_description")
         tmp_paths = []
 
     tags = str(tags_raw).split(",") if tags_raw else []
@@ -5612,6 +5615,7 @@ async def api_graph_note(request):
             author=author,
             project=project,
             attachments=tmp_paths or None,
+            short_description=short_description,
             org=org,
         )
     except FileNotFoundError as e:
@@ -5630,6 +5634,7 @@ async def api_graph_note(request):
         "lines": result["lines"],
         "chars": result["chars"],
         "attachments": result["attachments"],
+        "short_description": result.get("short_description"),
     })
 
 
@@ -5656,6 +5661,7 @@ async def api_graph_note_update(request):
                 integrate_ids = [str(x) for x in json.loads(str(integrate_raw))]
             except (json.JSONDecodeError, TypeError):
                 integrate_ids = []
+        short_description = str(form["short_description"]) if form.get("short_description") is not None else None
         tmp_paths, err = await _materialize_uploads(form)
         if err is not None:
             return err
@@ -5670,6 +5676,7 @@ async def api_graph_note_update(request):
             return JSONResponse({"error": e}, status_code=400)
         content = body["content"]
         integrate_ids = [str(x) for x in body.get("integrate_ids") or []]
+        short_description = body.get("short_description")
         tmp_paths = []
 
     try:
@@ -5679,6 +5686,7 @@ async def api_graph_note_update(request):
             content,
             integrate_comments=integrate_ids,
             attachments=tmp_paths or None,
+            short_description=short_description,
             org=org,
         )
     except graph_ops.CrossOrgWriteError as e:
@@ -5704,6 +5712,7 @@ async def api_graph_note_update(request):
         "integrated": result["integrated"],
         "not_found_comments": result["not_found_comments"],
         "attachments": result["attachments"],
+        "short_description": result.get("short_description"),
     })
 
 
@@ -6878,6 +6887,7 @@ async def api_graph_notes(request):
         items.append({
             "id": s["id"],
             "title": s.get("title", ""),
+            "short_description": s.get("short_description"),
             "created_at": s.get("created_at", ""),
             "author": meta.get("author", ""),
             "project": s.get("project", ""),
@@ -6903,6 +6913,7 @@ async def api_graph_collab_list(request):
         items.append({
             "id": s["id"],
             "title": s.get("title", ""),
+            "short_description": s.get("short_description"),
             "created_at": meta.get("created_at", s.get("created_at", "")),
             "author": meta.get("author", ""),
             "project": s.get("project", ""),

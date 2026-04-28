@@ -2783,6 +2783,7 @@ def cmd_note(args):
                 html_path=html_path,
                 auto_provenance_source_id=auto_src_id,
                 auto_provenance_turn=auto_turn,
+                short_description=getattr(args, "short_description", None),
                 org=getattr(args, "org", None),
             )
         except FileNotFoundError as e:
@@ -2945,6 +2946,7 @@ def cmd_note_update(args):
                 integrate_comments=integrate_ids,
                 attachments=attach_paths,
                 html_path=html_path,
+                short_description=getattr(args, "short_description", None),
                 org=getattr(args, "org", None),
             )
         except _ops.CrossOrgWriteError as e:
@@ -4061,6 +4063,8 @@ def main():
     p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
     p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement. For images use markdown syntax: ![alt]({1}). Unplaced attachments appear as downloads")
     p_note.add_argument("--html", help="HTML file for rich-content note (creates version-paired attachment)")
+    p_note.add_argument("--short-description", dest="short_description",
+                        help="One or two sentences explaining the note's purpose (used in card previews / hover tooltips / search summaries)")
     p_note.set_defaults(func=cmd_note_router)
 
     # notes (list notes with optional recency filter)
