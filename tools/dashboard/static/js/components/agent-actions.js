@@ -129,7 +129,7 @@
   }
 
   function iconClassFor(key) {
-    if (key === 'universal.send-to') return 'icon-send-to';
+    if (key === 'session.send-to') return 'icon-send-to';
     if (key.indexOf('update') !== -1) return 'icon-update';
     if (key.indexOf('consolidate') !== -1) return 'icon-consolidate';
     if (key.indexOf('review') !== -1) return 'icon-review';
@@ -249,7 +249,7 @@
 
       async dispatchMember(member) {
         this.closePanel();
-        if (member.universal && member.key === 'universal.send-to') {
+        if (member.universal && member.key === 'session.send-to') {
           await this.openSendToModal();
           return;
         }
@@ -311,7 +311,7 @@
         try {
           var body = {
             set_id: SET_ID,
-            member_key: 'universal.send-to',
+            member_key: 'session.send-to',
             asset_id: this.asset.id,
             page_context: pageContext(this.asset),
             target_session_name: target,

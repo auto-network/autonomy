@@ -97,7 +97,7 @@ def _seed_actions(org_db: Path) -> None:
     """Write a Send-To member + one note action into *org_db*."""
     members: list[tuple[str, dict]] = [
         (
-            "universal.send-to",
+            "session.send-to",
             {
                 "asset_type": "*",
                 "label": "Send To…",
@@ -393,7 +393,7 @@ def test_dispatch_send_to_uses_crosstalk(
     pre_sources = _list_agentic_sources()
 
     r = client.post("/api/agent-actions/dispatch", json={
-        "member_key": "universal.send-to",
+        "member_key": "session.send-to",
         "asset_id": asset_id,
         "page_context": {
             "asset_title": "Note",
@@ -407,14 +407,26 @@ def test_dispatch_send_to_uses_crosstalk(
     body = r.json()
     assert body["ok"] is True
     assert body["sent_to"] == "auto-target-1234"
+    # The mock and real paths both surface the primer body so callers can
+    # log / display the field shape without reconstructing it.
+    primer_body = body.get("primer_body") or ""
+    assert primer_body, "primer_body missing from response"
 
     assert len(sent) == 1
     target, envelope = sent[0]
     assert target == "auto-target-1234"
-    # The primer envelope must carry the full asset id and a stable URL.
-    assert asset_id in envelope
-    assert "asset_url:" in envelope
-    assert "auto-sender-5678" in envelope
+    # The envelope's label must be the dashboard subsystem name, not the
+    # bare 'dashboard' sentinel.
+    assert 'label="Dashboard Send-To"' in envelope, envelope
+    # Primer fields: full asset id, action key, no asset_url, no
+    # sender_session line. The sender session name still appears in the
+    # crosstalk envelope's `from="..."` attribute (transport metadata),
+    # but not as a primer field.
+    assert f"asset_id: {asset_id}" in envelope
+    assert "action: session.send-to" in envelope
+    assert "asset_url:" not in envelope, "asset_url line must be removed"
+    assert "sender_session:" not in envelope, "sender_session line must be removed"
+    assert f'from="auto-sender-5678"' in envelope
 
     # No agentic source row should have been created.
     assert _list_agentic_sources() == pre_sources
@@ -432,7 +444,7 @@ def test_dispatch_send_to_dead_session_404(
     monkeypatch.setattr(server_mod, "_tmux_session_exists", lambda n: False)
 
     r = client.post("/api/agent-actions/dispatch", json={
-        "member_key": "universal.send-to",
+        "member_key": "session.send-to",
         "asset_id": asset_id,
         "page_context": {},
         "target_session_name": "auto-dead-session",

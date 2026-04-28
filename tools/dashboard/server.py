@@ -7624,30 +7624,33 @@ def _get_tag_taxonomy(org: str) -> list[str]:
 
 def _build_send_to_primer(
     *,
-    asset_id: str,
-    page_context: dict,
-    sender_session: str,
-    member_key: str,
+    source: dict,
+    custom_message: str = "",
 ) -> str:
     """Compose the markdown primer that Send-To delivers to the chosen
-    session. Required fields are listed up front so the receiving
-    session has unambiguous context.
+    session. The receiver gets the canonical asset id, type, owning org,
+    title, and the action key — enough to resolve the asset against the
+    correct org's graph DB without consulting the dashboard.
     """
-    asset_type = str(page_context.get("asset_type") or "")
-    asset_title = str(page_context.get("asset_title") or "")[:80]
-    asset_url = str(page_context.get("asset_url") or "")
-    custom = str(page_context.get("custom_message") or "")
-    short_id = asset_id[:12]
+    asset_id = str(source.get("id") or "")
+    asset_type = str(source.get("type") or "")
+    asset_org = str(source.get("org") or source.get("project") or "")
+    asset_title = str(source.get("title") or "")[:80]
+    if not asset_org:
+        logger.warning(
+            "Send-To primer: asset_org unresolvable for asset_id=%s — "
+            "emitting empty value to preserve shape",
+            asset_id,
+        )
     lines = [
-        f"asset_id: {short_id} ({asset_id})",
+        f"asset_id: {asset_id}",
         f"asset_type: {asset_type}",
-        f"asset_url: {asset_url}",
+        f"asset_org: {asset_org}",
         f"asset_title: {asset_title}",
-        f"sender_session: {sender_session}",
-        f"action_key: {member_key}",
+        "action: session.send-to",
     ]
-    if custom:
-        lines.append(f"custom_message: {custom}")
+    if custom_message:
+        lines.append(f"custom_message: {custom_message}")
     return "\n".join(lines)
 
 
@@ -7656,15 +7659,22 @@ async def _send_to_via_crosstalk(
     target_session: str,
     sender_session: str,
     primer: str,
+    label: str | None = None,
 ) -> tuple[bool, str | None]:
     """Deliver a Send-To primer to *target_session* by injecting a
     crosstalk envelope into its tmux pane. Returns ``(ok, error)``.
+
+    ``label`` overrides the envelope's ``label="..."`` attribute. When
+    omitted, falls back to the sender session's stored label, then the
+    sender session name itself. Dashboard-originated Send-To passes
+    ``"Dashboard Send-To"`` so the receiver can recognise the subsystem
+    at a glance instead of seeing the bare ``dashboard`` sentinel.
     """
     if not _tmux_session_exists(target_session):
         return False, "session not live"
 
     sender_row = dashboard_db.get_session(sender_session)
-    sender_label = (sender_row or {}).get("label", "") or sender_session
+    sender_label = label or (sender_row or {}).get("label", "") or sender_session
     sender_source_id = (sender_row or {}).get("graph_source_id", "") or ""
     sender_entry_count = (sender_row or {}).get("entry_count", 0) or 0
     iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -7831,13 +7841,25 @@ async def api_agent_action_dispatch(request):
                 },
                 status_code=404,
             )
-        if bool(payload.get("universal")) and member_key == "universal.send-to":
+        if bool(payload.get("universal")) and member_key == "session.send-to":
             if not target_session_name:
                 return JSONResponse(
                     {"error": "target_session_name required for Send To"},
                     status_code=400,
                 )
-            return JSONResponse({"ok": True, "sent_to": target_session_name})
+            # Surface the primer body in the mock-mode response so the
+            # behavioural-sweep fetch spy can assert primer shape without
+            # having to wire a real CrossTalk delivery in the browser harness.
+            src.setdefault("org", target_org)
+            primer_body = _build_send_to_primer(
+                source=src,
+                custom_message=str(page_context.get("custom_message") or ""),
+            )
+            return JSONResponse({
+                "ok": True,
+                "sent_to": target_session_name,
+                "primer_body": primer_body,
+            })
         return JSONResponse({
             "ok": True,
             "agentic_source_id": f"mock-{member_key}-{asset_id[:8]}",
@@ -7883,29 +7905,32 @@ async def api_agent_action_dispatch(request):
         return JSONResponse(cached)
 
     # ── Step 4a: universal Send-To short-circuit ─────────────────
-    if bool(payload.get("universal")) and member_key == "universal.send-to":
+    if bool(payload.get("universal")) and member_key == "session.send-to":
         if not target_session_name:
             return JSONResponse(
                 {"error": "target_session_name required for Send To"},
                 status_code=400,
             )
         primer = _build_send_to_primer(
-            asset_id=asset_id,
-            page_context=page_context,
-            sender_session=dispatched_by_session or "dashboard",
-            member_key=member_key,
+            source=source,
+            custom_message=str(page_context.get("custom_message") or ""),
         )
         ok, err = await _send_to_via_crosstalk(
             target_session=target_session_name,
             sender_session=dispatched_by_session or "dashboard",
             primer=primer,
+            label="Dashboard Send-To",
         )
         if not ok:
             return JSONResponse(
                 {"error": err, "target_session": target_session_name},
                 status_code=404,
             )
-        response = {"ok": True, "sent_to": target_session_name}
+        response = {
+            "ok": True,
+            "sent_to": target_session_name,
+            "primer_body": primer,
+        }
         _agent_action_idempotency_remember(idem_key, response)
         return JSONResponse(response)
 
