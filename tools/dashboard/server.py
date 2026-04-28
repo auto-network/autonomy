@@ -8467,6 +8467,15 @@ async def _lifespan(app):
     finally:
         await _on_shutdown()
 
+class _RequestDurationMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        t0 = time.monotonic()
+        response = await call_next(request)
+        dur_ms = (time.monotonic() - t0) * 1000
+        logger.info("%s %s %d %.1fms", request.method, request.url.path, response.status_code, dur_ms)
+        return response
+
+
 class _CSPMiddleware(BaseHTTPMiddleware):
     """Phase 1 CSP: blocks dangerous injections while permitting existing inline scripts."""
 
@@ -8534,6 +8543,7 @@ app = Starlette(
     routes=routes,
     lifespan=_lifespan,
     middleware=[
+        Middleware(_RequestDurationMiddleware),
         # Outer: bind X-Graph-Org to the ops-layer contextvar for every
         # request. Every ``graph_ops.X()`` made while a handler is on the
         # stack picks up the caller org automatically.
