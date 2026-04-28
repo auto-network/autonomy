@@ -652,13 +652,30 @@ def _worktree_commit_shas(worktree: Path, *, base_ref: str | None = None) -> lis
 
 
 def _target_branch_contains_commit(repo: Path, branch: str, sha: str) -> bool:
-    """Return True when ``sha`` is already reachable from ``repo``'s ``branch``."""
+    """Return True when ``sha`` (or its patch) is already on ``branch``.
+
+    Checks SHA-reachability first (cheapest) then falls back to patch-id
+    equivalence via ``git cherry`` so a commit that was cherry-picked onto
+    ``branch`` with a different SHA is still detected as merged. Without
+    this, an orphan worktree branch keeps showing its original commit as
+    "pending" forever after the cherry-pick lands as a new SHA on master.
+    """
     rc, _, _ = _git_output(
         ["merge-base", "--is-ancestor", sha, f"refs/heads/{branch}"],
         repo,
         timeout=15,
     )
-    return rc == 0
+    if rc == 0:
+        return True
+    rc, out, _ = _git_output(
+        ["cherry", f"refs/heads/{branch}", sha, f"{sha}^"],
+        repo,
+        timeout=15,
+    )
+    if rc != 0:
+        return False
+    line = (out.splitlines() or [""])[0].strip()
+    return line.startswith("-")
 
 
 def _dashboard_pending_commit_shas(
