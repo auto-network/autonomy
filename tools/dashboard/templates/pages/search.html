@@ -1,12 +1,198 @@
-<div x-data="searchPage()" class="pb-safe">
-  <!-- Query display + count -->
-  <div class="flex items-center gap-3 mb-4">
-    <h1 class="text-lg font-semibold text-indigo-400" x-text="'Search: ' + query"></h1>
-    <span class="text-sm text-gray-500" x-show="loaded" x-text="results.length + ' results'"></span>
+<!-- Search results — grouped by source, iPhone-first.
+     Translated from Design Studio cb23bd8b-1a7 (revision 3 of 51bd7e8d-3bd).
+     Source of truth for visuals: do not edit class/var names without updating
+     the design. -->
+<style>
+  .sp-root {
+    --sp-bg: #111827; --sp-surface: #1f2937; --sp-border: #374151;
+    --sp-text-1: #e5e7eb; --sp-text-2: #9ca3af; --sp-text-3: #6b7280; --sp-text-4: #4b5563;
+    --sp-accent: #818cf8; --sp-accent-bg: #4f46e540;
+    --note: #eab308; --session: #4ade80; --agent-run: #fb923c;
+    --conversation: #60a5fa; --docs: #2dd4bf; --status: #94a3b8; --musing: #c084fc;
+    --note-bg: #eab30815; --session-bg: #4ade8015; --agent-run-bg: #fb923c15;
+    --conversation-bg: #60a5fa15; --docs-bg: #2dd4bf15; --status-bg: #94a3b815;
+    --musing-bg: #c084fc15;
+    --chip-off: #374151; --chip-on: #4f46e5;
+  }
+
+  /* ── Sticky search header ─────────────────────── */
+  .sp-header {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--sp-bg);
+    padding: 12px 0 0;
+    border-bottom: 1px solid var(--sp-border);
+    margin: -8px -16px 0;
+    padding-left: 16px; padding-right: 16px;
+  }
+  .sp-search-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 10px;
+  }
+  .sp-back-btn {
+    flex-shrink: 0; width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--sp-accent); background: none; border: none;
+    font-size: 20px; cursor: pointer; padding: 0;
+  }
+  .sp-search-field {
+    flex: 1; height: 36px;
+    background: var(--sp-surface); border: 1px solid var(--sp-border);
+    border-radius: 10px; padding: 0 12px; color: var(--sp-text-1);
+    font-size: 15px; outline: none;
+  }
+  .sp-search-field:focus { border-color: var(--sp-accent); }
+  .sp-search-field::placeholder { color: var(--sp-text-3); }
+
+  /* ── Chip rail ────────────────────────────────── */
+  .sp-chip-rail {
+    display: flex; gap: 6px; overflow-x: auto;
+    padding-bottom: 10px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .sp-chip-rail::-webkit-scrollbar { display: none; }
+  .sp-chip {
+    flex-shrink: 0; padding: 5px 12px; border-radius: 16px;
+    font-size: 13px; font-weight: 500; border: none; cursor: pointer;
+    white-space: nowrap; min-height: 30px;
+    transition: background 0.15s, color 0.15s;
+  }
+  .sp-chip-off { background: var(--chip-off); color: var(--sp-text-2); }
+  .sp-chip-off:active { background: #4b5563; }
+  .sp-chip-on { background: var(--chip-on); color: #fff; }
+  .sp-chip-count { opacity: 0.7; margin-left: 3px; }
+
+  /* ── Summary row ──────────────────────────────── */
+  .sp-summary-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 0;
+    font-size: 13px; color: var(--sp-text-3);
+  }
+  .sp-summary-query { color: var(--sp-accent); font-weight: 500; }
+
+  /* ── Source cards ─────────────────────────────── */
+  .sp-results { padding-bottom: 80px; }
+  .sp-source-card {
+    display: flex; margin-bottom: 8px;
+    border-radius: 10px; overflow: hidden;
+    background: var(--sp-surface);
+    border: 1px solid var(--sp-border);
+    text-decoration: none; color: inherit;
+  }
+  .sp-source-card:active { background: #283548; }
+
+  /* 3px accent rail */
+  .sp-accent-rail {
+    width: 3px; flex-shrink: 0; border-radius: 3px 0 0 3px;
+  }
+  .sp-rail-note { background: var(--note); }
+  .sp-rail-session { background: var(--session); }
+  .sp-rail-agent-run { background: var(--agent-run); }
+  .sp-rail-conversation { background: var(--conversation); }
+  .sp-rail-docs { background: var(--docs); }
+  .sp-rail-status { background: var(--status); }
+  .sp-rail-musing { background: var(--musing); }
+  .sp-rail-default { background: var(--sp-text-4); }
+
+  .sp-card-body {
+    flex: 1; min-width: 0; padding: 10px 12px;
+  }
+  .sp-card-meta {
+    display: flex; align-items: center; gap: 6px;
+    margin-bottom: 4px; flex-wrap: wrap;
+  }
+  .sp-type-pill {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.03em;
+    padding: 1px 7px; border-radius: 4px;
+    text-transform: uppercase;
+  }
+  .sp-pill-note { color: var(--note); background: var(--note-bg); }
+  .sp-pill-session { color: var(--session); background: var(--session-bg); }
+  .sp-pill-agent-run { color: var(--agent-run); background: var(--agent-run-bg); }
+  .sp-pill-conversation { color: var(--conversation); background: var(--conversation-bg); }
+  .sp-pill-docs { color: var(--docs); background: var(--docs-bg); }
+  .sp-pill-status { color: var(--status); background: var(--status-bg); }
+  .sp-pill-musing { color: var(--musing); background: var(--musing-bg); }
+  .sp-pill-default { color: var(--sp-text-2); background: #ffffff10; }
+  .sp-match-count {
+    font-size: 11px; color: var(--sp-text-3); margin-left: auto;
+  }
+  .sp-card-title {
+    font-size: 15px; font-weight: 600; color: var(--sp-text-1);
+    line-height: 1.35;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+    margin-bottom: 6px;
+  }
+
+  /* Excerpts */
+  .sp-excerpt {
+    display: flex; gap: 8px; align-items: flex-start;
+    padding: 4px 0;
+    text-decoration: none; color: inherit;
+  }
+  .sp-excerpt + .sp-excerpt { border-top: 1px solid #ffffff08; }
+  .sp-turn-badge {
+    flex-shrink: 0; font-size: 11px; font-weight: 600;
+    color: var(--sp-text-3); font-family: "SF Mono", ui-monospace, monospace;
+    min-width: 32px; padding-top: 1px;
+  }
+  .sp-excerpt-text {
+    font-size: 13px; color: var(--sp-text-2); line-height: 1.45;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .sp-excerpt-text mark {
+    background: var(--sp-accent-bg); color: var(--sp-accent);
+    padding: 0 2px; border-radius: 2px; font-weight: 500;
+  }
+
+  .sp-card-footer {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 6px; font-size: 11px; color: var(--sp-text-4);
+  }
+
+  .sp-card-chevron {
+    flex-shrink: 0; width: 28px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--sp-text-4); font-size: 14px;
+  }
+</style>
+
+<div x-data="searchPage()" class="sp-root pb-safe">
+  <!-- Sticky search header with chip rail -->
+  <div class="sp-header">
+    <div class="sp-search-row">
+      <button class="sp-back-btn" @click="goBack()" title="Back">‹</button>
+      <input type="text" class="sp-search-field"
+             x-model="query"
+             @keydown.enter="submitQuery()"
+             placeholder="Search knowledge…">
+    </div>
+    <div class="sp-chip-rail" data-testid="sp-chip-rail">
+      <button class="sp-chip"
+              :class="activeType === 'all' ? 'sp-chip-on' : 'sp-chip-off'"
+              @click="setType('all')">
+        All <span class="sp-chip-count" x-text="results.length"></span>
+      </button>
+      <template x-for="t in chipTypes" :key="t.key">
+        <button class="sp-chip"
+                :class="activeType === t.key ? 'sp-chip-on' : 'sp-chip-off'"
+                @click="setType(t.key)">
+          <span x-text="t.label"></span>
+          <span class="sp-chip-count" x-text="t.count"></span>
+        </button>
+      </template>
+    </div>
   </div>
 
-  <div class="mb-4">
-    {% include 'partials/zoom-toggle.html' %}
+  <!-- Summary row -->
+  <div class="sp-summary-row" x-show="loaded && results.length > 0">
+    <span>
+      <span x-text="filteredResults.length"></span> sources ·
+      <span x-text="totalMatches"></span> matches for
+      <span class="sp-summary-query" x-text="'“' + query + '”'"></span>
+    </span>
   </div>
 
   <!-- Loading -->
@@ -14,31 +200,25 @@
     <div class="text-gray-500 text-sm">Searching...</div>
   </template>
 
+  <!-- Empty -->
+  <template x-if="loaded && results.length === 0">
+    <div class="text-gray-500 text-sm">No results for "<span x-text="query"></span>"</div>
+  </template>
+
   <!-- Results -->
   <template x-if="loaded && results.length > 0">
-    <div class="flex flex-col" :class="zoom === 'compact' ? 'gap-1' : 'gap-1.5'">
-      <template x-for="r in results" :key="r.source_id || r.id">
+    <div class="sp-results" data-testid="sp-results">
+      <template x-for="r in filteredResults" :key="r.source_id || r.id">
         <a :href="'/graph/' + (r.source_id || r.id).slice(0, 12)"
            @click.prevent="navigateTo('/graph/' + (r.source_id || r.id).slice(0, 12))"
-           class="block rounded-lg overflow-clip">
-          <div class="px-2.5 py-2 bg-gray-800 hover:bg-gray-750 border-l-4 transition-colors"
-               :style="'border-left-color:' + typeColor(r.result_type)">
-            <!-- Row 1: stats plate (date + match-count, no org pill) -->
-            <div class="flex items-center gap-1.5" style="font-size:10px; font-family:ui-monospace,monospace; color:#4b5e73">
-              <span style="font-size:11px; font-weight:500; color:#64748b" x-text="typeName(r.result_type)"></span>
-              <span style="color:#4b5e73; flex-shrink:0" x-text="r.date"></span>
-              <template x-if="r.match_count > 1">
-                <span style="color:#94a3b8; background:#0f1623; padding:1px 5px; border-radius:3px" x-text="r.match_count + ' matches'"></span>
-              </template>
-              <span class="ml-auto" style="color:#3d4f63" x-text="(r.source_id || r.id).slice(0, 12)"></span>
-              <!-- Compact: title inline on stats row -->
-              <template x-if="zoom === 'compact'">
-                <span style="font-size:13px; font-weight:600; color:#f1f5f9; margin-left:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" x-text="r.source_title || 'Untitled'"></span>
-              </template>
-            </div>
-            <!-- Row 2: org glyph + title (normal/expanded).
-                 `flex` class (not inline display:flex) — Alpine x-show strips inline display. -->
-            <div x-show="zoom !== 'compact'" class="flex items-center" style="gap:6px; margin-top:1px">
+           class="sp-source-card"
+           :data-source-type="r.source_type || ''">
+          <div class="sp-accent-rail" :class="railClass(r.source_type)"></div>
+          <div class="sp-card-body">
+            <!-- Row 1: type pill + org glyph + match count -->
+            <div class="sp-card-meta">
+              <span class="sp-type-pill" :class="pillClass(r.source_type)"
+                    x-text="typeLabel(r.source_type)"></span>
               <template x-if="r.org">
                 <span class="sc-org"
                       :style="r.org.favicon ? '' : `background:${r.org.color}`"
@@ -54,29 +234,40 @@
                   <img class="sc-org-img" :src="r.org.favicon" x-show="r.org.favicon" :alt="r.org.name">
                 </span>
               </template>
-              <div style="font-size:14px; font-weight:600; color:#f1f5f9; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" x-text="r.source_title || 'Untitled'"></div>
+              <span class="sp-match-count"
+                    x-text="(r.match_count || 1) + ' match' + ((r.match_count || 1) === 1 ? '' : 'es')"></span>
             </div>
-            <!-- Row 3: content preview with highlighting (normal/expanded) -->
-            <div x-show="zoom !== 'compact'" class="mt-0.5 text-xs truncate" style="color:#6b7280"
-                 x-html="highlightTerms(r.content || '', query)"></div>
-            <!-- Row 4: tags (expanded only) -->
-            <template x-if="zoom === 'expanded' && parseTags(r.tags).length > 0">
-              <div class="flex gap-1 flex-wrap mt-1">
-                <template x-for="t in parseTags(r.tags)" :key="t">
-                  <a :href="'/stream/' + t" @click.prevent.stop="navigateTo('/stream/' + t)"
-                     style="display:inline-flex; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500; background:#1e293b; color:#94a3b8; text-decoration:none"
-                     x-text="t"></a>
+
+            <!-- Row 2: title -->
+            <div class="sp-card-title" x-text="r.source_title || 'Untitled'"></div>
+
+            <!-- Row 3: excerpts -->
+            <div class="sp-excerpts">
+              <template x-for="(ex, i) in cardExcerpts(r)" :key="i">
+                <template x-if="ex.turn_number != null">
+                  <a class="sp-excerpt"
+                     :href="'/graph/' + (r.source_id || r.id).slice(0, 12) + '?turn=' + ex.turn_number"
+                     @click.prevent.stop="navigateTo('/graph/' + (r.source_id || r.id).slice(0, 12) + '?turn=' + ex.turn_number)">
+                    <span class="sp-turn-badge" x-text="'t' + ex.turn_number"></span>
+                    <span class="sp-excerpt-text" x-html="highlightTerms(ex.content || '', query)"></span>
+                  </a>
                 </template>
-              </div>
-            </template>
+                <template x-if="ex.turn_number == null">
+                  <div class="sp-excerpt">
+                    <span class="sp-excerpt-text" x-html="highlightTerms(ex.content || '', query)"></span>
+                  </div>
+                </template>
+              </template>
+            </div>
+
+            <!-- Row 4: footer (date) -->
+            <div class="sp-card-footer" x-show="r.date">
+              <span x-text="r.date"></span>
+            </div>
           </div>
+          <div class="sp-card-chevron">›</div>
         </a>
       </template>
     </div>
-  </template>
-
-  <!-- Empty -->
-  <template x-if="loaded && results.length === 0">
-    <div class="text-gray-500 text-sm">No results for "<span x-text="query"></span>"</div>
   </template>
 </div>

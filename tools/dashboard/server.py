@@ -1446,6 +1446,8 @@ async def api_search(request):
         limit = int(request.query_params.get("limit", "20"))
         project = request.query_params.get("project")
         results = dao_beads.search(q, limit=limit, project=project)
+        if request.query_params.get("group"):
+            results = _group_search_results(results)
         _enrich_search_results(results)
         return JSONResponse(results)
     limit = int(request.query_params.get("limit", "20"))

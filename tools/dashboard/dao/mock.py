@@ -908,10 +908,13 @@ SEARCH_RESULT_DEFAULTS: dict[str, Any] = {
     "source_type": "note",
     "result_type": "thought",
     "project": "",
-    "rank": 1.0,
+    "platform": "local",
+    "rank": -1.0,
+    "rrf_score": 0.0,
     "content": "",
     "turn_number": None,
     "source_created_at": "",
+    "source_metadata": "{}",
 }
 
 
