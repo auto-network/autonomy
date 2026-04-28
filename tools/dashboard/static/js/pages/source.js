@@ -157,10 +157,22 @@
         }
       },
 
-      showMoreContext() {
+      async showMoreContext() {
         this.contextWindow += 5;
         const url = `/graph/${this.id}?turn=${this.targetTurn}&window=${this.contextWindow}`;
         history.replaceState({}, '', url);
+        try {
+          const res = await fetch(`/api/graph/${this.id}?turn=${this.targetTurn}&window=${this.contextWindow}`);
+          const data = await res.json();
+          if (data && !data.error && Array.isArray(data.entries)) {
+            this.allEntries = data.entries.map((e, i) => ({
+              ...e,
+              _key: e.turn_number != null ? `turn-${e.turn_number}` : `entry-${i}`,
+            }));
+          }
+        } catch (_) {
+          // Refetch is best-effort — fall back to whatever we already have.
+        }
         this._updateVisibleEntries();
       },
 
@@ -220,7 +232,10 @@
         this.highlightId = params.get('highlight') || '';
 
         try {
-          const res = await fetch(`/api/graph/${this.id}`);
+          const url = this.isContext
+            ? `/api/graph/${this.id}?turn=${this.targetTurn}&window=${this.contextWindow}`
+            : `/api/graph/${this.id}`;
+          const res = await fetch(url);
           const data = await res.json();
 
           if (data && data.error) {

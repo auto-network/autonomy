@@ -1617,9 +1617,21 @@ async def api_source_read(request):
         max_chars = int(request.query_params.get("max_chars", "50000"))
     except ValueError:
         return JSONResponse({"error": "invalid max_chars"}, status_code=400)
+    turn_raw = request.query_params.get("turn")
+    around_turn: int | None = None
+    if turn_raw is not None:
+        try:
+            around_turn = int(turn_raw)
+        except ValueError:
+            return JSONResponse({"error": "invalid turn"}, status_code=400)
+    try:
+        window = int(request.query_params.get("window", "5"))
+    except ValueError:
+        return JSONResponse({"error": "invalid window"}, status_code=400)
     org = request.headers.get("X-Graph-Org") or None
     result = await asyncio.to_thread(
         graph_ops.read_source_full, source_id, max_chars=max_chars, org=org,
+        around_turn=around_turn, window=window,
     )
     if result is None:
         return JSONResponse({"error": "source not found"}, status_code=404)
@@ -6654,11 +6666,24 @@ async def api_graph_resolve(request):
             })
         return JSONResponse({"error": "not found"}, status_code=404)
 
+    turn_raw = request.query_params.get("turn")
+    around_turn: int | None = None
+    if turn_raw is not None:
+        try:
+            around_turn = int(turn_raw)
+        except ValueError:
+            return JSONResponse({"error": "invalid turn"}, status_code=400)
+    try:
+        window = int(request.query_params.get("window", "5"))
+    except ValueError:
+        return JSONResponse({"error": "invalid window"}, status_code=400)
+
     org = _caller_org(request)
     source = graph_ops.get_source(id, org=org)
     if source:
         result = await asyncio.to_thread(
             graph_ops.read_source_full, source["id"], org=org, max_chars=50000,
+            around_turn=around_turn, window=window,
         )
         if result is None:
             result = {"source": source, "entries": [], "truncated": False,
