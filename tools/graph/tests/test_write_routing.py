@@ -445,13 +445,39 @@ def test_session_target_org_falls_back_to_graph_project(tmp_path):
     assert session_target_org(jsonl) == "anchore"
 
 
-def test_session_target_org_defaults_to_personal(tmp_path):
+def test_session_target_org_returns_none_when_no_meta(tmp_path):
+    """Fail-closed: a session with no meta has no resolvable org.
+
+    Returning None signals to the caller (``_ingest_session_routed``)
+    to skip rather than silently route to ``personal.db`` — that
+    silent fallback was the source of cross-org duplicates when the
+    re-ingest pass couldn't locate the meta on autonomy sessions.
+    """
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     jsonl = sessions / "no-meta.jsonl"
     jsonl.touch()
 
-    assert session_target_org(jsonl) == "personal"
+    assert session_target_org(jsonl) is None
+
+
+def test_session_target_org_returns_none_when_meta_lacks_org_keys(tmp_path):
+    sessions = tmp_path / "sessions"
+    _write_session_meta(sessions, {"type": "dispatch", "container_name": "x"})
+    jsonl = sessions / "abc.jsonl"
+    jsonl.touch()
+
+    assert session_target_org(jsonl) is None
+
+
+def test_session_target_org_explicit_default_still_honoured(tmp_path):
+    """Callers that want the legacy ``personal`` fallback can opt in."""
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    jsonl = sessions / "no-meta.jsonl"
+    jsonl.touch()
+
+    assert session_target_org(jsonl, default="personal") == "personal"
 
 
 def test_open_db_for_session_routes_to_graph_org_db(orgs_root, tmp_path):
@@ -470,7 +496,12 @@ def test_open_db_for_session_routes_to_graph_org_db(orgs_root, tmp_path):
         db.close()
 
 
-def test_open_db_for_session_defaults_to_personal(orgs_root, tmp_path):
+def test_open_db_for_session_returns_none_when_no_meta(orgs_root, tmp_path):
+    """Fail-closed: no meta → no DB to open.
+
+    The caller (``_ingest_session_routed``) skips the file rather than
+    creating a row in the wrong org's DB.
+    """
     GraphDB.create_org_db("personal", type_="personal").close()
     GraphDB.create_org_db("autonomy").close()
 
@@ -479,11 +510,7 @@ def test_open_db_for_session_defaults_to_personal(orgs_root, tmp_path):
     jsonl = sessions / "s.jsonl"
     jsonl.touch()
 
-    db = _open_db_for_session(jsonl)
-    try:
-        assert Path(db.db_path) == orgs_root / "personal.db"
-    finally:
-        db.close()
+    assert _open_db_for_session(jsonl) is None
 
 
 def test_open_db_for_session_graph_db_env_still_wins(orgs_root, tmp_path, monkeypatch):
