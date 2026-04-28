@@ -1008,6 +1008,22 @@
             { method: 'POST' },
           );
           const data = await _jsonOrError(resp);
+
+          // Same celebration shape as a successful FF merge — increment the
+          // seed (forces a re-trigger even if the user fires twice in a row),
+          // flash mergeBurstActive for the confetti window, then poof the
+          // row. Refresh reconciles backend state after the animation lands.
+          this.mergeBurstSeed += 1;
+          this.mergeBurstActive = true;
+          window.setTimeout(() => { this.mergeBurstActive = false; }, 860);
+          const rowKey = this.rowKey(row);
+          window.setTimeout(() => {
+            this.poofingRowKey = rowKey;
+            window.setTimeout(() => {
+              this.poofingRowKey = '';
+            }, 420);
+          }, 520);
+
           _toast('Cherry-picked ' + (data.commit || '').slice(0, 8) +
                  ' to ' + this.targetBranch(row), 'success');
           await this.refresh(false);
