@@ -71,6 +71,12 @@ def test_migration_idempotent_on_pre_existing_legacy_db(tmp_path):
     db.close()
 
     conn = sqlite3.connect(str(db_path))
+    # The sources_fts triggers (added in auto-kvka6) reference
+    # new.short_description / old.short_description, so they must come
+    # down before SQLite will let us DROP COLUMN.
+    for trg in ("sources_ai", "sources_ad", "sources_au"):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trg}")
+    conn.execute("DROP TABLE IF EXISTS sources_fts")
     conn.execute("ALTER TABLE sources DROP COLUMN short_description")
     conn.commit()
     conn.close()

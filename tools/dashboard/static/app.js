@@ -1424,6 +1424,11 @@ async function route() {
   // Fullscreen page mode: session viewer owns the viewport (hides sidebar + header)
   document.body.classList.toggle('fullscreen-page', isSessionViewPage);
 
+  // Per-route body class — currently only used by /search to flush its
+  // sticky filter strip against the global header (drops the 24px gap
+  // caused by main's pt-6 baseline). See bead auto-kvka6 §7.
+  document.body.classList.toggle('route-search', path === '/search');
+
   // Clear header action buttons from previous page
   const headerActions = document.getElementById('header-actions');
   if (headerActions) headerActions.innerHTML = '';

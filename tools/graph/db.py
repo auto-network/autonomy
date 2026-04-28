@@ -98,6 +98,16 @@ def resolve_caller_db_path(
 _CONNECTION_POOL: dict[tuple[str, str], "GraphDB"] = {}
 
 
+# Search-ranking tunables. ``rank`` is BM25-derived (lower = better match);
+# subtracting boosts pushes a row toward the top of the result set. A title
+# hit on a noisy term should outrank the best body match on the same term,
+# but the body floor (rank ≈ −10) shouldn't be drowned by a marginal title
+# hit. See bead auto-kvka6 for the calibration discussion.
+SEARCH_TITLE_BOOST = -50          # rank delta applied to sources_fts matches
+SEARCH_TAG_OVERLAP_BOOST = -5     # rank delta per matching tag
+SEARCH_TAG_OVERLAP_CAP = -25      # cumulative tag-overlap boost cap
+
+
 import re as _re
 
 _SOURCE_ID_RE = _re.compile(r'^[0-9a-f]{6,}(?:-[0-9a-f]+)*$', _re.IGNORECASE)
@@ -200,6 +210,10 @@ class GraphDB:
         self._migrate_publication_state()
         self._migrate_source_moves()
         self._migrate_source_short_description()
+        self._migrate_source_keywords()
+        # sources_fts depends on `short_description` + `keywords` columns, so
+        # it must run AFTER both column migrations above.
+        self._migrate_sources_fts()
         self._migrate_sources_type_index()
         self._migrate_settings()
         self._migrate_orgs()
@@ -271,6 +285,66 @@ class GraphDB:
         if "short_description" not in scols:
             self.conn.execute("ALTER TABLE sources ADD COLUMN short_description TEXT")
             self.conn.commit()
+
+    def _migrate_source_keywords(self):
+        """Add ``keywords`` column to sources (idempotent).
+
+        Free-form synonym/alias list — not navigational tags. Stored as a
+        comma-separated string so the FTS5 unicode61 tokenizer indexes
+        each token independently. Populated by the ``note.update-summary``
+        Haiku action; NULL on rows it hasn't processed.
+        """
+        scols = {r[1] for r in self.conn.execute("PRAGMA table_info(sources)").fetchall()}
+        if "keywords" not in scols:
+            self.conn.execute("ALTER TABLE sources ADD COLUMN keywords TEXT")
+            self.conn.commit()
+
+    def _migrate_sources_fts(self):
+        """Create the sources_fts FTS5 table + sync triggers (idempotent).
+
+        Indexes ``title``, ``short_description``, and ``keywords`` so curated
+        per-source metadata can outrank long-tail body matches in
+        :meth:`search`. The triggers mirror the thoughts_ai/ad/au shape from
+        schema.sql exactly — same rowid-keyed inserts, same magic 'delete'
+        row on remove/replace.
+
+        On first creation we run an ``INSERT('rebuild')`` to backfill
+        existing source rows; subsequent runs detect the table already
+        exists and skip the rebuild. Must run AFTER
+        :meth:`_migrate_source_keywords` so the column exists when the
+        rebuild reads it.
+        """
+        table_existed = self._has_table('sources_fts')
+        self.conn.executescript("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS sources_fts USING fts5(
+                id UNINDEXED,
+                title,
+                short_description,
+                keywords,
+                content='sources',
+                content_rowid='rowid',
+                tokenize='unicode61'
+            );
+            CREATE TRIGGER IF NOT EXISTS sources_ai AFTER INSERT ON sources BEGIN
+                INSERT INTO sources_fts(rowid, id, title, short_description, keywords)
+                VALUES (new.rowid, new.id, new.title, new.short_description, new.keywords);
+            END;
+            CREATE TRIGGER IF NOT EXISTS sources_ad AFTER DELETE ON sources BEGIN
+                INSERT INTO sources_fts(sources_fts, rowid, id, title, short_description, keywords)
+                VALUES ('delete', old.rowid, old.id, old.title, old.short_description, old.keywords);
+            END;
+            CREATE TRIGGER IF NOT EXISTS sources_au AFTER UPDATE ON sources BEGIN
+                INSERT INTO sources_fts(sources_fts, rowid, id, title, short_description, keywords)
+                VALUES ('delete', old.rowid, old.id, old.title, old.short_description, old.keywords);
+                INSERT INTO sources_fts(rowid, id, title, short_description, keywords)
+                VALUES (new.rowid, new.id, new.title, new.short_description, new.keywords);
+            END;
+        """)
+        if not table_existed:
+            self.conn.executescript(
+                "INSERT INTO sources_fts(sources_fts) VALUES('rebuild');"
+            )
+        self.conn.commit()
 
     def _migrate_sources_type_index(self):
         """Index sources.type so type-based filters (notes, agentic runs, etc.) stay cheap."""
@@ -496,13 +570,13 @@ class GraphDB:
             """INSERT INTO sources (id, type, platform, project, title, url, file_path, metadata,
                                     created_at, ingested_at, last_activity_at,
                                     publication_state, deprecated, successor_id, moved_to_org,
-                                    short_description)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    short_description, keywords)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (src.id, src.type, src.platform, src.project, src.title, src.url,
              src.file_path, json.dumps(src.metadata), src.created_at, src.ingested_at,
              src.last_activity_at,
              src.publication_state, int(bool(src.deprecated)), src.successor_id,
-             src.moved_to_org, src.short_description),
+             src.moved_to_org, src.short_description, src.keywords),
         )
         self.conn.commit()
         return src
@@ -519,6 +593,18 @@ class GraphDB:
         self.conn.execute(
             "UPDATE sources SET short_description = ? WHERE id = ?",
             (short_description, source_id),
+        )
+        self.conn.commit()
+
+    def update_source_keywords(self, source_id: str, keywords: str | None):
+        """Update the keywords column on a source. Last write wins.
+
+        ``keywords`` is a free-form comma-separated synonym/alias list
+        indexed by ``sources_fts``. Pass ``None`` to clear.
+        """
+        self.conn.execute(
+            "UPDATE sources SET keywords = ? WHERE id = ?",
+            (keywords, source_id),
         )
         self.conn.commit()
 
@@ -933,11 +1019,31 @@ class GraphDB:
         if project:
             # Project-scoped search
             rows = self.conn.execute(
+                f"""SELECT s.id, s.title as content, NULL as turn_number, NULL as tags,
+                          s.id as source_id,
+                          s.title as source_title, s.platform, s.project,
+                          s.type as source_type,
+                          s.created_at as source_created_at,
+                          s.short_description, s.keywords,
+                          s.metadata as source_metadata,
+                          'source' as result_type,
+                          (rank + ?) as rank
+                   FROM sources_fts fts
+                   JOIN sources s ON s.rowid = fts.rowid
+                   WHERE sources_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}
+                   ORDER BY rank
+                   LIMIT ?""",
+                (SEARCH_TITLE_BOOST, fts_query, project,
+                 *tag_params, *state_params, *excl_params, limit),
+            ).fetchall()
+            results.extend(dict(r) for r in rows)
+
+            rows = self.conn.execute(
                 f"""SELECT t.id, t.content, t.turn_number, t.tags, t.source_id,
                           s.title as source_title, s.platform, s.project,
                           s.type as source_type,
                           s.created_at as source_created_at,
-                          s.short_description,
+                          s.short_description, s.keywords,
                           s.metadata as source_metadata,
                           'thought' as result_type,
                           rank
@@ -956,7 +1062,7 @@ class GraphDB:
                           s.title as source_title, s.platform, s.project,
                           s.type as source_type,
                           s.created_at as source_created_at,
-                          s.short_description,
+                          s.short_description, s.keywords,
                           s.metadata as source_metadata,
                           'derivation' as result_type,
                           rank
@@ -970,13 +1076,33 @@ class GraphDB:
             ).fetchall()
             results.extend(dict(r) for r in rows)
         else:
-            # Global search
+            # Global search — sources_fts (curated metadata) ranked first.
+            rows = self.conn.execute(
+                f"""SELECT s.id, s.title as content, NULL as turn_number, NULL as tags,
+                          s.id as source_id,
+                          s.title as source_title, s.platform, s.project,
+                          s.type as source_type,
+                          s.created_at as source_created_at,
+                          s.short_description, s.keywords,
+                          s.metadata as source_metadata,
+                          'source' as result_type,
+                          (rank + ?) as rank
+                   FROM sources_fts fts
+                   JOIN sources s ON s.rowid = fts.rowid
+                   WHERE sources_fts MATCH ?{tag_clause}{state_clause}{excl_clause}
+                   ORDER BY rank
+                   LIMIT ?""",
+                (SEARCH_TITLE_BOOST, fts_query,
+                 *tag_params, *state_params, *excl_params, limit),
+            ).fetchall()
+            results.extend(dict(r) for r in rows)
+
             rows = self.conn.execute(
                 f"""SELECT t.id, t.content, t.turn_number, t.tags, t.source_id,
                           s.title as source_title, s.platform, s.project,
                           s.type as source_type,
                           s.created_at as source_created_at,
-                          s.short_description,
+                          s.short_description, s.keywords,
                           s.metadata as source_metadata,
                           'thought' as result_type,
                           rank
@@ -995,7 +1121,7 @@ class GraphDB:
                           s.title as source_title, s.platform, s.project,
                           s.type as source_type,
                           s.created_at as source_created_at,
-                          s.short_description,
+                          s.short_description, s.keywords,
                           s.metadata as source_metadata,
                           'derivation' as result_type,
                           rank
@@ -1008,6 +1134,34 @@ class GraphDB:
                 (fts_query, *tag_params, *state_params, *excl_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
+
+        # Tag-overlap soft signal: query terms that match a source's
+        # navigational tags get a small additional boost (capped). Lets a
+        # search for "pitfall failures" surface pitfall-tagged notes above
+        # equally-ranked rows that just happen to mention the words.
+        query_tokens = {t.lower() for t in query.split() if len(t) > 2}
+        if query_tokens:
+            for r in results:
+                meta = r.get("source_metadata")
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except (json.JSONDecodeError, TypeError):
+                        meta = {}
+                if not isinstance(meta, dict):
+                    continue
+                tags = [
+                    t.lower() for t in (meta.get("tags") or [])
+                    if isinstance(t, str)
+                ]
+                overlap = len(query_tokens & set(tags))
+                if overlap > 0:
+                    boost = max(
+                        SEARCH_TAG_OVERLAP_BOOST * overlap,
+                        SEARCH_TAG_OVERLAP_CAP,
+                    )
+                    cur = r.get("rank") or 0
+                    r["rank"] = cur + boost
 
         # Sort by rank
         results.sort(key=lambda r: r.get("rank", 0))
@@ -1156,7 +1310,7 @@ class GraphDB:
                                        s.title as source_title, s.platform, s.project,
                                        s.type as source_type,
                                        s.created_at as source_created_at,
-                                       s.short_description,
+                                       s.short_description, s.keywords,
                                        s.metadata as source_metadata,
                                        '{rtype}' as result_type, rank
                                 FROM {table} fts
@@ -1172,7 +1326,7 @@ class GraphDB:
                                        s.title as source_title, s.platform, s.project,
                                        s.type as source_type,
                                        s.created_at as source_created_at,
-                                       s.short_description,
+                                       s.short_description, s.keywords,
                                        s.metadata as source_metadata,
                                        '{rtype}' as result_type, rank
                                 FROM {table} fts
