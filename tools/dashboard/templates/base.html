@@ -443,6 +443,23 @@
       padding: 0 !important;
     }
 
+    /* /search drops main's pt-6 baseline so the page-level sticky filter
+       strip can flush against the global header. Without this the strip
+       pins INSIDE the padding box and leaves a 24px gap (auto-kvka6 §7).
+       The .sp-root component re-applies a small top margin for the very
+       first card in the result set so cards aren't tucked under the
+       strip. Other pages keep pt-6. */
+    body.route-search main#content {
+      padding-top: 0 !important;
+    }
+    body.route-search .sp-root {
+      padding-top: 0;
+    }
+    body.route-search .sp-header {
+      margin-top: 0;
+      padding-top: 0;
+    }
+
     /* Session viewer outer container — fills the available vertical space.
        Overlay mode (bottom-docked) overrides these via [data-mode="overlay"]. */
     .session-viewer {

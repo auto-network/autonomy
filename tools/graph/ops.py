@@ -2168,6 +2168,7 @@ def create_note(
     auto_provenance_source_id: str | None = None,
     auto_provenance_turn: int | None = None,
     short_description: str | None = None,
+    keywords: str | None = None,
     org: str | None = None,
 ) -> dict:
     """Create a note source + turn-1 thought in ``org``'s DB.
@@ -2211,6 +2212,7 @@ def create_note(
         metadata=meta,
         publication_state="curated",
         short_description=short_description,
+        keywords=keywords,
     )
 
     db = _open(org)
@@ -2281,6 +2283,7 @@ def create_note(
         "source_id": source.id,
         "title": source.title,
         "short_description": source.short_description,
+        "keywords": source.keywords,
         "org": _resolve_org(org) or "",
         "lines": lines,
         "chars": len(content),
@@ -2302,6 +2305,7 @@ def update_note(
     attachments: list[str] | None = None,
     html_path: str | None = None,
     short_description: str | None = None,
+    keywords: str | None = None,
     org: str | None = None,
 ) -> dict:
     """Append a new version to an existing note.
@@ -2438,6 +2442,11 @@ def update_note(
                 "UPDATE sources SET short_description = ? WHERE id = ?",
                 (short_description, src_id),
             )
+        if keywords is not None:
+            db.conn.execute(
+                "UPDATE sources SET keywords = ? WHERE id = ?",
+                (keywords, src_id),
+            )
 
         for name, etype in extract_entities(content):
             eid = db.upsert_entity(name, etype)
@@ -2474,6 +2483,7 @@ def update_note(
         "rich_content": is_rich,
         "attachments": att_records,
         "short_description": short_description,
+        "keywords": keywords,
     }
 
 

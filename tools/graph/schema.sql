@@ -159,6 +159,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS derivations_fts USING fts5(
     content_rowid=rowid
 );
 
+-- sources_fts indexes operator/Haiku-authored metadata (title +
+-- short_description + keywords). Curated metadata gets a higher rank
+-- weight than long-tail body text in GraphDB.search() so a clean title
+-- match outranks a TF-density body match (see SEARCH_TITLE_BOOST in db.py).
+-- The virtual table + triggers are created by _migrate_sources_fts in
+-- db.py (NOT here) because the ``keywords`` column is added by
+-- _migrate_source_keywords after this executescript runs on legacy DBs.
+-- Trigger shape mirrors thoughts_ai / thoughts_ad / thoughts_au exactly.
+
 -- Triggers to keep FTS in sync
 CREATE TRIGGER IF NOT EXISTS thoughts_ai AFTER INSERT ON thoughts BEGIN
     INSERT INTO thoughts_fts(rowid, id, content, tags)

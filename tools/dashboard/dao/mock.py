@@ -1006,6 +1006,8 @@ SEARCH_RESULT_DEFAULTS: dict[str, Any] = {
     "turn_number": None,
     "source_created_at": "",
     "source_metadata": "{}",
+    "short_description": None,
+    "keywords": None,
 }
 
 

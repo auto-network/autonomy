@@ -291,6 +291,15 @@
     display: flex; align-items: center; gap: 8px;
     margin-top: 6px; font-size: 11px; color: var(--sp-text-4);
   }
+  /* Per-row disambiguator: 12-char source_id prefix in monospace + the
+     second-resolution date. Prevents two cards with identical titles
+     (e.g. two rollouts of the same tmux session) from looking
+     interchangeable. See bead auto-kvka6 §6. */
+  .sp-card-id {
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 11px; color: var(--sp-text-3);
+    letter-spacing: 0.02em;
+  }
 
   .sp-card-chevron {
     flex-shrink: 0; width: 28px;
@@ -525,9 +534,17 @@
               </template>
             </div>
 
-            <!-- Row 4: footer (date) -->
-            <div class="sp-card-footer" x-show="r.date">
-              <span x-text="r.date"></span>
+            <!-- Row 4: footer (id + second-resolution date — disambiguates
+                 cards that share a title, e.g. two rollouts of the same
+                 tmux session). The id renders even when ``r.date`` is
+                 empty so every card carries a stable identifier. -->
+            <div class="sp-card-footer">
+              <span class="sp-card-id"
+                    data-testid="sp-card-id"
+                    x-text="(r.source_id || r.id || '').slice(0, 12)"></span>
+              <template x-if="r.date">
+                <span x-text="r.date"></span>
+              </template>
             </div>
           </div>
           <div class="sp-card-chevron">›</div>
