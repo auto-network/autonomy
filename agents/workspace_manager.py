@@ -358,6 +358,8 @@ class WorktreeState:
     clone_stale: bool
     rebase_required: bool
     session_live: bool
+    cherry_pick_eligible: bool = False
+    cherry_pick_commit: str | None = None
     commits: list[WorktreeCommit] = field(default_factory=list)
     dirty_files: list[GitFileChange] = field(default_factory=list)
 
@@ -898,9 +900,14 @@ def scan_all_worktrees(
             clone_stale = _worktree_clone_stale(repo_dir.name, clone)
             dirty_files_or_none = _worktree_dirty_files(repo_dir)
             dirty_files = dirty_files_or_none or []
+            # Tracked-only dirty: untracked '??' entries do not block rebase /
+            # merge / cherry-pick and conflating them produces misleading
+            # "stash or commit uncommitted changes" tooltips on worktrees that
+            # only have leftover runtime artifacts.
+            tracked_dirty = [f for f in dirty_files if f.status != "??"]
             # Preserve the previous safety behavior: if git status fails,
             # treat the worktree as dirty even though paths are unavailable.
-            is_dirty = True if dirty_files_or_none is None else bool(dirty_files)
+            is_dirty = True if dirty_files_or_none is None else bool(tracked_dirty)
             commits = _worktree_commits(repo_dir, repo_dir.name, base_ref=base_ref)
             commits_ahead = _worktree_commits_ahead(repo_dir, base_ref=base_ref)
             rebase_required = _worktree_rebase_required(
@@ -916,6 +923,16 @@ def scan_all_worktrees(
                 and not rebase_required
                 and _worktree_ff_only_safe(repo_dir, base_ref=base_ref)
             )
+            cherry_pick_eligible, cherry_pick_commit = (
+                _compute_cherry_pick_eligibility(
+                    repo_name=repo_dir.name,
+                    clone=clone,
+                    commits=commits,
+                    commits_ahead=commits_ahead,
+                    ff_eligible=ff_eligible,
+                    clone_stale=clone_stale,
+                )
+            )
             out.append(WorktreeState(
                 session_name=session_dir.name,
                 repo_name=repo_dir.name,
@@ -928,6 +945,8 @@ def scan_all_worktrees(
                 clone_stale=clone_stale,
                 rebase_required=rebase_required,
                 session_live=session_dir.name in live,
+                cherry_pick_eligible=cherry_pick_eligible,
+                cherry_pick_commit=cherry_pick_commit,
                 commits=commits,
                 dirty_files=dirty_files,
             ))
@@ -936,11 +955,81 @@ def scan_all_worktrees(
 
 
 def _worktree_has_uncommitted_changes(worktree: Path) -> bool:
-    rc, out, _ = _git_output(["status", "--porcelain"], worktree, timeout=15)
+    """Return True if the worktree has TRACKED-file modifications.
+
+    Untracked files (``git status`` ``??`` lines) do NOT count — they don't
+    block rebase, merge, or cherry-pick, and conflating them with real
+    uncommitted changes produces misleading "stash or commit" tooltips on
+    worktrees that just have leftover runtime artifacts (data/agent-runs/,
+    data/experiments.db, etc.) which neither side gitignores.
+    """
+    rc, out, _ = _git_output(
+        ["status", "--porcelain", "--untracked-files=no"], worktree, timeout=15,
+    )
     if rc != 0:
         # If status fails, treat as "dirty" — err on the side of preserving.
         return True
     return bool(out.strip())
+
+
+def _compute_cherry_pick_eligibility(
+    *,
+    repo_name: str,
+    clone: Path | None,
+    commits: list,
+    commits_ahead: int,
+    ff_eligible: bool,
+    clone_stale: bool,
+) -> tuple[bool, str | None]:
+    """Decide whether to surface a "Cherry Pick to <branch>" button.
+
+    Eligibility (initial scope — single ahead commit):
+      - autonomy repo (matches existing merge restriction)
+      - clone is in sync (clone_stale==False) so the dry-run target is real
+      - exactly one commit ahead, and FF is not already possible
+      - ``git merge-tree`` returns a clean tree (no ``<<<<<<<`` markers)
+
+    The dry-run is purely tree-level (no working tree / index / HEAD writes).
+    Multi-commit cherry-pick is intentionally out of scope for now — those
+    cases remain on the rebase path.
+    """
+    if repo_name != "autonomy" or clone is None:
+        return False, None
+    if ff_eligible or clone_stale:
+        return False, None
+    if commits_ahead != 1 or not commits:
+        return False, None
+    target_branch, _ = _autonomy_target_branch_and_head()
+    if target_branch is None:
+        return False, None
+    sha = commits[0].sha
+    clean, _ = _cherry_pick_dry_run(clone, sha, target_branch)
+    return (clean, sha if clean else None)
+
+
+def _cherry_pick_dry_run(
+    clone: Path, commit_sha: str, target_branch: str,
+) -> tuple[bool, str]:
+    """Return ``(clean, summary)`` — True if cherry-picking ``commit_sha`` onto
+    ``target_branch`` would auto-merge without conflicts.
+
+    Uses ``git merge-tree BASE OURS THEIRS`` (git 2.34+ legacy syntax) on the
+    managed clone. The operation is purely tree-level — no working tree, index,
+    or HEAD mutation. Conflicts surface as ``<<<<<<<`` markers in stdout.
+
+    The dry-run does not write any state. Safe to call on every worktree row
+    refresh.
+    """
+    rc, out, _ = _git_output(
+        ["merge-tree", f"{commit_sha}^", target_branch, commit_sha],
+        clone,
+        timeout=20,
+    )
+    if rc != 0:
+        return False, f"merge-tree exited {rc}"
+    if "<<<<<<<" in out:
+        return False, "would conflict"
+    return True, "clean"
 
 
 def _worktree_has_commits_ahead_of_base(worktree: Path) -> bool:
@@ -1270,6 +1359,115 @@ def merge_session_worktree(
     message = _run_git(["log", "-1", "--pretty=%s", commit], cwd=target_repo).strip()
     return {
         "commit": commit,
+        "message": message,
+        "target_repo": str(target_repo),
+        "target_branch": target_branch,
+    }
+
+
+def cherry_pick_session_worktree(
+    session_name: str,
+    repo_name: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> dict[str, str]:
+    """Apply a single ahead commit from a session worktree onto host ``target_branch``.
+
+    Pre-checked eligibility (one-ahead + clean merge-tree dry-run + autonomy +
+    not stale) is recomputed before commit so a stale row in the UI cannot
+    drive a cherry-pick that would conflict.
+
+    On any failure during ``git cherry-pick`` (rare given the pre-check, but
+    possible if state changed between dry-run and apply), the in-progress
+    cherry-pick is aborted so the host repo is left in its prior state.
+    """
+    worktree = worktrees_dir / session_name / repo_name
+    if not worktree.exists() or not worktree.is_dir():
+        raise WorkspaceError(f"worktree not found: {worktree}")
+
+    clone = _find_managed_clone_for_worktree(worktree)
+    if clone is None:
+        raise WorkspaceError(f"managed clone not found for worktree: {worktree}")
+
+    branch = _worktree_branch_name(worktree)
+    if branch is None:
+        raise WorkspaceError(f"worktree is detached or unreadable: {worktree}")
+
+    if repo_name != "autonomy":
+        raise WorkspaceError(
+            f"cherry-pick unsupported for repo {repo_name!r}; "
+            "only 'autonomy' can be cherry-picked from the dashboard today"
+        )
+
+    base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
+    commits = _worktree_commits(worktree, repo_name, base_ref=base_ref)
+    commits_ahead = _worktree_commits_ahead(worktree, base_ref=base_ref)
+    clone_stale = _worktree_clone_stale(repo_name, clone)
+    ff_eligible = (
+        commits_ahead > 0
+        and not clone_stale
+        and _worktree_ff_only_safe(worktree, base_ref=base_ref)
+    )
+    eligible, sha = _compute_cherry_pick_eligibility(
+        repo_name=repo_name,
+        clone=clone,
+        commits=commits,
+        commits_ahead=commits_ahead,
+        ff_eligible=ff_eligible,
+        clone_stale=clone_stale,
+    )
+    if not eligible or sha is None:
+        raise WorkspaceError(
+            f"worktree {session_name}/{repo_name} is not cherry-pick eligible "
+            f"(ahead={commits_ahead}, ff_eligible={ff_eligible}, "
+            f"clone_stale={clone_stale})"
+        )
+
+    target_branch, _ = _autonomy_target_branch_and_head()
+    if target_branch is None:
+        raise WorkspaceError("could not determine autonomy integration branch")
+
+    target_repo = REPO_ROOT
+    rc, head_branch, _ = _git_output(
+        ["symbolic-ref", "--quiet", "--short", "HEAD"], target_repo, timeout=15,
+    )
+    if rc != 0 or head_branch.strip() != target_branch:
+        raise WorkspaceError(
+            f"host HEAD must be on {target_branch} to cherry-pick "
+            f"(currently on {head_branch.strip() or 'detached'!r})"
+        )
+
+    if _worktree_has_uncommitted_changes(target_repo):
+        raise WorkspaceError(
+            "host working tree has uncommitted tracked changes; "
+            "stash or commit before cherry-picking"
+        )
+
+    _run_git(["fetch", str(clone), branch], cwd=target_repo)
+    fetched_sha = _run_git(["rev-parse", "FETCH_HEAD"], cwd=target_repo).strip()
+
+    rc, cherry_out, cherry_err = _git_output(
+        ["cherry-pick", fetched_sha], target_repo, timeout=60,
+    )
+    if rc != 0:
+        # Apply failed despite clean dry-run — rare, but possible if the
+        # repo state shifted between probe and apply. Abort so the host
+        # tree returns to its prior state, then surface the error.
+        _git_output(["cherry-pick", "--abort"], target_repo, timeout=15)
+        raise WorkspaceError(
+            f"cherry-pick failed: {cherry_err.strip() or cherry_out.strip()}"
+        )
+
+    new_commit = _run_git(
+        ["rev-parse", "--verify", f"refs/heads/{target_branch}"], cwd=target_repo,
+    ).strip()
+    _sync_managed_clone_branch_ref(clone, target_repo, target_branch)
+    message = _run_git(
+        ["log", "-1", "--pretty=%s", new_commit], cwd=target_repo,
+    ).strip()
+    return {
+        "commit": new_commit,
+        "source_commit": sha,
         "message": message,
         "target_repo": str(target_repo),
         "target_branch": target_branch,

@@ -59,6 +59,7 @@ from agents.workspace_manager import (
     get_session_worktree_commit_detail,
     get_session_worktree_dirty_detail,
     get_session_worktree_rebase_info,
+    cherry_pick_session_worktree,
     merge_session_worktree,
     merge_session_worktree_commit,
     prepare_session_mounts,
@@ -4878,6 +4879,8 @@ def _worktree_state_json(row: WorktreeState) -> dict:
         "clone_stale": row.clone_stale,
         "rebase_required": row.rebase_required,
         "session_live": row.session_live,
+        "cherry_pick_eligible": row.cherry_pick_eligible,
+        "cherry_pick_commit": row.cherry_pick_commit,
         "target_branch": worktree_target_branch_name(
             row.session_name,
             row.repo_name,
@@ -5025,6 +5028,39 @@ async def api_worktree_merge(request):
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
+        "message": result.get("message", ""),
+    })
+
+
+async def api_worktree_cherry_pick(request):
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+    row = _find_worktree_row(worktree_monitor.get_all(), session_name, repo_name)
+    if row is None:
+        return JSONResponse({"error": "worktree not found"}, status_code=404)
+    if not row.cherry_pick_eligible:
+        return JSONResponse(
+            {
+                "error": "worktree is not cherry-pick eligible",
+                "state": _worktree_state_json(row),
+            },
+            status_code=409,
+        )
+
+    try:
+        result = await asyncio.to_thread(
+            cherry_pick_session_worktree,
+            session_name,
+            repo_name,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    await worktree_monitor.refresh()
+    return JSONResponse({
+        "ok": True,
+        "commit": result.get("commit", ""),
+        "source_commit": result.get("source_commit", ""),
         "message": result.get("message", ""),
     })
 
@@ -8525,6 +8561,7 @@ routes = [
     Route("/api/worktrees/{session}/{repo}/sync-base", api_worktree_sync_base, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/request-rebase", api_worktree_request_rebase, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/merge", api_worktree_merge, methods=["POST"]),
+    Route("/api/worktrees/{session}/{repo}/cherry-pick", api_worktree_cherry_pick, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/discard", api_worktree_discard, methods=["POST"]),
     Route("/api/worktrees/{session}/cleanup", api_worktree_cleanup, methods=["POST"]),
     Route("/api/dao/bead/{id}", api_dao_bead),
