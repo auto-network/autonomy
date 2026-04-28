@@ -424,6 +424,33 @@ SWEEP_BEAD_DEPS = {
     },
 }
 
+# ── Dispatch SSE rows with kind metadata (auto-5k2j4 → auto-qlfg1) ────
+# Used by TestDispatchAgenticKindBadge. The agentic row carries
+# ``kind='agentic'`` to trigger the priority-badge partial's agentic
+# branch; the legacy row omits ``kind`` entirely so the UI's
+# ``(b.kind || 'bead')`` COALESCE picks 'bead' and renders the regular
+# priority badge.
+
+SWEEP_DISPATCH_RUN_AGENTIC = {
+    "id": "agentic-update-summary-20260428-100200",
+    "title": "agentic: note.update-summary on src-test-001",
+    "priority": None,
+    "status": "RUNNING",
+    "kind": "agentic",
+    "duration_secs": 30,
+    "snippet": "Resolving target source",
+}
+
+SWEEP_DISPATCH_RUN_LEGACY_NULL_KIND = {
+    "id": "auto-sweep-legacy-null",
+    "title": "Legacy bead row — NULL kind",
+    "priority": 2,
+    "status": "waiting",
+    # Intentionally no `kind` field — exercises the COALESCE-as-'bead'
+    # path in templates/partials/priority-badge.html.
+}
+
+
 # ── Dispatch SSE event (pushed after browser connects) ───────────────
 
 DISPATCH_SSE_DATA = {
@@ -436,10 +463,12 @@ DISPATCH_SSE_DATA = {
          "priority": None, "status": "RUNNING", "duration_secs": 45,
          "librarian_type": "review_report",
          "snippet": "Reviewing experience report"},
+        SWEEP_DISPATCH_RUN_AGENTIC,
     ],
     "waiting": [
         {"id": "auto-sweep-b3", "title": "Sweep gamma feature",
          "priority": 0, "status": "waiting"},
+        SWEEP_DISPATCH_RUN_LEGACY_NULL_KIND,
     ],
     "blocked": [
         {"id": "auto-sweep-b2", "title": "Sweep beta bug",
@@ -518,6 +547,54 @@ SWEEP_DISPATCH_ENTRIES = [
     {"type": "tool_result", "content": "File saved", "timestamp": NOW - 565},
     {"type": "assistant_text", "content": "The feature is implemented and tests pass.",
      "timestamp": NOW - 550},
+]
+
+
+# ── Search FTS fixture (auto-qlfg1, /search) ─────────────────────────
+# Multi-source-type, multi-source-grouped rows for the L2.B search-page
+# behavioural sweep. The first two entries share src-search-session-1 to
+# exercise per-source grouping (one card, two excerpts).
+
+SWEEP_SEARCH_RESULTS_DASHBOARD = [
+    # Multi-hit session: same source_id, two different turn_numbers.
+    {"id": "ssr-1", "source_id": "src-search-session-1",
+     "source_title": "Dashboard search rework conversation",
+     "source_type": "session", "result_type": "thought",
+     "project": "autonomy", "platform": "claude-code",
+     "turn_number": 12, "rank": -9.5,
+     "content": "first dashboard turn excerpt — chip rail design",
+     "source_created_at": "2026-04-20T03:14:58Z"},
+    {"id": "ssr-2", "source_id": "src-search-session-1",
+     "source_title": "Dashboard search rework conversation",
+     "source_type": "session", "result_type": "thought",
+     "project": "autonomy", "platform": "claude-code",
+     "turn_number": 47, "rank": -9.0,
+     "content": "second dashboard turn excerpt — accent rail by source_type",
+     "source_created_at": "2026-04-20T03:14:58Z"},
+    # Single-hit note (no turn).
+    {"id": "ssr-3", "source_id": "src-search-note-1",
+     "source_title": "pitfall: dashboard search regression",
+     "source_type": "note", "result_type": "thought",
+     "project": "autonomy", "platform": "local",
+     "turn_number": None, "rank": -7.0,
+     "content": "Dashboard live-tail ingest masks org column",
+     "source_created_at": "2026-04-14T22:10:02Z"},
+    # Single-hit agent run (with a turn).
+    {"id": "ssr-4", "source_id": "src-search-agent-1",
+     "source_title": "Graph search: dashboard surface alignment",
+     "source_type": "agent-run", "result_type": "derivation",
+     "project": "autonomy", "platform": "claude-code",
+     "turn_number": 17, "rank": -6.5,
+     "content": "agent run dashboard turn excerpt",
+     "source_created_at": "2026-04-12T08:00:00Z"},
+    # Single-hit docs row.
+    {"id": "ssr-5", "source_id": "src-search-docs-1",
+     "source_title": "Dashboard search results & viewer brief",
+     "source_type": "docs", "result_type": "thought",
+     "project": "autonomy", "platform": "local",
+     "turn_number": None, "rank": -6.0,
+     "content": "iPhone-first design for the dashboard search results page",
+     "source_created_at": "2026-03-23T10:00:00Z"},
 ]
 
 
@@ -944,6 +1021,7 @@ def _build_fixture() -> dict:
         "bead_deps": SWEEP_BEAD_DEPS,
         "graph_sources": SWEEP_GRAPH_SOURCES,
         "graph_attachments": SWEEP_GRAPH_ATTACHMENTS,
+        "search_results": SWEEP_SEARCH_RESULTS_DASHBOARD,
         "settings": {
             "dashboard.agent-actions": {
                 "_orgs": {"autonomy": SWEEP_AGENT_ACTIONS},
@@ -3775,4 +3853,738 @@ class TestAgentActionsDropdownLiveRefresh:
         )
         assert "note.live-refresh-probe" in (c.get("keys") or []), (
             f"New member missing from refreshed dropdown, keys={c.get('keys')}"
+        )
+
+
+# ── Search page behavioral sweep (auto-qlfg1) ─────────────────────────
+#
+# Backfill L2.B coverage for the /search surfaces shipped tonight:
+#   - auto-bcxdr  (search results page)
+#   - auto-zvu3z  (filter-strip chrome)
+#   - auto-gsu99  (chrome polish: muted glyph, state ladder, padding)
+#
+# All states are exercised in one async eval so the module-scoped browser
+# session navigates through three URL states without the cost of
+# spawning a fresh class fixture per state.
+
+SEARCH_PAGE_MULTI_STATE_CHECKS = """(async () => {
+  var r = {};
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+
+  // ── State 1: /search?q=dashboard (just navigated here) ──────────────
+  await sleep(900);
+
+  // Chip rail: All + each canonical type in CHIP_ORDER must be present.
+  var rail = document.querySelector('[data-testid="sp-chip-rail"]');
+  r.has_chip_rail = !!rail;
+  var chipLabels = [];
+  if (rail) {
+    rail.querySelectorAll('.sp-chip').forEach(function(c) {
+      var label = '';
+      var labelSpan = c.querySelector('span:first-child');
+      if (labelSpan && labelSpan !== c.querySelector('.sp-chip-count')) {
+        label = labelSpan.textContent.trim();
+      } else {
+        // The "All" chip has no inner span — text node before the count.
+        var clone = c.cloneNode(true);
+        var cnt = clone.querySelector('.sp-chip-count');
+        if (cnt) cnt.remove();
+        label = clone.textContent.trim();
+      }
+      chipLabels.push(label);
+    });
+  }
+  r.chip_labels = chipLabels;
+
+  // Per-chip count parsing — All count + sum of typed-chip counts must
+  // equal the rendered card count.
+  var chipCounts = [];
+  if (rail) {
+    rail.querySelectorAll('.sp-chip').forEach(function(c) {
+      var cnt = c.querySelector('.sp-chip-count');
+      var n = cnt ? parseInt(cnt.textContent.trim(), 10) : NaN;
+      chipCounts.push(isNaN(n) ? 0 : n);
+    });
+  }
+  r.chip_counts = chipCounts;
+
+  // Source cards rendered (one per source_id, not per excerpt row).
+  var cards = document.querySelectorAll('.sp-source-card');
+  r.card_count = cards.length;
+  r.card_source_types = Array.from(cards).map(function(c) {
+    return c.dataset.sourceType || '';
+  });
+
+  // Multi-hit grouping: src-search-session-1 has two excerpts (turns
+  // 12 + 47) and must render exactly ONE card with both turn anchors.
+  var multiCard = null;
+  cards.forEach(function(c) {
+    if (c.getAttribute('href') &&
+        c.getAttribute('href').indexOf('src-search-s') !== -1 &&
+        c.dataset.sourceType === 'session') {
+      multiCard = c;
+    }
+  });
+  r.multi_card_present = !!multiCard;
+  if (multiCard) {
+    var turnBadges = multiCard.querySelectorAll('.sp-turn-badge');
+    r.multi_turn_badges = Array.from(turnBadges).map(function(b) {
+      return b.textContent.trim();
+    });
+    r.multi_turn_anchor_count = multiCard.querySelectorAll('a.sp-excerpt').length;
+  }
+
+  // Two-way input binding: set #global-search value and dispatch the
+  // page-level custom event the searchPage component binds to.
+  var spRoot = document.querySelector('[x-data^="searchPage"]');
+  var spScope = spRoot && Alpine ? Alpine.$data(spRoot) : null;
+  r.has_alpine_root = !!spScope;
+  if (spScope) {
+    var ev = new CustomEvent('global-search:input', {
+      detail: { value: 'binding-probe-xyz' }
+    });
+    window.dispatchEvent(ev);
+    // The handler updates query synchronously; the debounced refetch
+    // does not affect the bound query value.
+    await sleep(80);
+    r.bound_query = spScope.query;
+  }
+
+  // ── State 2: /search (no q) — empty-query state ─────────────────────
+  navigateTo('/search');
+  await sleep(900);
+
+  var strip = document.querySelector('[data-testid="sp-filter-strip"]');
+  // x-show toggles inline display; the rail wrapper hides via display:none.
+  if (strip) {
+    var stripStyle = window.getComputedStyle(strip);
+    r.empty_filter_strip_display = stripStyle.display;
+  } else {
+    r.empty_filter_strip_display = 'missing';
+  }
+  var hint = document.querySelector('[data-testid="sp-no-query-hint"]');
+  r.empty_hint_visible = !!(hint && hint.offsetParent !== null);
+  r.empty_hint_text = hint ? (hint.textContent || '').trim() : '';
+
+  // ── State 3: /search?q=zzzzz_no_match — empty-results state ─────────
+  navigateTo('/search?q=zzzzz_no_match');
+  await sleep(1200);
+
+  var emptyEl = document.querySelector('[data-testid="sp-empty-state"]');
+  r.empty_state_visible = !!(emptyEl && emptyEl.offsetParent !== null);
+  if (emptyEl) {
+    var emptyCS = window.getComputedStyle(emptyEl);
+    r.empty_state_padding_top = parseFloat(emptyCS.paddingTop);
+    r.empty_state_text = (emptyEl.textContent || '').trim();
+  }
+
+  return JSON.stringify(r);
+})()"""
+
+
+class TestSearchPageBehavior:
+    """L2.B backfill for /search (auto-bcxdr + chrome).
+
+    Exercises three URL states in a single browser session: the populated
+    query, no query at all, and a query with no matches. Each test method
+    asserts one user-visible behaviour from the captured dict.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            "/search?q=dashboard",
+            SEARCH_PAGE_MULTI_STATE_CHECKS,
+            wait_ms=200,  # the JS does its own per-state sleeps
+        )
+        request.cls._checks = result
+
+    def test_search_page_renders_chip_rail(self):
+        """Chip rail visible with All + the canonical type chips."""
+        c = self._checks
+        assert c.get("has_chip_rail"), "Chip rail container missing"
+        labels = c.get("chip_labels") or []
+        # The "All" chip has no inner label-span — it's the first chip.
+        assert any(l.startswith("All") for l in labels), (
+            f"Chip rail missing 'All' chip; got {labels!r}"
+        )
+        for expected in ("Notes", "Sessions", "Agent runs",
+                         "Docs", "Conversations", "Status", "Musings"):
+            assert expected in labels, (
+                f"Chip rail missing {expected!r} chip; got {labels!r}"
+            )
+
+    def test_search_page_chip_counts_match_results(self):
+        """Sum of typed-chip counts equals the rendered card count.
+
+        The first chip is All (whose count duplicates the total) — the
+        invariant the test guards is that the per-type chip counts add
+        up to the unique-source-card count returned by /api/search.
+        """
+        c = self._checks
+        counts = c.get("chip_counts") or []
+        assert len(counts) >= 8, (
+            f"Expected ≥ 8 chips (All + 7 types), got counts={counts}"
+        )
+        # All count == card count (the first chip)
+        assert counts[0] == c.get("card_count"), (
+            f"All-chip count {counts[0]} ≠ card_count {c.get('card_count')}"
+        )
+        # Sum of typed chips also equals card count.
+        typed_sum = sum(counts[1:])
+        assert typed_sum == c.get("card_count"), (
+            f"Sum of typed chips ({typed_sum}) ≠ card_count "
+            f"({c.get('card_count')}); chip_counts={counts}"
+        )
+
+    def test_search_page_source_grouped_cards(self):
+        """A source_id with multiple turn-level hits collapses to ONE card.
+
+        SWEEP_SEARCH_RESULTS_DASHBOARD seeds two rows on
+        src-search-session-1 (turns 12 + 47). The grouped /api/search
+        response must produce one card whose excerpts list both turns.
+        """
+        c = self._checks
+        # 4 distinct source_ids in the fixture → 4 cards total.
+        assert c.get("card_count") == 4, (
+            f"Expected 4 grouped cards, got {c.get('card_count')}; "
+            f"types={c.get('card_source_types')}"
+        )
+        assert c.get("multi_card_present"), (
+            "Multi-hit session source did not render as a card"
+        )
+        badges = c.get("multi_turn_badges") or []
+        assert "t12" in badges and "t47" in badges, (
+            f"Multi-hit excerpt badges should include t12 + t47, "
+            f"got {badges!r}"
+        )
+        assert c.get("multi_turn_anchor_count", 0) >= 2, (
+            f"Multi-hit card should render ≥ 2 per-turn anchors, "
+            f"got {c.get('multi_turn_anchor_count')}"
+        )
+
+    def test_search_page_two_way_input_binding(self):
+        """Dispatching ``global-search:input`` updates the page's query ref.
+
+        The chrome's canonical input is the global header search box; the
+        page binds to it via @global-search:input.window. We verify the
+        binding by dispatching a synthetic CustomEvent and reading
+        Alpine state, NOT by typing into the DOM input.
+        """
+        c = self._checks
+        assert c.get("has_alpine_root"), (
+            "searchPage Alpine root not found — page never mounted?"
+        )
+        assert c.get("bound_query") == "binding-probe-xyz", (
+            f"Page query did not bind to global-search:input event; "
+            f"got bound_query={c.get('bound_query')!r}"
+        )
+
+    def test_search_page_empty_query_state(self):
+        """/search with no ?q= hides the chip rail and shows a centered hint."""
+        c = self._checks
+        # The strip wrapper x-show=\"query !== ''\" → display:none on no-query.
+        assert c.get("empty_filter_strip_display") == "none", (
+            f"Filter strip should be display:none when query is empty, "
+            f"got {c.get('empty_filter_strip_display')!r}"
+        )
+        assert c.get("empty_hint_visible"), "No-query hint not visible"
+        text = c.get("empty_hint_text") or ""
+        assert "Type a query" in text, (
+            f"Empty-query hint should read 'Type a query…', got {text!r}"
+        )
+
+    def test_search_page_no_results_state(self):
+        """A no-match query renders 'No results' with non-zero top padding.
+
+        Pre-polish (auto-zvu3z) the empty message tucked under the sticky
+        filter strip on a fast-render. auto-gsu99 added padding to the
+        ``.sp-empty-state`` container so the message lands below the strip.
+        """
+        c = self._checks
+        assert c.get("empty_state_visible"), (
+            "'No results' empty-state element not visible"
+        )
+        text = c.get("empty_state_text") or ""
+        assert "No results for" in text, (
+            f"Empty state should say 'No results for …'; got {text!r}"
+        )
+        pt = c.get("empty_state_padding_top") or 0
+        assert pt > 0, (
+            f"sp-empty-state should have top padding > 0 (auto-gsu99); "
+            f"got {pt}px"
+        )
+
+
+# ── Search chrome polish (auto-gsu99 verification) ────────────────────
+#
+# Confirms the production-rendered filter strip carries the polished
+# chrome — muted "All orgs" glyph, "Raw (Any)" default label, the bar
+# ladder dropdown, the include_raw vs states= URL split, and the tight
+# top padding. Each interactive assertion drives Alpine state (not
+# raw clicks) so the test stays browser-DOM-deterministic.
+
+SEARCH_CHROME_POLISH_CHECKS = """(async () => {
+  var r = {};
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+
+  // We just navigated to /search?q=polish — Alpine init() reads ?q= and
+  // kicks off the first fetch. Stub fetch BEFORE driving any state so
+  // every refetch URL is observable.
+  var capturedURLs = [];
+  var origFetch = window.fetch;
+  window.fetch = function(url, opts) {
+    try { capturedURLs.push(String(url)); } catch (_) {}
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: function() { return Promise.resolve([]); },
+    });
+  };
+
+  await sleep(800);  // Alpine init + initial _refetch flushed
+
+  var spRoot = document.querySelector('[x-data^="searchPage"]');
+  var spScope = spRoot && Alpine ? Alpine.$data(spRoot) : null;
+  r.has_alpine_root = !!spScope;
+
+  // ── 1. All-orgs glyph: muted, not gradient ──────────────────────────
+  var orgGlyph = document.querySelector(
+    '[data-testid="sp-org-chip"] .sp-filter-chip-glyph'
+  );
+  r.org_glyph_present = !!orgGlyph;
+  if (orgGlyph) {
+    var ogc = window.getComputedStyle(orgGlyph);
+    r.org_glyph_bg_color = ogc.backgroundColor;
+    r.org_glyph_bg_image = ogc.backgroundImage;
+    r.org_glyph_has_all_class = orgGlyph.classList.contains('sp-filter-chip-all');
+  }
+
+  // ── 2. State chip default label: 'Raw (Any)' ────────────────────────
+  var stateValue = document.querySelector(
+    '[data-testid="sp-state-chip"] .sp-filter-chip-value'
+  );
+  r.state_chip_label = stateValue ? (stateValue.textContent || '').trim() : '';
+
+  // ── 3. State dropdown progressive bars (open it via Alpine) ─────────
+  if (spScope) {
+    spScope.stateDropdownOpen = true;
+    await sleep(80);
+  }
+  var dropdownOptions = document.querySelectorAll(
+    '[data-testid="sp-state-dropdown"] .sp-org-option'
+  );
+  r.state_option_count = dropdownOptions.length;
+  var optionMatrix = [];
+  dropdownOptions.forEach(function(opt) {
+    var key = opt.getAttribute('data-state-key') || '';
+    var bars = opt.querySelectorAll('.sp-state-option-bar');
+    var filled = opt.querySelectorAll('.sp-state-option-bar-filled');
+    optionMatrix.push({
+      key: key,
+      total_bars: bars.length,
+      filled_bars: filled.length,
+    });
+  });
+  r.state_option_matrix = optionMatrix;
+  if (spScope) {
+    spScope.stateDropdownOpen = false;
+  }
+
+  // ── 4 & 5. include_raw vs states=canonical URL semantics ────────────
+  // Set the query so subsequent pickState calls actually refetch.
+  if (spScope) {
+    spScope.query = 'polish';
+    await sleep(40);
+    // Switch off the Raw default so picking it again triggers a refetch.
+    spScope.pickState('canonical');
+    await sleep(150);
+    capturedURLs.length = 0;
+    spScope.pickState('raw');
+    await sleep(200);
+    r.raw_url = capturedURLs.length
+      ? capturedURLs[capturedURLs.length - 1]
+      : null;
+
+    capturedURLs.length = 0;
+    spScope.pickState('canonical');
+    await sleep(200);
+    r.canonical_url = capturedURLs.length
+      ? capturedURLs[capturedURLs.length - 1]
+      : null;
+  }
+
+  // ── 6. Filter strip top padding ≤ 6px ───────────────────────────────
+  var header = document.querySelector('.sp-header');
+  if (header) {
+    var hcs = window.getComputedStyle(header);
+    r.header_padding_top = parseFloat(hcs.paddingTop);
+  }
+
+  // Restore real fetch so other class fixtures running later in the
+  // module aren't poisoned by the stub.
+  window.fetch = origFetch;
+
+  return JSON.stringify(r);
+})()"""
+
+
+class TestSearchChromePolish:
+    """Verifies auto-gsu99's production chrome on the live /search page.
+
+    Companion to test_search_chrome_polish.py — that file asserts the
+    SOURCE markup; this class asserts the rendered DOM + computed styles
+    + actual fetch URL after Alpine drives state changes.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            "/search?q=polish",
+            SEARCH_CHROME_POLISH_CHECKS,
+            wait_ms=200,
+        )
+        request.cls._checks = result
+
+    def test_org_chip_all_orgs_glyph_muted(self):
+        """The All-orgs glyph background is the muted #2a3441, NOT a gradient."""
+        c = self._checks
+        assert c.get("org_glyph_present"), "Org chip glyph element missing"
+        assert c.get("org_glyph_has_all_class"), (
+            "Default org chip glyph should carry the 'sp-filter-chip-all' "
+            "class (no org pinned), got class state: "
+            f"{c.get('org_glyph_has_all_class')!r}"
+        )
+        # Computed colour for #2a3441 is rgb(42, 52, 65).
+        assert c.get("org_glyph_bg_color") == "rgb(42, 52, 65)", (
+            f"All-orgs glyph background should be rgb(42, 52, 65), "
+            f"got {c.get('org_glyph_bg_color')!r}"
+        )
+        bg_img = c.get("org_glyph_bg_image") or "none"
+        assert "linear-gradient" not in bg_img, (
+            f"All-orgs glyph still uses a gradient: {bg_img!r}"
+        )
+
+    def test_state_chip_default_label_raw_any(self):
+        """The default state chip label reads 'Raw (Any)'."""
+        c = self._checks
+        assert c.get("state_chip_label") == "Raw (Any)", (
+            f"Default state chip label should be 'Raw (Any)', "
+            f"got {c.get('state_chip_label')!r}"
+        )
+
+    def test_state_chip_progressive_bars(self):
+        """Each dropdown option carries 1/2/3/4 filled bars in restrictiveness order."""
+        c = self._checks
+        matrix = c.get("state_option_matrix") or []
+        # Map (key → filled count)
+        seen = {row["key"]: row for row in matrix if row.get("key")}
+        expected = [("raw", 1), ("curated", 2), ("published", 3), ("canonical", 4)]
+        for key, want_filled in expected:
+            row = seen.get(key)
+            assert row is not None, (
+                f"State dropdown missing option {key!r}; matrix={matrix!r}"
+            )
+            assert row["total_bars"] == 4, (
+                f"State option {key!r} should render exactly 4 bars, "
+                f"got {row['total_bars']}"
+            )
+            assert row["filled_bars"] == want_filled, (
+                f"State option {key!r} should have {want_filled} filled "
+                f"bars, got {row['filled_bars']}"
+            )
+
+    def test_state_chip_raw_sends_include_raw(self):
+        """Picking Raw fires a fetch with ?include_raw=1 and NO ?states= clause."""
+        c = self._checks
+        url = c.get("raw_url") or ""
+        assert url, "No fetch URL captured for Raw chip click"
+        assert "include_raw=1" in url, (
+            f"Raw chip should send include_raw=1; got {url!r}"
+        )
+        assert "states=" not in url, (
+            f"Raw chip must NOT send states=; got {url!r}"
+        )
+
+    def test_state_chip_canonical_sends_states_canonical(self):
+        """Picking Canonical fires a fetch with ?states=canonical and NO include_raw."""
+        c = self._checks
+        url = c.get("canonical_url") or ""
+        assert url, "No fetch URL captured for Canonical chip click"
+        assert "states=canonical" in url, (
+            f"Canonical chip should send states=canonical; got {url!r}"
+        )
+        assert "include_raw" not in url, (
+            f"Canonical chip must NOT send include_raw; got {url!r}"
+        )
+
+    def test_filter_strip_top_margin_tight(self):
+        """The .sp-header padding-top is ≤ 6px (auto-gsu99 polish)."""
+        c = self._checks
+        pt = c.get("header_padding_top")
+        assert pt is not None, "sp-header element missing or unmeasurable"
+        assert pt <= 6, (
+            f"Filter strip padding-top should be ≤ 6px after the polish, "
+            f"got {pt}px"
+        )
+
+
+# ── /collab Recent-tab behaviour (auto-yn1gt) ─────────────────────────
+#
+# Companion to TestCollabPageBehavior — that class verifies the tab
+# scaffold; this class asserts the auto-yn1gt fix that the Recent tab
+# is the default and shows ALL recent notes (not just collab-tagged).
+
+COLLAB_RECENT_TAB_CHECKS = """
+    // ── Tab order in the DOM ────────────────────────────────────────────
+    var tabs = document.querySelectorAll('.collab-tab');
+    var tabOrder = [];
+    var tabTestids = [];
+    tabs.forEach(function(t) {
+        tabTestids.push(t.getAttribute('data-testid') || '');
+        var txt = t.textContent.trim();
+        // Strip the trailing count digits (e.g., 'Recent3' → 'Recent').
+        txt = txt.replace(/\\d+$/, '').trim();
+        tabOrder.push(txt);
+    });
+    r.tab_order = tabOrder;
+    r.tab_testids = tabTestids;
+
+    // ── Default active tab on first visit ───────────────────────────────
+    var activeTab = document.querySelector('.collab-tab.active');
+    r.active_tab_testid = activeTab
+        ? (activeTab.getAttribute('data-testid') || '')
+        : '';
+    r.active_tab_text = activeTab
+        ? (activeTab.textContent || '').replace(/\\d+$/, '').trim()
+        : '';
+
+    // ── Recent tab tag diversity ────────────────────────────────────────
+    // Cards inside the Recent panel — collect all .note-tag values.
+    var recentPanel = document.querySelector('[data-testid="collab-recent"]');
+    var recentTags = new Set();
+    var recentCardCount = 0;
+    if (recentPanel) {
+        var rcards = recentPanel.querySelectorAll('.note-card');
+        recentCardCount = rcards.length;
+        rcards.forEach(function(c) {
+            c.querySelectorAll('.note-tag').forEach(function(t) {
+                var v = t.textContent.trim();
+                if (v) recentTags.add(v);
+            });
+        });
+    }
+    r.recent_card_count = recentCardCount;
+    r.recent_distinct_tags = Array.from(recentTags);
+    r.recent_distinct_tag_count = recentTags.size;
+
+    // ── Curated tab still surfaces collab-tagged notes ──────────────────
+    var curatedPanel = document.querySelector('[data-testid="collab-curated"]');
+    var curatedCardCount = 0;
+    var curatedTags = new Set();
+    if (curatedPanel) {
+        var ccards = curatedPanel.querySelectorAll('.note-card');
+        curatedCardCount = ccards.length;
+        ccards.forEach(function(c) {
+            c.querySelectorAll('.note-tag').forEach(function(t) {
+                curatedTags.add(t.textContent.trim());
+            });
+        });
+    }
+    r.curated_card_count = curatedCardCount;
+    r.curated_tags = Array.from(curatedTags);
+"""
+
+
+class TestCollabRecentTabBehavior:
+    """L2.B backfill for the auto-yn1gt Recent-tab fix on /collab.
+
+    Companion to TestCollabPageBehavior — the existing class proved the
+    tabs render; this class proves the *default* is Recent and that
+    Recent surfaces mixed-tag notes (the regression auto-yn1gt fixed).
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        # Clear any localStorage left by earlier collab clicks before
+        # navigating, so the default-active assertion sees a fresh state.
+        subprocess.run(
+            ["agent-browser", "eval",
+             "try { localStorage.removeItem('collabTab'); } catch (_) {}"],
+            capture_output=True, timeout=5,
+        )
+        result = _navigate_and_check("/collab", COLLAB_RECENT_TAB_CHECKS, wait_ms=1000)
+        request.cls._checks = result
+
+    def test_collab_tab_order(self):
+        """DOM order is Recent, Curated, Thoughts, Threads, Topics."""
+        c = self._checks
+        assert c.get("tab_order") == [
+            "Recent", "Curated", "Thoughts", "Threads", "Topics"
+        ], f"Unexpected tab order: {c.get('tab_order')!r}"
+        assert c.get("tab_testids") == [
+            "collab-tab-recent", "collab-tab-curated", "collab-tab-thoughts",
+            "collab-tab-threads", "collab-tab-topics",
+        ], f"Tab testids out of order: {c.get('tab_testids')!r}"
+
+    def test_recent_tab_default_active(self):
+        """No localStorage / no ?tab= → Recent is the active tab."""
+        c = self._checks
+        assert c.get("active_tab_testid") == "collab-tab-recent", (
+            f"Default active tab should be Recent, got testid="
+            f"{c.get('active_tab_testid')!r}, text={c.get('active_tab_text')!r}"
+        )
+
+    def test_recent_tab_shows_mixed_tags(self):
+        """The Recent tab's note cards collectively show > 1 distinct tag.
+
+        Pre-fix the Recent panel was filtered to ``tag=collab`` only —
+        so every visible card carried just that one tag. Post-fix the
+        panel surfaces every recent note regardless of tag, so the
+        union of tag chips spans > 1 distinct value.
+        """
+        c = self._checks
+        assert c.get("recent_card_count", 0) >= 2, (
+            f"Need ≥ 2 Recent-tab cards to assert mixed tags, "
+            f"got {c.get('recent_card_count')}"
+        )
+        distinct = c.get("recent_distinct_tag_count", 0)
+        assert distinct > 1, (
+            f"Recent tab should display > 1 distinct tag (auto-yn1gt); "
+            f"got {distinct} from tags={c.get('recent_distinct_tags')!r}"
+        )
+
+    def test_curated_tab_shows_collab_only(self):
+        """The Curated tab still renders the prior collab-tagged notes.
+
+        SWEEP_COLLAB_NOTES seeds two notes (architecture + testing).
+        Post auto-yn1gt the Curated panel still backs onto
+        /api/graph/collab — this test guards against a regression that
+        could leave the panel empty after the Recent-tab refactor.
+        """
+        c = self._checks
+        assert c.get("curated_card_count", 0) >= 1, (
+            f"Curated panel should render the collab-tagged notes; "
+            f"got curated_card_count={c.get('curated_card_count')}"
+        )
+
+
+# ── /dispatch kind-badge rendering (auto-5k2j4) ───────────────────────
+#
+# Companion to TestDispatchPageBehavior — that class verifies the page
+# scaffold; this class asserts the auto-5k2j4 kind-badge feature:
+#   - kind='agentic'   → renders an "Agentic" badge (and skips P-badge)
+#   - kind=NULL/legacy → COALESCE-as-bead → renders the priority badge
+
+DISPATCH_KIND_BADGE_CHECKS = """
+    var bodyText = document.body.innerText;
+
+    // ── Agentic row: renders the kind-badge-agentic element ─────────────
+    var agenticBadges = document.querySelectorAll(
+        '[data-testid="kind-badge-agentic"]'
+    );
+    r.agentic_badge_count = agenticBadges.length;
+    r.agentic_badge_text = agenticBadges.length
+        ? (agenticBadges[0].textContent || '').trim()
+        : '';
+
+    // Locate the agentic card by id-bearing href; assert NO P-badge inside.
+    var agenticCard = document.querySelector(
+        'a[href*="agentic-update-summary-20260428-100200"]'
+    );
+    r.has_agentic_card = !!agenticCard;
+    if (agenticCard) {
+        var pBadge = null;
+        agenticCard.querySelectorAll('.ft-badge').forEach(function(b) {
+            if (/^P\\d+$/.test(b.textContent.trim())) pBadge = b;
+        });
+        r.agentic_card_has_priority_badge = !!pBadge;
+        r.agentic_card_has_kind_badge = !!agenticCard.querySelector(
+            '[data-testid="kind-badge-agentic"]'
+        );
+    }
+
+    // ── Legacy NULL-kind row: priority badge present, agentic absent ────
+    var legacyCard = document.querySelector(
+        'a[href*="auto-sweep-legacy-null"]'
+    );
+    r.has_legacy_card = !!legacyCard;
+    if (legacyCard) {
+        var legacyP = null;
+        legacyCard.querySelectorAll('.ft-badge').forEach(function(b) {
+            if (/^P\\d+$/.test(b.textContent.trim())) legacyP = b;
+        });
+        r.legacy_card_priority_badge_text = legacyP
+            ? legacyP.textContent.trim() : '';
+        r.legacy_card_has_kind_badge = !!legacyCard.querySelector(
+            '[data-testid="kind-badge-agentic"]'
+        );
+    }
+
+    // No template artifacts leak into the rendered fragment.
+    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+"""
+
+
+class TestDispatchAgenticKindBadge:
+    """L2.B backfill for the auto-5k2j4 kind-badge addition on /dispatch."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check(
+            "/dispatch", DISPATCH_KIND_BADGE_CHECKS, wait_ms=1000,
+        )
+        request.cls._checks = result
+
+    def test_dispatch_row_renders_kind_badge(self):
+        """An agentic dispatch row renders the 'Agentic' kind badge.
+
+        The badge is visually distinct from the regular bead's P-badge
+        (which is suppressed when kind === 'agentic') and from the
+        librarian's 'Lib' chip — three branches in priority-badge.html.
+        """
+        c = self._checks
+        assert c.get("agentic_badge_count", 0) >= 1, (
+            f"Expected ≥ 1 [data-testid=kind-badge-agentic] element; "
+            f"got {c.get('agentic_badge_count')}"
+        )
+        assert c.get("agentic_badge_text") == "Agentic", (
+            f"Agentic kind badge text should read 'Agentic'; "
+            f"got {c.get('agentic_badge_text')!r}"
+        )
+        assert c.get("has_agentic_card"), (
+            "Agentic dispatch row card not present in DOM"
+        )
+        assert c.get("agentic_card_has_kind_badge"), (
+            "Agentic card is missing its own kind badge"
+        )
+        assert not c.get("agentic_card_has_priority_badge"), (
+            "Agentic card must NOT also carry a P-badge — the priority "
+            "branch in priority-badge.html should suppress when "
+            "(b.kind || 'bead') === 'agentic'"
+        )
+
+    def test_dispatch_legacy_null_kind_renders_as_bead(self):
+        """A row without a `kind` field renders as a regular bead.
+
+        The COALESCE semantics from auto-5k2j4 — ``COALESCE(kind, 'bead')``
+        in SQL, ``(b.kind || 'bead')`` in JS — must hold at the UI layer
+        too. Concretely: the priority badge renders, the agentic badge
+        does NOT.
+        """
+        c = self._checks
+        assert c.get("has_legacy_card"), (
+            "Legacy NULL-kind dispatch row card not present in DOM"
+        )
+        # The fixture seeds priority=2 → P2 badge.
+        assert c.get("legacy_card_priority_badge_text") == "P2", (
+            f"Legacy NULL-kind row should render its priority badge "
+            f"(P2); got {c.get('legacy_card_priority_badge_text')!r}"
+        )
+        assert not c.get("legacy_card_has_kind_badge"), (
+            "Legacy NULL-kind row must NOT render the agentic kind badge "
+            "— COALESCE-as-'bead' takes that branch off"
+        )
+        assert c.get("no_jinja"), (
+            "Raw Jinja template syntax visible on dispatch page"
         )
