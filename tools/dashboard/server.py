@@ -3725,6 +3725,7 @@ async def api_session_create(request):
             session_type="container",
             project=monitor_project,
             jsonl_path=sess_dir,
+            harness=proj.harness if proj else "claude",
             seed_message="Starting..." if not primer_url else "",
         )
     else:
