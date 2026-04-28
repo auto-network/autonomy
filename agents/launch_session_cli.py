@@ -134,6 +134,10 @@ def main() -> int:
         }
         if metadata:
             meta_doc.update(metadata)
+            if "graph_org" not in meta_doc:
+                gp = meta_doc.get("graph_project")
+                if gp:
+                    meta_doc["graph_org"] = gp
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
 
         auth_args = _setup_auth_docker_args(creds, run_dir)
