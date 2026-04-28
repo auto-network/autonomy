@@ -5292,6 +5292,463 @@ async def api_events_replay(request):
     return JSONResponse({"events": events, "complete": complete}, status_code=status_code)
 
 
+# ── Diag round-trip ───────────────────────────────────────────
+#
+# /api/diag/sessions emits a `diag:request` SSE event, sleeps for the
+# collection window, then aggregates the per-tab POSTs that arrived on
+# /api/diag/client. The response also reports file-layer + server-tail
+# state so it's obvious which layer first disagrees with the others.
+
+import uuid as _uuid_mod
+
+# req_id -> {"emit_ts": float, "request_type": str,
+#            "deadline_ts": float, "params": dict,
+#            "clients": {client_id: (recv_ts, payload_dict)}}
+_DIAG_AGGREGATORS: dict[str, dict] = {}
+_DIAG_AGGREGATOR_TTL_SECONDS = 30.0
+_DIAG_COLLECTION_WINDOW_SECONDS = 3.0
+_DIAG_DIR = _REPO_ROOT / "data" / "diag"
+
+
+def _diag_janitor_sweep(now: float | None = None) -> None:
+    """Drop diag aggregators older than the TTL — bounded memory usage."""
+    cutoff = (now if now is not None else time.time()) - _DIAG_AGGREGATOR_TTL_SECONDS
+    for req_id in [k for k, v in _DIAG_AGGREGATORS.items() if v.get("emit_ts", 0) < cutoff]:
+        _DIAG_AGGREGATORS.pop(req_id, None)
+
+
+def _read_jsonl_tail(path: Path, n: int = 3) -> list[dict]:
+    """Return the last n parsed JSONL lines as (type, timestamp, identity) tuples."""
+    try:
+        with open(path, "rb") as fh:
+            try:
+                fh.seek(0, 2)
+                size = fh.tell()
+            except OSError:
+                return []
+            chunk_size = 8192
+            buf = b""
+            offset = size
+            while offset > 0 and buf.count(b"\n") <= n:
+                read = min(chunk_size, offset)
+                offset -= read
+                fh.seek(offset)
+                buf = fh.read(read) + buf
+            lines = [ln for ln in buf.splitlines() if ln.strip()]
+            tail_lines = lines[-n:] if len(lines) >= n else lines
+    except (FileNotFoundError, OSError):
+        return []
+
+    from tools.dashboard.session_monitor import _entry_identity
+    tails = []
+    for raw in tail_lines:
+        try:
+            obj = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        # JSONL rows from the harness aren't always normalized to the
+        # "type" the tail emits. Try a small set of possible shapes.
+        etype = obj.get("type") or ""
+        ts = obj.get("timestamp") or ""
+        # Best-effort: if the row looks like a Claude-style {"type": "human"}
+        # wrapper, _entry_identity will still produce a stable key.
+        tails.append({
+            "type": etype,
+            "timestamp": ts,
+            "identity": _entry_identity({
+                "type": etype,
+                "timestamp": ts,
+                "tool_id": obj.get("tool_id"),
+                "content": obj.get("content"),
+            }),
+        })
+    return tails
+
+
+def _diag_tail_3_alignment(file_tail: list[dict], server_tail: list[dict],
+                           clients: list[dict]) -> str:
+    """Classify how the layers compare on tail_3 identity keys.
+
+    Returns one of: "all_match", "file_server_match_clients_diverge",
+    "file_diverges", "clients_disagree".
+    """
+    def keys(rows: list[dict]) -> list[str]:
+        return [r.get("identity", "") for r in (rows or [])]
+
+    f = keys(file_tail)
+    s = keys(server_tail)
+    client_keys = [keys(c.get("session_markers", {}).get("tail_3", [])) for c in clients]
+
+    if clients:
+        unique_client_keys = {tuple(k) for k in client_keys}
+        if len(unique_client_keys) > 1:
+            return "clients_disagree"
+        sole = next(iter(unique_client_keys))
+        if f == s == list(sole):
+            return "all_match"
+        if f == s and list(sole) != f:
+            return "file_server_match_clients_diverge"
+        return "file_diverges"
+    # No clients: file vs server only.
+    if f == s:
+        return "all_match"
+    return "file_diverges"
+
+
+def _diag_build_bus_block() -> dict:
+    """Snapshot the EventBus side of the diag round-trip."""
+    first_seq, last_seq, first_ts, last_ts = event_bus.buffer_window()
+    snapshot_path: str | None = None
+    snapshot_mtime: float | None = None
+    try:
+        if EVENT_BUS_STATE_PATH.exists():
+            snapshot_path = str(EVENT_BUS_STATE_PATH)
+            snapshot_mtime = EVENT_BUS_STATE_PATH.stat().st_mtime
+    except OSError:
+        pass
+    epoch = current_server_epoch()
+    return {
+        "global_seq": event_bus._seq,
+        "epoch": epoch,
+        "epoch_age_s": max(0, int(time.time()) - int(epoch)),
+        "subscribers_count": event_bus.subscribers_count(),
+        "buffer_entries": len(event_bus._buffer),
+        "buffer_bytes": event_bus._buffer_bytes,
+        "buffer_first_seq": first_seq,
+        "buffer_last_seq": last_seq,
+        "buffer_first_ts": first_ts,
+        "buffer_last_ts": last_ts,
+        "broadcasts_last_60s": event_bus.broadcasts_last_60s(),
+        "last_snapshot_path": snapshot_path,
+        "last_snapshot_mtime": snapshot_mtime,
+    }
+
+
+def _diag_build_file_block(jsonl_path: str | None) -> dict:
+    """File-layer snapshot for one session — best-effort, never raises."""
+    block: dict = {
+        "path": jsonl_path,
+        "path_resolved": None,
+        "inode": None,
+        "device": None,
+        "lines": None,
+        "size_bytes": None,
+        "mtime_ago_s": None,
+        "tail_3": [],
+    }
+    if not jsonl_path:
+        return block
+    p = Path(jsonl_path)
+    try:
+        st = p.stat()
+        block["path_resolved"] = str(p.resolve())
+        block["inode"] = st.st_ino
+        block["device"] = st.st_dev
+        block["size_bytes"] = st.st_size
+        block["mtime_ago_s"] = max(0, int(time.time() - st.st_mtime))
+    except (FileNotFoundError, OSError):
+        return block
+    # Count lines via a quick read — tiny overhead, only on diag invocation.
+    try:
+        with open(p, "rb") as fh:
+            block["lines"] = sum(1 for _ in fh)
+    except OSError:
+        pass
+    block["tail_3"] = _read_jsonl_tail(p, n=3)
+    return block
+
+
+def _diag_build_server_block(session_id: str, ts) -> dict:
+    """_TailState snapshot for one session."""
+    file_offset = 0
+    try:
+        from tools.dashboard.session_monitor import get_session as _gs
+        row = _gs(session_id)
+        if row:
+            file_offset = int(row.get("file_offset") or 0)
+    except Exception:
+        pass
+    last_broadcast_ago_s: float | None = None
+    if ts and ts.last_broadcast_ts:
+        last_broadcast_ago_s = max(0.0, time.time() - ts.last_broadcast_ts)
+    if not ts:
+        return {
+            "broadcast_seq": 0,
+            "file_offset": file_offset,
+            "last_entry_type": "",
+            "last_broadcast_ago_s": None,
+            "pending_tools": 0,
+            "completed_tools": 0,
+            "task_tracker_warmed": False,
+            "watch_descriptor": None,
+            "dir_watch_descriptor": None,
+            "needs_resolution": False,
+            "resolution_dir": None,
+            "last_enqueue_content_len": 0,
+            "tail_3": [],
+        }
+    tail_3 = [
+        {"type": etype, "timestamp": tstamp, "identity": ident}
+        for (etype, tstamp, ident) in list(ts.recent_processed)
+    ]
+    return {
+        "broadcast_seq": ts.broadcast_seq,
+        "file_offset": file_offset,
+        "last_entry_type": ts.last_entry_type,
+        "last_broadcast_ago_s": last_broadcast_ago_s,
+        "pending_tools": len(ts.pending_tool_ids),
+        "completed_tools": len(ts.completed_tool_ids),
+        "task_tracker_warmed": ts.task_tracker_warmed,
+        "watch_descriptor": ts.watch_descriptor,
+        "dir_watch_descriptor": ts.dir_watch_descriptor,
+        "needs_resolution": ts.needs_resolution,
+        "resolution_dir": str(ts.resolution_dir) if ts.resolution_dir else None,
+        "last_enqueue_content_len": len(ts.last_enqueue_content or ""),
+        "tail_3": tail_3,
+    }
+
+
+def _diag_format_text_table(payload: dict) -> str:
+    """Render the diag aggregate as a plain-text table."""
+    bus = payload.get("bus", {})
+    rows = payload.get("rows", [])
+    header = (
+        "session_id   file/srv/min_cli  mtime  bus_seq  buf  subs  ooo  lag(p50/max)  align"
+    )
+    lines = [header]
+    bus_seq = bus.get("global_seq")
+    buf = bus.get("buffer_entries")
+    subs = bus.get("subscribers_count")
+    for row in rows:
+        sid = row.get("session_id", "?")
+        file_lines = (row.get("file") or {}).get("lines")
+        srv_seq = (row.get("server") or {}).get("broadcast_seq")
+        min_cli = row.get("min_client_seq")
+        mtime_ago = (row.get("file") or {}).get("mtime_ago_s")
+        ooo = row.get("max_out_of_order_count") or 0
+        clients = row.get("clients") or []
+        lags = [c.get("lag_ms") for c in clients if c.get("lag_ms") is not None]
+        if lags:
+            lags_sorted = sorted(lags)
+            p50 = lags_sorted[len(lags_sorted) // 2]
+            max_lag = lags_sorted[-1]
+            lag_str = f"{p50}/{max_lag}ms"
+        else:
+            lag_str = "-/-"
+        align = (row.get("drift") or {}).get("tail_3_alignment", "-")
+        lines.append(
+            f"{sid}   {file_lines}/{srv_seq}/{min_cli}       "
+            f"{mtime_ago}s    {bus_seq}    {buf}   {subs}    {ooo}    {lag_str}      {align}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+async def api_diag_sessions(request):
+    """Live alignment round-trip for one or all sessions.
+
+    GET /api/diag/sessions[?session=<id>][&format=text]
+
+    Emits a one-shot ``diag:request`` SSE event, waits for connected tabs to
+    POST to /api/diag/client, then aggregates per-layer snapshots so it's
+    obvious which layer (file/server/bus/client) first disagrees.
+    """
+    _diag_janitor_sweep()
+
+    requested = request.query_params.get("session")
+    # Resolve sessions the diag should cover.
+    try:
+        registry = session_monitor.get_registry()
+    except Exception:
+        registry = []
+    if requested:
+        sessions = [s for s in registry if s.get("session_id") == requested]
+        # If not in live registry, still allow (covers dead-but-known tabs).
+        if not sessions:
+            sessions = [{"session_id": requested}]
+    else:
+        sessions = registry
+
+    session_ids = [s["session_id"] for s in sessions if s.get("session_id")]
+
+    req_id = str(_uuid_mod.uuid4())
+    request_type = "session_markers"
+    emit_ts = time.time()
+    deadline_ts = emit_ts + _DIAG_COLLECTION_WINDOW_SECONDS
+
+    _DIAG_AGGREGATORS[req_id] = {
+        "emit_ts": emit_ts,
+        "request_type": request_type,
+        "deadline_ts": deadline_ts,
+        "params": {"sessions": session_ids},
+        "clients": {},
+    }
+
+    # Fire the request to all SSE subscribers. dedup=False because every
+    # diag round-trip is unique even if the body is identical.
+    await event_bus.broadcast(
+        "diag:request",
+        {
+            "req_id": req_id,
+            "request_type": request_type,
+            "params": {"sessions": session_ids},
+            "deadline_ms": int(_DIAG_COLLECTION_WINDOW_SECONDS * 1000),
+        },
+        dedup=False,
+    )
+
+    # Collect for the full window — clients that missed it just don't show up.
+    await asyncio.sleep(_DIAG_COLLECTION_WINDOW_SECONDS)
+
+    aggregator = _DIAG_AGGREGATORS.get(req_id, {})
+    client_replies = aggregator.get("clients", {})
+
+    bus_block = _diag_build_bus_block()
+
+    rows = []
+    for sid in session_ids:
+        ts_obj = session_monitor._tail_states.get(sid)
+        from tools.dashboard.session_monitor import get_session as _gs
+        row_db = _gs(sid)
+        jsonl_path = row_db.get("jsonl_path") if row_db else None
+        file_block = _diag_build_file_block(jsonl_path)
+        server_block = _diag_build_server_block(sid, ts_obj)
+
+        clients_for_session = []
+        for client_id, (recv_ts, payload) in client_replies.items():
+            sessions_payload = (payload.get("payload") or {}).get("sessions", {})
+            if sid not in sessions_payload:
+                continue
+            client_state = (payload.get("payload") or {}).get("client_state", {})
+            session_markers = sessions_payload[sid]
+            lag_ms = max(0, int((recv_ts - emit_ts) * 1000))
+            clients_for_session.append({
+                "client_id": client_id,
+                "lag_ms": lag_ms,
+                "client_state": client_state,
+                "session_markers": session_markers,
+            })
+
+        client_seqs = [
+            c.get("session_markers", {}).get("store_seq")
+            for c in clients_for_session
+            if c.get("session_markers", {}).get("store_seq") is not None
+        ]
+        max_lag = max((c.get("lag_ms", 0) for c in clients_for_session), default=None)
+        min_seq = min(client_seqs) if client_seqs else None
+        ooo_counts = [
+            c.get("session_markers", {}).get("out_of_order_count", 0)
+            for c in clients_for_session
+        ]
+        max_ooo = max(ooo_counts) if ooo_counts else 0
+
+        alignment = _diag_tail_3_alignment(
+            file_block.get("tail_3", []),
+            server_block.get("tail_3", []),
+            clients_for_session,
+        )
+        drift = {
+            "file_lines_vs_server_seq": (
+                (file_block.get("lines") or 0) - (server_block.get("broadcast_seq") or 0)
+            ),
+            "file_size_vs_server_offset": (
+                (file_block.get("size_bytes") or 0) - (server_block.get("file_offset") or 0)
+            ),
+            "server_seq_vs_min_client": (
+                (server_block.get("broadcast_seq") or 0) - min_seq
+                if min_seq is not None else None
+            ),
+            "tail_3_alignment": alignment,
+        }
+
+        rows.append({
+            "session_id": sid,
+            "file": file_block,
+            "server": server_block,
+            "topic": {
+                "name": "session:messages",
+                "last_seq": event_bus._last_seq.get("session:messages"),
+            },
+            "clients": clients_for_session,
+            "max_client_lag_ms": max_lag,
+            "min_client_seq": min_seq,
+            "max_out_of_order_count": max_ooo,
+            "drift": drift,
+        })
+
+    payload = {
+        "req_id": req_id,
+        "request_type": request_type,
+        "collection_window_ms": int(_DIAG_COLLECTION_WINDOW_SECONDS * 1000),
+        "clients_responded": len(client_replies),
+        "bus": bus_block,
+        "rows": rows,
+    }
+
+    # Best-effort cleanup — janitor handles the rest.
+    _DIAG_AGGREGATORS.pop(req_id, None)
+
+    fmt = request.query_params.get("format", "")
+    accept = request.headers.get("accept", "")
+    if fmt == "text" or "text/plain" in accept:
+        return PlainTextResponse(_diag_format_text_table(payload))
+    return JSONResponse(payload)
+
+
+async def api_diag_client(request):
+    """Receive a per-tab diag reply and stash it in the live aggregator."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    req_id = body.get("req_id")
+    request_type = body.get("request_type")
+    client_id = body.get("client_id")
+    if not req_id or not request_type or not client_id:
+        return JSONResponse(
+            {"error": "req_id, request_type, client_id required"},
+            status_code=400,
+        )
+    aggregator = _DIAG_AGGREGATORS.get(req_id)
+    if aggregator is None:
+        return JSONResponse({"error": "unknown or expired req_id"}, status_code=404)
+    if aggregator.get("request_type") != request_type:
+        return JSONResponse(
+            {"error": "request_type mismatch"}, status_code=400,
+        )
+    aggregator["clients"][client_id] = (time.time(), body)
+    return JSONResponse({"ok": True})
+
+
+async def api_diag_eventbus_snapshot(request):
+    """Persist the live EventBus state to a timestamped file under data/diag/.
+
+    No caller-supplied path — we always write to ``data/diag/eventbus-{ISO}.state``.
+    The fixed prefix means dumps accumulate harmlessly and never overwrite the
+    live ``data/event_bus.state`` consumed by the next reload.
+    """
+    diag_dir = _DIAG_DIR
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    # Filename-safe ISO 8601 (colons → dashes) in UTC, with sub-second resolution
+    # so two snapshots in the same second still produce distinct files.
+    now_dt = datetime.now(timezone.utc)
+    stamp = now_dt.strftime("%Y-%m-%dT%H-%M-%S") + f"-{now_dt.microsecond:06d}Z"
+    target = diag_dir / f"eventbus-{stamp}.state"
+    event_bus.snapshot(target)
+    bytes_written = target.stat().st_size if target.exists() else 0
+    first_seq, last_seq, _, _ = event_bus.buffer_window()
+    summary = {
+        "path": str(target),
+        "bytes": bytes_written,
+        "seq": event_bus._seq,
+        "epoch": current_server_epoch(),
+        "buffer_entries": len(event_bus._buffer),
+        "buffer_bytes": event_bus._buffer_bytes,
+        "buffer_first_seq": first_seq,
+        "buffer_last_seq": last_seq,
+    }
+    return JSONResponse(summary)
+
+
 # ── Background watchers ───────────────────────────────────────
 
 _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
@@ -7309,6 +7766,11 @@ routes = [
     # Events (SSE)
     Route("/api/events", api_events),
     Route("/api/events/replay", api_events_replay),
+
+    # Diag round-trip — file/server/bus/client alignment
+    Route("/api/diag/sessions", api_diag_sessions),
+    Route("/api/diag/client", api_diag_client, methods=["POST"]),
+    Route("/api/diag/eventbus/snapshot", api_diag_eventbus_snapshot, methods=["POST"]),
 
     # API
     Route("/api/beads/ready", api_beads_ready),

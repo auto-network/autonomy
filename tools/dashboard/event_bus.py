@@ -64,6 +64,9 @@ class EventBus:
         # Chronological ring buffer for gap replay
         self._buffer: deque[_BufferEntry] = deque()
         self._buffer_bytes: int = 0  # running total of serialised sizes
+        # Wall-clock timestamps of the last 60s of broadcasts (for /api/diag).
+        # Evicted lazily on read, never persisted in snapshots.
+        self._broadcast_log: deque[float] = deque()
 
     def subscribe(self) -> asyncio.Queue:
         """Subscribe to all topics.
@@ -127,10 +130,43 @@ class EventBus:
         self._buffer_bytes += entry.size
         self._trim_buffer()
 
+        # Track wall-clock broadcast time for /api/diag rate stats.
+        self._broadcast_log.append(time.time())
+        self._evict_old_broadcasts()
+
         # Push 3-tuple to all subscribers
         for q in list(self._subscribers):  # snapshot — don't hold lock across put()
             await q.put((topic, data, seq))
         return len(self._subscribers)
+
+    def _evict_old_broadcasts(self) -> None:
+        """Drop broadcast log entries older than 60s."""
+        cutoff = time.time() - 60.0
+        while self._broadcast_log and self._broadcast_log[0] < cutoff:
+            self._broadcast_log.popleft()
+
+    def broadcasts_last_60s(self) -> int:
+        """Number of broadcasts in the last 60s of wall-clock time."""
+        self._evict_old_broadcasts()
+        return len(self._broadcast_log)
+
+    def subscribers_count(self) -> int:
+        """Number of active SSE subscriber queues."""
+        return len(self._subscribers)
+
+    def buffer_window(self) -> tuple[int | None, int | None, float | None, float | None]:
+        """Return (first_seq, last_seq, first_ts, last_ts) for the buffer.
+
+        Returns (None, None, None, None) when the buffer is empty.
+        Timestamps are wall-clock seconds (Unix epoch), converted from
+        ``_BufferEntry.timestamp`` (monotonic) using the current offset.
+        """
+        if not self._buffer:
+            return (None, None, None, None)
+        first = self._buffer[0]
+        last = self._buffer[-1]
+        offset = time.time() - time.monotonic()
+        return (first.seq, last.seq, first.timestamp + offset, last.timestamp + offset)
 
     def _trim_buffer(self) -> None:
         """Evict oldest entries when memory budget is exceeded."""

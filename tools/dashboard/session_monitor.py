@@ -29,6 +29,7 @@ import json
 import logging
 import subprocess
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -476,6 +477,35 @@ class _TailState:
     # None sentinel means "never written on this process run" (forces one write
     # after warm-up so restarts repopulate the DB even without new events).
     last_todos_json: str | None = None
+    # /api/diag exposes the last 3 processed entries (post-_apply_activity_entries)
+    # as (type, timestamp, identity) tuples so file/server/client tail_3 can be
+    # compared. Bounded ring; never read on the hot path.
+    recent_processed: deque = field(default_factory=lambda: deque(maxlen=3))
+    # Wall-clock timestamp of the last session:messages broadcast for this
+    # session. Used by /api/diag to compute last_broadcast_ago_s.
+    last_broadcast_ts: float = 0.0
+
+
+def _entry_identity(entry: dict) -> str:
+    """Stable identity key for an entry — mirrors the JS _entryIdentity."""
+    etype = entry.get("type", "?") or "?"
+    tid = entry.get("tool_id")
+    if etype == "tool_use" and tid:
+        return f"tu:{tid}"
+    if etype == "tool_result" and tid:
+        return f"tr:{tid}"
+    ts_str = entry.get("timestamp", "") or ""
+    content = entry.get("content")
+    if isinstance(content, str):
+        snippet = content[:200]
+    elif content is None:
+        snippet = ""
+    else:
+        try:
+            snippet = json.dumps(content)[:200]
+        except Exception:
+            snippet = ""
+    return f"{etype}:{ts_str}:{snippet}"
 
 
 def _apply_activity_entries(ts: _TailState, entries: list[dict]) -> str:
@@ -496,6 +526,11 @@ def _apply_activity_entries(ts: _TailState, entries: list[dict]) -> str:
                 ts.completed_tool_ids.add(tid)
         if etype:
             ts.last_entry_type = etype
+            ts.recent_processed.append((
+                etype,
+                entry.get("timestamp", "") or "",
+                _entry_identity(entry),
+            ))
 
     if ts.pending_tool_ids:
         return "tool_running"
@@ -1238,6 +1273,7 @@ class SessionMonitor:
                 logger.exception("session_monitor: entry_enricher failed for %s", tmux_name)
         if new_entries and self._event_bus:
             ts.broadcast_seq += 1
+            ts.last_broadcast_ts = time.time()
             updated = get_session(tmux_name)
             await self._event_bus.broadcast(
                 "session:messages",
