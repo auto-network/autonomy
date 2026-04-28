@@ -153,7 +153,7 @@ class ClaudeSessionHarness:
         if jsonl_path is not None:
             if row and row.get("type") == "host":
                 return None
-            return _link_session_file(tmux_name, jsonl_path)
+            return _link_session_file(tmux_name, jsonl_path, project=(row or {}).get("project"))
 
         if row and row.get("type") == "host":
             found = _resolve_claude_host_jsonl(tmux_name)
