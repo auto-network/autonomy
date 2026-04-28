@@ -74,7 +74,7 @@
       try { topics = JSON.parse(topics); } catch (e) { topics = []; }
     }
     return Object.assign({}, row, {
-      id: row.session_id || row.tmux_session,
+      id: row.session_id,
       session_type: sessionType,
       topics: Array.isArray(topics) ? topics : [],
       latest: row.latest || row.last_message || '',
@@ -302,7 +302,9 @@
       },
 
       async sendToSession(session) {
-        var target = session && (session.tmux_session || session.tmux_name);
+        var target = session && (
+          session.tmux_session || session.tmux_name || session.session_id
+        );
         if (!target) return;
         this.pendingDispatch = true;
         this.lastError = '';

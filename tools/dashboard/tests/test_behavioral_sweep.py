@@ -42,7 +42,6 @@ NOW = int(time.time())
 SWEEP_SESSIONS = [
     {
         "session_id": "auto-sweep-alpha",
-        "tmux_session": "auto-sweep-alpha",
         "project": "autonomy",
         "type": "container",
         "is_live": True,
@@ -60,7 +59,6 @@ SWEEP_SESSIONS = [
     },
     {
         "session_id": "auto-sweep-beta",
-        "tmux_session": "auto-sweep-beta",
         "project": "autonomy",
         "type": "container",
         "is_live": True,
@@ -78,7 +76,6 @@ SWEEP_SESSIONS = [
     },
     {
         "session_id": "auto-sweep-gamma",
-        "tmux_session": "auto-sweep-gamma",
         "project": "autonomy",
         "type": "container",
         "is_live": True,
@@ -96,7 +93,6 @@ SWEEP_SESSIONS = [
     },
     {
         "session_id": "host-sweep-delta",
-        "tmux_session": "host-sweep-delta",
         "project": "autonomy",
         "type": "host",
         "is_live": True,
@@ -114,7 +110,6 @@ SWEEP_SESSIONS = [
     },
     {
         "session_id": "auto-sweep-epsilon",
-        "tmux_session": "auto-sweep-epsilon",
         "project": "autonomy",
         "type": "container",
         "is_live": True,
@@ -3584,62 +3579,109 @@ class TestRichContentNarrowViewport:
 
 AGENT_ACTIONS_AUTONOMY_CHECKS = """(async () => {
   const r = {};
-  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
-
-  // The agent-actions root mounts on initial page load (its host slot is
-  // never cleared by the router). After SPA-navigation, the component
-  // refetches on the 'app:navigated' event. Wait for refresh to settle.
-  await sleep(800);
-
-  const root = document.querySelector('.agent-actions-root');
-  r.root_in_dom = !!root;
-  r.root_inside_slot = !!(root && root.parentElement && root.parentElement.id === 'agent-actions-slot');
-  r.root_not_inside_header_actions = !!(
-    root && !root.closest('#header-actions')
-  );
-
-  const btn = document.querySelector('[data-testid=agent-actions-button]');
-  r.btn_exists = !!btn;
-  r.btn_visible = !!(btn && getComputedStyle(btn).display !== 'none');
-
-  // Open the panel
-  if (btn) btn.click();
-  await sleep(150);
-  const panel = document.querySelector('[data-testid=agent-actions-panel]');
-  r.panel_exists = !!panel;
-  r.panel_visible = !!(panel && getComputedStyle(panel).display !== 'none');
-  const items = panel ? panel.querySelectorAll('[data-testid^="agent-action-item-"]') : [];
-  r.action_item_count = items.length;
-  r.action_item_keys = Array.from(items).map(el => el.getAttribute('data-testid'));
-  r.has_send_to = r.action_item_keys.includes('agent-action-item-universal.send-to');
-  r.has_update = r.action_item_keys.includes('agent-action-item-note.update-summary');
-  r.has_consolidate = r.action_item_keys.includes('agent-action-item-note.consolidate-comments');
-  r.has_review = r.action_item_keys.includes('agent-action-item-note.review-accuracy');
-
-  // Element is visible iff it's in the DOM AND its computed display
-  // isn't 'none'. offsetParent is unreliable for position:fixed nodes
-  // (the modal backdrop), so use computed style instead.
+  const waitFor = async (predicate, timeoutMs = 1500, intervalMs = 25) => {
+    const deadline = performance.now() + timeoutMs;
+    while (performance.now() < deadline) {
+      const v = predicate();
+      if (v) return v;
+      await new Promise(res => setTimeout(res, intervalMs));
+    }
+    return predicate() || null;
+  };
   const isShown = (el) => !!(el && getComputedStyle(el).display !== 'none');
 
-  // Click the Send-To universal action — opens the modal
-  const sendTo = panel ? panel.querySelector('[data-testid="agent-action-item-universal.send-to"]') : null;
-  if (sendTo) sendTo.click();
-  // Modal opens immediately on click; the active_sessions fetch runs
-  // afterward so we wait long enough for the rows to render.
-  await sleep(700);
-  const modal = document.querySelector('[data-testid=agent-actions-send-to-modal]');
-  r.modal_in_dom = !!modal;
-  r.modal_visible = isShown(modal);
-  r.session_card_count = modal ? modal.querySelectorAll('.session-card').length : 0;
-  r.bespoke_row_count = modal ? modal.querySelectorAll('.send-to-session-row, .send-to-session-glyph, .send-to-session-state').length : 0;
-  r.session_button_count = modal ? modal.querySelectorAll('.send-to-session-button').length : 0;
+  // Spy on fetch so we can prove sendToSession actually POSTs the dispatch.
+  // Round 5's downstream "modal closed" assertion was satisfied by a no-op
+  // handler that short-circuited on a missing field but still closed the
+  // modal — we now assert on the actual network call.
+  const origFetch = window.fetch;
+  let dispatchSeen = null;
+  window.fetch = function (url, opts) {
+    if (typeof url === 'string' && url.includes('/api/agent-actions/dispatch')) {
+      dispatchSeen = { url: url, body: opts && opts.body };
+    }
+    return origFetch.apply(this, arguments);
+  };
 
-  // Click the first session button to dispatch via the universal endpoint
-  const firstButton = modal ? modal.querySelector('.send-to-session-button') : null;
-  r.first_button_testid = firstButton ? firstButton.getAttribute('data-testid') : '';
-  if (firstButton) firstButton.click();
-  await sleep(700);
-  r.modal_open_after_send = isShown(modal);
+  try {
+    // Wait for the agent-actions Alpine root to mount and visibility to be
+    // resolved (members fetch sets `visible`). Replaces sleep(800).
+    const root = await waitFor(() => {
+      const el = document.querySelector('.agent-actions-root');
+      if (!el || typeof Alpine === 'undefined') return null;
+      const scope = Alpine.$data(el);
+      return scope && scope.visible !== undefined ? el : null;
+    });
+    r.root_in_dom = !!root;
+    r.root_inside_slot = !!(root && root.parentElement && root.parentElement.id === 'agent-actions-slot');
+    r.root_not_inside_header_actions = !!(root && !root.closest('#header-actions'));
+
+    const btn = document.querySelector('[data-testid=agent-actions-button]');
+    r.btn_exists = !!btn;
+    r.btn_visible = !!(btn && getComputedStyle(btn).display !== 'none');
+
+    // Open the panel — wait for x-show to flip rather than relying on a
+    // single nextTick (Alpine sometimes needs more than one for x-show on
+    // an element that was previously cloaked).
+    if (btn) btn.click();
+    const panel = await waitFor(() => {
+      const p = document.querySelector('[data-testid=agent-actions-panel]');
+      return p && isShown(p) ? p : null;
+    });
+    r.panel_exists = !!(panel || document.querySelector('[data-testid=agent-actions-panel]'));
+    r.panel_visible = isShown(panel);
+    const items = panel ? panel.querySelectorAll('[data-testid^="agent-action-item-"]') : [];
+    r.action_item_count = items.length;
+    r.action_item_keys = Array.from(items).map(el => el.getAttribute('data-testid'));
+    r.has_send_to = r.action_item_keys.includes('agent-action-item-universal.send-to');
+    r.has_update = r.action_item_keys.includes('agent-action-item-note.update-summary');
+    r.has_consolidate = r.action_item_keys.includes('agent-action-item-note.consolidate-comments');
+    r.has_review = r.action_item_keys.includes('agent-action-item-note.review-accuracy');
+
+    // Open the Send-To modal. The active_sessions fetch is async, so wait
+    // for at least one session button to render rather than sleeping.
+    const sendTo = panel ? panel.querySelector('[data-testid="agent-action-item-universal.send-to"]') : null;
+    if (sendTo) sendTo.click();
+    const modal = await waitFor(() => {
+      const m = document.querySelector('[data-testid=agent-actions-send-to-modal]');
+      return m && isShown(m) ? m : null;
+    });
+    r.modal_in_dom = !!modal;
+    r.modal_visible = isShown(modal);
+
+    const firstButton = await waitFor(() =>
+      modal ? modal.querySelector('.send-to-session-button') : null
+    );
+    r.session_card_count = modal ? modal.querySelectorAll('.session-card').length : 0;
+    r.bespoke_row_count = modal ? modal.querySelectorAll('.send-to-session-row, .send-to-session-glyph, .send-to-session-state').length : 0;
+    r.session_button_count = modal ? modal.querySelectorAll('.send-to-session-button').length : 0;
+    r.first_button_testid = firstButton ? firstButton.getAttribute('data-testid') : '';
+
+    // Click the first session button. Wait for the dispatch POST to fire
+    // (fetch spy) and the modal to close — both are downstream of a
+    // working handler. If the handler short-circuits, neither happens.
+    if (firstButton) firstButton.click();
+    await waitFor(() => dispatchSeen, 1000);
+    await waitFor(() => !isShown(modal), 1000);
+    r.modal_open_after_send = isShown(modal);
+
+    r.dispatch_called = !!dispatchSeen;
+    if (dispatchSeen && dispatchSeen.body) {
+      try {
+        const parsed = JSON.parse(dispatchSeen.body);
+        r.dispatch_target = parsed.target_session_name || '';
+        r.dispatch_member_key = parsed.member_key || '';
+      } catch (e) {
+        r.dispatch_target = '';
+        r.dispatch_member_key = '';
+      }
+    } else {
+      r.dispatch_target = '';
+      r.dispatch_member_key = '';
+    }
+  } finally {
+    window.fetch = origFetch;
+  }
 
   return JSON.stringify(r);
 })()"""
@@ -3730,6 +3772,22 @@ class TestAgentActionsDropdown:
         )
         assert not c.get("modal_open_after_send"), \
             "Modal must close after a successful Send-To dispatch"
+
+    def test_send_to_actually_dispatches_to_api(self):
+        """Clicking a session button must POST to /api/agent-actions/dispatch
+        with the right target_session_name. Closes the gap left by Round 5
+        where the handler short-circuited on a missing field but the modal
+        closed anyway via downstream reactivity (auto-8l0xn)."""
+        c = self._checks
+        assert c.get("dispatch_called"), (
+            "POST to /api/agent-actions/dispatch never fired — handler short-circuited "
+            "(check session payload shape vs handler field names)."
+        )
+        assert c.get("dispatch_target"), \
+            "Dispatch payload must include target_session_name"
+        assert c.get("dispatch_member_key") == "universal.send-to", (
+            f"Dispatch must be universal.send-to, got {c.get('dispatch_member_key')!r}"
+        )
 
 
 class TestAgentActionsDropdownHiddenForEmptyOrg:
