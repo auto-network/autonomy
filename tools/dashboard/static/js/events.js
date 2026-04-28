@@ -254,6 +254,77 @@
     };
   }
 
+  // ── diag:request routing ──────────────────────────────────
+  // /api/diag/sessions broadcasts a one-shot diag:request event.
+  // Per-tab handlers live in window._diagCollectors keyed by request_type.
+  // The page (or session-store.js) registers a collector once; this dispatcher
+  // builds the POST body and ships it to /api/diag/client. Unknown
+  // request_types are silently ignored for forward-compat.
+  function _ensureClientId() {
+    try {
+      var existing = sessionStorage.getItem('diag_client_id');
+      if (existing) return existing;
+      var id = (window.crypto && window.crypto.randomUUID)
+        ? window.crypto.randomUUID()
+        : 'c-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+      sessionStorage.setItem('diag_client_id', id);
+      return id;
+    } catch (e) {
+      // sessionStorage unavailable — generate a per-tab id without persistence.
+      if (!window._diagClientId) {
+        window._diagClientId = 'c-' + Math.random().toString(36).slice(2);
+      }
+      return window._diagClientId;
+    }
+  }
+
+  window._diagCollectors = window._diagCollectors || {};
+  window._diagClientState = function() {
+    var es = _es;
+    return {
+      event_source_ready_state: es ? es.readyState : null,
+      replaying: !!_replaying,
+      held_events_count: _heldEvents.length,
+      client_last_seq: _lastSeq,
+      server_epoch: _serverEpoch,
+    };
+  };
+
+  registerHandler('diag:request', function(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    var reqId = payload.req_id;
+    var requestType = payload.request_type;
+    if (!reqId || !requestType) return;
+    var collector = window._diagCollectors[requestType];
+    // Forward-compat: unknown request_types are silently ignored.
+    if (typeof collector !== 'function') return;
+    var collected;
+    try {
+      collected = collector(payload.params || {}) || {};
+    } catch (err) {
+      console.warn('[EventBus] diag collector error', requestType, err);
+      collected = {};
+    }
+    var body = {
+      req_id: reqId,
+      request_type: requestType,
+      client_id: _ensureClientId(),
+      payload: Object.assign({ client_state: window._diagClientState() }, collected),
+    };
+    try {
+      fetch('/api/diag/client', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        keepalive: true,
+      }).catch(function(err) {
+        console.warn('[EventBus] diag POST failed', err);
+      });
+    } catch (err) {
+      console.warn('[EventBus] diag POST threw', err);
+    }
+  });
+
   // Expose API first, connect after — so app.js can register handlers
   // before the initial SSE event arrives.
   window.connectEvents = connectEvents;
