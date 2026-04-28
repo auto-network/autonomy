@@ -1579,7 +1579,7 @@ def _group_search_results(rows: list) -> list:
     SOURCE_FIELDS = (
         "source_id", "source_title", "source_type", "project", "platform",
         "org", "source_created_at", "source_metadata", "rrf_score",
-        "short_description",
+        "short_description", "keywords",
     )
     EXCERPT_FIELDS = ("turn_number", "content", "result_type", "rank")
     groups: dict = {}
@@ -1658,7 +1658,12 @@ def _enrich_search_results(results: list) -> None:
 
 
 def _format_search_date(raw: str) -> str:
-    """Normalize a timestamp string to ``YYYY-MM-DD HH:MM`` (24hr)."""
+    """Normalize a timestamp string to ``YYYY-MM-DD HH:MM:SS`` (24hr).
+
+    Second-resolution disambiguates rows that collide on minute (e.g. two
+    rollouts of the same tmux session ingested seconds apart) — see bead
+    auto-kvka6 §6.
+    """
     if not raw:
         return ""
     # Strip trailing Z / fractional seconds, support ISO or space-delimited.
@@ -1669,7 +1674,10 @@ def _format_search_date(raw: str) -> str:
     if "." in s:
         s = s.split(".", 1)[0]
     s = s.strip()
-    # Accept "YYYY-MM-DD" alone; otherwise keep to minute resolution.
+    # Accept "YYYY-MM-DD" alone; otherwise keep to second resolution
+    # (19 chars: "YYYY-MM-DD HH:MM:SS").
+    if len(s) >= 19:
+        return s[:19]
     if len(s) >= 16:
         return s[:16]
     return s[:10]
@@ -6472,6 +6480,7 @@ async def api_graph_note(request):
         project = str(form["project"]) if form.get("project") else None
         author = str(form["author"]) if form.get("author") else None
         short_description = str(form["short_description"]) if form.get("short_description") else None
+        keywords = str(form["keywords"]) if form.get("keywords") else None
         tmp_paths, err = await _materialize_uploads(form)
         if err is not None:
             return err
@@ -6487,6 +6496,7 @@ async def api_graph_note(request):
         project = body.get("project")
         author = body.get("author")
         short_description = body.get("short_description")
+        keywords = body.get("keywords")
         tmp_paths = []
 
     tags = str(tags_raw).split(",") if tags_raw else []
@@ -6500,6 +6510,7 @@ async def api_graph_note(request):
             project=project,
             attachments=tmp_paths or None,
             short_description=short_description,
+            keywords=keywords,
             org=org,
         )
     except FileNotFoundError as e:
@@ -6519,6 +6530,7 @@ async def api_graph_note(request):
         "chars": result["chars"],
         "attachments": result["attachments"],
         "short_description": result.get("short_description"),
+        "keywords": result.get("keywords"),
     })
 
 
@@ -6549,6 +6561,7 @@ async def api_graph_note_update(request):
             except (json.JSONDecodeError, TypeError):
                 integrate_ids = []
         short_description = str(form["short_description"]) if form.get("short_description") is not None else None
+        keywords = str(form["keywords"]) if form.get("keywords") is not None else None
         tmp_paths, err = await _materialize_uploads(form)
         if err is not None:
             return err
@@ -6564,6 +6577,7 @@ async def api_graph_note_update(request):
         content = body["content"]
         integrate_ids = [str(x) for x in body.get("integrate_ids") or []]
         short_description = body.get("short_description")
+        keywords = body.get("keywords")
         tmp_paths = []
 
     try:
@@ -6574,6 +6588,7 @@ async def api_graph_note_update(request):
             integrate_comments=integrate_ids,
             attachments=tmp_paths or None,
             short_description=short_description,
+            keywords=keywords,
             org=org,
         )
     except graph_ops.CrossOrgWriteError as e:
@@ -6600,6 +6615,7 @@ async def api_graph_note_update(request):
         "not_found_comments": result["not_found_comments"],
         "attachments": result["attachments"],
         "short_description": result.get("short_description"),
+        "keywords": result.get("keywords"),
     })
 
 
@@ -7581,6 +7597,31 @@ def _agent_action_idempotency_remember(
             _recent_agent_action_dispatches.pop(k, None)
 
 
+# ── Tag taxonomy cache for prompt-template injection ──────────────────
+# Populated on demand and refreshed every _TAG_TAXONOMY_TTL seconds (per
+# org). The taxonomy doesn't change per dispatch, so a 1-second in-process
+# cache amortizes the DB read across burst dispatches without holding stale
+# data when the operator adds a tag.
+_TAG_TAXONOMY_CACHE: dict[str, tuple[float, list[str]]] = {}
+_TAG_TAXONOMY_TTL = 1.0  # seconds
+
+
+def _get_tag_taxonomy(org: str) -> list[str]:
+    """Return the tag-name list for *org*, cached for ``_TAG_TAXONOMY_TTL``s."""
+    now = time.time()
+    cached = _TAG_TAXONOMY_CACHE.get(org)
+    if cached and now - cached[0] < _TAG_TAXONOMY_TTL:
+        return cached[1]
+    try:
+        rows = graph_ops.list_collab_topics(org=org)
+    except Exception:
+        logger.exception("agent-actions: tag taxonomy lookup failed org=%s", org)
+        rows = []
+    names = [r.get("name", "") for r in rows if r.get("name")]
+    _TAG_TAXONOMY_CACHE[org] = (now, names)
+    return names
+
+
 def _build_send_to_primer(
     *,
     asset_id: str,
@@ -7892,10 +7933,17 @@ async def api_agent_action_dispatch(request):
             status_code=409,
         )
 
+    # Inject the org's current tag taxonomy so prompts that need a tag
+    # whitelist (e.g. note.update-summary) can render ``{tag_list}``
+    # without making the action author thread it through page_context.
+    rendered_context = dict(page_context)
+    if "tag_list" not in rendered_context:
+        rendered_context["tag_list"] = ", ".join(_get_tag_taxonomy(target_org))
+
     rendered_prompt = _render_agent_action_prompt(
         template,
         asset_id=asset_id,
-        page_context=page_context,
+        page_context=rendered_context,
         dispatched_by_session=dispatched_by_session or "",
         member_key=member_key,
     )

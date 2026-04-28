@@ -2784,6 +2784,7 @@ def cmd_note(args):
                 auto_provenance_source_id=auto_src_id,
                 auto_provenance_turn=auto_turn,
                 short_description=getattr(args, "short_description", None),
+                keywords=getattr(args, "keywords", None),
                 org=getattr(args, "org", None),
             )
         except FileNotFoundError as e:
@@ -2947,6 +2948,7 @@ def cmd_note_update(args):
                 attachments=attach_paths,
                 html_path=html_path,
                 short_description=getattr(args, "short_description", None),
+                keywords=getattr(args, "keywords", None),
                 org=getattr(args, "org", None),
             )
         except _ops.CrossOrgWriteError as e:
@@ -4103,6 +4105,8 @@ def main():
     p_note.add_argument("--html", help="HTML file for rich-content note (creates version-paired attachment)")
     p_note.add_argument("--short-description", dest="short_description",
                         help="One or two sentences explaining the note's purpose (used in card previews / hover tooltips / search summaries)")
+    p_note.add_argument("--keywords", dest="keywords",
+                        help="Comma-separated synonym/alias list for search (indexed by sources_fts; e.g. 'worktree,worktrees,branch checkout')")
     p_note.set_defaults(func=cmd_note_router)
 
     # notes (list notes with optional recency filter)

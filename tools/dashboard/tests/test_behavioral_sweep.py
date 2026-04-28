@@ -989,6 +989,140 @@ index 7654321..1234567 100644
 }
 
 
+# Search results fixture (auto-kvka6). Each row mirrors the post-grouping
+# response shape from /api/search?group=1 — server-side enrichment fills
+# in `org`/`is_peer`/`date`. The mock DAO returns this list verbatim, so
+# the fixture order IS the expected card order.
+#
+# Five rows exercise the auto-kvka6 acceptance:
+#   1. Strong title hit (rank −55) — the curated "Worktrees Dashboard
+#      Specification" — should land at the top so a search for
+#      "Worktree" surfaces the canonical note over noisy body matches.
+#   2 & 3. Two rows that share an identical source title (rollouts of
+#      the same tmux session) at minute-resolution timestamps that
+#      collide — the disambiguator (12-char id + second-resolution
+#      date) must distinguish them.
+#   4. A note with a populated short_description — the card must render
+#      the description row.
+#   5. A note WITHOUT a short_description — the card must NOT render an
+#      empty description row.
+SWEEP_SEARCH_RESULTS = [
+    {
+        "source_id": "kvka6src1-aaaa",
+        "source_title": "Worktrees Dashboard Specification",
+        "source_type": "note",
+        "short_description": (
+            "How worktrees render in the dashboard, including the "
+            "filter strip and per-row actions."
+        ),
+        "keywords": "worktree,worktrees,dashboard,spec",
+        "result_type": "source",
+        "rank": -55.0,
+        "rrf_score": 0.55,
+        "match_count": 1,
+        "project": "autonomy",
+        "platform": "local",
+        "source_created_at": "2026-04-22T19:59:35Z",
+        "source_metadata": json.dumps({"tags": ["worktree", "dashboard"]}),
+        "excerpts": [{
+            "turn_number": None,
+            "content": "Worktrees Dashboard Specification",
+            "result_type": "source",
+            "rank": -55.0,
+        }],
+    },
+    {
+        "source_id": "kvka6src2-bbbb",
+        "source_title": "auto-0422-195935",
+        "source_type": "session",
+        "short_description": None,
+        "keywords": None,
+        "result_type": "thought",
+        "rank": -10.0,
+        "rrf_score": 0.10,
+        "match_count": 3,
+        "project": "autonomy",
+        "platform": "local",
+        "source_created_at": "2026-04-22T19:59:35Z",
+        "source_metadata": "{}",
+        "excerpts": [{
+            "turn_number": 12,
+            "content": "first rollout had worktree dashboard checks",
+            "result_type": "thought",
+            "rank": -10.0,
+        }],
+    },
+    {
+        "source_id": "kvka6src3-cccc",
+        "source_title": "auto-0422-195935",
+        "source_type": "session",
+        "short_description": None,
+        "keywords": None,
+        "result_type": "thought",
+        "rank": -9.5,
+        "rrf_score": 0.095,
+        "match_count": 2,
+        "project": "autonomy",
+        "platform": "local",
+        # SECONDS-resolution differs from the row above by 11s — at
+        # minute resolution the two cards would look identical.
+        "source_created_at": "2026-04-22T19:59:46Z",
+        "source_metadata": "{}",
+        "excerpts": [{
+            "turn_number": 7,
+            "content": "second rollout retried the worktree assertion",
+            "result_type": "thought",
+            "rank": -9.5,
+        }],
+    },
+    {
+        "source_id": "kvka6src4-dddd",
+        "source_title": "Pitfall: stash pop loses untracked",
+        "source_type": "note",
+        "short_description": (
+            "Untracked files are silently dropped if `git stash pop` "
+            "conflicts; always commit first."
+        ),
+        "keywords": "git,stash,pitfall",
+        "result_type": "source",
+        "rank": -8.0,
+        "rrf_score": 0.08,
+        "match_count": 1,
+        "project": "autonomy",
+        "platform": "local",
+        "source_created_at": "2026-04-21T10:30:00Z",
+        "source_metadata": json.dumps({"tags": ["pitfall", "git"]}),
+        "excerpts": [{
+            "turn_number": None,
+            "content": "Pitfall: stash pop loses untracked",
+            "result_type": "source",
+            "rank": -8.0,
+        }],
+    },
+    {
+        "source_id": "kvka6src5-eeee",
+        "source_title": "Bare body match",
+        "source_type": "note",
+        "short_description": None,  # absent → card omits the description row
+        "keywords": None,
+        "result_type": "thought",
+        "rank": -5.0,
+        "rrf_score": 0.05,
+        "match_count": 1,
+        "project": "autonomy",
+        "platform": "local",
+        "source_created_at": "2026-04-20T08:00:00Z",
+        "source_metadata": "{}",
+        "excerpts": [{
+            "turn_number": 2,
+            "content": "body mentions worktree once",
+            "result_type": "thought",
+            "rank": -5.0,
+        }],
+    },
+]
+
+
 def _build_fixture() -> dict:
     """Build the complete fixture dict for behavioral sweep tests."""
     entries = dict(SWEEP_SESSION_ENTRIES)
@@ -1016,7 +1150,10 @@ def _build_fixture() -> dict:
         "bead_deps": SWEEP_BEAD_DEPS,
         "graph_sources": SWEEP_GRAPH_SOURCES,
         "graph_attachments": SWEEP_GRAPH_ATTACHMENTS,
-        "search_results": SWEEP_SEARCH_RESULTS_DASHBOARD,
+        # Both fixtures coexist in the same list; the mock DAO substring-filters
+        # by query, so ?q=dashboard surfaces the auto-qlfg1 rows and
+        # ?q=worktree surfaces the auto-kvka6 ranking/disambiguator rows.
+        "search_results": SWEEP_SEARCH_RESULTS_DASHBOARD + SWEEP_SEARCH_RESULTS,
         "settings": {
             "dashboard.agent-actions": {
                 "_orgs": {"autonomy": SWEEP_AGENT_ACTIONS},
@@ -1673,6 +1810,113 @@ COLLAB_PAGE_CHECKS = """
     // Thought capture input present at page level (above tabs, always visible)
     var thoughtInput = document.querySelector('.page-capture-input');
     r.has_thought_input = !!thoughtInput;
+
+    // No template artifacts
+    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+"""
+
+# ── Search page JS check bundle (auto-kvka6) ─────────────────────────
+
+SEARCH_PAGE_CHECKS = """
+    var bodyText = document.body.innerText;
+
+    // Result cards rendered (one per source). The mock DAO returns the
+    // SWEEP_SEARCH_RESULTS list in fixture order, and the search page
+    // sorts by rank — so the strongest title-boosted hit (rank ≈ -55)
+    // should land first.
+    var cards = document.querySelectorAll('.sp-source-card');
+    r.card_count = cards.length;
+    r.has_cards = cards.length > 0;
+
+    var titles = [];
+    cards.forEach(function(c) {
+        var t = c.querySelector('.sp-card-title');
+        titles.push(t ? t.textContent.trim() : '');
+    });
+    r.titles = titles;
+    r.first_title = titles[0] || '';
+
+    // Title-boost: the curated "Worktrees Dashboard Specification" with
+    // rank −55 must outrank the rank −10 session-derivation cards. The
+    // mock DAO returns rows in the fixture order; the page sorts by
+    // rank server-side so the order survives.
+    r.title_boosted_first = titles[0] === 'Worktrees Dashboard Specification';
+
+    // Tag-overlap soft signal: the row tagged "pitfall" / "git" should
+    // come ahead of the bare body match. Both rows match on tokens; the
+    // server's tag-overlap boost reorders them.
+    var pitfallIdx = titles.indexOf('Pitfall: stash pop loses untracked');
+    var bareIdx = titles.indexOf('Bare body match');
+    r.pitfall_index = pitfallIdx;
+    r.bare_index = bareIdx;
+    r.tag_overlap_outranks_bare = pitfallIdx !== -1 && bareIdx !== -1
+        && pitfallIdx < bareIdx;
+
+    // short_description rendering: the curated note has one set; the
+    // bare body match does not. Card 0 must show the description; card 4
+    // must NOT have a sp-card-summary.
+    var firstSummary = cards[0] ? cards[0].querySelector('.sp-card-summary') : null;
+    r.first_card_has_summary = !!firstSummary;
+    r.first_card_summary_text = firstSummary ? firstSummary.textContent.trim() : '';
+
+    var bareCard = null;
+    cards.forEach(function(c) {
+        var t = c.querySelector('.sp-card-title');
+        if (t && t.textContent.trim() === 'Bare body match') bareCard = c;
+    });
+    r.bare_card_has_summary = bareCard
+        ? !!bareCard.querySelector('.sp-card-summary')
+        : null;
+
+    // Disambiguator: every card carries a 12-char id. Two collision
+    // cards (same title) must have DISTINCT ids and DISTINCT date
+    // strings (second-resolution) so they're not interchangeable at
+    // a glance.
+    var ids = [];
+    var dates = [];
+    var collisionIds = [];
+    var collisionDates = [];
+    cards.forEach(function(c) {
+        var idEl = c.querySelector('[data-testid=sp-card-id]');
+        var idTxt = idEl ? idEl.textContent.trim() : '';
+        ids.push(idTxt);
+        var footerSpans = c.querySelectorAll('.sp-card-footer span');
+        var dateTxt = footerSpans.length >= 2 ? footerSpans[1].textContent.trim() : '';
+        dates.push(dateTxt);
+        var titleEl = c.querySelector('.sp-card-title');
+        if (titleEl && titleEl.textContent.trim() === 'auto-0422-195935') {
+            collisionIds.push(idTxt);
+            collisionDates.push(dateTxt);
+        }
+    });
+    r.ids = ids;
+    r.dates = dates;
+    r.collision_ids = collisionIds;
+    r.collision_dates = collisionDates;
+    r.all_cards_have_id = ids.every(function(i) { return i && i.length === 12; });
+    r.collision_ids_distinct = collisionIds.length === 2
+        && collisionIds[0] !== collisionIds[1];
+    r.collision_dates_distinct = collisionDates.length === 2
+        && collisionDates[0] !== collisionDates[1];
+    // Second-resolution date must be 19 chars: "YYYY-MM-DD HH:MM:SS"
+    r.dates_at_second_resolution = collisionDates.every(function(d) {
+        return d.length >= 19;
+    });
+
+    // Sticky filter strip flush against the global header: with
+    // body.route-search active, main#content padding-top is 0. Reading
+    // the computed style avoids brittle pixel measurement.
+    var mainEl = document.getElementById('content');
+    var bodyHasRoute = document.body.classList.contains('route-search');
+    r.body_has_route_search = bodyHasRoute;
+    if (mainEl) {
+        var cs = getComputedStyle(mainEl);
+        r.main_padding_top = cs.paddingTop;
+        r.main_padding_top_zero = parseFloat(cs.paddingTop) === 0;
+    } else {
+        r.main_padding_top = '';
+        r.main_padding_top_zero = false;
+    }
 
     // No template artifacts
     r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
@@ -2395,6 +2639,101 @@ class TestCollabPageBehavior:
         """No raw Jinja template syntax visible."""
         c = self._checks
         assert c.get("no_jinja"), "Raw Jinja template syntax visible on collab page"
+
+
+class TestSearchPageRanking:
+    """Search page ranking + disambiguator behavioural sweep — auto-kvka6.
+
+    Phase 2 (auto-qlfg1) shipped TestSearchPageBehavior covering the
+    chrome groundwork (chip rail, grouping, empty states); this class
+    extends coverage to the Phase 3 ranking checks: title-boost,
+    tag-overlap, short_description rendering, and the per-card
+    disambiguator stamp on title collisions.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        # ?q=worktree exercises the search path so the sticky strip is
+        # visible and the auto-kvka6 ranking fixture rows surface (the
+        # mock DAO substring-filters search_results by query).
+        result = _navigate_and_check(
+            "/search?q=worktree", SEARCH_PAGE_CHECKS, wait_ms=1200,
+        )
+        request.cls._checks = result
+
+    def test_search_title_match_outranks_body_match(self):
+        """The curated 'Worktrees Dashboard Specification' lands at the top."""
+        c = self._checks
+        assert c.get("has_cards"), \
+            f"No search cards rendered (count={c.get('card_count')})"
+        assert c.get("title_boosted_first"), (
+            "Title-boosted source did not rank first; "
+            f"got titles={c.get('titles')}"
+        )
+
+    def test_search_tag_overlap_boosts_rank(self):
+        """A row carrying the matching 'pitfall' tag ranks above the bare body match."""
+        c = self._checks
+        assert c.get("tag_overlap_outranks_bare"), (
+            "Pitfall-tagged row did not outrank bare body match: "
+            f"pitfall_index={c.get('pitfall_index')} "
+            f"bare_index={c.get('bare_index')} titles={c.get('titles')}"
+        )
+
+    def test_search_card_renders_short_description(self):
+        """Cards with a short_description render the description row."""
+        c = self._checks
+        assert c.get("first_card_has_summary"), (
+            "First card (with short_description) is missing the .sp-card-summary row"
+        )
+        text = c.get("first_card_summary_text", "")
+        assert "worktrees" in text.lower() or "render" in text.lower(), (
+            f"First card summary text mismatch: {text!r}"
+        )
+        # Inverse: the row without a short_description must NOT render
+        # an empty summary row.
+        assert c.get("bare_card_has_summary") is False, (
+            "Card without short_description rendered an empty .sp-card-summary"
+        )
+
+    def test_search_card_disambiguator_on_title_collision(self):
+        """Two cards sharing a title each carry a distinct 12-char id and
+        second-resolution date.
+        """
+        c = self._checks
+        assert c.get("all_cards_have_id"), (
+            f"Not every card rendered the 12-char source_id "
+            f"disambiguator: ids={c.get('ids')}"
+        )
+        assert c.get("collision_ids_distinct"), (
+            f"Title-collision cards share identical ids: "
+            f"{c.get('collision_ids')}"
+        )
+        assert c.get("collision_dates_distinct"), (
+            f"Title-collision cards share identical dates (need second "
+            f"resolution): {c.get('collision_dates')}"
+        )
+        assert c.get("dates_at_second_resolution"), (
+            f"Dates are not at second resolution "
+            f"(YYYY-MM-DD HH:MM:SS): {c.get('collision_dates')}"
+        )
+
+    def test_search_filter_strip_flush_to_header(self):
+        """body.route-search drops main's pt-6 so the sticky strip flushes."""
+        c = self._checks
+        assert c.get("body_has_route_search"), (
+            "body.route-search class missing on /search route"
+        )
+        assert c.get("main_padding_top_zero"), (
+            f"main#content padding-top is not 0 on /search "
+            f"(got {c.get('main_padding_top')!r})"
+        )
+
+    def test_no_template_artifacts(self):
+        """No raw Jinja template syntax visible on /search."""
+        c = self._checks
+        assert c.get("no_jinja"), \
+            "Raw Jinja template syntax visible on search page"
 
 
 class TestStreamsPageBehavior:
