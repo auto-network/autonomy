@@ -1476,6 +1476,13 @@ async function route() {
   } else {
     content.innerHTML = '<div class="text-gray-400">Page not found</div>';
   }
+  // Notify persistent (un-cleared) header components that the SPA route
+  // changed. Used by the agent-actions dropdown — its Alpine root lives
+  // outside the per-page fragment so x-init runs once; this event lets
+  // it re-derive its asset and refetch members on every nav.
+  window.dispatchEvent(new CustomEvent('app:navigated', {
+    detail: { path: window.location.pathname },
+  }));
 }
 
 // ── Event Handlers ───────────────────────────────────────────

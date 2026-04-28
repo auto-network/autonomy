@@ -6873,6 +6873,12 @@ async def api_graph_settings_list(request):
     if err:
         return JSONResponse({"error": err}, status_code=400)
     org = _caller_org(request)
+    if os.environ.get("DASHBOARD_MOCK"):
+        from tools.dashboard.dao import mock as dao_mock
+        return JSONResponse({
+            "members": dao_mock.get_settings_members(set_id, org=org),
+            "dropped": {},
+        })
     members = graph_ops.read_set(
         set_id, target_revision=target, min_revision=minrev, org=org,
     )
@@ -7351,6 +7357,42 @@ async def api_agent_action_dispatch(request):
         )
     if not isinstance(dispatched_by_session, str):
         dispatched_by_session = ""
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        from tools.dashboard.dao import mock as dao_mock
+        src = dao_mock.get_source(asset_id)
+        if src is None:
+            return JSONResponse(
+                {"error": f"asset not found: {asset_id}"}, status_code=404,
+            )
+        from tools.dashboard.org_identity import session_org_slug
+        target_org = session_org_slug(src)
+        members = dao_mock.get_settings_members(set_id, org=target_org)
+        payload = next(
+            (m.get("payload") or {} for m in members if m.get("key") == member_key),
+            None,
+        )
+        if payload is None:
+            return JSONResponse(
+                {
+                    "error": "agent-action member not found",
+                    "set_id": set_id,
+                    "member_key": member_key,
+                    "target_org": target_org,
+                },
+                status_code=404,
+            )
+        if bool(payload.get("universal")) and member_key == "universal.send-to":
+            if not target_session_name:
+                return JSONResponse(
+                    {"error": "target_session_name required for Send To"},
+                    status_code=400,
+                )
+            return JSONResponse({"ok": True, "sent_to": target_session_name})
+        return JSONResponse({
+            "ok": True,
+            "agentic_source_id": f"mock-{member_key}-{asset_id[:8]}",
+        })
 
     # ── Step 1: resolve the target asset and its owning org ──────
     source = graph_ops.get_source(asset_id)

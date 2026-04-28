@@ -973,7 +973,10 @@
              class="bg-gray-700 text-gray-100 px-3 md:px-4 py-2 rounded-lg flex-1 max-w-xl text-sm
                     focus:outline-none focus:ring-2 focus:ring-indigo-500">
       <span class="text-sm text-gray-400 hidden md:inline" id="page-title"></span>
-      <div id="header-actions" class="flex items-center gap-2 ml-auto">
+      {# Persistent slot for the agentic-actions dropdown — never cleared by the SPA
+         router. Sibling of #header-actions, which IS cleared per page nav for
+         page-specific buttons (e.g. design Capture). #}
+      <div id="agent-actions-slot" class="flex items-center gap-2 ml-auto">
 
         <!-- Agentic actions dropdown (auto-pqgrl) -->
         <div class="agent-actions-root" x-data="agentActionsComponent()" x-init="init()" @keydown.escape.window="closePanel(); closeSendToModal()">
@@ -1047,23 +1050,14 @@
               </div>
               <div class="send-to-session-list">
                 <template x-if="liveSessions.length === 0">
-                  <div class="send-to-session-row" style="cursor:default;">
-                    <div class="send-to-session-info">
-                      <div class="send-to-session-name">No live sessions.</div>
-                    </div>
-                  </div>
+                  <div class="send-to-empty-row">No live sessions.</div>
                 </template>
-                <template x-for="s in liveSessions" :key="s.tmux_name">
+                <template x-for="s in liveSessions" :key="s.session_id || s.tmux_session">
                   <button type="button"
-                          class="send-to-session-row"
-                          :data-testid="'agent-actions-send-to-session-' + s.tmux_name"
+                          class="send-to-session-button"
+                          :data-testid="'agent-actions-send-to-session-' + (s.session_id || s.tmux_session)"
                           @click="sendToSession(s)">
-                    <div class="send-to-session-glyph" x-text="sessionGlyph(s)"></div>
-                    <div class="send-to-session-info">
-                      <div class="send-to-session-name" x-text="s.tmux_name"></div>
-                      <div class="send-to-session-label" x-text="s.label || ''"></div>
-                    </div>
-                    <span class="send-to-session-state" :class="stateClass(s)" x-text="stateLabel(s)"></span>
+                    {% include "partials/session-card.html" %}
                   </button>
                 </template>
               </div>
@@ -1076,6 +1070,7 @@
         </div>
 
       </div>
+      <div id="header-actions" class="flex items-center gap-2"></div>
     </header>
 
     <!-- SSE interruption banner — shown on server restart or unrecoverable gap -->

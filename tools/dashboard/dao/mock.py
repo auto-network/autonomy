@@ -1136,6 +1136,43 @@ def resolve_embed(embed_id: str, version: str | None = None) -> dict | None:
     return None
 
 
+# ── settings DAO interface ──────────────────────────────────────────
+# Mirrors the response shape of /api/graph/settings/<set_id> (production
+# returns SetMembers.as_payload()) for the dashboard.agent-actions
+# dropdown. The fixture's "settings" key is keyed by set_id and may
+# specify members per-org via {"_orgs": {"<slug>": [...]}} or a flat list
+# that applies to every org.
+
+def get_settings_members(set_id: str, org: str | None = None) -> list[dict]:
+    """Return the members list for *set_id*, optionally filtered to *org*.
+
+    Each row is normalized to ``{"key": str, "payload": dict, "org": str}``
+    matching the subset of ``ResolvedSetting.to_dict()`` that the dashboard
+    Settings API exposes. Members declared without an explicit org apply
+    to every caller (canonical members), mirroring the production
+    promotion model.
+    """
+    data = _load()
+    block = data.get("settings") or {}
+    raw = block.get(set_id)
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        flat = list(raw.get("_all", []))
+        per_org = raw.get("_orgs") or {}
+        if org and org in per_org:
+            flat = flat + list(per_org[org])
+    else:
+        flat = list(raw)
+    out: list[dict] = []
+    for entry in flat:
+        member = dict(entry)
+        member.setdefault("org", org or "")
+        member.setdefault("payload", {})
+        out.append(member)
+    return out
+
+
 # ── session mutation stubs (no-ops in mock mode) ────────────────────
 # These prevent crashes when session management endpoints are called in mock mode.
 
