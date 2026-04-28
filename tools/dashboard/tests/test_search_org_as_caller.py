@@ -230,9 +230,14 @@ def test_state_filter_any_sends_no_states_param(test_app):
 
 def test_search_js_sends_states_param_from_state_chip():
     """search.js _refetch() builds the ``&states=…`` query segment from
-    selectedState. The condition ``if (this.selectedState) url +=
-    '&states=' + …`` is the contract."""
+    the active STATE_OPTIONS entry. The minimum-state mapping (auto-gsu99)
+    joins ``opt.states`` with commas — e.g. picking Curated produces
+    ``&states=curated,published,canonical`` — so the contract is now
+    ``url += '&states=' + encodeURIComponent(opt.states.join(','))``
+    rather than the verbatim selectedState pass-through it was on
+    auto-zvu3z."""
     src = _read_search_js()
-    assert "url += '&states=' + encodeURIComponent(this.selectedState)" in src, (
-        "search.js _refetch() no longer appends &states= when state chip is set"
+    assert "url += '&states=' + encodeURIComponent(opt.states.join(','))" in src, (
+        "search.js _refetch() no longer joins opt.states for the &states= "
+        "query segment — minimum-state mapping is broken"
     )
