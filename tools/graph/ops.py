@@ -58,6 +58,28 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
 )
 
 
+# ── Note title extraction ────────────────────────────────────
+
+
+def _title_from_content(content: str) -> str:
+    """Pick a clean human-readable title from the start of note content.
+
+    If the content begins with a markdown ``# heading`` (any depth), the
+    leading ``#`` markers and whitespace are stripped — the body itself is
+    not modified. Otherwise the first 80 chars of the raw content are used,
+    matching the legacy behavior. Always returns a string (possibly empty).
+    """
+    if not content:
+        return ""
+    stripped = content.lstrip()
+    first_line = stripped.split("\n", 1)[0]
+    if first_line.startswith("#"):
+        body = first_line.lstrip("#").strip()
+        if body:
+            return body[:80]
+    return content[:80]
+
+
 # ── Cross-org write-rejection error ──────────────────────────
 
 
@@ -2065,15 +2087,21 @@ def create_note(
     html_path: str | None = None,
     auto_provenance_source_id: str | None = None,
     auto_provenance_turn: int | None = None,
+    short_description: str | None = None,
     org: str | None = None,
 ) -> dict:
     """Create a note source + turn-1 thought in ``org``'s DB.
 
     Returns a dict with ``id``, ``source_id`` (same as ``id``), ``title``,
-    ``org``, ``lines``, ``chars``, ``attachments`` (list of attachment
-    dicts), ``rich_content`` (bool), ``auto_provenance`` (optional dict
-    ``{source_id, turn}``). Mirrors :func:`cli.cmd_note` output fields so
-    callers can render the same echo lines.
+    ``short_description``, ``org``, ``lines``, ``chars``, ``attachments``
+    (list of attachment dicts), ``rich_content`` (bool), ``auto_provenance``
+    (optional dict ``{source_id, turn}``). Mirrors :func:`cli.cmd_note`
+    output fields so callers can render the same echo lines.
+
+    If ``content`` begins with a markdown ``# heading``, the leading marker
+    is stripped from ``title`` (the body content is unchanged). The new
+    ``short_description`` field is stored as-is when provided; absent, the
+    column stays NULL.
 
     ``html_path`` enables rich-content mode — the HTML is stored as a
     version-paired attachment keyed by ``<source-id>@1``. ``attachments``
@@ -2098,10 +2126,11 @@ def create_note(
         type="note",
         platform="local",
         project=project or "autonomy",
-        title=content[:80],
+        title=_title_from_content(content),
         file_path=source_key,
         metadata=meta,
         publication_state="curated",
+        short_description=short_description,
     )
 
     db = _open(org)
@@ -2171,6 +2200,7 @@ def create_note(
         "id": source.id,
         "source_id": source.id,
         "title": source.title,
+        "short_description": source.short_description,
         "org": _resolve_org(org) or "",
         "lines": lines,
         "chars": len(content),
@@ -2191,6 +2221,7 @@ def update_note(
     integrate_comments: list[str] | None = None,
     attachments: list[str] | None = None,
     html_path: str | None = None,
+    short_description: str | None = None,
     org: str | None = None,
 ) -> dict:
     """Append a new version to an existing note.
@@ -2200,6 +2231,11 @@ def update_note(
     ``source_id``, ``org``, ``lines``, ``chars``, ``integrated``
     (list of integrated comment ids), ``rich_content`` (post-update),
     ``attachments`` (list of new attachment records).
+
+    The title row is refreshed from the new content (the leading ``#``
+    heading marker, if any, is stripped). When ``short_description`` is
+    passed it overwrites the column; pass ``None`` to leave the existing
+    value untouched.
 
     Rich-content notes (``metadata.rich_content == True``) require
     ``html_path``; the dual HTML/markdown update keeps the version
@@ -2315,8 +2351,13 @@ def update_note(
         db.update_thought_content(thought["id"], content)
         db.conn.execute(
             "UPDATE sources SET title = ? WHERE id = ?",
-            (content[:80], src_id),
+            (_title_from_content(content), src_id),
         )
+        if short_description is not None:
+            db.conn.execute(
+                "UPDATE sources SET short_description = ? WHERE id = ?",
+                (short_description, src_id),
+            )
 
         for name, etype in extract_entities(content):
             eid = db.upsert_entity(name, etype)
@@ -2352,6 +2393,7 @@ def update_note(
         "not_found_comments": not_found,
         "rich_content": is_rich,
         "attachments": att_records,
+        "short_description": short_description,
     }
 
 
