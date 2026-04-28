@@ -20,10 +20,15 @@
   var _handlers = {};       // topic -> Set<fn>
   var _topicListening = new Set(); // topics with an ES listener already attached
   var _es = null;             // the single global EventSource
+  var _esConnectedAt = 0;     // ms-precision wall-clock when _es opened
   var _lastSeq = 0;
   var _serverEpoch = null;   // int timestamp from server, set from first event
   var _replaying = false;
   var _heldEvents = [];
+  // /api/diag depth fields — never read on the hot path.
+  var _gapReplaysCount = 0;
+  var _lastGapReplayTs = 0;     // ms-precision wall-clock; 0 means never
+  var _lastUserInteractionTs = Date.now();
 
   function _dispatch(topic, data) {
     var set = _handlers[topic];
@@ -103,6 +108,8 @@
   }
 
   async function _replayGap(fromSeq, toSeq) {
+    _gapReplaysCount++;
+    _lastGapReplayTs = Date.now();
     console.info('[EventBus] gap detected: seq ' + fromSeq + '-' + toSeq + ', replaying');
     try {
       var resp = await fetch('/api/events/replay?from=' + fromSeq + '&to=' + toSeq);
@@ -146,7 +153,14 @@
     // Required for manual reconnect (_es.close() + _connect()) — the old
     // EventSource's listeners don't transfer to the new object.
     _topicListening = new Set();
-    _es = new EventSource('/api/events');
+    // Attach the diag client_id so /api/diag/sessions can correlate this SSE
+    // queue back to the tab that POSTed the matching diag reply.
+    var cid = '';
+    try { cid = _ensureClientId(); } catch (e) { cid = ''; }
+    var url = '/api/events';
+    if (cid) url += '?client_id=' + encodeURIComponent(cid);
+    _es = new EventSource(url);
+    _esConnectedAt = Date.now();
 
     // Attach listeners for any topics already registered before _connect ran.
     for (var topic in _handlers) {
@@ -278,15 +292,92 @@
     }
   }
 
+  // Passive listeners for last-user-interaction. Keep them passive so we
+  // never block scroll/keypress; they exist purely to surface idle time
+  // in /api/diag responses.
+  function _bumpInteraction() { _lastUserInteractionTs = Date.now(); }
+  try {
+    var opts = { passive: true, capture: true };
+    window.addEventListener('keydown', _bumpInteraction, opts);
+    window.addEventListener('mousedown', _bumpInteraction, opts);
+    window.addEventListener('click', _bumpInteraction, opts);
+    window.addEventListener('scroll', _bumpInteraction, opts);
+    window.addEventListener('touchstart', _bumpInteraction, opts);
+    window.addEventListener('focus', _bumpInteraction, opts);
+  } catch (e) { /* non-browser env (jsdom test) — ignore */ }
+
+  function _handlerCount() {
+    var n = 0;
+    for (var k in _handlers) {
+      if (_handlers.hasOwnProperty(k) && _handlers[k]) {
+        n += _handlers[k].size || 0;
+      }
+    }
+    return n;
+  }
+
+  function _seenIdentitiesSize() {
+    try {
+      var sessions = (window.Alpine && Alpine.store('sessions')) || {};
+      var total = 0;
+      for (var id in sessions) {
+        if (!sessions.hasOwnProperty(id)) continue;
+        var s = sessions[id];
+        if (s && s._seenIdentities) {
+          total += Object.keys(s._seenIdentities).length;
+        }
+      }
+      return total;
+    } catch (e) { return 0; }
+  }
+
   window._diagCollectors = window._diagCollectors || {};
-  window._diagClientState = function() {
+  window._diagClientState = function(emitTs) {
     var es = _es;
+    var nowMs = Date.now();
+    // emitTs (server-stamped, in ms) → clock_skew_ms = client.now - emit_ts.
+    // A positive value means the client clock is ahead of the server.
+    var clockSkewMs = null;
+    if (typeof emitTs === 'number' && isFinite(emitTs) && emitTs > 0) {
+      clockSkewMs = nowMs - emitTs;
+    }
+    var connType = null;
+    try {
+      var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      if (conn && typeof conn.effectiveType === 'string') connType = conn.effectiveType;
+    } catch (e) { /* ignore */ }
+    var screenW = null, screenH = null;
+    try {
+      if (window.screen) { screenW = window.screen.width; screenH = window.screen.height; }
+    } catch (e) { /* ignore */ }
+    var tz = null;
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (e) { /* ignore */ }
     return {
+      // Existing fields — unchanged shape.
       event_source_ready_state: es ? es.readyState : null,
       replaying: !!_replaying,
       held_events_count: _heldEvents.length,
       client_last_seq: _lastSeq,
       server_epoch: _serverEpoch,
+      // New depth fields — see auto-wldnv.
+      page: (window.location && (window.location.pathname + window.location.search)) || '',
+      referrer: (typeof document !== 'undefined' && document.referrer) || '',
+      visibility_state: (typeof document !== 'undefined' && document.visibilityState) || null,
+      online: (typeof navigator !== 'undefined') ? !!navigator.onLine : null,
+      viewport: {
+        w: (typeof window !== 'undefined') ? window.innerWidth : null,
+        h: (typeof window !== 'undefined') ? window.innerHeight : null,
+      },
+      screen: { w: screenW, h: screenH },
+      time_zone: tz,
+      clock_skew_ms: clockSkewMs,
+      last_user_interaction_ms: Math.max(0, nowMs - _lastUserInteractionTs),
+      network_type: connType,
+      events_handler_count: _handlerCount(),
+      seen_identities_size: _seenIdentitiesSize(),
+      gap_replays_count: _gapReplaysCount,
+      last_gap_replay_ts: _lastGapReplayTs,
+      es_connected_age_ms: _esConnectedAt > 0 ? Math.max(0, nowMs - _esConnectedAt) : null,
     };
   };
 
@@ -305,11 +396,16 @@
       console.warn('[EventBus] diag collector error', requestType, err);
       collected = {};
     }
+    // Server stamps emit_ts (seconds) and emit_ts_ms; pass ms-precision
+    // form so _diagClientState can compute clock_skew_ms cleanly.
+    var emitTsMs = (typeof payload.emit_ts_ms === 'number')
+      ? payload.emit_ts_ms
+      : (typeof payload.emit_ts === 'number' ? payload.emit_ts * 1000 : null);
     var body = {
       req_id: reqId,
       request_type: requestType,
       client_id: _ensureClientId(),
-      payload: Object.assign({ client_state: window._diagClientState() }, collected),
+      payload: Object.assign({ client_state: window._diagClientState(emitTsMs) }, collected),
     };
     try {
       fetch('/api/diag/client', {
@@ -332,6 +428,9 @@
   window.unregisterHandler = unregisterHandler;
   window.reconnectEvents = reconnectEvents;
   window._connect = _connect;
+  // /api/diag accessors — read-only views into the gap-replay tracker.
+  window._diagGapReplaysCount = function() { return _gapReplaysCount; };
+  window._diagLastGapReplayTs = function() { return _lastGapReplayTs; };
   window.dashboardEvents = window.dashboardEvents || {};
   window.dashboardEvents.onSettingChanged = onSettingChanged;
   Object.defineProperty(window, '_lastSeq', {
