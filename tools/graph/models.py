@@ -32,6 +32,7 @@ class Source:
     successor_id: str | None = None
     moved_to_org: str | None = None
     short_description: str | None = None  # one or two sentences explaining the note's purpose
+    keywords: str | None = None  # comma-separated synonym/alias list, indexed by sources_fts
 
 
 @dataclass

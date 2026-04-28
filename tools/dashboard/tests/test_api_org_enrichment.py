@@ -4,7 +4,8 @@ endpoints. Spec: auto-w005w.
 All three surfaces must return a resolved ``org`` object on their payloads so
 the templates can render the glyph + name without a second round-trip or
 client-side cascade logic. Dates on search results are normalised to
-``YYYY-MM-DD HH:MM`` (24hr).
+``YYYY-MM-DD HH:MM:SS`` (24hr) — second-resolution disambiguates
+collisions between rows ingested seconds apart (auto-kvka6 §6).
 """
 
 from __future__ import annotations
@@ -72,14 +73,14 @@ def test_api_search_attaches_org_and_date(test_app):
     # Anchore source — resolved, real org.
     assert first["org"]["slug"] == "anchore"
     assert first["org"]["resolved"] is True
-    # Date — 24hr "YYYY-MM-DD HH:MM".
-    assert first["date"] == "2026-03-22 14:32"
+    # Date — 24hr "YYYY-MM-DD HH:MM:SS" (second resolution, auto-kvka6).
+    assert first["date"] == "2026-03-22 14:32:00"
 
     # Path-derived project — unresolved, renders "?".
     assert second["org"]["slug"] == "unknown"
     assert second["org"]["resolved"] is False
     assert second["org"]["initial"] == "?"
-    assert second["date"] == "2026-04-01 08:15"
+    assert second["date"] == "2026-04-01 08:15:42"
 
 
 # ── /api/source/{id} — org enrichment (mock mode) ─────────────────────

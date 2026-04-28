@@ -327,6 +327,7 @@ class HttpClient:
         attachments=None, html_path=None,
         auto_provenance_source_id=None, auto_provenance_turn=None,
         short_description=None,
+        keywords=None,
         org=None,
     ):
         if attachments or html_path:
@@ -337,6 +338,7 @@ class HttpClient:
                 auto_provenance_source_id=auto_provenance_source_id,
                 auto_provenance_turn=auto_provenance_turn,
                 short_description=short_description,
+                keywords=keywords,
                 org=org,
             )
         body: dict[str, Any] = {"content": content}
@@ -352,6 +354,8 @@ class HttpClient:
             body["auto_provenance_turn"] = auto_provenance_turn
         if short_description:
             body["short_description"] = short_description
+        if keywords:
+            body["keywords"] = keywords
         result = self._post("/api/graph/note", body, org=org)
         return _normalize_note_result(result, content)
 
@@ -359,7 +363,7 @@ class HttpClient:
         self, content, *, tags, author, project,
         attachments, html_path,
         auto_provenance_source_id, auto_provenance_turn,
-        short_description, org,
+        short_description, keywords, org,
     ):
         fields: dict[str, str] = {"content": content}
         if tags:
@@ -374,6 +378,8 @@ class HttpClient:
             fields["auto_provenance_turn"] = str(auto_provenance_turn)
         if short_description:
             fields["short_description"] = short_description
+        if keywords:
+            fields["keywords"] = keywords
         files: list[tuple[str, str, bytes, str]] = []
         if html_path:
             files.append(_file_tuple("html", html_path))
@@ -389,14 +395,16 @@ class HttpClient:
 
     def update_note(
         self, source_id, content, *, integrate_comments=None,
-        attachments=None, html_path=None, short_description=None, org=None,
+        attachments=None, html_path=None, short_description=None,
+        keywords=None, org=None,
     ):
         if attachments or html_path:
             return self._update_note_multipart(
                 source_id, content,
                 integrate_comments=integrate_comments,
                 attachments=attachments, html_path=html_path,
-                short_description=short_description, org=org,
+                short_description=short_description,
+                keywords=keywords, org=org,
             )
         body: dict[str, Any] = {
             "source_id": source_id,
@@ -406,12 +414,14 @@ class HttpClient:
             body["integrate_ids"] = list(integrate_comments)
         if short_description is not None:
             body["short_description"] = short_description
+        if keywords is not None:
+            body["keywords"] = keywords
         result = self._post("/api/graph/note/update", body, org=org)
         return _normalize_update_result(result, content)
 
     def _update_note_multipart(
         self, source_id, content, *, integrate_comments, attachments,
-        html_path, short_description, org,
+        html_path, short_description, keywords, org,
     ):
         fields: dict[str, str] = {
             "source_id": source_id,
@@ -421,6 +431,8 @@ class HttpClient:
             fields["integrate_ids"] = _json.dumps(list(integrate_comments))
         if short_description is not None:
             fields["short_description"] = short_description
+        if keywords is not None:
+            fields["keywords"] = keywords
         files: list[tuple[str, str, bytes, str]] = []
         if html_path:
             files.append(_file_tuple("html", html_path))
@@ -833,6 +845,7 @@ def _normalize_note_result(result: dict, content: str) -> dict:
         "source_id": result.get("source_id"),
         "title": result.get("title") or content[:80],
         "short_description": result.get("short_description"),
+        "keywords": result.get("keywords"),
         "org": result.get("org") or "",
         "lines": result.get("lines", lines),
         "chars": result.get("chars", len(content)),
@@ -860,6 +873,7 @@ def _normalize_update_result(result: dict, content: str) -> dict:
         "attachments": result.get("attachments") or [],
         "rich_content": bool(result.get("rich_content")),
         "short_description": result.get("short_description"),
+        "keywords": result.get("keywords"),
     }
 
 
