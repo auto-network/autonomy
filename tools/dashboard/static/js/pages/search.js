@@ -29,17 +29,123 @@
       results: [],
       loaded: false,
       activeType: 'all',
+      // Org pin (mirrors the ?org= URL param; '' means "All orgs").
+      selectedOrg: '',
+      orgList: [],
+      orgDropdownOpen: false,
 
       init() {
         var params = new URLSearchParams(window.location.search);
         this.query = params.get('q') || '';
+        // Accept ?org= or ?only_org= — the latter matches the back-end name.
+        this.selectedOrg = params.get('org') || params.get('only_org') || '';
+        // Populate org list for the dropdown (best-effort; chip still works
+        // with an empty list — only "All orgs" is selectable).
+        fetch('/api/orgs')
+          .then(r => r.ok ? r.json() : { orgs: [] })
+          .then(d => { this.orgList = this._normalizeOrgs(d && d.orgs || []); })
+          .catch(() => { this.orgList = []; });
         if (!this.query) { this.loaded = true; return; }
-        fetch('/api/search?q=' + encodeURIComponent(this.query) + '&group=1&limit=50')
+        var url = '/api/search?q=' + encodeURIComponent(this.query) +
+                  '&group=1&limit=50';
+        if (this.selectedOrg) {
+          url += '&only_org=' + encodeURIComponent(this.selectedOrg);
+        }
+        fetch(url)
           .then(r => r.json())
           .then(d => {
             this.results = Array.isArray(d) ? d : (d.results || []);
             this.loaded = true;
           });
+      },
+
+      // ── Org chip + dropdown ────────────────────────────────────────
+      _normalizeOrgs(raw) {
+        // /api/orgs returns ``{orgs: [{org: {slug, type}, identity_resolved: {...}}]}``.
+        // Flatten to ``{slug, name, color, favicon, initial, kind}`` for the
+        // dropdown. ``kind`` (= bootstrap row's ``type``) labels the option
+        // as "own" / "peer" / "shared" so the operator sees the relationship.
+        return (raw || []).map(e => {
+          var org = (e && e.org) || {};
+          var ident = (e && e.identity_resolved) || {};
+          var slug = org.slug || ident.slug || '';
+          return {
+            slug: slug,
+            name: ident.name || slug,
+            color: ident.color || '#6c63ff',
+            favicon: ident.favicon || null,
+            initial: ident.initial || (slug ? slug[0].toUpperCase() : '?'),
+            kind: org.type || '',
+          };
+        }).filter(o => o.slug);
+      },
+
+      get orgChip() {
+        if (!this.selectedOrg) {
+          return {
+            label: 'All orgs', allOrgs: true, glyphStyle: '',
+            initial: '∞', favicon: null,
+            title: 'Pin search to an organization',
+          };
+        }
+        var picked = (this.orgList || []).find(o => o.slug === this.selectedOrg);
+        if (!picked) {
+          return {
+            label: this.selectedOrg, allOrgs: false,
+            glyphStyle: 'background:#6c63ff', initial: this.selectedOrg[0].toUpperCase(),
+            favicon: null,
+            title: 'Search pinned to ' + this.selectedOrg,
+          };
+        }
+        return {
+          label: picked.name, allOrgs: false,
+          glyphStyle: picked.favicon ? '' : ('background:' + picked.color),
+          initial: picked.initial, favicon: picked.favicon,
+          title: 'Search pinned to ' + picked.name,
+        };
+      },
+
+      toggleOrgDropdown() {
+        this.orgDropdownOpen = !this.orgDropdownOpen;
+      },
+
+      pickOrg(slug) {
+        this.orgDropdownOpen = false;
+        if ((slug || '') === (this.selectedOrg || '')) return;
+        this.selectedOrg = slug || '';
+        // Update URL — drop ``org`` when "All orgs", set otherwise. Use
+        // ``org`` (short, user-facing) on the URL; the fetch below sends
+        // ``only_org`` which is the back-end's canonical name.
+        var url = new URL(window.location.href);
+        url.searchParams.delete('only_org');
+        if (this.selectedOrg) {
+          url.searchParams.set('org', this.selectedOrg);
+        } else {
+          url.searchParams.delete('org');
+        }
+        window.history.replaceState({}, '', url.toString());
+        if (this.query) this._refetch();
+      },
+
+      _refetch() {
+        this.loaded = false;
+        var url = '/api/search?q=' + encodeURIComponent(this.query) +
+                  '&group=1&limit=50';
+        if (this.selectedOrg) {
+          url += '&only_org=' + encodeURIComponent(this.selectedOrg);
+        }
+        fetch(url)
+          .then(r => r.json())
+          .then(d => {
+            this.results = Array.isArray(d) ? d : (d.results || []);
+            this.loaded = true;
+          })
+          .catch(() => { this.loaded = true; });
+      },
+
+      peerPillTitle(r) {
+        var orgName = r && r.org && r.org.name ? r.org.name : 'this org';
+        return 'Public surface of ' + orgName + ' — published or canonical only';
       },
 
       // ── chip filter ────────────────────────────────────────────────
