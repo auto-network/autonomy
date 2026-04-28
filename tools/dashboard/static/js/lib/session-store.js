@@ -85,6 +85,11 @@ window.getSessionStore = function(sessionId) {
       _loading: false,   // true during initial fetch — buffers SSE
       _pendingSSE: [],
       _displayDirty: false,
+      // /api/diag depth fields — never read on the hot path.
+      _entriesViaFetchCount: 0,
+      _entriesViaSSECount: 0,
+      _dedupCollisionsCount: 0,
+      _lastRenderTs: 0,
     };
   }
   return sessions[sessionId];
@@ -198,6 +203,7 @@ function _appendUniqueEntry(store, entry, insertAt) {
   _ensureSeenIdentities(store);
   var key = _entryIdentity(entry);
   if (key && store._seenIdentities[key]) {
+    store._dedupCollisionsCount = (store._dedupCollisionsCount || 0) + 1;
     var existing = null;
     if (entry.type === 'tool_use' && entry.tool_id) existing = _findToolUseEntry(store, entry.tool_id);
     if (entry.type === 'tool_result' && entry.tool_id) existing = _findToolResultEntry(store, entry.tool_id);
@@ -228,8 +234,11 @@ function _appendUniqueEntry(store, entry, insertAt) {
  * entries are new. Server-restart detection (seq halved) still resets store.seq.
  *
  * Returns number of entries actually added (0 if all are duplicates).
+ *
+ * ``provenance`` ('fetch' | 'sse') tracks where the entries came from for
+ * /api/diag — defaults to 'sse' since that's the streaming path.
  */
-window.appendSessionEntries = function(store, data) {
+window.appendSessionEntries = function(store, data, provenance) {
   // Advance store.seq, with server-restart detection.
   if (data.seq !== undefined) {
     if (data.seq > store.seq) {
@@ -250,6 +259,14 @@ window.appendSessionEntries = function(store, data) {
   for (var i = 0; i < data.entries.length; i++) {
     var entry = data.entries[i];
     if (_appendUniqueEntry(store, entry)) added++;
+  }
+  if (added > 0) {
+    if (provenance === 'fetch') {
+      store._entriesViaFetchCount = (store._entriesViaFetchCount || 0) + added;
+    } else {
+      store._entriesViaSSECount = (store._entriesViaSSECount || 0) + added;
+    }
+    store._lastRenderTs = Date.now();
   }
   return added;
 };
@@ -278,7 +295,7 @@ window.ensureSessionMessages = function() {
       return;
     }
 
-    window.appendSessionEntries(store, data);
+    window.appendSessionEntries(store, data, 'sse');
 
     // Update metadata
     if (data.context_tokens !== undefined) store.contextTokens = data.context_tokens;
@@ -382,15 +399,23 @@ window._diagSnapshotSessions = function(ids) {
       if (prev && t && t < prev) ooo++;
       if (t) prev = t;
     }
-    var tail3 = entries.slice(-3).map(function(e) {
+    var tail10Source = entries.slice(-10);
+    var tail10 = tail10Source.map(function(e) {
       return {
         type: (e && e.type) || '',
         timestamp: (e && e.timestamp) || '',
         identity: _entryIdentity(e) || '',
       };
     });
+    var nullSeq = 0;
+    for (var k = 0; k < entries.length; k++) {
+      var ek = entries[k];
+      if (ek && (ek.seq === null || ek.seq === undefined)) nullSeq++;
+    }
     var lastActivitySec = s.lastActivity || 0;
     var lastActivityMs = lastActivitySec ? Math.max(0, nowMs - lastActivitySec * 1000) : null;
+    var lastRenderMs = s._lastRenderTs ? Math.max(0, nowMs - s._lastRenderTs) : null;
+    var seenSize = (s._seenIdentities && Object.keys(s._seenIdentities).length) || 0;
     out[id] = {
       store_seq: s.seq || 0,
       tile_count: entries.length,
@@ -403,7 +428,18 @@ window._diagSnapshotSessions = function(ids) {
       store_last_entry_ts: lastTs,
       out_of_order_count: ooo,
       idle_ms: lastActivityMs,
-      tail_3: tail3,
+      tail_10: tail10,
+      // tail_3 retained for backwards compatibility with the auto-zh75w shape.
+      tail_3: tail10.slice(-3),
+      // /api/diag depth fields — never read on the hot path.
+      entries_via_fetch_count: s._entriesViaFetchCount || 0,
+      entries_via_sse_count: s._entriesViaSSECount || 0,
+      entries_with_null_seq_count: nullSeq,
+      gap_replays_count: (window._diagGapReplaysCount && window._diagGapReplaysCount()) || 0,
+      last_gap_replay_ts: (window._diagLastGapReplayTs && window._diagLastGapReplayTs()) || 0,
+      dedup_collisions: s._dedupCollisionsCount || 0,
+      last_render_ms: lastRenderMs,
+      seen_identities_size: seenSize,
     };
   }
   return out;

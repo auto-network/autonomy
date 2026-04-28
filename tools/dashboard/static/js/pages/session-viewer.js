@@ -331,7 +331,7 @@
           store._loading = false;
           store.loaded = true;
           for (var i = 0; i < pending.length; i++) {
-            window.appendSessionEntries(store, pending[i]);
+            window.appendSessionEntries(store, pending[i], 'sse');
           }
 
           this._rebuildDisplay();
@@ -976,8 +976,11 @@
 
       // ── Ingest entries through the shared session store path ──
 
-      _ingestEntries(store, payload) {
-        return window.appendSessionEntries(store, payload || {});
+      _ingestEntries(store, payload, provenance) {
+        // /api/diag tracks where entries came from. Default 'fetch' covers
+        // session-viewer's initial dispatch tail + dispatch tail polling
+        // paths; the SSE flush path passes 'sse' explicitly.
+        return window.appendSessionEntries(store, payload || {}, provenance || 'fetch');
       },
 
       // ── Overlay: dispatch tail polling ──────────────────────────

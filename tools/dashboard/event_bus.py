@@ -38,6 +38,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _SNAPSHOT_VERSION = 1
+_RECENT_BROADCASTS_PER_TOPIC = 10
+_RESTORE_HISTORY_MAX = 5
 
 
 @dataclass
@@ -49,12 +51,23 @@ class _BufferEntry:
     size: int  # len(serialised)
 
 
+@dataclass
+class _SubscriberMeta:
+    """Per-subscriber tracking for /api/diag visibility into backpressure."""
+    subscribed_at: float  # wall-clock seconds (Unix epoch)
+    dropped_count: int = 0
+    client_id: str | None = None  # set by the SSE handler if known
+    connection_id: str | None = None  # opaque id derived from queue identity
+
+
 class EventBus:
     _BUFFER_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
 
     def __init__(self) -> None:
         # Global list of subscriber queues — every queue receives every topic.
         self._subscribers: list[asyncio.Queue] = []
+        # Per-subscriber metadata, parallel-indexed to ``self._subscribers``.
+        self._subscriber_meta: dict[int, _SubscriberMeta] = {}
         # topic -> last-broadcast JSON string (for dedup + topic replay)
         self._last: dict[str, str] = {}
         # topic -> seq of last broadcast (for subscribe replay)
@@ -67,16 +80,33 @@ class EventBus:
         # Wall-clock timestamps of the last 60s of broadcasts (for /api/diag).
         # Evicted lazily on read, never persisted in snapshots.
         self._broadcast_log: deque[float] = deque()
+        # Running count of broadcasts skipped via dedup (never reset).
+        self._dedup_skipped_total: int = 0
+        # Per-topic recent-broadcast deque (last N entries) for /api/diag.
+        # Each entry: {seq, topic, ts, byte_size, dedup_skipped}.
+        self._recent_broadcasts: dict[str, deque[dict]] = {}
+        # Last RESTORE_HISTORY_MAX restore() calls — circular buffer.
+        # Each entry: {ts, success, seq_after, epoch_after}.
+        self._restore_history: deque[dict] = deque(maxlen=_RESTORE_HISTORY_MAX)
 
-    def subscribe(self) -> asyncio.Queue:
+    def subscribe(self, client_id: str | None = None) -> asyncio.Queue:
         """Subscribe to all topics.
 
         Returns a Queue that will receive (topic, data, seq) tuples for every
         future broadcast.  All cached topic states are immediately enqueued
         so the first SSE frame arrives without waiting for the next poll.
+
+        ``client_id`` is optional and only used by /api/diag for correlating
+        SSE subscriptions back to the diag client_id of a given tab.
         """
         q: asyncio.Queue = asyncio.Queue()
         self._subscribers.append(q)
+        meta = _SubscriberMeta(
+            subscribed_at=time.time(),
+            client_id=client_id,
+            connection_id=f"sub-{id(q):x}",
+        )
+        self._subscriber_meta[id(q)] = meta
         # Replay cached state for all known topics.
         # seq=0 signals "cached state, not a live event" — prevents the client's
         # gap detector from seeing non-contiguous seqs and firing a false alarm.
@@ -90,6 +120,18 @@ class EventBus:
             self._subscribers.remove(queue)
         except ValueError:
             pass
+        self._subscriber_meta.pop(id(queue), None)
+
+    def set_subscriber_client_id(self, queue: asyncio.Queue, client_id: str) -> None:
+        """Associate an SSE subscription queue with the tab's diag client_id.
+
+        Used after the tab POSTs to /api/diag/client and we want subsequent
+        diag responses to correlate the SSE queue to the tab. No-op if the
+        queue is no longer registered.
+        """
+        meta = self._subscriber_meta.get(id(queue))
+        if meta is not None:
+            meta.client_id = client_id
 
     def update_cache(self, topic: str, data: Any) -> None:
         """Update the cached state for a topic without broadcasting.
@@ -113,6 +155,11 @@ class EventBus:
         """
         serialised = json.dumps(data, separators=(",", ":"), sort_keys=True)
         if dedup and self._last.get(topic) == serialised:
+            self._dedup_skipped_total += 1
+            self._record_recent_broadcast(
+                topic=topic, seq=self._last_seq.get(topic, 0),
+                size=len(serialised), dedup_skipped=True,
+            )
             return 0
         self._last[topic] = serialised
 
@@ -133,11 +180,30 @@ class EventBus:
         # Track wall-clock broadcast time for /api/diag rate stats.
         self._broadcast_log.append(time.time())
         self._evict_old_broadcasts()
+        self._record_recent_broadcast(
+            topic=topic, seq=seq, size=len(serialised), dedup_skipped=False,
+        )
 
         # Push 3-tuple to all subscribers
         for q in list(self._subscribers):  # snapshot — don't hold lock across put()
             await q.put((topic, data, seq))
         return len(self._subscribers)
+
+    def _record_recent_broadcast(
+        self, *, topic: str, seq: int, size: int, dedup_skipped: bool,
+    ) -> None:
+        """Track this broadcast in the per-topic recent-broadcasts deque."""
+        bucket = self._recent_broadcasts.get(topic)
+        if bucket is None:
+            bucket = deque(maxlen=_RECENT_BROADCASTS_PER_TOPIC)
+            self._recent_broadcasts[topic] = bucket
+        bucket.append({
+            "seq": seq,
+            "topic": topic,
+            "ts": time.time(),
+            "byte_size": size,
+            "dedup_skipped": dedup_skipped,
+        })
 
     def _evict_old_broadcasts(self) -> None:
         """Drop broadcast log entries older than 60s."""
@@ -153,6 +219,62 @@ class EventBus:
     def subscribers_count(self) -> int:
         """Number of active SSE subscriber queues."""
         return len(self._subscribers)
+
+    def subscribers_metadata(self) -> list[dict]:
+        """Per-subscriber snapshot for /api/diag.
+
+        Returns a list of dicts ordered to match ``self._subscribers``.
+        Each entry: {connection_id, client_id, age_s, queue_depth, dropped_count}.
+        ``queue_depth`` reflects pending messages on the subscriber queue
+        (high values signal a slow client / backpressure).
+        """
+        out: list[dict] = []
+        now = time.time()
+        for q in self._subscribers:
+            meta = self._subscriber_meta.get(id(q))
+            if meta is None:
+                continue
+            try:
+                qsize = q.qsize()
+            except Exception:
+                qsize = -1
+            out.append({
+                "connection_id": meta.connection_id,
+                "client_id": meta.client_id,
+                "age_s": max(0.0, now - meta.subscribed_at),
+                "queue_depth": qsize,
+                "dropped_count": meta.dropped_count,
+            })
+        return out
+
+    def recent_broadcasts(self, topic: str | None = None, limit: int | None = None) -> list[dict]:
+        """Return recent broadcasts.
+
+        With no ``topic``, returns broadcasts merged across all topics, in
+        seq order, capped at ``limit`` (default: most recent 10 across all
+        topics).  With ``topic``, returns only that topic's deque.
+        """
+        if topic is not None:
+            bucket = self._recent_broadcasts.get(topic)
+            if not bucket:
+                return []
+            items = list(bucket)
+        else:
+            items = []
+            for bucket in self._recent_broadcasts.values():
+                items.extend(bucket)
+            items.sort(key=lambda e: e["seq"])
+        if limit is not None and limit >= 0:
+            items = items[-limit:]
+        return items
+
+    def dedup_skipped_total(self) -> int:
+        """Running count of broadcasts skipped via dedup since process start."""
+        return self._dedup_skipped_total
+
+    def restore_history(self) -> list[dict]:
+        """Last RESTORE_HISTORY_MAX restore() calls (most recent last)."""
+        return list(self._restore_history)
 
     def buffer_window(self) -> tuple[int | None, int | None, float | None, float | None]:
         """Return (first_seq, last_seq, first_ts, last_ts) for the buffer.
@@ -243,17 +365,29 @@ class EventBus:
         unclean restarts).
         """
         global _SERVER_EPOCH
+
+        def _record(success: bool) -> None:
+            self._restore_history.append({
+                "ts": time.time(),
+                "success": success,
+                "seq_after": self._seq,
+                "epoch_after": _SERVER_EPOCH,
+            })
+
         try:
             raw = Path(path).read_text()
         except (FileNotFoundError, OSError):
+            _record(False)
             return False
         except Exception:
             logger.exception("EventBus.restore(%s) failed reading file", path)
+            _record(False)
             return False
         try:
             state = json.loads(raw)
         except json.JSONDecodeError:
             logger.warning("EventBus.restore(%s): corrupt JSON, ignoring", path)
+            _record(False)
             return False
         if not isinstance(state, dict) or state.get("version") != _SNAPSHOT_VERSION:
             logger.warning(
@@ -261,6 +395,7 @@ class EventBus:
                 path, state.get("version") if isinstance(state, dict) else None,
                 _SNAPSHOT_VERSION,
             )
+            _record(False)
             return False
         try:
             new_seq = int(state["seq"])
@@ -283,6 +418,7 @@ class EventBus:
                 new_buffer_bytes += size
         except (KeyError, TypeError, ValueError):
             logger.exception("EventBus.restore(%s): malformed payload, ignoring", path)
+            _record(False)
             return False
         self._seq = new_seq
         self._last_seq = new_last_seq
@@ -290,6 +426,7 @@ class EventBus:
         self._buffer = new_buffer
         self._buffer_bytes = new_buffer_bytes
         _SERVER_EPOCH = new_epoch
+        _record(True)
         return True
 
 
