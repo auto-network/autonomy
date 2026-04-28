@@ -154,6 +154,7 @@ setsid bash -c "
     --reload-exclude 'tools/graph/tests/*' \
     --reload-exclude 'agents/tests/*' \
     --reload-exclude '**/__pycache__/*' \
+    --timeout-graceful-shutdown 5 \
     \$SSL_ARGS \
     >> \"$LOG_FILE\" 2>&1 &
   wait
