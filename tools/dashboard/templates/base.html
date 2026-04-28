@@ -15,6 +15,7 @@
   <link rel="stylesheet" href="/static/css/action-sheet.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/session-cards.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/dropdown-toggle.css?v=__STATIC_VERSION__">
+  <link rel="stylesheet" href="/static/css/agent-actions.css?v=__STATIC_VERSION__">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="/static/vendor/highlightjs/highlight.min.js?v=__STATIC_VERSION__"></script>
   <link rel="stylesheet" href="/static/vendor/highlightjs/github-dark.min.css?v=__STATIC_VERSION__">
@@ -972,7 +973,109 @@
              class="bg-gray-700 text-gray-100 px-3 md:px-4 py-2 rounded-lg flex-1 max-w-xl text-sm
                     focus:outline-none focus:ring-2 focus:ring-indigo-500">
       <span class="text-sm text-gray-400 hidden md:inline" id="page-title"></span>
-      <div id="header-actions" class="flex items-center gap-2 ml-auto"></div>
+      <div id="header-actions" class="flex items-center gap-2 ml-auto">
+
+        <!-- Agentic actions dropdown (auto-pqgrl) -->
+        <div class="agent-actions-root" x-data="agentActionsComponent()" x-init="init()" @keydown.escape.window="closePanel(); closeSendToModal()">
+          <button type="button"
+                  class="actions-btn"
+                  data-testid="agent-actions-button"
+                  x-show="visible"
+                  x-cloak
+                  @click.stop="togglePanel()">
+            <span class="actions-btn-icon">⚡</span>
+            <span>Actions</span>
+            <span class="actions-btn-caret">▾</span>
+          </button>
+
+          <!-- Dropdown panel -->
+          <div class="actions-panel"
+               data-testid="agent-actions-panel"
+               x-show="visible && panelOpen"
+               x-cloak
+               @click.outside="closePanel()">
+            <template x-if="members.some(m => m.universal)">
+              <div>
+                <div class="actions-section-label">Universal</div>
+                <template x-for="m in members.filter(m => m.universal)" :key="m.key">
+                  <button type="button"
+                          class="action-item"
+                          :data-testid="'agent-action-item-' + m.key"
+                          @click="dispatchMember(m)">
+                    <div class="action-item-icon" :class="iconClass(m.key)" x-text="(m.payload && m.payload.icon) || '·'"></div>
+                    <div class="action-item-body">
+                      <div class="action-item-label" x-text="(m.payload && m.payload.label) || m.key"></div>
+                      <div class="action-item-meta" x-text="metaFor(m.payload || {})"></div>
+                    </div>
+                  </button>
+                </template>
+                <div class="actions-divider" x-show="members.some(m => !m.universal)"></div>
+              </div>
+            </template>
+            <template x-if="members.some(m => !m.universal)">
+              <div>
+                <div class="actions-section-label" x-text="(asset.type ? (asset.type[0].toUpperCase() + asset.type.slice(1) + ' actions') : 'Actions') + (org ? ' · ' + org : '')"></div>
+                <template x-for="m in members.filter(m => !m.universal)" :key="m.key">
+                  <button type="button"
+                          class="action-item"
+                          :data-testid="'agent-action-item-' + m.key"
+                          @click="dispatchMember(m)">
+                    <div class="action-item-icon" :class="iconClass(m.key)" x-text="(m.payload && m.payload.icon) || '·'"></div>
+                    <div class="action-item-body">
+                      <div class="action-item-label" x-text="(m.payload && m.payload.label) || m.key"></div>
+                      <div class="action-item-meta" x-text="metaFor(m.payload || {})"></div>
+                    </div>
+                  </button>
+                </template>
+              </div>
+            </template>
+            <div class="agent-actions-error" x-show="lastError" x-text="lastError"></div>
+          </div>
+
+          <!-- Send-To modal -->
+          <div class="send-to-modal-backdrop"
+               data-testid="agent-actions-send-to-modal"
+               x-show="modalOpen"
+               x-cloak
+               @click.self="closeSendToModal()">
+            <div class="send-to-modal" @click.stop>
+              <div class="send-to-modal-title">Send to a session</div>
+              <div class="send-to-modal-subtitle">
+                Send a primer about
+                <strong x-text="(document.getElementById('page-title') && document.getElementById('page-title').textContent) || asset.id"></strong>
+                to a live session.
+              </div>
+              <div class="send-to-session-list">
+                <template x-if="liveSessions.length === 0">
+                  <div class="send-to-session-row" style="cursor:default;">
+                    <div class="send-to-session-info">
+                      <div class="send-to-session-name">No live sessions.</div>
+                    </div>
+                  </div>
+                </template>
+                <template x-for="s in liveSessions" :key="s.tmux_name">
+                  <button type="button"
+                          class="send-to-session-row"
+                          :data-testid="'agent-actions-send-to-session-' + s.tmux_name"
+                          @click="sendToSession(s)">
+                    <div class="send-to-session-glyph" x-text="sessionGlyph(s)"></div>
+                    <div class="send-to-session-info">
+                      <div class="send-to-session-name" x-text="s.tmux_name"></div>
+                      <div class="send-to-session-label" x-text="s.label || ''"></div>
+                    </div>
+                    <span class="send-to-session-state" :class="stateClass(s)" x-text="stateLabel(s)"></span>
+                  </button>
+                </template>
+              </div>
+              <div class="send-to-modal-actions">
+                <button type="button" class="send-to-modal-btn cancel" @click="closeSendToModal()">Cancel</button>
+              </div>
+              <div class="agent-actions-error" x-show="lastError" x-text="lastError"></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
     </header>
 
     <!-- SSE interruption banner — shown on server restart or unrecoverable gap -->
@@ -1108,6 +1211,7 @@
   <script src="/static/js/pages/search.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/pages/terminal.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/action-sheet.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/components/agent-actions.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/test-harness.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/pages/design.js?v=__STATIC_VERSION__"></script>
 </body>
