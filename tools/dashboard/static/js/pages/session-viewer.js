@@ -222,6 +222,7 @@
             this.sessionKey = sessionId;
             this.sessionId = sessionId;
             this.project = project;
+            if (this._mode === 'page') window._diagFocusedViewerId = sessionId;
 
             var store = window.getSessionStore(sessionId);
 
@@ -272,6 +273,10 @@
         this.sessionKey = sessionId;
         this.sessionId = sessionId;
         this.project = project;
+        // Track the session id the page is currently rendering so /api/diag
+        // collectors can flag is_focused_viewer correctly. Page mode owns
+        // this; panel/overlay sessions read but do not claim focus.
+        if (this._mode === 'page') window._diagFocusedViewerId = sessionId;
         this._tailUrl = '/api/session/' + encodeURIComponent(project) + '/' + encodeURIComponent(sessionId) + '/tail';
 
         var store = window.getSessionStore(sessionId);
@@ -448,6 +453,9 @@
           if (typeof this._storeCleanups[i] === 'function') this._storeCleanups[i]();
         }
         this._storeCleanups = [];
+        if (this._mode === 'page' && window._diagFocusedViewerId === this.sessionKey) {
+          window._diagFocusedViewerId = null;
+        }
         if (this._pollInterval) {
           clearInterval(this._pollInterval);
           this._pollInterval = null;
