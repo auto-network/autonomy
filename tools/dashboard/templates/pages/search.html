@@ -25,8 +25,9 @@
     padding-left: 16px; padding-right: 16px;
   }
   .sp-search-row {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 8px;
     margin-bottom: 10px;
+    position: relative;  /* anchors the .sp-org-dropdown */
   }
   .sp-back-btn {
     flex-shrink: 0; width: 32px; height: 32px;
@@ -35,13 +36,78 @@
     font-size: 20px; cursor: pointer; padding: 0;
   }
   .sp-search-field {
-    flex: 1; height: 36px;
+    flex: 1; min-width: 0; height: 36px;
     background: var(--sp-surface); border: 1px solid var(--sp-border);
     border-radius: 10px; padding: 0 12px; color: var(--sp-text-1);
     font-size: 15px; outline: none;
   }
   .sp-search-field:focus { border-color: var(--sp-accent); }
   .sp-search-field::placeholder { color: var(--sp-text-3); }
+
+  /* ── Org pin chip + dropdown ──────────────────── */
+  .sp-org-chip {
+    flex-shrink: 0; height: 36px;
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--sp-surface); border: 1px solid var(--sp-border);
+    border-radius: 10px; padding: 0 10px;
+    font-size: 13px; color: var(--sp-accent); font-weight: 500;
+    cursor: pointer; user-select: none; line-height: 1;
+  }
+  .sp-org-chip:hover { background: #283548; }
+  .sp-org-chip-glyph {
+    width: 18px; height: 18px; flex-shrink: 0;
+    border-radius: 4px; background: #6c63ff;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; color: #fff;
+    overflow: hidden;
+  }
+  .sp-org-chip-glyph img { width: 100%; height: 100%; object-fit: cover; }
+  .sp-org-chip-glyph.sp-org-chip-all {
+    background: linear-gradient(135deg, #6c63ff, #34d399, #fb923c);
+    font-size: 9px;
+  }
+  .sp-org-chip-caret { color: var(--sp-text-3); font-size: 10px; }
+
+  .sp-org-dropdown {
+    position: absolute; top: 42px; left: 40px; z-index: 20;
+    background: #1a2332; border: 1px solid var(--sp-border);
+    border-radius: 8px; padding: 4px; min-width: 220px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  }
+  .sp-org-option {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-radius: 6px;
+    font-size: 13px; color: var(--sp-text-1); cursor: pointer;
+    width: 100%; border: none; background: none; text-align: left;
+  }
+  .sp-org-option:hover { background: #1e293b; }
+  .sp-org-option.sp-org-option-selected {
+    background: #1e1b4b; color: var(--sp-accent);
+  }
+  .sp-org-option-glyph {
+    width: 18px; height: 18px; border-radius: 4px;
+    background: #6c63ff; color: #fff;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; flex-shrink: 0;
+    overflow: hidden;
+  }
+  .sp-org-option-glyph img { width: 100%; height: 100%; object-fit: cover; }
+  .sp-org-option-glyph.sp-org-option-glyph-all {
+    background: linear-gradient(135deg, #6c63ff, #34d399, #fb923c);
+    font-size: 9px;
+  }
+  .sp-org-option-meta {
+    margin-left: auto; font-size: 10px; color: #64748b;
+  }
+
+  /* Peer pill — painted on cross-org result rows */
+  .sp-peer-pill {
+    font-size: 9px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; padding: 1px 6px; border-radius: 3px;
+    color: #94a3b8; background: #1e293b;
+    border: 1px dashed #475569;
+    cursor: help;
+  }
 
   /* ── Chip rail ────────────────────────────────── */
   .sp-chip-rail {
@@ -164,10 +230,62 @@
   <div class="sp-header">
     <div class="sp-search-row">
       <button class="sp-back-btn" @click="goBack()" title="Back">‹</button>
+
+      <!-- Org pin chip — opens dropdown to pin search to one org -->
+      <button class="sp-org-chip"
+              data-testid="sp-org-chip"
+              @click.stop="toggleOrgDropdown()"
+              :title="orgChip.title">
+        <span class="sp-org-chip-glyph"
+              :class="orgChip.allOrgs ? 'sp-org-chip-all' : ''"
+              :style="orgChip.glyphStyle">
+          <template x-if="!orgChip.favicon">
+            <span x-text="orgChip.initial"></span>
+          </template>
+          <template x-if="orgChip.favicon">
+            <img :src="orgChip.favicon" :alt="orgChip.label">
+          </template>
+        </span>
+        <span x-text="orgChip.label"></span>
+        <span class="sp-org-chip-caret">▾</span>
+      </button>
+
       <input type="text" class="sp-search-field"
              x-model="query"
              @keydown.enter="submitQuery()"
              placeholder="Search knowledge…">
+
+      <!-- Org dropdown panel (open state) -->
+      <div class="sp-org-dropdown"
+           data-testid="sp-org-dropdown"
+           x-show="orgDropdownOpen"
+           @click.outside="orgDropdownOpen = false"
+           x-cloak>
+        <button class="sp-org-option"
+                :class="!selectedOrg ? 'sp-org-option-selected' : ''"
+                @click="pickOrg('')">
+          <span class="sp-org-option-glyph sp-org-option-glyph-all">∞</span>
+          <span>All orgs</span>
+          <span class="sp-org-option-meta">default</span>
+        </button>
+        <template x-for="o in orgList" :key="o.slug">
+          <button class="sp-org-option"
+                  :class="selectedOrg === o.slug ? 'sp-org-option-selected' : ''"
+                  @click="pickOrg(o.slug)">
+            <span class="sp-org-option-glyph"
+                  :style="o.favicon ? '' : `background:${o.color}`">
+              <template x-if="!o.favicon">
+                <span x-text="o.initial"></span>
+              </template>
+              <template x-if="o.favicon">
+                <img :src="o.favicon" :alt="o.name">
+              </template>
+            </span>
+            <span x-text="o.name"></span>
+            <span class="sp-org-option-meta" x-text="o.kind"></span>
+          </button>
+        </template>
+      </div>
     </div>
     <div class="sp-chip-rail" data-testid="sp-chip-rail">
       <button class="sp-chip"
@@ -233,6 +351,11 @@
                   </template>
                   <img class="sc-org-img" :src="r.org.favicon" x-show="r.org.favicon" :alt="r.org.name">
                 </span>
+              </template>
+              <template x-if="r.is_peer">
+                <span class="sp-peer-pill"
+                      data-testid="sp-peer-pill"
+                      :title="peerPillTitle(r)">peer</span>
               </template>
               <span class="sp-match-count"
                     x-text="(r.match_count || 1) + ' match' + ((r.match_count || 1) === 1 ? '' : 'es')"></span>

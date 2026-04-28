@@ -1519,13 +1519,33 @@ def _group_search_results(rows: list) -> list:
 
 
 def _enrich_search_results(results: list) -> None:
-    """Attach resolved ``org`` and 24hr ``date`` to each search result in-place."""
+    """Attach resolved ``org``, ``is_peer``, and 24hr ``date`` to each row in-place.
+
+    ``is_peer`` is True when the row's resolved org slug differs from the
+    caller-org bound by ``_CallerOrgMiddleware`` — used by the search UI to
+    paint a "peer" pill on cross-org rows. A scopeless caller (no contextvar /
+    no env) treats every row as own-org since "peer" only makes sense relative
+    to a known caller seat.
+    """
     from tools.dashboard.org_identity import resolve_org_identity, session_org_slug
+    from tools.graph.ops import _resolve_org as _resolve_caller_org
+    caller = _resolve_caller_org(None)
     for r in results:
         if not isinstance(r, dict):
             continue
+        # The cross-org search path annotates ``r["org"]`` with a bare slug
+        # string; older callers leave it absent. Capture the slug either way
+        # so the peer comparison sees a real value.
+        existing_org = r.get("org")
+        if isinstance(existing_org, dict):
+            org_slug = existing_org.get("slug")
+        elif isinstance(existing_org, str) and existing_org:
+            org_slug = existing_org
+        else:
+            org_slug = session_org_slug(r)
         if "org" not in r:
-            r["org"] = resolve_org_identity(session_org_slug(r))
+            r["org"] = resolve_org_identity(org_slug)
+        r["is_peer"] = bool(caller) and bool(org_slug) and org_slug != caller
         # Normalize date to "YYYY-MM-DD HH:MM" (24hr). Source may supply
         # created_at / date / last_activity_at in various forms.
         if "date" not in r or not r.get("date"):
