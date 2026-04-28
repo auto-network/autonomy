@@ -31,6 +31,7 @@ class Source:
     deprecated: bool = False
     successor_id: str | None = None
     moved_to_org: str | None = None
+    short_description: str | None = None  # one or two sentences explaining the note's purpose
 
 
 @dataclass
