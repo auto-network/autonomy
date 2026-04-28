@@ -57,13 +57,16 @@ CREATE TABLE IF NOT EXISTS dispatch_runs (
   last_activity DATETIME,
   jsonl_offset INTEGER DEFAULT 0,
   librarian_type TEXT,
-  failure_class TEXT
+  failure_class TEXT,
+  kind TEXT
 )
 """
 
 # Migrations for columns added after initial schema deployment.
 # Each entry is (column_name, ALTER TABLE statement).
 # init_db() runs these and ignores "duplicate column name" errors.
+# ``kind`` distinguishes lifecycle category (bead | librarian | agentic);
+# legacy NULLs read back as 'bead' (see DAO COALESCE).
 _MIGRATIONS = [
     "ALTER TABLE dispatch_runs ADD COLUMN last_snippet TEXT",
     "ALTER TABLE dispatch_runs ADD COLUMN token_count INTEGER",
@@ -76,6 +79,7 @@ _MIGRATIONS = [
     "ALTER TABLE dispatch_runs ADD COLUMN turn_count INTEGER",
     "ALTER TABLE dispatch_runs ADD COLUMN librarian_type TEXT",
     "ALTER TABLE dispatch_runs ADD COLUMN failure_class TEXT",
+    "ALTER TABLE dispatch_runs ADD COLUMN kind TEXT",
 ]
 
 CREATE_INDEX = """\
@@ -219,12 +223,16 @@ def insert_launch_run(
     container_name: str,
     output_dir: str,
     librarian_type: str | None = None,
+    kind: str = "bead",
 ) -> None:
     """Insert a RUNNING row at agent launch time.
 
     Only the fields known at launch are populated. Completion fields
     (decision, commit_hash, exit_code, completed_at, etc.) are left NULL
     and filled in by insert_run() when the agent finishes.
+
+    ``kind`` is the lifecycle category — ``bead`` (default), ``librarian``,
+    or ``agentic``. Reads coalesce NULL → ``bead`` for backwards compat.
     """
     started_dt = datetime.fromtimestamp(started_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if started_at else None
 
@@ -234,14 +242,16 @@ def insert_launch_run(
             """\
             INSERT OR IGNORE INTO dispatch_runs (
                 id, bead_id, started_at, status,
-                branch, branch_base, image, container_name, output_dir, librarian_type
-            ) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?)
+                branch, branch_base, image, container_name, output_dir, librarian_type,
+                kind
+            ) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id, bead_id, started_dt,
                 branch or None, branch_base or None,
                 image or None, container_name or None, output_dir or None,
                 librarian_type,
+                kind,
             ),
         )
         conn.commit()
@@ -267,6 +277,7 @@ def insert_run(
     output_dir: str,
     librarian_type: str | None = None,
     failure_class: str | None = None,
+    kind: str = "bead",
 ) -> None:
     """Upsert a dispatch run row on completion.
 
@@ -307,7 +318,7 @@ def insert_run(
                 score_tooling, score_clarity, score_confidence,
                 time_research_pct, time_coding_pct, time_debugging_pct, time_tooling_pct,
                 discovered_beads_count, has_experience_report, output_dir, librarian_type,
-                failure_class
+                failure_class, kind
             ) VALUES (
                 ?, ?, ?, ?, ?,
                 ?, ?, ?,
@@ -317,7 +328,7 @@ def insert_run(
                 ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
-                ?
+                ?, ?
             )
             """,
             (
@@ -330,7 +341,7 @@ def insert_run(
                 time_breakdown.get("research_pct"), time_breakdown.get("coding_pct"),
                 time_breakdown.get("debugging_pct"), time_breakdown.get("tooling_workaround_pct"),
                 discovered_beads_count, has_experience_report, output_dir or None, librarian_type,
-                failure_class,
+                failure_class, kind,
             ),
         )
         conn.commit()

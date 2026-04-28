@@ -31,6 +31,13 @@ _DISPATCH_DB = Path(__file__).parents[3] / "data" / "dispatch.db"
 # Session-type → group mapping. The DAO emits 'interactive', 'dispatch',
 # or 'librarian' from _derive_session_type, but extra values are routed
 # defensively so legacy metadata doesn't fall on the floor.
+#
+# 'agent-run' and 'agentic' fold into the dispatch bucket so the /sessions
+# Dispatch chip surfaces both bead-driven runs and dashboard-spawned
+# agent-action runs. The default-fallback in _group_for_session_type is
+# 'interactive', so any new agentic source type that lacks an explicit
+# entry here would silently land in the interactive bucket — exactly the
+# opposite of intent. Keep entries for both spellings.
 _SESSION_TYPE_GROUPS: dict[str, str] = {
     "interactive": "interactive",
     "host": "interactive",
@@ -39,6 +46,8 @@ _SESSION_TYPE_GROUPS: dict[str, str] = {
     "session": "interactive",
     "dispatch": "dispatch",
     "librarian": "librarian",
+    "agent-run": "dispatch",
+    "agentic": "dispatch",
 }
 
 # Per-type quotas. When the UI's filter chip is "all", each group gets its
@@ -60,6 +69,10 @@ def _group_for_session_type(session_type: str | None) -> str:
     since human-attended sessions are the ones we most need to preserve.
     """
     return _SESSION_TYPE_GROUPS.get((session_type or "").strip(), "interactive")
+
+
+# Public-spec alias used by tests and the bead description.
+_session_group = _group_for_session_type
 
 
 def _iso_to_epoch(ts: str | None) -> float:
@@ -226,6 +239,8 @@ def _derive_session_type(meta: dict, file_path: str) -> str:
     """Derive session type from metadata or file path heuristics."""
     if meta.get("session_type"):
         return meta["session_type"]
+    if meta.get("kind") == "agent-action" or (file_path or "").startswith("agentic:"):
+        return "agentic"
     if meta.get("bead_id"):
         return "dispatch"
     if "agent-runs" in file_path:
@@ -313,14 +328,15 @@ def get_recent_sessions(
             sql = (
                 "SELECT id, type, project, title, created_at, last_activity_at,"
                 " file_path, metadata FROM sources"
-                " WHERE type = 'session'"
+                " WHERE type IN ('session', 'agentic')"
                 " ORDER BY COALESCE(last_activity_at, created_at) DESC LIMIT ?"
             )
         else:
             sql = (
                 "SELECT id, type, project, title, created_at, NULL as last_activity_at,"
                 " file_path, metadata FROM sources"
-                " WHERE type = 'session' ORDER BY created_at DESC LIMIT ?"
+                " WHERE type IN ('session', 'agentic')"
+                " ORDER BY created_at DESC LIMIT ?"
             )
         rows = conn.execute(sql, (sample_limit,)).fetchall()
         for r in rows:
