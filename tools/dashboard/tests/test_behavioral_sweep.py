@@ -989,49 +989,52 @@ index 7654321..1234567 100644
 }
 
 
-# Search results fixture (auto-kvka6). Each row mirrors the post-grouping
-# response shape from /api/search?group=1 — server-side enrichment fills
-# in `org`/`is_peer`/`date`. The mock DAO returns this list verbatim, so
-# the fixture order IS the expected card order.
+# Search results fixture (auto-kvka6). Each row is a flat per-excerpt result
+# in the shape returned by ``dao_beads.search`` — the dashboard's /api/search
+# call passes ``?group=1`` so ``_group_search_results`` collapses rows by
+# source_id into the card list the page renders.
+#
+# Query token: ``worktree``. Every row's ``source_title`` or ``content`` must
+# contain the substring so the mock's case-insensitive filter returns it.
+# Row titles deliberately avoid the substring ``dashboard`` so this fixture
+# does not pollute auto-qlfg1's ``?q=dashboard`` count assertions.
 #
 # Five rows exercise the auto-kvka6 acceptance:
-#   1. Strong title hit (rank −55) — the curated "Worktrees Dashboard
-#      Specification" — should land at the top so a search for
-#      "Worktree" surfaces the canonical note over noisy body matches.
+#   1. Strong title hit (rank −55) — the curated "Worktrees Surface
+#      Specification" — lands at the top so a search for "Worktree"
+#      surfaces the curated note over noisy body matches.
 #   2 & 3. Two rows that share an identical source title (rollouts of
 #      the same tmux session) at minute-resolution timestamps that
 #      collide — the disambiguator (12-char id + second-resolution
 #      date) must distinguish them.
-#   4. A note with a populated short_description — the card must render
-#      the description row.
+#   4. A note with a populated short_description and matching tag — the
+#      card renders the description row and tag-overlap places it ahead
+#      of the bare body match in rank order.
 #   5. A note WITHOUT a short_description — the card must NOT render an
 #      empty description row.
 SWEEP_SEARCH_RESULTS = [
     {
+        "id": "kvka6row1",
         "source_id": "kvka6src1-aaaa",
-        "source_title": "Worktrees Dashboard Specification",
+        "source_title": "Worktrees Surface Specification",
         "source_type": "note",
         "short_description": (
-            "How worktrees render in the dashboard, including the "
+            "How worktrees render in the surface, including the "
             "filter strip and per-row actions."
         ),
-        "keywords": "worktree,worktrees,dashboard,spec",
+        "keywords": "worktree,worktrees,spec",
         "result_type": "source",
         "rank": -55.0,
         "rrf_score": 0.55,
-        "match_count": 1,
+        "turn_number": None,
+        "content": "Worktrees Surface Specification",
         "project": "autonomy",
         "platform": "local",
         "source_created_at": "2026-04-22T19:59:35Z",
-        "source_metadata": json.dumps({"tags": ["worktree", "dashboard"]}),
-        "excerpts": [{
-            "turn_number": None,
-            "content": "Worktrees Dashboard Specification",
-            "result_type": "source",
-            "rank": -55.0,
-        }],
+        "source_metadata": json.dumps({"tags": ["worktree", "surface"]}),
     },
     {
+        "id": "kvka6row2",
         "source_id": "kvka6src2-bbbb",
         "source_title": "auto-0422-195935",
         "source_type": "session",
@@ -1040,19 +1043,15 @@ SWEEP_SEARCH_RESULTS = [
         "result_type": "thought",
         "rank": -10.0,
         "rrf_score": 0.10,
-        "match_count": 3,
+        "turn_number": 12,
+        "content": "first rollout had worktree checks",
         "project": "autonomy",
         "platform": "local",
         "source_created_at": "2026-04-22T19:59:35Z",
         "source_metadata": "{}",
-        "excerpts": [{
-            "turn_number": 12,
-            "content": "first rollout had worktree dashboard checks",
-            "result_type": "thought",
-            "rank": -10.0,
-        }],
     },
     {
+        "id": "kvka6row3",
         "source_id": "kvka6src3-cccc",
         "source_title": "auto-0422-195935",
         "source_type": "session",
@@ -1061,23 +1060,19 @@ SWEEP_SEARCH_RESULTS = [
         "result_type": "thought",
         "rank": -9.5,
         "rrf_score": 0.095,
-        "match_count": 2,
+        "turn_number": 7,
+        "content": "second rollout retried the worktree assertion",
         "project": "autonomy",
         "platform": "local",
         # SECONDS-resolution differs from the row above by 11s — at
         # minute resolution the two cards would look identical.
         "source_created_at": "2026-04-22T19:59:46Z",
         "source_metadata": "{}",
-        "excerpts": [{
-            "turn_number": 7,
-            "content": "second rollout retried the worktree assertion",
-            "result_type": "thought",
-            "rank": -9.5,
-        }],
     },
     {
+        "id": "kvka6row4",
         "source_id": "kvka6src4-dddd",
-        "source_title": "Pitfall: stash pop loses untracked",
+        "source_title": "Pitfall: worktree stash pop loses untracked",
         "source_type": "note",
         "short_description": (
             "Untracked files are silently dropped if `git stash pop` "
@@ -1085,21 +1080,21 @@ SWEEP_SEARCH_RESULTS = [
         ),
         "keywords": "git,stash,pitfall",
         "result_type": "source",
+        # Rank baked-in below the bare body match — the production server
+        # subtracts SEARCH_TAG_OVERLAP_BOOST for the `pitfall`/`git` tag
+        # overlap; the mock can't compute that, so the fixture pre-applies
+        # the result.
         "rank": -8.0,
         "rrf_score": 0.08,
-        "match_count": 1,
+        "turn_number": None,
+        "content": "Pitfall: worktree stash pop loses untracked",
         "project": "autonomy",
         "platform": "local",
         "source_created_at": "2026-04-21T10:30:00Z",
         "source_metadata": json.dumps({"tags": ["pitfall", "git"]}),
-        "excerpts": [{
-            "turn_number": None,
-            "content": "Pitfall: stash pop loses untracked",
-            "result_type": "source",
-            "rank": -8.0,
-        }],
     },
     {
+        "id": "kvka6row5",
         "source_id": "kvka6src5-eeee",
         "source_title": "Bare body match",
         "source_type": "note",
@@ -1108,17 +1103,12 @@ SWEEP_SEARCH_RESULTS = [
         "result_type": "thought",
         "rank": -5.0,
         "rrf_score": 0.05,
-        "match_count": 1,
+        "turn_number": 2,
+        "content": "body mentions worktree once",
         "project": "autonomy",
         "platform": "local",
         "source_created_at": "2026-04-20T08:00:00Z",
         "source_metadata": "{}",
-        "excerpts": [{
-            "turn_number": 2,
-            "content": "body mentions worktree once",
-            "result_type": "thought",
-            "rank": -5.0,
-        }],
     },
 ]
 
@@ -1836,16 +1826,16 @@ SEARCH_PAGE_CHECKS = """
     r.titles = titles;
     r.first_title = titles[0] || '';
 
-    // Title-boost: the curated "Worktrees Dashboard Specification" with
+    // Title-boost: the curated "Worktrees Surface Specification" with
     // rank −55 must outrank the rank −10 session-derivation cards. The
     // mock DAO returns rows in the fixture order; the page sorts by
     // rank server-side so the order survives.
-    r.title_boosted_first = titles[0] === 'Worktrees Dashboard Specification';
+    r.title_boosted_first = titles[0] === 'Worktrees Surface Specification';
 
     // Tag-overlap soft signal: the row tagged "pitfall" / "git" should
     // come ahead of the bare body match. Both rows match on tokens; the
     // server's tag-overlap boost reorders them.
-    var pitfallIdx = titles.indexOf('Pitfall: stash pop loses untracked');
+    var pitfallIdx = titles.indexOf('Pitfall: worktree stash pop loses untracked');
     var bareIdx = titles.indexOf('Bare body match');
     r.pitfall_index = pitfallIdx;
     r.bare_index = bareIdx;
