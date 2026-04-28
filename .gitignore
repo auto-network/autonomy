@@ -60,6 +60,9 @@ data/dispatch.state.tmp
 data/event_bus.state
 data/event_bus.state.tmp
 
+# Diag dumps (event_bus snapshots written by /api/diag/eventbus/snapshot)
+data/diag/
+
 # Per-org graph DBs — bootstrap-managed, operator-local data
 # (graph://d970d946-f95). Reconstructed by `graph org create` /
 # the dashboard first-launch bootstrap path.

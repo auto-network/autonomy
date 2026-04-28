@@ -348,3 +348,63 @@ window.ensureSessionMessages = function() {
 
 // Register SSE handlers on startup — session store is always alive
 setTimeout(ensureSessionMessages, 0);
+
+/**
+ * Build the per-session marker dict consumed by /api/diag/sessions.
+ *
+ * Returns { id: { store_seq, tile_count, store_loading, pending_sse_count,
+ * is_focused_viewer, last_activity_ms, last_topic_seq,
+ * store_first_entry_ts, store_last_entry_ts, out_of_order_count, idle_ms,
+ * tail_3 } } for each id we have a store entry for. Ids without a store
+ * are omitted so the server-side diff is easier to reason about.
+ */
+window._diagSnapshotSessions = function(ids) {
+  var sessions = (window.Alpine && Alpine.store('sessions')) || {};
+  var out = {};
+  if (!Array.isArray(ids) || ids.length === 0) return out;
+  var nowMs = Date.now();
+  var focused = window._diagFocusedViewerId || null;
+  for (var i = 0; i < ids.length; i++) {
+    var id = ids[i];
+    var s = sessions[id];
+    if (!s) continue;
+    var entries = Array.isArray(s.entries) ? s.entries : [];
+    var firstTs = entries.length ? (entries[0] && entries[0].timestamp) || '' : '';
+    var lastTs = entries.length
+      ? (entries[entries.length - 1] && entries[entries.length - 1].timestamp) || ''
+      : '';
+    // Out-of-order count: any entry whose timestamp is < its predecessor's.
+    // Cheap O(n) scan — only invoked on diag, not on the hot path.
+    var ooo = 0;
+    var prev = null;
+    for (var j = 0; j < entries.length; j++) {
+      var t = entries[j] && entries[j].timestamp;
+      if (prev && t && t < prev) ooo++;
+      if (t) prev = t;
+    }
+    var tail3 = entries.slice(-3).map(function(e) {
+      return {
+        type: (e && e.type) || '',
+        timestamp: (e && e.timestamp) || '',
+        identity: _entryIdentity(e) || '',
+      };
+    });
+    var lastActivitySec = s.lastActivity || 0;
+    var lastActivityMs = lastActivitySec ? Math.max(0, nowMs - lastActivitySec * 1000) : null;
+    out[id] = {
+      store_seq: s.seq || 0,
+      tile_count: entries.length,
+      store_loading: !!s._loading,
+      pending_sse_count: Array.isArray(s._pendingSSE) ? s._pendingSSE.length : 0,
+      is_focused_viewer: focused === id,
+      last_activity_ms: lastActivityMs,
+      last_topic_seq: window._lastSeq || 0,
+      store_first_entry_ts: firstTs,
+      store_last_entry_ts: lastTs,
+      out_of_order_count: ooo,
+      idle_ms: lastActivityMs,
+      tail_3: tail3,
+    };
+  }
+  return out;
+};
