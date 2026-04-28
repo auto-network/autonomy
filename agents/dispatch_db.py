@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS dispatch_runs (
   jsonl_offset INTEGER DEFAULT 0,
   librarian_type TEXT,
   failure_class TEXT,
-  kind TEXT
+  kind TEXT,
+  agentic_source_id TEXT
 )
 """
 
@@ -67,6 +68,11 @@ CREATE TABLE IF NOT EXISTS dispatch_runs (
 # init_db() runs these and ignores "duplicate column name" errors.
 # ``kind`` distinguishes lifecycle category (bead | librarian | agentic);
 # legacy NULLs read back as 'bead' (see DAO COALESCE).
+# ``agentic_source_id`` links the row to the graph ``sources`` row of
+# ``type='agentic'`` that owns the action's identity (title, target,
+# member_key). Bead/librarian rows leave it NULL — readers that JOIN to
+# ``beads`` keep doing so via ``bead_id``; ``agentic_source_id`` is the
+# typed pointer for ``kind='agentic'`` rows only.
 _MIGRATIONS = [
     "ALTER TABLE dispatch_runs ADD COLUMN last_snippet TEXT",
     "ALTER TABLE dispatch_runs ADD COLUMN token_count INTEGER",
@@ -80,6 +86,7 @@ _MIGRATIONS = [
     "ALTER TABLE dispatch_runs ADD COLUMN librarian_type TEXT",
     "ALTER TABLE dispatch_runs ADD COLUMN failure_class TEXT",
     "ALTER TABLE dispatch_runs ADD COLUMN kind TEXT",
+    "ALTER TABLE dispatch_runs ADD COLUMN agentic_source_id TEXT",
 ]
 
 CREATE_INDEX = """\
@@ -224,6 +231,7 @@ def insert_launch_run(
     output_dir: str,
     librarian_type: str | None = None,
     kind: str = "bead",
+    agentic_source_id: str | None = None,
 ) -> None:
     """Insert a RUNNING row at agent launch time.
 
@@ -233,6 +241,8 @@ def insert_launch_run(
 
     ``kind`` is the lifecycle category — ``bead`` (default), ``librarian``,
     or ``agentic``. Reads coalesce NULL → ``bead`` for backwards compat.
+    ``agentic_source_id`` is set only for ``kind='agentic'`` rows; it
+    points at the graph ``sources`` row that owns the action's identity.
     """
     started_dt = datetime.fromtimestamp(started_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if started_at else None
 
@@ -243,8 +253,8 @@ def insert_launch_run(
             INSERT OR IGNORE INTO dispatch_runs (
                 id, bead_id, started_at, status,
                 branch, branch_base, image, container_name, output_dir, librarian_type,
-                kind
-            ) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?)
+                kind, agentic_source_id
+            ) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id, bead_id, started_dt,
@@ -252,6 +262,7 @@ def insert_launch_run(
                 image or None, container_name or None, output_dir or None,
                 librarian_type,
                 kind,
+                agentic_source_id,
             ),
         )
         conn.commit()
