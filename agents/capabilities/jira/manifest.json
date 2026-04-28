@@ -1,0 +1,19 @@
+{
+    "name": "autonomy/jira",
+    "version": 1,
+    "implements": [
+        {"contract": "issue_tracker", "version": 1}
+    ],
+    "delivery_mode": "mounted_tools",
+    "package_root": "agents/capabilities/jira",
+    "tool_paths": ["agents/capabilities/jira/tools"],
+    "skill_path": "agents/capabilities/jira/SKILL.md",
+    "primer_path": "agents/capabilities/jira/primer.md",
+    "probe": {
+        "kind": "command",
+        "entrypoint": "jira-read --probe"
+    },
+    "required_env": ["JIRA_EMAIL", "JIRA_BASE_URL"],
+    "required_secret_files": ["/run/secrets/jira_token"],
+    "notes": "Placeholder manifest. Populated in a later bead — see auto-uqq0i and graph://86e04207-a25 § Phase 3."
+}

@@ -1,0 +1,19 @@
+{
+    "name": "autonomy/github",
+    "version": 1,
+    "implements": [
+        {"contract": "source_control", "version": 1},
+        {"contract": "change_review", "version": 1},
+        {"contract": "merge_gates", "version": 1}
+    ],
+    "delivery_mode": "image_baked",
+    "package_root": "agents/capabilities/github",
+    "skill_path": "agents/capabilities/github/SKILL.md",
+    "primer_path": "agents/capabilities/github/primer.md",
+    "probe": {
+        "kind": "command",
+        "entrypoint": "gh auth status"
+    },
+    "required_env": ["GH_TOKEN"],
+    "notes": "Placeholder manifest. Populated in a later bead — see auto-uqq0i and graph://86e04207-a25."
+}
