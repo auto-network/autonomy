@@ -33,13 +33,13 @@
   .sp-header {
     position: sticky; top: 0; z-index: 10;
     background: var(--sp-bg);
-    padding: 10px 0 0;
+    padding: 4px 0 0;
     border-bottom: 1px solid var(--sp-border);
     margin: -8px -16px 0;
     padding-left: 16px; padding-right: 16px;
   }
   .sp-filter-row-1 {
-    display: flex; gap: 8px; padding-bottom: 8px;
+    display: flex; gap: 8px; padding-bottom: 6px;
     align-items: center; flex-wrap: wrap;
     position: relative;  /* anchors org dropdown + state dropdown */
   }
@@ -62,15 +62,28 @@
     overflow: hidden;
   }
   .sp-filter-chip-glyph img { width: 100%; height: 100%; object-fit: cover; }
+  /* "All orgs" glyph — muted dark, NOT a rainbow gradient. This is a
+     "no filter applied" state, not a colorful highlight. */
   .sp-filter-chip-glyph.sp-filter-chip-all {
-    background: linear-gradient(135deg, #6c63ff, #34d399, #fb923c);
-    font-size: 8px;
+    background: #2a3441;
+    color: #6b7280;
+    border: 1px solid var(--sp-border);
+    font-size: 11px;
+    font-weight: 600;
   }
-  .sp-state-chip-glyph {
-    width: 16px; height: 16px; flex-shrink: 0;
-    border-radius: 3px; border: 1px dashed #4b5e73;
-    display: inline-flex; align-items: center; justify-content: center;
-    font-size: 10px; color: #94a3b8;
+  /* State chip glyph — bar graph showing current restrictiveness.
+     Raw = 1 filled bar (floor); Canonical = 4 filled bars (ceiling). */
+  .sp-state-glyph {
+    width: 16px; height: 12px; flex-shrink: 0;
+    background: transparent; border: none;
+    display: inline-flex; align-items: center; gap: 1px;
+  }
+  .sp-state-glyph-bar {
+    width: 3px; height: 8px;
+    background: #2a3441; border-radius: 1px;
+  }
+  .sp-state-glyph-bar.sp-state-glyph-bar-filled {
+    background: var(--sp-accent);
   }
   .sp-filter-chip-label { font-weight: 500; color: var(--sp-text-2); }
   .sp-filter-chip-value { color: #c4b5fd; font-weight: 600; }
@@ -106,12 +119,52 @@
     overflow: hidden;
   }
   .sp-org-option-glyph img { width: 100%; height: 100%; object-fit: cover; }
+  /* Muted "All orgs" option in the dropdown — same neutral treatment as
+     the chip glyph, not a rainbow gradient. */
   .sp-org-option-glyph.sp-org-option-glyph-all {
-    background: linear-gradient(135deg, #6c63ff, #34d399, #fb923c);
-    font-size: 9px;
+    background: #2a3441;
+    color: #6b7280;
+    border: 1px solid var(--sp-border);
+    font-size: 11px;
+    font-weight: 600;
   }
   .sp-org-option-meta {
     margin-left: auto; font-size: 10px; color: #64748b;
+  }
+
+  /* State dropdown — restrictiveness ladder.
+     Each option carries a 4-bar glyph. Bars increase in height
+     left-to-right (state-h1 .. state-h4) and fill in as the option
+     becomes more restrictive (Raw = 1 filled, Canonical = 4 filled). */
+  .sp-state-option-bars {
+    display: inline-flex; align-items: center; gap: 1px;
+    width: 18px; flex-shrink: 0;
+  }
+  .sp-state-option-bar {
+    width: 3px; background: #2a3441; border-radius: 1px;
+  }
+  .sp-state-option-bar.sp-state-option-bar-filled {
+    background: var(--sp-accent);
+  }
+  .sp-state-h1 { height: 4px; }
+  .sp-state-h2 { height: 7px; }
+  .sp-state-h3 { height: 10px; }
+  .sp-state-h4 { height: 13px; }
+  .sp-state-option-hint {
+    font-size: 10px; color: var(--sp-text-3); font-style: italic;
+    margin-left: auto;
+  }
+
+  /* Empty / loading / no-query branch — clears the sticky filter strip
+     so the message lands below it on a fast load. */
+  .sp-empty-state {
+    padding-top: 16px; margin-top: 4px;
+    color: var(--sp-text-3); font-size: 13px;
+  }
+  .sp-no-query-hint {
+    padding: 32px 16px;
+    text-align: center;
+    color: var(--sp-text-3); font-size: 13px;
   }
 
   /* Peer pill — painted on cross-org result rows */
@@ -251,8 +304,10 @@
      @global-search:enter.window="onGlobalSearchEnter($event)"
      class="sp-root pb-safe">
   <!-- Sticky filter strip — NO back button, NO page-level search input.
-       The global "Search graph…" input in the top header is canonical. -->
-  <div class="sp-header" data-testid="sp-filter-strip">
+       The global "Search graph…" input in the top header is canonical.
+       Hidden entirely when there's no active query so /search (no q) shows
+       only the centered "type a query" hint. -->
+  <div class="sp-header" data-testid="sp-filter-strip" x-show="query !== ''">
 
     <!-- Row 1: org chip + publication-state chip -->
     <div class="sp-filter-row-1">
@@ -276,13 +331,21 @@
         <span class="sp-filter-chip-caret">▾</span>
       </button>
 
-      <!-- Publication-state chip — clamps the result set to canonical /
-           published / curated rows. ``Any`` (default) sends no states= filter. -->
+      <!-- Publication-state chip — minimum-state filter. Picking a state
+           clamps results to that state OR more restrictive. Raw is the
+           floor (everything qualifies, including raw rows from other
+           sessions via include_raw=1); Canonical is the ceiling. The
+           glyph mirrors the active selection's restrictiveness. -->
       <button class="sp-filter-chip"
               data-testid="sp-state-chip"
               @click.stop="toggleStateDropdown()"
-              title="Filter by publication state">
-        <span class="sp-state-chip-glyph">◆</span>
+              title="Filter by minimum publication state (more bars = more restrictive)">
+        <span class="sp-state-glyph" data-testid="sp-state-chip-glyph">
+          <template x-for="i in 4" :key="i">
+            <span class="sp-state-glyph-bar"
+                  :class="i <= stateChipFilledBars ? 'sp-state-glyph-bar-filled' : ''"></span>
+          </template>
+        </span>
         <span class="sp-filter-chip-label">State:</span>
         <span class="sp-filter-chip-value" x-text="stateChipLabel"></span>
         <span class="sp-filter-chip-caret">▾</span>
@@ -320,7 +383,11 @@
         </template>
       </div>
 
-      <!-- Publication-state dropdown panel (open state) -->
+      <!-- Publication-state dropdown panel (open state).
+           Order is Raw → Curated → Published → Canonical — top of list is
+           least restrictive (= "Any"); bottom is most restrictive. Each
+           option carries a 4-bar ladder where the number of filled bars
+           communicates restrictiveness. -->
       <div class="sp-state-dropdown"
            data-testid="sp-state-dropdown"
            x-show="stateDropdownOpen"
@@ -328,10 +395,17 @@
            x-cloak>
         <template x-for="opt in stateOptions" :key="opt.key">
           <button class="sp-org-option"
+                  :data-state-key="opt.key"
                   :class="selectedState === opt.key ? 'sp-org-option-selected' : ''"
                   @click="pickState(opt.key)">
+            <span class="sp-state-option-bars" data-testid="sp-state-option-bars">
+              <template x-for="i in 4" :key="i">
+                <span class="sp-state-option-bar"
+                      :class="(i <= opt.bars ? 'sp-state-option-bar-filled ' : '') + 'sp-state-h' + i"></span>
+              </template>
+            </span>
             <span x-text="opt.label"></span>
-            <span class="sp-org-option-meta" x-text="opt.meta"></span>
+            <span class="sp-state-option-hint" x-text="opt.hint"></span>
           </button>
         </template>
       </div>
@@ -355,8 +429,8 @@
     </div>
   </div>
 
-  <!-- Summary row -->
-  <div class="sp-summary-row" x-show="loaded && results.length > 0">
+  <!-- Summary row — only when there's a non-empty query AND results -->
+  <div class="sp-summary-row" x-show="query !== '' && loaded && results.length > 0">
     <span>
       <span x-text="filteredResults.length"></span> sources ·
       <span x-text="totalMatches"></span> matches for
@@ -364,14 +438,24 @@
     </span>
   </div>
 
-  <!-- Loading -->
-  <template x-if="!loaded">
-    <div class="text-gray-500 text-sm">Searching...</div>
+  <!-- Empty-query no-op state — operator hit /search without ?q=.
+       Hide chip rail + summary + empty msg; show a single centered hint. -->
+  <template x-if="query === ''">
+    <div class="sp-no-query-hint" data-testid="sp-no-query-hint">
+      Type a query in the search bar above to begin.
+    </div>
   </template>
 
-  <!-- Empty -->
-  <template x-if="loaded && results.length === 0">
-    <div class="text-gray-500 text-sm">No results for "<span x-text="query"></span>"</div>
+  <!-- Loading — top padding clears the sticky strip on a fast load. -->
+  <template x-if="query !== '' && !loaded">
+    <div class="sp-empty-state" data-testid="sp-loading-state">Searching…</div>
+  </template>
+
+  <!-- Empty — same top padding so the message isn't tucked under the strip. -->
+  <template x-if="query !== '' && loaded && results.length === 0">
+    <div class="sp-empty-state" data-testid="sp-empty-state">
+      No results for "<span x-text="query"></span>"
+    </div>
   </template>
 
   <!-- Results -->

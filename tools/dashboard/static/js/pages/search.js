@@ -23,15 +23,29 @@
     musing: 'Musings',
   };
 
-  // Publication-state dropdown options. ``key=''`` means "Any" — sends no
-  // states= filter. The other keys map directly to the back-end's accepted
-  // states (``/api/search?states=...``).
+  // Publication-state dropdown options. The selection is a *minimum-state*
+  // filter — picking a state clamps results to that state OR more
+  // restrictive. Order is least → most restrictive (Raw is the floor;
+  // Canonical the ceiling). ``bars`` drives the option's ladder glyph
+  // (1..4 filled bars). ``hint`` is the trailing italic restrictiveness
+  // tag ("any" / "+" / "strict") shown next to each option.
+  //
+  // Wire mapping (see _refetch below):
+  //   raw       → ?include_raw=1            (no states= — clears the
+  //                                          hidden "exclude raw rows
+  //                                          from other sessions" filter
+  //                                          baked into db.py defaults)
+  //   curated   → ?states=curated,published,canonical
+  //   published → ?states=published,canonical
+  //   canonical → ?states=canonical
   var STATE_OPTIONS = [
-    { key: '', label: 'Any', meta: 'default' },
-    { key: 'canonical', label: 'Canonical', meta: 'pinned' },
-    { key: 'published', label: 'Published', meta: 'shareable' },
-    { key: 'curated', label: 'Curated', meta: 'reviewed' },
+    { key: 'raw',       label: 'Raw',       hint: 'any',    bars: 1, states: null,                                  includeRaw: true  },
+    { key: 'curated',   label: 'Curated',   hint: '+',      bars: 2, states: ['curated', 'published', 'canonical'], includeRaw: false },
+    { key: 'published', label: 'Published', hint: '+',      bars: 3, states: ['published', 'canonical'],            includeRaw: false },
+    { key: 'canonical', label: 'Canonical', hint: 'strict', bars: 4, states: ['canonical'],                         includeRaw: false },
   ];
+
+  var DEFAULT_STATE_KEY = 'raw';
 
   // Debounce window for global-search input → refetch on /search. Matches
   // the brief: "300ms".
@@ -47,8 +61,10 @@
       selectedOrg: '',
       orgList: [],
       orgDropdownOpen: false,
-      // Publication-state chip ('' = Any; mirrors ?state= URL param).
-      selectedState: '',
+      // Publication-state chip — mirrors ?state= URL param. Default is
+      // ``raw`` (the floor; equivalent to the old "Any"). Non-recognised
+      // values fall back to the default.
+      selectedState: DEFAULT_STATE_KEY,
       stateDropdownOpen: false,
       stateOptions: STATE_OPTIONS,
       _refetchTimer: null,
@@ -61,7 +77,9 @@
         // wire — see _refetch() below — but we still parse legacy URLs so
         // bookmarks keep working.
         this.selectedOrg = params.get('org') || params.get('only_org') || '';
-        this.selectedState = params.get('state') || '';
+        var stateParam = params.get('state') || '';
+        var match = STATE_OPTIONS.find(o => o.key === stateParam);
+        this.selectedState = match ? match.key : DEFAULT_STATE_KEY;
         // Sync the global header input with our query so it isn't blank
         // when the page lands via deep link.
         this._syncGlobalInput();
@@ -135,9 +153,21 @@
       },
 
       // ── Publication-state chip + dropdown ──────────────────────────
+      _stateOption(key) {
+        return STATE_OPTIONS.find(o => o.key === (key || '')) ||
+               STATE_OPTIONS.find(o => o.key === DEFAULT_STATE_KEY);
+      },
+
       get stateChipLabel() {
-        var match = STATE_OPTIONS.find(o => o.key === (this.selectedState || ''));
-        return match ? match.label : 'Any';
+        var opt = this._stateOption(this.selectedState);
+        // Echo "Any" hint inline on Raw so the chip's label communicates
+        // its semantic ("Raw = floor / no filter") at a glance.
+        if (opt.key === 'raw') return 'Raw (Any)';
+        return opt.label;
+      },
+
+      get stateChipFilledBars() {
+        return this._stateOption(this.selectedState).bars;
       },
 
       toggleStateDropdown() {
@@ -147,8 +177,9 @@
 
       pickState(key) {
         this.stateDropdownOpen = false;
-        if ((key || '') === (this.selectedState || '')) return;
-        this.selectedState = key || '';
+        var resolved = this._stateOption(key).key;
+        if (resolved === this.selectedState) return;
+        this.selectedState = resolved;
         this._writeUrl();
         if (this.query) this._refetch();
       },
@@ -206,8 +237,11 @@
         else url.searchParams.delete('q');
         if (this.selectedOrg) url.searchParams.set('org', this.selectedOrg);
         else url.searchParams.delete('org');
-        if (this.selectedState) url.searchParams.set('state', this.selectedState);
-        else url.searchParams.delete('state');
+        if (this.selectedState && this.selectedState !== DEFAULT_STATE_KEY) {
+          url.searchParams.set('state', this.selectedState);
+        } else {
+          url.searchParams.delete('state');
+        }
         window.history.replaceState({}, '', url.toString());
       },
 
@@ -221,8 +255,20 @@
         // the operator expects when they pin "Autonomy".
         var url = '/api/search?q=' + encodeURIComponent(this.query) +
                   '&group=1&limit=50';
-        if (this.selectedState) {
-          url += '&states=' + encodeURIComponent(this.selectedState);
+        // Minimum-state filter mapping (see STATE_OPTIONS):
+        //   raw       → ?include_raw=1   (NO ?states= — the API's default
+        //                                 hidden filter excludes raw rows
+        //                                 from other sessions; include_raw
+        //                                 clears that filter so Raw really
+        //                                 means "any state, anywhere")
+        //   curated   → ?states=curated,published,canonical
+        //   published → ?states=published,canonical
+        //   canonical → ?states=canonical
+        var opt = this._stateOption(this.selectedState);
+        if (opt.includeRaw) {
+          url += '&include_raw=1';
+        } else if (opt.states && opt.states.length) {
+          url += '&states=' + encodeURIComponent(opt.states.join(','));
         }
         var headers = {};
         if (this.selectedOrg) headers['X-Graph-Org'] = this.selectedOrg;
