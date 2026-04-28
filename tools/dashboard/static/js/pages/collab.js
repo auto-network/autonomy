@@ -94,6 +94,11 @@
       typeClass(item) {
         return 'note-type-' + this.typeBucket(item);
       },
+      // Prefer the explicit short_description over the legacy preview slice
+      // (a 140-char content prefix). Empty string means "render nothing".
+      previewText(item) {
+        return item.short_description || item.preview || '';
+      },
     }));
   });
 })();
