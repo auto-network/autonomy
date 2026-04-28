@@ -866,6 +866,9 @@ def sweep_server(tmp_path_factory):
         "DASHBOARD_MOCK": str(fixture_path),
         "DASHBOARD_MOCK_EVENTS": str(events_path),
         "PYTHONPATH": str(Path(__file__).resolve().parents[3]),  # repo root
+        # Isolate EventBus snapshot so neither prior runs nor sibling tests
+        # can replay stale session:registry into our subscribers via restore().
+        "DASHBOARD_EVENT_BUS_STATE": str(tmpdir / "event_bus.state"),
     }
 
     proc = subprocess.Popen(
