@@ -1451,23 +1451,69 @@ async def api_search(request):
     limit = int(request.query_params.get("limit", "20"))
     project = request.query_params.get("project")
     or_mode = bool(request.query_params.get("or"))
+    tag = request.query_params.get("tag")
+    states_param = request.query_params.get("states")
+    states = [s for s in states_param.split(",") if s] if states_param else None
+    include_raw = bool(request.query_params.get("include_raw"))
+    only_org = request.query_params.get("only_org")
+    peers_param = request.query_params.get("peers")
+    peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
     org = request.headers.get("X-Graph-Org") or None
     results = await asyncio.to_thread(
         graph_ops.search,
-        q, org=org, limit=limit, project=project, or_mode=or_mode,
+        q, org=org, peers=peers, only_org=only_org,
+        limit=limit, project=project, or_mode=or_mode, tag=tag,
+        states=states, include_raw=include_raw,
     )
     if request.query_params.get("group"):
-        grouped: dict = {}
-        for r in results:
-            sid = r.get("source_id", r.get("id"))
-            if sid not in grouped:
-                grouped[sid] = r
-                grouped[sid]["match_count"] = 1
-            else:
-                grouped[sid]["match_count"] = grouped[sid].get("match_count", 0) + 1
-        results = sorted(grouped.values(), key=lambda x: x.get("rank", 0))
+        results = _group_search_results(results)
     _enrich_search_results(results)
     return JSONResponse(results)
+
+
+def _group_search_results(rows: list) -> list:
+    """Collapse FTS rows into one entry per source while preserving per-turn excerpts.
+
+    Output shape per group: source-level fields (source_id, source_title,
+    source_type, project, platform, org, source_created_at, rrf_score) plus
+    a best-rank ``rank`` and a sorted ``excerpts`` array of per-turn hits.
+    """
+    SOURCE_FIELDS = (
+        "source_id", "source_title", "source_type", "project", "platform",
+        "org", "source_created_at", "source_metadata", "rrf_score",
+    )
+    EXCERPT_FIELDS = ("turn_number", "content", "result_type", "rank")
+    groups: dict = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        sid = r.get("source_id") or r.get("id")
+        if sid is None:
+            continue
+        excerpt = {k: r.get(k) for k in EXCERPT_FIELDS}
+        g = groups.get(sid)
+        if g is None:
+            g = {k: r.get(k) for k in SOURCE_FIELDS if k in r}
+            g["source_id"] = sid
+            g["rank"] = r.get("rank")
+            g["excerpts"] = [excerpt]
+            g["match_count"] = 1
+            groups[sid] = g
+        else:
+            g["excerpts"].append(excerpt)
+            g["match_count"] += 1
+            cur = g.get("rank")
+            new = r.get("rank")
+            if new is not None and (cur is None or new < cur):
+                g["rank"] = new
+    for g in groups.values():
+        g["excerpts"].sort(
+            key=lambda e: (e.get("rank") if e.get("rank") is not None else 0)
+        )
+    return sorted(
+        groups.values(),
+        key=lambda g: (g.get("rank") if g.get("rank") is not None else 0),
+    )
 
 
 def _enrich_search_results(results: list) -> None:
@@ -1482,7 +1528,11 @@ def _enrich_search_results(results: list) -> None:
         # created_at / date / last_activity_at in various forms.
         if "date" not in r or not r.get("date"):
             r["date"] = _format_search_date(
-                r.get("created_at") or r.get("date") or r.get("last_activity_at") or ""
+                r.get("source_created_at")
+                or r.get("created_at")
+                or r.get("date")
+                or r.get("last_activity_at")
+                or ""
             )
         else:
             r["date"] = _format_search_date(r["date"])

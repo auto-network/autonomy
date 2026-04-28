@@ -100,7 +100,7 @@ _CONNECTION_POOL: dict[tuple[str, str], "GraphDB"] = {}
 
 import re as _re
 
-_SOURCE_ID_RE = _re.compile(r'^[0-9a-f]{6,}(-[0-9a-f]+)?$', _re.IGNORECASE)
+_SOURCE_ID_RE = _re.compile(r'^[0-9a-f]{6,}(?:-[0-9a-f]+)*$', _re.IGNORECASE)
 
 
 def _is_source_id(query: str) -> bool:
@@ -874,6 +874,9 @@ class GraphDB:
             rows = self.conn.execute(
                 f"""SELECT t.id, t.content, t.turn_number, t.tags, t.source_id,
                           s.title as source_title, s.platform, s.project,
+                          s.type as source_type,
+                          s.created_at as source_created_at,
+                          s.metadata as source_metadata,
                           'thought' as result_type,
                           rank
                    FROM thoughts_fts fts
@@ -889,6 +892,9 @@ class GraphDB:
             rows = self.conn.execute(
                 f"""SELECT d.id, d.content, d.turn_number, d.thought_id, d.source_id,
                           s.title as source_title, s.platform, s.project,
+                          s.type as source_type,
+                          s.created_at as source_created_at,
+                          s.metadata as source_metadata,
                           'derivation' as result_type,
                           rank
                    FROM derivations_fts fts
@@ -905,6 +911,9 @@ class GraphDB:
             rows = self.conn.execute(
                 f"""SELECT t.id, t.content, t.turn_number, t.tags, t.source_id,
                           s.title as source_title, s.platform, s.project,
+                          s.type as source_type,
+                          s.created_at as source_created_at,
+                          s.metadata as source_metadata,
                           'thought' as result_type,
                           rank
                    FROM thoughts_fts fts
@@ -920,6 +929,9 @@ class GraphDB:
             rows = self.conn.execute(
                 f"""SELECT d.id, d.content, d.turn_number, d.thought_id, d.source_id,
                           s.title as source_title, s.platform, s.project,
+                          s.type as source_type,
+                          s.created_at as source_created_at,
+                          s.metadata as source_metadata,
                           'derivation' as result_type,
                           rank
                    FROM derivations_fts fts
@@ -984,6 +996,8 @@ class GraphDB:
                 "rank": -1000,  # always first
                 "source_type": source.get("type"),
                 "created_at": source.get("created_at"),
+                "source_created_at": source.get("created_at"),
+                "source_metadata": source.get("metadata"),
             })
 
             # 2 & 3. Linked sources via edges (both directions)
@@ -1067,6 +1081,9 @@ class GraphDB:
                         rows = self.conn.execute(
                             f"""SELECT t.id, t.content, t.turn_number, t.source_id,
                                        s.title as source_title, s.platform, s.project,
+                                       s.type as source_type,
+                                       s.created_at as source_created_at,
+                                       s.metadata as source_metadata,
                                        '{rtype}' as result_type, rank
                                 FROM {table} fts
                                 JOIN {content_table} t ON t.rowid = fts.rowid
@@ -1079,6 +1096,9 @@ class GraphDB:
                         rows = self.conn.execute(
                             f"""SELECT t.id, t.content, t.turn_number, t.source_id,
                                        s.title as source_title, s.platform, s.project,
+                                       s.type as source_type,
+                                       s.created_at as source_created_at,
+                                       s.metadata as source_metadata,
                                        '{rtype}' as result_type, rank
                                 FROM {table} fts
                                 JOIN {content_table} t ON t.rowid = fts.rowid
