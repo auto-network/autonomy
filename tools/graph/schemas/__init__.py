@@ -28,6 +28,7 @@ from . import workspace_artifact  # noqa: F401 — autonomy.workspace.artifact#1
 from . import artifact_path  # noqa: F401 — autonomy.artifact-path#1
 from . import org_peer_subscription  # noqa: F401 — autonomy.org.peer-subscription#1
 from . import mount  # noqa: F401 — autonomy.workspace.mount#1
+from . import agent_actions  # noqa: F401 — dashboard.agent-actions#1
 
 __all__ = [
     "SchemaValidationError",
