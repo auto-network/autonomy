@@ -363,6 +363,31 @@ def make_primer(
     }
 
 
+def make_dispatch_run(
+    run_id="run-mock-001", bead_id="auto-test", status="DONE",
+    title="Mock dispatch", priority=2, kind=None,
+    started_at="2026-01-01T00:00:00Z", completed_at="2026-01-01T00:05:00Z",
+    duration_secs=300, **kwargs,
+):
+    """Build a dispatch run dict for the mock fixtures.
+
+    The ``kind`` arg mirrors the dispatch_runs.kind column added in
+    auto-5k2j4 (values ∈ {bead, librarian, agentic}). Pass ``kind=None``
+    to simulate a legacy row with NULL kind — UI code applies the
+    COALESCE-as-bead default at render time.
+    """
+    row = {
+        "id": run_id, "bead_id": bead_id, "status": status,
+        "title": title, "priority": priority,
+        "started_at": started_at, "completed_at": completed_at,
+        "duration_secs": duration_secs,
+        **kwargs,
+    }
+    if kind is not None:
+        row["kind"] = kind
+    return row
+
+
 # ── Comprehensive fixture set (all page types) ───────────────────────
 
 def full_fixture():
