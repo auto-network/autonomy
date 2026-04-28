@@ -1786,6 +1786,7 @@ def _record_librarian_launch(lib: RunningLibrarian) -> None:
             container_name=lib.container_name,
             output_dir=lib.output_dir,
             librarian_type=lib.job_type,
+            kind="librarian",
         )
     except Exception as e:
         print(f"  WARNING: Failed to record librarian launch to SQLite: {e}",
@@ -1812,6 +1813,7 @@ def _record_librarian_run(lib: RunningLibrarian, exit_code: int, status: str) ->
             exit_code=exit_code,
             output_dir=lib.output_dir,
             librarian_type=lib.job_type,
+            kind="librarian",
         )
     except Exception as e:
         print(f"  WARNING: Failed to record librarian run to SQLite: {e}",

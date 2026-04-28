@@ -741,10 +741,18 @@ async def api_dispatch_runs(request):
                 timestamp = f"{parts[1]}-{parts[2]}"
 
         librarian_type = row.get("librarian_type") or None
+        # Coalesce legacy NULL kind → 'bead'. The DAO already does this for
+        # rows it returns, but list_runs() bypasses the DAO and reads
+        # dispatch.db directly via the dispatcher's writer connection — so
+        # NULL can leak through here.
+        kind = row.get("kind") or "bead"
         dir_name = row.get("id", "")
         bead_id = row.get("bead_id", "")
         # Librarian runs have empty bead_id — use dir name as identifier
         if not bead_id and librarian_type:
+            bead_id = dir_name
+        # Agentic runs likewise have empty bead_id — use dir name as identifier
+        if not bead_id and kind == "agentic":
             bead_id = dir_name
         # Synthetic title for librarian runs
         title = None
@@ -768,6 +776,7 @@ async def api_dispatch_runs(request):
             "smoke_result": None,
             "librarian_review": None,
             "librarian_type": librarian_type,
+            "kind": kind,
             "title": title,
             # internal fields for enrichment — stripped before response
             "_run_id": row.get("id", ""),
@@ -889,6 +898,12 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
             time_breakdown[out_key] = val
 
     librarian_type = row["librarian_type"] or None
+    # Coalesce legacy NULL kind → 'bead'. Direct timeline reads bypass the
+    # dispatch DAO's _coerce_kind, so we normalize here.
+    try:
+        kind = row["kind"] or "bead"
+    except (IndexError, KeyError):
+        kind = "bead"
     return {
         "run_id": row["id"] or "",
         "bead_id": row["bead_id"] or "",
@@ -911,6 +926,7 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         "has_experience_report": bool(row["has_experience_report"]),
         "token_count": row["token_count"],
         "librarian_type": librarian_type,
+        "kind": kind,
         "librarian_review": None,  # populated by _enrich_with_librarian_data
         "smoke_result": _read_smoke_result(row["output_dir"]),
         "_output_dir": row["output_dir"] or "",  # internal field, stripped before response
@@ -1461,11 +1477,19 @@ async def api_search(request):
     peers_param = request.query_params.get("peers")
     peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
     org = request.headers.get("X-Graph-Org") or None
+    # Auxiliary source types (currently 'agentic' agent-action runs) are
+    # excluded from /api/search by default — the global surface should not
+    # be polluted by short-lived dashboard-spawned agents. Pass
+    # ``?include_aux=1`` to surface them (future "Auxiliary runs" tab).
+    excluded_source_types: list[str] | None = None
+    if request.query_params.get("include_aux"):
+        excluded_source_types = []
     results = await asyncio.to_thread(
         graph_ops.search,
         q, org=org, peers=peers, only_org=only_org,
         limit=limit, project=project, or_mode=or_mode, tag=tag,
         states=states, include_raw=include_raw,
+        excluded_source_types=excluded_source_types,
     )
     if request.query_params.get("group"):
         results = _group_search_results(results)

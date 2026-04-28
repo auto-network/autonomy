@@ -215,7 +215,8 @@ def backfill(*, dry_run: bool = False) -> list[dict]:
                         lines_added, lines_removed, files_changed,
                         score_tooling, score_clarity, score_confidence,
                         time_research_pct, time_coding_pct, time_debugging_pct, time_tooling_pct,
-                        discovered_beads_count, has_experience_report, output_dir
+                        discovered_beads_count, has_experience_report, output_dir,
+                        kind
                     ) VALUES (
                         ?, ?, ?, ?, ?,
                         ?, ?, ?,
@@ -224,7 +225,8 @@ def backfill(*, dry_run: bool = False) -> list[dict]:
                         ?, ?, ?,
                         ?, ?, ?,
                         ?, ?, ?, ?,
-                        ?, ?, ?
+                        ?, ?, ?,
+                        'bead'
                     )
                     """,
                     info["row"],

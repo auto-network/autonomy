@@ -16,7 +16,7 @@ PRAGMA foreign_keys = ON;
 -- moved_to_org: relocation marker for moved-from stubs kept in the origin org.
 CREATE TABLE IF NOT EXISTS sources (
     id                TEXT PRIMARY KEY,
-    type              TEXT NOT NULL,          -- 'conversation', 'musing', 'document', 'url', 'session'
+    type              TEXT NOT NULL,          -- 'conversation', 'musing', 'document', 'url', 'session', 'note', 'agentic'
     platform          TEXT,                   -- 'chatgpt', 'claude', 'claude-code', 'local', etc.
     project           TEXT,                   -- project identifier (e.g. '-home-jeremy-workspace-autonomy')
     title             TEXT,
@@ -32,9 +32,14 @@ CREATE TABLE IF NOT EXISTS sources (
     successor_id      TEXT,                   -- loose reference to another source (promotion succession)
     moved_to_org      TEXT
 );
--- idx_sources_last_activity and idx_sources_publication_state are created via
--- their _migrate_* methods, so legacy DBs that pre-date these columns don't
--- fail on CREATE INDEX during executescript.
+-- The ``type`` column is an open string; common values include the ones
+-- listed above. The ``agentic`` value identifies short-lived agent-action
+-- runs spawned from the dashboard; rows of that type are excluded from
+-- /api/search and /collab Recent by default (see GraphDB.search's
+-- ``excluded_source_types`` arg).
+-- idx_sources_last_activity, idx_sources_publication_state, and
+-- idx_sources_type are created via their _migrate_* methods, so legacy DBs
+-- that pre-date these columns don't fail on CREATE INDEX during executescript.
 
 -- ============================================================
 -- THOUGHTS — user assertions, questions, intents (sovereign)
