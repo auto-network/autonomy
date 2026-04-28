@@ -477,13 +477,24 @@ class _TailState:
     # None sentinel means "never written on this process run" (forces one write
     # after warm-up so restarts repopulate the DB even without new events).
     last_todos_json: str | None = None
-    # /api/diag exposes the last 3 processed entries (post-_apply_activity_entries)
-    # as (type, timestamp, identity) tuples so file/server/client tail_3 can be
+    # /api/diag exposes the last N processed entries (post-_apply_activity_entries)
+    # as (type, timestamp, identity) tuples so file/server/client tails can be
     # compared. Bounded ring; never read on the hot path.
-    recent_processed: deque = field(default_factory=lambda: deque(maxlen=3))
+    recent_processed: deque = field(default_factory=lambda: deque(maxlen=10))
     # Wall-clock timestamp of the last session:messages broadcast for this
     # session. Used by /api/diag to compute last_broadcast_ago_s.
     last_broadcast_ts: float = 0.0
+    # /api/diag depth fields — never read on the hot path.
+    parse_errors_count: int = 0
+    last_parse_error: str | None = None  # one-line snippet of the most recent error
+    last_parse_error_ts: float = 0.0
+    lines_processed_total: int = 0  # raw JSONL lines seen by the tailer (parsed or not)
+    inotify_events_received: int = 0  # IN_MODIFY events on this session's file watch
+    last_inotify_event_ts: float = 0.0
+    enqueue_dedup_count: int = 0  # times the queued/user dedup matched
+    last_enqueue_dedup_ts: float = 0.0
+    last_full_rescan_ts: float = 0.0  # wall-clock ts of last reconciliation hit
+    full_rescan_count: int = 0  # times reconciliation promoted this session
 
 
 def _entry_identity(entry: dict) -> str:
@@ -1240,6 +1251,8 @@ class SessionMonitor:
                   and ts.last_enqueue_content
                   and entry.get("content", "").strip() == ts.last_enqueue_content):
                 ts.last_enqueue_content = None
+                ts.enqueue_dedup_count += 1
+                ts.last_enqueue_dedup_ts = time.time()
             else:
                 deduped.append(entry)
         new_entries = deduped
@@ -1306,6 +1319,10 @@ class SessionMonitor:
                         name = self._wd_to_session.get(event.wd)
                         if name:
                             modified.add(name)
+                            ts_for_event = self._tail_states.get(name)
+                            if ts_for_event is not None:
+                                ts_for_event.inotify_events_received += 1
+                                ts_for_event.last_inotify_event_ts = time.time()
                     if event.mask & _iflags.CREATE:
                         await self._handle_in_create(event)
                     if event.mask & _iflags.IGNORED:
@@ -1710,9 +1727,13 @@ class SessionMonitor:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
+            ts.lines_processed_total += 1
             try:
                 entry = json.loads(line)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                ts.parse_errors_count += 1
+                ts.last_parse_error = f"json: {str(exc)[:160]} | line: {line[:160]}"
+                ts.last_parse_error_ts = time.time()
                 continue
 
             new_entry_count += 1
@@ -1725,7 +1746,10 @@ class SessionMonitor:
             # Parse full entry for SSE broadcast
             try:
                 parsed = harness.parse_line(line)
-            except Exception:
+            except Exception as exc:
+                ts.parse_errors_count += 1
+                ts.last_parse_error = f"harness.parse_line: {str(exc)[:160]} | line: {line[:160]}"
+                ts.last_parse_error_ts = time.time()
                 parsed = None
             if isinstance(parsed, list):
                 parsed_entries.extend(parsed)
@@ -1921,6 +1945,10 @@ class SessionMonitor:
                         continue
                     if self._handle_jsonl_appeared(tmux_name, jsonl):
                         resolved += 1
+                        ts_obj = self._tail_states.get(tmux_name)
+                        if ts_obj is not None:
+                            ts_obj.full_rescan_count += 1
+                            ts_obj.last_full_rescan_ts = time.time()
                         logger.info(
                             "session_monitor: reconciliation resolved %s → %s",
                             tmux_name, jsonl.name,

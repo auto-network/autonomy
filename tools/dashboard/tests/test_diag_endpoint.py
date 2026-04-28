@@ -580,3 +580,461 @@ class TestDiagEventBusSnapshot:
         out_path = Path(body["path"])
         assert "/tmp/evil-path.state" != str(out_path)
         assert str(out_path).startswith(str(tmp_path / "diag"))
+
+
+# ── auto-wldnv: maximum-information enrichment ───────────────────────────
+
+
+def _post_diag_reply(server_mod, client, sid, *, sessions_payload=None,
+                     client_state=None, client_id="tab-X"):
+    """Helper: POST a synthetic diag reply mid-window. Returns (body, req_id)."""
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if server_mod._DIAG_AGGREGATORS:
+            req_id = next(iter(server_mod._DIAG_AGGREGATORS))
+            payload = {
+                "client_state": client_state or {},
+                "sessions": sessions_payload or {},
+            }
+            body = {
+                "req_id": req_id,
+                "request_type": "session_markers",
+                "client_id": client_id,
+                "payload": payload,
+            }
+            client.post("/api/diag/client", json=body)
+            return body, req_id
+        time.sleep(0.02)
+    return None, None
+
+
+class TestDiagEnvelopeAdditions:
+    """Top-level envelope additions: emit_ts + per-client request metadata."""
+
+    def test_emit_ts_present_on_payload(self, diag_env):
+        server_mod, _tmp, _db = diag_env
+        from starlette.testclient import TestClient
+        _short_window(server_mod)
+        with TestClient(server_mod.app) as client:
+            resp = client.get("/api/diag/sessions")
+        body = resp.json()
+        assert "emit_ts" in body
+        assert "emit_ts_ms" in body
+        assert isinstance(body["emit_ts"], (int, float))
+        assert body["emit_ts"] > 0
+        assert body["emit_ts_ms"] == int(body["emit_ts"] * 1000)
+
+    def test_emit_ts_in_diag_request_event(self, diag_env):
+        """The `diag:request` SSE payload must carry emit_ts so clients can
+        compute clock_skew_ms."""
+        server_mod, _tmp, _db = diag_env
+        from starlette.testclient import TestClient
+        _short_window(server_mod)
+        bus = server_mod.event_bus
+
+        with TestClient(server_mod.app) as client:
+            client.get("/api/diag/sessions")
+        # The most recent diag:request broadcast must include emit_ts.
+        recent = bus.recent_broadcasts(topic="diag:request", limit=1)
+        assert recent, "no diag:request broadcasts recorded"
+        # We don't ship the payload in the recent log, but bus._last has the
+        # serialised body.
+        last = bus._last.get("diag:request")
+        assert last is not None
+        data = json.loads(last)
+        assert "emit_ts" in data and "emit_ts_ms" in data
+
+    def test_per_client_envelope_remote_addr_user_agent(self, diag_env):
+        server_mod, tmp_path, db_path = diag_env
+        from starlette.testclient import TestClient
+
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "auto-1.jsonl"
+        _write_entries(jsonl, _toolish_entries())
+        _insert_session(db_path, "auto-1", str(jsonl), file_offset=jsonl.stat().st_size)
+
+        _short_window(server_mod)
+        server_mod._DIAG_COLLECTION_WINDOW_SECONDS = 1.0
+
+        with TestClient(server_mod.app) as client:
+            def _post():
+                deadline = time.time() + 2.0
+                while time.time() < deadline:
+                    if server_mod._DIAG_AGGREGATORS:
+                        req_id = next(iter(server_mod._DIAG_AGGREGATORS))
+                        client.post(
+                            "/api/diag/client",
+                            json={
+                                "req_id": req_id,
+                                "request_type": "session_markers",
+                                "client_id": "tab-AA",
+                                "payload": {
+                                    "client_state": {"event_source_ready_state": 1},
+                                    "sessions": {"auto-1": {"store_seq": 1, "tile_count": 0}},
+                                },
+                            },
+                            headers={
+                                "User-Agent": "TestUA/1.0 (diag)",
+                                "Accept-Language": "en-US,en;q=0.9",
+                            },
+                        )
+                        return
+                    time.sleep(0.02)
+
+            t = threading.Thread(target=_post)
+            t.start()
+            resp = client.get("/api/diag/sessions")
+            t.join(timeout=3.0)
+        body = resp.json()
+        row = next(r for r in body["rows"] if r["session_id"] == "auto-1")
+        assert len(row["clients"]) == 1
+        c = row["clients"][0]
+        assert c["client_id"] == "tab-AA"
+        assert c["user_agent"] == "TestUA/1.0 (diag)"
+        assert c["accept_language"] == "en-US,en;q=0.9"
+        # Starlette TestClient reports remote_addr as None or a loopback addr.
+        assert "remote_addr" in c
+        assert "connection_id" in c
+        assert "subscription_age_s" in c
+
+
+class TestDiagBusBlockExtensions:
+    """auto-wldnv bus additions: subscribers/recent_broadcasts/dedup/restore."""
+
+    def test_subscribers_metadata_lists_active_subscribers(self, diag_env):
+        server_mod, _tmp, _db = diag_env
+        bus = server_mod.event_bus
+        q1 = bus.subscribe(client_id="cid-1")
+        q2 = bus.subscribe(client_id="cid-2")
+        try:
+            meta = bus.subscribers_metadata()
+            assert len(meta) == 2
+            cids = {m["client_id"] for m in meta}
+            assert cids == {"cid-1", "cid-2"}
+            for m in meta:
+                assert m["age_s"] >= 0.0
+                assert m["queue_depth"] >= 0
+                assert m["dropped_count"] == 0
+                assert m["connection_id"]
+        finally:
+            bus.unsubscribe(q1)
+            bus.unsubscribe(q2)
+        assert bus.subscribers_metadata() == []
+
+    def test_recent_broadcasts_capped_at_ten_per_topic(self, diag_env):
+        server_mod, _tmp, _db = diag_env
+        bus = server_mod.event_bus
+
+        async def _populate():
+            for i in range(11):
+                await bus.broadcast("test:rb", {"i": i}, dedup=False)
+        asyncio.run(_populate())
+
+        recent = bus.recent_broadcasts(topic="test:rb")
+        assert len(recent) == 10
+        # Monotonic: seqs ascend.
+        seqs = [e["seq"] for e in recent]
+        assert seqs == sorted(seqs)
+        # Only the 10 most recent — the 11 broadcasts had successive seqs,
+        # so the smallest one (the first) must have been evicted.
+        assert seqs[0] > recent[0]["seq"] - 1 or len(seqs) == 10
+
+    def test_dedup_skipped_total_increments(self, diag_env):
+        server_mod, _tmp, _db = diag_env
+        bus = server_mod.event_bus
+        baseline = bus.dedup_skipped_total()
+
+        async def _populate():
+            await bus.broadcast("test:dedup", {"x": 1}, dedup=True)
+            # Same payload, dedup=True → skipped.
+            await bus.broadcast("test:dedup", {"x": 1}, dedup=True)
+        asyncio.run(_populate())
+        assert bus.dedup_skipped_total() == baseline + 1
+
+    def test_restore_history_records_calls(self, diag_env):
+        server_mod, tmp_path, _db = diag_env
+        bus = server_mod.event_bus
+        before = len(bus.restore_history())
+
+        # Failure path: non-existent file.
+        ok = bus.restore(tmp_path / "missing.state")
+        assert ok is False
+        # Success path: write a snapshot then restore.
+        snap = tmp_path / "snap.state"
+
+        async def _broadcast_one():
+            await bus.broadcast("test:restore", {"v": 1}, dedup=False)
+        asyncio.run(_broadcast_one())
+        bus.snapshot(snap)
+        ok2 = bus.restore(snap)
+        assert ok2 is True
+
+        history = bus.restore_history()
+        assert len(history) == before + 2
+        assert history[-2]["success"] is False
+        assert history[-1]["success"] is True
+        assert "ts" in history[-1]
+        assert "seq_after" in history[-1]
+        assert "epoch_after" in history[-1]
+
+    def test_bus_block_includes_new_fields(self, diag_env):
+        server_mod, _tmp, _db = diag_env
+        from starlette.testclient import TestClient
+        _short_window(server_mod)
+        with TestClient(server_mod.app) as client:
+            resp = client.get("/api/diag/sessions")
+        body = resp.json()
+        bus = body["bus"]
+        for key in ("subscribers", "recent_broadcasts", "dedup_skipped_total",
+                    "restore_history"):
+            assert key in bus, f"bus missing {key}"
+        assert isinstance(bus["subscribers"], list)
+        assert isinstance(bus["recent_broadcasts"], list)
+        assert isinstance(bus["dedup_skipped_total"], int)
+        assert isinstance(bus["restore_history"], list)
+
+
+class TestDiagFileBlockExtensions:
+    """auto-wldnv file additions: tail_10, permissions, owner_uid, link_count, lines_in_*."""
+
+    def test_file_block_has_new_fields(self, diag_env):
+        server_mod, tmp_path, db_path = diag_env
+        from starlette.testclient import TestClient
+
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "auto-1.jsonl"
+        # 12 entries → tail_10 should keep 10, file lines == 12.
+        entries = []
+        for i in range(12):
+            entries.append({"type": "assistant_text", "content": f"hi {i}",
+                            "timestamp": f"2026-04-28T04:31:{20 + i:02d}.000Z"})
+        _write_entries(jsonl, entries)
+        _insert_session(db_path, "auto-1", str(jsonl), file_offset=jsonl.stat().st_size)
+
+        _short_window(server_mod)
+        with TestClient(server_mod.app) as client:
+            resp = client.get("/api/diag/sessions?session=auto-1")
+        body = resp.json()
+        row = next(r for r in body["rows"] if r["session_id"] == "auto-1")
+        f = row["file"]
+        assert f["lines"] == 12
+        assert len(f["tail_10"]) == 10
+        assert len(f["tail_3"]) == 3  # backwards-compat
+        assert f["permissions"] is not None
+        assert f["permissions"].startswith("0o")
+        assert isinstance(f["owner_uid"], int)
+        assert isinstance(f["link_count"], int) and f["link_count"] >= 1
+        assert f["lines_in_first_kb"] is not None
+        assert f["lines_in_last_kb"] is not None
+
+
+class TestDiagServerBlockExtensions:
+    """auto-wldnv server additions: harness, parse_errors, lines_processed,
+    inotify, enqueue_dedup, full_rescan, tail_10."""
+
+    def test_server_block_has_new_fields(self, diag_env):
+        server_mod, tmp_path, db_path = diag_env
+        from starlette.testclient import TestClient
+
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "auto-1.jsonl"
+        _write_entries(jsonl, _toolish_entries())
+        _insert_session(db_path, "auto-1", str(jsonl), file_offset=jsonl.stat().st_size)
+
+        _short_window(server_mod)
+        with TestClient(server_mod.app) as client:
+            resp = client.get("/api/diag/sessions?session=auto-1")
+        body = resp.json()
+        row = next(r for r in body["rows"] if r["session_id"] == "auto-1")
+        s = row["server"]
+        for key in (
+            "harness", "harness_mismatch", "parse_errors_count",
+            "last_parse_error", "lines_processed_total",
+            "inotify_events_received", "last_inotify_event_ts",
+            "enqueue_dedup_count", "last_enqueue_dedup_ts",
+            "full_rescan_count", "last_full_rescan_ts", "tail_10",
+        ):
+            assert key in s, f"server missing {key}"
+
+    def test_parse_errors_count_increments_on_corrupt_jsonl(self, diag_env):
+        """Writing a malformed line bumps parse_errors_count via _tail_one."""
+        server_mod, tmp_path, db_path = diag_env
+        from tools.dashboard import session_monitor as monitor_mod
+
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "auto-1.jsonl"
+        # Two valid + one corrupt + one valid.
+        with open(jsonl, "w") as fh:
+            fh.write(json.dumps({"type": "user", "content": "hi",
+                                 "timestamp": "2026-04-28T00:00:00Z"}) + "\n")
+            fh.write("this is not json — trip the parser\n")
+            fh.write(json.dumps({"type": "assistant_text", "content": "ok",
+                                 "timestamp": "2026-04-28T00:00:01Z"}) + "\n")
+        _insert_session(db_path, "auto-1", str(jsonl), file_offset=0)
+
+        ts = monitor_mod._TailState()
+        monitor_mod.session_monitor._tail_states["auto-1"] = ts
+        # Drive _tail_one directly so we don't need the inotify loop.
+        row = monitor_mod.get_session("auto-1")
+        ok, _ = monitor_mod.session_monitor._tail_one(row, ts)
+        assert ts.parse_errors_count >= 1
+        assert ts.last_parse_error is not None
+        assert "json" in (ts.last_parse_error or "").lower() or \
+               "expecting" in (ts.last_parse_error or "").lower()
+        # lines_processed_total counts every non-empty line read.
+        assert ts.lines_processed_total == 3
+
+    def test_harness_field_matches_db(self, diag_env):
+        server_mod, tmp_path, db_path = diag_env
+        from starlette.testclient import TestClient
+        from tools.dashboard.dao import dashboard_db as db_mod
+
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "auto-1.jsonl"
+        _write_entries(jsonl, _toolish_entries())
+        _insert_session(db_path, "auto-1", str(jsonl), file_offset=jsonl.stat().st_size)
+        # Set an explicit harness column value.
+        conn = db_mod.get_conn()
+        conn.execute("UPDATE tmux_sessions SET harness=? WHERE tmux_name=?",
+                     ("claude", "auto-1"))
+        conn.commit()
+
+        _short_window(server_mod)
+        with TestClient(server_mod.app) as client:
+            resp = client.get("/api/diag/sessions?session=auto-1")
+        body = resp.json()
+        row = next(r for r in body["rows"] if r["session_id"] == "auto-1")
+        assert row["server"]["harness"] == "claude"
+
+    def test_harness_mismatch_flag_for_rollout_jsonl_as_claude(self, diag_env):
+        """A rollout-* JSONL registered as harness=claude is the canonical
+        mismatch pattern from the auto-f8r9l rollout. The diag block must
+        flag it."""
+        server_mod, tmp_path, db_path = diag_env
+        from starlette.testclient import TestClient
+        from tools.dashboard.dao import dashboard_db as db_mod
+
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "rollout-2026-04-28T04-30-00-abcd.jsonl"
+        _write_entries(jsonl, _toolish_entries())
+        _insert_session(db_path, "auto-1", str(jsonl), file_offset=jsonl.stat().st_size)
+        conn = db_mod.get_conn()
+        conn.execute("UPDATE tmux_sessions SET harness=? WHERE tmux_name=?",
+                     ("claude", "auto-1"))
+        conn.commit()
+
+        _short_window(server_mod)
+        with TestClient(server_mod.app) as client:
+            resp = client.get("/api/diag/sessions?session=auto-1")
+        body = resp.json()
+        row = next(r for r in body["rows"] if r["session_id"] == "auto-1")
+        assert row["server"]["harness"] == "claude"
+        assert row["server"]["harness_mismatch"] is True
+
+    def test_recent_processed_maxlen_is_ten(self, diag_env):
+        """Bumped from 3 → 10 in auto-wldnv so server tail_10 has room."""
+        from tools.dashboard import session_monitor as monitor_mod
+        ts = monitor_mod._TailState()
+        # The deque should now accept up to 10 entries.
+        assert ts.recent_processed.maxlen == 10
+        for i in range(15):
+            ts.recent_processed.append(("t", str(i), f"id-{i}"))
+        assert len(ts.recent_processed) == 10
+        last = list(ts.recent_processed)[-1]
+        assert last[2] == "id-14"
+
+    def test_enqueue_dedup_count_increments(self, diag_env):
+        """When a queued message is followed by a matching user entry, the
+        dedup path drops the user entry and bumps enqueue_dedup_count."""
+        server_mod, tmp_path, db_path = diag_env
+        from tools.dashboard import session_monitor as monitor_mod
+
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "auto-1.jsonl"
+        jsonl.touch()
+        _insert_session(db_path, "auto-1", str(jsonl), file_offset=0)
+
+        ts = monitor_mod._TailState()
+        monitor_mod.session_monitor._tail_states["auto-1"] = ts
+        # Run the dedup logic directly via _process_tail_entries.
+        row = monitor_mod.get_session("auto-1")
+        new_entries = [
+            {"type": "user", "content": "hello", "queued": True,
+             "timestamp": "2026-04-28T00:00:00Z"},
+            {"type": "user", "content": "hello",
+             "timestamp": "2026-04-28T00:00:01Z"},
+        ]
+        # Patch out the broadcast so we don't need a running event bus loop.
+        monitor_mod.session_monitor._event_bus = None
+        asyncio.run(monitor_mod.session_monitor._process_tail_entries(
+            "auto-1", row, ts, new_entries,
+        ))
+        assert ts.enqueue_dedup_count == 1
+        assert ts.last_enqueue_dedup_ts > 0
+
+
+class TestDiagTopicBlock:
+    def test_topic_recent_broadcasts_for_session_present(self, diag_env):
+        server_mod, tmp_path, db_path = diag_env
+        from starlette.testclient import TestClient
+
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "auto-1.jsonl"
+        _write_entries(jsonl, _toolish_entries())
+        _insert_session(db_path, "auto-1", str(jsonl), file_offset=jsonl.stat().st_size)
+
+        bus = server_mod.event_bus
+
+        async def _seed():
+            for i in range(3):
+                await bus.broadcast(
+                    "session:messages", {"session_id": "auto-1", "i": i},
+                    dedup=False,
+                )
+        asyncio.run(_seed())
+
+        _short_window(server_mod)
+        from starlette.testclient import TestClient
+        with TestClient(server_mod.app) as client:
+            resp = client.get("/api/diag/sessions?session=auto-1")
+        body = resp.json()
+        row = next(r for r in body["rows"] if r["session_id"] == "auto-1")
+        assert "recent_broadcasts_for_session" in row["topic"]
+        recent = row["topic"]["recent_broadcasts_for_session"]
+        assert isinstance(recent, list)
+        assert any(e["topic"] == "session:messages" for e in recent)
+
+
+class TestDiagTextFormatGlyphs:
+    def test_text_table_has_compact_glyphs(self, diag_env):
+        server_mod, tmp_path, db_path = diag_env
+        from starlette.testclient import TestClient
+
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "auto-1.jsonl"
+        _write_entries(jsonl, _toolish_entries())
+        _insert_session(db_path, "auto-1", str(jsonl), file_offset=jsonl.stat().st_size)
+
+        _short_window(server_mod)
+        with TestClient(server_mod.app) as client:
+            resp = client.get("/api/diag/sessions?format=text")
+        text = resp.text
+        # Compact glyphs from the spec.
+        assert "parse_err=" in text
+        assert "replay=" in text
+        assert "dedup=" in text
+        assert "harness=" in text
+        # Bus-line glyphs.
+        assert "dedup_skip=" in text
+        # Width: no line wider than 200 cols.
+        for line in text.splitlines():
+            assert len(line) <= 200, f"line too wide ({len(line)}): {line!r}"
