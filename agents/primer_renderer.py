@@ -20,7 +20,7 @@ from pathlib import Path
 
 import jinja2
 
-from agents.workspace_settings import WorkspaceV1
+from agents.workspace_settings import REPO_ROOT, WorkspaceV1
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "primers"
 PROJECTS_DIR = Path(__file__).resolve().parent / "projects"
@@ -104,6 +104,43 @@ def _find_overlay_writability_drift(
     return messages
 
 
+def _capability_primer_blocks(config: WorkspaceV1) -> list[dict]:
+    """Build the per-capability primer projection rows for the template.
+
+    Each row carries:
+
+    * ``implementation`` — display heading (e.g. ``autonomy/jira``).
+    * ``contract`` / ``contract_version`` — the contract this row binds.
+    * ``mount_target`` — the deterministic container path where the
+      capability package is visible (so the agent can inspect
+      ``SKILL.md`` / ``primer.md`` / bundled scripts directly).
+    * ``primer_text`` — content read from ``MaterializedCapability
+      .primer_path`` if the file exists, otherwise an empty string. The
+      primer file is the implementation's short, action-oriented surface
+      (``jira-read KEY``, ``gh`` is authenticated, etc.); the renderer
+      simply embeds it under the per-capability heading.
+
+    Returns rows in stable contract order — :class:`MaterializedCapability`
+    is already sorted by contract, so iterating the input is sufficient.
+    """
+    rows: list[dict] = []
+    for cap in config.capabilities:
+        primer_text = ""
+        if cap.primer_path:
+            primer_file = REPO_ROOT / cap.primer_path
+            if primer_file.is_file():
+                primer_text = primer_file.read_text().rstrip()
+        rows.append({
+            "implementation": cap.implementation,
+            "contract": cap.contract,
+            "contract_version": cap.contract_version,
+            "delivery_mode": cap.delivery_mode,
+            "mount_target": cap.mount_target,
+            "primer_text": primer_text,
+        })
+    return rows
+
+
 def render_workspace_primer(config: WorkspaceV1) -> str:
     """Render the workspace runtime primer for a given project config.
 
@@ -138,6 +175,7 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
             f"primer overlay for project {config.id!r} contradicts "
             f"projects.yaml: " + "; ".join(drift)
         )
+    capability_blocks = _capability_primer_blocks(config)
     return template.render(
         config=config,
         writable_repos=writable_repos,
@@ -145,4 +183,5 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         workspace_primer=workspace_primer,
         org_primer=org_primer,
         org=config.graph_project,
+        capability_blocks=capability_blocks,
     )

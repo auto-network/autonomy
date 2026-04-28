@@ -50,11 +50,24 @@ from tools.graph.schemas.mount import (
     SCHEMA_REVISION as MOUNT_REVISION,
     WorkspaceMountV1,
 )
+from tools.graph.schemas.workspace_capability_enable import (
+    SET_ID as WORKSPACE_CAPABILITY_ENABLE_SET_ID,
+    SCHEMA_REVISION as WORKSPACE_CAPABILITY_ENABLE_REVISION,
+)
+from tools.graph.schemas.org_capability_install import (
+    SET_ID as ORG_CAPABILITY_INSTALL_SET_ID,
+    SCHEMA_REVISION as ORG_CAPABILITY_INSTALL_REVISION,
+)
+from tools.graph.schemas.capability_impl import (
+    SET_ID as CAPABILITY_IMPL_SET_ID,
+    SCHEMA_REVISION as CAPABILITY_IMPL_REVISION,
+)
 from tools.graph.settings_ops import ResolvedSetting
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ARTIFACTS_ROOT = REPO_ROOT / "data" / "artifacts"
 ARTIFACTS_MOUNT_DIR = "/etc/autonomy/artifacts"
+CAPABILITIES_MOUNT_DIR = "/opt/autonomy/capabilities"
 
 ARTIFACT_PATH_SET_ID = "autonomy.artifact-path"
 ARTIFACT_PATH_REVISION = 1
@@ -209,6 +222,37 @@ class OrgOverride:
 
 
 @dataclass(frozen=True)
+class MaterializedCapability:
+    """A capability resolved for a workspace and ready to materialize at launch.
+
+    Composed from the ``autonomy.workspace.capability.enable#1`` →
+    ``autonomy.org.capability.install#1`` → ``autonomy.capability.impl#1``
+    chain established in ``auto-0ase8`` (see graph://86e04207-a25). Carries
+    every field the launcher and primer renderer need so the runtime does
+    not have to walk the chain a second time.
+
+    Path fields are repo-local (validated at the schema layer); the
+    launcher resolves them against ``REPO_ROOT`` to produce host paths.
+    ``mount_target`` is the canonical container path for the package root
+    (``/opt/autonomy/capabilities/<impl-slug>``).
+    """
+    contract: str
+    contract_version: int
+    implementation: str
+    implementation_version: int
+    delivery_mode: str
+    package_root: str
+    mount_target: str
+    required_env: tuple[str, ...] = ()
+    required_secret_files: tuple[str, ...] = ()
+    tool_paths: tuple[str, ...] = ()
+    primer_path: str | None = None
+    skill_path: str | None = None
+    env_bindings: dict[str, str] = field(default_factory=dict)
+    secret_file_bindings: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class WorkspaceV1:
     """Composed workspace config — one ``autonomy.workspace#1`` Setting
     plus its attached artifact + mount Settings plus the owning org slug.
@@ -219,6 +263,11 @@ class WorkspaceV1:
     ``autonomy.workspace.mount#1`` Settings keyed by composite key
     (``<workspace-id>:<mount-name>``) so consumers can inspect
     origin/state for error reporting without re-querying.
+
+    ``capabilities`` carries every enabled capability resolved through
+    the workspace-enable / org-install / impl chain (see
+    :func:`resolve_capabilities`). Sorted by contract name for stable
+    ordering across launches and primer renders.
     """
     id: str
     name: str
@@ -237,6 +286,7 @@ class WorkspaceV1:
     env_from_host: tuple[str, ...] = ()
     artifacts: tuple[ArtifactSpec, ...] = ()
     mounts: dict[str, ResolvedSetting] = field(default_factory=dict)
+    capabilities: tuple[MaterializedCapability, ...] = ()
 
 
 # ── Setting payload → typed model helpers ──────────────────
@@ -265,6 +315,7 @@ def _workspace_from_setting(
     graph_project: str,
     artifacts: tuple[ArtifactSpec, ...],
     mounts: dict[str, ResolvedSetting],
+    capabilities: tuple[MaterializedCapability, ...] = (),
 ) -> WorkspaceV1:
     """Compose a :class:`WorkspaceV1` from a resolved Setting payload.
 
@@ -310,6 +361,7 @@ def _workspace_from_setting(
         ),
         artifacts=artifacts,
         mounts=mounts,
+        capabilities=capabilities,
     )
 
 
@@ -387,6 +439,169 @@ def load_mounts(
     ).to_dict()
 
 
+def _impl_slug(name: str) -> str:
+    """Convert an implementation name like ``autonomy/github`` to a path slug.
+
+    Slashes become hyphens so the value is safe to splice into a container
+    path (``/opt/autonomy/capabilities/<slug>``) without shell-quoting or
+    nested-directory surprises.
+    """
+    return name.replace("/", "-")
+
+
+def _impl_mount_target(name: str) -> str:
+    """Container path where an implementation's package root is mounted."""
+    return f"{CAPABILITIES_MOUNT_DIR}/{_impl_slug(name)}"
+
+
+def _read_capability_impls(*, org: str | None) -> dict[tuple[str, int], dict]:
+    """Return every visible ``autonomy.capability.impl#1`` keyed by ``(name, version)``.
+
+    Implementations are typically published in a sharing org and consumed
+    by every org that installs them, so peers stay enabled (the default
+    cross-org read path) — only canonical/published rows surface from
+    peers (graph://bcce359d-a1d).
+    """
+    if get_schema(CAPABILITY_IMPL_SET_ID, CAPABILITY_IMPL_REVISION) is None:
+        return {}
+    members = ops.read_set(CAPABILITY_IMPL_SET_ID, org=org).members
+    out: dict[tuple[str, int], dict] = {}
+    for m in members:
+        name = m.payload.get("name")
+        ver = m.payload.get("version")
+        if isinstance(name, str) and isinstance(ver, int):
+            out[(name, ver)] = m.payload
+    return out
+
+
+def _materialize_capability(
+    contract: str,
+    enable_payload: dict,
+    install_payload: dict,
+    impl_payload: dict,
+) -> MaterializedCapability:
+    """Build a :class:`MaterializedCapability` from validated chain payloads."""
+    contract_version = enable_payload.get("contract_version")
+    if contract_version is None:
+        contract_version = install_payload.get("contract_version")
+    impl_name = impl_payload["name"]
+    return MaterializedCapability(
+        contract=contract,
+        contract_version=int(contract_version),
+        implementation=impl_name,
+        implementation_version=int(impl_payload["version"]),
+        delivery_mode=str(impl_payload["delivery_mode"]),
+        package_root=str(impl_payload["package_root"]),
+        mount_target=_impl_mount_target(impl_name),
+        required_env=tuple(str(e) for e in impl_payload.get("required_env", ())),
+        required_secret_files=tuple(
+            str(s) for s in impl_payload.get("required_secret_files", ())
+        ),
+        tool_paths=tuple(str(p) for p in impl_payload.get("tool_paths", ())),
+        primer_path=(impl_payload.get("primer_path") or None),
+        skill_path=(impl_payload.get("skill_path") or None),
+        env_bindings={
+            str(k): str(v)
+            for k, v in (install_payload.get("env_bindings") or {}).items()
+        },
+        secret_file_bindings={
+            str(k): str(v)
+            for k, v in (install_payload.get("secret_file_bindings") or {}).items()
+        },
+    )
+
+
+def resolve_capabilities(
+    workspace_id: str, *, org: str | None = None,
+) -> tuple[MaterializedCapability, ...]:
+    """Resolve every enabled capability for *workspace_id*.
+
+    Walks the schema chain established by ``auto-0ase8``:
+
+    1. ``autonomy.workspace.capability.enable#1`` Settings whose key is
+       ``<workspace_id>:<contract>`` (workspace-scoped enables).
+    2. The matching ``autonomy.org.capability.install#1`` row in the
+       workspace's org (keyed by ``<contract>``) — picks the
+       implementation.
+    3. ``autonomy.capability.impl#1`` payload referenced by the install,
+       resolved across orgs (impls are typically published from a
+       sharing org and consumed everywhere).
+
+    Returns a stable, contract-name-sorted tuple. An enable row with
+    ``enabled: false`` is dropped — workspaces can opt out of an
+    org-installed capability, which is the documented override behaviour
+    (graph://86e04207-a25). Schema-missing or chain-incomplete rows are
+    silently skipped so resolution stays best-effort: a deployment that
+    has only landed some of the four schemas keeps booting.
+    """
+    if get_schema(
+        WORKSPACE_CAPABILITY_ENABLE_SET_ID,
+        WORKSPACE_CAPABILITY_ENABLE_REVISION,
+    ) is None:
+        return ()
+    enable_members = ops.read_set(
+        WORKSPACE_CAPABILITY_ENABLE_SET_ID,
+        org=org, peers=[], prefix=workspace_id,
+    ).members
+    if not enable_members:
+        return ()
+
+    if get_schema(
+        ORG_CAPABILITY_INSTALL_SET_ID,
+        ORG_CAPABILITY_INSTALL_REVISION,
+    ) is None:
+        return ()
+    install_members = ops.read_set(
+        ORG_CAPABILITY_INSTALL_SET_ID, org=org, peers=[],
+    ).members
+    install_by_contract: dict[str, dict] = {
+        m.key: m.payload for m in install_members
+    }
+
+    impls = _read_capability_impls(org=org)
+
+    out: list[MaterializedCapability] = []
+    prefix = f"{workspace_id}:"
+    for em in enable_members:
+        if not em.key.startswith(prefix):
+            continue
+        contract_name = em.key[len(prefix):]
+        if not contract_name:
+            continue
+        enable_payload = em.payload
+        if enable_payload.get("enabled", True) is False:
+            continue
+        install = install_by_contract.get(contract_name)
+        if install is None:
+            continue
+        contract_version = enable_payload.get("contract_version")
+        if contract_version is None:
+            contract_version = install.get("contract_version")
+        if contract_version is None:
+            continue
+        impl_name = install.get("implementation")
+        impl_version = install.get("implementation_version")
+        if not isinstance(impl_name, str) or not isinstance(impl_version, int):
+            continue
+        impl_payload = impls.get((impl_name, impl_version))
+        if impl_payload is None:
+            continue
+        # The implementation must declare it implements the resolved
+        # (contract, version). Without this guard the org could install
+        # an impl that has drifted to a different contract version.
+        declared = {
+            (r.get("contract"), r.get("version"))
+            for r in impl_payload.get("implements", [])
+        }
+        if (contract_name, contract_version) not in declared:
+            continue
+        out.append(_materialize_capability(
+            contract_name, enable_payload, install, impl_payload,
+        ))
+    out.sort(key=lambda c: c.contract)
+    return tuple(out)
+
+
 def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
     """Read every ``autonomy.workspace#1`` owned by *slug* + attach artifacts.
 
@@ -402,9 +617,10 @@ def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
     for m in members:
         artifacts = _artifacts_for_workspace(m.key, org=slug)
         mounts = load_mounts(m.key, org=slug)
+        capabilities = resolve_capabilities(m.key, org=slug)
         out[m.key] = _workspace_from_setting(
             m.payload, workspace_id=m.key, graph_project=slug,
-            artifacts=artifacts, mounts=mounts,
+            artifacts=artifacts, mounts=mounts, capabilities=capabilities,
         )
     return out
 
@@ -440,10 +656,12 @@ def _load_workspaces_uncached() -> dict[str, WorkspaceV1]:
         for m in members:
             artifacts = _artifacts_for_workspace(m.key, org=None)
             mounts = load_mounts(m.key, org=None)
+            capabilities = resolve_capabilities(m.key, org=None)
             graph_project = m.org or ""
             out[m.key] = _workspace_from_setting(
                 m.payload, workspace_id=m.key, graph_project=graph_project,
                 artifacts=artifacts, mounts=mounts,
+                capabilities=capabilities,
             )
         return out
     out = {}

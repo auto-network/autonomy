@@ -200,6 +200,16 @@ graph crosstalk broadcast "message to all live sessions"
 Container is on a bridge network. Reach host services via `host.docker.internal`:
 - Dashboard: `https://host.docker.internal:8080`
 {% endif %}
+{% for cap in capability_blocks %}
+
+### {{ cap.implementation }} — {{ cap.contract }}@{{ cap.contract_version }}
+
+Capability package mounted at `{{ cap.mount_target }}`.
+{% if cap.primer_text %}
+
+{{ cap.primer_text }}
+{% endif %}
+{% endfor %}
 
 ## Graph Scoping
 

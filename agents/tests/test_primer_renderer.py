@@ -17,7 +17,13 @@ from agents.primer_renderer import (
     _find_overlay_writability_drift,
     render_workspace_primer,
 )
-from agents.workspace_settings import WorkspaceV1, RepoMount, get_workspace
+from agents.workspace_settings import (
+    CAPABILITIES_MOUNT_DIR,
+    MaterializedCapability,
+    RepoMount,
+    WorkspaceV1,
+    get_workspace,
+)
 
 
 def _cfg(**overrides) -> WorkspaceV1:
@@ -415,3 +421,92 @@ def test_autonomy_workspace_has_no_anchore_primer(shipped_workspaces):
     """Autonomy org has no primer file today — section must be absent."""
     out = render_workspace_primer(get_workspace("autonomy"))
     assert "## Org Conventions (anchore)" not in out
+
+
+# ── Capability primer projection (auto-uqq0i) ───────────────────────
+
+
+def _github_cap(*, primer_path="agents/capabilities/github/primer.md") -> MaterializedCapability:
+    return MaterializedCapability(
+        contract="source_control",
+        contract_version=1,
+        implementation="autonomy/github",
+        implementation_version=1,
+        delivery_mode="image_baked",
+        package_root="agents/capabilities/github",
+        mount_target=f"{CAPABILITIES_MOUNT_DIR}/autonomy-github",
+        required_env=("GH_TOKEN",),
+        primer_path=primer_path,
+    )
+
+
+def _jira_cap() -> MaterializedCapability:
+    return MaterializedCapability(
+        contract="issue_tracker",
+        contract_version=1,
+        implementation="autonomy/jira",
+        implementation_version=1,
+        delivery_mode="mounted_tools",
+        package_root="agents/capabilities/jira",
+        mount_target=f"{CAPABILITIES_MOUNT_DIR}/autonomy-jira",
+        required_env=("JIRA_EMAIL", "JIRA_BASE_URL"),
+        required_secret_files=("/run/secrets/jira_token",),
+        tool_paths=("agents/capabilities/jira/tools",),
+        primer_path="agents/capabilities/jira/primer.md",
+    )
+
+
+def test_no_capabilities_no_capability_section():
+    out = render_workspace_primer(_cfg(capabilities=()))
+    # No per-capability heading should appear when nothing is enabled.
+    assert "autonomy/github" not in out
+    assert "autonomy/jira" not in out
+
+
+def test_enabled_capability_renders_primer_section():
+    out = render_workspace_primer(_cfg(capabilities=(_github_cap(),)))
+    # Per-capability heading carries the impl name and contract@version.
+    assert "### autonomy/github — source_control@1" in out
+    # Deterministic mount target announced to the agent.
+    assert f"{CAPABILITIES_MOUNT_DIR}/autonomy-github" in out
+    # The shipped placeholder primer content shows up.
+    assert "GitHub capability — primer projection" in out
+
+
+def test_disabled_capability_does_not_render():
+    """Disabled (or absent) capabilities produce no primer section."""
+    out = render_workspace_primer(_cfg(capabilities=()))
+    assert "source_control@" not in out
+    assert "issue_tracker@" not in out
+
+
+def test_multiple_capabilities_render_in_stable_order():
+    """Capabilities render in the order they appear on the workspace.
+
+    :class:`MaterializedCapability` rows are already sorted by contract
+    name in the resolver; the renderer preserves that order so two
+    successive launches produce identical primers.
+    """
+    out_a = render_workspace_primer(_cfg(
+        capabilities=(_github_cap(), _jira_cap()),
+    ))
+    out_b = render_workspace_primer(_cfg(
+        capabilities=(_github_cap(), _jira_cap()),
+    ))
+    assert out_a == out_b
+    # Ordering as supplied: GitHub before Jira.
+    gh_idx = out_a.index("### autonomy/github")
+    ji_idx = out_a.index("### autonomy/jira")
+    assert gh_idx < ji_idx
+
+
+def test_capability_with_missing_primer_file_still_renders_heading(tmp_path, monkeypatch):
+    """A capability whose primer.md is missing on disk still gets a heading.
+
+    The agent still needs to know the capability is enabled and where
+    the package mount sits — we just skip the embedded primer body.
+    """
+    cap = _github_cap(primer_path="agents/capabilities/does-not-exist/primer.md")
+    out = render_workspace_primer(_cfg(capabilities=(cap,)))
+    assert "### autonomy/github — source_control@1" in out
+    assert f"{CAPABILITIES_MOUNT_DIR}/autonomy-github" in out

@@ -32,6 +32,65 @@ DEFAULT_IMAGE = "autonomy-agent:dashboard"
 DEFAULT_OPUS_MODEL = "claude-opus-4-7[1m]"
 
 
+# ── Capability materialization ────────────────────────────────────────────────
+
+
+def _capability_mounts(capabilities) -> dict[str, str]:
+    """Return ``{host_path: container_spec}`` for every enabled capability.
+
+    For each :class:`MaterializedCapability`:
+
+    * the package root mounts read-only at ``mount_target`` (deterministic
+      ``/opt/autonomy/capabilities/<impl-slug>``). For ``image_baked``
+      delivery the binary is already in the image, but the package mount
+      keeps ``SKILL.md`` / ``primer.md`` / bundled scripts inspectable
+      from inside the container at the same canonical path used for
+      ``mounted_tools`` — agents do not need to know which delivery mode
+      was chosen.
+    * any declared repo-local ``tool_paths`` mount under
+      ``<mount_target>/<basename>`` so the package surface matches the
+      repo layout. Subpaths inside the package root would be redundant
+      with the package mount; only paths that escape the package root
+      get an extra mount entry.
+    * every ``secret_file_bindings`` entry mounts the host source at the
+      declared container path read-only. Secret values stay file-based —
+      they are never injected as env vars per the runtime model
+      (graph://86e04207-a25 § Runtime materialization).
+    """
+    mounts: dict[str, str] = {}
+    for cap in capabilities:
+        package_host = REPO_ROOT / cap.package_root
+        mounts[str(package_host)] = f"{cap.mount_target}:ro"
+        for tool_path in cap.tool_paths:
+            tool_host = REPO_ROOT / tool_path
+            # Skip subpaths already covered by the package-root mount.
+            try:
+                tool_host.relative_to(package_host)
+                continue
+            except ValueError:
+                pass
+            container_path = f"{cap.mount_target}/{Path(tool_path).name}"
+            mounts[str(tool_host)] = f"{container_path}:ro"
+        for container_path, host_source in cap.secret_file_bindings.items():
+            mounts[host_source] = f"{container_path}:ro"
+    return mounts
+
+
+def _capability_env(capabilities) -> dict[str, str]:
+    """Return ``{env_name: value}`` for non-secret capability env bindings.
+
+    Pulls from each capability's ``env_bindings`` (the org install's
+    declared non-secret env). Secret values are deliberately excluded —
+    they go through ``secret_file_bindings`` and surface as file mounts,
+    not env vars (graph://86e04207-a25 § Runtime materialization).
+    """
+    out: dict[str, str] = {}
+    for cap in capabilities:
+        for env_name, value in cap.env_bindings.items():
+            out[env_name] = value
+    return out
+
+
 # ── Credential Resolution ─────────────────────────────────────────────────────
 
 def _resolve_credentials() -> dict | None:
@@ -153,6 +212,7 @@ def launch_session(
     privileged: bool = False,
     startup_script: str | Path | None = None,
     network_host: bool = True,
+    capabilities: tuple = (),
 ) -> str | None:
     """Launch an agent container session.
 
@@ -201,6 +261,14 @@ def launch_session(
                     and rewrites ``GRAPH_API`` to
                     ``https://host.docker.internal:8080`` so the container
                     can still reach the dashboard.
+        capabilities: Tuple of resolved
+                    :class:`~agents.workspace_settings.MaterializedCapability`
+                    rows for the workspace. Each one contributes a
+                    deterministic package-root mount at
+                    ``/opt/autonomy/capabilities/<impl-slug>``, declared
+                    secret-file mounts, and non-secret env bindings.
+                    Disabled / not-installed capabilities never reach
+                    the launcher because the resolver filters them out.
 
     Returns:
         detach=True:  container_id string on success, None on failure.
@@ -307,6 +375,18 @@ def launch_session(
                     del default_mounts[dk]
             default_mounts[str(host_path)] = container_spec
 
+    # Capability mounts: package roots, tool subtrees, and secret files for
+    # every enabled MaterializedCapability. Caller-supplied mounts for the
+    # same container path still win (matching the override semantics above).
+    for host_path, container_spec in _capability_mounts(capabilities).items():
+        container_path = container_spec.split(":")[0]
+        if any(
+            spec.split(":")[0] == container_path
+            for spec in default_mounts.values()
+        ):
+            continue
+        default_mounts[host_path] = container_spec
+
     # ── CrossTalk token ──────────────────────────────────────────
     from tools.dashboard.dao import auth_db
     raw_token = secrets.token_urlsafe(32)
@@ -378,6 +458,12 @@ def launch_session(
     if extra_env:
         for k, v in extra_env.items():
             cmd.extend(["-e", f"{k}={v}"])
+
+    # Capability env bindings: non-secret env vars declared by org installs.
+    # Secret values stay file-mounted (see _capability_mounts) and never
+    # land here per graph://86e04207-a25 § Runtime materialization.
+    for k, v in _capability_env(capabilities).items():
+        cmd.extend(["-e", f"{k}={v}"])
 
     cmd.extend(["-w", working_dir])
 
