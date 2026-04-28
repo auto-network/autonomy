@@ -7,6 +7,7 @@ Uses asyncio.run() since pytest-asyncio is not installed.
 """
 
 import asyncio
+import json
 import os
 import sqlite3
 
@@ -24,7 +25,11 @@ def bus():
 
 @pytest.fixture
 def setup_env(tmp_path):
-    """Minimal env so server module can load (needs DASHBOARD_DB)."""
+    """Minimal env so server module can load (needs DASHBOARD_DB).
+
+    Also redirects EVENT_BUS_STATE_PATH at the tmp dir so the TestClient
+    lifespan never reads or writes the real repo's data/event_bus.state.
+    """
     db_path = tmp_path / "dashboard.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
@@ -46,8 +51,10 @@ def setup_env(tmp_path):
     conn.commit()
     conn.close()
     os.environ["DASHBOARD_DB"] = str(db_path)
+    os.environ["DASHBOARD_EVENT_BUS_STATE"] = str(tmp_path / "event_bus.state")
     yield
     os.environ.pop("DASHBOARD_DB", None)
+    os.environ.pop("DASHBOARD_EVENT_BUS_STATE", None)
 
 
 async def _broadcast_n(bus, n, topic="test"):
@@ -245,3 +252,113 @@ class TestSeqMonotonicity:
         assert seqs == [1, 2, 3, 4, 5]
         topics = [e["topic"] for e in events]
         assert topics == ["topic_a", "topic_b", "topic_a", "topic_c", "topic_b"]
+
+
+# ── TestSnapshotRoundtrip ────────────────────────────────────────────
+
+
+class TestSnapshotRoundtrip:
+    """Persisting EventBus state across restart (uvicorn --reload)."""
+
+    def test_round_trip_preserves_state_and_replays(self, bus, tmp_path):
+        """snapshot() + restore() preserves seq, last_seq, last, buffer, epoch.
+
+        Replay still works after restore — events from the prior process
+        come back via the ring buffer, so the SSE gap-fill flow succeeds.
+        """
+        from tools.dashboard import event_bus as event_bus_module
+        from tools.dashboard.event_bus import EventBus
+
+        async def _populate():
+            await bus.broadcast("topic_a", {"v": 1}, dedup=False)
+            await bus.broadcast("topic_b", {"v": 2}, dedup=False)
+            await bus.broadcast("topic_a", {"v": 3}, dedup=False)
+        asyncio.run(_populate())
+
+        snapshot_path = tmp_path / "event_bus.state"
+        original_epoch = event_bus_module._SERVER_EPOCH
+        try:
+            bus.snapshot(snapshot_path)
+            assert snapshot_path.exists()
+
+            event_bus_module._SERVER_EPOCH = original_epoch + 999
+            new_bus = EventBus()
+            assert new_bus.restore(snapshot_path) is True
+
+            assert new_bus._seq == bus._seq
+            assert new_bus._last_seq == bus._last_seq
+            assert new_bus._last == bus._last
+            assert len(new_bus._buffer) == len(bus._buffer)
+            assert event_bus_module._SERVER_EPOCH == original_epoch
+
+            events, complete = new_bus.replay(1, 3)
+            assert complete is True
+            assert [e["seq"] for e in events] == [1, 2, 3]
+            assert [e["topic"] for e in events] == ["topic_a", "topic_b", "topic_a"]
+        finally:
+            event_bus_module._SERVER_EPOCH = original_epoch
+
+    def test_corrupt_json_returns_false_no_exception(self, bus, tmp_path):
+        """Garbage in the snapshot file → restore() returns False, bus untouched."""
+        snapshot_path = tmp_path / "event_bus.state"
+        snapshot_path.write_text("{not valid json")
+
+        assert bus.restore(snapshot_path) is False
+        assert bus._seq == 0
+        assert bus._buffer_bytes == 0
+        assert len(bus._buffer) == 0
+        assert bus._last == {}
+        assert bus._last_seq == {}
+
+    def test_missing_file_returns_false_no_exception(self, bus, tmp_path):
+        """Missing snapshot file → restore() returns False, no exception."""
+        assert bus.restore(tmp_path / "does_not_exist.state") is False
+        assert bus._seq == 0
+        assert bus._buffer_bytes == 0
+
+    def test_version_mismatch_returns_false_no_exception(self, bus, tmp_path):
+        """Schema version mismatch → restore() returns False, bus untouched."""
+        snapshot_path = tmp_path / "event_bus.state"
+        snapshot_path.write_text(json.dumps({
+            "version": 999,
+            "epoch": 12345,
+            "seq": 42,
+            "last_seq": {},
+            "last": {},
+            "buffer": [],
+        }))
+
+        assert bus.restore(snapshot_path) is False
+        assert bus._seq == 0
+        assert bus._buffer_bytes == 0
+
+    def test_buffer_bytes_recomputed_after_restore(self, bus, tmp_path):
+        """_buffer_bytes is recomputed from `size` fields, not persisted."""
+        from tools.dashboard.event_bus import EventBus
+
+        asyncio.run(_broadcast_n(bus, 5))
+        expected_bytes = sum(e.size for e in bus._buffer)
+        assert bus._buffer_bytes == expected_bytes  # sanity — pre-snapshot
+
+        snapshot_path = tmp_path / "event_bus.state"
+        bus.snapshot(snapshot_path)
+
+        # Confirm buffer_bytes is NOT in the persisted JSON
+        on_disk = json.loads(snapshot_path.read_text())
+        assert "buffer_bytes" not in on_disk
+
+        new_bus = EventBus()
+        # Pre-fill _buffer_bytes with garbage to prove restore overwrites it.
+        new_bus._buffer_bytes = 9_999_999
+        assert new_bus.restore(snapshot_path) is True
+        assert new_bus._buffer_bytes == expected_bytes
+
+    def test_snapshot_atomic_write_uses_tmp_then_rename(self, bus, tmp_path):
+        """No `.tmp` file should remain after a successful snapshot."""
+        asyncio.run(_broadcast_n(bus, 3))
+        snapshot_path = tmp_path / "event_bus.state"
+        bus.snapshot(snapshot_path)
+
+        assert snapshot_path.exists()
+        leftovers = list(tmp_path.glob("*.tmp"))
+        assert leftovers == []
