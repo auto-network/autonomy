@@ -680,45 +680,62 @@ def parse_codex_session(file_path: Path) -> tuple[dict, list[dict]]:
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def _load_session_meta(file_path: Path) -> dict:
-    """Look for .session_meta.json in the same directory or parent directory.
+_META_WALK_MAX_DEPTH = 5
 
-    Returns the parsed dict if found, otherwise an empty dict.
-    Used to enrich session source metadata with session type, bead_id, etc.
+
+def _load_session_meta(file_path: Path) -> dict:
+    """Look upward from *file_path* for a ``.session_meta.json``.
+
+    Walks ``file_path.parent`` and successive ancestors until the meta
+    is found, the ancestor is named ``agent-runs`` (run-tree boundary),
+    or :data:`_META_WALK_MAX_DEPTH` ancestors have been checked. Codex
+    rollouts live three directories below their meta
+    (``<run>/sessions/YYYY/MM/DD/rollout-*.jsonl`` vs.
+    ``<run>/sessions/.session_meta.json``); the deepest meta wins so
+    nested layouts route correctly. Returns ``{}`` if nothing is found.
     """
-    for search_dir in (file_path.parent, file_path.parent.parent):
-        meta_file = search_dir / ".session_meta.json"
+    current = file_path.parent
+    for _ in range(_META_WALK_MAX_DEPTH):
+        meta_file = current / ".session_meta.json"
         if meta_file.exists():
             try:
                 return json.loads(meta_file.read_text())
             except (json.JSONDecodeError, OSError):
-                pass
+                return {}
+        if current.name == "agent-runs" or current.parent == current:
+            break
+        current = current.parent
     return {}
 
 
-def session_target_org(file_path: Path | str, default: str = "personal") -> str:
-    """Return the org slug a session file should land in.
+def session_target_org(file_path: Path | str, default: str | None = None) -> str | None:
+    """Return the org slug a session file should land in, or ``None``.
 
-    Reads ``.session_meta.json`` next to (or one level above) *file_path*
-    and returns its ``graph_org`` value — falling back to the legacy
-    ``graph_project`` field (pre-rename sessions), then to *default*
-    (``personal`` per auto-txg5.3 scopeless convergence).
+    Reads ``.session_meta.json`` near *file_path* and returns its
+    ``graph_org`` value — falling back to the legacy ``graph_project``
+    field (pre-rename sessions), then to *default*. The default is
+    ``None`` so callers fail-closed (skip ingest) for sessions without
+    org context, rather than silently routing to ``personal.db``.
 
-    Helper for per-org DB write routing (auto-9iq2s migration + auto-36v11
-    routing). Pure read; no DB or filesystem mutation.
+    Helper for per-org DB write routing. Pure read; no mutation.
     """
     meta = _load_session_meta(Path(file_path))
     return meta.get("graph_org") or meta.get("graph_project") or default
 
 
-def _open_db_for_session(file_path: Path, *, default_org: str = "personal") -> GraphDB:
+def _open_db_for_session(
+    file_path: Path, *, default_org: str | None = None,
+) -> GraphDB | None:
     """Open the GraphDB that *file_path*'s session should write to.
 
-    Resolves the target org via :func:`session_target_org`, then opens
-    the per-org DB through :func:`resolve_caller_db_path` (same cascade
-    as ``ops._db_path`` — ``GRAPH_DB`` env still wins for test pinning).
+    Returns ``None`` when the session has no resolvable org (no meta or
+    meta lacking ``graph_org``/``graph_project``). The caller is expected
+    to skip ingest in that case so an unscoped session can never be
+    silently filed in ``personal.db``.
     """
     org = session_target_org(file_path, default=default_org)
+    if org is None:
+        return None
     return GraphDB(resolve_caller_db_path(org))
 
 
@@ -1170,8 +1187,17 @@ def _ingest_session_routed(jsonl_file: Path, force: bool) -> dict:
     callers (single-session CLI, tests pinning ``GRAPH_DB``) keep passing
     a ``db`` handle. Batch entry points below call this helper so each
     session lands in the DB named by its own ``.session_meta.json``.
+
+    Fail-closed: if the session has no resolvable org (missing meta or
+    meta without ``graph_org``/``graph_project``), the file is skipped
+    rather than dumped into ``personal.db``. This prevents the cross-org
+    duplicates we got when re-ingest passes filed autonomy sessions
+    twice — once routed correctly at session-end, once into personal
+    on a later sweep that couldn't find the meta.
     """
     db = _open_db_for_session(jsonl_file)
+    if db is None:
+        return {"status": "skipped", "reason": "no graph_org in meta"}
     try:
         return ingest_session_file(db, jsonl_file, force=force)
     finally:

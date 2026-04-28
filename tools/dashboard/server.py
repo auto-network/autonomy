@@ -3656,7 +3656,7 @@ async def api_session_create(request):
             prompt=None,
             detach=False,
             image="autonomy-agent:dashboard",
-            metadata={"tmux_session": tmux_name},
+            metadata={"tmux_session": tmux_name, "graph_project": "autonomy"},
             global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
         )
         if not cmd_str:
