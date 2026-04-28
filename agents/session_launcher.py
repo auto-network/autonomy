@@ -366,6 +366,10 @@ def launch_session(
 
     if global_claude_md is not None:
         cmd.extend(["-v", f"{global_claude_md}:/home/agent/.claude/CLAUDE.md:ro"])
+        # Mirror to AGENTS.md so Codex picks up the same workspace primer.
+        # Claude reads CLAUDE.md, Codex reads AGENTS.md — same content,
+        # different file, no harness branching needed.
+        cmd.extend(["-v", f"{global_claude_md}:/home/agent/.codex/AGENTS.md:ro"])
 
     # Per-project startup script (used by the dind entrypoint wrapper).
     if startup_script is not None:
