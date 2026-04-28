@@ -10,12 +10,16 @@ A contract groups one or more named operations. Each operation declares
 JSON-shaped input/output schemas so consumers can typecheck their calls
 without binding to a specific provider.
 
-Initial contract families (see graph://86e04207-a25):
+Initial contract families for the v1 model (see graph://86e04207-a25):
 
 * ``issue_tracker`` — read/write tickets (Jira, Linear, GitHub Issues, ...)
-* ``source_control`` — branch and commit state
-* ``change_review`` — branch-linked PRs/MRs
-* ``merge_gates`` — checks/approvals/mergeability
+* ``source_control`` — branch and commit state, with review and
+  merge-gate concerns nested under ``source_control@1`` rather than
+  split into separate top-level contracts. (The aspirational note
+  sketches a future split into ``change_review`` and ``merge_gates``;
+  the v1 placeholder schemas do not encode them as top-level contract
+  families.) The full nested op inventory for ``source_control@1`` is
+  finalized in a later bead.
 
 Versioning semantics (mirrors graph note discussion in this session):
 
