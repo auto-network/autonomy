@@ -314,6 +314,7 @@
       poofingRowKey: '',
       rebaseRequiredDialog: null,
       rebaseRequesting: false,
+      cherryPicking: false,
       commitStickyTop: 0,
       commitFileRowStickyTop: 0,
       reviewTitlePinned: false,
@@ -523,6 +524,20 @@
           item.position === 1 &&
           !!item.row.rebase_required &&
           !!item.row.session_live;
+      },
+
+      canCherryPick(item) {
+        // Cherry-pick is the dead-session-friendly path: when FF isn't
+        // possible (master moved past the worktree's fork point) but the
+        // single ahead commit would auto-merge cleanly, surface an enabled
+        // "Cherry Pick to <branch>" button. No session_live gate — the
+        // whole point is to land orphaned commits from dead sessions.
+        return !!item &&
+          this.supportsDashboardMerge(item.row) &&
+          !this.cloneStale(item.row) &&
+          item.position === 1 &&
+          !item.row.ff_eligible &&
+          !!item.row.cherry_pick_eligible;
       },
 
       mergeDisabledReason(item) {
@@ -981,6 +996,26 @@
           message: payload.message || 'Rebase required before merge.',
           session_live: !!payload.session_live,
         };
+      },
+
+      async cherryPickCommit(row) {
+        if (!row || this.cherryPicking) return;
+        this.cherryPicking = true;
+        try {
+          const resp = await fetch(
+            '/api/worktrees/' + encodeURIComponent(row.session_name) + '/' +
+              encodeURIComponent(row.repo_name) + '/cherry-pick',
+            { method: 'POST' },
+          );
+          const data = await _jsonOrError(resp);
+          _toast('Cherry-picked ' + (data.commit || '').slice(0, 8) +
+                 ' to ' + this.targetBranch(row), 'success');
+          await this.refresh(false);
+        } catch (err) {
+          _toast('Cherry-pick failed: ' + (err.message || String(err)), 'error');
+        } finally {
+          this.cherryPicking = false;
+        }
       },
 
       async requestRebase(row) {
