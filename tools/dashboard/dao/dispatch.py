@@ -63,14 +63,33 @@ def _coerce_ts(row: dict) -> dict:
     return out
 
 
+def _coerce_kind(row: dict) -> dict:
+    """Coalesce a NULL/missing ``kind`` column to ``'bead'`` for legacy rows.
+
+    The ``kind`` column was added after the initial schema (auto-5k2j4):
+
+      * Pre-migration schemas may not have the column at all — the dict
+        won't contain a ``kind`` key. Backfill it.
+      * Post-migration rows that pre-date the writer's per-call
+        ``kind=`` argument come back as ``kind=None``. Fold to ``'bead'``.
+
+    Normalising at the DAO boundary keeps every consumer (SSE payload,
+    timeline enrichment, `/api/dispatch/runs`, monitoring counts) honest
+    without sprinkling ``COALESCE(kind, 'bead')`` across each SQL site.
+    """
+    if not row.get("kind"):
+        row["kind"] = "bead"
+    return row
+
+
 def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
     rows = conn.execute(sql, params).fetchall()
-    return [_coerce_ts({k: row[k] for k in row.keys()}) for row in rows]
+    return [_coerce_kind(_coerce_ts({k: row[k] for k in row.keys()})) for row in rows]
 
 
 def _one(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> dict | None:
     row = conn.execute(sql, params).fetchone()
-    return _coerce_ts({k: row[k] for k in row.keys()}) if row else None
+    return _coerce_kind(_coerce_ts({k: row[k] for k in row.keys()})) if row else None
 
 
 def get_running_with_stats() -> list[dict]:
@@ -79,6 +98,10 @@ def get_running_with_stats() -> list[dict]:
     Ordered by started_at ascending so the oldest running run appears first.
     The dispatcher updates these rows with live stats (snippet, token count,
     cpu/mem) during its poll cycle.
+
+    NULL or missing ``kind`` columns are coalesced to ``'bead'`` by
+    ``_coerce_kind`` (see module docstring) so legacy schemas and pre-bead
+    rows keep working without each consumer doing its own coalesce.
     """
     conn = _get_conn()
     try:
