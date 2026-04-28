@@ -1,6 +1,9 @@
 """HTTP and wiring tests for the Worktrees dashboard page."""
 
+import asyncio
 from pathlib import Path
+
+import pytest
 
 from agents.workspace_manager import (
     CleanupResult,
@@ -527,3 +530,372 @@ class TestWorktreePage:
         assert worktrees.startswith('<div data-testid="worktrees-fragment-root">')
         assert collab.startswith('<div data-testid="collab-fragment-root">')
         assert design.startswith('<div data-testid="design-fragment-root">')
+
+
+# ── Worktrees row-scoped GitHub operation surface (auto-ltibi) ─────────
+
+
+class _DockerExecRecorder:
+    """Capture ``run_cli`` calls made by worktree_github and replay scripted
+    ``(stdout, stderr, returncode, timed_out)`` tuples in order.
+
+    First inspect call is treated as the container liveness probe and is
+    stubbed independently from gh invocations.
+    """
+
+    def __init__(self, *, container_running=True, gh_results=None):
+        self.calls: list[list[str]] = []
+        self._container_running = container_running
+        self._gh_results = list(gh_results or [])
+
+    async def run_cli(self, cmd, *, timeout=30):
+        self.calls.append(list(cmd))
+        # docker inspect probe → liveness
+        if cmd[:3] == ["docker", "inspect", "-f"]:
+            running = "true" if self._container_running else "false"
+            rc = 0 if self._container_running else 1
+            return running, "", rc, False
+        # docker exec ... gh ...  → scripted gh result
+        if cmd[:2] == ["docker", "exec"]:
+            if not self._gh_results:
+                raise AssertionError(
+                    f"unexpected docker exec call with no scripted result: {cmd!r}"
+                )
+            return self._gh_results.pop(0)
+        raise AssertionError(f"unexpected run_cli command: {cmd!r}")
+
+
+def _live_row(session="auto-test", repo="autonomy"):
+    return _row(session=session, repo=repo, live=True)
+
+
+def _install_github_stubs(
+    monkeypatch,
+    *,
+    rows,
+    container_running=True,
+    gh_results=None,
+    repo_slug="anchore/autonomy",
+):
+    from tools.dashboard import worktree_github as wg
+
+    monkeypatch.setattr(wg.worktree_monitor, "get_all", lambda: list(rows))
+    recorder = _DockerExecRecorder(
+        container_running=container_running,
+        gh_results=gh_results,
+    )
+    monkeypatch.setattr(wg, "run_cli", recorder.run_cli)
+    monkeypatch.setattr(wg, "derive_repo_slug", lambda _path: repo_slug)
+    return wg, recorder
+
+
+class TestWorktreeGithubResolution:
+    def test_find_live_worktree_row_returns_only_live_match(self, monkeypatch):
+        from tools.dashboard import worktree_github as wg
+
+        rows = [
+            _row(session="auto-dead", repo="autonomy", live=False),
+            _row(session="auto-live", repo="autonomy", live=True),
+            _row(session="auto-live", repo="enterprise", live=True),
+        ]
+        monkeypatch.setattr(wg.worktree_monitor, "get_all", lambda: list(rows))
+
+        live = wg.find_live_worktree_row("auto-live", "enterprise")
+        assert live is not None
+        assert live.session_name == "auto-live"
+        assert live.repo_name == "enterprise"
+
+        dead = wg.find_live_worktree_row("auto-dead", "autonomy")
+        assert dead is None
+
+    def test_find_live_worktree_row_with_explicit_rows_arg(self):
+        from tools.dashboard import worktree_github as wg
+
+        rows = [_row(session="auto-x", live=True)]
+        match = wg.find_live_worktree_row("auto-x", "autonomy", rows=rows)
+        assert match is not None
+        assert match.session_name == "auto-x"
+
+    def test_classify_failure_maps_canonical_states(self):
+        from tools.dashboard import worktree_github as wg
+
+        assert wg.classify_failure("", "", 0, False) is None
+        assert wg.classify_failure("", "timeout", -1, True) == wg.FAILURE_TIMED_OUT
+        assert (
+            wg.classify_failure("", 'OCI runtime exec failed: exec failed: unable to start container process: exec: "gh"', 126, False)
+            == wg.FAILURE_GH_MISSING
+        )
+        assert wg.classify_failure("", "", 127, False) == wg.FAILURE_GH_MISSING
+        assert (
+            wg.classify_failure("", "Try authenticating with: gh auth login", 4, False)
+            == wg.FAILURE_AUTH_MISSING
+        )
+        assert (
+            wg.classify_failure("", "HTTP 401 Unauthorized", 1, False)
+            == wg.FAILURE_AUTH_MISSING
+        )
+        assert wg.classify_failure("", "boom", 2, False) == wg.FAILURE_EXEC_FAILED
+
+
+class TestWorktreePRSnapshot:
+    def test_snapshot_runs_gh_pr_view_in_live_container(self, monkeypatch):
+        wg, recorder = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            gh_results=[(
+                '{"number": 42, "state": "OPEN", "title": "Demo"}',
+                "",
+                0,
+                False,
+            )],
+        )
+
+        result = asyncio.run(
+            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+        )
+
+        assert result.ok is True
+        assert result.failure is None
+        assert result.operation == wg.OP_PR_SNAPSHOT
+        assert result.session_name == "auto-test"
+        assert result.repo_name == "autonomy"
+        assert result.exit_code == 0
+        assert result.timed_out is False
+        assert result.container_name == "auto-test"
+        assert result.branch == "session/auto-test"
+        assert result.repo_slug == "anchore/autonomy"
+        assert result.stdout == '{"number": 42, "state": "OPEN", "title": "Demo"}'
+        assert result.error_message is None
+
+        # docker inspect ran first (liveness), then docker exec ... gh ...
+        assert recorder.calls[0][:3] == ["docker", "inspect", "-f"]
+        assert recorder.calls[0][-1] == "auto-test"
+        gh_call = recorder.calls[1]
+        assert gh_call[:4] == ["docker", "exec", "auto-test", "gh"]
+        assert "pr" in gh_call and "view" in gh_call
+        assert "session/auto-test" in gh_call
+        assert "--repo" in gh_call
+        assert "anchore/autonomy" in gh_call
+        assert "--json" in gh_call
+        # Same docker exec command surfaces in the result for diagnostics.
+        assert result.command == gh_call
+
+    def test_snapshot_returns_no_live_row_when_session_is_dead(self, monkeypatch):
+        wg, recorder = _install_github_stubs(
+            monkeypatch,
+            rows=[_row(session="auto-dead", live=False)],
+        )
+
+        result = asyncio.run(
+            wg.worktree_pr_snapshot_v1("auto-dead", "autonomy")
+        )
+
+        assert result.ok is False
+        assert result.failure == wg.FAILURE_NO_LIVE_ROW
+        assert result.container_name is None
+        assert result.command == []
+        assert "no live worktree row" in (result.error_message or "")
+        # Must not exec into any container if the row isn't live.
+        assert recorder.calls == []
+
+    def test_snapshot_returns_no_live_container_when_inspect_fails(self, monkeypatch):
+        wg, recorder = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            container_running=False,
+            gh_results=[],
+        )
+
+        result = asyncio.run(
+            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+        )
+
+        assert result.ok is False
+        assert result.failure == wg.FAILURE_NO_LIVE_CONTAINER
+        assert result.container_name is None
+        # docker inspect was probed; docker exec was not.
+        assert any(c[:3] == ["docker", "inspect", "-f"] for c in recorder.calls)
+        assert not any(c[:2] == ["docker", "exec"] for c in recorder.calls)
+
+    def test_snapshot_surfaces_gh_missing_when_exit_127(self, monkeypatch):
+        wg, _recorder = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            gh_results=[("", "gh: command not found", 127, False)],
+        )
+
+        result = asyncio.run(
+            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+        )
+
+        assert result.ok is False
+        assert result.failure == wg.FAILURE_GH_MISSING
+        assert result.exit_code == 127
+        assert "command not found" in (result.error_message or "")
+
+    def test_snapshot_surfaces_auth_missing_when_gh_says_login(self, monkeypatch):
+        wg, _recorder = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            gh_results=[("", "Run `gh auth login` to authenticate.", 4, False)],
+        )
+
+        result = asyncio.run(
+            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+        )
+
+        assert result.ok is False
+        assert result.failure == wg.FAILURE_AUTH_MISSING
+        assert "gh auth login" in (result.error_message or "")
+
+    def test_snapshot_surfaces_timeout(self, monkeypatch):
+        wg, _recorder = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            gh_results=[("", "timeout after 30s", -1, True)],
+        )
+
+        result = asyncio.run(
+            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+        )
+
+        assert result.ok is False
+        assert result.failure == wg.FAILURE_TIMED_OUT
+        assert result.timed_out is True
+
+    def test_snapshot_surfaces_no_repo_slug_when_remote_unparseable(self, monkeypatch):
+        from tools.dashboard import worktree_github as wg
+
+        monkeypatch.setattr(wg.worktree_monitor, "get_all", lambda: [_live_row()])
+        monkeypatch.setattr(wg, "derive_repo_slug", lambda _p: None)
+        # run_cli must NOT be called — we should fail before reaching docker.
+        async def _explode(*a, **k):
+            raise AssertionError("run_cli should not be invoked when repo slug is missing")
+        monkeypatch.setattr(wg, "run_cli", _explode)
+
+        result = asyncio.run(
+            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+        )
+
+        assert result.ok is False
+        assert result.failure == wg.FAILURE_NO_REPO_SLUG
+        assert result.container_name is None
+
+
+class TestWorktreePRRefresh:
+    def test_refresh_runs_same_gh_pr_view_template_as_snapshot(self, monkeypatch):
+        wg, recorder = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            gh_results=[("{}", "", 0, False)],
+        )
+
+        result = asyncio.run(
+            wg.worktree_pr_refresh_v1("auto-test", "autonomy")
+        )
+
+        assert result.ok is True
+        assert result.operation == wg.OP_PR_REFRESH
+        gh_call = recorder.calls[1]
+        assert gh_call[:4] == ["docker", "exec", "auto-test", "gh"]
+        assert "pr" in gh_call and "view" in gh_call
+        assert "session/auto-test" in gh_call
+
+
+class TestWorktreePRWatchSet:
+    @pytest.mark.parametrize(
+        ("mode", "expected_subscribed", "expected_ignored", "expected_method"),
+        [
+            ("subscribed", "subscribed=true", "ignored=false", "PUT"),
+            ("ignored", "subscribed=false", "ignored=true", "PUT"),
+        ],
+    )
+    def test_watch_set_put_subscribed_and_ignored(
+        self, monkeypatch, mode, expected_subscribed, expected_ignored, expected_method,
+    ):
+        wg, recorder = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            gh_results=[("", "", 0, False)],
+        )
+
+        result = asyncio.run(
+            wg.worktree_pr_watch_set_v1("auto-test", "autonomy", mode)
+        )
+
+        assert result.ok is True
+        assert result.operation == wg.OP_PR_WATCH_SET
+        gh_call = recorder.calls[1]
+        assert gh_call[:4] == ["docker", "exec", "auto-test", "gh"]
+        assert "api" in gh_call
+        assert expected_method in gh_call
+        assert "/repos/anchore/autonomy/subscription" in gh_call
+        assert expected_subscribed in gh_call
+        assert expected_ignored in gh_call
+
+    def test_watch_set_default_clears_subscription_via_delete(self, monkeypatch):
+        wg, recorder = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            gh_results=[("", "", 0, False)],
+        )
+
+        result = asyncio.run(
+            wg.worktree_pr_watch_set_v1("auto-test", "autonomy", "default")
+        )
+
+        assert result.ok is True
+        gh_call = recorder.calls[1]
+        assert "DELETE" in gh_call
+        assert "/repos/anchore/autonomy/subscription" in gh_call
+
+    def test_watch_set_rejects_unknown_mode_without_executing(self, monkeypatch):
+        wg, recorder = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            gh_results=[],
+        )
+
+        result = asyncio.run(
+            wg.worktree_pr_watch_set_v1("auto-test", "autonomy", "muted")
+        )
+
+        assert result.ok is False
+        assert result.failure == wg.FAILURE_INVALID_MODE
+        assert "muted" in (result.error_message or "")
+        # Invalid mode short-circuits before ANY docker call — including
+        # the inspect liveness probe — to avoid touching infra on bad input.
+        assert recorder.calls == []
+
+
+class TestWorktreeGithubExecResultSerialization:
+    def test_to_dict_round_trips_all_fields(self):
+        from tools.dashboard import worktree_github as wg
+
+        result = wg.WorktreeGithubExecResult(
+            operation=wg.OP_PR_SNAPSHOT,
+            session_name="auto-x",
+            repo_name="autonomy",
+            ok=False,
+            stdout="payload",
+            stderr="err",
+            exit_code=127,
+            timed_out=False,
+            container_name="auto-x",
+            branch="session/auto-x",
+            repo_slug="anchore/autonomy",
+            command=["docker", "exec", "auto-x", "gh", "pr", "view"],
+            failure=wg.FAILURE_GH_MISSING,
+            error_message="gh CLI is not installed in the live container",
+        )
+        data = result.to_dict()
+        assert data["operation"] == wg.OP_PR_SNAPSHOT
+        assert data["ok"] is False
+        assert data["failure"] == wg.FAILURE_GH_MISSING
+        assert data["command"] == ["docker", "exec", "auto-x", "gh", "pr", "view"]
+        assert data["exit_code"] == 127
+        assert data["timed_out"] is False
+        assert data["container_name"] == "auto-x"
+        assert data["branch"] == "session/auto-x"
+        assert data["repo_slug"] == "anchore/autonomy"
+        assert data["error_message"] == "gh CLI is not installed in the live container"
