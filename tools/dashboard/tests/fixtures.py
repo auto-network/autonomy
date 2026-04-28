@@ -389,6 +389,24 @@ def full_fixture():
             make_collab_note(title="Architecture decision", tags=["collab", "architecture"]),
             make_collab_note(title="Testing strategy", tags=["collab", "testing"], comment_count=3),
         ],
+        "recent_notes": [
+            {
+                "id": f"note-recent-{uuid.uuid4().hex[:8]}",
+                "title": "pitfall: Recent feed regression",
+                "created_at": "2026-01-02T00:00:00Z",
+                "author": "host-mock", "project": "autonomy", "org": "autonomy",
+                "tags": ["pitfall", "dashboard"], "source_type": "note",
+                "preview": "Hot reload resets counts",
+            },
+            {
+                "id": f"note-recent-{uuid.uuid4().hex[:8]}",
+                "title": "EventBus snapshot persists across reload",
+                "created_at": "2026-01-01T18:00:00Z",
+                "author": "terminal:auto-83g69", "project": "autonomy",
+                "org": "autonomy", "tags": ["eventbus"], "source_type": "note",
+                "preview": "Atomic temp+rename, restore-before-subscribe",
+            },
+        ],
         "thoughts": [
             make_thought(content="Auth needs passkeys"),
             make_thought(content="Consider Alpine.js migration", thread_id="thread-001"),

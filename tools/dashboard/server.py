@@ -6728,6 +6728,47 @@ async def api_graph_streams(request):
     return JSONResponse({"streams": graph_ops.streams_summary()})
 
 
+async def api_graph_notes(request):
+    """List recent notes as structured JSON (cross-org chronological merge).
+
+    Backs the /collab "Recent" tab. Unlike ``/api/graph/collab`` (which is
+    pinned to ``collab``-tagged sources), this returns notes regardless of
+    tag, ordered by ``created_at`` DESC. Optional filters: ``?since=24h``,
+    ``?tags=a,b``, ``?only_org=<slug>``, ``?limit=N``. Caller org is read
+    from the ``X-Graph-Org`` header.
+    """
+    if os.environ.get("DASHBOARD_MOCK"):
+        limit = int(request.query_params.get("limit", "50"))
+        return JSONResponse({"notes": dao_beads.get_recent_notes(limit)})
+
+    limit = int(request.query_params.get("limit", "50"))
+    since_param = request.query_params.get("since")
+    since_iso = _parse_range(since_param) if since_param else None
+    tags_param = request.query_params.get("tags")
+    tags = [t for t in tags_param.split(",") if t] if tags_param else None
+    only_org = request.query_params.get("only_org")
+    org = _caller_org(request)
+    notes = graph_ops.list_notes(
+        org=org, only_org=only_org, since=since_iso, tags=tags, limit=limit,
+    )
+    items = []
+    for s in notes:
+        meta_raw = s.get("metadata")
+        meta = json.loads(meta_raw) if isinstance(meta_raw, str) else (meta_raw or {})
+        items.append({
+            "id": s["id"],
+            "title": s.get("title", ""),
+            "created_at": s.get("created_at", ""),
+            "author": meta.get("author", ""),
+            "project": s.get("project", ""),
+            "org": s.get("org", ""),
+            "tags": meta.get("tags", []),
+            "source_type": s.get("type", "note"),
+            "preview": (s.get("title", "") or "")[:140],
+        })
+    return JSONResponse({"notes": items})
+
+
 async def api_graph_collab_list(request):
     """List collab-tagged notes as structured JSON."""
     if os.environ.get("DASHBOARD_MOCK"):
@@ -7137,6 +7178,7 @@ routes = [
     Route("/api/sources", api_sources),
     Route("/api/graph/streams", api_graph_streams, methods=["GET"]),
     Route("/api/graph/stream/{tag}", api_graph_stream, methods=["GET"]),
+    Route("/api/graph/notes", api_graph_notes, methods=["GET"]),
     Route("/api/graph/collab", api_graph_collab_list, methods=["GET"]),
     Route("/api/graph/collab/tag/{source_id}", api_graph_collab_tag, methods=["PUT"]),
     Route("/api/graph/collab/tag-describe/{name}", api_graph_collab_tag_describe, methods=["PUT"]),
