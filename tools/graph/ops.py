@@ -2779,6 +2779,8 @@ def read_source_full(
     max_chars: int = 50000,
     org: str | None = None,
     peers: list[str] | None = None,
+    around_turn: int | None = None,
+    window: int = 5,
 ) -> dict | None:
     """Return a dashboard-ready full read of a source.
 
@@ -2790,6 +2792,11 @@ def read_source_full(
          "truncated": bool, "total_chars": int}
 
     Cross-org: own-org full surface first, then peer public surface.
+
+    When ``around_turn`` is given, only entries with
+    ``turn_number BETWEEN around_turn - window AND around_turn + window``
+    are returned. The ``max_chars`` cap is not applied inside the window
+    (search-result deep links must always render the full slice).
     """
     resolved = _resolve_org(org)
     source = get_source(source_id, org=org, peers=peers)
@@ -2809,7 +2816,22 @@ def read_source_full(
         return None
 
     try:
-        entries_src = db.get_source_content(source["id"])
+        if around_turn is not None:
+            lo = around_turn - window
+            hi = around_turn + window
+            rows = db.conn.execute(
+                """SELECT turn_number, role, content, created_at FROM thoughts
+                   WHERE source_id = ? AND turn_number BETWEEN ? AND ?
+                   UNION ALL
+                   SELECT turn_number, COALESCE(model, 'assistant') as role,
+                          content, created_at FROM derivations
+                   WHERE source_id = ? AND turn_number BETWEEN ? AND ?
+                   ORDER BY turn_number""",
+                (source["id"], lo, hi, source["id"], lo, hi),
+            ).fetchall()
+            entries_src = [dict(r) for r in rows]
+        else:
+            entries_src = db.get_source_content(source["id"])
         comments_src = (
             db.get_comments(source["id"], include_integrated=True)
             if source.get("type") == "note"
@@ -2839,13 +2861,14 @@ def read_source_full(
     out_entries: list[dict] = []
     for e in entries_src:
         c = e.get("content") or ""
-        remaining = max_chars - total_chars
-        if remaining <= 0:
-            truncated = True
-            break
-        if len(c) > remaining:
-            c = c[:remaining]
-            truncated = True
+        if around_turn is None:
+            remaining = max_chars - total_chars
+            if remaining <= 0:
+                truncated = True
+                break
+            if len(c) > remaining:
+                c = c[:remaining]
+                truncated = True
         out_entries.append({
             "turn_number": e.get("turn_number"),
             "role": e.get("role"),
