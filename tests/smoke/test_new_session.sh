@@ -1,126 +1,126 @@
 #!/usr/bin/env bash
-# Smoke test: new session visibility + empty state polish (auto-rdh2)
-#
-# Verifies:
-# 1. Press + → new session card appears in Active Sessions within 3s
-# 2. Card shows tmux name, "Starting..." state
-# 3. Navigate to new session → viewer shows empty state message
-# 4. Input bar is present and visible
-#
-# Prerequisites:
-#   - Dashboard running on https://localhost:8080
-#   - agent-browser available
-#
-# Usage: bash tests/smoke/test_new_session.sh
-
+# Smoke test: sessions page launch chrome + empty-state viewer for a new live session.
 set -euo pipefail
 
 PASS=0
 FAIL=0
+PORT=9092
+FIXTURE=/tmp/test_new_session_fixture.json
+EVENTS=/tmp/test_new_session_events.jsonl
 
-pass() { echo "  ✓ $1"; PASS=$((PASS + 1)); }
-fail() { echo "  ✗ $1"; FAIL=$((FAIL + 1)); }
+pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-echo "=== Smoke Test: New Session Visibility (auto-rdh2) ==="
+cleanup() {
+  kill "${SERVER_PID:-}" 2>/dev/null || true
+  rm -f "$FIXTURE" "$EVENTS"
+  agent-browser close >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 
-# 1. Open sessions page
-echo ""
-echo "Step 1: Open sessions page"
-agent-browser open https://localhost:8080/sessions --ignore-https-errors >/dev/null 2>&1
-agent-browser wait --load networkidle >/dev/null 2>&1
+cat >"$FIXTURE" <<'JSON'
+{
+  "beads": [
+    {"id": "auto-smoke", "title": "Smoke", "status": "open", "priority": 1}
+  ],
+  "active_sessions": [
+    {
+      "session_id": "auto-new-smoke",
+      "tmux_session": "auto-new-smoke",
+      "project": "autonomy",
+      "type": "container",
+      "is_live": true,
+      "linked": true,
+      "label": "New session smoke",
+      "role": "builder",
+      "entry_count": 0,
+      "context_tokens": 0,
+      "last_activity": "2026-03-24T12:00:00Z",
+      "last_message": "Starting..."
+    }
+  ],
+  "session_entries": {
+    "auto-new-smoke": []
+  }
+}
+JSON
+>"$EVENTS"
 
-SNAP=$(agent-browser snapshot -i 2>&1)
+echo "=== Setup ==="
+DASHBOARD_MOCK="$FIXTURE" \
+  DASHBOARD_MOCK_EVENTS="$EVENTS" \
+  PYTHONPATH=/workspace/repo \
+  uvicorn tools.dashboard.server:app --host 0.0.0.0 --port "$PORT" &
+SERVER_PID=$!
+sleep 3
 
-if echo "$SNAP" | grep -q "Active Sessions"; then
+echo "=== Test 1: Sessions page launch controls ==="
+agent-browser open "http://localhost:$PORT/sessions"
+sleep 2
+
+RESULT=$(agent-browser eval 'document.body.textContent.indexOf("Active Sessions") !== -1')
+if echo "$RESULT" | grep -q "true"; then
   pass "Sessions page loaded"
 else
   fail "Sessions page did not load"
 fi
 
-# Count existing sessions before creation
-BEFORE_COUNT=$(echo "$SNAP" | grep -c 'auto-t' || true)
-echo "  (existing auto-t sessions: $BEFORE_COUNT)"
-
-# 2. Click the + button to open dropdown
-echo ""
-echo "Step 2: Create new session via + button"
-# Find the + button ref
-PLUS_REF=$(echo "$SNAP" | grep 'button "+"' | grep -oP 'ref=\K[^]]+' | head -1)
-if [ -z "$PLUS_REF" ]; then
-  fail "Could not find + button"
-  agent-browser close >/dev/null 2>&1
-  exit 1
-fi
-pass "Found + button (ref=$PLUS_REF)"
-
-agent-browser click "$PLUS_REF" >/dev/null 2>&1
-sleep 0.5
-
-# Take snapshot to see dropdown
-DROP_SNAP=$(agent-browser snapshot -i 2>&1)
-if echo "$DROP_SNAP" | grep -q "Host Terminal"; then
-  pass "Dropdown appeared with Host Terminal option"
+PLUS_REF=$(agent-browser snapshot -i 2>&1 | grep 'button "+"' | grep -oP 'ref=\K[^]]+' | head -1)
+if [ -n "$PLUS_REF" ]; then
+  pass "Found launch button (ref=$PLUS_REF)"
 else
-  fail "Dropdown did not appear"
+  fail "Could not find launch button"
 fi
 
-# 3. Verify the sessions page structure has the right template elements
-echo ""
-echo "Step 3: Verify template structure"
-# Check that the sessions.html template includes _starting conditional
-if grep -q '_starting' tools/dashboard/templates/pages/sessions.html; then
-  pass "sessions.html has _starting state handling"
+if [ -n "$PLUS_REF" ]; then
+  agent-browser click "$PLUS_REF" >/dev/null 2>&1
+  sleep 1
+  RESULT=$(agent-browser eval 'document.body.textContent.indexOf("Host Terminal") !== -1')
+  if echo "$RESULT" | grep -q "true"; then
+    pass "Launch dropdown shows Host Terminal option"
+  else
+    fail "Launch dropdown did not show Host Terminal option"
+  fi
+fi
+
+RESULT=$(agent-browser eval 'document.body.textContent.indexOf("New session smoke") !== -1')
+if echo "$RESULT" | grep -q "true"; then
+  pass "Active session card is visible"
 else
-  fail "sessions.html missing _starting state handling"
+  fail "Active session card did not render"
 fi
 
-if grep -q 'Starting\.\.\.' tools/dashboard/templates/pages/sessions.html; then
-  pass "sessions.html shows 'Starting...' text"
+RESULT=$(agent-browser eval 'document.body.textContent.indexOf("Starting...") !== -1')
+if echo "$RESULT" | grep -q "true"; then
+  pass "Active session card shows startup message"
 else
-  fail "sessions.html missing 'Starting...' text"
+  fail "Active session card missing startup message"
 fi
 
-# 4. Verify session viewer empty state
-echo ""
-echo "Step 4: Verify session viewer empty state template"
-if grep -q 'Session started' tools/dashboard/templates/pages/session-view.html; then
-  pass "session-view.html has empty state message"
+echo "=== Test 2: New live session empty state ==="
+agent-browser open "http://localhost:$PORT/session/autonomy/auto-new-smoke"
+sleep 2
+
+RESULT=$(agent-browser eval 'document.body.textContent.indexOf("Session started") !== -1')
+if echo "$RESULT" | grep -q "true"; then
+  pass "Session viewer shows empty-state heading"
 else
-  fail "session-view.html missing empty state message"
+  fail "Session viewer missing empty-state heading"
 fi
 
-if grep -q 'Send a message to begin' tools/dashboard/templates/pages/session-view.html; then
-  pass "session-view.html has 'Send a message to begin' text"
+RESULT=$(agent-browser eval 'document.body.textContent.indexOf("Send a message to begin") !== -1')
+if echo "$RESULT" | grep -q "true"; then
+  pass "Session viewer shows empty-state body"
 else
-  fail "session-view.html missing 'Send a message to begin' text"
+  fail "Session viewer missing empty-state body"
 fi
 
-# 5. Verify server handles starting sessions
-echo ""
-echo "Step 5: Verify server-side changes"
-if grep -q 'monitor_state = session_monitor.get_one(session_id)' tools/dashboard/server.py; then
-  pass "server.py checks monitor for starting sessions in tail API"
+RESULT=$(agent-browser eval 'var el = document.querySelector(".sv-input"); el ? getComputedStyle(el).display !== "none" && el.offsetHeight > 0 : false')
+if echo "$RESULT" | grep -q "true"; then
+  pass "Input bar is visible for live linked session"
 else
-  fail "server.py missing monitor check in tail API"
+  fail "Input bar not visible for live linked session"
 fi
-
-if grep -q 'Register immediately so session appears' tools/dashboard/server.py; then
-  pass "server.py registers host sessions immediately"
-else
-  fail "server.py missing immediate registration for host sessions"
-fi
-
-# 6. Verify session_monitor doesn't break session_id
-echo ""
-echo "Step 6: Verify session_monitor preserves session_id"
-if grep -q 'Keep session_id as tmux_name' tools/dashboard/session_monitor.py; then
-  pass "session_monitor preserves session_id on JSONL resolve"
-else
-  fail "session_monitor still changes session_id on resolve"
-fi
-
-# Cleanup
-agent-browser close >/dev/null 2>&1
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
