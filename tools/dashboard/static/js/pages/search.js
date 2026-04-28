@@ -23,6 +23,20 @@
     musing: 'Musings',
   };
 
+  // Publication-state dropdown options. ``key=''`` means "Any" — sends no
+  // states= filter. The other keys map directly to the back-end's accepted
+  // states (``/api/search?states=...``).
+  var STATE_OPTIONS = [
+    { key: '', label: 'Any', meta: 'default' },
+    { key: 'canonical', label: 'Canonical', meta: 'pinned' },
+    { key: 'published', label: 'Published', meta: 'shareable' },
+    { key: 'curated', label: 'Curated', meta: 'reviewed' },
+  ];
+
+  // Debounce window for global-search input → refetch on /search. Matches
+  // the brief: "300ms".
+  var GLOBAL_INPUT_DEBOUNCE_MS = 300;
+
   document.addEventListener('alpine:init', () => {
     Alpine.data('searchPage', () => ({
       query: '',
@@ -33,12 +47,24 @@
       selectedOrg: '',
       orgList: [],
       orgDropdownOpen: false,
+      // Publication-state chip ('' = Any; mirrors ?state= URL param).
+      selectedState: '',
+      stateDropdownOpen: false,
+      stateOptions: STATE_OPTIONS,
+      _refetchTimer: null,
 
       init() {
         var params = new URLSearchParams(window.location.search);
         this.query = params.get('q') || '';
-        // Accept ?org= or ?only_org= — the latter matches the back-end name.
+        // Accept ?org= (canonical) or ?only_org= (legacy URL form). Note:
+        // the org chip now sends X-Graph-Org instead of ?only_org= on the
+        // wire — see _refetch() below — but we still parse legacy URLs so
+        // bookmarks keep working.
         this.selectedOrg = params.get('org') || params.get('only_org') || '';
+        this.selectedState = params.get('state') || '';
+        // Sync the global header input with our query so it isn't blank
+        // when the page lands via deep link.
+        this._syncGlobalInput();
         // Populate org list for the dropdown (best-effort; chip still works
         // with an empty list — only "All orgs" is selectable).
         fetch('/api/orgs')
@@ -46,17 +72,7 @@
           .then(d => { this.orgList = this._normalizeOrgs(d && d.orgs || []); })
           .catch(() => { this.orgList = []; });
         if (!this.query) { this.loaded = true; return; }
-        var url = '/api/search?q=' + encodeURIComponent(this.query) +
-                  '&group=1&limit=50';
-        if (this.selectedOrg) {
-          url += '&only_org=' + encodeURIComponent(this.selectedOrg);
-        }
-        fetch(url)
-          .then(r => r.json())
-          .then(d => {
-            this.results = Array.isArray(d) ? d : (d.results || []);
-            this.loaded = true;
-          });
+        this._refetch();
       },
 
       // ── Org chip + dropdown ────────────────────────────────────────
@@ -83,9 +99,9 @@
       get orgChip() {
         if (!this.selectedOrg) {
           return {
-            label: 'All orgs', allOrgs: true, glyphStyle: '',
+            label: 'All', allOrgs: true, glyphStyle: '',
             initial: '∞', favicon: null,
-            title: 'Pin search to an organization',
+            title: 'Pin search to an organization (sets caller_org for the request)',
           };
         }
         var picked = (this.orgList || []).find(o => o.slug === this.selectedOrg);
@@ -94,18 +110,19 @@
             label: this.selectedOrg, allOrgs: false,
             glyphStyle: 'background:#6c63ff', initial: this.selectedOrg[0].toUpperCase(),
             favicon: null,
-            title: 'Search pinned to ' + this.selectedOrg,
+            title: 'Search caller pinned to ' + this.selectedOrg,
           };
         }
         return {
           label: picked.name, allOrgs: false,
           glyphStyle: picked.favicon ? '' : ('background:' + picked.color),
           initial: picked.initial, favicon: picked.favicon,
-          title: 'Search pinned to ' + picked.name,
+          title: 'Search caller pinned to ' + picked.name,
         };
       },
 
       toggleOrgDropdown() {
+        this.stateDropdownOpen = false;
         this.orgDropdownOpen = !this.orgDropdownOpen;
       },
 
@@ -113,28 +130,103 @@
         this.orgDropdownOpen = false;
         if ((slug || '') === (this.selectedOrg || '')) return;
         this.selectedOrg = slug || '';
-        // Update URL — drop ``org`` when "All orgs", set otherwise. Use
-        // ``org`` (short, user-facing) on the URL; the fetch below sends
-        // ``only_org`` which is the back-end's canonical name.
-        var url = new URL(window.location.href);
-        url.searchParams.delete('only_org');
-        if (this.selectedOrg) {
-          url.searchParams.set('org', this.selectedOrg);
-        } else {
-          url.searchParams.delete('org');
-        }
-        window.history.replaceState({}, '', url.toString());
+        this._writeUrl();
         if (this.query) this._refetch();
+      },
+
+      // ── Publication-state chip + dropdown ──────────────────────────
+      get stateChipLabel() {
+        var match = STATE_OPTIONS.find(o => o.key === (this.selectedState || ''));
+        return match ? match.label : 'Any';
+      },
+
+      toggleStateDropdown() {
+        this.orgDropdownOpen = false;
+        this.stateDropdownOpen = !this.stateDropdownOpen;
+      },
+
+      pickState(key) {
+        this.stateDropdownOpen = false;
+        if ((key || '') === (this.selectedState || '')) return;
+        this.selectedState = key || '';
+        this._writeUrl();
+        if (this.query) this._refetch();
+      },
+
+      // ── Global header input bridge ─────────────────────────────────
+      _syncGlobalInput() {
+        // Reflect the page's query into the top-bar input so the operator
+        // sees the live query string while on /search.
+        var gs = document.getElementById('global-search');
+        if (gs && gs.value !== this.query) gs.value = this.query;
+      },
+
+      onGlobalSearchInput(ev) {
+        // Fired by app.js on every input event of #global-search while the
+        // /search route is active. Two-way bind to ``query`` and refetch
+        // (debounced) so results update live as the operator types.
+        var raw = (ev && ev.detail && typeof ev.detail.value === 'string')
+          ? ev.detail.value : '';
+        this.query = raw;
+        // Update URL via replaceState so the q= reflects the live query
+        // without spawning a navigation entry per keystroke.
+        this._writeUrl();
+        if (this._refetchTimer) clearTimeout(this._refetchTimer);
+        var self = this;
+        this._refetchTimer = setTimeout(function () {
+          self._refetchTimer = null;
+          if (!self.query) {
+            self.results = [];
+            self.loaded = true;
+            return;
+          }
+          self._refetch();
+        }, GLOBAL_INPUT_DEBOUNCE_MS);
+      },
+
+      onGlobalSearchEnter(ev) {
+        // Enter pressed in #global-search while on /search → flush any
+        // pending debounced refetch immediately (no extra navigation).
+        if (this._refetchTimer) {
+          clearTimeout(this._refetchTimer);
+          this._refetchTimer = null;
+        }
+        var raw = (ev && ev.detail && typeof ev.detail.value === 'string')
+          ? ev.detail.value : this.query;
+        this.query = raw;
+        this._writeUrl();
+        if (this.query) this._refetch();
+      },
+
+      _writeUrl() {
+        var url = new URL(window.location.href);
+        // Drop legacy ?only_org= so we don't double-write it.
+        url.searchParams.delete('only_org');
+        if (this.query) url.searchParams.set('q', this.query);
+        else url.searchParams.delete('q');
+        if (this.selectedOrg) url.searchParams.set('org', this.selectedOrg);
+        else url.searchParams.delete('org');
+        if (this.selectedState) url.searchParams.set('state', this.selectedState);
+        else url.searchParams.delete('state');
+        window.history.replaceState({}, '', url.toString());
       },
 
       _refetch() {
         this.loaded = false;
+        // Org chip = caller_org. Sent as ``X-Graph-Org`` header — NOT as
+        // ``?only_org=`` (which means "show me this org's PEER-VIEW
+        // surface", a different intent kept around for explicit audit
+        // calls). With caller=autonomy, /api/search returns the full
+        // autonomy surface (raw + published + canonical + curated) — what
+        // the operator expects when they pin "Autonomy".
         var url = '/api/search?q=' + encodeURIComponent(this.query) +
                   '&group=1&limit=50';
-        if (this.selectedOrg) {
-          url += '&only_org=' + encodeURIComponent(this.selectedOrg);
+        if (this.selectedState) {
+          url += '&states=' + encodeURIComponent(this.selectedState);
         }
-        fetch(url)
+        var headers = {};
+        if (this.selectedOrg) headers['X-Graph-Org'] = this.selectedOrg;
+        fetch(url, { headers: headers })
           .then(r => r.json())
           .then(d => {
             this.results = Array.isArray(d) ? d : (d.results || []);
@@ -188,17 +280,6 @@
       },
 
       setType(t) { this.activeType = t; },
-
-      goBack() {
-        if (window.history.length > 1) window.history.back();
-        else navigateTo('/');
-      },
-
-      submitQuery() {
-        var q = (this.query || '').trim();
-        if (!q) return;
-        navigateTo('/search?q=' + encodeURIComponent(q));
-      },
 
       // ── rendering helpers ──────────────────────────────────────────
       typeLabel(t) { return TYPE_LABELS[t] || (t ? this._titleCase(t) : 'Note'); },

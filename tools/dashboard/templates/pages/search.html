@@ -1,7 +1,21 @@
-<!-- Search results — grouped by source, iPhone-first.
-     Translated from Design Studio cb23bd8b-1a7 (revision 3 of 51bd7e8d-3bd).
-     Source of truth for visuals: do not edit class/var names without updating
-     the design. -->
+<!-- Search results — filter-strip chrome (auto-zvu3z).
+     Translated from Design Studio 09baf3a5-9ec ("Search chrome v4 — filter
+     strip only"). Cards still come from cb23bd8b-1a7 (auto-bcxdr).
+
+     Chrome rules:
+       - NO back button, NO page-level search input.
+       - Row 1: Org chip + Publication-state chip.
+       - Row 2: horizontal-scrolling type pills.
+       - Row 3: summary row.
+
+     The global "Search graph…" input in the top bar is the canonical query
+     input. While on /search it is two-way bound to this page's ``query``
+     ref via the ``global-search:input`` and ``global-search:enter`` custom
+     events emitted by static/app.js.
+
+     Pinning the org chip sets the ``X-Graph-Org`` header (caller_org) on
+     subsequent /api/search calls — NOT ``?only_org=`` — so search treats
+     the picked org as the caller (full surface), not as a peer. -->
 <style>
   .sp-root {
     --sp-bg: #111827; --sp-surface: #1f2937; --sp-border: #374151;
@@ -15,63 +29,63 @@
     --chip-off: #374151; --chip-on: #4f46e5;
   }
 
-  /* ── Sticky search header ─────────────────────── */
+  /* ── Sticky filter strip ──────────────────────── */
   .sp-header {
     position: sticky; top: 0; z-index: 10;
     background: var(--sp-bg);
-    padding: 12px 0 0;
+    padding: 10px 0 0;
     border-bottom: 1px solid var(--sp-border);
     margin: -8px -16px 0;
     padding-left: 16px; padding-right: 16px;
   }
-  .sp-search-row {
-    display: flex; align-items: center; gap: 8px;
-    margin-bottom: 10px;
-    position: relative;  /* anchors the .sp-org-dropdown */
+  .sp-filter-row-1 {
+    display: flex; gap: 8px; padding-bottom: 8px;
+    align-items: center; flex-wrap: wrap;
+    position: relative;  /* anchors org dropdown + state dropdown */
   }
-  .sp-back-btn {
-    flex-shrink: 0; width: 32px; height: 32px;
-    display: flex; align-items: center; justify-content: center;
-    color: var(--sp-accent); background: none; border: none;
-    font-size: 20px; cursor: pointer; padding: 0;
-  }
-  .sp-search-field {
-    flex: 1; min-width: 0; height: 36px;
-    background: var(--sp-surface); border: 1px solid var(--sp-border);
-    border-radius: 10px; padding: 0 12px; color: var(--sp-text-1);
-    font-size: 15px; outline: none;
-  }
-  .sp-search-field:focus { border-color: var(--sp-accent); }
-  .sp-search-field::placeholder { color: var(--sp-text-3); }
 
-  /* ── Org pin chip + dropdown ──────────────────── */
-  .sp-org-chip {
-    flex-shrink: 0; height: 36px;
+  /* ── Filter chips (org + publication state) ───── */
+  .sp-filter-chip {
+    flex-shrink: 0; height: 30px;
     display: inline-flex; align-items: center; gap: 6px;
     background: var(--sp-surface); border: 1px solid var(--sp-border);
-    border-radius: 10px; padding: 0 10px;
-    font-size: 13px; color: var(--sp-accent); font-weight: 500;
+    border-radius: 8px; padding: 0 10px;
+    font-size: 12px; color: var(--sp-accent); font-weight: 500;
     cursor: pointer; user-select: none; line-height: 1;
   }
-  .sp-org-chip:hover { background: #283548; }
-  .sp-org-chip-glyph {
-    width: 18px; height: 18px; flex-shrink: 0;
-    border-radius: 4px; background: #6c63ff;
+  .sp-filter-chip:hover { background: #283548; }
+  .sp-filter-chip-glyph {
+    width: 16px; height: 16px; flex-shrink: 0;
+    border-radius: 3px; background: #6c63ff;
     display: inline-flex; align-items: center; justify-content: center;
-    font-size: 11px; font-weight: 700; color: #fff;
+    font-size: 10px; font-weight: 700; color: #fff;
     overflow: hidden;
   }
-  .sp-org-chip-glyph img { width: 100%; height: 100%; object-fit: cover; }
-  .sp-org-chip-glyph.sp-org-chip-all {
+  .sp-filter-chip-glyph img { width: 100%; height: 100%; object-fit: cover; }
+  .sp-filter-chip-glyph.sp-filter-chip-all {
     background: linear-gradient(135deg, #6c63ff, #34d399, #fb923c);
-    font-size: 9px;
+    font-size: 8px;
   }
-  .sp-org-chip-caret { color: var(--sp-text-3); font-size: 10px; }
+  .sp-state-chip-glyph {
+    width: 16px; height: 16px; flex-shrink: 0;
+    border-radius: 3px; border: 1px dashed #4b5e73;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10px; color: #94a3b8;
+  }
+  .sp-filter-chip-label { font-weight: 500; color: var(--sp-text-2); }
+  .sp-filter-chip-value { color: #c4b5fd; font-weight: 600; }
+  .sp-filter-chip-caret { color: var(--sp-text-3); font-size: 9px; }
 
   .sp-org-dropdown {
-    position: absolute; top: 42px; left: 40px; z-index: 20;
+    position: absolute; top: 36px; left: 0; z-index: 20;
     background: #1a2332; border: 1px solid var(--sp-border);
     border-radius: 8px; padding: 4px; min-width: 220px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  }
+  .sp-state-dropdown {
+    position: absolute; top: 36px; left: 0; z-index: 20;
+    background: #1a2332; border: 1px solid var(--sp-border);
+    border-radius: 8px; padding: 4px; min-width: 180px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   }
   .sp-org-option {
@@ -109,7 +123,7 @@
     cursor: help;
   }
 
-  /* ── Chip rail ────────────────────────────────── */
+  /* ── Chip rail (type pills, row 2) ────────────── */
   .sp-chip-rail {
     display: flex; gap: 6px; overflow-x: auto;
     padding-bottom: 10px;
@@ -118,9 +132,9 @@
   }
   .sp-chip-rail::-webkit-scrollbar { display: none; }
   .sp-chip {
-    flex-shrink: 0; padding: 5px 12px; border-radius: 16px;
-    font-size: 13px; font-weight: 500; border: none; cursor: pointer;
-    white-space: nowrap; min-height: 30px;
+    flex-shrink: 0; padding: 5px 11px; border-radius: 16px;
+    font-size: 12px; font-weight: 500; border: none; cursor: pointer;
+    white-space: nowrap; min-height: 28px;
     transition: background 0.15s, color 0.15s;
   }
   .sp-chip-off { background: var(--chip-off); color: var(--sp-text-2); }
@@ -232,19 +246,23 @@
   }
 </style>
 
-<div x-data="searchPage()" class="sp-root pb-safe">
-  <!-- Sticky search header with chip rail -->
-  <div class="sp-header">
-    <div class="sp-search-row">
-      <button class="sp-back-btn" @click="goBack()" title="Back">‹</button>
+<div x-data="searchPage()"
+     @global-search:input.window="onGlobalSearchInput($event)"
+     @global-search:enter.window="onGlobalSearchEnter($event)"
+     class="sp-root pb-safe">
+  <!-- Sticky filter strip — NO back button, NO page-level search input.
+       The global "Search graph…" input in the top header is canonical. -->
+  <div class="sp-header" data-testid="sp-filter-strip">
 
-      <!-- Org pin chip — opens dropdown to pin search to one org -->
-      <button class="sp-org-chip"
+    <!-- Row 1: org chip + publication-state chip -->
+    <div class="sp-filter-row-1">
+      <!-- Org pin chip — opens dropdown to pin search caller to one org -->
+      <button class="sp-filter-chip"
               data-testid="sp-org-chip"
               @click.stop="toggleOrgDropdown()"
               :title="orgChip.title">
-        <span class="sp-org-chip-glyph"
-              :class="orgChip.allOrgs ? 'sp-org-chip-all' : ''"
+        <span class="sp-filter-chip-glyph"
+              :class="orgChip.allOrgs ? 'sp-filter-chip-all' : ''"
               :style="orgChip.glyphStyle">
           <template x-if="!orgChip.favicon">
             <span x-text="orgChip.initial"></span>
@@ -253,14 +271,22 @@
             <img :src="orgChip.favicon" :alt="orgChip.label">
           </template>
         </span>
-        <span x-text="orgChip.label"></span>
-        <span class="sp-org-chip-caret">▾</span>
+        <span class="sp-filter-chip-label">Org:</span>
+        <span class="sp-filter-chip-value" x-text="orgChip.label"></span>
+        <span class="sp-filter-chip-caret">▾</span>
       </button>
 
-      <input type="text" class="sp-search-field"
-             x-model="query"
-             @keydown.enter="submitQuery()"
-             placeholder="Search knowledge…">
+      <!-- Publication-state chip — clamps the result set to canonical /
+           published / curated rows. ``Any`` (default) sends no states= filter. -->
+      <button class="sp-filter-chip"
+              data-testid="sp-state-chip"
+              @click.stop="toggleStateDropdown()"
+              title="Filter by publication state">
+        <span class="sp-state-chip-glyph">◆</span>
+        <span class="sp-filter-chip-label">State:</span>
+        <span class="sp-filter-chip-value" x-text="stateChipLabel"></span>
+        <span class="sp-filter-chip-caret">▾</span>
+      </button>
 
       <!-- Org dropdown panel (open state) -->
       <div class="sp-org-dropdown"
@@ -293,7 +319,25 @@
           </button>
         </template>
       </div>
+
+      <!-- Publication-state dropdown panel (open state) -->
+      <div class="sp-state-dropdown"
+           data-testid="sp-state-dropdown"
+           x-show="stateDropdownOpen"
+           @click.outside="stateDropdownOpen = false"
+           x-cloak>
+        <template x-for="opt in stateOptions" :key="opt.key">
+          <button class="sp-org-option"
+                  :class="selectedState === opt.key ? 'sp-org-option-selected' : ''"
+                  @click="pickState(opt.key)">
+            <span x-text="opt.label"></span>
+            <span class="sp-org-option-meta" x-text="opt.meta"></span>
+          </button>
+        </template>
+      </div>
     </div>
+
+    <!-- Row 2: type pills (horizontal scroll) -->
     <div class="sp-chip-rail" data-testid="sp-chip-rail">
       <button class="sp-chip"
               :class="activeType === 'all' ? 'sp-chip-on' : 'sp-chip-off'"

@@ -1480,18 +1480,39 @@ async function route() {
 
 // ── Event Handlers ───────────────────────────────────────────
 
-// Global search — context-sensitive (beads page searches beads, others search graph)
-globalSearch.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    const q = globalSearch.value.trim();
-    if (!q) return;
-    const path = window.location.pathname;
-    if (path === '/' || path === '/beads') {
-      // On beads page: Alpine component reacts to input events — no extra action needed
-    } else {
-      navigateTo('/search?q=' + encodeURIComponent(q));
-    }
+// Global search — context-sensitive.
+//   - On /search: broadcast every input change as a ``global-search:input``
+//     CustomEvent so the search-page Alpine component can two-way bind to
+//     ``query``, debounce a refetch, and replaceState() the q= in the URL.
+//     Enter dispatches ``global-search:enter`` so the page can flush its
+//     debounce immediately. The page is the listener; this code stays
+//     route-agnostic.
+//   - On /beads: the Alpine component listens to native input events on
+//     #global-search directly.
+//   - Anywhere else: Enter navigates to /search?q=…
+globalSearch.addEventListener('input', () => {
+  if (window.location.pathname === '/search') {
+    window.dispatchEvent(new CustomEvent('global-search:input', {
+      detail: { value: globalSearch.value },
+    }));
   }
+});
+globalSearch.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const q = globalSearch.value.trim();
+  const path = window.location.pathname;
+  if (path === '/search') {
+    window.dispatchEvent(new CustomEvent('global-search:enter', {
+      detail: { value: globalSearch.value },
+    }));
+    return;
+  }
+  if (path === '/' || path === '/beads') {
+    // On beads page: Alpine component reacts to input events — no extra action needed
+    return;
+  }
+  if (!q) return;
+  navigateTo('/search?q=' + encodeURIComponent(q));
 });
 
 // Client-side nav (no full page reload)
