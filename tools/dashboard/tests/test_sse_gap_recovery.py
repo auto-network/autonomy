@@ -187,8 +187,14 @@ def _make_fixture():
 
 # ── Server lifecycle ─────────────────────────────────────────────────
 
-def _start_server(fixture_path, events_path, port):
-    """Boot mock dashboard server. Returns Popen handle."""
+def _start_server(fixture_path, events_path, port, state_path=None):
+    """Boot mock dashboard server. Returns Popen handle.
+
+    ``state_path`` controls where EventBus snapshot/restore reads & writes.
+    Pass a per-call fresh path to ensure each spawn boots with a new epoch
+    (preserving the pre-snapshot ``test_epoch_change_resets`` semantics)
+    and to avoid polluting the real data/event_bus.state.
+    """
     # Kill any stale server on our port
     subprocess.run(
         ["pkill", "-f", f"uvicorn.*{port}"],
@@ -200,6 +206,8 @@ def _start_server(fixture_path, events_path, port):
     env["DASHBOARD_MOCK"] = str(fixture_path)
     env["DASHBOARD_MOCK_EVENTS"] = str(events_path)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
+    if state_path is not None:
+        env["DASHBOARD_EVENT_BUS_STATE"] = str(state_path)
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "tools.dashboard.server:app",
          "--host", "127.0.0.1", "--port", str(port)],
@@ -265,13 +273,27 @@ class GapRecoveryHarness:
         self.fixture_path = tmp_path / "fixtures.json"
         self.events_path = tmp_path / "events.jsonl"
         self.proc = None
+        self._restart_idx = 0
 
     def write_fixture(self, fixture_dict):
         self.fixture_path.write_text(json.dumps(fixture_dict, indent=2))
 
+    def _state_path_for_run(self):
+        """Return a unique snapshot path per server spawn.
+
+        Ensures each restart starts with no readable snapshot, so the
+        "Server restarted" banner path stays exercised by the existing
+        TestServerRestart suite.
+        """
+        return self.tmp / f"event_bus.state.{self._restart_idx}"
+
     def start_server(self):
         self.events_path.touch()
-        self.proc = _start_server(self.fixture_path, self.events_path, TEST_PORT)
+        self._restart_idx += 1
+        self.proc = _start_server(
+            self.fixture_path, self.events_path, TEST_PORT,
+            state_path=self._state_path_for_run(),
+        )
         if not _wait_for_server(TEST_PORT):
             self.stop()
             raise RuntimeError(f"Server failed to start on port {TEST_PORT}")
@@ -282,7 +304,11 @@ class GapRecoveryHarness:
         time.sleep(1)
         # Clear events file for fresh start
         self.events_path.write_text("")
-        self.proc = _start_server(self.fixture_path, self.events_path, TEST_PORT)
+        self._restart_idx += 1
+        self.proc = _start_server(
+            self.fixture_path, self.events_path, TEST_PORT,
+            state_path=self._state_path_for_run(),
+        )
         if not _wait_for_server(TEST_PORT):
             self.stop()
             raise RuntimeError(f"Server failed to restart on port {TEST_PORT}")

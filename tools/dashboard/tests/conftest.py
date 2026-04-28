@@ -61,6 +61,23 @@ def _configure_writable_dbs_if_readonly():
 _configure_writable_dbs_if_readonly()
 
 
+# ── Default EventBus snapshot redirect ─────────────────────────────────
+# Prevent any test that boots the server (TestClient lifespan or uvicorn
+# subprocess) from reading or writing the real repo's data/event_bus.state.
+# Per-fixture redirects (e.g. test_app, setup_env) override this with a
+# tmp_path-scoped value where stricter isolation is needed.
+def _set_default_event_bus_state_path():
+    if _os.environ.get("DASHBOARD_EVENT_BUS_STATE"):
+        return
+    worker = _os.environ.get("PYTEST_XDIST_WORKER", "master")
+    tmp = _Path(_tempfile.gettempdir()) / f"pytest-event-bus-state-{_os.getpid()}-{worker}"
+    tmp.mkdir(parents=True, exist_ok=True)
+    _os.environ["DASHBOARD_EVENT_BUS_STATE"] = str(tmp / "event_bus.state")
+
+
+_set_default_event_bus_state_path()
+
+
 # ── JSONL Fixture ──────────────────────────────────────────────────────
 
 MOCK_ENTRIES = [
@@ -252,9 +269,12 @@ def shipped_settings_orgs(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture
-def test_app(test_db, mock_tmux):
+def test_app(test_db, mock_tmux, tmp_path):
     """Boot the dashboard app against test data with tmux mocked."""
     os.environ["DASHBOARD_DB"] = test_db
+    # Redirect EventBus snapshot path so the TestClient lifespan never
+    # reads or writes the real repo's data/event_bus.state.
+    os.environ["DASHBOARD_EVENT_BUS_STATE"] = str(tmp_path / "event_bus.state")
     # Reload DAO to pick up new DB path
     import importlib
     from tools.dashboard.dao import dashboard_db as db_mod

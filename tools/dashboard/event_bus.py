@@ -22,10 +22,16 @@ Usage::
 
 import asyncio
 import json
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_SNAPSHOT_VERSION = 1
 
 
 @dataclass
@@ -154,10 +160,111 @@ class EventBus:
         """Return topics that have cached state."""
         return list(self._last.keys())
 
+    def snapshot(self, path: str | Path) -> None:
+        """Persist bus state + module epoch to ``path`` atomically.
+
+        Failures are logged but never raised — snapshot loss falls back to
+        the fresh-epoch boot path (clients see the "Server restarted" banner).
+        """
+        try:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            state = {
+                "version": _SNAPSHOT_VERSION,
+                "epoch": _SERVER_EPOCH,
+                "seq": self._seq,
+                "last_seq": dict(self._last_seq),
+                "last": dict(self._last),
+                "buffer": [
+                    {
+                        "seq": e.seq,
+                        "topic": e.topic,
+                        "serialised": e.serialised,
+                        "timestamp": e.timestamp,
+                        "size": e.size,
+                    }
+                    for e in self._buffer
+                ],
+            }
+            tmp = target.with_suffix(target.suffix + ".tmp")
+            tmp.write_text(json.dumps(state))
+            tmp.replace(target)
+        except Exception:
+            logger.exception("EventBus.snapshot(%s) failed", path)
+
+    def restore(self, path: str | Path) -> bool:
+        """Restore bus state from ``path``. Returns True if a valid snapshot was loaded.
+
+        Missing, corrupt, or version-mismatched files restore nothing and
+        never raise — the caller is expected to continue with the empty bus,
+        which causes the client banner to fire (correct behaviour for
+        unclean restarts).
+        """
+        global _SERVER_EPOCH
+        try:
+            raw = Path(path).read_text()
+        except (FileNotFoundError, OSError):
+            return False
+        except Exception:
+            logger.exception("EventBus.restore(%s) failed reading file", path)
+            return False
+        try:
+            state = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("EventBus.restore(%s): corrupt JSON, ignoring", path)
+            return False
+        if not isinstance(state, dict) or state.get("version") != _SNAPSHOT_VERSION:
+            logger.warning(
+                "EventBus.restore(%s): version mismatch (got %r, want %d), ignoring",
+                path, state.get("version") if isinstance(state, dict) else None,
+                _SNAPSHOT_VERSION,
+            )
+            return False
+        try:
+            new_seq = int(state["seq"])
+            new_epoch = int(state["epoch"])
+            new_last_seq = {str(k): int(v) for k, v in state["last_seq"].items()}
+            new_last = {str(k): str(v) for k, v in state["last"].items()}
+            new_buffer: deque[_BufferEntry] = deque()
+            new_buffer_bytes = 0
+            for raw_entry in state["buffer"]:
+                serialised = str(raw_entry["serialised"])
+                size = int(raw_entry["size"])
+                entry = _BufferEntry(
+                    seq=int(raw_entry["seq"]),
+                    topic=str(raw_entry["topic"]),
+                    serialised=serialised,
+                    timestamp=float(raw_entry["timestamp"]),
+                    size=size,
+                )
+                new_buffer.append(entry)
+                new_buffer_bytes += size
+        except (KeyError, TypeError, ValueError):
+            logger.exception("EventBus.restore(%s): malformed payload, ignoring", path)
+            return False
+        self._seq = new_seq
+        self._last_seq = new_last_seq
+        self._last = new_last
+        self._buffer = new_buffer
+        self._buffer_bytes = new_buffer_bytes
+        _SERVER_EPOCH = new_epoch
+        return True
+
 
 # Module-level singleton — imported by server.py
 event_bus = EventBus()
 
 # Server epoch — set once at import time, changes on process restart.
 # Clients compare this to detect restarts and reset stale seq counters.
+# EventBus.restore() may overwrite this on startup so a clean uvicorn reload
+# preserves the prior epoch and avoids the client "Server restarted" banner.
 _SERVER_EPOCH = int(time.time())
+
+
+def current_server_epoch() -> int:
+    """Return the live module-level server epoch.
+
+    Callers must use this rather than importing ``_SERVER_EPOCH`` directly,
+    so values restored from snapshot are visible after startup.
+    """
+    return _SERVER_EPOCH

@@ -54,6 +54,12 @@ data/dispatch.db
 data/dispatch.db-wal
 data/dispatch.db-shm
 
+# Runtime state snapshots (regenerated each restart)
+data/dispatch.state
+data/dispatch.state.tmp
+data/event_bus.state
+data/event_bus.state.tmp
+
 # Per-org graph DBs — bootstrap-managed, operator-local data
 # (graph://d970d946-f95). Reconstructed by `graph org create` /
 # the dashboard first-launch bootstrap path.

@@ -80,7 +80,7 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
-from tools.dashboard.event_bus import event_bus, _SERVER_EPOCH
+from tools.dashboard.event_bus import event_bus, current_server_epoch
 from tools.dashboard.session_harness import (
     CLAUDE_HARNESS,
     dedup_claude_entries,
@@ -123,6 +123,12 @@ def _static_version() -> str:
     return version
 
 DISPATCH_STATE_PATH = _REPO_ROOT / "data" / "dispatch.state"
+# Tests override this via the DASHBOARD_EVENT_BUS_STATE env var to avoid
+# polluting the real repo path when TestClient drives the lifespan.
+EVENT_BUS_STATE_PATH = Path(
+    os.environ.get("DASHBOARD_EVENT_BUS_STATE")
+    or str(_REPO_ROOT / "data" / "event_bus.state")
+)
 # Labels always shown in pause UI even if not in dispatch.state
 _KNOWN_PAUSE_LABELS = ["dashboard"]
 
@@ -5151,7 +5157,7 @@ async def api_events(request):
         try:
             while True:
                 topic, data, seq = await queue.get()
-                yield {"id": f"{seq}:{_SERVER_EPOCH}", "event": topic, "data": json.dumps(data)}
+                yield {"id": f"{seq}:{current_server_epoch()}", "event": topic, "data": json.dumps(data)}
         except asyncio.CancelledError:
             pass
         finally:
@@ -7227,6 +7233,18 @@ _task_state_tracker = TaskStateTracker()
 
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task
+    # Restore EventBus state from the prior process so a uvicorn --reload
+    # cycle preserves seq/epoch and avoids the client "Server restarted"
+    # banner. Failure modes (missing/corrupt/version-mismatched snapshot)
+    # are swallowed inside restore() — we proceed with a fresh epoch.
+    # Some tests substitute a MockEventBus without snapshot/restore;
+    # treat absence of the attribute as a no-op.
+    restore_fn = getattr(event_bus, "restore", None)
+    if callable(restore_fn):
+        try:
+            restore_fn(EVENT_BUS_STATE_PATH)
+        except Exception:
+            logger.exception("event_bus.restore() raised unexpectedly; continuing")
     if os.environ.get("DASHBOARD_MOCK"):
         await worktree_monitor.start()
         # Mock mode: skip real database init and session monitor.
@@ -7296,6 +7314,16 @@ async def _on_shutdown():
         await worktree_monitor.stop()
     except Exception:
         logger.exception("error during worktree_monitor.stop()")
+    # Snapshot bus state after monitors stop so the next process boots into
+    # the same epoch + seq + buffer state. Best-effort: snapshot() itself
+    # logs and swallows any exception. Some tests substitute a MockEventBus
+    # without snapshot/restore; treat absence of the attribute as a no-op.
+    snapshot_fn = getattr(event_bus, "snapshot", None)
+    if callable(snapshot_fn):
+        try:
+            snapshot_fn(EVENT_BUS_STATE_PATH)
+        except Exception:
+            logger.exception("event_bus.snapshot() raised unexpectedly; continuing")
 
 @asynccontextmanager
 async def _lifespan(app):
