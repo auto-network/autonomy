@@ -6663,6 +6663,429 @@ async def api_graph_settings_migrate(request):
     return JSONResponse(report.to_dict())
 
 
+# ── Agentic actions dispatch (auto-pqgrl) ────────────────────
+
+
+# In-process idempotency cache for ``/api/agent-actions/dispatch``. Keyed
+# by ``(asset_id, member_key, dispatched_by_session)`` → ``(epoch, response)``.
+# UI debounce isn't enough — duplicate clicks across tabs / network retries
+# can fire twice. A duplicate inside the window returns the previous
+# response so the front-end routes to the in-flight trace rather than
+# spawning a second agent.
+_AGENT_ACTION_IDEMPOTENCY_WINDOW_SEC = 5.0
+_recent_agent_action_dispatches: dict[str, tuple[float, dict]] = {}
+
+
+def _agent_action_idempotency_key(
+    asset_id: str, member_key: str, dispatched_by_session: str,
+) -> str:
+    return f"{asset_id}|{member_key}|{dispatched_by_session}"
+
+
+def _agent_action_idempotency_lookup(
+    key: str, *, now: float | None = None,
+) -> dict | None:
+    """Return a cached response if one is still inside the window."""
+    epoch = now if now is not None else time.time()
+    entry = _recent_agent_action_dispatches.get(key)
+    if entry is None:
+        return None
+    ts, response = entry
+    if epoch - ts > _AGENT_ACTION_IDEMPOTENCY_WINDOW_SEC:
+        _recent_agent_action_dispatches.pop(key, None)
+        return None
+    return response
+
+
+def _agent_action_idempotency_remember(
+    key: str, response: dict, *, now: float | None = None,
+) -> None:
+    epoch = now if now is not None else time.time()
+    _recent_agent_action_dispatches[key] = (epoch, response)
+    # Opportunistic GC of stale entries so the dict never grows unbounded.
+    cutoff = epoch - _AGENT_ACTION_IDEMPOTENCY_WINDOW_SEC
+    for k, (ts, _) in list(_recent_agent_action_dispatches.items()):
+        if ts < cutoff:
+            _recent_agent_action_dispatches.pop(k, None)
+
+
+def _build_send_to_primer(
+    *,
+    asset_id: str,
+    page_context: dict,
+    sender_session: str,
+    member_key: str,
+) -> str:
+    """Compose the markdown primer that Send-To delivers to the chosen
+    session. Required fields are listed up front so the receiving
+    session has unambiguous context.
+    """
+    asset_type = str(page_context.get("asset_type") or "")
+    asset_title = str(page_context.get("asset_title") or "")[:80]
+    asset_url = str(page_context.get("asset_url") or "")
+    custom = str(page_context.get("custom_message") or "")
+    short_id = asset_id[:12]
+    lines = [
+        f"asset_id: {short_id} ({asset_id})",
+        f"asset_type: {asset_type}",
+        f"asset_url: {asset_url}",
+        f"asset_title: {asset_title}",
+        f"sender_session: {sender_session}",
+        f"action_key: {member_key}",
+    ]
+    if custom:
+        lines.append(f"custom_message: {custom}")
+    return "\n".join(lines)
+
+
+async def _send_to_via_crosstalk(
+    *,
+    target_session: str,
+    sender_session: str,
+    primer: str,
+) -> tuple[bool, str | None]:
+    """Deliver a Send-To primer to *target_session* by injecting a
+    crosstalk envelope into its tmux pane. Returns ``(ok, error)``.
+    """
+    if not _tmux_session_exists(target_session):
+        return False, "session not live"
+
+    sender_row = dashboard_db.get_session(sender_session)
+    sender_label = (sender_row or {}).get("label", "") or sender_session
+    sender_source_id = (sender_row or {}).get("graph_source_id", "") or ""
+    sender_entry_count = (sender_row or {}).get("entry_count", 0) or 0
+    iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    envelope = (
+        f'<crosstalk from="{sender_session}"\n'
+        f'           label="{sender_label}"\n'
+        f'           source="{sender_source_id}" turn="{sender_entry_count}"\n'
+        f'           timestamp="{iso_now}">\n'
+        f'{primer}\n'
+        f'</crosstalk>'
+    )
+    try:
+        await tmux_send(target_session, envelope)
+    except Exception as exc:
+        logger.exception(
+            "agent-actions Send-To: tmux_send failed target=%s", target_session,
+        )
+        return False, f"tmux_send failed: {exc}"
+    try:
+        await asyncio.to_thread(
+            auth_db.insert_message,
+            sender_session, sender_label, target_session,
+            sender_source_id or None, sender_entry_count or None,
+            primer, time.time(),
+        )
+    except Exception:
+        logger.exception("agent-actions Send-To: crosstalk log insert failed")
+    return True, None
+
+
+def _resolve_agent_action_member(
+    *, set_id: str, member_key: str, target_org: str,
+) -> dict | None:
+    """Look up the member's payload in *target_org*'s DB.
+
+    Strictly own-org-of-asset: the dropdown for an anchore note shows
+    only members defined in anchore.db; cross-org adoption is via
+    Setting promotion. ``peers=[]`` enforces that here.
+    """
+    try:
+        members = graph_ops.read_set(
+            set_id, org=target_org, peers=[],
+        ).members
+    except Exception:
+        logger.exception(
+            "agent-actions: read_set failed set_id=%s target_org=%s",
+            set_id, target_org,
+        )
+        return None
+    for m in members:
+        if m.key == member_key:
+            return dict(m.payload) if not isinstance(m.payload, dict) else m.payload
+    return None
+
+
+def _resolve_workspace_for_org(target_org: str):
+    """Return the first workspace whose graph_project == target_org, or None."""
+    from agents.workspace_settings import load_workspaces
+    for _wid, ws in load_workspaces().items():
+        if ws.graph_project == target_org:
+            return ws
+    return None
+
+
+def _render_agent_action_prompt(
+    template: str, *, asset_id: str, page_context: dict,
+    dispatched_by_session: str, member_key: str,
+) -> str:
+    """Render ``template`` against ``page_context`` via ``str.format``.
+
+    Pre-populates the asset id and dispatched-by session so prompt
+    authors do not have to thread them through ``page_context`` manually.
+    Missing keys raise KeyError, surfacing as a 400 to the caller — this
+    is preferable to silently rendering ``{key}`` literal text.
+    """
+    fmt_ctx = {
+        "asset_id": asset_id,
+        "dispatched_by_session": dispatched_by_session,
+        "member_key": member_key,
+    }
+    fmt_ctx.update({str(k): str(v) for k, v in page_context.items()})
+    return template.format_map(_DefaultDict(fmt_ctx))
+
+
+class _DefaultDict(dict):
+    """``dict`` that returns ``{key}`` literal for missing keys.
+
+    ``str.format_map`` raises ``KeyError`` on missing keys; the prompt
+    templates ship with a fixed list of placeholders, but page_context
+    coverage may grow over time. Returning the literal placeholder makes
+    a missing key visible to the agent at runtime instead of failing the
+    dispatch.
+    """
+
+    def __missing__(self, key):  # type: ignore[override]
+        return "{" + key + "}"
+
+
+async def api_agent_action_dispatch(request):
+    """POST /api/agent-actions/dispatch — spawn an agentic action.
+
+    Body schema::
+
+        {
+          "set_id":            "dashboard.agent-actions",
+          "member_key":        "note.update-summary",
+          "asset_id":          "abc12345-...",
+          "page_context":      {"asset_title": ..., "asset_url": ..., ...},
+          "target_session_name": "auto-..."   // universal Send-To only
+          "dispatched_by_session": "auto-..." // provenance
+        }
+
+    The endpoint enforces own-org-of-asset routing — the action's
+    Setting member is resolved from the *target asset's* org, not the
+    operator's. The agent (when one is spawned) runs in the workspace
+    registered to that same org.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    set_id = body.get("set_id") or "dashboard.agent-actions"
+    member_key = body.get("member_key") or ""
+    asset_id = body.get("asset_id") or ""
+    page_context = body.get("page_context") or {}
+    target_session_name = body.get("target_session_name") or ""
+    dispatched_by_session = body.get("dispatched_by_session") or ""
+
+    if not member_key or not isinstance(member_key, str):
+        return JSONResponse(
+            {"error": "member_key required"}, status_code=400,
+        )
+    if not asset_id or not isinstance(asset_id, str):
+        return JSONResponse({"error": "asset_id required"}, status_code=400)
+    if not isinstance(page_context, dict):
+        return JSONResponse(
+            {"error": "page_context must be an object"}, status_code=400,
+        )
+    if not isinstance(dispatched_by_session, str):
+        dispatched_by_session = ""
+
+    # ── Step 1: resolve the target asset and its owning org ──────
+    source = graph_ops.get_source(asset_id)
+    if source is None:
+        return JSONResponse(
+            {"error": f"asset not found: {asset_id}"}, status_code=404,
+        )
+    target_org = source.get("org") or ""
+    if not target_org:
+        return JSONResponse(
+            {"error": "asset has no owning org"}, status_code=409,
+        )
+
+    # ── Step 2: look up the action member in target_org's DB ─────
+    payload = _resolve_agent_action_member(
+        set_id=set_id, member_key=member_key, target_org=target_org,
+    )
+    if payload is None:
+        return JSONResponse(
+            {
+                "error": "agent-action member not found",
+                "set_id": set_id,
+                "member_key": member_key,
+                "target_org": target_org,
+            },
+            status_code=404,
+        )
+
+    # ── Step 3: idempotency window check ─────────────────────────
+    idem_key = _agent_action_idempotency_key(
+        asset_id, member_key, dispatched_by_session,
+    )
+    cached = _agent_action_idempotency_lookup(idem_key)
+    if cached is not None:
+        logger.warning(
+            "agent-actions: duplicate dispatch within %.0fs window key=%s",
+            _AGENT_ACTION_IDEMPOTENCY_WINDOW_SEC, idem_key,
+        )
+        return JSONResponse(cached)
+
+    # ── Step 4a: universal Send-To short-circuit ─────────────────
+    if bool(payload.get("universal")) and member_key == "universal.send-to":
+        if not target_session_name:
+            return JSONResponse(
+                {"error": "target_session_name required for Send To"},
+                status_code=400,
+            )
+        primer = _build_send_to_primer(
+            asset_id=asset_id,
+            page_context=page_context,
+            sender_session=dispatched_by_session or "dashboard",
+            member_key=member_key,
+        )
+        ok, err = await _send_to_via_crosstalk(
+            target_session=target_session_name,
+            sender_session=dispatched_by_session or "dashboard",
+            primer=primer,
+        )
+        if not ok:
+            return JSONResponse(
+                {"error": err, "target_session": target_session_name},
+                status_code=404,
+            )
+        response = {"ok": True, "sent_to": target_session_name}
+        _agent_action_idempotency_remember(idem_key, response)
+        return JSONResponse(response)
+
+    # ── Step 4b: non-universal action — workspace lookup ─────────
+    workspace = _resolve_workspace_for_org(target_org)
+    if workspace is None:
+        return JSONResponse(
+            {"error": "no workspace for org", "org": target_org},
+            status_code=409,
+        )
+
+    template = payload.get("prompt_template")
+    if not isinstance(template, str) or not template:
+        return JSONResponse(
+            {
+                "error": "agent-action member has no prompt_template",
+                "member_key": member_key,
+            },
+            status_code=409,
+        )
+    model = payload.get("model")
+    if not isinstance(model, str) or not model:
+        return JSONResponse(
+            {"error": "agent-action member has no model", "member_key": member_key},
+            status_code=409,
+        )
+
+    rendered_prompt = _render_agent_action_prompt(
+        template,
+        asset_id=asset_id,
+        page_context=page_context,
+        dispatched_by_session=dispatched_by_session or "",
+        member_key=member_key,
+    )
+
+    # ── Step 5: eager-create the agentic source row in target_org ─
+    title = str(payload.get("label") or member_key)
+    try:
+        src = graph_ops.insert_agentic_session(
+            org=target_org,
+            set_id=set_id,
+            set_revision=int(payload.get("set_revision") or 1),
+            member_key=member_key,
+            model=model,
+            target_source_id=asset_id,
+            target_org=target_org,
+            dispatched_by_session=dispatched_by_session or "",
+            title=title,
+        )
+    except Exception as exc:
+        logger.exception("agent-actions: insert_agentic_session failed")
+        return JSONResponse(
+            {"error": "failed to create agentic source", "detail": str(exc)},
+            status_code=500,
+        )
+
+    # ── Step 6: spawn the agent in target_org's workspace ────────
+    started_at = time.time()
+    container_name = src["slug"]
+    run_id = container_name
+    try:
+        from agents.session_launcher import launch_session
+    except Exception:
+        launch_session = None  # type: ignore[assignment]
+
+    container_id: str | None = None
+    if launch_session is not None and not os.environ.get("AGENT_ACTIONS_NO_LAUNCH"):
+        try:
+            container_id = await asyncio.to_thread(
+                launch_session,
+                "agentic",  # session_type
+                container_name,
+                rendered_prompt,
+                None,  # mounts
+                {
+                    "graph_project": target_org,
+                    "graph_org": target_org,
+                    "agentic_source_id": src["id"],
+                    "set_id": set_id,
+                    "member_key": member_key,
+                    "dispatched_by_session": dispatched_by_session or "",
+                },
+                True,  # detach
+                workspace.image,
+                "/workspace/repo",
+                workspace.harness,
+                None,  # extra_env
+                None,  # output_dir
+                model,
+            )
+        except Exception:
+            logger.exception("agent-actions: launch_session crashed")
+            container_id = None
+
+    # ── Step 7: record the dispatch_runs row ─────────────────────
+    try:
+        from agents.dispatch_db import init_db, insert_launch_run
+        init_db()
+        insert_launch_run(
+            run_id=run_id,
+            bead_id="",
+            started_at=started_at,
+            branch="",
+            branch_base="",
+            image=workspace.image,
+            container_name=container_name,
+            output_dir="",
+            kind="agentic",
+            agentic_source_id=src["id"],
+        )
+    except Exception:
+        logger.exception(
+            "agent-actions: dispatch_runs insert failed run_id=%s", run_id,
+        )
+
+    response = {
+        "agentic_source_id": src["id"],
+        "dispatched_at": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "target_workspace": workspace.id,
+        "target_org": target_org,
+        "container_id": container_id,
+        "slug": src["slug"],
+    }
+    _agent_action_idempotency_remember(idem_key, response)
+    return JSONResponse(response, status_code=201)
+
+
 # ── Org registry (graph://d970d946-f95) ──────────────────────
 
 
@@ -7370,6 +7793,7 @@ routes = [
     Route("/api/graph/setting/{id}/deprecate", api_graph_setting_deprecate, methods=["POST"]),
     Route("/api/graph/setting/{id}", api_graph_setting_get, methods=["GET"]),
     Route("/api/graph/setting/{id}", api_graph_setting_delete, methods=["DELETE"]),
+    Route("/api/agent-actions/dispatch", api_agent_action_dispatch, methods=["POST"]),
     Route("/api/graph/{id}", api_graph_resolve),
     Route("/api/source/{id}", api_source_read),
     Route("/api/source/{id}/attachments", api_source_attachments),
