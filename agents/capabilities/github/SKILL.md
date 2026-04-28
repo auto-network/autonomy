@@ -10,11 +10,15 @@ graph://86e04207-a25 § Phase 2 — *GitHub capability MVP for Worktrees*).
 
 Implementation: `autonomy/github`.
 
-Contracts implemented:
+Contract implemented:
 
 - `source_control@1`
-- `change_review@1`
-- `merge_gates@1`
+
+For the v1 capability model (graph://86e04207-a25), review and merge-gate
+concerns nest under `source_control@1` rather than appearing as separate
+top-level contracts. The full nested op inventory for `source_control@1`
+is finalized in a later bead; the placeholder below sketches the surface
+the GitHub MVP will expose.
 
 Delivery mode: `image_baked` — the workspace image already carries `gh`
 on PATH and `GH_TOKEN` is provisioned at workspace launch.

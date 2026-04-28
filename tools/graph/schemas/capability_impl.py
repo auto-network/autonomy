@@ -21,12 +21,21 @@ Versioning semantics (mirrors the contract schema):
 
 Each entry in ``implements`` references a contract by ``contract`` name
 and ``version``. An implementation may declare it implements multiple
-contracts (e.g. ``autonomy/github`` implements ``source_control@1``,
-``change_review@1``, and ``merge_gates@1``).
+contracts. For the v1 model (graph://86e04207-a25), review and merge-gate
+concerns nest under ``source_control@1`` rather than appearing as
+separate top-level contracts; the placeholder ``autonomy/github`` impl
+declares ``source_control@1`` only. The full nested op inventory for
+``source_control@1`` is finalized in a later bead.
+
+All repo-local file/path fields (``package_root``, ``tool_paths``,
+``skill_path``, ``primer_path``) are validated through
+:func:`validate_repo_local_path` so later launch-time materialization can
+trust the metadata for mounts and reads without re-validating.
 """
 
 from __future__ import annotations
 
+import posixpath
 from typing import Any
 
 from .registry import SchemaValidationError, SettingSchema, register_schema
@@ -58,6 +67,75 @@ _CONTRACT_REF_REQUIRED = ("contract", "version")
 _CONTRACT_REF_ALLOWED = set(_CONTRACT_REF_REQUIRED)
 
 _PROBE_REQUIRED = ("kind", "entrypoint")
+
+
+def validate_repo_local_path(
+    value: Any,
+    *,
+    field: str,
+    cls_name: str,
+) -> None:
+    """Reject any path that is not a normalized, repo-local relative path.
+
+    The intent is "the normalized path remains inside the repo-relative
+    capability tree". Concretely we reject:
+
+    * non-string or empty values
+    * absolute paths (``/...`` or any drive-style ``C:\\...``)
+    * any ``..`` parent-traversal segment (even if the normalized form
+      would land back inside the tree — the segment itself signals
+      escape intent and is unsafe to feed to a launch-time mount)
+    * degenerate values (``.``, all-whitespace, paths whose normalized
+      form is empty or ``.``)
+
+    This helper is exported so other capability-related schemas can apply
+    the same rule rather than duplicating ad hoc checks.
+    """
+    if not isinstance(value, str):
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must be a string, got "
+            f"{type(value).__name__}"
+        )
+    if not value or not value.strip():
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must be a non-empty repo-local path"
+        )
+    # Reject backslashes outright — capability paths are POSIX-style.
+    if "\\" in value:
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must use forward slashes "
+            f"(POSIX-style), got {value!r}"
+        )
+    if value.startswith("/"):
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must be repo-local "
+            f"(not absolute), got {value!r}"
+        )
+    # Drive-letter style absolutes (``C:\foo``) — defensive belt-and-braces.
+    if len(value) >= 2 and value[1] == ":":
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must be repo-local "
+            f"(not absolute), got {value!r}"
+        )
+    parts = value.split("/")
+    if any(p == ".." for p in parts):
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must not contain parent-traversal "
+            f"('..') segments, got {value!r}"
+        )
+    normalized = posixpath.normpath(value)
+    if normalized in (".", "", "/"):
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must resolve to a non-empty "
+            f"repo-local path, got {value!r}"
+        )
+    if normalized.startswith("../") or normalized == "..":
+        # Defensive: even with the no-`..` rule above, fail closed if a
+        # future loosening of that rule lets an escape through.
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must remain inside the repo-relative "
+            f"capability tree, got {value!r}"
+        )
 
 
 def _validate_contract_ref(ref: Any, idx: int, cls_name: str) -> None:
@@ -134,6 +212,10 @@ class CapabilityImplV1(SettingSchema):
 
     Optional: ``required_env``, ``required_secret_files``, ``tool_paths``,
     ``skill_path``, ``primer_path``, ``notes``.
+
+    Repo-local path fields (``package_root``, ``tool_paths``,
+    ``skill_path``, ``primer_path``) are validated through
+    :func:`validate_repo_local_path`.
     """
 
     set_id = SET_ID
@@ -190,18 +272,16 @@ class CapabilityImplV1(SettingSchema):
                 f"{VALID_DELIVERY_MODES}, got {delivery_mode!r}"
             )
 
-        # package_root
-        package_root = payload.get("package_root")
-        if not isinstance(package_root, str) or not package_root:
+        # package_root — required repo-local path
+        if "package_root" not in payload:
             raise SchemaValidationError(
-                f"{cls.__name__}: 'package_root' is required and must be a "
-                f"non-empty string"
+                f"{cls.__name__}: 'package_root' is required"
             )
-        if package_root.startswith("/"):
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'package_root' must be repo-local "
-                f"(not absolute), got {package_root!r}"
-            )
+        validate_repo_local_path(
+            payload["package_root"],
+            field="package_root",
+            cls_name=cls.__name__,
+        )
 
         # probe
         if "probe" not in payload:
@@ -215,12 +295,29 @@ class CapabilityImplV1(SettingSchema):
         _validate_str_list(payload, "required_secret_files", cls.__name__)
         _validate_str_list(payload, "tool_paths", cls.__name__)
 
-        # Optional string fields.
-        for key in ("skill_path", "primer_path", "notes"):
-            if key in payload and not isinstance(payload[key], str):
-                raise SchemaValidationError(
-                    f"{cls.__name__}: {key!r} must be a string"
+        # tool_paths — every entry must be a repo-local path.
+        if "tool_paths" in payload:
+            for i, entry in enumerate(payload["tool_paths"]):
+                validate_repo_local_path(
+                    entry,
+                    field=f"tool_paths[{i}]",
+                    cls_name=cls.__name__,
                 )
+
+        # Optional repo-local path fields.
+        for key in ("skill_path", "primer_path"):
+            if key in payload:
+                validate_repo_local_path(
+                    payload[key],
+                    field=key,
+                    cls_name=cls.__name__,
+                )
+
+        # Optional free-form string field.
+        if "notes" in payload and not isinstance(payload["notes"], str):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'notes' must be a string"
+            )
 
 
 register_schema(SET_ID, SCHEMA_REVISION, CapabilityImplV1)

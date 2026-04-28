@@ -95,13 +95,18 @@ def _source_control_v1() -> dict:
 
 
 def _autonomy_github_v1() -> dict:
+    """v1 GitHub fixture.
+
+    Per graph://86e04207-a25 the v1 capability shape collapses review and
+    merge-gate concerns under ``source_control``. ``change_review`` and
+    ``merge_gates`` are not separate top-level contracts in v1; the nested
+    op inventory for ``source_control@1`` is finalized in a later bead.
+    """
     return {
         "name": "autonomy/github",
         "version": 1,
         "implements": [
             {"contract": "source_control", "version": 1},
-            {"contract": "change_review", "version": 1},
-            {"contract": "merge_gates", "version": 1},
         ],
         "delivery_mode": "image_baked",
         "package_root": "agents/capabilities/github",
@@ -334,6 +339,183 @@ def test_impl_unknown_top_level_field_fails():
             payload,
         )
     assert "unknown field" in str(ei.value)
+
+
+# ── Path safety (repo-local rule) ────────────────────────────
+#
+# All file/path fields on `autonomy.capability.impl#1` must point inside
+# the repo-relative capability tree. Absolute paths, parent traversal
+# (`..`), and degenerate values (empty string, `.`) are rejected before
+# any later runtime trusts the metadata for mounts or reads.
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "/opt/capabilities/github",          # absolute
+        "../outside",                        # leading parent traversal
+        "agents/../outside",                 # parent traversal mid-path
+        "agents/capabilities/github/../..",  # exits the repo via traversal
+        "",                                  # empty
+        ".",                                 # degenerate (resolves to repo root)
+        "agents/./capabilities/../..",       # normalizes outside the repo
+    ],
+)
+def test_impl_package_root_rejects_repo_escape(bad_value):
+    payload = _autonomy_github_v1()
+    payload["package_root"] = bad_value
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "package_root" in str(ei.value)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "/etc/passwd",
+        "../SKILL.md",
+        "../../primer.md",
+        "agents/../etc/passwd",
+        "",
+    ],
+)
+def test_impl_skill_path_rejects_repo_escape(bad_value):
+    payload = _autonomy_github_v1()
+    payload["skill_path"] = bad_value
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "skill_path" in str(ei.value)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "/etc/primer.md",
+        "../../primer.md",
+        "agents/capabilities/../../primer.md",
+    ],
+)
+def test_impl_primer_path_rejects_repo_escape(bad_value):
+    payload = _autonomy_github_v1()
+    payload["primer_path"] = bad_value
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "primer_path" in str(ei.value)
+
+
+def test_impl_tool_paths_rejects_repo_escape_in_any_entry():
+    """One bad entry in a list of tool paths must fail the whole payload."""
+    payload = _autonomy_jira_v1()
+    payload["tool_paths"] = [
+        "agents/capabilities/jira/tools",  # fine
+        "../oops",                         # repo escape
+    ]
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "tool_paths" in str(ei.value)
+
+
+def test_impl_tool_paths_rejects_absolute_entry():
+    payload = _autonomy_jira_v1()
+    payload["tool_paths"] = ["/opt/jira-tools"]
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "tool_paths" in str(ei.value)
+
+
+def test_impl_normal_repo_local_paths_validate():
+    """The reference fixtures (with deep but legal paths) still validate."""
+    validate_payload(
+        capability_impl.SET_ID,
+        capability_impl.SCHEMA_REVISION,
+        _autonomy_github_v1(),
+    )
+    validate_payload(
+        capability_impl.SET_ID,
+        capability_impl.SCHEMA_REVISION,
+        _autonomy_jira_v1(),
+    )
+
+    # Multi-entry tool_paths with deeply-nested but legal repo-local
+    # entries must still validate.
+    payload = _autonomy_jira_v1()
+    payload["tool_paths"] = [
+        "agents/capabilities/jira/tools",
+        "agents/capabilities/jira/tools/sub",
+    ]
+    validate_payload(
+        capability_impl.SET_ID,
+        capability_impl.SCHEMA_REVISION,
+        payload,
+    )
+
+
+# ── GitHub v1 contract shape ─────────────────────────────────
+#
+# graph://86e04207-a25 — the v1 model collapses review and merge-gate
+# concerns under `source_control`. The placeholder GitHub impl must not
+# advertise `change_review` or `merge_gates` as separate top-level
+# contracts for the v1 shape; tests assert that the placeholder fixture
+# matches the agreed v1 shape.
+
+
+def test_github_v1_implements_source_control_only():
+    payload = _autonomy_github_v1()
+    declared = {ref["contract"] for ref in payload["implements"]}
+    assert "source_control" in declared
+    assert "change_review" not in declared, (
+        "GitHub v1 must not advertise change_review as a separate top-level "
+        "contract — review concerns nest under source_control@1"
+    )
+    assert "merge_gates" not in declared, (
+        "GitHub v1 must not advertise merge_gates as a separate top-level "
+        "contract — gate concerns nest under source_control@1"
+    )
+
+
+def test_github_manifest_file_matches_v1_shape():
+    """The on-disk manifest stub must validate and match the v1 shape."""
+    import json
+    from pathlib import Path
+
+    manifest_path = (
+        Path(__file__).resolve().parents[3]
+        / "agents"
+        / "capabilities"
+        / "github"
+        / "manifest.json"
+    )
+    payload = json.loads(manifest_path.read_text())
+    validate_payload(
+        capability_impl.SET_ID,
+        capability_impl.SCHEMA_REVISION,
+        payload,
+    )
+    declared = {ref["contract"] for ref in payload["implements"]}
+    assert declared == {"source_control"}, (
+        f"GitHub manifest must implement source_control only for v1; "
+        f"got {sorted(declared)}"
+    )
 
 
 # ── Org install schema ──────────────────────────────────────
