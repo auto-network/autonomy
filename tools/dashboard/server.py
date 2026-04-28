@@ -4180,7 +4180,7 @@ async def api_upload(request):
     Returns: {"ok": true, "path": "/workspace/repo/data/uploads/filename.jpg", "filename": "filename.jpg"}
     """
     try:
-        form = await request.form()
+        form = await _parse_form_data(request)
     except Exception:
         return JSONResponse({"error": "invalid multipart form"}, status_code=400)
 
@@ -6319,6 +6319,95 @@ def _caller_org(request) -> str | None:
     return request.headers.get("X-Graph-Org") or None
 
 
+class _FallbackUpload:
+    """Minimal async upload shim for stdlib multipart parsing."""
+
+    def __init__(self, filename: str | None, content_type: str | None, content: bytes):
+        self.filename = filename
+        self.content_type = content_type
+        self._content = content
+
+    async def read(self) -> bytes:
+        return self._content
+
+
+class _FallbackFormData:
+    """Tiny subset of Starlette's ``FormData`` used by our handlers."""
+
+    def __init__(self, items: list[tuple[str, object]]):
+        self._items = items
+
+    def get(self, key: str, default=None):
+        for name, value in self._items:
+            if name == key:
+                return value
+        return default
+
+    def __getitem__(self, key: str):
+        sentinel = object()
+        value = self.get(key, sentinel)
+        if value is sentinel:
+            raise KeyError(key)
+        return value
+
+    def multi_items(self):
+        return list(self._items)
+
+
+async def _parse_form_data(request):
+    """Return form data, falling back to stdlib multipart parsing.
+
+    ``request.form()`` requires the optional ``python-multipart`` package.
+    Some host/test environments omit it, so parse the small subset we need
+    ourselves when Starlette raises that specific assertion.
+    """
+    try:
+        return await request.form()
+    except AssertionError as exc:
+        if "python-multipart" not in str(exc):
+            raise
+
+    from email.parser import BytesParser
+    from email.policy import default as email_policy
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        raise ValueError("invalid multipart form")
+
+    body = await request.body()
+    envelope = (
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+        + body
+    )
+    message = BytesParser(policy=email_policy).parsebytes(envelope)
+    if not message.is_multipart():
+        raise ValueError("invalid multipart form")
+
+    items: list[tuple[str, object]] = []
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        if filename is not None:
+            items.append((
+                str(name),
+                _FallbackUpload(filename, part.get_content_type(), payload),
+            ))
+            continue
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            value = payload.decode(charset)
+        except UnicodeDecodeError:
+            value = payload.decode("utf-8", errors="replace")
+        items.append((str(name), value))
+
+    return _FallbackFormData(items)
+
+
 def _cross_org_error_response(err):
     """Build the 409 JSON shape emitted for CrossOrgWriteError."""
     return JSONResponse(
@@ -6368,7 +6457,10 @@ async def api_graph_note(request):
     org = _caller_org(request)
 
     if "multipart/form-data" in content_type:
-        form = await request.form()
+        try:
+            form = await _parse_form_data(request)
+        except Exception:
+            return JSONResponse({"error": "invalid multipart form"}, status_code=400)
         content = str(form.get("content", ""))
         if not content:
             return JSONResponse({"error": "content required"}, status_code=400)
@@ -6436,7 +6528,10 @@ async def api_graph_note_update(request):
     org = _caller_org(request)
 
     if "multipart/form-data" in content_type:
-        form = await request.form()
+        try:
+            form = await _parse_form_data(request)
+        except Exception:
+            return JSONResponse({"error": "invalid multipart form"}, status_code=400)
         source_id = str(form.get("source_id", ""))
         e = _graph_validate_source_id(source_id)
         if e:
@@ -6840,7 +6935,10 @@ async def api_graph_sessions(request):
 async def api_graph_attach(request):
     """Attach a file to the graph via multipart form upload."""
     import tempfile
-    form = await request.form()
+    try:
+        form = await _parse_form_data(request)
+    except Exception:
+        return JSONResponse({"error": "invalid multipart form"}, status_code=400)
     upload = form.get("file")
     if not upload:
         return JSONResponse({"error": "file field required"}, status_code=400)

@@ -24,6 +24,24 @@ def test_init_creates_table():
     ).fetchall()
     conn.close()
     assert ("dispatch_runs",) in tables
+    assert ("dispatcher_state",) in tables
+
+
+def test_pause_state_missing_schema_defaults_safe():
+    """Read-only pause helpers tolerate an uninitialised temp DB."""
+    tmp = tempfile.mktemp(suffix=".db")
+    db.DB_PATH = Path(tmp)
+
+    assert db.is_paused() is False
+    assert db.get_pause_reason() is None
+
+
+def test_consecutive_failures_missing_schema_defaults_zero():
+    """Circuit-breaker reads tolerate an uninitialised temp DB."""
+    tmp = tempfile.mktemp(suffix=".db")
+    db.DB_PATH = Path(tmp)
+
+    assert db.get_consecutive_failures("auto-missing") == (0, 0)
 
 
 def test_insert_full_decision():

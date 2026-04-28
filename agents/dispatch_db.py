@@ -123,6 +123,12 @@ CREATE TABLE IF NOT EXISTS dispatcher_state (
 """
 
 
+def _ensure_dispatcher_state(conn: sqlite3.Connection) -> None:
+    """Create ``dispatcher_state`` lazily for older / uninitialised DBs."""
+    conn.execute(CREATE_DISPATCHER_STATE)
+    conn.commit()
+
+
 def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
@@ -450,11 +456,16 @@ def get_consecutive_failures(bead_id: str) -> tuple[int, int]:
     conn = _get_conn()
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
-            "SELECT status, failure_class FROM dispatch_runs "
-            "WHERE bead_id = ? ORDER BY started_at DESC",
-            (bead_id,),
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                "SELECT status, failure_class FROM dispatch_runs "
+                "WHERE bead_id = ? ORDER BY started_at DESC",
+                (bead_id,),
+            ).fetchall()
+        except sqlite3.OperationalError as e:
+            if "no such table: dispatch_runs" not in str(e):
+                raise
+            return 0, 0
 
         agent_failures = 0
         merge_failures = 0
@@ -600,12 +611,23 @@ def set_dispatcher_paused(reason_json: dict) -> None:
     """
     conn = _get_conn()
     try:
-        conn.execute(
-            "INSERT OR REPLACE INTO dispatcher_state (key, value, updated_at) "
-            "VALUES ('paused', ?, datetime('now'))",
-            (json.dumps(reason_json),),
-        )
-        conn.commit()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO dispatcher_state (key, value, updated_at) "
+                "VALUES ('paused', ?, datetime('now'))",
+                (json.dumps(reason_json),),
+            )
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            if "no such table: dispatcher_state" not in str(e):
+                raise
+            _ensure_dispatcher_state(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO dispatcher_state (key, value, updated_at) "
+                "VALUES ('paused', ?, datetime('now'))",
+                (json.dumps(reason_json),),
+            )
+            conn.commit()
     finally:
         conn.close()
 
@@ -614,8 +636,13 @@ def clear_paused() -> None:
     """Remove the paused key from dispatcher_state."""
     conn = _get_conn()
     try:
-        conn.execute("DELETE FROM dispatcher_state WHERE key = 'paused'")
-        conn.commit()
+        try:
+            conn.execute("DELETE FROM dispatcher_state WHERE key = 'paused'")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            if "no such table: dispatcher_state" not in str(e):
+                raise
+            _ensure_dispatcher_state(conn)
     finally:
         conn.close()
 
@@ -624,10 +651,16 @@ def is_paused() -> bool:
     """Return True if the dispatcher is paused."""
     conn = _get_conn()
     try:
-        row = conn.execute(
-            "SELECT 1 FROM dispatcher_state WHERE key = 'paused' LIMIT 1"
-        ).fetchone()
-        return row is not None
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM dispatcher_state WHERE key = 'paused' LIMIT 1"
+            ).fetchone()
+            return row is not None
+        except sqlite3.OperationalError as e:
+            if "no such table: dispatcher_state" not in str(e):
+                raise
+            _ensure_dispatcher_state(conn)
+            return False
     finally:
         conn.close()
 
@@ -636,9 +669,15 @@ def get_pause_reason() -> dict | None:
     """Return the pause reason dict, or None if not paused."""
     conn = _get_conn()
     try:
-        row = conn.execute(
-            "SELECT value FROM dispatcher_state WHERE key = 'paused' LIMIT 1"
-        ).fetchone()
+        try:
+            row = conn.execute(
+                "SELECT value FROM dispatcher_state WHERE key = 'paused' LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError as e:
+            if "no such table: dispatcher_state" not in str(e):
+                raise
+            _ensure_dispatcher_state(conn)
+            return None
         if row is None:
             return None
         return json.loads(row[0])

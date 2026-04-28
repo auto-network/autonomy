@@ -24,6 +24,40 @@ from unittest.mock import patch
 import pytest
 import httpx
 
+_ISOLATED_TEST_ENVS = (
+    "AGENT_BROWSER_SESSION",
+    "AUTONOMY_ORGS_DIR",
+    "DASHBOARD_AGENT_RUNS_DIR",
+    "DASHBOARD_DB",
+    "DASHBOARD_MOCK",
+    "DASHBOARD_MOCK_EVENTS",
+    "DISPATCH_DB",
+    "GRAPH_API",
+    "GRAPH_DB",
+    "GRAPH_ORG",
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_dashboard_env():
+    """Restore common dashboard/graph env after each test.
+
+    A number of dashboard suites still mutate ``os.environ`` directly instead
+    of routing through ``monkeypatch``. Snapshot after higher-scope fixtures
+    have set their test-local values, then restore after the test so later
+    files on the same xdist worker do not inherit stray DB, mock, or browser
+    settings.
+    """
+    snapshot = {key: os.environ.get(key) for key in _ISOLATED_TEST_ENVS}
+    try:
+        yield
+    finally:
+        for key, value in snapshot.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
 
 # ── Read-only workspace auto-redirect ──────────────────────────────────
 # Sub-session envs that mount /workspace/repo read-only still need DB
