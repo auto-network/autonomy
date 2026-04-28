@@ -6316,6 +6316,53 @@ def _parse_settings_read_params(query_params) -> tuple[int | None, int | None, i
     )
 
 
+async def _emit_setting_changed(
+    *,
+    operation: str,
+    setting_id: str | None = None,
+    org: str | None = None,
+    snapshot: dict | None = None,
+) -> None:
+    """Publish a ``setting.changed`` SSE event for a Settings mutation.
+
+    Either pass a fully-formed ``snapshot`` (used by delete / migrate where
+    we capture row state outside this helper) or a ``setting_id`` we can
+    resolve via ``get_setting``. Best-effort: a missing row or fetch
+    failure silently skips the broadcast — Settings writes never block on
+    event delivery.
+    """
+    if snapshot is None:
+        if setting_id is None:
+            return
+        try:
+            got = graph_ops.get_setting(setting_id, org=org)
+        except Exception:
+            logger.debug(
+                "setting.changed: get_setting(%s) failed", setting_id,
+                exc_info=True,
+            )
+            return
+        if got is None:
+            return
+        snapshot = {
+            "set_id": got.set_id,
+            "schema_revision": got.stored_revision,
+            "key": got.key,
+            "publication_state": got.state,
+            "deprecated": bool(got.deprecated),
+        }
+    payload = {
+        "set_id": snapshot["set_id"],
+        "schema_revision": snapshot["schema_revision"],
+        "key": snapshot["key"],
+        "org": org,
+        "publication_state": snapshot["publication_state"],
+        "deprecated": snapshot["deprecated"],
+        "operation": operation,
+    }
+    await event_bus.broadcast("setting.changed", payload, dedup=False)
+
+
 async def api_graph_settings_list(request):
     """GET /api/graph/settings/<set_id> — resolved members of a SET."""
     set_id = request.path_params["set_id"]
@@ -6389,6 +6436,7 @@ async def api_graph_setting_create(request):
         )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    await _emit_setting_changed(operation="write", setting_id=sid, org=org)
     return JSONResponse({"id": sid}, status_code=201)
 
 
@@ -6413,6 +6461,7 @@ async def api_graph_setting_override(request):
         )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    await _emit_setting_changed(operation="override", setting_id=sid, org=org)
     return JSONResponse({"id": sid}, status_code=201)
 
 
@@ -6433,6 +6482,7 @@ async def api_graph_setting_exclude(request):
         return JSONResponse({"error": str(e)}, status_code=404)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    await _emit_setting_changed(operation="exclude", setting_id=sid, org=org)
     return JSONResponse({"id": sid}, status_code=201)
 
 
@@ -6450,6 +6500,7 @@ async def api_graph_setting_promote(request):
         return JSONResponse({"error": str(e)}, status_code=404)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    await _emit_setting_changed(operation="promote", setting_id=sid, org=org)
     return JSONResponse({"ok": True})
 
 
@@ -6498,6 +6549,7 @@ async def api_graph_setting_deprecate(request):
         )
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
+    await _emit_setting_changed(operation="deprecate", setting_id=sid, org=org)
     return JSONResponse({"ok": True})
 
 
@@ -6505,12 +6557,28 @@ async def api_graph_setting_delete(request):
     """DELETE /api/graph/setting/<id> — hard-delete (raw only)."""
     sid = request.path_params["id"]
     org = _caller_org(request)
+    # Snapshot row state before delete so we still know set_id/key when emitting.
+    try:
+        pre = graph_ops.get_setting(sid, org=org)
+    except Exception:
+        pre = None
     try:
         graph_ops.remove_setting(sid, org=org)
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    if pre is not None:
+        await _emit_setting_changed(
+            operation="delete", org=org,
+            snapshot={
+                "set_id": pre.set_id,
+                "schema_revision": pre.stored_revision,
+                "key": pre.key,
+                "publication_state": pre.state,
+                "deprecated": bool(pre.deprecated),
+            },
+        )
     return JSONResponse({"ok": True})
 
 
@@ -6542,6 +6610,11 @@ async def api_graph_settings_migrate(request):
         )
     except Exception as e:  # noqa: BLE001 — mirror CLI surface
         return JSONResponse({"error": str(e)}, status_code=500)
+    if not dry_run:
+        for affected_id in report.affected_ids:
+            await _emit_setting_changed(
+                operation="migrate", setting_id=affected_id, org=org,
+            )
     return JSONResponse(report.to_dict())
 
 

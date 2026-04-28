@@ -215,6 +215,45 @@
     };
   }
 
+  // ── setting.changed routing ──────────────────────────────
+  // Consumers register interest in a specific set_id; the router
+  // filters incoming `setting.changed` events and only invokes
+  // matching callbacks. Cross-org filtering (if any) is the
+  // consumer's responsibility — the event payload carries `org`.
+  var _settingListeners = {}; // set_id -> Set<fn>
+  var _settingDispatcherInstalled = false;
+
+  function _ensureSettingDispatcher() {
+    if (_settingDispatcherInstalled) return;
+    _settingDispatcherInstalled = true;
+    registerHandler('setting.changed', function(payload) {
+      if (!payload || typeof payload !== 'object') return;
+      var listeners = _settingListeners[payload.set_id];
+      if (!listeners) return;
+      listeners.forEach(function(fn) {
+        try { fn(payload); } catch (err) {
+          console.warn('[EventBus] setting.changed listener error', err);
+        }
+      });
+    });
+  }
+
+  function onSettingChanged(setId, callback) {
+    if (!setId || typeof callback !== 'function') {
+      return function() {};
+    }
+    _ensureSettingDispatcher();
+    if (!_settingListeners[setId]) _settingListeners[setId] = new Set();
+    _settingListeners[setId].add(callback);
+    return function unsubscribe() {
+      var s = _settingListeners[setId];
+      if (s) {
+        s.delete(callback);
+        if (s.size === 0) delete _settingListeners[setId];
+      }
+    };
+  }
+
   // Expose API first, connect after — so app.js can register handlers
   // before the initial SSE event arrives.
   window.connectEvents = connectEvents;
@@ -222,6 +261,8 @@
   window.unregisterHandler = unregisterHandler;
   window.reconnectEvents = reconnectEvents;
   window._connect = _connect;
+  window.dashboardEvents = window.dashboardEvents || {};
+  window.dashboardEvents.onSettingChanged = onSettingChanged;
   Object.defineProperty(window, '_lastSeq', {
     get: function() { return _lastSeq; },
     set: function(v) { _lastSeq = v; },

@@ -3,6 +3,12 @@
 All subscribers receive ALL topics. Each broadcast is tagged with the topic
 name so SSE clients can set the event type and route locally.
 
+TODO(auto-p5rbu): the ``setting.changed`` topic is emitted in-process only.
+When uvicorn moves to multi-worker, Settings writes from worker A won't
+reach SSE subscribers on worker B. Either (a) hoist the bus onto a
+process-shared transport (Redis pub/sub, NATS) or (b) keep workers
+single-process for the dashboard.
+
 Usage::
 
     bus = EventBus()
