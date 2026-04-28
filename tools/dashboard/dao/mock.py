@@ -1015,6 +1015,17 @@ def search(query: str, limit: int = 20, project: str | None = None) -> list[dict
     results = [_fill(r, SEARCH_RESULT_DEFAULTS) for r in data.get("search_results", [])]
     if project:
         results = [r for r in results if r.get("project") == project]
+    if query:
+        # Behavioural sweep relies on the no-match branch to drive the
+        # empty-state UI. Production FTS is full-text; here we approximate
+        # with a case-insensitive substring across title + content so a
+        # query like "zzzzz_no_match" filters everything out.
+        q_lower = query.lower()
+        results = [
+            r for r in results
+            if q_lower in (r.get("source_title", "") or "").lower()
+            or q_lower in (r.get("content", "") or "").lower()
+        ]
     return results[:limit]
 
 
