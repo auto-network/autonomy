@@ -737,6 +737,98 @@ def get_collab_notes(limit: int = 20) -> list[dict]:
     return [_fill(n, COLLAB_NOTE_DEFAULTS) for n in data.get("collab_notes", [])][:limit]
 
 
+# ── graph recent-notes DAO interface ────────────────────────────────
+
+RECENT_NOTE_DEFAULTS: dict[str, Any] = {
+    "id": "note-mock-recent-001",
+    "title": "Mock recent note",
+    "created_at": "2026-01-01T00:00:00Z",
+    "author": "",
+    "project": "",
+    "org": "",
+    "tags": [],
+    "source_type": "note",
+    "preview": "",
+}
+
+
+def _default_recent_notes() -> list[dict]:
+    """Plausible defaults so DASHBOARD_MOCK fixtures without ``recent_notes``
+    still render a populated /collab Recent tab. Mixes source types, authors,
+    and tags so the redesigned card helpers can be exercised end to end."""
+    return [
+        {
+            "id": "note-mock-recent-001",
+            "title": "pitfall: dashboard hot-reload resets EventBus epoch",
+            "created_at": "2026-04-27T14:00:00Z",
+            "author": "host-0418-192255",
+            "project": "autonomy",
+            "org": "autonomy",
+            "tags": ["pitfall", "dashboard", "eventbus"],
+            "source_type": "note",
+            "preview": "Hot reload of the Dashboard creates a lot of issues because it resets sequence numbers",
+        },
+        {
+            "id": "note-mock-recent-002",
+            "title": "EventBus state persistence across uvicorn reload",
+            "created_at": "2026-04-26T12:00:00Z",
+            "author": "terminal:auto-83g69",
+            "project": "autonomy",
+            "org": "autonomy",
+            "tags": ["eventbus", "dashboard"],
+            "source_type": "note",
+            "preview": "Snapshot is atomic (temp file + rename), restored on startup before any subscriber connects",
+        },
+        {
+            "id": "note-mock-recent-003",
+            "title": "Search needs source_type colors and per-turn drill-down",
+            "created_at": "2026-04-25T09:30:00Z",
+            "author": "",
+            "project": "autonomy",
+            "org": "autonomy",
+            "tags": [],
+            "source_type": "thought",
+            "preview": "",
+        },
+        {
+            "id": "note-mock-recent-004",
+            "title": "Per-org DB + cross-org search architecture",
+            "created_at": "2026-04-24T16:45:00Z",
+            "author": "terminal:host-0420-122533",
+            "project": "autonomy",
+            "org": "autonomy",
+            "tags": ["architecture", "graph", "canonical"],
+            "source_type": "note",
+            "preview": "Project = hard boundary (sharing/sync/access). Tags = soft boundary (search/ranking).",
+        },
+        {
+            "id": "note-mock-recent-005",
+            "title": "Dispatch run auto-83g69 — DONE",
+            "created_at": "2026-04-23T22:10:00Z",
+            "author": "agent",
+            "project": "autonomy",
+            "org": "autonomy",
+            "tags": ["dispatch"],
+            "source_type": "agent-run",
+            "preview": "Refactored monitor_ipc to share the SSE bus with the dashboard reload watcher.",
+        },
+    ]
+
+
+def get_recent_notes(limit: int = 50) -> list[dict]:
+    """Mirror of ``graph_ops.list_notes`` for DASHBOARD_MOCK fixtures.
+
+    Reads ``recent_notes`` from the fixture if present. Otherwise falls back
+    to a plausible mixed-type default so the /collab Recent tab is never
+    empty in mock mode.
+    """
+    data = _load()
+    rows = data.get("recent_notes")
+    if rows is None:
+        rows = _default_recent_notes()
+    return [_fill(n, RECENT_NOTE_DEFAULTS) for n in rows][:limit]
+
+
 # ── graph thoughts DAO interface ────────────────────────────────────
 
 THOUGHT_DEFAULTS: dict[str, Any] = {

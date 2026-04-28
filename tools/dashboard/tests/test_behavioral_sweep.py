@@ -314,6 +314,34 @@ SWEEP_COLLAB_NOTES = [
     },
 ]
 
+# Recent feed (untagged, mixed source-type) — backs /api/graph/notes in mock mode.
+SWEEP_RECENT_NOTES = [
+    {
+        "id": "note-sweep-recent-001",
+        "title": "Architecture follow-up — sequencing",
+        "created_at": "2026-03-26T08:00:00Z", "author": "agent-alpha",
+        "project": "autonomy", "org": "autonomy",
+        "tags": ["architecture"], "source_type": "note",
+        "preview": "Sequence the auth migration after the passkey rollout",
+    },
+    {
+        "id": "note-sweep-recent-002",
+        "title": "Testing harness improvements",
+        "created_at": "2026-03-25T12:00:00Z", "author": "agent-beta",
+        "project": "autonomy", "org": "autonomy",
+        "tags": ["testing"], "source_type": "note",
+        "preview": "Tee pytest output so reruns aren't needed",
+    },
+    {
+        "id": "note-sweep-recent-003",
+        "title": "Dispatch run auto-test1 — DONE",
+        "created_at": "2026-03-25T08:00:00Z", "author": "agent",
+        "project": "autonomy", "org": "autonomy",
+        "tags": ["dispatch"], "source_type": "agent-run",
+        "preview": "Refactor merged successfully",
+    },
+]
+
 SWEEP_THOUGHTS = [
     {
         "id": "thought-sweep-001", "content": "Auth needs passkeys for MFA",
@@ -837,6 +865,7 @@ def _build_fixture() -> dict:
         "timeline_entries": SWEEP_TIMELINE_ENTRIES,
         "timeline_stats": SWEEP_TIMELINE_STATS,
         "collab_notes": SWEEP_COLLAB_NOTES,
+        "recent_notes": SWEEP_RECENT_NOTES,
         "thoughts": SWEEP_THOUGHTS,
         "threads": SWEEP_THREADS,
         "streams": SWEEP_STREAMS,
@@ -1438,12 +1467,13 @@ TIMELINE_PAGE_CHECKS = """
 COLLAB_PAGE_CHECKS = """
     var bodyText = document.body.innerText;
 
-    // Tab strip visible (Recent, Thoughts, Threads, Topics)
+    // Tab strip visible (Recent, Curated, Thoughts, Threads, Topics)
     var tabs = document.querySelectorAll('.collab-tab');
     var tabLabels = [];
     tabs.forEach(function(t) { tabLabels.push(t.textContent.trim()); });
     r.tab_labels = tabLabels;
     r.has_recent_tab = tabLabels.some(function(t) { return t.indexOf('Recent') !== -1; });
+    r.has_curated_tab = tabLabels.some(function(t) { return t.indexOf('Curated') !== -1; });
     r.has_thoughts_tab = tabLabels.some(function(t) { return t.indexOf('Thoughts') !== -1; });
     r.has_threads_tab = tabLabels.some(function(t) { return t.indexOf('Threads') !== -1; });
     r.has_topics_tab = tabLabels.some(function(t) { return t.indexOf('Topics') !== -1; });
@@ -2166,13 +2196,14 @@ class TestCollabPageBehavior:
         request.cls._checks = result
 
     def test_tab_strip(self):
-        """User sees tab strip with Recent, Thoughts, Threads, Topics."""
+        """User sees tab strip with Recent, Curated, Thoughts, Threads, Topics."""
         c = self._checks
         assert c.get("has_recent_tab"), f"No 'Recent' tab, got: {c.get('tab_labels')}"
+        assert c.get("has_curated_tab"), f"No 'Curated' tab, got: {c.get('tab_labels')}"
         assert c.get("has_thoughts_tab"), f"No 'Thoughts' tab, got: {c.get('tab_labels')}"
         assert c.get("has_threads_tab"), f"No 'Threads' tab, got: {c.get('tab_labels')}"
         assert c.get("has_topics_tab"), f"No 'Topics' tab, got: {c.get('tab_labels')}"
-        assert c.get("tab_count") == 4, f"Expected 4 tabs, got {c.get('tab_count')}"
+        assert c.get("tab_count") == 5, f"Expected 5 tabs, got {c.get('tab_count')}"
 
     def test_recent_notes(self):
         """User sees recent note cards in the default tab."""
@@ -2199,7 +2230,7 @@ class TestCollabPageBehavior:
         c = self._checks
         assert c.get("has_tags"), f"No tags visible"
         tags = c.get("tags", [])
-        assert any("architecture" in t or "testing" in t or "auth" in t for t in tags), \
+        assert any("architecture" in t or "testing" in t or "auth" in t or "dispatch" in t for t in tags), \
             f"Expected fixture tags, got: {tags}"
 
     def test_tab_counts(self):
