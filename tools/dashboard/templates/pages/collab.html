@@ -33,6 +33,12 @@
   .note-card:hover { background: #1e2d3d; }
   .note-card.type-thought { border-left-color: #a855f7; }
   .note-card.type-pitfall { border-left-color: #ef4444; }
+  .note-card.type-session { border-left-color: #4ade80; }
+  .note-card.type-agent-run { border-left-color: #fb923c; }
+  .note-card.type-conversation { border-left-color: #38bdf8; }
+  .note-card.type-docs { border-left-color: #facc15; }
+  .note-card.type-status { border-left-color: #f472b6; }
+  .note-card.type-musing { border-left-color: #c084fc; }
   .note-card-wrap { border-radius: 8px; overflow: clip; }
 
   .note-stats {
@@ -48,6 +54,12 @@
   .note-type-note { color: #ca8a04; }
   .note-type-thought { color: #a855f7; }
   .note-type-pitfall { color: #ef4444; }
+  .note-type-session { color: #4ade80; }
+  .note-type-agent-run { color: #fb923c; }
+  .note-type-conversation { color: #38bdf8; }
+  .note-type-docs { color: #facc15; }
+  .note-type-status { color: #f472b6; }
+  .note-type-musing { color: #c084fc; }
   .note-date { color: #4b5e73; }
   .note-author { color: #3d4f63; margin-left: auto; }
   .note-title {
@@ -158,18 +170,26 @@
             data-testid="page-capture-btn">Capture</button>
   </div>
 
-  <!-- Tab strip -->
+  <!-- Tab strip — order: Recent | Curated | Thoughts | Threads | Topics. -->
   <div class="collab-tabs">
-    <button class="collab-tab" :class="tab === 'recent' && 'active'" @click="setTab('recent')">
+    <button class="collab-tab" :class="tab === 'recent' && 'active'" @click="setTab('recent')"
+            data-testid="collab-tab-recent">
       Recent<span class="collab-tab-count" x-text="recent.length"></span>
     </button>
-    <button class="collab-tab" :class="tab === 'thoughts' && 'active'" @click="setTab('thoughts')">
+    <button class="collab-tab" :class="tab === 'curated' && 'active'" @click="setTab('curated')"
+            data-testid="collab-tab-curated">
+      Curated<span class="collab-tab-count" x-text="curated.length"></span>
+    </button>
+    <button class="collab-tab" :class="tab === 'thoughts' && 'active'" @click="setTab('thoughts')"
+            data-testid="collab-tab-thoughts">
       Thoughts<span class="collab-tab-count" x-text="thoughts.length"></span>
     </button>
-    <button class="collab-tab" :class="tab === 'threads' && 'active'" @click="setTab('threads')">
+    <button class="collab-tab" :class="tab === 'threads' && 'active'" @click="setTab('threads')"
+            data-testid="collab-tab-threads">
       Threads<span class="collab-tab-count" x-text="threads.length"></span>
     </button>
-    <button class="collab-tab" :class="tab === 'topics' && 'active'" @click="setTab('topics')">
+    <button class="collab-tab" :class="tab === 'topics' && 'active'" @click="setTab('topics')"
+            data-testid="collab-tab-topics">
       Topics<span class="collab-tab-count" x-text="topics.length"></span>
     </button>
   </div>
@@ -179,9 +199,33 @@
     <div class="collab-loading">Loading...</div>
   </template>
 
-  <!-- RECENT TAB -->
-  <div x-show="tab === 'recent' && !loading" class="collab-list">
+  <!-- RECENT TAB — all recent notes regardless of tag (/api/graph/notes). -->
+  <div x-show="tab === 'recent' && !loading" class="collab-list" data-testid="collab-recent">
     <template x-for="item in recent" :key="item.id">
+      <div class="note-card-wrap">
+        <a class="note-card" :class="borderClass(item)"
+           :href="'/graph/' + item.id.slice(0, 12)"
+           @click.prevent="navigateTo('/graph/' + item.id.slice(0, 12))">
+          <div class="note-stats">
+            <span class="note-type" :class="typeClass(item)" x-text="typeLabel(item)"></span>
+            <span class="note-date" x-text="formatDate(item.created_at)"></span>
+            <span class="note-author" x-text="formatAuthor(item.author)"></span>
+          </div>
+          <div class="note-title" x-text="item.title"></div>
+          <div class="note-preview" x-text="item.preview"></div>
+          <div class="note-tags">
+            <template x-for="tag in (item.tags || [])" :key="tag">
+              <span class="note-tag" x-text="tag"></span>
+            </template>
+          </div>
+        </a>
+      </div>
+    </template>
+  </div>
+
+  <!-- CURATED TAB — collab-tagged notes (/api/graph/collab). -->
+  <div x-show="tab === 'curated' && !loading" class="collab-list" data-testid="collab-curated">
+    <template x-for="item in curated" :key="item.id">
       <div class="note-card-wrap">
         <a class="note-card" :class="borderClass(item)"
            :href="'/graph/' + item.id.slice(0, 12)"
