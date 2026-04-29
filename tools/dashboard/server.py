@@ -4116,10 +4116,13 @@ async def api_session_resume(request):
     model = "claude-opus-4-7[1m]"
 
     if session_type == "container":
-        # Derive output_dir from JSONL parent path
-        # JSONL is typically at data/agent-runs/<name>-<ts>/sessions/<uuid>/<file>.jsonl
-        # output_dir is the run directory (parent of sessions/)
-        output_dir = str(jsonl_path.parent.parent.parent)
+        # Derive output_dir (the run dir) by walking up to the "sessions" parent.
+        # Claude:  <run>/sessions/<uuid>/<file>.jsonl
+        # Codex:   <run>/sessions/YYYY/MM/DD/<file>.jsonl
+        _od = jsonl_path
+        while _od.parent != _od and _od.name != "sessions":
+            _od = _od.parent
+        output_dir = str(_od.parent)
 
         # If this was a workspace (project-scoped) session, resume with the
         # same image, mounts, and env.  dashboard.db.project stores the
