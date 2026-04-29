@@ -601,6 +601,34 @@ def update_live_stats(
         pass
 
 
+def record_dispatch_failure(
+    run_id: str, *, failure_class: str, reason: str,
+) -> None:
+    """Mark a dispatch_runs row as failed before/at launch (no decision yet).
+
+    Used by callers that detect a structural failure (e.g. the prompt
+    template references undefined placeholders, the workspace can't be
+    resolved) and want a persistent record on the run row so post-mortem
+    doesn't require digging through logs. Best-effort: silently ignores
+    write failures so a record_failure miss never crashes the dispatch
+    endpoint.
+    """
+    if not run_id:
+        return
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE dispatch_runs SET status = ?, failure_class = ?, "
+            "reason = ?, completed_at = datetime('now') WHERE id = ?",
+            ("FAILED", failure_class, reason[:500], run_id),
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
 # ── Dispatcher pause/resume ──────────────────────────────────────
 
 

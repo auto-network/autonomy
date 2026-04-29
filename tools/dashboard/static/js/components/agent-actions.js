@@ -141,12 +141,37 @@
     return (el && el.textContent && el.textContent.trim()) || '';
   }
 
+  function pageShortDescription() {
+    // The graph/source page exposes the loaded source on a few shapes
+    // depending on the page. Prefer the canonical Alpine store; fall
+    // back to a DOM data-attribute the template stamps on the asset
+    // root. Returns '' when nothing is available — server backfills
+    // from the resolved source row.
+    if (window.Alpine && typeof window.Alpine.store === 'function') {
+      try {
+        var src = window.Alpine.store('asset');
+        if (src && (src.short_description || (src.source && src.source.short_description))) {
+          return String(src.short_description || src.source.short_description || '');
+        }
+      } catch (e) {}
+    }
+    var el = document.querySelector('[data-asset-short-description]');
+    if (el) {
+      return String(el.getAttribute('data-asset-short-description') || '');
+    }
+    if (window.__dashboardAsset && window.__dashboardAsset.short_description) {
+      return String(window.__dashboardAsset.short_description);
+    }
+    return '';
+  }
+
   function pageContext(asset) {
     return {
       asset_id: asset.id,
       asset_type: asset.type,
       asset_url: window.location.origin + window.location.pathname,
       asset_title: pageTitle(),
+      asset_short_description: pageShortDescription(),
     };
   }
 

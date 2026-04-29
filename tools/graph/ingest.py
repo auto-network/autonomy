@@ -897,6 +897,170 @@ def detect_session_format(file_path: Path) -> str:
     return "claude"
 
 
+def _ingest_agentic_session(
+    db: GraphDB,
+    *,
+    file_path: Path,
+    abs_path: str,
+    parser,
+    default_model: str,
+    existing_source: dict,
+    session_meta: dict,
+    force: bool,
+) -> dict:
+    """Append agentic-session turns onto an existing eager-created source.
+
+    The dashboard's ``api_agent_action_dispatch`` (auto-pqgrl, Round 5)
+    inserts a ``type='agentic'`` source row when the action launches.
+    The agent's JSONL is later appended onto THAT row by this function
+    rather than creating a fresh ``type='session'`` row by file_path.
+
+    Differences from the generic session ingest path:
+
+    * Source resolved by ``agentic_source_id`` from
+      ``.session_meta.json``, not by ``file_path``.
+    * Title is preserved (the dispatch endpoint set it to the action's
+      label, e.g. "Update Title & Summary"); ``_derive_session_title``
+      is intentionally NOT called.
+    * ``file_path`` on the source row is left as-is (the dashboard
+      stores ``agentic:<slug>`` there to keep the row uniquely
+      addressable independent of the JSONL location).
+    * Returns ``status='agentic_updated'`` so callers can distinguish
+      this branch in logs.
+
+    Mirrors the incremental-append logic of ``_ingest_text_session``'s
+    "existing" branch — turns whose ``turn_number`` is greater than the
+    current max are appended; older turns are skipped to keep the call
+    idempotent.
+    """
+    source_id = existing_source["id"]
+    current_size = file_path.stat().st_size
+    existing_meta = (
+        json.loads(existing_source["metadata"]) if existing_source.get("metadata") else {}
+    )
+
+    if not force:
+        last_size = existing_meta.get("file_size", 0)
+        if last_size and current_size == last_size:
+            return {
+                "status": "skipped",
+                "source_id": source_id,
+                "reason": "already up to date (agentic)",
+            }
+
+    meta, turns = parser(file_path)
+    if not turns:
+        return {
+            "status": "skipped",
+            "source_id": source_id,
+            "reason": "no content turns found (agentic)",
+        }
+
+    max_turn = db.get_max_turn(source_id)
+    new_turns = [t for t in turns if t["turn_number"] > max_turn]
+
+    thoughts: list[Thought] = []
+    derivations: list[Derivation] = []
+    all_entities: dict = {}
+
+    last_thought_row = db.conn.execute(
+        "SELECT id FROM thoughts WHERE source_id = ? ORDER BY turn_number DESC LIMIT 1",
+        (source_id,),
+    ).fetchone()
+    last_thought_id = last_thought_row["id"] if last_thought_row else None
+
+    for turn in new_turns:
+        if turn["role"] == "compact_summary":
+            t_meta = {"timestamp": turn.get("timestamp", "")}
+            if turn.get("compact_metadata"):
+                t_meta["compact_metadata"] = turn["compact_metadata"]
+            t = Thought(
+                source_id=source_id,
+                content=turn["content"],
+                role="compact_summary",
+                turn_number=turn["turn_number"],
+                message_id=turn.get("message_id"),
+                metadata=t_meta,
+                created_at=turn.get("timestamp") or now_iso(),
+            )
+            db.insert_thought(t)
+            thoughts.append(t)
+            continue
+
+        ents = extract_entities(turn["content"])
+        for name, etype in ents:
+            key = name.lower()
+            if key not in all_entities:
+                all_entities[key] = (name, etype)
+
+        if turn["role"] == "user":
+            t = Thought(
+                source_id=source_id,
+                content=turn["content"],
+                turn_number=turn["turn_number"],
+                message_id=turn.get("message_id"),
+                metadata={"timestamp": turn.get("timestamp", "")},
+                created_at=turn.get("timestamp") or now_iso(),
+            )
+            db.insert_thought(t)
+            thoughts.append(t)
+            last_thought_id = t.id
+            for name, etype in ents:
+                eid = db.upsert_entity(name, etype)
+                db.add_mention(eid, t.id, "thought")
+
+        elif turn["role"] == "assistant":
+            d = Derivation(
+                source_id=source_id,
+                thought_id=last_thought_id,
+                content=turn["content"],
+                model=meta.get("model", default_model),
+                turn_number=turn["turn_number"],
+                message_id=turn.get("message_id"),
+                metadata={"timestamp": turn.get("timestamp", "")},
+                created_at=turn.get("timestamp") or now_iso(),
+            )
+            db.insert_derivation(d)
+            derivations.append(d)
+            for name, etype in ents:
+                eid = db.upsert_entity(name, etype)
+                db.add_mention(eid, d.id, "derivation")
+            if last_thought_id:
+                db.insert_edge(Edge(
+                    source_id=d.id, source_type="derivation",
+                    target_id=last_thought_id, target_type="thought",
+                    relation="responds_to",
+                ))
+
+    new_meta = _build_summary_meta(
+        existing_meta, meta, file_path, session_meta, current_size,
+    )
+    db.update_source_summary(
+        source_id,
+        title=None,  # preserve dashboard-set title
+        metadata=new_meta,
+        last_activity_at=meta.get("ended_at") or existing_source.get("last_activity_at"),
+    )
+    db.commit()
+
+    if not new_turns:
+        return {
+            "status": "agentic_refreshed",
+            "source_id": source_id,
+            "reason": "summary refreshed",
+        }
+    return {
+        "status": "agentic_updated",
+        "source_id": source_id,
+        "session_id": meta["session_id"],
+        "new_thoughts": len(thoughts),
+        "new_derivations": len(derivations),
+        "new_entities": len(all_entities),
+        "from_turn": max_turn + 1,
+        "to_turn": turns[-1]["turn_number"],
+    }
+
+
 def _ingest_text_session(
     db: GraphDB,
     file_path: str | Path,
@@ -914,6 +1078,33 @@ def _ingest_text_session(
     session_meta = _load_session_meta(file_path)
     if project is None:
         project = session_meta.get("graph_project")
+
+    # ── Agentic session routing (auto-gh2iv) ────────────────────
+    # When .session_meta.json carries type='agentic' + agentic_source_id,
+    # the source row was eager-created by the dashboard's
+    # api_agent_action_dispatch endpoint at launch time. The ingest must
+    # APPEND turns to that existing row — not create a new source —
+    # so /graph/<agentic_source_id> renders the agent's work after
+    # completion. The title is set by the dispatch endpoint (the
+    # action's label) and must NOT be overwritten by _derive_session_title.
+    if session_meta.get("type") == "agentic":
+        agentic_source_id = session_meta.get("agentic_source_id")
+        if agentic_source_id:
+            existing_agentic = db.get_source(agentic_source_id)
+            if existing_agentic is not None:
+                return _ingest_agentic_session(
+                    db,
+                    file_path=file_path,
+                    abs_path=abs_path,
+                    parser=parser,
+                    default_model=default_model,
+                    existing_source=existing_agentic,
+                    session_meta=session_meta,
+                    force=force,
+                )
+            # If the source row doesn't exist yet (race / mismatched org),
+            # fall through to the legacy create-by-file_path path so the
+            # session content isn't dropped.
 
     existing = db.get_source_by_path(abs_path)
 

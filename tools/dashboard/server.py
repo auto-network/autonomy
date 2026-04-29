@@ -2660,6 +2660,65 @@ def _find_session_files(run_name: str) -> list[Path]:
     return []
 
 
+async def _read_session_jsonl(
+    session_file: Path, *, after: int, run_name: str,
+) -> JSONResponse:
+    """Read a JSONL session file and return tail JSONResponse from byte ``after``.
+
+    Shared between the bead-style ``/api/dispatch/tail/{run}`` path and the
+    agentic-run path which finds the JSONL via ``dispatch_runs.output_dir``
+    instead of the bead-naming glob. Both paths emit the same shape so the
+    overlay client doesn't have to branch.
+    """
+    file_size = session_file.stat().st_size
+    is_live = (import_time() - session_file.stat().st_mtime) < 120
+    session_uuid = session_file.stem
+    project = session_file.parent.name
+    tmux_name = run_name
+    session_id = tmux_name
+
+    if after >= file_size:
+        return JSONResponse({
+            "entries": [], "offset": file_size, "is_live": is_live,
+            "session_id": session_id, "tmux_name": tmux_name,
+            "tmux_session": tmux_name, "session_uuid": session_uuid,
+            "project": project,
+        })
+
+    entries: list[dict] = []
+    harness = resolve_harness_for_path(session_file)
+    with open(session_file, "rb") as f:
+        f.seek(after)
+        data = f.read()
+        new_offset = after + len(data)
+        text = data.decode("utf-8", errors="replace")
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            parsed = harness.parse_line(line)
+            if parsed is None:
+                continue
+            if isinstance(parsed, list):
+                entries.extend(parsed)
+            else:
+                entries.append(parsed)
+
+    entries = harness.postprocess_entries(
+        entries, session_dir=session_file.parent / session_file.stem,
+    )
+    return JSONResponse({
+        "entries": entries,
+        "offset": new_offset,
+        "is_live": is_live,
+        "session_id": session_id,
+        "tmux_name": tmux_name,
+        "tmux_session": tmux_name,
+        "session_uuid": session_uuid,
+        "project": project,
+    })
+
+
 async def api_dispatch_tail(request):
     """Tail JSONL session data for a dispatch run.
 
@@ -2672,7 +2731,27 @@ async def api_dispatch_tail(request):
     # Mock mode: resolve by run_dir against the fixture, mirroring
     # api_session_tail's DASHBOARD_MOCK branch.
     if os.environ.get("DASHBOARD_MOCK"):
+        # First look up the run by id — a dashboard fixture may carry
+        # entries under the run_id directly (this is how agentic-run
+        # fixtures are seeded; they have no run_dir).
         sess = dao_sessions.get_session_by_run_dir(run_name)
+        if sess is None:
+            entries = dao_sessions.get_session_entries(run_name)
+            if entries is not None:
+                TaskStateTracker().enrich(run_name, entries)
+                return JSONResponse({
+                    "entries": entries,
+                    "offset": len(entries),
+                    "is_live": True,
+                    "session_id": run_name,
+                    "tmux_session": run_name,
+                    "tmux_name": run_name,
+                    "project": "autonomy",
+                    "type": "agentic",
+                    "role": "",
+                    "resolved": True,
+                    "seq": len(entries),
+                })
         if sess:
             sid = sess.get("session_id") or sess.get("tmux_session") or run_name
             entries = dao_sessions.get_session_entries(sid) or []
@@ -2691,6 +2770,45 @@ async def api_dispatch_tail(request):
                 "seq": len(entries),
             })
         # fall through to filesystem scan
+
+    # Agentic-run path: dispatch_runs.output_dir is the authoritative
+    # JSONL location (set at launch by api_agent_action_dispatch). When
+    # the run is kind='agentic' we resolve the file via that column,
+    # NOT by the bead-style "agent-{bead_id}-{pid}" globbing.
+    try:
+        run_row = dao_dispatch.get_run(run_name)
+    except Exception:
+        run_row = None
+    if run_row and (run_row.get("kind") or "bead") == "agentic":
+        output_dir = run_row.get("output_dir") or ""
+        if not output_dir:
+            logger.error(
+                "api_dispatch_tail: agentic run %s has no output_dir", run_name,
+            )
+            return JSONResponse(
+                {"error": "agentic run missing output_dir", "run_id": run_name},
+                status_code=500,
+            )
+        sessions_dir = Path(output_dir) / "sessions"
+        jsonl_files = sorted(
+            sessions_dir.rglob("*.jsonl") if sessions_dir.exists() else [],
+            key=lambda f: f.stat().st_mtime,
+        )
+        if not jsonl_files:
+            return JSONResponse({
+                "entries": [], "offset": 0,
+                "is_live": (run_row.get("status") == "RUNNING"),
+                "session_id": run_name,
+                "tmux_name": run_name,
+                "tmux_session": run_name,
+                "project": "autonomy",
+            })
+        # Multi-JSONL handling deferred per Round 7h scope: claude emits
+        # exactly one .jsonl per session today; take the first.
+        session_file = jsonl_files[0]
+        return await _read_session_jsonl(
+            session_file, after=after, run_name=run_name,
+        )
 
     session_files = _find_session_files(run_name)
     if not session_files:
@@ -6105,6 +6223,8 @@ async def _collect_dispatch_data() -> dict:
     for run in running_runs:
         bead_id = run.get("bead_id", "")
         librarian_type = run.get("librarian_type") or None
+        kind = run.get("kind") or "bead"
+        agentic_source_id = run.get("agentic_source_id") or None
         meta = bead_meta.get(bead_id, {})
         container = None
         if run.get("container_name"):
@@ -6113,18 +6233,38 @@ async def _collect_dispatch_data() -> dict:
                 "image": run.get("image"),
                 "status": None,
             }
-        # Librarian runs: use dir name as id, synthetic title, no priority
-        effective_id = bead_id or run.get("id", "")
-        if librarian_type:
+        # Agentic runs: id is the run's container_name (== run.id), title from
+        # the dispatch_runs row (set by the dashboard endpoint at launch).
+        # Librarian runs: use dir name as id, synthetic title, no priority.
+        if kind == "agentic":
+            effective_id = run.get("id", "")
+            # For agentic runs the dispatch_runs row has no title column.
+            # Fixtures may stuff a "title" key on the row; otherwise resolve
+            # from the agentic source (set at insert_agentic_session time).
+            effective_title = run.get("title") or ""
+            if not effective_title and agentic_source_id:
+                try:
+                    src_row = graph_ops.get_source(agentic_source_id)
+                    if src_row:
+                        effective_title = src_row.get("title") or ""
+                except Exception:
+                    pass
+            if not effective_title:
+                effective_title = run.get("id", "")
+        elif librarian_type:
+            effective_id = bead_id or run.get("id", "")
             effective_title = f"Librarian: {librarian_type}"
         else:
+            effective_id = bead_id or run.get("id", "")
             effective_title = meta.get("title") or bead_id
         active.append({
             "id": effective_id,
             "title": effective_title,
-            "priority": meta.get("priority") if not librarian_type else None,
+            "priority": meta.get("priority") if not (librarian_type or kind == "agentic") else None,
             "labels": meta.get("labels", []),
             "librarian_type": librarian_type,
+            "kind": kind,
+            "agentic_source_id": agentic_source_id,
             "container": container,
             "run_dir": run.get("id"),
             "last_snippet": run.get("last_snippet"),
@@ -7739,38 +7879,94 @@ def _resolve_workspace_for_org(target_org: str):
     return None
 
 
+# Authoritative list of placeholders that prompt-template authors may
+# reference. Extending this list also requires extending the context
+# build site in ``_render_agent_action_prompt`` so the field actually
+# resolves at runtime — the static check below catches the mismatch
+# before the agent ever sees the prompt.
+_AGENT_ACTION_PLACEHOLDERS = (
+    "asset_id",
+    "asset_title",
+    "asset_short_description",
+    "asset_url",
+    "asset_type",
+    "asset_org",
+    "tag_list",
+    "dispatched_by_session",
+    "member_key",
+)
+
+
 def _render_agent_action_prompt(
     template: str, *, asset_id: str, page_context: dict,
     dispatched_by_session: str, member_key: str,
+    run_id: str | None = None,
 ) -> str:
     """Render ``template`` against ``page_context`` via ``str.format``.
 
-    Pre-populates the asset id and dispatched-by session so prompt
-    authors do not have to thread them through ``page_context`` manually.
-    Missing keys raise KeyError, surfacing as a 400 to the caller — this
-    is preferable to silently rendering ``{key}`` literal text.
+    Strict mode (auto-gh2iv): the template is statically inspected
+    BEFORE rendering. Any placeholder not in
+    :data:`_AGENT_ACTION_PLACEHOLDERS` raises ``ValueError`` so the
+    dispatch endpoint can surface a 500 with a clear message instead of
+    silently shipping ``{undefined_field}`` literal text to the agent.
+
+    Pre-Round 7h, missing keys returned the literal ``{key}`` to the
+    agent — useful for dev iteration, terrible for production safety.
+    Now we fail loudly: the agent should never see an unsubstituted
+    brace, and a typo in a template ``.md`` is a launch-time error.
+
+    If ``run_id`` is provided, a static-check failure ALSO writes a
+    failure row to ``dispatch_runs`` so post-mortem can find it without
+    re-reading logs.
     """
+    import string as _string
+
+    referenced = {
+        f for _, f, _, _ in _string.Formatter().parse(template)
+        if f and not f[0].isdigit()
+    }
+    unknown = referenced - set(_AGENT_ACTION_PLACEHOLDERS)
+    if unknown:
+        msg = (
+            f"prompt template references undefined placeholder(s) "
+            f"{sorted(unknown)}; add to _AGENT_ACTION_PLACEHOLDERS or fix the template"
+        )
+        logger.error("agent-actions render failure: %s", msg)
+        if run_id:
+            try:
+                from agents.dispatch_db import record_dispatch_failure
+                record_dispatch_failure(
+                    run_id,
+                    failure_class="prompt_render_error",
+                    reason=msg,
+                )
+            except Exception:
+                logger.exception(
+                    "agent-actions: failed to record render failure for run_id=%s",
+                    run_id,
+                )
+        raise ValueError(msg)
+
     fmt_ctx = {
         "asset_id": asset_id,
+        "asset_title": str(page_context.get("asset_title") or ""),
+        "asset_short_description": str(
+            page_context.get("asset_short_description") or ""
+        ),
+        "asset_url": str(page_context.get("asset_url") or ""),
+        "asset_type": str(page_context.get("asset_type") or ""),
+        "asset_org": str(page_context.get("asset_org") or ""),
+        "tag_list": str(page_context.get("tag_list") or ""),
         "dispatched_by_session": dispatched_by_session,
         "member_key": member_key,
     }
-    fmt_ctx.update({str(k): str(v) for k, v in page_context.items()})
-    return template.format_map(_DefaultDict(fmt_ctx))
-
-
-class _DefaultDict(dict):
-    """``dict`` that returns ``{key}`` literal for missing keys.
-
-    ``str.format_map`` raises ``KeyError`` on missing keys; the prompt
-    templates ship with a fixed list of placeholders, but page_context
-    coverage may grow over time. Returning the literal placeholder makes
-    a missing key visible to the agent at runtime instead of failing the
-    dispatch.
-    """
-
-    def __missing__(self, key):  # type: ignore[override]
-        return "{" + key + "}"
+    try:
+        return template.format(**fmt_ctx)
+    except KeyError as e:  # defense-in-depth — static check above should have caught this
+        raise ValueError(
+            f"prompt template references undefined placeholder {e!s}; "
+            f"this is a bug — static check should have caught it"
+        ) from e
 
 
 async def api_agent_action_dispatch(request):
@@ -7965,13 +8161,51 @@ async def api_agent_action_dispatch(request):
     if "tag_list" not in rendered_context:
         rendered_context["tag_list"] = ", ".join(_get_tag_taxonomy(target_org))
 
-    rendered_prompt = _render_agent_action_prompt(
-        template,
-        asset_id=asset_id,
-        page_context=rendered_context,
-        dispatched_by_session=dispatched_by_session or "",
-        member_key=member_key,
-    )
+    # Backfill source-derived placeholders that the front-end's
+    # pageContext() may not have populated. The page builder is best-
+    # effort; the dispatch endpoint owns the asset's authoritative state
+    # so we trust the resolved ``source`` row here over whatever the
+    # browser sent. This keeps templates that reference
+    # ``{asset_short_description}`` from leaking literal braces to the
+    # agent (auto-gh2iv: Round 7g/7h placeholder regression).
+    src_meta_raw = source.get("metadata") or {}
+    if isinstance(src_meta_raw, str):
+        try:
+            src_meta = json.loads(src_meta_raw)
+        except (json.JSONDecodeError, TypeError):
+            src_meta = {}
+    else:
+        src_meta = src_meta_raw
+    if not rendered_context.get("asset_short_description"):
+        rendered_context["asset_short_description"] = (
+            source.get("short_description")
+            or src_meta.get("short_description")
+            or ""
+        )
+    if not rendered_context.get("asset_title"):
+        rendered_context["asset_title"] = source.get("title") or ""
+    if not rendered_context.get("asset_type"):
+        rendered_context["asset_type"] = source.get("type") or ""
+    if not rendered_context.get("asset_org"):
+        rendered_context["asset_org"] = target_org
+
+    try:
+        rendered_prompt = _render_agent_action_prompt(
+            template,
+            asset_id=asset_id,
+            page_context=rendered_context,
+            dispatched_by_session=dispatched_by_session or "",
+            member_key=member_key,
+        )
+    except ValueError as render_err:
+        return JSONResponse(
+            {
+                "error": "prompt template render failed",
+                "detail": str(render_err),
+                "member_key": member_key,
+            },
+            status_code=500,
+        )
 
     # ── Step 5: eager-create the agentic source row in target_org ─
     title = str(payload.get("label") or member_key)
@@ -7998,6 +8232,17 @@ async def api_agent_action_dispatch(request):
     started_at = time.time()
     container_name = src["slug"]
     run_id = container_name
+    # Pre-compute the run output_dir so we can persist it on the
+    # dispatch_runs row at launch — the live-trace endpoint and the
+    # completion watcher both read it from there. Mirrors the layout
+    # session_launcher would otherwise pick (data/agent-runs/{name}-{ts}).
+    from agents.session_launcher import REPO_ROOT as _SESSION_REPO_ROOT
+    _run_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    output_dir_path = (
+        _SESSION_REPO_ROOT / "data" / "agent-runs" / f"{container_name}-{_run_ts}"
+    )
+    output_dir = str(output_dir_path)
+
     try:
         from agents.session_launcher import launch_session
     except Exception:
@@ -8025,7 +8270,7 @@ async def api_agent_action_dispatch(request):
                 "/workspace/repo",
                 workspace.harness,
                 None,  # extra_env
-                None,  # output_dir
+                output_dir,  # explicit output_dir so dispatch_runs.output_dir matches
                 model,
             )
         except Exception:
@@ -8044,7 +8289,7 @@ async def api_agent_action_dispatch(request):
             branch_base="",
             image=workspace.image,
             container_name=container_name,
-            output_dir="",
+            output_dir=output_dir,
             kind="agentic",
             agentic_source_id=src["id"],
         )
