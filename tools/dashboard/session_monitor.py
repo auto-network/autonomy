@@ -466,6 +466,11 @@ class _TailState:
     # inotify watch descriptors
     watch_descriptor: int | None = None       # IN_MODIFY on active JSONL
     dir_watch_descriptor: int | None = None   # IN_CREATE on session directory
+    # Inode of the JSONL the most-recent file watch was registered against.
+    # Used as the safety-net signal in the reconciliation loop: if the
+    # current path's inode != last_known_inode, the file was replaced (e.g.
+    # compaction) and we missed the IN_CREATE event, so we must rewatch.
+    last_known_inode: int = 0
     # Activity state tracking — pending tool calls and last entry type
     pending_tool_ids: set = field(default_factory=set)
     completed_tool_ids: set = field(default_factory=set)
@@ -1071,6 +1076,10 @@ class SessionMonitor:
             self._tail_states[tmux_name] = ts
         ts.watch_descriptor = wd
         self._wd_to_session[wd] = tmux_name
+        try:
+            ts.last_known_inode = Path(jsonl_path).stat().st_ino
+        except OSError:
+            ts.last_known_inode = 0
 
     def _add_dir_watch(self, tmux_name: str, dir_path: str) -> None:
         """Add an IN_CREATE watch on a session directory (deduplicated).
@@ -1394,6 +1403,93 @@ class SessionMonitor:
                 await self._handle_container_create(tmux_name, row, new_file)
             else:
                 await self._handle_host_create(tmux_name, row, new_file, dir_path)
+
+        # Compaction recovery — same path, new inode. If the type-specific
+        # dispatch above didn't end up reattaching the watch (e.g.
+        # _handle_host_create returns early when parentUuid is null, which is
+        # exactly the shape of a compacted JSONL's first line), fall back to
+        # re-registering the IN_MODIFY watch on the new inode at the tracked
+        # path so the session is no longer blind to writes after compaction.
+        for tmux_name in list(sessions):
+            ts = self._tail_states.get(tmux_name)
+            if ts is None or ts.watch_descriptor is not None:
+                continue
+            row = get_session(tmux_name)
+            if not row:
+                continue
+            tracked_path = row.get("jsonl_path")
+            if not tracked_path:
+                continue
+            if Path(tracked_path) != new_file:
+                continue
+            await self._rewatch_replaced_jsonl(
+                tmux_name, new_file, source="IN_CREATE",
+            )
+
+    async def _rewatch_replaced_jsonl(
+        self, tmux_name: str, new_path: Path, *, source: str,
+    ) -> None:
+        """Re-register an IN_MODIFY watch for a JSONL replaced at the same path.
+
+        Triggered when the file's inode changes (e.g. compaction unlinks the
+        old file and creates a new one at the same path). Resets all state
+        derived from the prior file's content, then tails the new file so
+        post-replacement entries broadcast immediately.
+
+        ``source`` is included in the INFO log so an operator can tell which
+        recovery path fired (``IN_CREATE`` for the inotify-event path,
+        ``reconciliation`` for the periodic backstop).
+        """
+        ts = self._tail_states.get(tmux_name)
+        if ts is None:
+            return
+        old_inode = ts.last_known_inode
+        try:
+            new_inode = new_path.stat().st_ino
+        except OSError as exc:
+            logger.warning(
+                "session_monitor: rewatch stat failed for %s: %s", tmux_name, exc,
+            )
+            return
+
+        # Drop any stale wd → tmux_name mapping defensively (the kernel
+        # already removed the watch, but the dict entry may linger if
+        # IN_IGNORED hasn't been processed yet).
+        if ts.watch_descriptor is not None:
+            self._wd_to_session.pop(ts.watch_descriptor, None)
+            ts.watch_descriptor = None
+
+        if not self._inotify:
+            return
+        try:
+            new_wd = self._inotify.add_watch(str(new_path), _iflags.MODIFY)
+        except OSError as exc:
+            logger.warning(
+                "session_monitor: rewatch add_watch failed for %s: %s", tmux_name, exc,
+            )
+            return
+
+        ts.watch_descriptor = new_wd
+        self._wd_to_session[new_wd] = tmux_name
+        ts.last_known_inode = new_inode
+        # State derived from the old file's stream is no longer valid.
+        ts.recent_processed.clear()
+        ts.pending_tool_ids.clear()
+        ts.completed_tool_ids.clear()
+        # File offset on disk must reset so the new file is read from byte 0.
+        update_tail_state(tmux_name, file_offset=0)
+
+        logger.info(
+            "session_monitor: rewatched %s %s → %s after %s",
+            tmux_name, old_inode, new_inode, source,
+        )
+
+        # Tail the new content immediately so the first post-replacement
+        # entries broadcast without waiting for the next IN_MODIFY event.
+        row = get_session(tmux_name)
+        if row and row.get("jsonl_path"):
+            _, new_entries = await asyncio.to_thread(self._tail_one, row, ts)
+            await self._process_tail_entries(tmux_name, row, ts, new_entries)
 
     async def _handle_container_create(
         self, tmux_name: str, row: dict, new_file: Path,
@@ -1959,6 +2055,36 @@ class SessionMonitor:
                     "session_monitor: reconciliation scan failed for %s: %s",
                     tmux_name, exc,
                 )
+
+        # Inode safety net — backstop for the case where IN_CREATE was never
+        # delivered (kernel queue overflow, IN_IGNORED arriving without a
+        # subsequent IN_CREATE we noticed, etc.). For every tracked session
+        # whose stored inode disagrees with the file's current inode, run the
+        # rewatch sequence.
+        for tmux_name, ts in list(self._tail_states.items()):
+            row = get_session(tmux_name)
+            if not row:
+                continue
+            jsonl_path_str = row.get("jsonl_path")
+            if not jsonl_path_str:
+                continue
+            jsonl_path = Path(jsonl_path_str)
+            try:
+                current_inode = jsonl_path.stat().st_ino
+            except OSError:
+                continue
+            if ts.last_known_inode == 0:
+                # Watch never ran (e.g. inotify unavailable, or stat failed
+                # at add-watch time). Don't treat 0 → real-inode as a
+                # replacement; just record the current value.
+                ts.last_known_inode = current_inode
+                continue
+            if current_inode == ts.last_known_inode:
+                continue
+            await self._rewatch_replaced_jsonl(
+                tmux_name, jsonl_path, source="reconciliation",
+            )
+
         if resolved:
             await self._broadcast_registry()
         return resolved
