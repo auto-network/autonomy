@@ -141,6 +141,39 @@ def _setting_exists(
     return row is not None
 
 
+def _fetch_setting(
+    db: GraphDB, *, set_id: str, schema_revision: int, key: str,
+) -> dict | None:
+    row = db.conn.execute(
+        "SELECT id, payload, updated_at FROM settings "
+        "WHERE set_id = ? AND schema_revision = ? AND key = ? LIMIT 1",
+        (set_id, int(schema_revision), key),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "payload": row["payload"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _parse_iso_to_epoch(ts: str | None) -> float:
+    """Best-effort ISO-8601 → epoch seconds. Returns 0 on parse failure."""
+    if not ts:
+        return 0.0
+    try:
+        # The seed writes Z-suffixed UTC timestamps; fromisoformat doesn't
+        # accept the trailing Z until 3.11+, so normalise it.
+        normalised = ts.rstrip("Z")
+        dt = datetime.fromisoformat(normalised)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except ValueError:
+        return 0.0
+
+
 # Pre-rename keys whose payload moved to a new key in the same set. The
 # seed loop is idempotent on the new key; the old row needs explicit
 # retirement so the dropdown stops surfacing it. Deprecating (rather than
@@ -172,13 +205,20 @@ def _now_iso() -> str:
 
 
 def build_plan(
-    org_db: Path, *, prompts_dir: Path = DEFAULT_PROMPTS_DIR,
+    org_db: Path, *,
+    prompts_dir: Path = DEFAULT_PROMPTS_DIR,
+    no_update: bool = False,
 ) -> list[dict]:
-    """Validate every seed payload + decide which need inserting.
+    """Validate every seed payload + decide which need inserting/updating.
 
     Returns a list of ``{key, payload, action}`` dicts where ``action`` is
-    ``insert`` or ``skip_exists``. Raises if the org DB is missing, a
-    payload fails schema validation, or a prompt template is missing.
+    ``insert``, ``update``, or ``skip_exists``. ``update`` fires when the
+    prompt-template file's mtime is newer than the row's ``updated_at`` AND
+    the rendered payload differs from the stored one — matches operator
+    intuition (edit the file, run the migration, see the new content).
+    ``no_update=True`` (CLI: ``--no-update``) pins existing rows so the
+    migration only inserts. Raises if the org DB is missing, a payload
+    fails schema validation, or a prompt template is missing.
     """
     if not org_db.exists():
         raise RuntimeError(
@@ -196,15 +236,34 @@ def build_plan(
             schemas.validate_payload(
                 AGENT_ACTIONS_SET_ID, AGENT_ACTIONS_REVISION, payload,
             )
-            action = "insert"
-            if _setting_exists(
+            existing = _fetch_setting(
                 db,
                 set_id=AGENT_ACTIONS_SET_ID,
                 schema_revision=AGENT_ACTIONS_REVISION,
                 key=key,
-            ):
-                action = "skip_exists"
-            plan.append({"key": key, "payload": payload, "action": action})
+            )
+            entry: dict[str, object] = {"key": key, "payload": payload}
+            if existing is None:
+                entry["action"] = "insert"
+            elif no_update:
+                entry["action"] = "skip_exists"
+                entry["existing_id"] = existing["id"]
+            else:
+                file_path = prompts_dir / f"{key}.md"
+                file_mtime = (
+                    file_path.stat().st_mtime if file_path.is_file() else 0.0
+                )
+                row_mtime = _parse_iso_to_epoch(existing["updated_at"])
+                payload_changed = (
+                    json.loads(existing["payload"]) != payload
+                )
+                if payload_changed and file_mtime > row_mtime:
+                    entry["action"] = "update"
+                    entry["existing_id"] = existing["id"]
+                else:
+                    entry["action"] = "skip_exists"
+                    entry["existing_id"] = existing["id"]
+            plan.append(entry)
     finally:
         db.close()
     return plan
@@ -213,7 +272,7 @@ def build_plan(
 def apply_plan(
     org_db: Path, plan: list[dict], *, log=print,
 ) -> list[dict]:
-    """Insert every entry in *plan* whose action is ``insert``.
+    """Insert/update every entry in *plan* per its ``action``.
 
     Re-checks idempotency inside the write loop so concurrent runs do not
     double-insert. Returns the same plan (with ``action`` flipped to
@@ -223,9 +282,25 @@ def apply_plan(
     try:
         _retire_legacy_members(db, log=log)
         for entry in plan:
-            if entry["action"] != "insert":
-                log(f"  {entry['key']}: skip ({entry['action']})")
+            action = entry["action"]
+            if action == "skip_exists":
+                log(f"  {entry['key']}: skip (skip_exists)")
                 continue
+            if action == "update":
+                existing_id = entry.get("existing_id")
+                if not existing_id:
+                    log(f"  {entry['key']}: skip (update without id)")
+                    continue
+                now = _now_iso()
+                db.conn.execute(
+                    "UPDATE settings SET payload = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (json.dumps(entry["payload"]), now, existing_id),
+                )
+                db.conn.commit()
+                log(f"  {entry['key']}: updated ({existing_id})")
+                continue
+            # action == "insert"
             if _setting_exists(
                 db,
                 set_id=AGENT_ACTIONS_SET_ID,
@@ -265,14 +340,24 @@ def run(
     orgs_dir: Path = DEFAULT_ORGS_DIR,
     prompts_dir: Path = DEFAULT_PROMPTS_DIR,
     dry_run: bool = False,
+    no_update: bool = False,
     log=print,
 ) -> list[dict]:
-    """Public entry point. Builds and (optionally) applies the seed plan."""
+    """Public entry point. Builds and (optionally) applies the seed plan.
+
+    ``no_update=True`` pins existing rows; the migration only inserts new
+    ones. Otherwise rows whose prompt file is newer than the stored
+    ``updated_at`` get an UPDATE.
+    """
     org_db = orgs_dir / f"{org}.db"
-    plan = build_plan(org_db, prompts_dir=prompts_dir)
+    plan = build_plan(org_db, prompts_dir=prompts_dir, no_update=no_update)
     inserts = sum(1 for e in plan if e["action"] == "insert")
+    updates = sum(1 for e in plan if e["action"] == "update")
     skips = sum(1 for e in plan if e["action"] == "skip_exists")
-    log(f"agent-actions seed for {org!r}: {inserts} insert, {skips} skip")
+    log(
+        f"agent-actions seed for {org!r}: "
+        f"{inserts} insert, {updates} update, {skips} skip"
+    )
     if dry_run:
         return plan
     return apply_plan(org_db, plan, log=log)
@@ -290,6 +375,11 @@ def main(argv: list[str] | None = None) -> int:
         help="root containing <key>.md templates (default: agents/actions/)",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--no-update", action="store_true",
+        help="pin existing rows; only insert new ones (skip mtime-based "
+             "auto-update). Use when payload pinning is intentional.",
+    )
     args = parser.parse_args(argv)
     try:
         run(
@@ -297,6 +387,7 @@ def main(argv: list[str] | None = None) -> int:
             orgs_dir=args.orgs_dir,
             prompts_dir=args.prompts_dir,
             dry_run=args.dry_run,
+            no_update=args.no_update,
         )
     except Exception as e:
         print(f"agent-actions seed: aborted: {e}", file=sys.stderr)

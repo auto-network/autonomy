@@ -131,3 +131,135 @@ def test_insert_run_agentic_kind_no_bead_id():
     assert row["completed_at"] is not None
     assert row["duration_secs"] == 300
     assert row["exit_code"] == 0
+
+
+def test_insert_run_preserves_agentic_source_id_round_trip():
+    """Launch an agentic run with ``agentic_source_id`` set, then complete
+    it via insert_run threading the column back. The INSERT OR REPLACE
+    must NOT clobber the column to NULL.
+
+    Regression for Bug B from auto-gh2iv: the completion watcher's upsert
+    omitted the column, NULL'd it on every dispatch finish, and broke
+    downstream JOINs against ``sources``. Host Guardian threaded the
+    column through; this test pins the contract so it stays threaded.
+    """
+    tmp = _use_temp_db()
+    src = "abc-source-id-001"
+
+    db.insert_launch_run(
+        run_id="agentic-preserve-test",
+        bead_id="",
+        started_at=1714340200.0,
+        branch="",
+        branch_base="",
+        image="autonomy-agent",
+        container_name="agentic-preserve-test",
+        output_dir="/tmp/agentic-preserve",
+        kind="agentic",
+        agentic_source_id=src,
+    )
+
+    # Simulate the completion watcher: SELECT the RUNNING row + thread
+    # ``agentic_source_id`` back into insert_run.
+    conn = sqlite3.connect(tmp)
+    conn.row_factory = sqlite3.Row
+    running_row = conn.execute(
+        "SELECT * FROM dispatch_runs WHERE id = ?",
+        ("agentic-preserve-test",),
+    ).fetchone()
+    conn.close()
+    assert running_row is not None
+    assert running_row["agentic_source_id"] == src, (
+        "baseline: launch row must carry the agentic_source_id"
+    )
+
+    db.insert_run(
+        run_id="agentic-preserve-test",
+        bead_id="",
+        started_at=1714340200.0,
+        completed_at=1714340500.0,
+        status="DONE",
+        reason="",
+        decision=None,
+        commit_hash="",
+        branch="",
+        branch_base="",
+        image="autonomy-agent",
+        container_name="agentic-preserve-test",
+        exit_code=0,
+        output_dir="/tmp/agentic-preserve",
+        kind="agentic",
+        agentic_source_id=running_row["agentic_source_id"],
+    )
+
+    conn = sqlite3.connect(tmp)
+    conn.row_factory = sqlite3.Row
+    final = conn.execute(
+        "SELECT * FROM dispatch_runs WHERE id = ?",
+        ("agentic-preserve-test",),
+    ).fetchone()
+    conn.close()
+
+    assert final is not None
+    assert final["agentic_source_id"] == src, (
+        "agentic_source_id clobbered by INSERT OR REPLACE: "
+        f"{final['agentic_source_id']!r}"
+    )
+    assert final["status"] == "DONE"
+    assert final["kind"] == "agentic"
+
+
+def test_insert_run_omitted_agentic_source_id_does_not_inherit():
+    """Symmetric guard: when insert_run is called WITHOUT
+    ``agentic_source_id`` (e.g. a bead row), the column stays NULL —
+    INSERT OR REPLACE doesn't carry it forward from any prior matching
+    row. Documents the explicit-thread-through contract.
+    """
+    tmp = _use_temp_db()
+
+    db.insert_launch_run(
+        run_id="bead-no-source-id",
+        bead_id="b-1",
+        started_at=1714340600.0,
+        branch="",
+        branch_base="",
+        image="autonomy-agent",
+        container_name="bead-no-source-id",
+        output_dir="/tmp/bead-no-source",
+        kind="bead",
+    )
+
+    db.insert_run(
+        run_id="bead-no-source-id",
+        bead_id="b-1",
+        started_at=1714340600.0,
+        completed_at=1714340700.0,
+        status="DONE",
+        reason="",
+        decision=None,
+        commit_hash="",
+        branch="",
+        branch_base="",
+        image="autonomy-agent",
+        container_name="bead-no-source-id",
+        exit_code=0,
+        output_dir="/tmp/bead-no-source",
+        kind="bead",
+        # agentic_source_id intentionally omitted.
+    )
+
+    conn = sqlite3.connect(tmp)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM dispatch_runs WHERE id = ?",
+        ("bead-no-source-id",),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["agentic_source_id"] is None, (
+        "bead rows without agentic_source_id must stay NULL — INSERT OR "
+        "REPLACE must not inherit it from any other row"
+    )
+    assert row["status"] == "DONE"
+    assert row["kind"] == "bead"

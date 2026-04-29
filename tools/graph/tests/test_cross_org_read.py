@@ -404,6 +404,50 @@ def test_read_set_includes_peer_published_rows(orgs_root):
     assert keys["local"].org == "anchore"
 
 
+def test_read_set_skips_deprecated_peer_rows(orgs_root):
+    """Same deprecated filter applies to peer-org reads. A peer
+    canonical+deprecated row must not contribute to the local resolution.
+    Regression for the universal.send-to dropdown duplicate (Round 7i).
+    """
+    _seed_org("autonomy")
+    _seed_org("anchore")
+    _seed_org("personal")
+
+    from tools.graph.schemas import registry
+    SET_ID = "autonomy.test.cross-org-deprecated"
+
+    class _Schema(registry.SettingSchema):
+        set_id = SET_ID
+        schema_revision = 1
+
+        @classmethod
+        def validate(cls, payload):
+            super().validate(payload)
+    if (SET_ID, 1) not in registry.SCHEMAS:
+        registry.register_schema(SET_ID, 1, _Schema)
+
+    # Autonomy publishes two canonical rows; one will be deprecated.
+    settings_ops.add_setting(
+        SET_ID, 1, key="active.key",
+        payload={"k": "auto-active"},
+        org="autonomy", state="canonical",
+    )
+    retired = settings_ops.add_setting(
+        SET_ID, 1, key="retired.key",
+        payload={"k": "auto-retired"},
+        org="autonomy", state="canonical",
+    )
+    settings_ops.deprecate_setting(retired, org="autonomy")
+
+    result = ops.read_set(SET_ID, org="anchore")
+    keys = {m.key for m in result.members}
+    assert "active.key" in keys, "peer canonical active row must surface"
+    assert "retired.key" not in keys, (
+        "peer canonical+deprecated row must NOT surface from read_set"
+    )
+    assert result.dropped.deprecated_filtered == 1
+
+
 def test_get_setting_resolves_peer_canonical_by_id(orgs_root):
     """``ops.get_setting`` finds a peer id when it's published/canonical."""
     _seed_org("autonomy")

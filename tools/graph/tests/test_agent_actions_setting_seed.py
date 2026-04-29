@@ -10,11 +10,15 @@ Covers:
 * The migration is idempotent: re-running does not duplicate members.
 * Missing prompt-template files fail the migration loudly with a runtime
   error that names the offending key + path (no silent NULLs).
+* Re-running with a newer prompt file refreshes the live payload (auto-17oir).
+* ``--no-update`` pins existing rows even if the file is newer (auto-17oir).
 """
 
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -239,3 +243,135 @@ def test_seed_rejects_missing_org_db(tmp_path, prompts_dir):
         seed_agent_actions.run(
             org="autonomy", orgs_dir=empty, prompts_dir=prompts_dir, log=lambda *_: None,
         )
+
+
+# ── Re-run mtime auto-update (auto-17oir) ───────────────────
+
+
+def _fetch_payload(org_db: Path, key: str) -> dict:
+    db = GraphDB(org_db)
+    try:
+        row = db.conn.execute(
+            "SELECT payload FROM settings WHERE set_id = ? AND key = ?",
+            (AGENT_ACTIONS_SET_ID, key),
+        ).fetchone()
+    finally:
+        db.close()
+    assert row is not None, f"missing seeded row for {key!r}"
+    return json.loads(row["payload"])
+
+
+def _fetch_id(org_db: Path, key: str) -> str:
+    db = GraphDB(org_db)
+    try:
+        row = db.conn.execute(
+            "SELECT id FROM settings WHERE set_id = ? AND key = ?",
+            (AGENT_ACTIONS_SET_ID, key),
+        ).fetchone()
+    finally:
+        db.close()
+    assert row is not None
+    return row["id"]
+
+
+def test_rerun_with_updated_file_refreshes_payload(orgs_dir, prompts_dir):
+    """Run seed once. Modify the prompt template on disk + bump mtime.
+    Run seed again. Live Setting payload reflects the new file content.
+    Regression for the Round 7c → 7g flailing-agent incident.
+    """
+    target = prompts_dir / "note.update-summary.md"
+    target.write_text("OLD MARKER: original prompt template body.\n")
+    seed_agent_actions.run(
+        org="autonomy", orgs_dir=orgs_dir, prompts_dir=prompts_dir,
+        log=lambda *_: None,
+    )
+    initial = _fetch_payload(orgs_dir / "autonomy.db", "note.update-summary")
+    assert "OLD MARKER" in initial["prompt_template"]
+    initial_id = _fetch_id(orgs_dir / "autonomy.db", "note.update-summary")
+
+    # Touch the file with new content + bump mtime well past the row's
+    # second-resolution updated_at timestamp.
+    target.write_text("NEW MARKER: refreshed prompt template body.\n")
+    future = time.time() + 60
+    os.utime(target, (future, future))
+
+    seed_agent_actions.run(
+        org="autonomy", orgs_dir=orgs_dir, prompts_dir=prompts_dir,
+        log=lambda *_: None,
+    )
+    updated = _fetch_payload(orgs_dir / "autonomy.db", "note.update-summary")
+    assert "NEW MARKER" in updated["prompt_template"]
+    assert "OLD MARKER" not in updated["prompt_template"]
+    # Same row — UPDATE in place, not a duplicate INSERT.
+    assert _fetch_id(orgs_dir / "autonomy.db", "note.update-summary") == initial_id
+
+
+def test_rerun_no_update_flag_pins_payload(orgs_dir, prompts_dir):
+    """With ``no_update=True`` the migration must NOT touch existing rows
+    even when the prompt file is newer than the stored row."""
+    target = prompts_dir / "note.update-summary.md"
+    target.write_text("OLD MARKER: original prompt template body.\n")
+    seed_agent_actions.run(
+        org="autonomy", orgs_dir=orgs_dir, prompts_dir=prompts_dir,
+        log=lambda *_: None,
+    )
+    before = _fetch_payload(orgs_dir / "autonomy.db", "note.update-summary")
+
+    target.write_text("NEW MARKER: should not be applied.\n")
+    future = time.time() + 60
+    os.utime(target, (future, future))
+
+    seed_agent_actions.run(
+        org="autonomy", orgs_dir=orgs_dir, prompts_dir=prompts_dir,
+        no_update=True, log=lambda *_: None,
+    )
+    after = _fetch_payload(orgs_dir / "autonomy.db", "note.update-summary")
+    assert after == before, "no_update must leave the existing payload intact"
+    assert "OLD MARKER" in after["prompt_template"]
+
+
+def test_rerun_with_unchanged_file_skips(orgs_dir, prompts_dir):
+    """If the file mtime is older than the row's ``updated_at``, skip —
+    preserves intentional operator overrides (e.g. via direct SQL or
+    ``graph set override``)."""
+    target = prompts_dir / "note.update-summary.md"
+    # Make the file old enough that the post-seed row will look newer.
+    past = time.time() - 60
+    os.utime(target, (past, past))
+
+    seed_agent_actions.run(
+        org="autonomy", orgs_dir=orgs_dir, prompts_dir=prompts_dir,
+        log=lambda *_: None,
+    )
+
+    # Simulate operator override: rewrite the row's payload directly.
+    db = GraphDB(orgs_dir / "autonomy.db")
+    try:
+        db.conn.execute(
+            "UPDATE settings SET payload = ? "
+            "WHERE set_id = ? AND key = ?",
+            (
+                json.dumps({
+                    "asset_type": "note",
+                    "label": "Update Title & Summary",
+                    "icon": "✏",
+                    "model": "claude-haiku-4-5-20251001",
+                    "estimated_seconds": 10,
+                    "writes": ["source.title", "source.short_description"],
+                    "prompt_template": "OPERATOR OVERRIDE",
+                }),
+                AGENT_ACTIONS_SET_ID, "note.update-summary",
+            ),
+        )
+        db.conn.commit()
+    finally:
+        db.close()
+
+    seed_agent_actions.run(
+        org="autonomy", orgs_dir=orgs_dir, prompts_dir=prompts_dir,
+        log=lambda *_: None,
+    )
+    after = _fetch_payload(orgs_dir / "autonomy.db", "note.update-summary")
+    assert after["prompt_template"] == "OPERATOR OVERRIDE", (
+        "older file mtime must not clobber an operator override"
+    )

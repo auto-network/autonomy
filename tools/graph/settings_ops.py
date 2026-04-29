@@ -88,6 +88,7 @@ class DropAccounting:
     no_upconvert_path: int = 0
     above_target_no_downgrade: int = 0
     schema_invalid: int = 0
+    deprecated_filtered: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -726,6 +727,7 @@ def read_set(
 
     resolved_org = _resolve_settings_caller(org)
     raw_rows: list[tuple[str | None, Any]] = []
+    deprecated_filtered = 0
     prefix_clause = ""
     prefix_params: tuple[Any, ...] = ()
     if prefix is not None:
@@ -734,11 +736,23 @@ def read_set(
     db = _open(org)
     try:
         rows = db.conn.execute(
-            f"SELECT * FROM settings WHERE set_id = ?{prefix_clause}",
+            f"SELECT * FROM settings WHERE set_id = ? "
+            f"  AND deprecated = 0"
+            f"{prefix_clause}",
             (set_id, *prefix_params),
         ).fetchall()
         for r in rows:
             raw_rows.append((resolved_org, r))
+        # Count what we just filtered out so operators can spot drift
+        # (e.g. a deprecated row still surfacing through some other path).
+        dep_row = db.conn.execute(
+            f"SELECT COUNT(*) AS n FROM settings WHERE set_id = ? "
+            f"  AND deprecated = 1"
+            f"{prefix_clause}",
+            (set_id, *prefix_params),
+        ).fetchone()
+        if dep_row is not None:
+            deprecated_filtered += int(dep_row["n"])
     finally:
         db.close()
 
@@ -751,14 +765,25 @@ def read_set(
         placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
         rows = peer_db.conn.execute(
             f"SELECT * FROM settings WHERE set_id = ? "
+            f"  AND deprecated = 0 "
             f"  AND publication_state IN ({placeholders})"
             f"{prefix_clause}",
             (set_id, *PEER_VISIBLE_STATES, *prefix_params),
         ).fetchall()
         for r in rows:
             raw_rows.append((peer, r))
+        dep_row = peer_db.conn.execute(
+            f"SELECT COUNT(*) AS n FROM settings WHERE set_id = ? "
+            f"  AND deprecated = 1 "
+            f"  AND publication_state IN ({placeholders})"
+            f"{prefix_clause}",
+            (set_id, *PEER_VISIBLE_STATES, *prefix_params),
+        ).fetchone()
+        if dep_row is not None:
+            deprecated_filtered += int(dep_row["n"])
 
     dropped = DropAccounting()
+    dropped.deprecated_filtered = deprecated_filtered
 
     # Apply min_revision floor before transform (drops live rows wholesale).
     survivors: list[tuple[str | None, Any]] = []

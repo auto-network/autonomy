@@ -1162,7 +1162,8 @@ def get_settings_members(set_id: str, org: str | None = None) -> list[dict]:
     matching the subset of ``ResolvedSetting.to_dict()`` that the dashboard
     Settings API exposes. Members declared without an explicit org apply
     to every caller (canonical members), mirroring the production
-    promotion model.
+    promotion model. Members carrying ``deprecated == 1`` are dropped to
+    mirror the production ``read_set`` filter (auto-17oir).
     """
     data = _load()
     block = data.get("settings") or {}
@@ -1178,6 +1179,8 @@ def get_settings_members(set_id: str, org: str | None = None) -> list[dict]:
         flat = list(raw)
     out: list[dict] = []
     for entry in flat:
+        if entry.get("deprecated"):
+            continue
         member = dict(entry)
         member.setdefault("org", org or "")
         member.setdefault("payload", {})
