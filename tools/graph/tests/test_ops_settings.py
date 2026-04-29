@@ -305,3 +305,40 @@ def test_org_param_accepted(graph_db_env, example_schema):
         "autonomy.test.example", org="autonomy", peers=["anchore"],
     )
     assert len(members.members) == 1
+
+
+# ── deprecated filter ───────────────────────────────────────
+
+
+def test_read_set_skips_deprecated_rows(graph_db_env, example_schema):
+    """A row with deprecated=1 must not surface from read_set, even if
+    publication_state is canonical. Regression for the universal.send-to
+    duplicate that surfaced in the dashboard agent-actions dropdown
+    (Round 7g rename → 7i fix)."""
+    ops.add_setting(
+        "autonomy.test.example", 1, "active.key",
+        {"name": "active"}, state="canonical",
+    )
+    retired = ops.add_setting(
+        "autonomy.test.example", 1, "retired.key",
+        {"name": "retired"}, state="canonical",
+    )
+    ops.deprecate_setting(retired)
+
+    members = ops.read_set("autonomy.test.example")
+    keys = {m.key for m in members.members}
+    assert "active.key" in keys
+    assert "retired.key" not in keys
+    assert members.dropped.deprecated_filtered == 1
+
+
+def test_read_set_deprecated_filter_counts_zero_when_none(
+    graph_db_env, example_schema,
+):
+    """Without any deprecated rows the counter stays at 0 (no false pos)."""
+    ops.add_setting(
+        "autonomy.test.example", 1, "active.key",
+        {"name": "active"}, state="canonical",
+    )
+    members = ops.read_set("autonomy.test.example")
+    assert members.dropped.deprecated_filtered == 0

@@ -719,6 +719,17 @@ SWEEP_AGENT_ACTIONS = [
         "universal": True,
         "writes": [],
     }},
+    # Production carries a deprecated legacy row from the Round 7g rename
+    # (universal.send-to → session.send-to). The L2.B harness must mirror
+    # that shape so the dropdown count assertion catches a regression in
+    # the production read_set deprecated filter (auto-17oir).
+    {"key": "universal.send-to", "deprecated": 1, "payload": {
+        "asset_type": "*",
+        "label": "Send To…",
+        "icon": "↗",
+        "universal": True,
+        "writes": [],
+    }},
     {"key": "note.update-summary", "payload": {
         "asset_type": "note",
         "label": "Update Title & Summary",
