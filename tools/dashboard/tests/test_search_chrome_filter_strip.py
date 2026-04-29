@@ -101,13 +101,15 @@ def test_search_page_summary_row_present(test_app):
 
 def test_search_page_result_cards_still_render(test_app):
     """Card layout is unchanged from auto-bcxdr — only the chrome above
-    them was restructured. The accent-rail-by-source-type binding and the
-    short_description block still ship."""
+    them was restructured. The accent rail still binds to a per-row
+    pill key (Round 7k folded ``rowPillKey`` over the raw source_type
+    so dispatched sessions paint orange) and the short_description block
+    still ships."""
     with TestClient(test_app) as client:
         html = client.get("/pages/search").text
     assert 'data-testid="sp-results"' in html
     assert 'class="sp-source-card"' in html
-    assert "railClass(r.source_type)" in html
+    assert "railClass(rowPillKey(r))" in html
     # short_description block from the prior round still renders.
     assert 'data-testid="sp-short-description"' in html
 

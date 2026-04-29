@@ -1011,7 +1011,37 @@ SEARCH_RESULT_DEFAULTS: dict[str, Any] = {
 }
 
 
-def search(query: str, limit: int = 20, project: str | None = None) -> list[dict]:
+def _row_session_type(row: dict) -> str | None:
+    """Extract ``metadata.session_type`` from a fixture row.
+
+    Fixtures may carry ``session_type`` either at the top level (the
+    behavioural-sweep shape) or nested inside ``source_metadata`` JSON
+    (the production /api/search shape). Check both so a single fixture
+    row can drive both client-shape and server-shape assertions.
+    """
+    direct = row.get("session_type")
+    if direct is not None:
+        return direct
+    meta = row.get("source_metadata")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+    if isinstance(meta, dict):
+        v = meta.get("session_type")
+        if isinstance(v, str):
+            return v
+    return None
+
+
+def search(
+    query: str,
+    limit: int = 20,
+    project: str | None = None,
+    order: str = "relevance",
+    session_type: list[str] | None = None,
+) -> list[dict]:
     data = _load()
     results = [_fill(r, SEARCH_RESULT_DEFAULTS) for r in data.get("search_results", [])]
     if project:
@@ -1027,6 +1057,21 @@ def search(query: str, limit: int = 20, project: str | None = None) -> list[dict
             if q_lower in (r.get("source_title", "") or "").lower()
             or q_lower in (r.get("content", "") or "").lower()
         ]
+    # Strict session_type filter — empty list returns zero rows; rows
+    # with NULL session_type are NEVER kept once a non-None filter is
+    # applied. Mirrors db.search's contract.
+    if session_type is not None:
+        if not session_type:
+            return []
+        allowed = set(session_type)
+        results = [r for r in results if _row_session_type(r) in allowed]
+    if order == "recent":
+        # Stable sort by source_created_at DESC. Empty timestamps sort last.
+        results = sorted(
+            results,
+            key=lambda r: r.get("source_created_at") or "",
+            reverse=True,
+        )
     return results[:limit]
 
 

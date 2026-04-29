@@ -1526,16 +1526,57 @@ async def api_dispatch_trace(request):
         "files_changed": files_changed,
     })
 
+_SEARCH_VALID_ORDERS = ("relevance", "recent")
+_SEARCH_VALID_SESSION_TYPES = (
+    "terminal", "chatwith", "dispatch", "librarian", "agentic",
+)
+
+
 async def api_search(request):
     q = request.query_params.get("q", "")
     if not q:
         return JSONResponse({"error": "missing q parameter"})
+
+    # ``order`` — relevance (default) or recent. Strict allowlist so a
+    # typo (?order=date, ?order=desc) fails loud rather than silently
+    # passing through to db.search and surprising someone reading logs.
+    order = request.query_params.get("order", "relevance")
+    if order not in _SEARCH_VALID_ORDERS:
+        return JSONResponse(
+            {"error": f"invalid order {order!r}; "
+                      f"expected one of {list(_SEARCH_VALID_ORDERS)}"},
+            status_code=400,
+        )
+
+    # ``session_type`` — comma-separated list, strictly one of the known
+    # values. ``None`` (param absent) disables the filter; an empty/all-
+    # invalid list returns 400 to avoid the "I sent a typo and got every
+    # row" footgun. Round 7k pins NULL invisibility — see db.search docs.
+    session_type_param = request.query_params.get("session_type")
+    session_type: list[str] | None
+    if session_type_param is None:
+        session_type = None
+    else:
+        raw = [s.strip() for s in session_type_param.split(",") if s.strip()]
+        bad = [s for s in raw if s not in _SEARCH_VALID_SESSION_TYPES]
+        if bad:
+            return JSONResponse(
+                {"error": f"invalid session_type values {bad!r}; "
+                          f"expected subset of "
+                          f"{list(_SEARCH_VALID_SESSION_TYPES)}"},
+                status_code=400,
+            )
+        session_type = raw
+
     if os.environ.get("DASHBOARD_MOCK"):
         limit = int(request.query_params.get("limit", "20"))
         project = request.query_params.get("project")
-        results = dao_beads.search(q, limit=limit, project=project)
+        results = dao_beads.search(
+            q, limit=limit, project=project,
+            order=order, session_type=session_type,
+        )
         if request.query_params.get("group"):
-            results = _group_search_results(results)
+            results = _group_search_results(results, order=order)
         _enrich_search_results(results)
         return JSONResponse(results)
     limit = int(request.query_params.get("limit", "20"))
@@ -1562,24 +1603,37 @@ async def api_search(request):
         limit=limit, project=project, or_mode=or_mode, tag=tag,
         states=states, include_raw=include_raw,
         excluded_source_types=excluded_source_types,
+        order=order, session_type=session_type,
     )
     if request.query_params.get("group"):
-        results = _group_search_results(results)
+        results = _group_search_results(results, order=order)
     _enrich_search_results(results)
     return JSONResponse(results)
 
 
-def _group_search_results(rows: list) -> list:
+def _group_search_results(rows: list, *, order: str = "relevance") -> list:
     """Collapse FTS rows into one entry per source while preserving per-turn excerpts.
 
     Output shape per group: source-level fields (source_id, source_title,
     source_type, project, platform, org, source_created_at, rrf_score) plus
     a best-rank ``rank`` and a sorted ``excerpts`` array of per-turn hits.
+
+    ``order`` controls the post-group sort: ``'relevance'`` (default)
+    sorts by best ``rank`` ascending — the legacy behaviour; ``'recent'``
+    sorts by ``source_created_at`` DESC so Round 7k's recency toggle
+    survives the groupby step. Per-source excerpts always sort by rank
+    so the strongest excerpt leads each card.
     """
     SOURCE_FIELDS = (
         "source_id", "source_title", "source_type", "project", "platform",
         "org", "source_created_at", "source_metadata", "rrf_score",
         "short_description", "keywords",
+        # Round 7k: surface ``session_type`` so the search page's chip
+        # rail (Sessions vs Dispatch) and per-row badge can read it
+        # directly. The mock DAO sets the field at top level; the live
+        # path stores it inside source_metadata JSON, where
+        # _enrich_search_results promotes it.
+        "session_type",
     )
     EXCERPT_FIELDS = ("turn_number", "content", "result_type", "rank")
     groups: dict = {}
@@ -1608,6 +1662,12 @@ def _group_search_results(rows: list) -> list:
     for g in groups.values():
         g["excerpts"].sort(
             key=lambda e: (e.get("rank") if e.get("rank") is not None else 0)
+        )
+    if order == "recent":
+        return sorted(
+            groups.values(),
+            key=lambda g: g.get("source_created_at") or "",
+            reverse=True,
         )
     return sorted(
         groups.values(),
@@ -1643,6 +1703,23 @@ def _enrich_search_results(results: list) -> None:
         if "org" not in r:
             r["org"] = resolve_org_identity(org_slug)
         r["is_peer"] = bool(caller) and bool(org_slug) and org_slug != caller
+        # Round 7k: promote ``metadata.session_type`` to the row's top
+        # level so the chip rail can read ``r.session_type`` without
+        # parsing the metadata JSON in the browser. Production rows
+        # carry it nested in ``source_metadata``; mock rows may set it
+        # at the top level directly. Skip if already set (don't clobber
+        # an explicit fixture value with a missing metadata key).
+        if r.get("session_type") is None:
+            meta = r.get("source_metadata")
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except (json.JSONDecodeError, TypeError):
+                    meta = None
+            if isinstance(meta, dict):
+                st = meta.get("session_type")
+                if isinstance(st, str) and st:
+                    r["session_type"] = st
         # Normalize date to "YYYY-MM-DD HH:MM" (24hr). Source may supply
         # created_at / date / last_activity_at in various forms.
         if "date" not in r or not r.get("date"):
