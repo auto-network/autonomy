@@ -20,12 +20,12 @@ proposed tags) so search and card previews accurately reflect the content.
 3. Otherwise, produce a JSON object with all four fields:
 
    ```json
-   {
+   {{
      "title": "<concise title, 4–10 words, no leading # marker>",
      "short_description": "<one or two sentences, ≤ 200 chars>",
      "keywords": ["<synonym>", "<alias>", "<related-term>", ...],
      "proposed_tags": ["<existing-tag-from-taxonomy>", ...]
-   }
+   }}
    ```
 
    Rules:
