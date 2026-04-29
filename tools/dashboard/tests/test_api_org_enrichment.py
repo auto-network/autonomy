@@ -58,7 +58,9 @@ def test_api_search_attaches_org_and_date(test_app):
             with patch.object(
                 server.dao_beads,
                 "search",
-                staticmethod(lambda q, limit=20, project=None: _mock_search_results()),
+                staticmethod(lambda q, limit=20, project=None,
+                             order="relevance", session_type=None:
+                             _mock_search_results()),
                 create=True,
             ):
                 r = client.get("/api/search?q=anchore")

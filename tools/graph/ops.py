@@ -285,6 +285,8 @@ def search(
     session_source_ids: list[str] | None = None,
     session_author_pattern: str | None = None,
     excluded_source_types: list[str] | None = None,
+    order: str = "relevance",
+    session_type: list[str] | None = None,
 ) -> list[dict]:
     """Full-text search across the graph with cross-org RRF merge.
 
@@ -302,6 +304,16 @@ def search(
     slug), bypassing peer merge. Useful for ``graph search --only-org``.
     ``peers`` overrides the resolved peer set (empty list = isolated,
     None = default from subscription Setting or every sibling DB).
+
+    ``order`` selects the per-DB ordering — ``'relevance'`` (default) ranks
+    by FTS BM25 + boosts; ``'recent'`` orders by ``source.created_at``
+    DESC. Under recency, the cross-org merge falls back to a chronological
+    union (see ``cross_org.chronological_merge``) instead of RRF — RRF
+    re-ranks by relevance score, which is moot for a recency feed.
+
+    ``session_type`` filters strictly on ``metadata.session_type`` —
+    ``None`` disables the filter; ``[]`` returns zero rows; rows with
+    NULL session_type never match a non-empty list.
     """
     resolved_org = _resolve_org(org)
 
@@ -315,12 +327,17 @@ def search(
                 q, limit=limit, project=project, or_mode=or_mode, tag=tag,
                 states=states, include_raw=include_raw,
                 excluded_source_types=excluded_source_types,
+                order=order, session_type=session_type,
             )
             for r in rows:
                 r["org"] = slug
             org_lists.append((slug, rows))
         if not org_lists:
             return []
+        if order == "recent":
+            return chronological_merge(
+                org_lists, limit=limit, time_field="source_created_at",
+            )
         return rrf_merge(org_lists, limit=limit, own_org=None, key="id")
 
     # Single-org pin: skip peer resolution entirely.
@@ -334,6 +351,7 @@ def search(
                     session_source_ids=session_source_ids,
                     session_author_pattern=session_author_pattern,
                     excluded_source_types=excluded_source_types,
+                    order=order, session_type=session_type,
                 )
             finally:
                 db.close()
@@ -348,6 +366,7 @@ def search(
             q, limit=limit, project=project, or_mode=or_mode, tag=tag,
             states=list(PEER_VISIBLE_STATES), include_raw=False,
             excluded_source_types=excluded_source_types,
+            order=order, session_type=session_type,
         )
         for r in rows:
             r.setdefault("org", only_org)
@@ -362,6 +381,7 @@ def search(
             session_source_ids=session_source_ids,
             session_author_pattern=session_author_pattern,
             excluded_source_types=excluded_source_types,
+            order=order, session_type=session_type,
         )
 
     def fetch_peer(db: GraphDB, _slug: str) -> list[dict]:
@@ -369,6 +389,7 @@ def search(
             q, limit=limit, project=project, or_mode=or_mode, tag=tag,
             states=list(PEER_VISIBLE_STATES), include_raw=False,
             excluded_source_types=excluded_source_types,
+            order=order, session_type=session_type,
         )
 
     org_lists = run_across_orgs(
@@ -382,6 +403,10 @@ def search(
         for r in rows:
             r.setdefault("org", resolved_org or "")
         return rows[:limit]
+    if order == "recent":
+        return chronological_merge(
+            org_lists, limit=limit, time_field="source_created_at",
+        )
     return rrf_merge(
         org_lists, limit=limit, own_org=resolved_org, key="id",
     )
