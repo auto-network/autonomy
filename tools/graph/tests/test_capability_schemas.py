@@ -443,6 +443,175 @@ def test_impl_tool_paths_rejects_absolute_entry():
     assert "tool_paths" in str(ei.value)
 
 
+# ── tool_target / command-surface (auto-1webn.2) ────────────
+#
+# `tool_paths` only declares which repo-local subtrees the capability
+# brings along — it cannot say where the tool bundle should land inside
+# the container or which commands should land on PATH. The Jira worked
+# example needs both: `/opt/jira-tools` mount + `jira-read` etc.
+# `tool_target` is the explicit substrate field that closes that gap.
+
+
+def _jira_with_tool_target() -> dict:
+    payload = _autonomy_jira_v1()
+    payload["tool_target"] = {
+        "source": "agents/capabilities/jira/tools",
+        "target": "/opt/jira-tools",
+        "expose_commands": [
+            "jira-read",
+            "jira-comment",
+            "jira-create",
+            "jira-createmeta",
+        ],
+    }
+    return payload
+
+
+def test_impl_tool_target_jira_validates():
+    """The Jira worked example: package root + /opt/jira-tools + jira-* commands."""
+    validate_payload(
+        capability_impl.SET_ID,
+        capability_impl.SCHEMA_REVISION,
+        _jira_with_tool_target(),
+    )
+
+
+def test_impl_tool_target_without_expose_commands_validates():
+    """`expose_commands` is optional — bundles without command shims still validate."""
+    payload = _autonomy_jira_v1()
+    payload["tool_target"] = {
+        "source": "agents/capabilities/jira/tools",
+        "target": "/opt/jira-tools",
+    }
+    validate_payload(
+        capability_impl.SET_ID,
+        capability_impl.SCHEMA_REVISION,
+        payload,
+    )
+
+
+def test_impl_tool_target_must_be_object():
+    payload = _autonomy_jira_v1()
+    payload["tool_target"] = ["agents/capabilities/jira/tools", "/opt/jira-tools"]
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "tool_target" in str(ei.value)
+
+
+def test_impl_tool_target_relative_target_fails():
+    """The container target must be absolute — relative paths cannot become a stable mount."""
+    payload = _autonomy_jira_v1()
+    payload["tool_target"] = {
+        "source": "agents/capabilities/jira/tools",
+        "target": "opt/jira-tools",
+    }
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "target" in str(ei.value)
+
+
+def test_impl_tool_target_traversal_in_target_fails():
+    payload = _autonomy_jira_v1()
+    payload["tool_target"] = {
+        "source": "agents/capabilities/jira/tools",
+        "target": "/opt/../etc/jira-tools",
+    }
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "target" in str(ei.value)
+
+
+def test_impl_tool_target_repo_escape_in_source_fails():
+    payload = _autonomy_jira_v1()
+    payload["tool_target"] = {
+        "source": "../outside",
+        "target": "/opt/jira-tools",
+    }
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "source" in str(ei.value)
+
+
+def test_impl_tool_target_command_with_slash_fails():
+    """expose_commands entries must be PATH command names, not paths."""
+    payload = _autonomy_jira_v1()
+    payload["tool_target"] = {
+        "source": "agents/capabilities/jira/tools",
+        "target": "/opt/jira-tools",
+        "expose_commands": ["bin/jira-read"],
+    }
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "expose_commands" in str(ei.value)
+
+
+def test_impl_tool_target_unknown_subfield_fails():
+    payload = _autonomy_jira_v1()
+    payload["tool_target"] = {
+        "source": "agents/capabilities/jira/tools",
+        "target": "/opt/jira-tools",
+        "magic": True,
+    }
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "tool_target" in str(ei.value)
+
+
+def test_impl_tool_target_missing_required_subfield_fails():
+    payload = _autonomy_jira_v1()
+    payload["tool_target"] = {
+        "source": "agents/capabilities/jira/tools",
+        # missing target
+    }
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "target" in str(ei.value)
+
+
+def test_impl_tool_target_empty_command_name_fails():
+    payload = _autonomy_jira_v1()
+    payload["tool_target"] = {
+        "source": "agents/capabilities/jira/tools",
+        "target": "/opt/jira-tools",
+        "expose_commands": [""],
+    }
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    assert "expose_commands" in str(ei.value)
+
+
 def test_impl_normal_repo_local_paths_validate():
     """The reference fixtures (with deep but legal paths) still validate."""
     validate_payload(

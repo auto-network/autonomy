@@ -500,6 +500,53 @@ def test_multiple_capabilities_render_in_stable_order():
     assert gh_idx < ji_idx
 
 
+# ── Primer regressions found after auto-uqq0i (auto-1webn.2) ────────
+
+
+def test_writable_session_branch_uses_session_prefix():
+    """Worktrees create branches as `session/<name>` (per workspace_manager).
+
+    The earlier `agent/<session>` wording is stale and confuses agents
+    that look for the branch via tab-complete or `git branch --list`.
+    """
+    out = render_workspace_primer(_cfg(
+        repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),),
+    ))
+    assert "session/<session>" in out, (
+        "writable-branch guidance must reference the current "
+        "`session/<session>` worktree branch model"
+    )
+    # The stale `agent/<session>` language must not survive in the
+    # editing/committing block.
+    assert "agent/<session>" not in out
+
+
+def test_sync_snippet_assignment_and_curl_on_separate_lines():
+    """The DASHBOARD assignment and the curl call must render on separate
+    lines — the earlier template glued them together because Jinja's
+    `trim_blocks=True` ate the trailing newline of the inline ``{% if %}``.
+    """
+    out = render_workspace_primer(_cfg(
+        repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),),
+        network_host=True,
+    ))
+    # Valid shell — DASHBOARD value followed by a real newline before curl.
+    assert "DASHBOARD=https://localhost:8080\ncurl " in out
+    # Sanity: the broken concatenation must not appear.
+    assert "https://localhost:8080curl" not in out
+
+
+def test_sync_snippet_renders_for_bridge_network():
+    """Bridge-network workspaces resolve to host.docker.internal but the
+    rendered shell must still place `curl` on its own line."""
+    out = render_workspace_primer(_cfg(
+        repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),),
+        network_host=False,
+    ))
+    assert "DASHBOARD=https://host.docker.internal:8080\ncurl " in out
+    assert "host.docker.internal:8080curl" not in out
+
+
 def test_capability_with_missing_primer_file_still_renders_heading(tmp_path, monkeypatch):
     """A capability whose primer.md is missing on disk still gets a heading.
 

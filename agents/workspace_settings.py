@@ -222,6 +222,23 @@ class OrgOverride:
 
 
 @dataclass(frozen=True)
+class CapabilityToolTarget:
+    """Stable runtime mount + command surface for a capability bundle.
+
+    Built from the optional ``tool_target`` field on
+    ``autonomy.capability.impl#1``. ``source`` is a repo-local path that
+    holds the tool subtree; ``target`` is the absolute container path
+    where the launcher mounts that subtree (e.g. ``/opt/jira-tools``).
+    ``expose_commands`` lists bare command names the launcher should make
+    available on PATH via shim scripts so ``jira-read``, ``jira-comment``,
+    etc. resolve without the agent guessing the install layout.
+    """
+    source: str
+    target: str
+    expose_commands: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class MaterializedCapability:
     """A capability resolved for a workspace and ready to materialize at launch.
 
@@ -235,6 +252,10 @@ class MaterializedCapability:
     launcher resolves them against ``REPO_ROOT`` to produce host paths.
     ``mount_target`` is the canonical container path for the package root
     (``/opt/autonomy/capabilities/<impl-slug>``).
+
+    ``tool_target`` (when present) carries a ``CapabilityToolTarget``
+    describing where the implementation's tool subtree should land inside
+    the container plus which commands the launcher should expose on PATH.
     """
     contract: str
     contract_version: int
@@ -246,6 +267,7 @@ class MaterializedCapability:
     required_env: tuple[str, ...] = ()
     required_secret_files: tuple[str, ...] = ()
     tool_paths: tuple[str, ...] = ()
+    tool_target: CapabilityToolTarget | None = None
     primer_path: str | None = None
     skill_path: str | None = None
     env_bindings: dict[str, str] = field(default_factory=dict)
@@ -474,6 +496,22 @@ def _read_capability_impls(*, org: str | None) -> dict[tuple[str, int], dict]:
     return out
 
 
+def _materialize_tool_target(payload: Any) -> CapabilityToolTarget | None:
+    """Build a :class:`CapabilityToolTarget` from a validated impl payload."""
+    if not isinstance(payload, dict):
+        return None
+    source = payload.get("source")
+    target = payload.get("target")
+    if not isinstance(source, str) or not isinstance(target, str):
+        return None
+    expose = payload.get("expose_commands") or ()
+    return CapabilityToolTarget(
+        source=source,
+        target=target,
+        expose_commands=tuple(str(c) for c in expose),
+    )
+
+
 def _materialize_capability(
     contract: str,
     enable_payload: dict,
@@ -498,6 +536,7 @@ def _materialize_capability(
             str(s) for s in impl_payload.get("required_secret_files", ())
         ),
         tool_paths=tuple(str(p) for p in impl_payload.get("tool_paths", ())),
+        tool_target=_materialize_tool_target(impl_payload.get("tool_target")),
         primer_path=(impl_payload.get("primer_path") or None),
         skill_path=(impl_payload.get("skill_path") or None),
         env_bindings={

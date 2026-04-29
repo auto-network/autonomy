@@ -3857,6 +3857,7 @@ async def api_session_create(request):
             privileged=proj.dind,
             working_dir=working_dir,
             network_host=proj.network_host,
+            capabilities=proj.capabilities,
         )
         if not cmd_str:
             return JSONResponse(
@@ -4211,6 +4212,7 @@ async def api_session_resume(request):
                 model=model,
                 resume_uuid=session_uuid,
                 network_host=proj_for_resume.network_host,
+                capabilities=proj_for_resume.capabilities,
             )
         else:
             docker_cmd = launch_session(

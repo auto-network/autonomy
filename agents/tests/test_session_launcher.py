@@ -17,6 +17,7 @@ import pytest
 from agents import session_launcher
 from agents.workspace_settings import (
     CAPABILITIES_MOUNT_DIR,
+    CapabilityToolTarget,
     MaterializedCapability,
 )
 
@@ -347,6 +348,154 @@ def test_both_capabilities_render_without_clobber(
     assert (
         "/etc/autonomy/secrets/jira_token:/run/secrets/jira_token:ro" in mounts
     )
+
+
+# ── tool_target / command-surface (auto-1webn.2) ────────────
+
+
+def _jira_with_tool_target() -> MaterializedCapability:
+    """Jira capability with the explicit `/opt/jira-tools` runtime model."""
+    return MaterializedCapability(
+        contract="issue_tracker",
+        contract_version=1,
+        implementation="autonomy/jira",
+        implementation_version=1,
+        delivery_mode="mounted_tools",
+        package_root="agents/capabilities/jira",
+        mount_target=f"{CAPABILITIES_MOUNT_DIR}/autonomy-jira",
+        required_env=("JIRA_EMAIL", "JIRA_BASE_URL"),
+        required_secret_files=("/run/secrets/jira_token",),
+        primer_path="agents/capabilities/jira/primer.md",
+        skill_path="agents/capabilities/jira/SKILL.md",
+        tool_target=CapabilityToolTarget(
+            source="agents/capabilities/jira/tools",
+            target="/opt/jira-tools",
+            expose_commands=(
+                "jira-read",
+                "jira-comment",
+                "jira-create",
+                "jira-createmeta",
+            ),
+        ),
+        env_bindings={
+            "JIRA_EMAIL": "ops@example.com",
+            "JIRA_BASE_URL": "https://example.atlassian.net",
+        },
+        secret_file_bindings={
+            "/run/secrets/jira_token": "/etc/autonomy/secrets/jira_token",
+        },
+    )
+
+
+def test_tool_target_mounts_source_at_absolute_target(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    """Capability declares /opt/jira-tools — package mount must land there."""
+    _run(
+        output_dir=str(tmp_path / "run"),
+        capabilities=(_jira_with_tool_target(),),
+    )
+    cmd = captured_run[0]
+    mounts = _mounts(cmd)
+    # The repo-local source must mount at the declared absolute target.
+    assert any(
+        m.endswith("agents/capabilities/jira/tools:/opt/jira-tools:ro")
+        for m in mounts
+    ), f"expected /opt/jira-tools mount, got {mounts}"
+    # The package root mount is still there (capability inspectability).
+    assert any(
+        m.endswith(f"agents/capabilities/jira:{CAPABILITIES_MOUNT_DIR}/autonomy-jira:ro")
+        for m in mounts
+    )
+
+
+def test_tool_target_creates_command_shims_with_correct_targets(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    """Each expose_commands entry must produce an executable shim that
+    invokes the declared tool target — making `jira-read` etc. resolvable
+    through the mounted shim directory."""
+    run_dir = tmp_path / "run"
+    _run(
+        output_dir=str(run_dir),
+        capabilities=(_jira_with_tool_target(),),
+    )
+    shim_dir = run_dir / "cap-bin"
+    assert shim_dir.is_dir(), f"shim directory not created at {shim_dir}"
+    for cmd_name in ("jira-read", "jira-comment", "jira-create", "jira-createmeta"):
+        shim = shim_dir / cmd_name
+        assert shim.is_file(), f"shim missing for {cmd_name} at {shim}"
+        # Executable bit must be set so the kernel can load the shim.
+        import os, stat
+        assert shim.stat().st_mode & stat.S_IXUSR, (
+            f"shim {shim} is not executable"
+        )
+        body = shim.read_text()
+        assert "/opt/jira-tools/" + cmd_name in body, (
+            f"shim {shim} does not exec /opt/jira-tools/{cmd_name}: {body!r}"
+        )
+
+
+def test_tool_target_mounts_shim_dir_at_capability_bin(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    """The shim directory must be mounted at /etc/autonomy/cap-bin so the
+    image can prepend it to PATH for `jira-*` commands."""
+    run_dir = tmp_path / "run"
+    _run(
+        output_dir=str(run_dir),
+        capabilities=(_jira_with_tool_target(),),
+    )
+    cmd = captured_run[0]
+    mounts = _mounts(cmd)
+    shim_dir = run_dir / "cap-bin"
+    assert f"{shim_dir}:/etc/autonomy/cap-bin:ro" in mounts
+
+
+def test_tool_target_sets_capability_bin_env(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    """Expose AUTONOMY_CAPABILITY_BIN so the container knows where shims live."""
+    _run(
+        output_dir=str(tmp_path / "run"),
+        capabilities=(_jira_with_tool_target(),),
+    )
+    cmd = captured_run[0]
+    envs = _envs(cmd)
+    assert "AUTONOMY_CAPABILITY_BIN=/etc/autonomy/cap-bin" in envs
+
+
+def test_tool_target_without_expose_commands_skips_shim_dir(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    """A capability with a tool_target but no expose_commands still mounts
+    the bundle but does not synthesize a shim directory."""
+    cap = MaterializedCapability(
+        contract="issue_tracker",
+        contract_version=1,
+        implementation="autonomy/jira",
+        implementation_version=1,
+        delivery_mode="mounted_tools",
+        package_root="agents/capabilities/jira",
+        mount_target=f"{CAPABILITIES_MOUNT_DIR}/autonomy-jira",
+        tool_target=CapabilityToolTarget(
+            source="agents/capabilities/jira/tools",
+            target="/opt/jira-tools",
+            expose_commands=(),
+        ),
+    )
+    run_dir = tmp_path / "run"
+    _run(output_dir=str(run_dir), capabilities=(cap,))
+    cmd = captured_run[0]
+    mounts = _mounts(cmd)
+    envs = _envs(cmd)
+    # tool_target source still mounts at /opt/jira-tools.
+    assert any(m.endswith("agents/capabilities/jira/tools:/opt/jira-tools:ro") for m in mounts)
+    # No shim directory mount or env when nothing to expose.
+    assert not any(":/etc/autonomy/cap-bin:" in m for m in mounts)
+    assert not any(e.startswith("AUTONOMY_CAPABILITY_BIN=") for e in envs)
+    # And no cap-bin scaffold gets dropped on disk.
+    assert not (run_dir / "cap-bin").exists()
 
 
 def test_no_hardcoded_license_mount(tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch):
