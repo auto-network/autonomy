@@ -136,6 +136,19 @@ def ensure_managed_clone(url: str, *, repos_dir: Path = REPOS_DIR) -> Path:
     if clone_path.exists():
         logger.info("workspace: fetching %s", clone_path)
         _run_git(["fetch", "origin", "--prune"], cwd=clone_path)
+        # Advance the local integration-branch ref to match origin's tip so
+        # `git log <branch>` from inside session worktrees doesn't show a
+        # stale base. The fetch above only writes refs/remotes/origin/<branch>;
+        # without this update-ref, refs/heads/<branch> stays frozen at
+        # whatever it was on first clone (operator pain — see auto-0428-131200's
+        # 12-day-stale-main report).
+        default = _repo_default_branch(clone_path)
+        if default:
+            _git_output(
+                ["update-ref", f"refs/heads/{default}", f"refs/remotes/origin/{default}"],
+                clone_path,
+                timeout=15,
+            )
     else:
         logger.info("workspace: cloning %s → %s", url, clone_path)
         clone_path.parent.mkdir(parents=True, exist_ok=True)
