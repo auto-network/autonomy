@@ -15,7 +15,12 @@ Tests:
 from pathlib import Path
 import pytest
 
-from agents.workspace_settings import WorkspaceV1, RepoMount
+from agents.workspace_settings import (
+    CAPABILITIES_MOUNT_DIR,
+    MaterializedCapability,
+    RepoMount,
+    WorkspaceV1,
+)
 
 
 class TestResumeWithSourceId:
@@ -490,6 +495,155 @@ class TestWorkspaceHarnessPassthrough:
         assert resp.status_code == 200
         assert launch_kwargs["harness"] == "codex"
         assert prep_kwargs["refresh_existing_worktree"] is False
+
+
+class TestWorkspaceCapabilityPassthrough:
+    """Workspace create/resume must pass resolved capabilities to launch_session.
+
+    `auto-uqq0i` proved the substrate in isolation but never wired the
+    real Dashboard route to forward `proj.capabilities`. This bead
+    (`auto-1webn.2`) closes the gap — the actual `/api/session/create`
+    and `/api/session/resume` endpoints must hand the capabilities
+    tuple over to the launcher so resolution survives the dashboard
+    seam.
+    """
+
+    @staticmethod
+    def _jira_capability() -> MaterializedCapability:
+        return MaterializedCapability(
+            contract="issue_tracker",
+            contract_version=1,
+            implementation="autonomy/jira",
+            implementation_version=1,
+            delivery_mode="mounted_tools",
+            package_root="agents/capabilities/jira",
+            mount_target=f"{CAPABILITIES_MOUNT_DIR}/autonomy-jira",
+            required_env=("JIRA_EMAIL", "JIRA_BASE_URL"),
+            required_secret_files=("/run/secrets/jira_token",),
+            tool_paths=("agents/capabilities/jira/tools",),
+            primer_path="agents/capabilities/jira/primer.md",
+        )
+
+    def _workspace_with_capabilities(self) -> WorkspaceV1:
+        return WorkspaceV1(
+            id="autonomy",
+            name="Autonomy Jira",
+            description="",
+            image="autonomy-agent:dashboard",
+            graph_project="autonomy",
+            harness="claude",
+            repos=(RepoMount(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
+            working_dir="/workspace/repo",
+            capabilities=(self._jira_capability(),),
+        )
+
+    def test_workspace_create_passes_capabilities_to_launch_session(
+        self, test_client, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        launch_kwargs: dict = {}
+        workspace = self._workspace_with_capabilities()
+
+        monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
+        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
+        monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
+        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+        monkeypatch.setattr(server, "prepare_session_mounts", lambda *a, **kw: {})
+
+        def fake_launch_session(**kwargs):
+            launch_kwargs.update(kwargs)
+            return "docker run cap"
+
+        monkeypatch.setattr(server, "launch_session", fake_launch_session)
+        monkeypatch.setattr(
+            server.dashboard_db,
+            "get_session",
+            lambda tmux_name: {
+                "tmux_name": tmux_name,
+                "is_live": 1,
+                "jsonl_path": "/tmp/fake/sessions",
+                "type": "container",
+                "label": "",
+            },
+        )
+
+        resp = test_client.post("/api/session/create", json={"project": "autonomy"})
+        assert resp.status_code == 200
+        assert "capabilities" in launch_kwargs, (
+            "workspace create must forward capabilities=... to launch_session"
+        )
+        assert launch_kwargs["capabilities"] == workspace.capabilities
+
+    def test_workspace_resume_passes_capabilities_to_launch_session(
+        self, test_client, resume_env, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        launch_kwargs: dict = {}
+        workspace = self._workspace_with_capabilities()
+
+        test_client._dead_sessions["abc123-def456"] = {
+            "tmux_name": "auto-0326-142603",
+            "is_live": 0,
+            "label": "Workspace session",
+            "jsonl_path": resume_env["jsonl_file"],
+            "session_uuid": "abc123-def456",
+            "type": "container",
+            "project": "autonomy",
+        }
+
+        monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
+        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
+        monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
+        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+        monkeypatch.setattr(server, "prepare_session_mounts", lambda *a, **kw: {})
+
+        def fake_launch_session(**kwargs):
+            launch_kwargs.update(kwargs)
+            return "docker run cap"
+
+        monkeypatch.setattr(server, "launch_session", fake_launch_session)
+
+        resp = test_client.post(
+            "/api/session/resume",
+            json={"source_id": resume_env["container_source_id"]},
+        )
+        assert resp.status_code == 200
+        assert "capabilities" in launch_kwargs, (
+            "workspace resume must forward capabilities=... to launch_session"
+        )
+        assert launch_kwargs["capabilities"] == workspace.capabilities
+
+    def test_default_terminal_create_path_does_not_forward_capabilities(
+        self, test_client, monkeypatch,
+    ):
+        """Non-workspace create path must remain unchanged — no capabilities arg."""
+        from tools.dashboard import server
+
+        launch_kwargs: dict = {}
+
+        def fake_launch_session(**kwargs):
+            launch_kwargs.update(kwargs)
+            return "docker run terminal"
+
+        monkeypatch.setattr(server, "launch_session", fake_launch_session)
+        monkeypatch.setattr(
+            server.dashboard_db,
+            "get_session",
+            lambda tmux_name: {
+                "tmux_name": tmux_name,
+                "is_live": 1,
+                "jsonl_path": "/tmp/fake/sessions",
+                "type": "container",
+                "label": "",
+            },
+        )
+
+        resp = test_client.post("/api/session/create", json={})
+        assert resp.status_code == 200
+        # The default container-terminal path must not synthesize capabilities.
+        assert launch_kwargs.get("capabilities", ()) == ()
 
 
 class TestRecentSessionsEnriched:

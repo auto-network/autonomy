@@ -35,6 +35,9 @@ DEFAULT_OPUS_MODEL = "claude-opus-4-7[1m]"
 # ── Capability materialization ────────────────────────────────────────────────
 
 
+CAPABILITY_BIN_DIR = "/etc/autonomy/cap-bin"
+
+
 def _capability_mounts(capabilities) -> dict[str, str]:
     """Return ``{host_path: container_spec}`` for every enabled capability.
 
@@ -52,6 +55,12 @@ def _capability_mounts(capabilities) -> dict[str, str]:
       repo layout. Subpaths inside the package root would be redundant
       with the package mount; only paths that escape the package root
       get an extra mount entry.
+    * a ``tool_target`` (when set) mounts the declared repo-local
+      ``source`` at the absolute container ``target`` — the Jira-style
+      ``/opt/jira-tools`` runtime location described in
+      graph://86e04207-a25 § Example 2. The shim directory exposing
+      ``expose_commands`` is materialized separately (see
+      :func:`_capability_command_surface`).
     * every ``secret_file_bindings`` entry mounts the host source at the
       declared container path read-only. Secret values stay file-based —
       they are never injected as env vars per the runtime model
@@ -71,9 +80,54 @@ def _capability_mounts(capabilities) -> dict[str, str]:
                 pass
             container_path = f"{cap.mount_target}/{Path(tool_path).name}"
             mounts[str(tool_host)] = f"{container_path}:ro"
+        if cap.tool_target is not None:
+            tt = cap.tool_target
+            tt_host = REPO_ROOT / tt.source
+            mounts[str(tt_host)] = f"{tt.target}:ro"
         for container_path, host_source in cap.secret_file_bindings.items():
             mounts[host_source] = f"{container_path}:ro"
     return mounts
+
+
+def _capability_command_surface(
+    capabilities, run_dir: Path,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Materialize PATH-visible command shims for every ``tool_target``.
+
+    For each capability that declares ``tool_target.expose_commands`` the
+    launcher writes a tiny POSIX shim script under ``<run_dir>/cap-bin/``
+    that ``exec``s the matching binary at the declared absolute target
+    (``/opt/jira-tools/jira-read`` etc.). The shim directory is then
+    bind-mounted at :data:`CAPABILITY_BIN_DIR` and exposed via the
+    ``AUTONOMY_CAPABILITY_BIN`` env var so the container image can prepend
+    it to ``PATH``.
+
+    Returns ``(mounts, env)`` — both empty when no capability declares an
+    ``expose_commands`` list, so the function is a no-op for callers that
+    do not opt in.
+    """
+    shims_to_emit: list[tuple[str, str]] = []
+    for cap in capabilities:
+        tt = getattr(cap, "tool_target", None)
+        if tt is None:
+            continue
+        for cmd in tt.expose_commands:
+            shims_to_emit.append((cmd, f"{tt.target}/{cmd}"))
+    if not shims_to_emit:
+        return {}, {}
+    shim_dir = run_dir / "cap-bin"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    for cmd, exec_target in shims_to_emit:
+        shim_path = shim_dir / cmd
+        shim_path.write_text(
+            f'#!/bin/sh\nexec {exec_target} "$@"\n'
+        )
+        # 0755 — executable for everyone so the agent user can invoke it.
+        shim_path.chmod(0o755)
+    return (
+        {str(shim_dir): f"{CAPABILITY_BIN_DIR}:ro"},
+        {"AUTONOMY_CAPABILITY_BIN": CAPABILITY_BIN_DIR},
+    )
 
 
 def _capability_env(capabilities) -> dict[str, str]:
@@ -387,6 +441,19 @@ def launch_session(
             continue
         default_mounts[host_path] = container_spec
 
+    # Per-session shim directory for ``tool_target.expose_commands``.
+    # Built lazily — when no capability declares expose_commands, no
+    # disk artefact, mount, or env var is created.
+    shim_mounts, shim_env = _capability_command_surface(capabilities, run_dir)
+    for host_path, container_spec in shim_mounts.items():
+        container_path = container_spec.split(":")[0]
+        if any(
+            spec.split(":")[0] == container_path
+            for spec in default_mounts.values()
+        ):
+            continue
+        default_mounts[host_path] = container_spec
+
     # ── CrossTalk token ──────────────────────────────────────────
     from tools.dashboard.dao import auth_db
     raw_token = secrets.token_urlsafe(32)
@@ -463,6 +530,11 @@ def launch_session(
     # Secret values stay file-mounted (see _capability_mounts) and never
     # land here per graph://86e04207-a25 § Runtime materialization.
     for k, v in _capability_env(capabilities).items():
+        cmd.extend(["-e", f"{k}={v}"])
+
+    # Command-surface env (e.g. AUTONOMY_CAPABILITY_BIN) — only present
+    # when at least one capability declared ``tool_target.expose_commands``.
+    for k, v in shim_env.items():
         cmd.extend(["-e", f"{k}={v}"])
 
     cmd.extend(["-w", working_dir])

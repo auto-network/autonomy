@@ -58,10 +58,14 @@ _ALLOWED_TOP_LEVEL = {
     "required_env",
     "required_secret_files",
     "tool_paths",
+    "tool_target",
     "skill_path",
     "primer_path",
     "notes",
 }
+
+_TOOL_TARGET_REQUIRED = ("source", "target")
+_TOOL_TARGET_ALLOWED = set(_TOOL_TARGET_REQUIRED) | {"expose_commands"}
 
 _CONTRACT_REF_REQUIRED = ("contract", "version")
 _CONTRACT_REF_ALLOWED = set(_CONTRACT_REF_REQUIRED)
@@ -192,6 +196,101 @@ def _validate_probe(probe: Any, cls_name: str) -> None:
             )
 
 
+def _validate_absolute_container_path(value: Any, *, field: str, cls_name: str) -> None:
+    """Reject anything that is not a normalized absolute POSIX path.
+
+    ``tool_target.target`` declares a stable runtime location inside the
+    container (e.g. ``/opt/jira-tools``). It must be absolute so the
+    launcher can mount the bundle deterministically without depending on
+    the container's working directory.
+    """
+    if not isinstance(value, str):
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must be a string, got {type(value).__name__}"
+        )
+    if not value or not value.strip():
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must be a non-empty absolute container path"
+        )
+    if "\\" in value:
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must use forward slashes (POSIX-style), "
+            f"got {value!r}"
+        )
+    if not value.startswith("/"):
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must be absolute (start with '/'), got {value!r}"
+        )
+    parts = value.split("/")
+    if any(p == ".." for p in parts):
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must not contain parent-traversal "
+            f"('..') segments, got {value!r}"
+        )
+    normalized = posixpath.normpath(value)
+    if normalized in ("/", ""):
+        raise SchemaValidationError(
+            f"{cls_name}: {field!r} must resolve to a non-root absolute "
+            f"path, got {value!r}"
+        )
+
+
+def _validate_tool_target(payload: Any, cls_name: str) -> None:
+    """Validate the optional ``tool_target`` shape.
+
+    ``tool_target`` carries the runtime substrate that goes beyond
+    ``tool_paths``: it declares an absolute container path where the
+    bundle should be mounted, plus an optional list of ``expose_commands``
+    that the launcher should make available on PATH via shim scripts.
+    Together these fields express the Jira-style worked example
+    (graph://86e04207-a25 § Example 2): tools at ``/opt/jira-tools`` plus
+    PATH-visible ``jira-read`` / ``jira-comment`` / ``jira-create`` /
+    ``jira-createmeta`` commands.
+    """
+    if not isinstance(payload, dict):
+        raise SchemaValidationError(
+            f"{cls_name}: 'tool_target' must be an object, got "
+            f"{type(payload).__name__}"
+        )
+    extra = set(payload) - _TOOL_TARGET_ALLOWED
+    if extra:
+        raise SchemaValidationError(
+            f"{cls_name}: 'tool_target' has unknown field(s): {sorted(extra)}"
+        )
+    for key in _TOOL_TARGET_REQUIRED:
+        if key not in payload:
+            raise SchemaValidationError(
+                f"{cls_name}: 'tool_target' missing required field {key!r}"
+            )
+    validate_repo_local_path(
+        payload["source"],
+        field="tool_target.source",
+        cls_name=cls_name,
+    )
+    _validate_absolute_container_path(
+        payload["target"],
+        field="tool_target.target",
+        cls_name=cls_name,
+    )
+    expose = payload.get("expose_commands", [])
+    if not isinstance(expose, list):
+        raise SchemaValidationError(
+            f"{cls_name}: 'tool_target.expose_commands' must be a list of "
+            f"command names"
+        )
+    for i, cmd in enumerate(expose):
+        if not isinstance(cmd, str) or not cmd:
+            raise SchemaValidationError(
+                f"{cls_name}: 'tool_target.expose_commands[{i}]' must be a "
+                f"non-empty string"
+            )
+        if "/" in cmd or "\\" in cmd or cmd in (".", ".."):
+            raise SchemaValidationError(
+                f"{cls_name}: 'tool_target.expose_commands[{i}]' must be a "
+                f"bare command name (no path separators), got {cmd!r}"
+            )
+
+
 def _validate_str_list(payload: dict, key: str, cls_name: str) -> None:
     if key not in payload:
         return
@@ -211,7 +310,15 @@ class CapabilityImplV1(SettingSchema):
     ``probe`` (object with ``kind`` and ``entrypoint``).
 
     Optional: ``required_env``, ``required_secret_files``, ``tool_paths``,
-    ``skill_path``, ``primer_path``, ``notes``.
+    ``tool_target``, ``skill_path``, ``primer_path``, ``notes``.
+
+    ``tool_target`` (when present) is an object with required ``source``
+    (repo-local path) and ``target`` (absolute container path) fields and
+    an optional ``expose_commands`` list of bare command names. It lets a
+    capability declare a stable non-package mount target — e.g. tools at
+    ``/opt/jira-tools`` plus PATH-visible ``jira-read`` / ``jira-comment``
+    / ``jira-create`` / ``jira-createmeta`` commands (graph://86e04207-a25
+    § Example 2).
 
     Repo-local path fields (``package_root``, ``tool_paths``,
     ``skill_path``, ``primer_path``) are validated through
@@ -303,6 +410,10 @@ class CapabilityImplV1(SettingSchema):
                     field=f"tool_paths[{i}]",
                     cls_name=cls.__name__,
                 )
+
+        # tool_target — optional command-surface declaration.
+        if "tool_target" in payload:
+            _validate_tool_target(payload["tool_target"], cls.__name__)
 
         # Optional repo-local path fields.
         for key in ("skill_path", "primer_path"):

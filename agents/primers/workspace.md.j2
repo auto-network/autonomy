@@ -26,7 +26,7 @@ There is no bead, no task directive, and no `decision.json` to write.
 - **Do not use local `~/.claude/` for memory** — it is container-local and wiped on exit. Persistent knowledge goes in the graph (see below).
 {% else %}
 ## Editing and Committing
-- Writable repos above are mounted as per-session git worktrees on a branch named `agent/<session>`
+- Writable repos above are mounted as per-session git worktrees on a branch named `session/<session>`
 - Edit freely and commit normally — the host picks up your commits when the session ends
 - Push to remotes only when the user explicitly asks
 - **Do not use local `~/.claude/` for memory** — it is container-local and wiped on exit. Persistent knowledge goes in the graph (see below).
@@ -37,7 +37,7 @@ Your worktree fetches from a managed clone (`data/repos/.../<repo>.git`) that th
 Self-serve sync via the dashboard API — pulls host's `{{ target_branch_default | default('master') }}` into the managed clone you fetch from:
 
 ```bash
-{% if config.network_host %}DASHBOARD=https://localhost:8080{% else %}DASHBOARD=https://host.docker.internal:8080{% endif %}
+DASHBOARD=https://{{ 'localhost' if config.network_host else 'host.docker.internal' }}:8080
 curl -sk -X POST "$DASHBOARD/api/worktrees/$AUTONOMY_SESSION/<repo_name>/sync-base"
 # Then your normal fetch+rebase will see the new commits:
 git fetch /home/jeremy/workspace/autonomy/data/repos/.../<repo>.git master:hostsync/master
