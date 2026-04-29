@@ -295,7 +295,17 @@
           this.state = 'ready';
           this._scrollToBottom();
         } else {
-          // First visit — subscribe SSE before fetch to not miss events
+          // First visit — fetch is the authoritative initial render.
+          // Clear any SSE entries that accumulated since SPA boot so the
+          // chronological fetch batch isn't appended *after* newer SSE
+          // entries (which would invert head/tail and hide the latest
+          // message at entries[0]). See auto-cq7yd.
+          store.entries = [];
+          store._seenIdentities = {};
+          store.toolMap = {};
+          store.resultMap = {};
+          store._pendingSSE = [];
+
           store._loading = true;
           window.ensureSessionMessages();
 
