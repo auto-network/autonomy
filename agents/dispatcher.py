@@ -2263,6 +2263,7 @@ def poll_and_collect_agentic() -> None:
                 exit_code=exit_code,
                 output_dir=output_dir,
                 kind="agentic",
+                agentic_source_id=row["agentic_source_id"],
             )
         except Exception as e:
             print(
