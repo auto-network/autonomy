@@ -295,12 +295,18 @@ def insert_run(
     librarian_type: str | None = None,
     failure_class: str | None = None,
     kind: str = "bead",
+    agentic_source_id: str | None = None,
 ) -> None:
     """Upsert a dispatch run row on completion.
 
     If a RUNNING row was inserted at launch, this updates it with completion
     data. If no prior row exists (e.g. backfill), it inserts a new one.
     All LLM-produced fields extracted from decision.
+
+    ``agentic_source_id`` must be passed through for ``kind='agentic'`` rows
+    so the post-completion INSERT OR REPLACE doesn't NULL the column. The
+    completion watcher reads it from the existing RUNNING row's SELECT and
+    threads it back here. Bead/librarian rows pass None.
     """
     duration_secs = int(completed_at - started_at) if started_at and completed_at else None
 
@@ -335,7 +341,7 @@ def insert_run(
                 score_tooling, score_clarity, score_confidence,
                 time_research_pct, time_coding_pct, time_debugging_pct, time_tooling_pct,
                 discovered_beads_count, has_experience_report, output_dir, librarian_type,
-                failure_class, kind
+                failure_class, kind, agentic_source_id
             ) VALUES (
                 ?, ?, ?, ?, ?,
                 ?, ?, ?,
@@ -345,7 +351,7 @@ def insert_run(
                 ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, ?
+                ?, ?, ?
             )
             """,
             (
@@ -358,7 +364,7 @@ def insert_run(
                 time_breakdown.get("research_pct"), time_breakdown.get("coding_pct"),
                 time_breakdown.get("debugging_pct"), time_breakdown.get("tooling_workaround_pct"),
                 discovered_beads_count, has_experience_report, output_dir or None, librarian_type,
-                failure_class, kind,
+                failure_class, kind, agentic_source_id,
             ),
         )
         conn.commit()
