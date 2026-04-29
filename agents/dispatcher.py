@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -2117,6 +2118,196 @@ def _collect_live_stats_for_librarian(lib: RunningLibrarian) -> None:
               file=sys.stderr)
 
 
+# ── Agentic completion watcher ────────────────────────────────────
+
+
+def _agentic_jsonl_metrics(jsonl_file: Path) -> tuple[str, int, int, str | None]:
+    """Pull (last_snippet, turn_count, tool_count, last_activity_iso) from a JSONL.
+
+    Cheap full-file scan — agentic JSONLs cap out around a few MB so this
+    is acceptable for a once-per-completion call. Returns empty/zero
+    defaults when the file is missing or unparseable so callers can keep
+    going.
+    """
+    if not jsonl_file or not jsonl_file.exists():
+        return "", 0, 0, None
+    last_snippet = ""
+    turn_count = 0
+    tool_count = 0
+    last_ts: str | None = None
+    try:
+        with open(jsonl_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = entry.get("timestamp") or ""
+                if ts:
+                    last_ts = ts
+                msg = entry.get("message") or {}
+                role = entry.get("type") or msg.get("role") or ""
+                content = msg.get("content")
+                if role in ("user", "assistant"):
+                    turn_count += 1
+                    if role == "assistant" and isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict):
+                                if block.get("type") == "text":
+                                    text = (block.get("text") or "")[:400]
+                                    if text:
+                                        last_snippet = text
+                                elif block.get("type") == "tool_use":
+                                    tool_count += 1
+    except OSError:
+        pass
+    return last_snippet, turn_count, tool_count, last_ts
+
+
+def poll_and_collect_agentic() -> None:
+    """Finalise dispatch_runs rows for agentic containers that have exited.
+
+    Agentic action launches happen in the dashboard process
+    (api_agent_action_dispatch). They write a RUNNING row but never enter
+    the dispatcher's in-memory ``running`` list, so the existing
+    poll_and_collect path can't see them. This watcher closes the gap:
+
+    1. Query ``dispatch_runs WHERE kind='agentic' AND status='RUNNING'``.
+    2. For each row, ``docker inspect`` the container_name to check exit.
+    3. On exit, derive last_snippet / turn_count / tool_count /
+       last_activity from the JSONL under ``output_dir/sessions/...``,
+       then UPSERT the row to status DONE/FAILED via ``insert_run``.
+
+    Runs are keyed by ``dispatch_runs.id`` (the run_id, which equals
+    container_name for agentic per Round 5) — never by ``bead_id``,
+    which is empty for these rows.
+    """
+    try:
+        conn = _open_dispatch_db()
+    except Exception:
+        return
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT id, container_name, output_dir, started_at, image, "
+                "agentic_source_id "
+                "FROM dispatch_runs WHERE COALESCE(kind, 'bead') = 'agentic' "
+                "AND status = 'RUNNING'"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+    finally:
+        conn.close()
+
+    if not rows:
+        return
+
+    for row in rows:
+        run_id = row["id"] if hasattr(row, "keys") else row[0]
+        container_name = (row["container_name"] if hasattr(row, "keys") else row[1]) or ""
+        output_dir = (row["output_dir"] if hasattr(row, "keys") else row[2]) or ""
+        started_at_str = row["started_at"] if hasattr(row, "keys") else row[3]
+        image = (row["image"] if hasattr(row, "keys") else row[4]) or ""
+
+        if not container_name:
+            continue
+
+        finished, exit_code = poll_container(container_name)
+        if not finished:
+            continue
+
+        # Pull JSONL-derived metrics.
+        sessions_dir = Path(output_dir) / "sessions" if output_dir else None
+        jsonl_files = (
+            sorted(sessions_dir.rglob("*.jsonl")) if sessions_dir and sessions_dir.exists() else []
+        )
+        jsonl_file = jsonl_files[0] if jsonl_files else None
+        last_snippet, turn_count, tool_count, last_ts = _agentic_jsonl_metrics(
+            jsonl_file
+        ) if jsonl_file else ("", 0, 0, None)
+
+        # Convert started_at (string from sqlite) to epoch for insert_run.
+        started_epoch = 0.0
+        if started_at_str:
+            try:
+                if isinstance(started_at_str, (int, float)):
+                    started_epoch = float(started_at_str)
+                else:
+                    started_epoch = datetime.strptime(
+                        str(started_at_str), "%Y-%m-%d %H:%M:%S"
+                    ).replace(tzinfo=timezone.utc).timestamp()
+            except (ValueError, TypeError):
+                started_epoch = 0.0
+
+        completed_epoch = time.time()
+        status = "DONE" if exit_code == 0 else "FAILED"
+        reason = "" if exit_code == 0 else f"container exited with code {exit_code}"
+
+        try:
+            insert_run(
+                run_id=run_id,
+                bead_id="",
+                started_at=started_epoch,
+                completed_at=completed_epoch,
+                status=status,
+                reason=reason,
+                decision=None,
+                commit_hash="",
+                branch="",
+                branch_base="",
+                image=image,
+                container_name=container_name,
+                exit_code=exit_code,
+                output_dir=output_dir,
+                kind="agentic",
+            )
+        except Exception as e:
+            print(
+                f"  agentic completion: insert_run failed for {run_id}: {e}",
+                file=sys.stderr,
+            )
+            continue
+
+        # Best-effort live-stats refresh so the SSE payload stops
+        # showing the row as RUNNING before the next dashboard poll.
+        try:
+            update_live_stats(
+                run_id=run_id,
+                last_snippet=last_snippet or None,
+                last_activity=last_ts,
+                turn_delta=max(0, turn_count),
+                tool_delta=max(0, tool_count),
+            )
+        except Exception:
+            pass
+
+        try:
+            remove_container(container_name)
+        except Exception:
+            pass
+
+        print(
+            f"  Agentic completed: {run_id} (exit={exit_code}, "
+            f"turns={turn_count}, tools={tool_count})"
+        )
+
+
+def _open_dispatch_db():
+    """Open a SQLite handle on dispatch.db for the agentic watcher.
+
+    Read-only would be ideal but completion writes go through the
+    standard dispatch_db helpers; this handle is used only for the
+    SELECT step.
+    """
+    db_path = REPO_ROOT / "data" / "dispatch.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 # ── Dispatch cycle ──────────────────────────────────────────────
 
 
@@ -2147,6 +2338,13 @@ def dispatch_cycle(
 
     # ── Phase 2: Poll running librarian agents ─────────────────
     poll_and_collect_librarians(running_librarians)
+
+    # ── Phase 2b: Poll running agentic-action containers ───────
+    # Agentic dispatches are launched out-of-band by the dashboard,
+    # so they never enter ``running``. The watcher discovers them by
+    # querying ``dispatch_runs WHERE kind='agentic' AND status='RUNNING'``
+    # and finalises rows whose containers have exited (auto-gh2iv).
+    poll_and_collect_agentic()
 
     # ── Pause gate: auth failure halts all new launches ────────
     if db_is_paused():

@@ -426,12 +426,15 @@ SWEEP_BEAD_DEPS = {
 # ``(b.kind || 'bead')`` COALESCE picks 'bead' and renders the regular
 # priority badge.
 
+SWEEP_AGENTIC_SOURCE_ID = "bd2a78f2-da73-453c-b873-9002ae33c4bf"
 SWEEP_DISPATCH_RUN_AGENTIC = {
     "id": "agentic-update-summary-20260428-100200",
     "title": "agentic: note.update-summary on src-test-001",
     "priority": None,
     "status": "RUNNING",
     "kind": "agentic",
+    "agentic_source_id": SWEEP_AGENTIC_SOURCE_ID,
+    "run_dir": "agentic-update-summary-20260428-100200",
     "duration_secs": 30,
     "snippet": "Resolving target source",
 }
@@ -543,6 +546,57 @@ SWEEP_DISPATCH_ENTRIES = [
     {"type": "assistant_text", "content": "The feature is implemented and tests pass.",
      "timestamp": NOW - 550},
 ]
+
+# Agentic dispatch JSONL-shaped entries — what the /api/dispatch/tail/<run_id>
+# endpoint returns for an agentic run. The mock fixture key is the run_id
+# (which equals dispatch_runs.id and the container_name for agentic runs).
+SWEEP_AGENTIC_DISPATCH_ENTRIES = [
+    {"type": "system", "content": "agentic session started", "timestamp": NOW - 200},
+    {"type": "user",
+     "content": "Update Title & Summary action: rewrite the note's title + short_description.",
+     "timestamp": NOW - 195},
+    {"type": "assistant_text",
+     "content": "I'll read the note and rewrite the title + summary.",
+     "timestamp": NOW - 190},
+    {"type": "tool_use", "tool_name": "Bash",
+     "content": "graph read bd2a78f2-da73", "timestamp": NOW - 180},
+    {"type": "assistant_text",
+     "content": "Title set; short_description set. Done.", "timestamp": NOW - 170},
+]
+
+# Eager-created agentic graph source — the row inserted by the dashboard
+# at agent-action dispatch and which the agentic-ingest path appends turns
+# onto. ``entries`` here represent already-ingested turns; the page renders
+# them under /graph/<id>.
+SWEEP_AGENTIC_GRAPH_SOURCE = {
+    "id": SWEEP_AGENTIC_SOURCE_ID,
+    "title": "Update Title & Summary",
+    "type": "agentic",
+    "project": "autonomy",
+    "created_at": "2026-04-28T22:00:40Z",
+    "metadata": json.dumps({
+        "kind": "agent-action",
+        "set_id": "dashboard.agent-actions",
+        "member_key": "note.update-summary",
+        "session_type": "agentic",
+        "slug": "agentic-update-summary-20260428-100200",
+    }),
+    "content": "Agentic action run",
+    "entries": [
+        {"id": "thought-agentic-1", "entry_type": "thought", "role": "user",
+         "turn_number": 1,
+         "content": "Update Title & Summary action: rewrite the note's title.",
+         "message_id": None, "metadata": {}},
+        {"id": "deriv-agentic-2", "entry_type": "derivation", "role": "assistant",
+         "turn_number": 2,
+         "content": "I'll read the note and rewrite the title + summary.",
+         "message_id": None, "metadata": {}},
+        {"id": "deriv-agentic-3", "entry_type": "derivation", "role": "assistant",
+         "turn_number": 3,
+         "content": "Title set; short_description set. Done.",
+         "message_id": None, "metadata": {}},
+    ],
+}
 
 
 # ── Search FTS fixture (auto-qlfg1, /search) ─────────────────────────
@@ -733,6 +787,7 @@ SWEEP_GRAPH_SOURCES = {
     },
     SWEEP_AGENT_ACTIONS_AUTONOMY_NOTE_ID: SWEEP_AGENT_ACTIONS_SOURCE_AUTONOMY,
     SWEEP_AGENT_ACTIONS_EMPTY_NOTE_ID: SWEEP_AGENT_ACTIONS_SOURCE_EMPTY_ORG,
+    SWEEP_AGENTIC_SOURCE_ID: SWEEP_AGENTIC_GRAPH_SOURCE,
 }
 
 SWEEP_GRAPH_ATTACHMENTS = {
@@ -1118,6 +1173,8 @@ def _build_fixture() -> dict:
     entries = dict(SWEEP_SESSION_ENTRIES)
     # Add dispatch run entries keyed by run dir name (for dispatch tail)
     entries["auto-sweep-b2-20260327-120000"] = SWEEP_DISPATCH_ENTRIES
+    # Agentic run: tail key == run_id == container_name
+    entries[SWEEP_DISPATCH_RUN_AGENTIC["id"]] = SWEEP_AGENTIC_DISPATCH_ENTRIES
     return {
         "active_sessions": SWEEP_SESSIONS,
         "session_entries": entries,
@@ -4937,10 +4994,14 @@ DISPATCH_KIND_BADGE_CHECKS = """
         ? (agenticBadges[0].textContent || '').trim()
         : '';
 
-    // Locate the agentic card by id-bearing href; assert NO P-badge inside.
-    var agenticCard = document.querySelector(
-        'a[href*="agentic-update-summary-20260428-100200"]'
+    // Locate the agentic card by walking up from the kind-badge element
+    // to its containing anchor. Post auto-gh2iv the anchor's href routes
+    // to /graph/<agentic_source_id>, so an href-substring lookup keyed
+    // on the run_id no longer matches.
+    var agenticBadgeForCard = document.querySelector(
+        '[data-testid="kind-badge-agentic"]'
     );
+    var agenticCard = agenticBadgeForCard ? agenticBadgeForCard.closest('a') : null;
     r.has_agentic_card = !!agenticCard;
     if (agenticCard) {
         var pBadge = null;
@@ -5037,3 +5098,138 @@ class TestDispatchAgenticKindBadge:
         assert c.get("no_jinja"), (
             "Raw Jinja template syntax visible on dispatch page"
         )
+
+
+# ── /dispatch agentic observability (auto-gh2iv) ──────────────────────
+#
+# Companion to TestDispatchAgenticKindBadge. The kind-badge tests assert
+# that the badge renders. THIS class asserts the rest of the agentic
+# session-observability surface: row routes to /graph/<agentic_source_id>,
+# Live Trace returns JSONL turns for the run, and /api/graph/<id>
+# returns the appended turns under the agentic source.
+
+DISPATCH_AGENTIC_ROUTING_CHECKS = """
+    // Locate the agentic dispatch card by walking up from its kind badge —
+    // the anchor's href is /graph/<agentic_source_id>, so we can't query
+    // by run_id substring on href.
+    var badge = document.querySelector('[data-testid="kind-badge-agentic"]');
+    var agenticCard = badge ? badge.closest('a') : null;
+    r.found_card = !!agenticCard;
+    r.card_href = agenticCard ? agenticCard.getAttribute('href') : '';
+    // The agentic href must NOT be /bead/... (would route to a 404 page).
+    r.routes_to_graph = !!(agenticCard && agenticCard.getAttribute('href') &&
+        agenticCard.getAttribute('href').indexOf('/graph/') === 0);
+    r.routes_to_bead = !!(agenticCard && agenticCard.getAttribute('href') &&
+        agenticCard.getAttribute('href').indexOf('/bead/') === 0);
+"""
+
+
+class TestAgenticDispatchObservability:
+    """L2.B: agentic dispatch session is observable end-to-end (auto-gh2iv).
+
+    Stack of four observability assertions:
+      1. /dispatch row click routes to /graph/<agentic_source_id> (not /bead/...).
+      2. /api/dispatch/tail/<run_id> returns the run's JSONL turns.
+      3. /api/graph/<agentic_source_id> renders nonzero entries.
+      4. _render_agent_action_prompt fails loudly on undefined placeholders.
+
+    The dispatch-status-transition assertion lives at the unit level (it
+    queries dispatch.db directly, doesn't need a browser); see
+    test_dispatch_db_agentic_completion.py for that path.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check(
+            "/dispatch", DISPATCH_AGENTIC_ROUTING_CHECKS, wait_ms=1000,
+        )
+        request.cls._checks = result
+        request.cls._sweep_url = browser["url"]
+
+    def test_dispatch_row_routes_to_agentic_source(self):
+        """Click target is /graph/<agentic_source_id>, NOT /bead/<...>."""
+        c = self._checks
+        assert c.get("found_card"), (
+            "Agentic dispatch card not found in DOM (id-bearing href)"
+        )
+        assert c.get("routes_to_graph"), (
+            f"Agentic row href must start with /graph/, got "
+            f"{c.get('card_href')!r}"
+        )
+        assert not c.get("routes_to_bead"), (
+            f"Agentic row href must NOT route to /bead/<...>; got "
+            f"{c.get('card_href')!r} (would land on a 404)"
+        )
+        assert SWEEP_AGENTIC_SOURCE_ID in c.get("card_href", ""), (
+            f"Agentic row href should embed the agentic_source_id; got "
+            f"{c.get('card_href')!r}"
+        )
+
+    def test_live_trace_shows_jsonl_turns(self):
+        """/api/dispatch/tail/<run_id> returns the seeded JSONL entries."""
+        import urllib.request as _urllib_req
+        run_id = SWEEP_DISPATCH_RUN_AGENTIC["id"]
+        url = f"{self._sweep_url}/api/dispatch/tail/{run_id}"
+        with _urllib_req.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        entries = data.get("entries") or []
+        assert len(entries) >= 1, (
+            f"/api/dispatch/tail/{run_id} returned no entries; got {data!r}"
+        )
+        # Sanity-check that one of the seeded payloads survives the round trip.
+        joined = " ".join(
+            (e.get("content") or "") for e in entries if isinstance(e, dict)
+        )
+        assert "Title set" in joined or "Update Title" in joined, (
+            f"Expected seeded JSONL content in tail entries; got {entries!r}"
+        )
+
+    def test_agentic_source_renders_turns_after_ingest(self):
+        """/api/graph/<id> returns the ingested turns for the agentic source."""
+        import urllib.request as _urllib_req
+        url = f"{self._sweep_url}/api/graph/{SWEEP_AGENTIC_SOURCE_ID}"
+        with _urllib_req.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        entries = data.get("entries") or []
+        assert len(entries) >= 1, (
+            f"/api/graph/{SWEEP_AGENTIC_SOURCE_ID} returned 0 entries; got "
+            f"{data!r} — ingest must append turns to the agentic source row"
+        )
+
+    def test_prompt_renderer_raises_on_undefined_placeholder(self):
+        """Direct unit-style test: undefined placeholder → ValueError."""
+        from tools.dashboard.server import _render_agent_action_prompt
+        bad_template = (
+            "Hello {asset_id}, missing {bogus_field}"
+        )
+        with pytest.raises(ValueError, match="bogus_field"):
+            _render_agent_action_prompt(
+                bad_template,
+                asset_id="x",
+                page_context={},
+                dispatched_by_session="",
+                member_key="k",
+            )
+
+    def test_prompt_renderer_accepts_known_placeholders(self):
+        """Known placeholders render without error and substitute values."""
+        from tools.dashboard.server import _render_agent_action_prompt
+        good_template = (
+            "asset={asset_id} title={asset_title} "
+            "short={asset_short_description}"
+        )
+        out = _render_agent_action_prompt(
+            good_template,
+            asset_id="abc-123",
+            page_context={
+                "asset_title": "Hello",
+                "asset_short_description": "A short blurb",
+            },
+            dispatched_by_session="auto-test",
+            member_key="note.update-summary",
+        )
+        assert "asset=abc-123" in out
+        assert "title=Hello" in out
+        assert "short=A short blurb" in out
+        # No stray literal braces from a missed substitution.
+        assert "{asset_short_description}" not in out
