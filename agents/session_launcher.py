@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -582,17 +583,20 @@ def launch_session(
             if resume_uuid:
                 cmd += ["--resume", resume_uuid]
         else:
-            if resume_uuid:
-                print(
-                    f"  ERROR: Codex resume is not implemented yet for '{name}'",
-                    file=sys.stderr,
-                )
-                return None
             codex_args = [
                 "codex",
                 "--no-alt-screen",
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
+            if resume_uuid:
+                # Dashboard stores the rollout filename stem
+                # (rollout-YYYY-MM-DDTHH-MM-SS-<uuid>) as session_uuid for
+                # codex sessions; codex resume only accepts the canonical UUID.
+                m = re.search(
+                    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+                    resume_uuid,
+                )
+                codex_args += ["resume", m.group(1) if m else resume_uuid]
             if privileged:
                 cmd += [image, *codex_args]
             else:
