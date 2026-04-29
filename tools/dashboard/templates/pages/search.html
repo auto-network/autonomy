@@ -360,6 +360,20 @@
         <span class="sp-filter-chip-caret">▾</span>
       </button>
 
+      <!-- Sort chip (Round 7k) — toggles between Relevance (BM25) and
+           Recent (created_at DESC). URL is the source of truth via
+           ?order=recent. The chip mirrors the State chip's pattern
+           (filter chip + dropdown) so the row reads as a coherent
+           filter strip. -->
+      <button class="sp-filter-chip"
+              data-testid="sp-order-chip"
+              @click.stop="toggleOrderDropdown()"
+              title="Sort results by relevance or recency">
+        <span class="sp-filter-chip-label">Sort:</span>
+        <span class="sp-filter-chip-value" x-text="orderChipLabel"></span>
+        <span class="sp-filter-chip-caret">▾</span>
+      </button>
+
       <!-- Org dropdown panel (open state) -->
       <div class="sp-org-dropdown"
            data-testid="sp-org-dropdown"
@@ -413,6 +427,25 @@
                       :class="(i <= opt.bars ? 'sp-state-option-bar-filled ' : '') + 'sp-state-h' + i"></span>
               </template>
             </span>
+            <span x-text="opt.label"></span>
+            <span class="sp-state-option-hint" x-text="opt.hint"></span>
+          </button>
+        </template>
+      </div>
+
+      <!-- Sort dropdown panel (open state). Mirrors the State dropdown
+           pattern; ``data-order-key`` lets the L2.B sweep address each
+           option deterministically. -->
+      <div class="sp-state-dropdown"
+           data-testid="sp-order-dropdown"
+           x-show="orderDropdownOpen"
+           @click.outside="orderDropdownOpen = false"
+           x-cloak>
+        <template x-for="opt in orderOptions" :key="opt.key">
+          <button class="sp-org-option"
+                  :data-order-key="opt.key"
+                  :class="selectedOrder === opt.key ? 'sp-org-option-selected' : ''"
+                  @click="pickOrder(opt.key)">
             <span x-text="opt.label"></span>
             <span class="sp-state-option-hint" x-text="opt.hint"></span>
           </button>
@@ -474,13 +507,21 @@
         <a :href="'/graph/' + (r.source_id || r.id).slice(0, 12)"
            @click.prevent="navigateTo('/graph/' + (r.source_id || r.id).slice(0, 12))"
            class="sp-source-card"
-           :data-source-type="r.source_type || ''">
-          <div class="sp-accent-rail" :class="railClass(r.source_type)"></div>
+           :data-source-type="r.source_type || ''"
+           :data-session-type="rowSessionType(r) || ''"
+           :data-chip-key="rowChipKey(r)">
+          <div class="sp-accent-rail" :class="railClass(rowPillKey(r))"></div>
           <div class="sp-card-body">
-            <!-- Row 1: type pill + org glyph + match count -->
+            <!-- Row 1: type pill + org glyph + match count.
+                 Round 7k: the badge reads off the chip key (which folds
+                 ``metadata.session_type`` into Sessions vs Dispatch)
+                 rather than the raw ``source_type`` — so a bead-driven
+                 session shows as orange "Dispatch", an interactive
+                 session shows as green "Session", and other source
+                 types keep their existing colors. -->
             <div class="sp-card-meta">
-              <span class="sp-type-pill" :class="pillClass(r.source_type)"
-                    x-text="typeLabel(r.source_type)"></span>
+              <span class="sp-type-pill" :class="pillClass(rowPillKey(r))"
+                    x-text="typeLabel(rowChipKey(r))"></span>
               <template x-if="r.org">
                 <span class="sc-org"
                       :style="r.org.favicon ? '' : `background:${r.org.color}`"

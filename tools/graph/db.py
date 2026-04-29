@@ -961,6 +961,8 @@ class GraphDB:
 
     _DEFAULT_EXCLUDED_SOURCE_TYPES: tuple[str, ...] = ("agentic",)
 
+    SEARCH_VALID_ORDERS: tuple[str, ...] = ("relevance", "recent")
+
     def _build_excluded_types_clause(
         self, excluded_source_types: list[str] | None
     ) -> tuple[str, list[str]]:
@@ -979,11 +981,39 @@ class GraphDB:
         placeholders = ",".join("?" * len(excluded))
         return f" AND s.type NOT IN ({placeholders})", excluded
 
+    @staticmethod
+    def _build_session_type_clause(
+        session_type: list[str] | None, *, alias: str = "s",
+    ) -> tuple[str, list[str]]:
+        """Build a strict ``metadata.session_type IN (...)`` predicate.
+
+        ``session_type`` semantics:
+          - ``None``: no filter applied; rows with NULL session_type are kept.
+          - ``[]``: emit a contradiction (``AND 0``) so the query returns
+            zero rows. Callers wanting "no filter" must pass ``None``.
+          - ``[...]``: ``json_extract(metadata, '$.session_type') IN (...)``.
+            ``IN`` is NULL-safe in SQL: NULL never matches any list, so rows
+            without session_type are intentionally invisible — that contract
+            is pinned in the search-order/session_type unit tests.
+        """
+        if session_type is None:
+            return "", []
+        if not session_type:
+            return " AND 0", []
+        placeholders = ",".join("?" * len(session_type))
+        clause = (
+            f" AND json_extract({alias}.metadata, '$.session_type') "
+            f"IN ({placeholders})"
+        )
+        return clause, list(session_type)
+
     def search(self, query: str, limit: int = 20, project: str | None = None, or_mode: bool = False, tag: str | None = None,
                states: list[str] | None = None, include_raw: bool = False,
                session_source_ids: list[str] | None = None,
                session_author_pattern: str | None = None,
-               excluded_source_types: list[str] | None = None) -> list[dict]:
+               excluded_source_types: list[str] | None = None,
+               order: str = "relevance",
+               session_type: list[str] | None = None) -> list[dict]:
         """Full-text search across thoughts and derivations. Optionally filter by project.
 
         If *query* looks like a hex source ID (6+ hex chars), resolves it
@@ -993,7 +1023,21 @@ class GraphDB:
         ``excluded_source_types`` defaults to ``['agentic']`` — auxiliary
         agent-action rows are kept out of the global search surface. Pass
         ``[]`` to disable the filter entirely.
+
+        ``order`` selects the result ordering — ``'relevance'`` (default)
+        ranks by FTS BM25 + boosts; ``'recent'`` orders by
+        ``source.created_at DESC``. Any other value raises ``ValueError``.
+
+        ``session_type`` filters strictly on ``metadata.session_type``: rows
+        whose JSON ``session_type`` is NULL or absent are NEVER returned
+        when the filter is active. ``None`` disables the filter; ``[]``
+        returns zero rows.
         """
+        if order not in self.SEARCH_VALID_ORDERS:
+            raise ValueError(
+                f"unknown search order {order!r}; "
+                f"expected one of {self.SEARCH_VALID_ORDERS}"
+            )
         if _is_source_id(query):
             # Explicit ID lookup — user asked for this specific source, do not filter by state.
             return self._search_source_id(
@@ -1015,6 +1059,17 @@ class GraphDB:
         )
 
         excl_clause, excl_params = self._build_excluded_types_clause(excluded_source_types)
+        st_clause, st_params = self._build_session_type_clause(session_type)
+
+        # ``order='recent'`` swaps the per-query ORDER BY to source.created_at
+        # DESC. The post-process tag-overlap boost applies only under the
+        # default 'relevance' ordering — boosting a recency feed would defeat
+        # the purpose of the toggle. ``rank`` is still selected so callers
+        # that inspect it under recency see the underlying BM25 score.
+        order_by_sql = (
+            "s.created_at DESC, rank"
+            if order == "recent" else "rank"
+        )
 
         if project:
             # Project-scoped search
@@ -1030,11 +1085,11 @@ class GraphDB:
                           (rank + ?) as rank
                    FROM sources_fts fts
                    JOIN sources s ON s.rowid = fts.rowid
-                   WHERE sources_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}
-                   ORDER BY rank
+                   WHERE sources_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}{st_clause}
+                   ORDER BY {order_by_sql}
                    LIMIT ?""",
                 (SEARCH_TITLE_BOOST, fts_query, project,
-                 *tag_params, *state_params, *excl_params, limit),
+                 *tag_params, *state_params, *excl_params, *st_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -1050,10 +1105,11 @@ class GraphDB:
                    FROM thoughts_fts fts
                    JOIN thoughts t ON t.rowid = fts.rowid
                    JOIN sources s ON s.id = t.source_id
-                   WHERE thoughts_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}
-                   ORDER BY rank
+                   WHERE thoughts_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}{st_clause}
+                   ORDER BY {order_by_sql}
                    LIMIT ?""",
-                (fts_query, project, *tag_params, *state_params, *excl_params, limit),
+                (fts_query, project,
+                 *tag_params, *state_params, *excl_params, *st_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -1069,10 +1125,11 @@ class GraphDB:
                    FROM derivations_fts fts
                    JOIN derivations d ON d.rowid = fts.rowid
                    JOIN sources s ON s.id = d.source_id
-                   WHERE derivations_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}
-                   ORDER BY rank
+                   WHERE derivations_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}{st_clause}
+                   ORDER BY {order_by_sql}
                    LIMIT ?""",
-                (fts_query, project, *tag_params, *state_params, *excl_params, limit),
+                (fts_query, project,
+                 *tag_params, *state_params, *excl_params, *st_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
         else:
@@ -1089,11 +1146,11 @@ class GraphDB:
                           (rank + ?) as rank
                    FROM sources_fts fts
                    JOIN sources s ON s.rowid = fts.rowid
-                   WHERE sources_fts MATCH ?{tag_clause}{state_clause}{excl_clause}
-                   ORDER BY rank
+                   WHERE sources_fts MATCH ?{tag_clause}{state_clause}{excl_clause}{st_clause}
+                   ORDER BY {order_by_sql}
                    LIMIT ?""",
                 (SEARCH_TITLE_BOOST, fts_query,
-                 *tag_params, *state_params, *excl_params, limit),
+                 *tag_params, *state_params, *excl_params, *st_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -1109,10 +1166,11 @@ class GraphDB:
                    FROM thoughts_fts fts
                    JOIN thoughts t ON t.rowid = fts.rowid
                    JOIN sources s ON s.id = t.source_id
-                   WHERE thoughts_fts MATCH ?{tag_clause}{state_clause}{excl_clause}
-                   ORDER BY rank
+                   WHERE thoughts_fts MATCH ?{tag_clause}{state_clause}{excl_clause}{st_clause}
+                   ORDER BY {order_by_sql}
                    LIMIT ?""",
-                (fts_query, *tag_params, *state_params, *excl_params, limit),
+                (fts_query,
+                 *tag_params, *state_params, *excl_params, *st_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -1128,10 +1186,11 @@ class GraphDB:
                    FROM derivations_fts fts
                    JOIN derivations d ON d.rowid = fts.rowid
                    JOIN sources s ON s.id = d.source_id
-                   WHERE derivations_fts MATCH ?{tag_clause}{state_clause}{excl_clause}
-                   ORDER BY rank
+                   WHERE derivations_fts MATCH ?{tag_clause}{state_clause}{excl_clause}{st_clause}
+                   ORDER BY {order_by_sql}
                    LIMIT ?""",
-                (fts_query, *tag_params, *state_params, *excl_params, limit),
+                (fts_query,
+                 *tag_params, *state_params, *excl_params, *st_params, limit),
             ).fetchall()
             results.extend(dict(r) for r in rows)
 
@@ -1139,32 +1198,44 @@ class GraphDB:
         # navigational tags get a small additional boost (capped). Lets a
         # search for "pitfall failures" surface pitfall-tagged notes above
         # equally-ranked rows that just happen to mention the words.
-        query_tokens = {t.lower() for t in query.split() if len(t) > 2}
-        if query_tokens:
-            for r in results:
-                meta = r.get("source_metadata")
-                if isinstance(meta, str):
-                    try:
-                        meta = json.loads(meta)
-                    except (json.JSONDecodeError, TypeError):
-                        meta = {}
-                if not isinstance(meta, dict):
-                    continue
-                tags = [
-                    t.lower() for t in (meta.get("tags") or [])
-                    if isinstance(t, str)
-                ]
-                overlap = len(query_tokens & set(tags))
-                if overlap > 0:
-                    boost = max(
-                        SEARCH_TAG_OVERLAP_BOOST * overlap,
-                        SEARCH_TAG_OVERLAP_CAP,
-                    )
-                    cur = r.get("rank") or 0
-                    r["rank"] = cur + boost
+        # Skipped under ``order='recent'`` — boosting a recency feed would
+        # blunt the toggle's intent.
+        if order == "relevance":
+            query_tokens = {t.lower() for t in query.split() if len(t) > 2}
+            if query_tokens:
+                for r in results:
+                    meta = r.get("source_metadata")
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta)
+                        except (json.JSONDecodeError, TypeError):
+                            meta = {}
+                    if not isinstance(meta, dict):
+                        continue
+                    tags = [
+                        t.lower() for t in (meta.get("tags") or [])
+                        if isinstance(t, str)
+                    ]
+                    overlap = len(query_tokens & set(tags))
+                    if overlap > 0:
+                        boost = max(
+                            SEARCH_TAG_OVERLAP_BOOST * overlap,
+                            SEARCH_TAG_OVERLAP_CAP,
+                        )
+                        cur = r.get("rank") or 0
+                        r["rank"] = cur + boost
 
-        # Sort by rank
-        results.sort(key=lambda r: r.get("rank", 0))
+        if order == "recent":
+            # Stable-sort by source.created_at DESC. Fall back to empty
+            # string so rows with NULL created_at sort last.
+            results.sort(
+                key=lambda r: r.get("source_created_at") or "",
+                reverse=True,
+            )
+        else:
+            # Default: relevance — sort by rank ascending (BM25 ranks are
+            # negative, so the strongest hits are most-negative).
+            results.sort(key=lambda r: r.get("rank", 0))
         return results[:limit]
 
     def _search_source_id(self, query: str, limit: int = 20, project: str | None = None, tag: str | None = None,

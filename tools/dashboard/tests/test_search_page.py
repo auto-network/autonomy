@@ -169,15 +169,18 @@ def test_search_page_multi_hit_renders_excerpt_list(test_app):
 
 
 def test_search_page_accent_rail_by_source_type(test_app):
-    """The accent rail class derives from ``r.source_type`` — the legacy
+    """The accent rail class derives from a session_type-aware key —
+    Round 7k folded ``rowPillKey()`` over the raw ``source_type`` so a
+    bead-driven session paints the orange "dispatch" rail. The legacy
     template painted from ``r.result_type`` and got every card the same
     yellow rail. Guard against regressing to result_type."""
     with TestClient(test_app) as client:
         html = client.get("/pages/search").text
 
-    # The current template binds the accent rail's class function to source_type.
-    assert 'railClass(r.source_type)' in html
-    # And does NOT use result_type for the rail (legacy behavior).
+    # The current template binds the accent rail's class function to the
+    # row pill key (session_type-aware) — NOT the raw source_type and NOT
+    # the result_type.
+    assert 'railClass(rowPillKey(r))' in html
     assert 'railClass(r.result_type)' not in html
     assert 'typeColor(r.result_type)' not in html
 
@@ -228,7 +231,8 @@ def test_search_page_mock_mode_groups_fixture_rows(test_app):
         with TestClient(test_app) as client:
             with patch.object(
                 server.dao_beads, "search",
-                staticmethod(lambda q, limit=20, project=None: rows),
+                staticmethod(lambda q, limit=20, project=None,
+                             order="relevance", session_type=None: rows),
                 create=True,
             ):
                 r = client.get("/api/search?q=mock&group=1")
