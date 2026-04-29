@@ -11,12 +11,31 @@
     musing: 'Musing',
   };
 
-  // Chip rail order — fixed left-to-right after the All chip.
-  var CHIP_ORDER = ['note', 'session', 'agent-run', 'docs', 'conversation', 'status', 'musing'];
+  // Round 7k pill rework. The two row-level chips that used to discriminate
+  // by ``source_type`` (Sessions vs "Agent runs") now read from
+  // ``metadata.session_type`` instead. ``source.type='agent-run'`` no
+  // longer drives a pill — those 87 subagent-trace rows can still be
+  // searched but lose their dedicated chip, which was confusing because
+  // it mixed traces with dispatch runs.
+  //
+  //   Sessions → metadata.session_type IN ('terminal','chatwith')
+  //   Dispatch → metadata.session_type IN ('dispatch','librarian','agentic')
+  //
+  // Strict NULL semantics: rows whose session_type is null/missing match
+  // NEITHER pill. ~615 such rows exist in autonomy.db (separate
+  // data-hygiene bead) — they remain visible under "All".
+  var SESSION_TYPES_INTERACTIVE = ['terminal', 'chatwith'];
+  var SESSION_TYPES_DISPATCH = ['dispatch', 'librarian', 'agentic'];
+
+  // Chip rail order — fixed left-to-right after the All chip. ``session``
+  // and ``dispatch`` are now session_type-derived virtual categories,
+  // not source_type values. The remaining keys still map directly to
+  // ``source_type`` (note/docs/conversation/status/musing).
+  var CHIP_ORDER = ['note', 'session', 'dispatch', 'docs', 'conversation', 'status', 'musing'];
   var CHIP_LABELS = {
     note: 'Notes',
     session: 'Sessions',
-    'agent-run': 'Agent runs',
+    dispatch: 'Dispatch',
     docs: 'Docs',
     conversation: 'Conversations',
     status: 'Status',
@@ -47,9 +66,54 @@
 
   var DEFAULT_STATE_KEY = 'raw';
 
+  // Sort chip — toggles between Relevance (BM25) and Recent (created_at
+  // DESC). URL is the source of truth: ?order=recent. Default is
+  // Relevance (no ?order= written).
+  var ORDER_OPTIONS = [
+    { key: 'relevance', label: 'Relevance', hint: 'BM25' },
+    { key: 'recent',    label: 'Recent',    hint: 'newest first' },
+  ];
+  var DEFAULT_ORDER_KEY = 'relevance';
+
   // Debounce window for global-search input → refetch on /search. Matches
   // the brief: "300ms".
   var GLOBAL_INPUT_DEBOUNCE_MS = 300;
+
+  // Map a row's ``source_type`` + ``session_type`` to the pill key used
+  // by the chip rail. Round 7k strict semantics:
+  //   * session_type IN ('terminal','chatwith') → 'session' (interactive)
+  //   * session_type IN ('dispatch','librarian','agentic') → 'dispatch'
+  //   * Session-shaped source_types (session/agent-run/agentic) WITHOUT
+  //     a metadata.session_type are bucketed as 'unknown' — invisible
+  //     to both pills (the strict NULL contract) but still visible
+  //     under "All". Pinned this way so the data-hygiene bead for the
+  //     ~615 NULL-session_type rows in autonomy.db can land
+  //     independently without changing pill behaviour.
+  //   * Everything else falls back to source_type (note/docs/etc.).
+  function rowChipKey(r) {
+    var st = (r && (r.session_type || _metaSessionType(r))) || null;
+    if (SESSION_TYPES_INTERACTIVE.indexOf(st) >= 0) return 'session';
+    if (SESSION_TYPES_DISPATCH.indexOf(st) >= 0) return 'dispatch';
+    var srcType = r && r.source_type;
+    if (srcType === 'session' || srcType === 'agent-run' ||
+        srcType === 'agentic') {
+      return 'unknown';
+    }
+    return srcType || 'unknown';
+  }
+
+  // Pull session_type out of a row's source_metadata (JSON string or dict).
+  function _metaSessionType(r) {
+    if (!r) return null;
+    var meta = r.source_metadata;
+    if (typeof meta === 'string') {
+      try { meta = JSON.parse(meta); } catch (_) { return null; }
+    }
+    if (meta && typeof meta === 'object' && typeof meta.session_type === 'string') {
+      return meta.session_type;
+    }
+    return null;
+  }
 
   document.addEventListener('alpine:init', () => {
     Alpine.data('searchPage', () => ({
@@ -67,6 +131,10 @@
       selectedState: DEFAULT_STATE_KEY,
       stateDropdownOpen: false,
       stateOptions: STATE_OPTIONS,
+      // Sort chip — mirrors ?order= URL param. Default is Relevance.
+      selectedOrder: DEFAULT_ORDER_KEY,
+      orderDropdownOpen: false,
+      orderOptions: ORDER_OPTIONS,
       _refetchTimer: null,
 
       init() {
@@ -80,6 +148,11 @@
         var stateParam = params.get('state') || '';
         var match = STATE_OPTIONS.find(o => o.key === stateParam);
         this.selectedState = match ? match.key : DEFAULT_STATE_KEY;
+        // Sort chip — ?order=recent flips to recency. Anything else
+        // (missing, typo, legacy ?order=relevance) lands on the default.
+        var orderParam = params.get('order') || '';
+        var orderMatch = ORDER_OPTIONS.find(o => o.key === orderParam);
+        this.selectedOrder = orderMatch ? orderMatch.key : DEFAULT_ORDER_KEY;
         // Sync the global header input with our query so it isn't blank
         // when the page lands via deep link.
         this._syncGlobalInput();
@@ -141,6 +214,7 @@
 
       toggleOrgDropdown() {
         this.stateDropdownOpen = false;
+        this.orderDropdownOpen = false;
         this.orgDropdownOpen = !this.orgDropdownOpen;
       },
 
@@ -172,6 +246,7 @@
 
       toggleStateDropdown() {
         this.orgDropdownOpen = false;
+        this.orderDropdownOpen = false;
         this.stateDropdownOpen = !this.stateDropdownOpen;
       },
 
@@ -180,6 +255,31 @@
         var resolved = this._stateOption(key).key;
         if (resolved === this.selectedState) return;
         this.selectedState = resolved;
+        this._writeUrl();
+        if (this.query) this._refetch();
+      },
+
+      // ── Sort chip + dropdown ───────────────────────────────────────
+      _orderOption(key) {
+        return ORDER_OPTIONS.find(o => o.key === (key || '')) ||
+               ORDER_OPTIONS.find(o => o.key === DEFAULT_ORDER_KEY);
+      },
+
+      get orderChipLabel() {
+        return this._orderOption(this.selectedOrder).label;
+      },
+
+      toggleOrderDropdown() {
+        this.orgDropdownOpen = false;
+        this.stateDropdownOpen = false;
+        this.orderDropdownOpen = !this.orderDropdownOpen;
+      },
+
+      pickOrder(key) {
+        this.orderDropdownOpen = false;
+        var resolved = this._orderOption(key).key;
+        if (resolved === this.selectedOrder) return;
+        this.selectedOrder = resolved;
         this._writeUrl();
         if (this.query) this._refetch();
       },
@@ -242,6 +342,11 @@
         } else {
           url.searchParams.delete('state');
         }
+        if (this.selectedOrder && this.selectedOrder !== DEFAULT_ORDER_KEY) {
+          url.searchParams.set('order', this.selectedOrder);
+        } else {
+          url.searchParams.delete('order');
+        }
         window.history.replaceState({}, '', url.toString());
       },
 
@@ -270,6 +375,9 @@
         } else if (opt.states && opt.states.length) {
           url += '&states=' + encodeURIComponent(opt.states.join(','));
         }
+        if (this.selectedOrder && this.selectedOrder !== DEFAULT_ORDER_KEY) {
+          url += '&order=' + encodeURIComponent(this.selectedOrder);
+        }
         var headers = {};
         if (this.selectedOrg) headers['X-Graph-Org'] = this.selectedOrg;
         fetch(url, { headers: headers })
@@ -287,14 +395,27 @@
       },
 
       // ── chip filter ────────────────────────────────────────────────
+      // Surface session_type for renderers + chip filtering. Reads first
+      // from the row's top-level field, then from source_metadata JSON.
+      rowSessionType(r) {
+        if (!r) return null;
+        if (typeof r.session_type === 'string') return r.session_type;
+        return _metaSessionType(r);
+      },
+
+      // The pill key for a row — drives both chipTypes counts and the
+      // active-pill filter. Round 7k: session_type-driven categories
+      // override raw source_type for sessions / dispatch.
+      rowChipKey(r) { return rowChipKey(r); },
+
       get chipTypes() {
         // Build counts from the result set in canonical order, but only
-        // include chips for types actually present (plus the always-on
+        // include chips for keys actually present (plus the always-on
         // canonical CHIP_ORDER members so the rail looks like the design).
         var counts = {};
         for (var i = 0; i < this.results.length; i++) {
-          var t = this.results[i].source_type || 'unknown';
-          counts[t] = (counts[t] || 0) + 1;
+          var key = rowChipKey(this.results[i]);
+          counts[key] = (counts[key] || 0) + 1;
         }
         var out = [];
         var seen = {};
@@ -303,9 +424,11 @@
           out.push({ key: key, label: CHIP_LABELS[key], count: counts[key] || 0 });
           seen[key] = true;
         }
-        // Append any other source_types we saw that aren't in CHIP_ORDER.
+        // Append any other chip keys we saw that aren't in CHIP_ORDER
+        // (e.g. legacy 'agent-run' rows still surface as their own bucket
+        // under "All", but only if present — no permanent chip).
         Object.keys(counts).forEach(k => {
-          if (!seen[k]) {
+          if (!seen[k] && k !== 'unknown') {
             out.push({ key: k, label: this._titleCase(k), count: counts[k] });
           }
         });
@@ -314,7 +437,7 @@
 
       get filteredResults() {
         if (this.activeType === 'all') return this.results;
-        return this.results.filter(r => (r.source_type || 'unknown') === this.activeType);
+        return this.results.filter(r => rowChipKey(r) === this.activeType);
       },
 
       get totalMatches() {
@@ -328,7 +451,25 @@
       setType(t) { this.activeType = t; },
 
       // ── rendering helpers ──────────────────────────────────────────
-      typeLabel(t) { return TYPE_LABELS[t] || (t ? this._titleCase(t) : 'Note'); },
+      typeLabel(t) {
+        // Per-row badge label. Round 7k: session_type-derived rows show
+        // "Session" or "Dispatch" instead of the raw source_type.
+        if (t === 'session') return 'Session';
+        if (t === 'dispatch') return 'Dispatch';
+        return TYPE_LABELS[t] || (t ? this._titleCase(t) : 'Note');
+      },
+
+      // Compute the per-row pill key (for the badge under the title +
+      // the accent rail). Sessions get green; dispatch (incl. legacy
+      // agent-run rows that retain dispatch session_type via metadata)
+      // gets the orange "agent-run" hue for visual continuity with the
+      // pre-Round-7k color (note 24).
+      rowPillKey(r) {
+        var key = rowChipKey(r);
+        if (key === 'dispatch') return 'agent-run';
+        if (key === 'session') return 'session';
+        return r && r.source_type;
+      },
 
       railClass(t) {
         if (!t) return 'sp-rail-default';

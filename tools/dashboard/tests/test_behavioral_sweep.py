@@ -606,20 +606,25 @@ SWEEP_AGENTIC_GRAPH_SOURCE = {
 
 SWEEP_SEARCH_RESULTS_DASHBOARD = [
     # Multi-hit session: same source_id, two different turn_numbers.
+    # Round 7k: session_type='terminal' lands this row under the Sessions
+    # pill (interactive) — pre-Round-7k behaviour was source_type='session'
+    # alone, which mixed dispatched runs into the same bucket.
     {"id": "ssr-1", "source_id": "src-search-session-1",
      "source_title": "Dashboard search rework conversation",
      "source_type": "session", "result_type": "thought",
      "project": "autonomy", "platform": "claude-code",
      "turn_number": 12, "rank": -9.5,
      "content": "first dashboard turn excerpt — chip rail design",
-     "source_created_at": "2026-04-20T03:14:58Z"},
+     "source_created_at": "2026-04-20T03:14:58Z",
+     "session_type": "terminal"},
     {"id": "ssr-2", "source_id": "src-search-session-1",
      "source_title": "Dashboard search rework conversation",
      "source_type": "session", "result_type": "thought",
      "project": "autonomy", "platform": "claude-code",
      "turn_number": 47, "rank": -9.0,
      "content": "second dashboard turn excerpt — accent rail by source_type",
-     "source_created_at": "2026-04-20T03:14:58Z"},
+     "source_created_at": "2026-04-20T03:14:58Z",
+     "session_type": "terminal"},
     # Single-hit note (no turn).
     {"id": "ssr-3", "source_id": "src-search-note-1",
      "source_title": "pitfall: dashboard search regression",
@@ -628,14 +633,18 @@ SWEEP_SEARCH_RESULTS_DASHBOARD = [
      "turn_number": None, "rank": -7.0,
      "content": "Dashboard live-tail ingest masks org column",
      "source_created_at": "2026-04-14T22:10:02Z"},
-    # Single-hit agent run (with a turn).
+    # Round 7k: a dispatched session — source_type='session' but
+    # session_type='dispatch' so it lands under the new Dispatch pill,
+    # NOT under Sessions. (Pre-Round-7k this would have lived in the
+    # combined Sessions bucket.)
     {"id": "ssr-4", "source_id": "src-search-agent-1",
      "source_title": "Graph search: dashboard surface alignment",
-     "source_type": "agent-run", "result_type": "derivation",
+     "source_type": "session", "result_type": "derivation",
      "project": "autonomy", "platform": "claude-code",
      "turn_number": 17, "rank": -6.5,
      "content": "agent run dashboard turn excerpt",
-     "source_created_at": "2026-04-12T08:00:00Z"},
+     "source_created_at": "2026-04-12T08:00:00Z",
+     "session_type": "dispatch"},
     # Single-hit docs row.
     {"id": "ssr-5", "source_id": "src-search-docs-1",
      "source_title": "Dashboard search results & viewer brief",
@@ -644,6 +653,107 @@ SWEEP_SEARCH_RESULTS_DASHBOARD = [
      "turn_number": None, "rank": -6.0,
      "content": "iPhone-first design for the dashboard search results page",
      "source_created_at": "2026-03-23T10:00:00Z"},
+]
+
+
+# ── Round 7k pill semantics + sort chip fixture (auto-fsw6r) ─────────
+#
+# Distinct query token "pillsweep" so this set never collides with the
+# auto-qlfg1 dashboard / auto-kvka6 worktree fixtures already in the
+# behavioural sweep. Each row exercises a specific session_type so the
+# new TestSearchPillSemantics / TestSearchSortChip classes can address
+# them deterministically:
+#
+#   * terminal + chatwith → Sessions pill returns these
+#   * dispatch + librarian + agentic → Dispatch pill returns these
+#   * NULL session_type → invisible to both pills (strict contract)
+#   * source.type='agent-run' with no session_type → invisible too;
+#     proves the legacy "Agent runs" chip is gone
+#
+# Sort chip ordering is verifiable because the rows ship with widely
+# spread ``source_created_at`` timestamps. Under Relevance the row with
+# the strongest title boost (``rank=-50``) lands first; under Recent
+# the row with the most recent ``source_created_at`` wins.
+SWEEP_SEARCH_PILLSWEEP = [
+    # Interactive: terminal session — Sessions pill, mid-recent.
+    {"id": "psw-1", "source_id": "src-pillsweep-terminal",
+     "source_title": "pillsweep terminal session",
+     "source_type": "session", "result_type": "thought",
+     "project": "autonomy", "platform": "claude-code",
+     "turn_number": 4, "rank": -8.0,
+     "content": "pillsweep terminal turn body",
+     "source_created_at": "2026-04-25T12:00:00Z",
+     "session_type": "terminal"},
+    # Interactive: chatwith — Sessions pill, second-oldest.
+    {"id": "psw-2", "source_id": "src-pillsweep-chatwith",
+     "source_title": "pillsweep chatwith session",
+     "source_type": "session", "result_type": "thought",
+     "project": "autonomy", "platform": "local",
+     "turn_number": 1, "rank": -7.0,
+     "content": "pillsweep chatwith turn body",
+     "source_created_at": "2026-02-10T08:00:00Z",
+     "session_type": "chatwith"},
+    # Dispatched: dispatch — Dispatch pill, oldest.
+    {"id": "psw-3", "source_id": "src-pillsweep-dispatch",
+     "source_title": "pillsweep dispatch run",
+     "source_type": "session", "result_type": "thought",
+     "project": "autonomy", "platform": "claude-code",
+     "turn_number": 2, "rank": -6.0,
+     "content": "pillsweep dispatch turn body",
+     "source_created_at": "2026-01-05T03:00:00Z",
+     "session_type": "dispatch"},
+    # Dispatched: librarian — Dispatch pill, mid-old.
+    {"id": "psw-4", "source_id": "src-pillsweep-librarian",
+     "source_title": "pillsweep librarian run",
+     "source_type": "session", "result_type": "thought",
+     "project": "autonomy", "platform": "claude-code",
+     "turn_number": 1, "rank": -5.5,
+     "content": "pillsweep librarian turn body",
+     "source_created_at": "2026-03-12T09:30:00Z",
+     "session_type": "librarian"},
+    # Dispatched: agentic — Dispatch pill, second-most-recent.
+    {"id": "psw-5", "source_id": "src-pillsweep-agentic",
+     "source_title": "pillsweep agentic action",
+     "source_type": "agentic", "result_type": "source",
+     "project": "autonomy", "platform": "local",
+     "turn_number": None, "rank": -5.0,
+     "content": "pillsweep agentic turn body",
+     "source_created_at": "2026-04-28T14:00:00Z",
+     "session_type": "agentic"},
+    # NULL session_type — must be visible under "All" but invisible to
+    # both Sessions and Dispatch pills. Source-type 'session' so the
+    # "if it looks like a session, treat it as one" read-side fallback
+    # would have previously caught it — pinning that we rejected that
+    # fallback in Round 7k.
+    {"id": "psw-6", "source_id": "src-pillsweep-null",
+     "source_title": "pillsweep null sessiontype",
+     "source_type": "session", "result_type": "thought",
+     "project": "autonomy", "platform": "claude-code",
+     "turn_number": 1, "rank": -4.5,
+     "content": "pillsweep null turn body",
+     "source_created_at": "2026-04-29T00:00:00Z"},
+    # Title-boosted note — most title-relevant row, but old enough that
+    # the Recent ordering picks a different row first. Under Relevance
+    # this row wins on rank=-50; under Recent, the most-recent row
+    # (psw-6, NULL session_type) wins instead — proving the toggle has a
+    # visible effect.
+    {"id": "psw-7", "source_id": "src-pillsweep-note",
+     "source_title": "pillsweep ranking note",
+     "source_type": "note", "result_type": "source",
+     "project": "autonomy", "platform": "local",
+     "turn_number": None, "rank": -50.0,
+     "content": "pillsweep ranking note",
+     "source_created_at": "2026-02-01T00:00:00Z"},
+    # source.type='agent-run' with no session_type — the legacy
+    # "Agent runs" pill is GONE in Round 7k. Surfaces under "All" but
+    # never under Sessions or Dispatch.
+    {"id": "psw-8", "source_id": "src-pillsweep-legacy-agent",
+     "source_title": "pillsweep legacy agent run",
+     "source_type": "agent-run", "result_type": "thought",
+     "project": "autonomy", "platform": "claude-code",
+     "turn_number": 1, "rank": -4.0,
+     "content": "pillsweep legacy agent-run turn body",
+     "source_created_at": "2026-04-26T05:00:00Z"},
 ]
 
 
@@ -1208,10 +1318,16 @@ def _build_fixture() -> dict:
         "bead_deps": SWEEP_BEAD_DEPS,
         "graph_sources": SWEEP_GRAPH_SOURCES,
         "graph_attachments": SWEEP_GRAPH_ATTACHMENTS,
-        # Both fixtures coexist in the same list; the mock DAO substring-filters
-        # by query, so ?q=dashboard surfaces the auto-qlfg1 rows and
-        # ?q=worktree surfaces the auto-kvka6 ranking/disambiguator rows.
-        "search_results": SWEEP_SEARCH_RESULTS_DASHBOARD + SWEEP_SEARCH_RESULTS,
+        # All fixtures coexist in the same list; the mock DAO substring-
+        # filters by query, so:
+        #   ?q=dashboard  → SWEEP_SEARCH_RESULTS_DASHBOARD (auto-qlfg1)
+        #   ?q=worktree   → SWEEP_SEARCH_RESULTS (auto-kvka6 ranking)
+        #   ?q=pillsweep  → SWEEP_SEARCH_PILLSWEEP (auto-fsw6r pill / sort)
+        "search_results": (
+            SWEEP_SEARCH_RESULTS_DASHBOARD
+            + SWEEP_SEARCH_RESULTS
+            + SWEEP_SEARCH_PILLSWEEP
+        ),
         "settings": {
             "dashboard.agent-actions": {
                 "_orgs": {"autonomy": SWEEP_AGENT_ACTIONS},
@@ -4517,7 +4633,14 @@ class TestSearchPageBehavior:
         request.cls._checks = result
 
     def test_search_page_renders_chip_rail(self):
-        """Chip rail visible with All + the canonical type chips."""
+        """Chip rail visible with All + the canonical type chips.
+
+        Round 7k renamed "Agent runs" to "Dispatch" and reworked it to
+        select on ``metadata.session_type`` rather than
+        ``source.type='agent-run'``. The chip rail contract:
+        All + Notes + Sessions + Dispatch + Docs + Conversations + Status
+        + Musings (8 chips total). "Agent runs" must be gone.
+        """
         c = self._checks
         assert c.get("has_chip_rail"), "Chip rail container missing"
         labels = c.get("chip_labels") or []
@@ -4525,11 +4648,16 @@ class TestSearchPageBehavior:
         assert any(l.startswith("All") for l in labels), (
             f"Chip rail missing 'All' chip; got {labels!r}"
         )
-        for expected in ("Notes", "Sessions", "Agent runs",
+        for expected in ("Notes", "Sessions", "Dispatch",
                          "Docs", "Conversations", "Status", "Musings"):
             assert expected in labels, (
                 f"Chip rail missing {expected!r} chip; got {labels!r}"
             )
+        # The legacy "Agent runs" chip must not surface — Round 7k drops
+        # the source.type='agent-run' pill entirely.
+        assert "Agent runs" not in labels, (
+            f"Legacy 'Agent runs' chip still present; got {labels!r}"
+        )
 
     def test_search_page_chip_counts_match_results(self):
         """Sum of typed-chip counts equals the rendered card count.
@@ -4843,6 +4971,407 @@ class TestSearchChromePolish:
         assert pt <= 6, (
             f"Filter strip padding-top should be ≤ 6px after the polish, "
             f"got {pt}px"
+        )
+
+
+# ── Round 7k pill semantics + sort chip (auto-fsw6r) ──────────────────
+#
+# The bead reworks the chip rail so Sessions / Dispatch are derived from
+# ``metadata.session_type`` (not ``source.type``), drops the legacy
+# "Agent runs" pill, and adds a Relevance/Recent sort chip. This sweep
+# drives all three behaviours through Alpine state mutations + URL
+# inspection, mirroring TestSearchChromePolish's pattern.
+
+SEARCH_PILL_SEMANTICS_CHECKS = """(async () => {
+  var r = {};
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+  await sleep(900);  // initial fetch settles
+
+  var spRoot = document.querySelector('[x-data^="searchPage"]');
+  var spScope = spRoot && Alpine ? Alpine.$data(spRoot) : null;
+  r.has_alpine_root = !!spScope;
+  if (!spScope) return JSON.stringify(r);
+
+  // ── 1. Chip rail labels: "Agent runs" must be gone, Dispatch present
+  var rail = document.querySelector('[data-testid="sp-chip-rail"]');
+  var chipLabels = [];
+  if (rail) {
+    rail.querySelectorAll('.sp-chip').forEach(function(c) {
+      var labelSpan = c.querySelector('span:first-child');
+      var label = '';
+      if (labelSpan && labelSpan !== c.querySelector('.sp-chip-count')) {
+        label = labelSpan.textContent.trim();
+      } else {
+        var clone = c.cloneNode(true);
+        var cnt = clone.querySelector('.sp-chip-count');
+        if (cnt) cnt.remove();
+        label = clone.textContent.trim();
+      }
+      chipLabels.push(label);
+    });
+  }
+  r.chip_labels = chipLabels;
+
+  // Total result count under "All" — should be every pillsweep row.
+  r.all_card_count = (spScope.results || []).length;
+  r.all_titles = (spScope.results || []).map(function(x) {
+    return x.source_title || '';
+  });
+
+  // ── 2. Sessions pill activated → only terminal/chatwith rows remain
+  spScope.setType('session');
+  await sleep(60);
+  var filtered = spScope.filteredResults || [];
+  r.sessions_titles = filtered.map(function(x) { return x.source_title || ''; });
+  r.sessions_session_types = filtered.map(function(x) {
+    return spScope.rowSessionType(x);
+  });
+
+  // ── 3. Dispatch pill activated → dispatch/librarian/agentic only
+  spScope.setType('dispatch');
+  await sleep(60);
+  filtered = spScope.filteredResults || [];
+  r.dispatch_titles = filtered.map(function(x) { return x.source_title || ''; });
+  r.dispatch_session_types = filtered.map(function(x) {
+    return spScope.rowSessionType(x);
+  });
+
+  // ── 4. Per-row badges: drive from rowChipKey / typeLabel
+  spScope.setType('all');
+  await sleep(60);
+  var badges = (spScope.results || []).map(function(x) {
+    return {
+      title: x.source_title || '',
+      pill_key: spScope.rowPillKey(x),
+      label: spScope.typeLabel(spScope.rowChipKey(x)),
+      chip_key: spScope.rowChipKey(x),
+    };
+  });
+  r.badges = badges;
+
+  return JSON.stringify(r);
+})()"""
+
+
+class TestSearchPillSemantics:
+    """Round 7k: pill semantics — Sessions, Dispatch, NULL invisibility,
+    legacy 'Agent runs' chip removed.
+
+    Pill mapping:
+      Sessions → metadata.session_type IN ('terminal','chatwith')
+      Dispatch → metadata.session_type IN ('dispatch','librarian','agentic')
+
+    Strict NULL: rows whose session_type is null/missing are visible
+    under "All" but never under either pill — pinning the contract that
+    the data-hygiene bead for the ~615 NULL rows in autonomy.db can
+    land independently.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            "/search?q=pillsweep",
+            SEARCH_PILL_SEMANTICS_CHECKS,
+            wait_ms=200,
+        )
+        request.cls._checks = result
+
+    def test_chip_rail_drops_agent_runs(self):
+        """The legacy "Agent runs" chip is gone; "Dispatch" replaces it."""
+        c = self._checks
+        labels = c.get("chip_labels") or []
+        assert "Agent runs" not in labels, (
+            f"'Agent runs' chip still in rail; got {labels!r}"
+        )
+        assert "Dispatch" in labels, (
+            f"'Dispatch' chip missing from rail; got {labels!r}"
+        )
+        assert "Sessions" in labels, (
+            f"'Sessions' chip missing from rail; got {labels!r}"
+        )
+
+    def test_all_pill_includes_null_and_legacy_agent_run(self):
+        """Under "All", every fixture row is visible — including the
+        NULL-session_type and legacy ``source.type='agent-run'`` rows."""
+        c = self._checks
+        titles = c.get("all_titles") or []
+        # 8 rows, 8 distinct source_ids → 8 cards.
+        assert c.get("all_card_count") == 8, (
+            f"Expected 8 cards under All; got {c.get('all_card_count')}, "
+            f"titles={titles!r}"
+        )
+        assert "pillsweep null sessiontype" in titles, (
+            f"NULL-session_type row hidden from All; got titles={titles!r}"
+        )
+        assert "pillsweep legacy agent run" in titles, (
+            f"Legacy agent-run row hidden from All; got titles={titles!r}"
+        )
+
+    def test_sessions_pill_returns_interactive_only(self):
+        """Sessions pill: only terminal/chatwith rows pass."""
+        c = self._checks
+        titles = c.get("sessions_titles") or []
+        types = c.get("sessions_session_types") or []
+        assert set(types) <= {"terminal", "chatwith"}, (
+            f"Sessions pill leaked non-interactive session_type; "
+            f"got types={types!r}"
+        )
+        # Must contain BOTH our terminal and chatwith fixtures.
+        assert "pillsweep terminal session" in titles, (
+            f"Terminal session missing from Sessions pill; titles={titles!r}"
+        )
+        assert "pillsweep chatwith session" in titles, (
+            f"Chatwith session missing from Sessions pill; titles={titles!r}"
+        )
+        # NULL row + dispatch rows + legacy agent-run must be hidden.
+        assert "pillsweep null sessiontype" not in titles, (
+            f"NULL-session_type row leaked into Sessions pill; "
+            f"titles={titles!r}"
+        )
+        assert "pillsweep dispatch run" not in titles, (
+            f"Dispatch row leaked into Sessions pill; titles={titles!r}"
+        )
+        assert "pillsweep legacy agent run" not in titles, (
+            f"Legacy agent-run row leaked into Sessions pill; "
+            f"titles={titles!r}"
+        )
+
+    def test_dispatch_pill_returns_dispatched_only(self):
+        """Dispatch pill: only dispatch/librarian/agentic rows pass."""
+        c = self._checks
+        titles = c.get("dispatch_titles") or []
+        types = c.get("dispatch_session_types") or []
+        assert set(types) <= {"dispatch", "librarian", "agentic"}, (
+            f"Dispatch pill leaked non-dispatch session_type; "
+            f"got types={types!r}"
+        )
+        # Must contain ALL three of our dispatched fixtures.
+        for expected in ("pillsweep dispatch run", "pillsweep librarian run",
+                         "pillsweep agentic action"):
+            assert expected in titles, (
+                f"Dispatched row {expected!r} missing from Dispatch "
+                f"pill; titles={titles!r}"
+            )
+        # Interactive + NULL + legacy agent-run must be hidden.
+        assert "pillsweep terminal session" not in titles, (
+            f"Terminal row leaked into Dispatch pill; titles={titles!r}"
+        )
+        assert "pillsweep null sessiontype" not in titles, (
+            f"NULL-session_type row leaked into Dispatch pill; "
+            f"titles={titles!r}"
+        )
+        assert "pillsweep legacy agent run" not in titles, (
+            f"Legacy agent-run row leaked into Dispatch pill; "
+            f"titles={titles!r}"
+        )
+
+    def test_per_row_badges_match_session_type(self):
+        """Per-row badges read from session_type:
+            terminal/chatwith → "Session" (green pill)
+            dispatch/librarian/agentic → "Dispatch" (orange pill,
+                pillClass='agent-run' for visual continuity)
+        """
+        c = self._checks
+        badges = {b["title"]: b for b in (c.get("badges") or [])}
+
+        for title in ("pillsweep terminal session",
+                      "pillsweep chatwith session"):
+            b = badges.get(title)
+            assert b, f"Badge entry missing for {title!r}; have {list(badges)}"
+            assert b.get("label") == "Session", (
+                f"{title!r} should label 'Session', got {b.get('label')!r}"
+            )
+            assert b.get("pill_key") == "session", (
+                f"{title!r} should pill_key='session', got "
+                f"{b.get('pill_key')!r}"
+            )
+
+        for title in ("pillsweep dispatch run", "pillsweep librarian run",
+                      "pillsweep agentic action"):
+            b = badges.get(title)
+            assert b, f"Badge entry missing for {title!r}; have {list(badges)}"
+            assert b.get("label") == "Dispatch", (
+                f"{title!r} should label 'Dispatch', got {b.get('label')!r}"
+            )
+            # ``rowPillKey`` returns 'agent-run' for the dispatch chip
+            # so the orange .sp-pill-agent-run class still applies —
+            # visual continuity with pre-Round-7k.
+            assert b.get("pill_key") == "agent-run", (
+                f"{title!r} should pill_key='agent-run' (orange) for "
+                f"visual continuity; got {b.get('pill_key')!r}"
+            )
+
+
+SEARCH_SORT_CHIP_CHECKS = """(async () => {
+  var r = {};
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+  await sleep(900);  // initial fetch settles
+
+  var spRoot = document.querySelector('[x-data^="searchPage"]');
+  var spScope = spRoot && Alpine ? Alpine.$data(spRoot) : null;
+  r.has_alpine_root = !!spScope;
+  if (!spScope) return JSON.stringify(r);
+
+  // ── 1. Default Relevance — sort chip label + URL is bare ────────────
+  r.default_chip_label = spScope.orderChipLabel;
+  r.default_selected_order = spScope.selectedOrder;
+  r.default_url_search = window.location.search;
+
+  // Top result under default Relevance: the title-boosted note
+  // (rank=-50) — pillsweep ranking note.
+  r.relevance_first_title =
+    (spScope.results || [])[0] && spScope.results[0].source_title || '';
+
+  // Stub fetch so the next refetch's URL is observable.
+  var capturedURLs = [];
+  var origFetch = window.fetch;
+  window.fetch = function(url, opts) {
+    capturedURLs.push(String(url));
+    // Mirror what the mock /api/search would return for ?q=pillsweep
+    // under recency. Mock server's _group_search_results re-sorts by
+    // source_created_at when order=recent, so the most-recent row
+    // (psw-6, NULL session_type) leads.
+    return origFetch.call(window, url, opts);
+  };
+
+  // ── 2. Pick "recent" via the sort chip's pickOrder() ────────────────
+  capturedURLs.length = 0;
+  spScope.pickOrder('recent');
+  await sleep(400);
+  r.recent_chip_label = spScope.orderChipLabel;
+  r.recent_selected_order = spScope.selectedOrder;
+  r.recent_url_search = window.location.search;
+  r.recent_fetch_url = capturedURLs.length
+    ? capturedURLs[capturedURLs.length - 1]
+    : null;
+
+  // After the refetch the most-recent row should be the first card.
+  // psw-6 (NULL session_type, 2026-04-29) is the most recent row.
+  r.recent_first_title =
+    (spScope.results || [])[0] && spScope.results[0].source_title || '';
+  r.recent_titles = (spScope.results || []).map(function(x) {
+    return x.source_title || '';
+  });
+
+  // ── 3. Toggle back to relevance — URL drops ?order= ─────────────────
+  capturedURLs.length = 0;
+  spScope.pickOrder('relevance');
+  await sleep(400);
+  r.toggle_back_url_search = window.location.search;
+  r.toggle_back_fetch_url = capturedURLs.length
+    ? capturedURLs[capturedURLs.length - 1]
+    : null;
+
+  // Restore real fetch.
+  window.fetch = origFetch;
+
+  return JSON.stringify(r);
+})()"""
+
+
+class TestSearchSortChip:
+    """Round 7k: sort chip toggles Relevance ⇄ Recent.
+
+    URL is the source of truth — ``?order=recent`` is round-tripped on
+    every flip, and Relevance (the default) is bare (no ?order= written).
+    Each toggle triggers a refetch with ``&order=recent`` (or the param
+    omitted) on the wire so the server re-orders, not the client.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            "/search?q=pillsweep",
+            SEARCH_SORT_CHIP_CHECKS,
+            wait_ms=200,
+        )
+        request.cls._checks = result
+
+    def test_default_order_is_relevance(self):
+        """No ``?order=`` in URL → chip says Relevance, internal state
+        is 'relevance'."""
+        c = self._checks
+        assert c.get("has_alpine_root"), "searchPage component missing"
+        assert c.get("default_selected_order") == "relevance", (
+            f"Default selectedOrder should be 'relevance'; got "
+            f"{c.get('default_selected_order')!r}"
+        )
+        assert c.get("default_chip_label") == "Relevance", (
+            f"Default chip label should be 'Relevance'; got "
+            f"{c.get('default_chip_label')!r}"
+        )
+        url = c.get("default_url_search") or ""
+        assert "order=" not in url, (
+            f"Default URL must not carry order=; got {url!r}"
+        )
+
+    def test_default_order_surfaces_title_boost(self):
+        """Under Relevance, the title-boosted note is the first card."""
+        c = self._checks
+        assert c.get("relevance_first_title") == "pillsweep ranking note", (
+            f"Relevance default should rank the title-boosted note "
+            f"(rank=-50) first; got {c.get('relevance_first_title')!r}"
+        )
+
+    def test_pick_recent_writes_url_and_refetches(self):
+        """Click → ?order=recent in URL + outgoing fetch carries
+        &order=recent, and chip label flips to 'Recent'."""
+        c = self._checks
+        assert c.get("recent_selected_order") == "recent", (
+            f"After pickOrder('recent'), selectedOrder should be "
+            f"'recent'; got {c.get('recent_selected_order')!r}"
+        )
+        assert c.get("recent_chip_label") == "Recent", (
+            f"Chip label should flip to 'Recent'; got "
+            f"{c.get('recent_chip_label')!r}"
+        )
+        url = c.get("recent_url_search") or ""
+        assert "order=recent" in url, (
+            f"URL must carry order=recent after toggle; got {url!r}"
+        )
+        fetch_url = c.get("recent_fetch_url") or ""
+        assert "order=recent" in fetch_url, (
+            f"Outgoing fetch must include order=recent; got "
+            f"{fetch_url!r}"
+        )
+
+    def test_recent_changes_result_order(self):
+        """Under Recent, the most-recent row leads — the title-boosted
+        note no longer wins."""
+        c = self._checks
+        first = c.get("recent_first_title") or ""
+        # Under Recent the most-recent row (2026-04-29, NULL
+        # session_type) leads. The title-boosted note (rank=-50,
+        # 2026-02-01) drops down the list.
+        assert first == "pillsweep null sessiontype", (
+            f"Recent ordering should pick the most-recent row first; "
+            f"got {first!r}"
+        )
+        titles = c.get("recent_titles") or []
+        assert "pillsweep ranking note" in titles, (
+            f"Title-boosted note should still be present under Recent, "
+            f"just lower-ranked; got {titles!r}"
+        )
+        # The title-boosted note should NOT lead under Recent.
+        if titles:
+            assert titles[0] != "pillsweep ranking note", (
+                f"Title-boosted note should NOT lead under Recent; "
+                f"got first={titles[0]!r}"
+            )
+
+    def test_toggle_back_drops_order_param(self):
+        """Picking Relevance after Recent removes ?order= from the URL
+        and the next fetch URL — the URL is the canonical state."""
+        c = self._checks
+        url = c.get("toggle_back_url_search") or ""
+        assert "order=" not in url, (
+            f"After toggle back to Relevance, URL must drop order=; "
+            f"got {url!r}"
+        )
+        fetch_url = c.get("toggle_back_fetch_url") or ""
+        assert "order=" not in fetch_url, (
+            f"After toggle back, outgoing fetch must drop order=; "
+            f"got {fetch_url!r}"
         )
 
 
