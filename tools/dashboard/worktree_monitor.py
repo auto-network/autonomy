@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from agents.capabilities.github import probe as github_probe
 from agents.capabilities.github.service import (
+    FAILURE_RATE_LIMITED,
     WorktreeGithubExecResult,
     normalize_review_payload,
     source_control_review_read_v1,
@@ -34,6 +36,26 @@ logger = logging.getLogger(__name__)
 # stable card without faking PR data.
 _GITHUB_PROBE_TIMEOUT = 3.0
 _GITHUB_REVIEW_TIMEOUT = 10.0
+
+# TTL caching for source_control snapshots — graph://c64d0f5d-480 §
+# Why we must become stateful (minimally). The 30s scan loop is right
+# for derivable local-git signals but wasteful for remote PR queries:
+# 15 live rows × 2 calls/row × 120 refreshes/hour = 3,600 GitHub API
+# requests/hour just from worktree polling, easily blowing the
+# authenticated 5,000/hour PAT quota when shared with release-pull
+# tooling. Open-PR state is *not* terminal (checks transition), so we
+# can't cache forever — but a 5-min TTL with operator-action
+# invalidation cuts the rate ~10x without losing freshness on the
+# operator timescale. Watch-active rows shorten to 60s since the
+# operator's already in active-feedback mode.
+SOURCE_CONTROL_TTL_SECONDS = 300.0
+SOURCE_CONTROL_WATCH_TTL_SECONDS = 60.0
+# When gh reports rate-limited, set a backoff window during which we
+# skip every capability fetch — re-fetching while the limit is hot
+# only deepens the hole and risks secondary rate-limit penalties.
+# 10 min covers most short-burst rate-limit windows; the actual reset
+# is hourly so a follow-up could parse the X-RateLimit-Reset header.
+RATE_LIMIT_BACKOFF_SECONDS = 600.0
 
 
 # Nag modes for the source_control.watch block. The UI maps these onto
@@ -152,6 +174,13 @@ class WorktreeMonitor:
         self._interval_seconds = interval_seconds
         self._cache: list[WorktreeState] = []
         self._source_control_cache: dict[tuple[str, str], dict] = {}
+        # Per-row last-fetch monotonic timestamp for TTL caching. Reset
+        # when an operator forces a refresh.
+        self._source_control_fetched_at: dict[tuple[str, str], float] = {}
+        # Monotonic-clock instant before which we skip every capability
+        # fetch — set when gh reports rate-limited, cleared on the next
+        # successful operator-forced refresh that actually probes.
+        self._capability_backoff_until: float = 0.0
         self._nag_modes: dict[tuple[str, str], str] = {}
         self._task: asyncio.Task | None = None
         self._lock: asyncio.Lock | None = None
@@ -187,36 +216,116 @@ class WorktreeMonitor:
             cached["watch"] = {"mode": mode}
         return mode
 
-    async def refresh(self) -> list[WorktreeState]:
-        """Force a scan and replace the cache."""
+    async def refresh(self, *, force_capabilities: bool = False) -> list[WorktreeState]:
+        """Force a scan and replace the cache.
+
+        ``force_capabilities=True`` bypasses the per-row TTL and any
+        active rate-limit back-off — operator-triggered refresh
+        (``POST /api/worktrees/refresh``) wants fresh data on demand.
+        The background polling loop calls with the default
+        ``False`` so it respects the TTL and backs off when gh is
+        rate-limited.
+        """
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:
             rows = await asyncio.to_thread(scan_all_worktrees)
             self._cache = rows
-            await self._refresh_source_control(rows)
+            await self._refresh_source_control(
+                rows, force_capabilities=force_capabilities,
+            )
             return list(rows)
 
-    async def _refresh_source_control(self, rows: list[WorktreeState]) -> None:
-        """Fan out source_control fetches for live rows, concurrently."""
+    def _row_ttl(self, key: tuple[str, str]) -> float:
+        """TTL for a row's source_control snapshot.
+
+        Watch-active rows (Nag All / Nag When Done) shorten the TTL so
+        the operator's active feedback loop sees check transitions
+        sooner. Silent rows use the default 5-min TTL.
+        """
+        mode = self.get_nag_mode(*key)
+        if mode != NAG_SILENT:
+            return SOURCE_CONTROL_WATCH_TTL_SECONDS
+        return SOURCE_CONTROL_TTL_SECONDS
+
+    def _row_is_fresh(self, key: tuple[str, str], now: float) -> bool:
+        """True when the row's cached snapshot is within its TTL."""
+        last = self._source_control_fetched_at.get(key)
+        if last is None:
+            return False
+        return (now - last) < self._row_ttl(key)
+
+    async def _refresh_source_control(
+        self,
+        rows: list[WorktreeState],
+        *,
+        force_capabilities: bool = False,
+    ) -> None:
+        """Fan out source_control fetches for live rows, concurrently.
+
+        Skips a per-row fetch when:
+          - the row's cached snapshot is within TTL (and not forced), OR
+          - the rate-limit back-off is active (and not forced).
+
+        In both cases the existing snapshot is preserved so the UI
+        stays stable; rows that have never been fetched stamp a
+        synthesized degraded snapshot so the operator sees the back-off
+        explicitly rather than a missing block.
+        """
         live_rows = [r for r in rows if r.session_live]
         if not live_rows:
             self._source_control_cache = {}
+            self._source_control_fetched_at = {}
             return
 
-        results = await asyncio.gather(
-            *(
-                _fetch_source_control(
-                    row, rows,
-                    watch_mode=self.get_nag_mode(row.session_name, row.repo_name),
-                )
-                for row in live_rows
-            ),
-            return_exceptions=True,
+        now = time.monotonic()
+        backoff_active = (
+            not force_capabilities and now < self._capability_backoff_until
         )
+        backoff_remaining = max(0, int(self._capability_backoff_until - now))
 
-        new_cache: dict[tuple[str, str], dict] = {}
-        for row, snapshot in zip(live_rows, results):
+        # Decide per row: fetch or reuse the cached snapshot.
+        rows_to_fetch: list[WorktreeState] = []
+        carried: dict[tuple[str, str], dict] = {}
+        for row in live_rows:
+            key = (row.session_name, row.repo_name)
+            cached = self._source_control_cache.get(key)
+            if backoff_active:
+                if cached is not None:
+                    carried[key] = cached
+                else:
+                    carried[key] = _degraded_snapshot(
+                        state="degraded",
+                        reason=FAILURE_RATE_LIMITED,
+                        watch_mode=self.get_nag_mode(*key),
+                        details={"backoff_seconds_remaining": backoff_remaining},
+                    )
+                continue
+            if not force_capabilities and self._row_is_fresh(key, now) and cached is not None:
+                carried[key] = cached
+                continue
+            rows_to_fetch.append(row)
+
+        # Fan out only the rows that actually need a fresh fetch.
+        results: list = []
+        if rows_to_fetch:
+            results = await asyncio.gather(
+                *(
+                    _fetch_source_control(
+                        row, rows,
+                        watch_mode=self.get_nag_mode(row.session_name, row.repo_name),
+                    )
+                    for row in rows_to_fetch
+                ),
+                return_exceptions=True,
+            )
+
+        new_cache: dict[tuple[str, str], dict] = dict(carried)
+        new_fetched_at: dict[tuple[str, str], float] = {
+            k: v for k, v in self._source_control_fetched_at.items() if k in carried
+        }
+        rate_limit_seen = False
+        for row, snapshot in zip(rows_to_fetch, results):
             key = (row.session_name, row.repo_name)
             if isinstance(snapshot, Exception):
                 logger.warning(
@@ -230,7 +339,28 @@ class WorktreeMonitor:
                 )
                 continue
             new_cache[key] = snapshot
+            new_fetched_at[key] = now
+            # Detect rate-limited responses and arm the back-off so
+            # subsequent rows in the same refresh cycle (and the next
+            # 30s tick) skip gh entirely.
+            if snapshot.get("reason") == FAILURE_RATE_LIMITED:
+                rate_limit_seen = True
+
+        if rate_limit_seen:
+            self._capability_backoff_until = now + RATE_LIMIT_BACKOFF_SECONDS
+            logger.warning(
+                "worktree_monitor: gh rate-limited; backing off capability "
+                "fetches for %ds",
+                int(RATE_LIMIT_BACKOFF_SECONDS),
+            )
+        elif force_capabilities and rows_to_fetch:
+            # An operator-forced refresh that ran without seeing
+            # rate-limit clears any stale back-off — auth/quota
+            # recovered.
+            self._capability_backoff_until = 0.0
+
         self._source_control_cache = new_cache
+        self._source_control_fetched_at = new_fetched_at
 
     async def start(self) -> None:
         """Start the background polling loop."""

@@ -5619,7 +5619,10 @@ async def api_worktrees(request):
 async def api_worktrees_refresh(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_sessions.get_worktrees())
-    rows = await worktree_monitor.refresh()
+    # Operator-triggered refresh bypasses the source_control TTL cache
+    # and any active rate-limit back-off — they want fresh PR data on
+    # demand. The 30s background loop continues to respect both.
+    rows = await worktree_monitor.refresh(force_capabilities=True)
     return JSONResponse([
         _worktree_state_json(row)
         for row in rows
