@@ -1,20 +1,24 @@
-"""Row-scoped GitHub operation surface for live Worktrees rows.
+"""``autonomy/github`` capability service — typed deterministic surface.
 
-Public API: typed async operations keyed off a ``(session_name, repo_name)``
-worktree row, internally implemented by deterministic ``docker exec
-<live-container> gh ...`` invocations against the container that already
-backs the row. Privileged GitHub access stays inside the container; the
-dashboard never sees raw credentials and never starts a new container to
-satisfy a request.
+This module is the canonical implementation of the ``autonomy/github``
+capability (see ``agents/capabilities/github/manifest.json``). It exposes
+the deterministic operations under the ``source_control@1`` contract that
+Dashboard, Worktrees, and other consumers depend on, scoped to a single
+live ``(session_name, repo_name)`` worktree row.
 
-Each operation returns a :class:`WorktreeGithubExecResult` with structured
+Operations are async and run as ``docker exec <live-container> gh ...``
+against the workspace container that already backs the row — no new
+containers, no tmux/agent mediation, no arbitrary shell. Privileged
+GitHub access stays inside the container; the dashboard never sees raw
+credentials.
+
+Each operation returns a :class:`WorktreeGithubExecResult` with
 ``ok / stdout / stderr / exit_code / timed_out`` plus execution-context
-metadata (operation name, container name, branch, repo slug, command argv,
-canonical failure code, error message).
-
-Failure codes are a closed set (see ``FAILURE_*`` constants) so callers can
-branch on missing-row, missing-container, missing-``gh``, and missing-auth
-states without parsing free-form stderr.
+metadata (operation name, container name, branch, repo slug, command
+argv, canonical failure code, error message). Failure codes are a closed
+set (see ``FAILURE_*`` constants) so callers can branch on missing-row,
+missing-container, missing-``gh``, and missing-auth states without
+parsing free-form stderr.
 """
 
 from __future__ import annotations
@@ -31,11 +35,15 @@ from tools.dashboard.worktree_monitor import worktree_monitor
 logger = logging.getLogger(__name__)
 
 
-OP_PR_SNAPSHOT = "worktree_pr_snapshot_v1"
-OP_PR_REFRESH = "worktree_pr_refresh_v1"
-OP_PR_WATCH_SET = "worktree_pr_watch_set_v1"
+# Operation names for the ``source_control@1`` contract surface this
+# service implements. Underscore-flat naming matches the contract schema's
+# snake_case rule; the displayed surface is ``source_control.review.read``,
+# ``source_control.review.refresh``, and ``source_control.gates.watch_set``.
+OP_REVIEW_READ = "source_control_review_read_v1"
+OP_REVIEW_REFRESH = "source_control_review_refresh_v1"
+OP_GATES_WATCH_SET = "source_control_gates_watch_set_v1"
 
-# PR watch modes accepted by ``worktree_pr_watch_set_v1``. They mirror the
+# PR watch modes accepted by ``source_control_gates_watch_set_v1``. They mirror the
 # GitHub subscription tri-state — subscribed / ignored / default (cleared).
 PR_WATCH_SUBSCRIBED = "subscribed"
 PR_WATCH_IGNORED = "ignored"
@@ -438,15 +446,16 @@ class _OpArgsError(Exception):
 # ── Public API ────────────────────────────────────────────────────────
 
 
-async def worktree_pr_snapshot_v1(
+async def source_control_review_read_v1(
     session_name: str,
     repo_name: str,
     *,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WorktreeGithubExecResult:
-    """Capture the current PR state for the worktree's branch.
+    """Read the current PR review state for the worktree's branch.
 
-    Maps internally to::
+    Implementation of ``source_control.review.read`` for the
+    ``autonomy/github`` capability. Maps internally to::
 
         docker exec <container> gh pr view <branch> --repo <owner>/<repo> --json <fields>
     """
@@ -455,7 +464,7 @@ async def worktree_pr_snapshot_v1(
         return _pr_view_args(row.branch, repo_slug)
 
     return await _execute_op(
-        operation=OP_PR_SNAPSHOT,
+        operation=OP_REVIEW_READ,
         session_name=session_name,
         repo_name=repo_name,
         gh_args_for=_args,
@@ -463,25 +472,25 @@ async def worktree_pr_snapshot_v1(
     )
 
 
-async def worktree_pr_refresh_v1(
+async def source_control_review_refresh_v1(
     session_name: str,
     repo_name: str,
     *,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WorktreeGithubExecResult:
-    """Re-fetch the PR state for the worktree's branch.
+    """Re-fetch the PR review state for the worktree's branch.
 
-    Same gh invocation as :func:`worktree_pr_snapshot_v1` (gh has no
-    persistent client cache to invalidate), but exposed as a separate op
-    so callers can express intent — e.g. UI "Refresh" actions vs initial
-    page-load snapshots.
+    Same gh invocation as :func:`source_control_review_read_v1` (gh has
+    no persistent client cache to invalidate), exposed as a separate op
+    so callers can express intent — e.g. UI "Refresh" actions vs
+    initial page-load reads.
     """
 
     def _args(*, row, repo_slug, mode):  # noqa: ARG001
         return _pr_view_args(row.branch, repo_slug)
 
     return await _execute_op(
-        operation=OP_PR_REFRESH,
+        operation=OP_REVIEW_REFRESH,
         session_name=session_name,
         repo_name=repo_name,
         gh_args_for=_args,
@@ -489,18 +498,19 @@ async def worktree_pr_refresh_v1(
     )
 
 
-async def worktree_pr_watch_set_v1(
+async def source_control_gates_watch_set_v1(
     session_name: str,
     repo_name: str,
     mode: str,
     *,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WorktreeGithubExecResult:
-    """Set the PR-watch mode for the worktree's repo.
+    """Set the merge-gate watch mode for the worktree's repo.
 
-    ``mode`` must be one of :data:`PR_WATCH_MODES` —
-    ``"subscribed"``, ``"ignored"``, or ``"default"``. See
-    :func:`_pr_watch_set_args` for the fixed gh template.
+    Implementation of ``source_control.gates.watch_set``. ``mode`` must
+    be one of :data:`PR_WATCH_MODES` — ``"subscribed"``, ``"ignored"``,
+    or ``"default"``. See :func:`_pr_watch_set_args` for the fixed gh
+    template.
     """
 
     def _args(*, row, repo_slug, mode):  # noqa: ARG001
@@ -516,7 +526,7 @@ async def worktree_pr_watch_set_v1(
     # touching docker — the caller likely passed a typo'd UI value.
     if mode not in PR_WATCH_MODES:
         return _failure_result(
-            OP_PR_WATCH_SET, session_name, repo_name,
+            OP_GATES_WATCH_SET, session_name, repo_name,
             failure=FAILURE_INVALID_MODE,
             error_message=(
                 f"invalid PR watch mode: {mode!r}; "
@@ -525,7 +535,7 @@ async def worktree_pr_watch_set_v1(
         )
 
     return await _execute_op(
-        operation=OP_PR_WATCH_SET,
+        operation=OP_GATES_WATCH_SET,
         session_name=session_name,
         repo_name=repo_name,
         gh_args_for=_args,
@@ -535,9 +545,9 @@ async def worktree_pr_watch_set_v1(
 
 
 __all__ = [
-    "OP_PR_SNAPSHOT",
-    "OP_PR_REFRESH",
-    "OP_PR_WATCH_SET",
+    "OP_REVIEW_READ",
+    "OP_REVIEW_REFRESH",
+    "OP_GATES_WATCH_SET",
     "PR_WATCH_SUBSCRIBED",
     "PR_WATCH_IGNORED",
     "PR_WATCH_DEFAULT",
@@ -559,7 +569,7 @@ __all__ = [
     "derive_repo_slug",
     "classify_failure",
     "run_cli",
-    "worktree_pr_snapshot_v1",
-    "worktree_pr_refresh_v1",
-    "worktree_pr_watch_set_v1",
+    "source_control_review_read_v1",
+    "source_control_review_refresh_v1",
+    "source_control_gates_watch_set_v1",
 ]

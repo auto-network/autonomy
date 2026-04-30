@@ -1,14 +1,19 @@
-# GitHub capability — primer projection (placeholder)
+## GitHub capability
 
-Stable stub so primer rendering can target this path without having to
-invent it. The real primer block is added by the GitHub capability MVP
-bead (graph://86e04207-a25 § Phase 2).
+`gh` is on PATH and `GH_TOKEN` is already configured — no auth setup
+needed. Use it freely for PR inspection, checks, review, and any GitHub
+operation.
 
-When populated this file will be a short primer block telling the
-agent:
+Common one-liners:
 
-- `gh` is available on PATH
-- `GH_TOKEN` is already configured
-- which deterministic operations are exposed via the capability layer
-- where to look for richer guidance (the Agent Skills bundle in
-  `SKILL.md`)
+- `gh pr view --json number,url,title,state` — PR for current branch
+- `gh pr checks` — merge-gate status
+- `gh pr list --limit 10` — recent PRs
+
+The Dashboard composes typed `source_control@1` operations
+(`review.read`, `review.refresh`, `gates.watch_set`) from
+`agents/capabilities/github/service.py` against your live container —
+don't `gh auth logout`. Per-PR watch is repo-level for now;
+PR-thread subscription is a follow-up.
+
+For full skill content see `agents/capabilities/github/SKILL.md`.
