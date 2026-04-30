@@ -380,17 +380,17 @@
         // Set up reactive watchers
         this._setupWatchers();
 
-        // Worktree status — same anchor renders in page-mode header and
-        // overlay title-bar; both bind to ``hasWorkspaceChanges``.
-        // Initial fetch + a slow poll so the indicator clears within
-        // 30s of a merge/discard without waiting for the next
-        // visibility/focus event. Resume-recovery still triggers a
-        // refresh on any blur/focus cycle for snappier feedback.
-        this._refreshWorkspaceStatus();
+        // Worktree status — pushed live via the ``worktrees`` SSE
+        // topic. registerHandler immediately replays the cached
+        // payload (so the indicator paints on first render without a
+        // round-trip) and then runs on every change. The /api/worktrees
+        // fallback fires only if SSE hasn't delivered anything yet.
         var self = this;
-        this._workspaceTimer = setInterval(function () {
-          self._refreshWorkspaceStatus();
-        }, 30000);
+        this._workspaceHandler = function (rows) { self._applyWorkspaceRows(rows); };
+        if (typeof window.registerHandler === 'function') {
+          window.registerHandler('worktrees', this._workspaceHandler);
+        }
+        if (!this._workspaceStatus) this._refreshWorkspaceStatus();
 
         // Restore draft text into contenteditable + attach file-paste handler
         var self = this;
@@ -519,9 +519,9 @@
           clearInterval(this._resumeHeartbeatInterval);
           this._resumeHeartbeatInterval = null;
         }
-        if (this._workspaceTimer) {
-          clearInterval(this._workspaceTimer);
-          this._workspaceTimer = null;
+        if (this._workspaceHandler && typeof window.unregisterHandler === 'function') {
+          window.unregisterHandler('worktrees', this._workspaceHandler);
+          this._workspaceHandler = null;
         }
         // Dispose terminal WS + xterm if the toggle was active. Leaking these
         // holds a server-side tmux attach and exhausts WebSocket slots.
@@ -1131,31 +1131,35 @@
         }
       },
 
-      // Fetch worktree state for this session's tmux name and stash it
-      // on ``_workspaceStatus``. Both the overlay title-bar anchor and
-      // the page-mode header anchor bind to ``hasWorkspaceChanges`` /
+      // Update ``_workspaceStatus`` from a worktree-rows payload (either
+      // pushed via the ``worktrees`` SSE topic or fetched as a one-shot
+      // fallback). Both the overlay title-bar anchor and the page-mode
+      // header anchor bind to ``hasWorkspaceChanges`` /
       // ``workspaceStatusTooltip`` via Alpine, so updating the cache
       // is the only thing this method needs to do — the DOM follows.
+      _applyWorkspaceRows(rows) {
+        if (!this.sessionKey || !Array.isArray(rows)) return;
+        var sid = this.sessionKey;
+        var matching = rows.filter(function (r) { return r.session_name === sid; });
+        var dirtyCount = 0;
+        var commitsAhead = 0;
+        for (var i = 0; i < matching.length; i++) {
+          var r = matching[i];
+          if (r.is_dirty) dirtyCount += (r.dirty_files || []).length;
+          commitsAhead += r.commits_ahead || 0;
+        }
+        this._workspaceStatus = {
+          hasChanges: (dirtyCount + commitsAhead) > 0,
+          dirtyCount: dirtyCount,
+          commitsAhead: commitsAhead,
+        };
+      },
       async _refreshWorkspaceStatus() {
         if (!this.sessionKey) return;
         try {
           var res = await fetch('/api/worktrees');
           if (!res.ok) return;
-          var rows = await res.json();
-          var sid = this.sessionKey;
-          var matching = rows.filter(function (r) { return r.session_name === sid; });
-          var dirtyCount = 0;
-          var commitsAhead = 0;
-          for (var i = 0; i < matching.length; i++) {
-            var r = matching[i];
-            if (r.is_dirty) dirtyCount += (r.dirty_files || []).length;
-            commitsAhead += r.commits_ahead || 0;
-          }
-          this._workspaceStatus = {
-            hasChanges: (dirtyCount + commitsAhead) > 0,
-            dirtyCount: dirtyCount,
-            commitsAhead: commitsAhead,
-          };
+          this._applyWorkspaceRows(await res.json());
         } catch (e) {
           // Best-effort; don't poison the session viewer on fetch failure.
         }
