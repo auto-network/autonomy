@@ -70,6 +70,7 @@ class LoadedPlugin:
     routes: list = field(default_factory=list)
     badge_counter: Callable[[], Any] | None = None
     schemas: list = field(default_factory=list)
+    actions: list[str] = field(default_factory=list)
 
 
 # ── Discovery ────────────────────────────────────────────────────────
@@ -247,6 +248,7 @@ def _resolve_entrypoints(
     routes: list = []
     badge_counter: Callable[[], Any] | None = None
     schemas: list = []
+    actions: list[str] = []
 
     try:
         if ep.api:
@@ -261,6 +263,13 @@ def _resolve_entrypoints(
             badge_counter = _resolve_attr(ep.badge_counter)
         if ep.schemas:
             schemas = [_resolve_attr(s) for s in ep.schemas]
+        if ep.actions:
+            # Bare module paths — importing fires register_action(...) at
+            # module top-level. We don't keep handles to the imported
+            # modules; the side effect lives in settings_mediator.REGISTRY.
+            for spec in ep.actions:
+                importlib.import_module(spec)
+            actions = list(ep.actions)
     except (ImportError, AttributeError, TypeError) as exc:
         logger.warning(
             "[plugin_loader] downgrading plugin %r to disabled: "
@@ -282,6 +291,7 @@ def _resolve_entrypoints(
         routes=routes,
         badge_counter=badge_counter,
         schemas=schemas,
+        actions=actions,
     )
 
 

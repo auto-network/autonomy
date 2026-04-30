@@ -40,6 +40,10 @@ class PluginEntrypoints(BaseModel):
     api: Optional[str] = None
     badge_counter: Optional[str] = None
     schemas: Optional[List[str]] = None
+    # Each entry is a bare module path — the loader imports it for the
+    # ``register_action(...)`` side effect at module top-level. No attribute
+    # is resolved; the registry is the contract.
+    actions: Optional[List[str]] = None
 
 
 class PluginManifest(BaseModel):
