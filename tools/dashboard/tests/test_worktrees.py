@@ -894,7 +894,10 @@ class TestWorktreePRSnapshot:
         assert recorder.calls[0][-1] == "auto-test"
         gh_call = recorder.calls[1]
         assert gh_call[:4] == ["docker", "exec", "auto-test", "gh"]
-        assert "pr" in gh_call and "view" in gh_call
+        # ``gh pr list --head <branch>`` surfaces every PR on the ref so
+        # stacked PRs (multiple PRs sharing one branch) all show up.
+        assert "pr" in gh_call and "list" in gh_call
+        assert "--head" in gh_call
         assert "session/auto-test" in gh_call
         assert "--repo" in gh_call
         assert "anchore/autonomy" in gh_call
@@ -1020,7 +1023,8 @@ class TestWorktreePRRefresh:
         assert result.operation == wg.OP_REVIEW_REFRESH
         gh_call = recorder.calls[1]
         assert gh_call[:4] == ["docker", "exec", "auto-test", "gh"]
-        assert "pr" in gh_call and "view" in gh_call
+        assert "pr" in gh_call and "list" in gh_call
+        assert "--head" in gh_call
         assert "session/auto-test" in gh_call
 
 
@@ -1290,6 +1294,49 @@ class TestNormalizeReviewPayload:
         assert wg._icon_from_label("") == "?"
         assert wg._icon_from_label("   ") == "?"
         assert wg._icon_from_label("///") == "?"
+
+    def test_stack_orders_prs_by_local_commit_position(self):
+        """``normalize_review_stack`` orders stacked PRs by which PR's
+        last claimed commit comes later in local rev-list order, and
+        chains each PR's ``base_sha`` to the previous PR's head_sha so
+        per-PR diffs scope correctly."""
+        from agents.capabilities.github import service as wg
+
+        # gh returns the array in arbitrary order. Two PRs on one ref:
+        # PR #303 claims commit ``ddd``, PR #302 claims commit ``ccc``.
+        # Local rev-list order is ccc -> ddd -> eee, so #302 comes
+        # before #303 in the stack.
+        raw = (
+            '[{"number": 303, "state": "OPEN", "title": "step 2",'
+            ' "url": "https://x/y/pull/303", "headRefOid": "ddd",'
+            ' "baseRefOid": "ccc", "baseRefName": "main",'
+            ' "statusCheckRollup": [],'
+            ' "commits": [{"oid": "ddd"}]},'
+            '{"number": 302, "state": "OPEN", "title": "step 1",'
+            ' "url": "https://x/y/pull/302", "headRefOid": "ccc",'
+            ' "baseRefOid": "main_base", "baseRefName": "main",'
+            ' "statusCheckRollup": [],'
+            ' "commits": [{"oid": "ccc"}]}]'
+        )
+        stack = wg.normalize_review_stack(
+            raw, local_commit_shas=("ccc", "ddd", "eee"),
+        )
+        assert len(stack) == 2
+        # Ordered: #302 first (its commit ccc lands at index 0 of local),
+        # then #303 (its commit ddd at index 1).
+        assert [r.number for r in stack] == [302, 303]
+        # First PR keeps its baseRefOid; second PR's base chains to first's head.
+        assert stack[0].base_sha == "main_base"
+        assert stack[1].base_sha == "ccc"
+        # commit_shas mirror the local-order subset each PR claims.
+        assert stack[0].commit_shas == ("ccc",)
+        assert stack[1].commit_shas == ("ddd",)
+
+    def test_stack_returns_empty_for_no_open_prs(self):
+        """``gh pr list`` returns ``[]`` when the branch has no open PRs."""
+        from agents.capabilities.github import service as wg
+
+        assert wg.normalize_review_stack("[]") == ()
 
     def test_running_check_carries_icon(self):
         """End-to-end: an in-progress check normalizes with both status

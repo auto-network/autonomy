@@ -60,14 +60,21 @@ FAILURE_AUTH_MISSING = "auth_missing"
 FAILURE_TIMED_OUT = "timed_out"
 FAILURE_EXEC_FAILED = "exec_failed"
 
-# Fields requested from ``gh pr view`` for review read/refresh. Kept compact
-# so the JSON fits comfortably in a single response and so callers don't end
-# up depending on incidental fields the spec didn't promise. ``body`` and
-# ``headRefOid`` feed the review payload's ``body`` and ``head_sha``.
-PR_VIEW_FIELDS = (
-    "number,state,title,body,url,headRefName,headRefOid,baseRefName,isDraft,"
-    "mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,updatedAt"
+# Fields requested from ``gh pr list --head <branch>`` for review
+# read/refresh. ``commits`` is the per-PR commit list; ``baseRefOid`` is
+# the base commit SHA (so per-PR diffs can be scoped to that PR's range
+# rather than the whole branch). ``baseRefName`` lets the UI render the
+# integration target. ``statusCheckRollup`` carries gates; ``isDraft``
+# / ``mergeable`` / ``reviewDecision`` feed the aggregate-state rule.
+PR_LIST_FIELDS = (
+    "number,state,title,body,url,"
+    "headRefName,headRefOid,baseRefName,baseRefOid,"
+    "isDraft,mergeable,mergeStateStatus,reviewDecision,"
+    "statusCheckRollup,commits,updatedAt"
 )
+# Backward-compat alias — kept so any out-of-tree caller importing
+# ``PR_VIEW_FIELDS`` (none in tree) still resolves to the new fields.
+PR_VIEW_FIELDS = PR_LIST_FIELDS
 
 DEFAULT_TIMEOUT_SECONDS = 30
 
@@ -164,19 +171,30 @@ class CheckEntry:
 
 @dataclass(frozen=True)
 class ReviewPayload:
-    """Normalized ``source_control.review`` block for one PR."""
+    """Normalized review block for one PR.
+
+    ``base_sha`` and ``commit_shas`` enable stacked-PR support
+    (multiple PRs on one branch — Graphite/Sapling style). For a single
+    PR ``base_sha`` is the merge-base with ``base_branch``; for a
+    stacked PR ``base_sha`` is the previous PR's head_sha. Per-PR
+    diffs are scoped via ``git diff base_sha...head_sha``.
+    ``commit_shas`` are the local SHAs in ``rev-list base..HEAD`` order
+    that this PR claims.
+    """
 
     number: int | None
     url: str
     title: str
     body: str
     head_sha: str
+    base_sha: str
     base_branch: str
     state: str  # ``open`` / ``closed`` / ``merged`` / ``unknown``
     is_draft: bool
     aggregate_state: str  # ``green`` / ``yellow``
     running: bool
     checks: tuple[CheckEntry, ...] = ()
+    commit_shas: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -185,12 +203,14 @@ class ReviewPayload:
             "title": self.title,
             "body": self.body,
             "head_sha": self.head_sha,
+            "base_sha": self.base_sha,
             "base_branch": self.base_branch,
             "state": self.state,
             "is_draft": self.is_draft,
             "aggregate_state": self.aggregate_state,
             "running": self.running,
             "checks": [c.to_dict() for c in self.checks],
+            "commit_shas": list(self.commit_shas),
         }
 
 
@@ -283,22 +303,16 @@ def _normalize_check(entry: dict) -> CheckEntry | None:
     return None
 
 
-def normalize_review_payload(raw_stdout: str) -> ReviewPayload | None:
-    """Shape ``gh pr view --json`` stdout into a typed :class:`ReviewPayload`.
+def _normalize_one_pr(data: dict) -> ReviewPayload | None:
+    """Shape one PR object from ``gh pr list --json`` into a ReviewPayload.
 
-    Returns ``None`` when stdout is empty (gh returns nothing when the
-    branch has no PR) or unparseable. Callers should treat that as
-    ``review: null`` in the source_control snapshot, and ``.to_dict()``
-    the returned object at the JSON boundary.
+    Returns ``None`` for non-dict / empty entries. ``commit_shas`` is
+    populated from gh's ``commits`` field but not yet ordered against
+    local history — :func:`_assign_commits_to_reviews` does that.
+    ``base_sha`` is filled with ``baseRefOid`` (the PR's base commit
+    SHA per gh) and is later overwritten with the previous PR's head
+    SHA when a stack is detected.
     """
-    import json
-
-    if not raw_stdout or not raw_stdout.strip():
-        return None
-    try:
-        data = json.loads(raw_stdout)
-    except (TypeError, ValueError):
-        return None
     if not isinstance(data, dict):
         return None
 
@@ -316,19 +330,172 @@ def normalize_review_payload(raw_stdout: str) -> ReviewPayload | None:
     )
     running = any(c.status in (_CHECK_RUNNING, _CHECK_PENDING) for c in checks)
 
+    # gh's ``commits`` field is a list of {oid, messageHeadline, ...}.
+    pr_commits = data.get("commits") or []
+    commit_shas: list[str] = []
+    for commit in pr_commits:
+        if not isinstance(commit, dict):
+            continue
+        oid = commit.get("oid") or commit.get("sha")
+        if oid:
+            commit_shas.append(str(oid))
+
     return ReviewPayload(
         number=data.get("number"),
         url=data.get("url") or "",
         title=(data.get("title") or "").strip(),
         body=data.get("body") or "",
         head_sha=data.get("headRefOid") or "",
+        base_sha=data.get("baseRefOid") or "",
         base_branch=data.get("baseRefName") or "",
         state=str(data.get("state") or "").lower() or "unknown",
         is_draft=bool(data.get("isDraft")),
         aggregate_state=_AGGREGATE_YELLOW if aggregate_yellow else _AGGREGATE_GREEN,
         running=running,
         checks=tuple(checks),
+        commit_shas=tuple(commit_shas),
     )
+
+
+def _assign_commits_to_reviews(
+    reviews: list[ReviewPayload],
+    local_shas: list[str],
+) -> tuple[ReviewPayload, ...]:
+    """Order ``reviews`` by stack position and stamp local commit_shas.
+
+    ``local_shas`` is ``git rev-list --reverse <merge-base>..HEAD`` —
+    chronological order on the worktree branch. For each local SHA we
+    pick the PR whose ``commit_shas`` claim it; PRs are then ordered
+    by the index of their **last** claimed local SHA. That yields the
+    operator-intuitive order: PR #N appears before PR #N+1 when N's
+    commits land earlier in the branch history.
+
+    Each PR's ``commit_shas`` is rewritten to the local-order subset.
+    For stacked PRs we also rewrite ``base_sha`` to the previous PR's
+    head SHA (so per-PR diff scoping `git diff base...head` covers
+    only that PR's commits, not the whole stack).
+    """
+    if not reviews:
+        return ()
+
+    # Map every local SHA to the PR that claims it. First-claim wins
+    # in the rare double-claim case.
+    claims: dict[str, ReviewPayload] = {}
+    for review in reviews:
+        for sha in review.commit_shas:
+            if sha in claims:
+                continue
+            if sha in local_shas:
+                claims[sha] = review
+
+    # Group local SHAs by their owning PR, preserving local order.
+    grouped: dict[int, list[str]] = {}
+    for sha in local_shas:
+        owner = claims.get(sha)
+        if owner is None:
+            continue
+        key = id(owner)
+        grouped.setdefault(key, []).append(sha)
+
+    # Score each PR by the local index of its last claimed commit.
+    # PRs whose commits aren't on the local stack at all (rare —
+    # already-merged PRs, etc.) drop to position 0 and sort by gh's
+    # original order.
+    def score(review: ReviewPayload) -> tuple[int, int]:
+        shas = grouped.get(id(review))
+        if not shas:
+            return (-1, reviews.index(review))
+        return (local_shas.index(shas[-1]), 0)
+
+    ordered = sorted(reviews, key=score)
+
+    # Rewrite commit_shas to the local-order subset, then chain
+    # base_sha so each PR's diff is scoped to its own commits.
+    out: list[ReviewPayload] = []
+    prev_head: str = ""
+    for review in ordered:
+        shas = grouped.get(id(review)) or []
+        base_sha = prev_head if (prev_head and shas) else review.base_sha
+        out.append(
+            ReviewPayload(
+                number=review.number,
+                url=review.url,
+                title=review.title,
+                body=review.body,
+                head_sha=review.head_sha,
+                base_sha=base_sha,
+                base_branch=review.base_branch,
+                state=review.state,
+                is_draft=review.is_draft,
+                aggregate_state=review.aggregate_state,
+                running=review.running,
+                checks=review.checks,
+                commit_shas=tuple(shas),
+            )
+        )
+        if shas:
+            prev_head = review.head_sha
+    return tuple(out)
+
+
+def normalize_review_stack(
+    raw_stdout: str,
+    *,
+    local_commit_shas: tuple[str, ...] | list[str] = (),
+) -> tuple[ReviewPayload, ...]:
+    """Shape ``gh pr list --json`` stdout into an ordered review stack.
+
+    Returns an empty tuple when the branch has no open PRs (gh returns
+    ``[]``) or stdout is unparseable. ``local_commit_shas`` is
+    ``rev-list --reverse <merge-base>..HEAD`` from the worktree;
+    supplying it lets us order stacked PRs by branch position and
+    chain their per-PR ``base_sha`` for scoped diffs.
+    """
+    import json
+
+    if not raw_stdout or not raw_stdout.strip():
+        return ()
+    try:
+        data = json.loads(raw_stdout)
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(data, list):
+        return ()
+
+    reviews: list[ReviewPayload] = []
+    for entry in data:
+        normalized = _normalize_one_pr(entry)
+        if normalized is not None:
+            reviews.append(normalized)
+
+    return _assign_commits_to_reviews(reviews, list(local_commit_shas))
+
+
+# Backward-compat shim — drops to the new normalizer's first review
+# (``None`` when the stack is empty). Accepts both the new array-shaped
+# stdout (``gh pr list``) and the legacy single-object shape
+# (``gh pr view``) so callers that haven't migrated yet keep working.
+def normalize_review_payload(
+    raw_stdout: str,
+    *,
+    local_commit_shas: tuple[str, ...] | list[str] = (),
+) -> ReviewPayload | None:
+    import json
+
+    text = (raw_stdout or "").strip()
+    if not text:
+        return None
+    # If the input is a single object (legacy ``gh pr view`` shape),
+    # wrap it in an array so the stack normalizer can consume it.
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(data, dict):
+        text = json.dumps([data])
+
+    stack = normalize_review_stack(text, local_commit_shas=local_commit_shas)
+    return stack[0] if stack else None
 
 
 # ── Subprocess helpers ────────────────────────────────────────────────
@@ -521,8 +688,21 @@ def _failure_result(
 
 
 def _pr_view_args(branch: str, repo_slug: str) -> list[str]:
-    """Fixed gh argv template for snapshot/refresh."""
-    return ["pr", "view", branch, "--repo", repo_slug, "--json", PR_VIEW_FIELDS]
+    """Fixed gh argv template for review read/refresh.
+
+    Uses ``gh pr list --head <branch>`` rather than ``gh pr view`` so
+    branches carrying multiple stacked PRs (Graphite/Sapling) surface
+    every PR, not just the most recent one ``gh pr view`` would
+    resolve to. Output is a JSON array — the singular case is just a
+    one-element list.
+    """
+    return [
+        "pr", "list",
+        "--repo", repo_slug,
+        "--head", branch,
+        "--state", "open",
+        "--json", PR_LIST_FIELDS,
+    ]
 
 
 def _pr_watch_set_args(repo_slug: str, mode: str) -> list[str]:
@@ -788,6 +968,7 @@ __all__ = [
     "FAILURE_TIMED_OUT",
     "FAILURE_EXEC_FAILED",
     "PR_VIEW_FIELDS",
+    "PR_LIST_FIELDS",
     "DEFAULT_TIMEOUT_SECONDS",
     "WorktreeGithubExecResult",
     "CheckEntry",
@@ -798,6 +979,7 @@ __all__ = [
     "classify_failure",
     "run_cli",
     "normalize_review_payload",
+    "normalize_review_stack",
     "source_control_review_read_v1",
     "source_control_review_refresh_v1",
     "source_control_gates_watch_set_v1",
