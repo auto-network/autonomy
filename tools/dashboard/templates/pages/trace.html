@@ -11,11 +11,21 @@
     <div>
       <div class="mb-6">
         <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">&#8592; Back to Dispatch</a>
-        <h1 class="text-2xl font-bold mb-2" x-text="bead ? bead.title : trace.bead_id"></h1>
+        <template x-if="trace.kind === 'agentic'">
+          <h1 class="text-2xl font-bold mb-2" x-text="trace.action_label || 'Agentic Action'"></h1>
+        </template>
+        <template x-if="trace.kind !== 'agentic'">
+          <h1 class="text-2xl font-bold mb-2" x-text="bead ? bead.title : trace.bead_id"></h1>
+        </template>
         <div class="flex gap-2 items-center mb-4">
-          <a :href="'/bead/' + trace.bead_id" class="font-mono text-sm text-indigo-400 hover:underline" x-text="trace.bead_id"></a>
+          <template x-if="trace.kind !== 'agentic' && trace.bead_id">
+            <a :href="'/bead/' + trace.bead_id" class="font-mono text-sm text-indigo-400 hover:underline" x-text="trace.bead_id"></a>
+          </template>
           <template x-if="bead">
             <span class="badge" :class="'badge-p' + bead.priority" x-text="'P' + bead.priority"></span>
+          </template>
+          <template x-if="trace.kind === 'agentic'">
+            <span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded font-mono">Agentic</span>
           </template>
           <span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded font-mono animate-pulse">RUNNING</span>
         </div>
@@ -24,8 +34,115 @@
     </div>
   </template>
 
-  <!-- Completed dispatch -->
-  <template x-if="!loading && !error && trace && !trace.is_live">
+  <!-- Completed agentic dispatch — different shape than beads: no
+       commit, no diff, no experience report. Show the action that
+       ran, the asset it operated on, and provenance back to sender +
+       agentic source. Session log is the primary trace artifact. -->
+  <template x-if="!loading && !error && trace && !trace.is_live && trace.kind === 'agentic'">
+    <div>
+
+      <!-- Header -->
+      <div class="mb-6">
+        <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">&#8592; Back to Dispatch</a>
+        <h1 class="text-2xl font-bold mb-2" x-text="trace.action_label || 'Agentic Action'"></h1>
+        <template x-if="trace.target_title">
+          <div class="text-sm text-gray-400 mb-3">
+            on
+            <a :href="'/graph/' + (trace.target_source_id || '')"
+               class="text-indigo-400 hover:underline"
+               x-text="trace.target_title"></a>
+          </div>
+        </template>
+        <div class="flex gap-2 items-center mb-4 flex-wrap">
+          <span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded font-mono">Agentic</span>
+          <span class="badge" :class="statusBadgeClass(decision.status)" x-text="decision.status || '?'"></span>
+          <template x-if="trace.member_key">
+            <span class="font-mono text-xs text-gray-400" x-text="trace.member_key"></span>
+          </template>
+          <template x-if="trace.target_org">
+            <span class="font-mono text-xs text-gray-500" x-text="'org: ' + trace.target_org"></span>
+          </template>
+        </div>
+      </div>
+
+      <!-- Decision -->
+      <section class="mb-6" aria-label="Decision">
+        <h2 class="text-lg font-semibold mb-2" :class="decisionHeadingClass(decision.status)">Decision</h2>
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="text-sm mb-2"><strong>Status:</strong> <span x-text="decision.status || '?'"></span></div>
+          <template x-if="decision.reason">
+            <div class="text-sm mb-2"><strong>Reason:</strong> <span x-text="decision.reason"></span></div>
+          </template>
+          <div class="mt-3 flex gap-4 text-xs font-mono">
+            <template x-if="trace.duration_secs != null">
+              <span class="text-gray-500">&#9201; <span x-text="fmtDuration(trace.duration_secs)"></span></span>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <!-- Provenance: links back to sender, asset, and agentic source row -->
+      <section class="mb-6" aria-label="Provenance">
+        <h2 class="text-lg font-semibold mb-2 text-blue-400">Provenance</h2>
+        <div class="bg-gray-800 rounded-lg p-4 space-y-2 text-sm">
+          <template x-if="trace.target_source_id">
+            <div>
+              <span class="text-gray-500">Asset:</span>
+              <a :href="'/graph/' + trace.target_source_id"
+                 class="ml-2 text-indigo-400 hover:underline"
+                 x-text="trace.target_title || trace.target_source_id.slice(0, 8)"></a>
+            </div>
+          </template>
+          <template x-if="trace.dispatched_by_session && trace.dispatched_by_session !== 'dashboard' && trace.dispatched_by_project">
+            <div>
+              <span class="text-gray-500">Sender:</span>
+              <a :href="'/session/' + encodeURIComponent(trace.dispatched_by_project) + '/' + encodeURIComponent(trace.dispatched_by_session)"
+                 class="ml-2 text-indigo-400 hover:underline font-mono text-xs"
+                 x-text="trace.dispatched_by_session"></a>
+            </div>
+          </template>
+          <template x-if="trace.dispatched_by_session && trace.dispatched_by_session !== 'dashboard' && !trace.dispatched_by_project">
+            <div>
+              <span class="text-gray-500">Sender:</span>
+              <span class="ml-2 text-gray-400 font-mono text-xs" x-text="trace.dispatched_by_session"></span>
+            </div>
+          </template>
+          <template x-if="trace.dispatched_by_session === 'dashboard'">
+            <div>
+              <span class="text-gray-500">Sender:</span>
+              <span class="ml-2 text-gray-400 font-mono text-xs">dashboard (browser-initiated)</span>
+            </div>
+          </template>
+          <template x-if="trace.agentic_source_id">
+            <div>
+              <span class="text-gray-500">Agent session:</span>
+              <a :href="'/graph/' + trace.agentic_source_id"
+                 class="ml-2 text-indigo-400 hover:underline font-mono text-xs"
+                 x-text="trace.agentic_source_id.slice(0, 8)"></a>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- Session log — the primary trace artifact for agentic runs.
+           This is the JSONL of what the agent actually did. -->
+      <template x-if="trace.has_session">
+        <div class="mb-6">
+          <button
+            @click="openSessionLog()"
+            class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300"
+          >View Session Log</button>
+        </div>
+      </template>
+      <template x-if="!trace.has_session">
+        <div class="mb-6 text-xs text-gray-500">No session log captured for this run.</div>
+      </template>
+
+    </div>
+  </template>
+
+  <!-- Completed bead/librarian dispatch -->
+  <template x-if="!loading && !error && trace && !trace.is_live && trace.kind !== 'agentic'">
     <div>
 
       <!-- Header: back link · title · bead link · priority · status · commit -->

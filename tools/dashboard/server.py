@@ -1602,8 +1602,9 @@ async def api_dispatch_trace(request):
             return JSONResponse({"error": "run not found"}, status_code=404)
         return JSONResponse({
             "run": trace.get("id", run_name),
+            "kind": trace.get("kind") or "bead",
             "bead_id": trace.get("bead_id", ""),
-            "bead": dao_beads.get_bead(trace.get("bead_id", "")),
+            "bead": dao_beads.get_bead(trace.get("bead_id", "")) if trace.get("bead_id") else None,
             "decision": trace.get("decision"),
             "experience_report": trace.get("experience_report", ""),
             "commit_hash": trace.get("commit_hash", ""),
@@ -1616,6 +1617,15 @@ async def api_dispatch_trace(request):
             "lines_added": trace.get("lines_added"),
             "lines_removed": trace.get("lines_removed"),
             "files_changed": trace.get("files_changed"),
+            # Mock fixtures may pre-populate agentic identity for trace fixtures
+            "agentic_source_id": trace.get("agentic_source_id") or "",
+            "action_label": trace.get("action_label"),
+            "member_key": trace.get("member_key"),
+            "target_source_id": trace.get("target_source_id"),
+            "target_org": trace.get("target_org"),
+            "target_title": trace.get("target_title"),
+            "dispatched_by_session": trace.get("dispatched_by_session"),
+            "dispatched_by_project": trace.get("dispatched_by_project") or "",
         })
 
     # Get structured metadata from SQLite
@@ -1689,7 +1699,55 @@ async def api_dispatch_trace(request):
         lines_removed = None
         files_changed = None
 
-    # Large artifacts still from disk
+    kind = (row.get("kind") if row else None) or "bead"
+    agentic_source_id = (row.get("agentic_source_id") if row else None) or ""
+    is_live = row.get("status") == "RUNNING" if row else False
+
+    # Agentic runs follow a different shape than beads: no commit, no
+    # diff, no experience_report, no bead lookup. The interesting
+    # context lives on the agentic source row (action label, target
+    # asset, sender) and in the session JSONL the agent wrote at
+    # ``dispatch_runs.output_dir``. Resolve those and short-circuit.
+    if kind == "agentic":
+        agentic_run_dir = Path(row["output_dir"]) if row and row.get("output_dir") else run_dir
+        has_session = bool(_find_session_files(run_name, run_dir=agentic_run_dir))
+        identity = _resolve_agentic_identity(agentic_source_id)
+        # Resolve the dispatching session's project so the front-end
+        # can build a real /session/<project>/<tmux> link. The "dashboard"
+        # sentinel is browser-initiated and has no session to link back to.
+        sender = identity["dispatched_by_session"] or ""
+        sender_project = ""
+        if sender and sender != "dashboard":
+            sender_project = _session_meta_for_tmux(sender).get("project") or ""
+        return JSONResponse({
+            "run": run_name,
+            "kind": "agentic",
+            "bead_id": "",
+            "bead": None,
+            "decision": decision,
+            "experience_report": "",
+            "commit_hash": "",
+            "branch": "",
+            "diff": "",
+            "has_session": has_session,
+            "is_live": is_live,
+            "duration_secs": duration_secs,
+            "commit_message": "",
+            "lines_added": None,
+            "lines_removed": None,
+            "files_changed": None,
+            # Agentic identity — what action ran, on what asset, for whom.
+            "agentic_source_id": agentic_source_id,
+            "action_label": identity["action_label"],
+            "member_key": identity["member_key"],
+            "target_source_id": identity["target_source_id"],
+            "target_org": identity["target_org"],
+            "target_title": identity["title"],
+            "dispatched_by_session": sender,
+            "dispatched_by_project": sender_project,
+        })
+
+    # Large artifacts still from disk (beads / librarian only)
     experience = ""
     if run_dir.exists():
         exp_path = run_dir / "experience_report.md"
@@ -1703,16 +1761,18 @@ async def api_dispatch_trace(request):
         if rc == 0:
             diff = stdout
 
-    # Bead info
-    bead = await run_cli_json(["bd", "show", bead_id, "--json"])
+    # Bead info — only for kind='bead' rows. ``bd show`` with an empty
+    # id returns an "ambiguous ID" error that crowds the UI.
+    bead = None
+    if bead_id:
+        bead = await run_cli_json(["bd", "show", bead_id, "--json"])
 
     # Session log availability
     has_session = bool(_find_session_files(run_name))
 
-    is_live = row.get("status") == "RUNNING" if row else False
-
     return JSONResponse({
         "run": run_name,
+        "kind": kind,
         "bead_id": bead_id,
         "bead": bead,
         "decision": decision,
@@ -2947,12 +3007,19 @@ def _dedup_queued_entries(entries: list[dict]) -> list[dict]:
     return dedup_claude_entries(entries)
 
 
-def _find_session_files(run_name: str) -> list[Path]:
-    """Find JSONL session files for a run, checking multiple locations."""
+def _find_session_files(run_name: str, *, run_dir: Path | None = None) -> list[Path]:
+    """Find JSONL session files for a run, checking multiple locations.
+
+    Bead/librarian dispatches: the run directory is ``AGENT_RUNS_DIR /
+    run_name``. Agentic dispatches: the dispatch_runs row carries an
+    explicit ``output_dir`` because the slug + timestamp aren't tied
+    to the run name. Callers pass that as ``run_dir`` when the row
+    is agentic so we don't have to repeat the agentic-vs-bead split.
+    """
     # 1. Run directory sessions — use rglob because Claude Code writes JSONL
     #    into a subdirectory (e.g. sessions/-workspace-repo/<hash>.jsonl)
-    run_dir = AGENT_RUNS_DIR / run_name
-    sessions_dir = run_dir / "sessions"
+    rd = run_dir if run_dir is not None else (AGENT_RUNS_DIR / run_name)
+    sessions_dir = rd / "sessions"
     if sessions_dir.exists():
         files = sorted(sessions_dir.rglob("*.jsonl"), key=lambda f: f.stat().st_mtime)
         if files:

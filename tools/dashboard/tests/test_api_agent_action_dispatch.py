@@ -600,6 +600,63 @@ def test_dispatch_canonicalises_prefix_asset_id(client, per_org_universe):
     assert md["target_source_id"] == asset_id
 
 
+def test_dispatch_trace_agentic_shape(
+    test_app, per_org_universe, isolated_dispatch_db,
+    patch_launch_session, reset_idempotency_cache,
+):
+    """``/api/dispatch/trace/<run>`` for kind='agentic' must return a
+    response shaped for the agentic UI: no bead lookup (so the
+    ``bd show`` ambiguous-id error doesn't crowd the response), no
+    diff/experience, and the agentic identity fields surfaced
+    (action_label, target_source_id, target_org, member_key, sender,
+    target_title).
+
+    Regression: before this, the trace page rendered almost nothing
+    for agentic dispatches because the endpoint returned a bead-shaped
+    response with empty fields and a ``bd show ""`` error.
+    """
+    importlib.reload(__import__("tools.dashboard.dao.dispatch", fromlist=["x"]))
+
+    asset_title = "Anchor note for trace test"
+    asset_id = "deadbeef-0000-0000-0000-deadbeef0099"
+    _insert_note_source(org="autonomy", source_id=asset_id, title=asset_title)
+
+    with TestClient(test_app) as client:
+        r = client.post(
+            "/api/agent-actions/dispatch",
+            json={"member_key": "note.update-summary", "asset_id": asset_id},
+        )
+        assert r.status_code == 201, r.json()
+        run_id = r.json()["slug"]
+
+        trace = client.get(f"/api/dispatch/trace/{run_id}")
+        assert trace.status_code == 200, trace.text
+        body = trace.json()
+
+    # Kind is surfaced so the front-end knows which template to render.
+    assert body["kind"] == "agentic"
+    # No bead lookup — empty bead_id, null bead. The previous bug
+    # called ``bd show ""`` and stuffed a multi-thousand-char
+    # "ambiguous ID" error string into ``bead``.
+    assert (body.get("bead_id") or "") == ""
+    assert body.get("bead") is None, (
+        f"agentic trace must not invoke bd show; bead={body.get('bead')!r}"
+    )
+    # No commit/diff/experience for agentic.
+    assert body.get("commit_hash") == ""
+    assert body.get("diff") == ""
+    assert body.get("experience_report") == ""
+    # Agentic identity fields drive the new template branch.
+    assert body.get("agentic_source_id") == r.json()["agentic_source_id"]
+    assert body.get("action_label") == "Update Title & Summary"
+    assert body.get("target_source_id") == asset_id
+    assert body.get("target_org") == "autonomy"
+    assert body.get("member_key") == "note.update-summary"
+    assert body.get("target_title") == asset_title
+    # Browser-initiated → "dashboard" sentinel + no project link.
+    assert body.get("dispatched_by_session") == "dashboard"
+
+
 @pytest.mark.asyncio
 async def test_live_active_resolves_agentic_target_title(
     test_app, per_org_universe, isolated_dispatch_db,
