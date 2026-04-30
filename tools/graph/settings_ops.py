@@ -570,6 +570,234 @@ def _resolve_settings_caller(org: str | None) -> str | None:
     return _ops._resolve_org(org)
 
 
+def resolve_setting_strict(
+    value: str,
+    *,
+    org: str | None = None,
+    peers: list[str] | None = None,
+) -> dict | list[dict] | None:
+    """Resolve a Setting by full id or id-prefix, own-first then peers.
+
+    Mirrors :func:`resolve_source_strict` semantics. Own-org sees every
+    state; peer DBs only contribute rows whose ``publication_state`` is
+    ``published`` or ``canonical``. Returns:
+
+    * dict — single row (success)
+    * list[dict] — multiple matches in one scope (caller surfaces as
+      ambiguity error with candidate UUIDs)
+    * None — no match anywhere in scope
+
+    The resolver short-circuits as soon as a scope (own, then each peer)
+    yields any match, so an exact own-org hit wins over a peer prefix
+    match — consistent with how source resolution already behaves.
+    """
+    from .cross_org import (
+        PEER_VISIBLE_STATES,
+        open_peer_db,
+        resolve_peers,
+    )
+
+    db = _open(org)
+    try:
+        # 1. Exact id, own org
+        row = db.conn.execute(
+            "SELECT * FROM settings WHERE id = ?", (value,)
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+        # 2. Prefix id, own org
+        rows = db.conn.execute(
+            "SELECT * FROM settings WHERE id LIKE ?", (f"{value}%",)
+        ).fetchall()
+        if len(rows) == 1:
+            return dict(rows[0])
+        if len(rows) > 1:
+            return [dict(r) for r in rows]
+    finally:
+        db.close()
+
+    # 3. Peer scan (public surface only)
+    resolved_org = _resolve_settings_caller(org)
+    placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
+    for peer in sorted(resolve_peers(resolved_org, peers)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        # exact id
+        row = peer_db.conn.execute(
+            "SELECT * FROM settings WHERE id = ?", (value,)
+        ).fetchone()
+        if row is not None and row["publication_state"] in PEER_VISIBLE_STATES:
+            return dict(row)
+        # prefix id
+        rows = peer_db.conn.execute(
+            f"SELECT * FROM settings WHERE id LIKE ? "
+            f"  AND publication_state IN ({placeholders})",
+            (f"{value}%", *PEER_VISIBLE_STATES),
+        ).fetchall()
+        if len(rows) == 1:
+            return dict(rows[0])
+        if len(rows) > 1:
+            return [dict(r) for r in rows]
+    return None
+
+
+def resolve_set_key(
+    set_id: str,
+    key: str,
+    *,
+    org: str | None = None,
+    peers: list[str] | None = None,
+) -> dict | None:
+    """Resolve ``(set_id, key)`` to the winning base Setting row.
+
+    Uses :func:`read_set` so the answer matches what consumers see at
+    runtime — same precedence, same cross-org visibility, same exclude
+    rules. Returns the underlying base row dict (the one that becomes
+    ``ResolvedSetting.id`` post-merge), or None if no member matches.
+    """
+    members = read_set(set_id, org=org, peers=peers)
+    for m in members.members:
+        if m.key == key:
+            # m.id is the chosen base id; fetch the row in its origin DB.
+            return _fetch_setting_any_org(m.id, org)
+    return None
+
+
+def chain_setting(
+    set_id: str,
+    key: str,
+    *,
+    org: str | None = None,
+    peers: list[str] | None = None,
+) -> dict | None:
+    """Walk the supersedes chain for ``(set_id, key)`` and return the
+    per-layer contributions.
+
+    Returns ``None`` if no winning base exists. Otherwise returns:
+
+    .. code-block:: python
+
+        {
+            "set_id": ...,
+            "key": ...,
+            "layers": [
+                {
+                    "id": ..., "kind": "base"|"override",
+                    "state": ..., "stored_revision": ..., "org": ...,
+                    "supersedes": ..., "created_at": ...,
+                    "patch": {...},   # full base payload, or override patch
+                    "result": {...},  # merged-so-far after this layer
+                },
+                ...
+            ],
+            "final": {...},          # final resolved payload
+        }
+
+    Override application order matches :func:`read_set`: each override
+    whose ``supersedes`` points at the chosen base contributes one
+    layer. Overrides of overrides are not currently followed (the
+    underlying resolver does not chase them either).
+    """
+    from .cross_org import (
+        PEER_VISIBLE_STATES,
+        open_peer_db,
+        resolve_peers,
+    )
+
+    resolved_org = _resolve_settings_caller(org)
+    raw_rows: list[tuple[str | None, Any]] = []
+    db = _open(org)
+    try:
+        rows = db.conn.execute(
+            "SELECT * FROM settings WHERE set_id = ? AND key = ? "
+            "  AND deprecated = 0",
+            (set_id, key),
+        ).fetchall()
+        for r in rows:
+            raw_rows.append((resolved_org, r))
+    finally:
+        db.close()
+
+    placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
+    for peer in sorted(resolve_peers(resolved_org, peers)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        rows = peer_db.conn.execute(
+            f"SELECT * FROM settings WHERE set_id = ? AND key = ? "
+            f"  AND deprecated = 0 "
+            f"  AND publication_state IN ({placeholders})",
+            (set_id, key, *PEER_VISIBLE_STATES),
+        ).fetchall()
+        for r in rows:
+            raw_rows.append((peer, r))
+
+    if not raw_rows:
+        return None
+
+    bases: list[tuple[str | None, Any]] = []
+    overrides: list[tuple[str | None, Any]] = []
+    excludes: list[tuple[str | None, Any]] = []
+    for src_org, r in raw_rows:
+        if r["excludes"] is not None:
+            excludes.append((src_org, r))
+        elif r["supersedes"] is not None:
+            overrides.append((src_org, r))
+        else:
+            bases.append((src_org, r))
+
+    excluded_ids = {r["excludes"] for (_, r) in excludes}
+    candidate_bases = [
+        (o, r) for (o, r) in bases if r["id"] not in excluded_ids
+    ]
+    if not candidate_bases:
+        return None
+    candidate_bases.sort(key=lambda om: om[1]["created_at"] or "", reverse=True)
+    candidate_bases.sort(
+        key=lambda om: PRECEDENCE.get(om[1]["publication_state"], 99),
+    )
+    chosen_org, chosen_row = candidate_bases[0]
+
+    base_payload = json.loads(chosen_row["payload"])
+    layers: list[dict] = [{
+        "id": chosen_row["id"],
+        "kind": "base",
+        "state": chosen_row["publication_state"],
+        "stored_revision": int(chosen_row["schema_revision"]),
+        "org": chosen_org,
+        "supersedes": chosen_row["supersedes"],
+        "created_at": chosen_row["created_at"],
+        "patch": base_payload,
+        "result": dict(base_payload),
+    }]
+
+    merged = dict(base_payload)
+    for ov_org, ov_row in overrides:
+        if ov_row["supersedes"] != chosen_row["id"]:
+            continue
+        ov_payload = json.loads(ov_row["payload"])
+        merged = json_merge_patch(merged, ov_payload)
+        layers.append({
+            "id": ov_row["id"],
+            "kind": "override",
+            "state": ov_row["publication_state"],
+            "stored_revision": int(ov_row["schema_revision"]),
+            "org": ov_org,
+            "supersedes": ov_row["supersedes"],
+            "created_at": ov_row["created_at"],
+            "patch": ov_payload,
+            "result": dict(merged),
+        })
+
+    return {
+        "set_id": set_id,
+        "key": key,
+        "layers": layers,
+        "final": merged,
+    }
+
+
 def _fetch_setting_any_org(
     setting_id: str,
     org: str | None,
