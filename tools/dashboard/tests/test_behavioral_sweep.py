@@ -56,6 +56,9 @@ SWEEP_SESSIONS = [
         "nag_enabled": False,
         "nag_interval": 15,
         "nag_message": "",
+        # auto-ngis4 — harness + model surfaced on every session row.
+        "harness": "claude",
+        "model": "claude-opus-4-7",
     },
     {
         "session_id": "auto-sweep-beta",
@@ -73,6 +76,9 @@ SWEEP_SESSIONS = [
         "nag_enabled": False,
         "nag_interval": 15,
         "nag_message": "",
+        # auto-ngis4 — beta runs Codex so the badge palette differs.
+        "harness": "codex",
+        "model": "gpt-5-codex",
     },
     {
         "session_id": "auto-sweep-gamma",
@@ -1672,6 +1678,25 @@ SESSIONS_PAGE_CHECKS = """
         });
     });
     r.recent_footers = recentFooters;
+
+    // auto-ngis4: harness badge present on every active card. We capture
+    // a {session_id: harness} map by reading the data-harness attribute
+    // (set by the canonical session-harness-badge partial). Cards may
+    // render the badge twice (compact + stats rows) — collapse via Set.
+    var harnessByCard = {};
+    cards.forEach(function(c) {
+        var sid = c.getAttribute('data-session-id') || '';
+        var badges = c.querySelectorAll('[data-testid="session-harness-badge"]');
+        var harnesses = new Set();
+        badges.forEach(function(b) {
+            var h = b.getAttribute('data-harness') || '';
+            if (h) harnesses.add(h);
+        });
+        // Collapse the duplicate badge across compact + stats rows.
+        harnessByCard[sid] = harnesses.size === 1 ? Array.from(harnesses)[0] : Array.from(harnesses).join('|');
+    });
+    r.harness_by_card = harnessByCard;
+    r.harness_badge_count = document.querySelectorAll('[data-testid="session-harness-badge"]').length;
 """
 
 # ── Resume button state-transition async check ──────────────────────
@@ -7560,3 +7585,225 @@ class TestCoordinatorBoardSettingsWiring:
             f"setting.changed SSE did not surface the new decision within "
             f"1s (saw {latest!r} after {elapsed_ms:.0f}ms)"
         )
+
+
+# ── auto-ngis4: harness badge sweep ────────────────────────────────────
+
+
+HARNESS_API_BADGE_CHECKS = """
+    // Inspect every active card for a harness badge. Each card may render
+    // the badge twice (compact-only row + stats row). We collapse to a
+    // single value per card.
+    var cards = document.querySelectorAll('[data-testid="session-card"]');
+    var perCard = {};
+    cards.forEach(function(c) {
+        var sid = c.getAttribute('data-session-id') || '';
+        var harnesses = new Set();
+        c.querySelectorAll('[data-testid="session-harness-badge"]').forEach(function(b) {
+            harnesses.add(b.getAttribute('data-harness') || '');
+        });
+        perCard[sid] = Array.from(harnesses).filter(Boolean);
+    });
+    r.harness_per_card = perCard;
+    r.total_badge_count = document.querySelectorAll('[data-testid="session-harness-badge"]').length;
+"""
+
+
+class TestSessionHarnessBadge:
+    """auto-ngis4 — canonical session-harness badge across every surface
+    that renders a session, plus the API + CrossTalk envelope contracts.
+
+    Acceptance from bead auto-ngis4:
+      1. /api/dao/session_status + /api/dao/active_sessions return
+         ``harness`` and ``model`` for every row.
+      2. CrossTalk envelope carries both, additively (legacy envelopes
+         without those attrs continue to parse).
+      3. Sessions page cards render a harness badge for both Claude and
+         Codex sessions, with the right per-harness brand class.
+      4. Detection fallback: a session whose harness was not declared at
+         registration falls back to a JSONL-shape sniff at ingest.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check("/sessions", HARNESS_API_BADGE_CHECKS, wait_ms=1500)
+        request.cls._checks = result
+
+    # ── API contract ────────────────────────────────────────────────
+
+    def test_active_sessions_api_carries_harness_and_model(self, sweep_server):
+        """``/api/dao/active_sessions`` includes harness + model on every row."""
+        status, body = _http_get(f"{sweep_server['url']}/api/dao/active_sessions")
+        assert status == 200, f"GET /api/dao/active_sessions returned {status}"
+        rows = json.loads(body)
+        assert isinstance(rows, list) and rows, "expected non-empty session list"
+        for row in rows:
+            assert "harness" in row, f"session row missing harness: {row.get('session_id')}"
+            assert "model" in row, f"session row missing model: {row.get('session_id')}"
+
+    def test_session_status_api_carries_harness_and_model(self, sweep_server):
+        """``/api/dao/session_status`` includes harness + model on every row."""
+        status, body = _http_get(f"{sweep_server['url']}/api/dao/session_status")
+        assert status == 200, f"GET /api/dao/session_status returned {status}"
+        rows = json.loads(body)
+        assert isinstance(rows, list) and rows, "expected non-empty status list"
+        for row in rows:
+            assert "harness" in row, f"status row missing harness: {row.get('tmux_name')}"
+            assert "model" in row, f"status row missing model: {row.get('tmux_name')}"
+
+    def test_alpha_session_carries_claude_harness_in_api(self, sweep_server):
+        """Fixture: alpha registered as claude → API surfaces ``harness=claude``."""
+        status, body = _http_get(f"{sweep_server['url']}/api/dao/active_sessions")
+        assert status == 200
+        rows = json.loads(body)
+        alpha = next((r for r in rows if r.get("session_id") == "auto-sweep-alpha"), None)
+        assert alpha is not None, "alpha session missing from API"
+        assert alpha.get("harness") == "claude"
+        assert alpha.get("model") == "claude-opus-4-7"
+
+    def test_beta_session_carries_codex_harness_in_api(self, sweep_server):
+        """Fixture: beta registered as codex → API surfaces ``harness=codex``."""
+        status, body = _http_get(f"{sweep_server['url']}/api/dao/active_sessions")
+        assert status == 200
+        rows = json.loads(body)
+        beta = next((r for r in rows if r.get("session_id") == "auto-sweep-beta"), None)
+        assert beta is not None, "beta session missing from API"
+        assert beta.get("harness") == "codex"
+        assert beta.get("model") == "gpt-5-codex"
+
+    # ── UI contract: badge renders on every card ───────────────────
+
+    def test_harness_badge_renders_on_every_active_card(self):
+        """Every active session card carries at least one harness badge."""
+        c = self._checks
+        per_card = c.get("harness_per_card") or {}
+        assert per_card, "no active session cards in DOM"
+        for sid, harnesses in per_card.items():
+            assert harnesses, (
+                f"session card {sid!r} renders no harness badge — every "
+                "card-rendering surface must consume the canonical partial"
+            )
+
+    def test_alpha_card_paints_claude_brand(self):
+        """Claude-harness session card carries data-harness=claude."""
+        c = self._checks
+        harnesses = (c.get("harness_per_card") or {}).get("auto-sweep-alpha") or []
+        assert "claude" in harnesses, (
+            f"alpha card should render a claude harness badge, got {harnesses!r}"
+        )
+
+    def test_beta_card_paints_codex_brand(self):
+        """Codex-harness session card carries data-harness=codex."""
+        c = self._checks
+        harnesses = (c.get("harness_per_card") or {}).get("auto-sweep-beta") or []
+        assert "codex" in harnesses, (
+            f"beta card should render a codex harness badge, got {harnesses!r}"
+        )
+
+    # ── CrossTalk envelope: additive ──────────────────────────────
+
+    def test_crosstalk_envelope_includes_harness_and_model(self):
+        """Outbound envelope carries ``harness`` and ``model`` attrs.
+
+        Production sender path (``api_crosstalk_send``) embeds both attrs
+        in the ``<crosstalk …>`` open tag. We assert the regex still
+        accepts the legacy form AND parses the new form's attrs.
+        """
+        from tools.dashboard.session_harness import _classify_crosstalk
+
+        legacy = (
+            '<crosstalk from="auto-peer" label="Peer" '
+            'source="aabb" turn="10" timestamp="2026-04-30T13:00:00Z">\n'
+            'Hey\n</crosstalk>'
+        )
+        new = (
+            '<crosstalk from="auto-peer" label="Peer" '
+            'source="aabb" turn="10" '
+            'harness="codex" model="gpt-5-codex" '
+            'timestamp="2026-04-30T13:00:00Z">\n'
+            'Hey\n</crosstalk>'
+        )
+        legacy_parsed = _classify_crosstalk(legacy)
+        new_parsed = _classify_crosstalk(new)
+        # Backward compat: legacy envelope still parses (existing test).
+        assert legacy_parsed is not None, "legacy crosstalk envelope must parse"
+        assert legacy_parsed.get("harness") == ""
+        assert legacy_parsed.get("model") == ""
+        # New envelope: harness + model surface in the parsed dict.
+        assert new_parsed is not None, "new crosstalk envelope must parse"
+        assert new_parsed.get("harness") == "codex"
+        assert new_parsed.get("model") == "gpt-5-codex"
+
+    # ── Detection fallback (auto-ngis4 spec) ───────────────────────
+
+    def test_detection_fallback_claude_jsonl_shape(self):
+        """A Claude-shaped JSONL line resolves to harness=claude.
+
+        Sessions whose workspace is not in ``workspace_settings`` get their
+        harness sniffed from the first line. Per the spec: Claude lines
+        have a ``message.role`` envelope; Codex lines use ``session_meta``
+        / ``response_item`` envelopes.
+        """
+        from tools.dashboard.session_harness import (
+            CLAUDE_HARNESS,
+            CODEX_HARNESS,
+            resolve_harness_for_path,
+        )
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
+            f.write(json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": "hello"},
+                "timestamp": "2026-04-30T12:00:00Z",
+            }) + "\n")
+            claude_path = Path(f.name)
+        try:
+            assert resolve_harness_for_path(claude_path) is CLAUDE_HARNESS
+        finally:
+            claude_path.unlink(missing_ok=True)
+
+    def test_detection_fallback_codex_jsonl_shape(self):
+        """A Codex-shaped JSONL (session_meta envelope) resolves to harness=codex."""
+        from tools.dashboard.session_harness import (
+            CLAUDE_HARNESS,
+            CODEX_HARNESS,
+            resolve_harness_for_path,
+        )
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
+            f.write(json.dumps({
+                "type": "session_meta",
+                "payload": {"originator": "codex-tui", "model": "gpt-5-codex"},
+            }) + "\n")
+            codex_path = Path(f.name)
+        try:
+            assert resolve_harness_for_path(codex_path) is CODEX_HARNESS
+        finally:
+            codex_path.unlink(missing_ok=True)
+
+    # ── Model extraction (auto-ngis4 acceptance) ───────────────────
+
+    def test_claude_extract_model_from_assistant_turn(self):
+        """Claude harness reads ``message.model`` off assistant turns."""
+        from tools.dashboard.session_harness import CLAUDE_HARNESS
+
+        entry = {
+            "type": "assistant",
+            "message": {"role": "assistant", "model": "claude-opus-4-7", "content": []},
+        }
+        assert CLAUDE_HARNESS.extract_model(entry, None) == "claude-opus-4-7"
+        # User turns leave the model unchanged
+        user_entry = {"type": "user", "message": {"role": "user", "content": "hi"}}
+        assert CLAUDE_HARNESS.extract_model(user_entry, "claude-opus-4-7") == "claude-opus-4-7"
+
+    def test_codex_extract_model_from_session_meta(self):
+        """Codex harness reads model off the session_meta opening envelope."""
+        from tools.dashboard.session_harness import CODEX_HARNESS
+
+        entry = {
+            "type": "session_meta",
+            "payload": {"originator": "codex-tui", "model": "gpt-5-codex"},
+        }
+        assert CODEX_HARNESS.extract_model(entry, None) == "gpt-5-codex"

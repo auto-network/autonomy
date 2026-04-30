@@ -154,8 +154,14 @@
                    live session (not the "dashboard" sentinel), link back to
                    that session. Plain text otherwise. -->
               <template x-if="e._isAgentic && e.dispatched_by_session && e.dispatched_by_session !== 'dashboard'">
-                <a class="tl-exp-link" :href="'/session/' + e.dispatched_by_session"
-                   x-text="'From: ' + e.dispatched_by_session + ' →'"></a>
+                <span class="inline-flex items-center gap-1.5">
+                  <a class="tl-exp-link" :href="'/session/' + e.dispatched_by_session"
+                     x-text="'From: ' + e.dispatched_by_session + ' →'"></a>
+                  <!-- Harness badge — auto-ngis4 / icon-rail. -->
+                  <span x-data="{ harness: e.sender_harness }">
+                    {% include 'partials/session-harness-badge.html' %}
+                  </span>
+                </span>
               </template>
               <template x-if="e._isAgentic && (!e.dispatched_by_session || e.dispatched_by_session === 'dashboard')">
                 <span class="tl-exp-link" style="cursor:default; opacity:0.7"

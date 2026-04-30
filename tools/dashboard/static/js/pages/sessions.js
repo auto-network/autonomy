@@ -516,6 +516,10 @@
             activity_state: s.activityState || 'idle',
             org: s.org || null,
             resumable: false,
+            // auto-ngis4: harness + model from session store
+            // (graph://553c7437-036 icon-rail).
+            harness: s.harness || null,
+            model: s.model || null,
             _hasData: !!hasData,
           });
         }
@@ -610,6 +614,10 @@
               librarian_type: r.librarian_type || null,
               librarian_target_bead_id: r.librarian_target_bead_id || null,
               librarian_target_bead_title: r.librarian_target_bead_title || '',
+              // auto-ngis4 — pass harness + model through so dead recent
+              // cards still render the icon-rail badge.
+              harness: r.harness || null,
+              model: r.model || null,
             };
           }).filter(function(x) { return x !== null; });
         } catch (e) {

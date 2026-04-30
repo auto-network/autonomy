@@ -94,6 +94,11 @@ SESSION_DEFAULTS: dict[str, Any] = {
     "nag_message": None,
     "dispatch_nag_enabled": False,
     "linked": False,
+    # auto-ngis4: harness + model are session identity (icon-rail note
+    # graph://553c7437-036). Default unknown so legacy fixtures behave
+    # the same as production rows that haven't seen an assistant turn yet.
+    "harness": "claude",
+    "model": None,
     # Legacy fields for backward compat
     "size_bytes": 1024000,
     "age_seconds": 120,
@@ -125,6 +130,9 @@ RECENT_SESSION_DEFAULTS: dict[str, Any] = {
     "librarian_type": None,
     "librarian_target_bead_id": None,
     "librarian_target_bead_title": "",
+    # auto-ngis4 — see SESSION_DEFAULTS for context.
+    "harness": "claude",
+    "model": None,
 }
 
 WORKTREE_FILE_DEFAULTS: dict[str, Any] = {
@@ -162,6 +170,9 @@ WORKTREE_ROW_DEFAULTS: dict[str, Any] = {
     "target_branch": "main",
     "commits": [],
     "dirty_files": [],
+    # auto-ngis4 — see SESSION_DEFAULTS for context.
+    "session_harness": None,
+    "session_model": None,
 }
 
 WORKTREE_DIRTY_DETAIL_DEFAULTS: dict[str, Any] = {
@@ -521,6 +532,9 @@ def get_session_status_rows(since: str | None = None) -> list[dict]:
                     "created_at": float(last_activity),
                     "context_tokens": int(sess.get("context_tokens") or 0),
                     "label": sess.get("label") or "",
+                    # auto-ngis4 — surface harness + model on every status row.
+                    "harness": sess.get("harness") or "claude",
+                    "model": sess.get("model") or None,
                 }
             )
 
@@ -559,6 +573,9 @@ def get_session_status_rows(since: str | None = None) -> list[dict]:
                     "created_at": _epoch(sess.get("created_at")),
                     "context_tokens": int(sess.get("context_tokens") or 0),
                     "label": sess.get("title") or "",
+                    # auto-ngis4 — surface harness + model on every status row.
+                    "harness": sess.get("harness") or "claude",
+                    "model": sess.get("model") or None,
                 }
             )
 

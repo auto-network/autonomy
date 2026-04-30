@@ -1204,6 +1204,10 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         "target_org": None,
         "member_key": None,
         "action_label": None,
+        # auto-ngis4: dispatching session identity surfaced on every row so
+        # the timeline card chrome can render a uniform harness badge.
+        "sender_harness": None,
+        "sender_model": None,
         "librarian_review": None,  # populated by _enrich_with_librarian_data
         "smoke_result": _read_smoke_result(row["output_dir"]),
         "_output_dir": row["output_dir"] or "",  # internal field, stripped before response
@@ -1222,6 +1226,18 @@ def _enrich_timeline_agentic(entries: list[dict]) -> None:
         entry["target_source_id"] = ident["target_source_id"]
         entry["target_org"] = ident["target_org"]
         entry["dispatched_by_session"] = ident["dispatched_by_session"]
+        # auto-ngis4: attach the dispatching session's harness + model so
+        # the timeline card can render an icon-rail badge for the "From:"
+        # link without a separate lookup. Sentinel sessions ("dashboard")
+        # leave both fields None.
+        sender = ident["dispatched_by_session"] or ""
+        if sender and sender != "dashboard":
+            sender_row = dashboard_db.get_session(sender) or {}
+            entry["sender_harness"] = sender_row.get("harness") or None
+            entry["sender_model"] = sender_row.get("model") or None
+        else:
+            entry["sender_harness"] = None
+            entry["sender_model"] = None
         # Always overwrite title for agentic entries so live and historical
         # views agree even if the upstream row had a stale or wrong value.
         if ident["title"]:
@@ -2493,6 +2509,8 @@ async def api_crosstalk_send(request):
     sender_label = (sender_row or {}).get("label", "") or sender
     sender_source_id = dashboard_db.reconcile_session_graph_source_id(sender_row)
     sender_turn = dashboard_db.get_source_max_turn_number(sender_source_id)
+    sender_harness = (sender_row or {}).get("harness") or "claude"
+    sender_model = (sender_row or {}).get("model") or ""
 
     # Build envelope. When MAX(turn_number) is unavailable (source not yet
     # ingested) emit an empty turn="" rather than fall back to a
@@ -2504,6 +2522,7 @@ async def api_crosstalk_send(request):
         f'<crosstalk from="{sender}"\n'
         f'           label="{sender_label}"\n'
         f'           source="{sender_source_id}" turn="{turn_str}"\n'
+        f'           harness="{sender_harness}" model="{sender_model}"\n'
         f'           timestamp="{iso_now}">\n'
         f'{message}\n'
         f'</crosstalk>'
@@ -2527,6 +2546,8 @@ async def api_crosstalk_send(request):
         "source_id": sender_source_id or None,
         "turn": sender_turn,
         "target": target,
+        "harness": sender_harness,
+        "model": sender_model or None,
     })
 
 
@@ -2600,6 +2621,8 @@ async def api_crosstalk_broadcast(request):
     sender_label = (sender_row or {}).get("label", "") or sender
     sender_source_id = dashboard_db.reconcile_session_graph_source_id(sender_row)
     sender_turn = dashboard_db.get_source_max_turn_number(sender_source_id)
+    sender_harness = (sender_row or {}).get("harness") or "claude"
+    sender_model = (sender_row or {}).get("model") or ""
 
     # Build envelope. Empty turn="" when graph turn number is unavailable.
     iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2608,6 +2631,7 @@ async def api_crosstalk_broadcast(request):
         f'<crosstalk from="{sender}"\n'
         f'           label="{sender_label}"\n'
         f'           source="{sender_source_id}" turn="{turn_str}"\n'
+        f'           harness="{sender_harness}" model="{sender_model}"\n'
         f'           timestamp="{iso_now}">\n'
         f'{message}\n'
         f'</crosstalk>'
@@ -2746,8 +2770,15 @@ async def api_chatwith_sessions(request):
 # ── Live Session Tailing ──────────────────────────────────────
 
 
+# auto-ngis4: harness + model are optional (additive) so legacy envelopes
+# without those attrs continue to parse and pre-existing callers see the
+# same group set. Named groups insulate consumers from positional shifts.
 _CROSSTALK_RE = re.compile(
-    r'<crosstalk\s+from="([^"]+)"\s+label="([^"]*)"\s+source="([^"]*)"\s+turn="([^"]*)"\s+timestamp="([^"]+)">\n(.*)\n</crosstalk>',
+    r'<crosstalk\s+from="(?P<from_>[^"]+)"\s+label="(?P<label>[^"]*)"'
+    r'\s+source="(?P<source>[^"]*)"\s+turn="(?P<turn>[^"]*)"'
+    r'(?:\s+harness="(?P<harness>[^"]*)")?'
+    r'(?:\s+model="(?P<model>[^"]*)")?'
+    r'\s+timestamp="(?P<timestamp>[^"]+)">\n(?P<body>.*)\n</crosstalk>',
     re.DOTALL,
 )
 
@@ -2763,15 +2794,17 @@ def _classify_crosstalk(text: str) -> dict | None:
     m = _CROSSTALK_RE.fullmatch(stripped)
     if not m:
         return None
-    body = m.group(6)
+    body = m.group("body")
     if '<' in body or '>' in body:
         return None  # not valid crosstalk — body must be plain text
     return {
-        "from": m.group(1),
-        "label": m.group(2),
-        "source": m.group(3),
-        "turn": m.group(4),
-        "timestamp": m.group(5),
+        "from": m.group("from_"),
+        "label": m.group("label"),
+        "source": m.group("source"),
+        "turn": m.group("turn"),
+        "timestamp": m.group("timestamp"),
+        "harness": m.group("harness") or "",
+        "model": m.group("model") or "",
         "message": body,
     }
 
@@ -5485,6 +5518,7 @@ async def _send_dashboard_ui_crosstalk(target_session: str, message: str) -> Non
         f'<crosstalk from="{sender}"\n'
         f'           label="{label}"\n'
         f'           source="" turn="0"\n'
+        f'           harness="dashboard" model=""\n'
         f'           timestamp="{iso_now}">\n'
         f'{message}\n'
         f'</crosstalk>'
@@ -5504,17 +5538,23 @@ async def _send_dashboard_ui_crosstalk(target_session: str, message: str) -> Non
 
 
 def _session_meta_for_tmux(tmux_name: str) -> dict:
-    """Look up a session's title + project in one pass.
+    """Look up a session's title + project + harness in one pass.
 
     ``project`` lets the worktree review screen build a deeplink back
     to the page-mode session viewer (``/session/<project>/<tmux>``)
     for any live row, so the operator can hop from a commit/dirty
     review straight to the conversation that produced it.
+
+    ``harness`` and ``model`` are surfaced (auto-ngis4 / icon-rail
+    principle 553c7437-036) so worktree rows can render a harness badge
+    inline without a second lookup.
     """
     row = dashboard_db.get_session(tmux_name) or {}
     return {
         "title": (row.get("label") or "").strip(),
         "project": (row.get("project") or "").strip(),
+        "harness": row.get("harness") or None,
+        "model": row.get("model") or None,
     }
 
 
@@ -5524,6 +5564,10 @@ def _worktree_state_json(row: WorktreeState) -> dict:
         "session_name": row.session_name,
         "session_title": meta["title"],
         "session_project": meta["project"],
+        # auto-ngis4: surface the running session's harness (claude / codex)
+        # so the worktree review chrome can render the icon-rail badge.
+        "session_harness": meta["harness"],
+        "session_model": meta["model"],
         "repo_name": row.repo_name,
         "worktree_path": str(row.worktree_path),
         "managed_clone": str(row.managed_clone) if row.managed_clone else None,
@@ -8576,12 +8620,15 @@ async def _send_to_via_crosstalk(
     # Reconcile-on-read + graph MAX(turn_number) (auto-4nr14 §A/§B).
     sender_source_id = dashboard_db.reconcile_session_graph_source_id(sender_row)
     sender_turn = dashboard_db.get_source_max_turn_number(sender_source_id)
+    sender_harness = (sender_row or {}).get("harness") or "claude"
+    sender_model = (sender_row or {}).get("model") or ""
     iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     turn_str = str(sender_turn) if sender_turn is not None else ""
     envelope = (
         f'<crosstalk from="{sender_session}"\n'
         f'           label="{sender_label}"\n'
         f'           source="{sender_source_id}" turn="{turn_str}"\n'
+        f'           harness="{sender_harness}" model="{sender_model}"\n'
         f'           timestamp="{iso_now}">\n'
         f'{primer}\n'
         f'</crosstalk>'

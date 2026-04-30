@@ -182,10 +182,18 @@
                   <div class="text-sm text-gray-300" x-text="turn.content_preview || turn.content || ''"></div>
                 </div>
               </template>
-              <div class="text-xs text-gray-500">
-                Source: <a :href="'/graph/' + prov.source_id"
-                           class="text-indigo-400 hover:underline font-mono text-xs"
-                           x-text="prov.source_id.slice(0, 12)"></a>
+              <div class="text-xs text-gray-500 flex items-center gap-2">
+                <span>Source:</span>
+                <a :href="'/graph/' + prov.source_id"
+                   class="text-indigo-400 hover:underline font-mono text-xs"
+                   x-text="prov.source_id.slice(0, 12)"></a>
+                <!-- Harness badge — auto-ngis4 / icon-rail. Surfaces only
+                     for session-typed provenance rows that carry harness. -->
+                <template x-if="prov.harness">
+                  <span x-data="{ harness: prov.harness }">
+                    {% include 'partials/session-harness-badge.html' %}
+                  </span>
+                </template>
               </div>
             </div>
           </template>

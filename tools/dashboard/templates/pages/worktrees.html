@@ -195,6 +195,10 @@
                   </span>
                   <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                         x-text="item.row.session_name"></span>
+                  <!-- Harness badge — auto-ngis4 / icon-rail. -->
+                  <span x-data="{ harness: item.row.session_harness }">
+                    {% include 'partials/session-harness-badge.html' %}
+                  </span>
                   <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
                         :class="statusClass(item.row)"
                         x-text="statusLabel(item.row)"></span>
@@ -306,6 +310,10 @@
                 </span>
                 <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                       x-text="row.session_name"></span>
+                <!-- Harness badge — auto-ngis4 / icon-rail. -->
+                <span x-data="{ harness: row.session_harness }">
+                  {% include 'partials/session-harness-badge.html' %}
+                </span>
                 <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
                   <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
                   <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
