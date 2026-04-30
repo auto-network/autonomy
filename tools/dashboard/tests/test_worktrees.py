@@ -1937,7 +1937,55 @@ class TestWorktreeMonitorNagMode:
         }
         monitor.set_nag_mode("auto-x", "autonomy", "nag_done")
         cached = monitor.get_source_control("auto-x", "autonomy")
-        assert cached["watch"] == {"mode": "nag_done"}
+        # Cached watch block now carries both the mode and the
+        # operator-visible expiry countdown — every nag request is
+        # time-limited (Jeremy 2026-04-30).
+        assert cached["watch"]["mode"] == "nag_done"
+        assert cached["watch"]["expires_in_seconds"] > 0
+
+    def test_nag_mode_auto_reverts_to_silent_after_expiry(self, monkeypatch):
+        """Per Jeremy (2026-04-30): you can never request infinite nags.
+        After the configured duration elapses, ``get_nag_mode`` returns
+        silent without any explicit revert call.
+        """
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+        # 1ms duration so we can step past it deterministically.
+        monitor.set_nag_mode(
+            "auto-x", "autonomy", "nag_all", duration_seconds=0.001,
+        )
+        assert monitor.get_nag_mode("auto-x", "autonomy") == "nag_all"
+        time.sleep(0.005)
+        # Past expiry — entry remains in-memory but the live mode is
+        # silent so the polling decision tree won't poll any more.
+        assert monitor.get_nag_mode("auto-x", "autonomy") == "silent"
+        assert monitor.get_nag_expiry_remaining("auto-x", "autonomy") == 0.0
+
+    def test_set_nag_mode_clamps_long_durations_to_max(self):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+        # Try to ask for 100 hours — should be clamped to the 4-hour
+        # ceiling (NAG_MAX_DURATION_SECONDS).
+        monitor.set_nag_mode(
+            "auto-x", "autonomy", "nag_all", duration_seconds=360_000.0,
+        )
+        remaining = monitor.get_nag_expiry_remaining("auto-x", "autonomy")
+        assert remaining <= wm_module.NAG_MAX_DURATION_SECONDS
+
+    def test_set_nag_mode_rejects_zero_or_negative_duration(self):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+        with pytest.raises(ValueError):
+            monitor.set_nag_mode(
+                "auto-x", "autonomy", "nag_all", duration_seconds=0.0,
+            )
+        with pytest.raises(ValueError):
+            monitor.set_nag_mode(
+                "auto-x", "autonomy", "nag_all", duration_seconds=-5.0,
+            )
 
 
 class TestWorktreeWatchEndpoint:
@@ -1948,11 +1996,16 @@ class TestWorktreeWatchEndpoint:
 
         captured = {}
 
-        def fake_set(session, repo, mode):
+        def fake_set(session, repo, mode, *, duration_seconds=None):
             captured["args"] = (session, repo, mode)
+            captured["duration_seconds"] = duration_seconds
             return mode
 
         monkeypatch.setattr(server.worktree_monitor, "set_nag_mode", fake_set)
+        monkeypatch.setattr(
+            server.worktree_monitor, "get_nag_expiry_remaining",
+            lambda *_: 3600.0,
+        )
 
         resp = test_client.put(
             "/api/worktrees/auto-x/autonomy/watch",
@@ -1966,8 +2019,37 @@ class TestWorktreeWatchEndpoint:
             "session_name": "auto-x",
             "repo_name": "autonomy",
             "mode": "nag_all",
+            "expires_in_seconds": 3600,
         }
         assert captured["args"] == ("auto-x", "autonomy", "nag_all")
+        # No explicit duration passed in body -> None reaches set_nag_mode,
+        # which then applies its own NAG_DEFAULT_DURATION_SECONDS.
+        assert captured["duration_seconds"] is None
+
+    def test_put_watch_accepts_explicit_duration(self, test_client, monkeypatch):
+        """Body can include ``duration_seconds`` to override the default."""
+        from tools.dashboard import server
+
+        captured = {}
+
+        def fake_set(session, repo, mode, *, duration_seconds=None):
+            captured["duration_seconds"] = duration_seconds
+            return mode
+
+        monkeypatch.setattr(server.worktree_monitor, "set_nag_mode", fake_set)
+        monkeypatch.setattr(
+            server.worktree_monitor, "get_nag_expiry_remaining",
+            lambda *_: 600.0,
+        )
+
+        resp = test_client.put(
+            "/api/worktrees/auto-x/autonomy/watch",
+            json={"mode": "nag_done", "duration_seconds": 600},
+        )
+
+        assert resp.status_code == 200
+        assert captured["duration_seconds"] == 600
+        assert resp.json()["expires_in_seconds"] == 600
 
     def test_put_watch_rejects_unknown_mode(self, test_client, monkeypatch):
         from tools.dashboard import server
@@ -1994,11 +2076,14 @@ class TestWorktreeWatchEndpoint:
 
         captured = {}
 
-        def fake_set(session, repo, mode):
+        def fake_set(session, repo, mode, *, duration_seconds=None):
             captured["args"] = (session, repo, mode)
             return mode
 
         monkeypatch.setattr(server.worktree_monitor, "set_nag_mode", fake_set)
+        monkeypatch.setattr(
+            server.worktree_monitor, "get_nag_expiry_remaining", lambda *_: 0.0,
+        )
 
         resp = test_client.put("/api/worktrees/auto-x/autonomy/watch", json={})
 

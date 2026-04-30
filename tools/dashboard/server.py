@@ -5834,10 +5834,17 @@ async def api_worktree_cherry_pick(request):
 async def api_worktree_watch_set(request):
     """Persist the source_control nag mode for a worktree row.
 
-    Mode is one of ``silent`` / ``nag_all`` / ``nag_done`` (the UI's
-    Silent / Nag All Changes / Nag When Done buttons). Storage is
-    in-memory on :class:`WorktreeMonitor` for v1 — CrossTalk delivery
-    of nag transitions is a separate follow-up bead.
+    Body shape::
+
+        {"mode": "silent" | "nag_all" | "nag_done",
+         "duration_seconds": <optional float, default 1h, capped at 4h>}
+
+    Per Jeremy (2026-04-30) every nag request is time-limited; the
+    duration defaults to ``NAG_DEFAULT_DURATION_SECONDS`` and is
+    clamped to ``NAG_MAX_DURATION_SECONDS`` (4 h). After the duration
+    elapses the row reverts to silent automatically, no operator
+    action required. Storage stays in-memory on :class:`WorktreeMonitor`
+    for v1.
     """
     from tools.dashboard.worktree_monitor import NAG_MODES, NAG_DEFAULT
 
@@ -5858,8 +5865,11 @@ async def api_worktree_watch_set(request):
             },
             status_code=400,
         )
+    duration_seconds = (body or {}).get("duration_seconds") if isinstance(body, dict) else None
     try:
-        worktree_monitor.set_nag_mode(session_name, repo_name, mode)
+        worktree_monitor.set_nag_mode(
+            session_name, repo_name, mode, duration_seconds=duration_seconds,
+        )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse({
@@ -5867,6 +5877,9 @@ async def api_worktree_watch_set(request):
         "session_name": session_name,
         "repo_name": repo_name,
         "mode": mode,
+        "expires_in_seconds": int(
+            worktree_monitor.get_nag_expiry_remaining(session_name, repo_name)
+        ),
     })
 
 
