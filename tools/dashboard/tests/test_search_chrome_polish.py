@@ -70,12 +70,16 @@ def _state_options_block(js: str) -> str:
 # ── 1. Filter strip top padding ───────────────────────────────────────
 
 
-def test_filter_strip_padding_top_reduced(test_app):
-    """The sticky filter-strip's ``padding-top`` is ≤ 6px after the polish.
+def test_filter_strip_padding_top_breathing_room(test_app):
+    """The sticky filter-strip's ``padding-top`` lands in a 4–12px
+    breathing-room band.
 
-    The previous chrome (auto-zvu3z) used 10px, which felt airy at
-    desktop width. The design experiment (a34b7927-3ef) tightens it to
-    4px. Allow 6px slack so a future tweak to 5/6px doesn't break this.
+    auto-zvu3z used 10px (airy at desktop). auto-gsu99 tightened to 4px.
+    Round 7m (auto-4e87g) restored ~8px because the route-specific
+    override in base.html had reduced the EFFECTIVE gap to 0px and the
+    chip row was butting against the global header. The contract is now
+    a band, not a ceiling: at least 4px to clear the header, at most
+    12px so we don't reintroduce the original excess.
     """
     with TestClient(test_app) as client:
         html = client.get("/pages/search").text
@@ -91,9 +95,9 @@ def test_filter_strip_padding_top_reduced(test_app):
             f".sp-header has no padding declaration: {body!r}"
         )
         pt = int(m.group(1))
-    assert pt <= 6, (
-        f".sp-header padding-top should be tightened to ≤ 6px (was 10px), "
-        f"got {pt}px"
+    assert 4 <= pt <= 12, (
+        f".sp-header padding-top should sit in the 4–12px breathing-room "
+        f"band (Round 7m restoration), got {pt}px"
     )
 
 

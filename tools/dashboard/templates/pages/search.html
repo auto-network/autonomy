@@ -30,13 +30,17 @@
   }
 
   /* ── Sticky filter strip ──────────────────────── */
+  /* The base.html ``body.route-search .sp-header`` rule overrides
+     ``margin-top`` and ``padding-top`` to wire up the route-specific
+     spacing (Round 7m: 8px breathing room above the chip row). This
+     in-component rule covers the non-route case (mock fixtures, design
+     studio previews) where the route class isn't applied. */
   .sp-header {
     position: sticky; top: 0; z-index: 10;
     background: var(--sp-bg);
-    padding: 4px 0 0;
+    padding: 8px 16px 0;
     border-bottom: 1px solid var(--sp-border);
-    margin: -8px -16px 0;
-    padding-left: 16px; padding-right: 16px;
+    margin: 0 -16px;
   }
   .sp-filter-row-1 {
     display: flex; gap: 8px; padding-bottom: 6px;
@@ -52,12 +56,16 @@
     align-items: center;
   }
 
-  /* ── Filter chips (org + publication state) ───── */
+  /* ── Filter chips (org + publication state + sort) ───
+     Round 7m: padding tightened from 0 10px → 0 8px and the
+     "Org:"/"State:"/"Sort:" labels + trailing caret were dropped so all
+     three chips fit in one row at iPhone width (390px). The glyph alone
+     communicates each chip's purpose. */
   .sp-filter-chip {
     flex-shrink: 0; height: 30px;
     display: inline-flex; align-items: center; gap: 6px;
     background: var(--sp-surface); border: 1px solid var(--sp-border);
-    border-radius: 8px; padding: 0 10px;
+    border-radius: 8px; padding: 0 8px;
     font-size: 12px; color: var(--sp-accent); font-weight: 500;
     cursor: pointer; user-select: none; line-height: 1;
   }
@@ -93,9 +101,25 @@
   .sp-state-glyph-bar.sp-state-glyph-bar-filled {
     background: var(--sp-accent);
   }
-  .sp-filter-chip-label { font-weight: 500; color: var(--sp-text-2); }
+  /* Sort chip glyph — three descending lines (sort/list metaphor),
+     same lightweight aesthetic as the State chip's bar graph: no
+     background, just inline shapes that scale with the chip. Round
+     7m introduced this so the Sort chip carries a glyph like Org and
+     State, keeping the row visually consistent after the labels were
+     dropped. */
+  .sp-order-glyph {
+    width: 14px; height: 12px; flex-shrink: 0;
+    display: inline-flex; flex-direction: column;
+    justify-content: center; align-items: flex-start; gap: 2px;
+  }
+  .sp-order-glyph-line {
+    height: 2px; background: var(--sp-accent); border-radius: 1px;
+  }
+  .sp-order-glyph-line-1 { width: 12px; }
+  .sp-order-glyph-line-2 { width: 9px; }
+  .sp-order-glyph-line-3 { width: 6px; }
+
   .sp-filter-chip-value { color: #c4b5fd; font-weight: 600; }
-  .sp-filter-chip-caret { color: var(--sp-text-3); font-size: 9px; }
 
   .sp-org-dropdown {
     position: absolute; top: 36px; left: 0; z-index: 20;
@@ -347,9 +371,7 @@
               <img :src="orgChip.favicon" :alt="orgChip.label">
             </template>
           </span>
-          <span class="sp-filter-chip-label">Org:</span>
           <span class="sp-filter-chip-value" x-text="orgChip.label"></span>
-          <span class="sp-filter-chip-caret">▾</span>
         </button>
 
         <!-- Org dropdown panel (open state) -->
@@ -401,9 +423,7 @@
                     :class="i <= stateChipFilledBars ? 'sp-state-glyph-bar-filled' : ''"></span>
             </template>
           </span>
-          <span class="sp-filter-chip-label">State:</span>
           <span class="sp-filter-chip-value" x-text="stateChipLabel"></span>
-          <span class="sp-filter-chip-caret">▾</span>
         </button>
 
         <!-- Publication-state dropdown panel (open state).
@@ -444,9 +464,12 @@
                 data-testid="sp-order-chip"
                 @click.stop="toggleOrderDropdown()"
                 title="Sort results by relevance or recency">
-          <span class="sp-filter-chip-label">Sort:</span>
+          <span class="sp-order-glyph" data-testid="sp-order-chip-glyph">
+            <span class="sp-order-glyph-line sp-order-glyph-line-1"></span>
+            <span class="sp-order-glyph-line sp-order-glyph-line-2"></span>
+            <span class="sp-order-glyph-line sp-order-glyph-line-3"></span>
+          </span>
           <span class="sp-filter-chip-value" x-text="orderChipLabel"></span>
-          <span class="sp-filter-chip-caret">▾</span>
         </button>
 
         <!-- Sort dropdown panel (open state). Mirrors the State dropdown
