@@ -484,6 +484,82 @@
         return (pr && pr.pr_checks) || [];
       },
 
+      // ── Rich check-tooltip popover ───────────────────────────────────
+      // Replaces the native ``title`` attribute with an anchor-positioned
+      // popover (settled design 3435e03f, lines 779-788). Lifted from
+      // the design's helpers; one piece of mutable state on the
+      // worktreesPage component.
+      checkTooltip: {
+        visible: false,
+        text: '',
+        detail: '',
+        x: 0,
+        y: 0,
+        key: '',
+      },
+
+      describeCheckStatus(status) {
+        if (status === 'pass') return 'passing';
+        if (status === 'running') return 'running';
+        if (status === 'pending') return 'pending';
+        if (status === 'fail') return 'failing';
+        return status || 'unknown';
+      },
+
+      checkTooltipKey(check) {
+        if (!check) return '';
+        return [check.id, check.icon, check.label, check.status, check.detail].join('|');
+      },
+
+      checkTooltipText(check) {
+        if (!check) return '';
+        return (check.label || 'Check') + ' — ' + this.describeCheckStatus(check.status);
+      },
+
+      checkTooltipDetail(check) {
+        return (check && check.detail) || '';
+      },
+
+      tooltipAnchorPoint(event) {
+        const target = event && event.currentTarget;
+        if (target && typeof target.getBoundingClientRect === 'function') {
+          const rect = target.getBoundingClientRect();
+          return {
+            x: Math.min(window.innerWidth - 16, Math.max(16, rect.left + rect.width / 2)),
+            y: Math.max(16, rect.top),
+          };
+        }
+        return {
+          x: Math.min(window.innerWidth - 16, Math.max(16, (event && event.clientX) || window.innerWidth / 2)),
+          y: Math.max(16, (event && event.clientY) || window.innerHeight / 2),
+        };
+      },
+
+      showCheckTooltip(event, check) {
+        const point = this.tooltipAnchorPoint(event || {});
+        this.checkTooltip.visible = true;
+        this.checkTooltip.text = this.checkTooltipText(check);
+        this.checkTooltip.detail = this.checkTooltipDetail(check);
+        this.checkTooltip.x = point.x;
+        this.checkTooltip.y = point.y;
+        this.checkTooltip.key = this.checkTooltipKey(check);
+      },
+
+      hideCheckTooltip() {
+        this.checkTooltip.visible = false;
+        this.checkTooltip.detail = '';
+        this.checkTooltip.key = '';
+      },
+
+      toggleCheckTooltip(event, check) {
+        const key = this.checkTooltipKey(check);
+        if (this.checkTooltip.visible && this.checkTooltip.key === key) {
+          this.hideCheckTooltip();
+          return;
+        }
+        this.showCheckTooltip(event, check);
+      },
+
       // ── Nag controls (Silent / Nag All Changes / Nag When Done) ─────
       // Backend mode strings (worktree_monitor.py NAG_*) are
       // 'silent' / 'nag_all' / 'nag_done'. UI labels match auto-r098a.
