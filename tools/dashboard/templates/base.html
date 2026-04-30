@@ -444,11 +444,16 @@
     }
 
     /* /search drops main's pt-6 baseline so the page-level sticky filter
-       strip can flush against the global header. Without this the strip
-       pins INSIDE the padding box and leaves a 24px gap (auto-kvka6 §7).
-       The .sp-root component re-applies a small top margin for the very
-       first card in the result set so cards aren't tucked under the
-       strip. Other pages keep pt-6. */
+       strip can flush-mount near the global header without inheriting
+       a 24px gap (auto-kvka6 §7). The .sp-root component re-applies a
+       small top margin for the very first card in the result set so
+       cards aren't tucked under the strip. Other pages keep pt-6.
+
+       Round 7m restores ~8px of breathing room above the chip row via
+       padding-top on .sp-header itself (not on main). Putting the gap
+       INSIDE .sp-header preserves it both unscrolled AND when the
+       strip is sticky-pinned at top: 0 — otherwise the gap would
+       collapse the moment the user scrolls. */
     body.route-search main#content {
       padding-top: 0 !important;
     }
@@ -457,7 +462,7 @@
     }
     body.route-search .sp-header {
       margin-top: 0;
-      padding-top: 0;
+      padding-top: 8px;
     }
 
     /* Session viewer outer container — fills the available vertical space.
