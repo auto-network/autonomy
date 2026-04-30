@@ -258,7 +258,10 @@
               }, 2000);
             }
 
-            if (this._mode === 'overlay') this._updateHeader();
+            if (this._mode === 'overlay') {
+              this._updateHeader();
+              this._refreshWorkspaceStatus();
+            }
             return;
           } catch (e) {
             this.state = 'error';
@@ -646,6 +649,10 @@
           } finally {
             self._resumeRefreshInFlight = null;
           }
+          // Also refresh worktree status — files may have changed while
+          // the panel was hidden (operator committed elsewhere, agent
+          // wrote new files, etc.).
+          if (self._mode === 'overlay') self._refreshWorkspaceStatus();
         })();
         return this._resumeRefreshInFlight;
       },
@@ -1083,6 +1090,53 @@
           statusEl.className = 'text-xs text-gray-500 ml-auto';
           if (pulseEl) { pulseEl.style.background = '#6b7280'; pulseEl.style.animation = 'none'; }
           if (badgeEl) { badgeEl.textContent = 'Complete'; badgeEl.className = 'badge badge-closed'; }
+        }
+
+        // Workspace-changes indicator: poke the title-bar anchor to
+        // surface tracked changes (uncommitted dirty files OR commits
+        // ahead of base) for this session's worktrees. Anchor click
+        // jumps straight to /worktrees so the operator can review.
+        var wsEl = document.getElementById('live-panel-workspace-status');
+        if (wsEl && this._workspaceStatus) {
+          var ws = this._workspaceStatus;
+          if (ws.hasChanges) {
+            var bits = [];
+            if (ws.commitsAhead > 0) bits.push(ws.commitsAhead + ' commit' + (ws.commitsAhead === 1 ? '' : 's') + ' to review');
+            if (ws.dirtyCount > 0) bits.push(ws.dirtyCount + ' dirty file' + (ws.dirtyCount === 1 ? '' : 's'));
+            wsEl.title = 'Workspace: ' + bits.join(', ') + ' — open Worktrees review';
+            wsEl.style.display = 'inline-block';
+          } else {
+            wsEl.style.display = 'none';
+          }
+        }
+      },
+
+      // Fetch worktree state for this session's tmux name and stash it
+      // for ``_updateHeader`` to render. Called once on overlay mount;
+      // re-fetched on visibility/focus via the resume-recovery path.
+      async _refreshWorkspaceStatus() {
+        if (!this.sessionKey) return;
+        try {
+          var res = await fetch('/api/worktrees');
+          if (!res.ok) return;
+          var rows = await res.json();
+          var sid = this.sessionKey;
+          var matching = rows.filter(function (r) { return r.session_name === sid; });
+          var dirtyCount = 0;
+          var commitsAhead = 0;
+          for (var i = 0; i < matching.length; i++) {
+            var r = matching[i];
+            if (r.is_dirty) dirtyCount += (r.dirty_files || []).length;
+            commitsAhead += r.commits_ahead || 0;
+          }
+          this._workspaceStatus = {
+            hasChanges: (dirtyCount + commitsAhead) > 0,
+            dirtyCount: dirtyCount,
+            commitsAhead: commitsAhead,
+          };
+          this._updateHeader();
+        } catch (e) {
+          // Best-effort; don't poison the session viewer on fetch failure.
         }
       },
 
