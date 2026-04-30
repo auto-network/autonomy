@@ -32,6 +32,23 @@ SET_ID = "autonomy.workspace.capability.enable"
 SCHEMA_REVISION = 1
 
 
+SYNOPSIS = {
+    "summary": (
+        "Per-workspace capability enable: opt in/out of the org's installed "
+        "capability for a contract, with optional version pin and overrides"
+    ),
+    "nouns": [
+        "capability", "enable", "workspace capability",
+        "opt out", "disable", "projection",
+    ],
+    "related_set_ids": [
+        "autonomy.org.capability.install#1",
+        "autonomy.capability.contract#1",
+        "autonomy.workspace#1",
+    ],
+}
+
+
 _ALLOWED_TOP_LEVEL = {
     "contract",
     "contract_version",
@@ -63,6 +80,47 @@ class WorkspaceCapabilityEnableV1(SettingSchema):
 
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "contract": {
+            "type": "string",
+            "required": True,
+            "description": "Contract identifier this workspace enables/disables",
+        },
+        "contract_version": {
+            "type": "integer",
+            "description": (
+                "Pinned canonical contract version. Null/omitted = unpinned, "
+                "follows the current working version."
+            ),
+        },
+        "enabled": {
+            "type": "boolean",
+            "description": "Whether the contract is enabled for this workspace",
+            "default": True,
+        },
+        "disable_agentic_projection": {
+            "type": "boolean",
+            "description": "Disable just the agentic projection (skill / primer)",
+            "default": False,
+        },
+        "disable_deterministic_projection": {
+            "type": "boolean",
+            "description": (
+                "Disable just the deterministic projection "
+                "(Dashboard / Worktrees API)"
+            ),
+            "default": False,
+        },
+        "workspace_overrides": {
+            "type": "object",
+            "description": "Workspace-local overrides applied on top of the org install",
+        },
+        "notes": {
+            "type": "string",
+            "description": "Free-form notes",
+        },
+    }
 
     @classmethod
     def validate(cls, payload: Any) -> None:  # noqa: C901 — flat checks

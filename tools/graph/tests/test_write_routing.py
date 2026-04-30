@@ -64,9 +64,19 @@ def _count_sources(db_path: Path) -> int:
 
 
 def _count_settings(db_path: Path) -> int:
+    """Count Settings rows excluding the registered-schema meta-Settings.
+
+    ``autonomy.schema`` / ``autonomy.schema.synopsis`` rows are written
+    automatically by the lazy schema-meta flush (auto-82xyq) on every
+    writable DB connection, so they're not what the routing tests care
+    about. Filter them out so the assertion targets the row under test.
+    """
     conn = sqlite3.connect(str(db_path))
     try:
-        return conn.execute("SELECT COUNT(*) FROM settings").fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM settings "
+            "WHERE set_id NOT IN ('autonomy.schema', 'autonomy.schema.synopsis')"
+        ).fetchone()[0]
     finally:
         conn.close()
 

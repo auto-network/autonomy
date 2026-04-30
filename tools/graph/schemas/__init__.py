@@ -18,6 +18,11 @@ from .registry import (
     upconvert_payload,
     validate_payload,
     list_registered_set_ids,
+    flush_schema_meta,
+    SCHEMA_META_SET_ID,
+    SCHEMA_META_REVISION,
+    SYNOPSIS_META_SET_ID,
+    SYNOPSIS_META_REVISION,
 )
 
 # Concrete schema registrations. Importing for side effects — each module
@@ -45,4 +50,9 @@ __all__ = [
     "upconvert_payload",
     "validate_payload",
     "list_registered_set_ids",
+    "flush_schema_meta",
+    "SCHEMA_META_SET_ID",
+    "SCHEMA_META_REVISION",
+    "SYNOPSIS_META_SET_ID",
+    "SYNOPSIS_META_REVISION",
 ]

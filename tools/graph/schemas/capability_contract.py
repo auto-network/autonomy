@@ -46,6 +46,23 @@ SET_ID = "autonomy.capability.contract"
 SCHEMA_REVISION = 1
 
 
+SYNOPSIS = {
+    "summary": (
+        "Provider-agnostic capability contract: deterministic interface "
+        "(named ops with input/output schemas) consumers can rely on"
+    ),
+    "nouns": [
+        "capability", "contract", "interface", "ops", "operations",
+        "issue tracker", "source control",
+    ],
+    "related_set_ids": [
+        "autonomy.capability.impl#1",
+        "autonomy.org.capability.install#1",
+        "autonomy.workspace.capability.enable#1",
+    ],
+}
+
+
 _SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 _ALLOWED_TOP_LEVEL = {
@@ -112,6 +129,50 @@ class CapabilityContractV1(SettingSchema):
 
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "name": {
+            "type": "string",
+            "required": True,
+            "description": "Lowercase snake_case identifier for the contract family",
+        },
+        "version": {
+            "type": "integer",
+            "required": True,
+            "description": (
+                "Single monotonic integer version. ``name@N`` denotes the "
+                "pinned canonical revision."
+            ),
+        },
+        "summary": {
+            "type": "string",
+            "required": True,
+            "description": "Operator-facing one-line description of the contract",
+        },
+        "ops": {
+            "type": "array",
+            "required": True,
+            "description": "Named operations this contract groups",
+            "element": {
+                "name": {"type": "string", "required": True,
+                         "description": "Op name (lowercase snake_case)"},
+                "summary": {"type": "string", "required": True,
+                            "description": "One-line op description"},
+                "input_schema": {"type": "object", "required": True,
+                                 "description": "JSON-schema for op input"},
+                "output_schema": {"type": "object", "required": True,
+                                  "description": "JSON-schema for op output"},
+            },
+        },
+        "notes": {
+            "type": "string",
+            "description": "Free-form notes (design rationale, caveats, links)",
+        },
+        "ui_hints": {
+            "type": "object",
+            "description": "Free-form object of UI hints for dashboard renderers",
+        },
+    }
 
     @classmethod
     def validate(cls, payload: Any) -> None:  # noqa: C901 — flat checks

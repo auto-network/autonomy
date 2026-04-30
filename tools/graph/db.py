@@ -236,6 +236,21 @@ class GraphDB:
         self._migrate_settings()
         self._migrate_orgs()
         self._seed_tags()
+        self._flush_schema_meta()
+
+    def _flush_schema_meta(self):
+        """Lazy-flush schema metadata Settings on connection open.
+
+        Runs once per writable GraphDB connection; idempotent (payload
+        match short-circuits the UPDATE). Imported lazily to avoid an
+        import cycle with ``tools.graph.schemas`` (which transitively
+        imports settings_ops, which imports back from db).
+        """
+        try:
+            from .schemas.registry import flush_schema_meta
+        except Exception:
+            return
+        flush_schema_meta(self)
 
     def _migrate_attachments_alt_text(self):
         """Add alt_text column to attachments table if missing (idempotent)."""

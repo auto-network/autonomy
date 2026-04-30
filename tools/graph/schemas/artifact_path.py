@@ -27,9 +27,34 @@ SET_ID = "autonomy.artifact-path"
 SCHEMA_REVISION = 1
 
 
+SYNOPSIS = {
+    "summary": (
+        "Operator-local override for an artifact's host filesystem path"
+    ),
+    "nouns": [
+        "artifact", "path", "host filesystem",
+        "artifact override", "personal override",
+    ],
+    "related_set_ids": [
+        "autonomy.workspace.artifact#1",
+    ],
+}
+
+
 class ArtifactPathV1(SettingSchema):
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "path": {
+            "type": "string",
+            "required": True,
+            "description": (
+                "Absolute host path where the artifact lives, replacing the "
+                "Artifact-Layering default. Setting key is '<org>:<name>'."
+            ),
+        },
+    }
 
     @classmethod
     def validate(cls, payload: dict) -> None:

@@ -12,15 +12,49 @@ Breaking changes are expressed by *not* registering an upconverter for the
 hop. Callers asking for ``target_revision >= N`` will silently drop
 ``stored_revision < N`` rows when no chain reaches them — see
 ``upconvert_chain``.
+
+Schema-as-Setting (auto-82xyq): registered schemas are also lazily
+upserted into each per-org DB as ``autonomy.schema#1`` Settings, with
+their hand-curated synopsis surfacing as ``autonomy.schema.synopsis#1``.
+``flush_schema_meta(db)`` performs the upsert; ``GraphDB._init_schema``
+calls it once per writable connection. The flush is idempotent — payload
+match is a no-op.
 """
 
 from __future__ import annotations
 
+import json
+import sys
 from typing import Any, Callable
+from uuid import uuid4
 
 
 class SchemaValidationError(ValueError):
     """Raised when a payload does not conform to its declared schema."""
+
+
+# ── JSON-schema field shape helpers ──────────────────────────
+
+
+_PY_TO_JSON_TYPE = {
+    str: "string",
+    bool: "boolean",
+    int: "integer",
+    float: "number",
+    list: "array",
+    dict: "object",
+}
+
+
+def _python_type_to_json_type(t: Any) -> str:
+    """Map a Python type (or tuple of types) to a JSON-schema type name."""
+    if isinstance(t, tuple):
+        for cand in t:
+            mapped = _PY_TO_JSON_TYPE.get(cand)
+            if mapped is not None:
+                return mapped
+        return "string"
+    return _PY_TO_JSON_TYPE.get(t, "string")
 
 
 class SettingSchema:
@@ -30,10 +64,23 @@ class SettingSchema:
     override ``validate`` to enforce shape. The default ``validate`` is a
     no-op so registry round-trips work in tests without writing a real
     contract.
+
+    For schema introspection (``graph set schema/example/find``), subclasses
+    declare ``_field_metadata`` — a per-field dict carrying description,
+    type, required flag, enum choices, default value, and (for arrays)
+    element shape. ``export_json_schema()`` synthesizes a json-schema
+    dict from this metadata.
     """
 
     set_id: str = ""
     schema_revision: int = 0
+
+    # Hand-rolled metadata: {field_name: {description, type, required,
+    # enum, default, element, ...}}. Kept alongside ``_required`` /
+    # ``_optional_types`` rather than derived from them so that
+    # descriptions, enum choices, and defaults stay close to the validator
+    # logic that enforces them.
+    _field_metadata: dict[str, dict] = {}
 
     @classmethod
     def validate(cls, payload: dict) -> None:
@@ -45,6 +92,38 @@ class SettingSchema:
             raise SchemaValidationError(
                 f"{cls.__name__}: payload must be a dict, got {type(payload).__name__}"
             )
+
+    @classmethod
+    def export_json_schema(cls) -> dict:
+        """Synthesize a json-schema-compatible dict from ``_field_metadata``.
+
+        The output shape is intentionally close to draft-07: ``type:
+        object``, ``properties`` keyed by field name, ``required``
+        listing field names whose metadata flags ``required: True``.
+        Per-field property dicts copy through ``description``, ``type``,
+        ``enum``, ``default``, and ``element`` (array element shape).
+
+        Schemas without a populated ``_field_metadata`` produce an empty
+        properties dict — useful for the test-only stub schemas that
+        exist only to satisfy the registry contract.
+        """
+        properties: dict[str, dict] = {}
+        required: list[str] = []
+        for name, meta in cls._field_metadata.items():
+            prop: dict[str, Any] = {}
+            for k in ("type", "description", "enum", "default", "element"):
+                if k in meta:
+                    prop[k] = meta[k]
+            properties[name] = prop
+            if meta.get("required"):
+                required.append(name)
+        return {
+            "set_id": cls.set_id,
+            "schema_revision": cls.schema_revision,
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        }
 
 
 # ── Storage ──────────────────────────────────────────────────
@@ -182,3 +261,116 @@ def validate_payload(set_id: str, revision: int, payload: Any) -> None:
             f"unknown schema: {schema_key(set_id, revision)}"
         )
     schema.validate(payload)
+
+
+# ── Schema-as-Setting flush (auto-82xyq) ─────────────────────
+
+
+SCHEMA_META_SET_ID = "autonomy.schema"
+SCHEMA_META_REVISION = 1
+SYNOPSIS_META_SET_ID = "autonomy.schema.synopsis"
+SYNOPSIS_META_REVISION = 1
+
+
+def _module_synopsis(model_cls: type[SettingSchema]) -> dict | None:
+    """Return the ``SYNOPSIS`` constant from *model_cls*'s defining module,
+    or ``None`` if the module didn't declare one.
+    """
+    mod = sys.modules.get(model_cls.__module__)
+    if mod is None:
+        return None
+    syn = getattr(mod, "SYNOPSIS", None)
+    if not isinstance(syn, dict):
+        return None
+    return syn
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _upsert_meta_setting(
+    db,
+    *,
+    meta_set_id: str,
+    meta_revision: int,
+    key: str,
+    payload: dict,
+    now: str,
+) -> None:
+    """Idempotent upsert: one base Setting row per ``(meta_set_id, key)``.
+
+    Multiple base rows would be a registry/flush bug; the first one wins
+    and we update its payload in place. We deliberately skip
+    ``schemas.validate_payload`` — the meta set_ids are not registered as
+    SettingSchemas, and their payloads are produced by code we control.
+    """
+    serialized = json.dumps(payload, sort_keys=True)
+    row = db.conn.execute(
+        "SELECT id, payload FROM settings "
+        "WHERE set_id = ? AND key = ? "
+        "  AND supersedes IS NULL AND excludes IS NULL",
+        (meta_set_id, key),
+    ).fetchone()
+    if row is not None:
+        if row["payload"] != serialized:
+            db.conn.execute(
+                "UPDATE settings SET payload = ?, updated_at = ? WHERE id = ?",
+                (serialized, now, row["id"]),
+            )
+        return
+    db.conn.execute(
+        "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
+        "publication_state, created_at, updated_at) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+        (str(uuid4()), meta_set_id, int(meta_revision), key, serialized,
+         "canonical", now, now),
+    )
+
+
+def flush_schema_meta(db) -> None:
+    """Idempotently upsert schema + synopsis meta-Settings into ``db``.
+
+    The flush walks the live ``SCHEMAS`` registry rather than a separate
+    pending-upsert list — every registration is the source of truth, and
+    re-registering simply re-flushes. Read-only DBs are skipped.
+    Subsequent calls against an unchanged registry no-op (payload-equality
+    short-circuits the UPDATE).
+
+    Called once per writable :class:`GraphDB` connection from
+    ``GraphDB._init_schema``. The cost (~24 SELECT no-ops on a populated
+    DB) is dominated by the surrounding migration pass.
+    """
+    if getattr(db, "read_only", False):
+        return
+    if not SCHEMAS:
+        return
+    now = _now_iso()
+    for sk, model_cls in SCHEMAS.items():
+        try:
+            json_schema = model_cls.export_json_schema()
+        except Exception:
+            # Defensive: a schema with a broken export shouldn't crash
+            # every DB connection. Skip it; ``set schema`` will surface
+            # the absence on lookup.
+            continue
+        _upsert_meta_setting(
+            db,
+            meta_set_id=SCHEMA_META_SET_ID,
+            meta_revision=SCHEMA_META_REVISION,
+            key=sk,
+            payload=json_schema,
+            now=now,
+        )
+        synopsis = _module_synopsis(model_cls)
+        if synopsis is not None:
+            _upsert_meta_setting(
+                db,
+                meta_set_id=SYNOPSIS_META_SET_ID,
+                meta_revision=SYNOPSIS_META_REVISION,
+                key=sk,
+                payload=synopsis,
+                now=now,
+            )
+    db.conn.commit()

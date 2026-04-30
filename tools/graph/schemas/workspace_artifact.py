@@ -31,9 +31,51 @@ VALID_SCOPES = (
 )
 
 
+SYNOPSIS = {
+    "summary": (
+        "Workspace artifact contracts: files the workspace expects under "
+        "/etc/autonomy/artifacts/, scoped per org/workspace"
+    ),
+    "nouns": [
+        "artifact", "workspace artifact", "file mount",
+        "artifact scope", "license file",
+    ],
+    "related_set_ids": [
+        "autonomy.workspace#1",
+        "autonomy.artifact-path#1",
+        "autonomy.workspace.mount#1",
+    ],
+}
+
+
 class WorkspaceArtifactV1(SettingSchema):
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "scope": {
+            "type": "string",
+            "required": True,
+            "description": (
+                "Resolution scope for the artifact's host file. Setting key "
+                "is '<workspace-id>:<artifact-name>'."
+            ),
+            "enum": list(VALID_SCOPES),
+        },
+        "required": {
+            "type": "boolean",
+            "description": "Whether the artifact is required at workspace launch",
+            "default": True,
+        },
+        "description": {
+            "type": "string",
+            "description": "Operator-facing description of what this artifact contains",
+        },
+        "help": {
+            "type": "string",
+            "description": "Long-form help shown when the artifact is missing",
+        },
+    }
 
     @classmethod
     def validate(cls, payload: dict) -> None:
