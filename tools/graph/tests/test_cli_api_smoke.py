@@ -315,8 +315,113 @@ def test_cmd_context_routes_through_api(
     graph_cli.cmd_context(args)
     out = capsys.readouterr().out
     assert "Dispatch Lifecycle Signpost" in out
-    assert "Turn 1" in out
+    # Header AND label AND body — title-only assertions hid an empty-entries
+    # bug for months (auto-5zess). The label assertion specifically guards
+    # auto-yhnpm: in container/HTTP mode the entries payload has ``role`` but
+    # no ``entry_type``, so a label test that demands "USER" (matching the
+    # seeded role="user") catches a regression to the etype-only branch.
+    assert "Turn 1 — USER" in out
     assert "canonical signpost content" in out
+
+
+def test_cmd_context_role_labels_match_seeded_roles(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch, orgs_root,
+):
+    """Mixed-role fixture: container-mode ``graph context`` must label each
+    turn by its actual role, not blanket-ASSISTANT every entry.
+
+    Regression for auto-yhnpm: the host path returns ``entry_type``
+    ('thought' | 'derivation') alongside ``role``, the server path
+    returns only ``role``. The CLI's label logic used to branch on
+    ``entry_type == 'thought'`` only, so every entry from the HTTP
+    payload (where ``entry_type`` is absent) rendered as ASSISTANT —
+    user turns included.
+    """
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+
+    db = GraphDB.open_org_db("autonomy", mode="rw")
+    sid = str(uuid.uuid4())
+    try:
+        src = Source(
+            id=sid, type="session", platform="claude-code",
+            project="autonomy", title="mixed-role context fixture",
+            file_path=f"session:{sid}", metadata={"author": "test"},
+        )
+        db.insert_source(src)
+        db.insert_thought(Thought(
+            source_id=sid, content="user turn one body",
+            role="user", turn_number=1,
+        ))
+        db.insert_thought(Thought(
+            source_id=sid, content="assistant turn two body",
+            role="assistant", turn_number=2,
+        ))
+        db.insert_thought(Thought(
+            source_id=sid, content="user turn three body",
+            role="user", turn_number=3,
+        ))
+        db.commit()
+    finally:
+        db.close()
+    GraphDB.close_all_pooled()
+
+    args = _cli_args(source=sid, turn="2", window=2, max_chars=0)
+    graph_cli.cmd_context(args)
+    out = capsys.readouterr().out
+
+    assert "mixed-role context fixture" in out
+    # Label MUST match role on every turn — and the body MUST be present
+    # (smoke tests that only checked headers shipped a 404 unnoticed).
+    assert "Turn 1 — USER" in out
+    assert "user turn one body" in out
+    assert "Turn 2 — ASSISTANT" in out
+    assert "assistant turn two body" in out
+    assert "Turn 3 — USER" in out
+    assert "user turn three body" in out
+    # The blanket-ASSISTANT regression printed "Turn 1 — ASSISTANT" — fail
+    # loud if it ever comes back.
+    assert "Turn 1 — ASSISTANT" not in out
+    assert "Turn 3 — ASSISTANT" not in out
+
+
+def test_cmd_context_last_n_role_labels_match_seeded_roles(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch, orgs_root,
+):
+    """The ``last:N`` tail-render path has its own loop with its own label
+    logic — guard it the same way as the around-turn path."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+
+    db = GraphDB.open_org_db("autonomy", mode="rw")
+    sid = str(uuid.uuid4())
+    try:
+        src = Source(
+            id=sid, type="session", platform="claude-code",
+            project="autonomy", title="tail role-label fixture",
+            file_path=f"session:{sid}", metadata={"author": "test"},
+        )
+        db.insert_source(src)
+        db.insert_thought(Thought(
+            source_id=sid, content="user tail body",
+            role="user", turn_number=1,
+        ))
+        db.insert_thought(Thought(
+            source_id=sid, content="assistant tail body",
+            role="assistant", turn_number=2,
+        ))
+        db.commit()
+    finally:
+        db.close()
+    GraphDB.close_all_pooled()
+
+    args = _cli_args(source=sid, turn="last:2", window=0, max_chars=0)
+    graph_cli.cmd_context(args)
+    out = capsys.readouterr().out
+
+    assert "Turn 1 — USER" in out
+    assert "user tail body" in out
+    assert "Turn 2 — ASSISTANT" in out
+    assert "assistant tail body" in out
+    assert "Turn 1 — ASSISTANT" not in out
 
 
 def test_read_source_full_via_api_uses_resolve_endpoint(monkeypatch):
