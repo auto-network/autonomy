@@ -90,6 +90,56 @@ class TestDispatcherHTTPClient:
         )
         assert method.upper() == "POST", f"method was {method!r}, expected POST"
 
+    def test_dispatcher_register_agentic_uses_http(self, tmp_path):
+        """_register_agentic_session must POST to /api/monitor/register
+        with type='agentic' and the run-id-as-tmux-name shape.
+
+        Without this registration the dashboard's session_monitor never
+        inotifies the agentic JSONL, no ``session:messages`` events
+        fire, and the live-trace overlay can't auto-refresh — operator
+        has to close+reopen to see new turns. Pinning the HTTP shape
+        here so the live-trace breakage can't recur silently.
+        """
+        from agents import dispatcher
+        import json as _json
+
+        run_id = "agentic-update-summary-abcd"
+        output_dir = str(tmp_path / "agent-runs" / run_id)
+        sessions_dir = tmp_path / "agent-runs" / run_id / "sessions" / "-workspace-repo"
+        sessions_dir.mkdir(parents=True)
+        jsonl = sessions_dir / "agent-uuid.jsonl"
+        jsonl.write_text("")
+
+        fake_urlopen = MagicMock()
+        fake_urlopen.return_value.__enter__ = MagicMock(
+            return_value=MagicMock(read=MagicMock(return_value=b'{"ok":true}'))
+        )
+        fake_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            dispatcher._register_agentic_session(run_id, output_dir, jsonl)
+
+        assert fake_urlopen.call_count >= 1, (
+            "_register_agentic_session did not POST to "
+            "/api/monitor/register"
+        )
+
+        call = fake_urlopen.call_args
+        req = call[0][0]
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        assert "/api/monitor/register" in url
+
+        # Body shape: tmux_name=run_id, type='agentic', jsonl_path set,
+        # project derived from the JSONL's parent dir name.
+        body = req.data if hasattr(req, "data") else None
+        assert body is not None
+        payload = _json.loads(body.decode())
+        assert payload["tmux_name"] == run_id
+        assert payload["type"] == "agentic"
+        assert payload["jsonl_path"] == str(jsonl)
+        assert payload["project"] == "-workspace-repo"
+        assert payload["run_dir"] == output_dir
+
     def test_dispatcher_deregister_uses_http_not_db(self, tmp_path, monkeypatch):
         """_deregister_session_with_monitor must POST, not call mark_dead."""
         from agents import dispatcher
