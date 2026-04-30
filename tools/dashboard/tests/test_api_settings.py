@@ -266,3 +266,60 @@ def test_delete_canonical_blocked_400(graph_db_env, example_schema, client):
                            state="canonical")
     r = client.delete(f"/api/graph/setting/{sid}")
     assert r.status_code == 400
+
+
+# ── Resolve / chain endpoints (auto-xhimi) ─────────────────
+
+
+def test_setting_resolve_unique_prefix(graph_db_env, example_schema, client):
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    r = client.get(f"/api/graph/setting-resolve/{sid[:8]}")
+    assert r.status_code == 200
+    assert r.json()["id"] == sid
+
+
+def test_setting_resolve_full_id(graph_db_env, example_schema, client):
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    r = client.get(f"/api/graph/setting-resolve/{sid}")
+    assert r.status_code == 200
+    assert r.json()["id"] == sid
+
+
+def test_setting_resolve_404(graph_db_env, example_schema, client):
+    r = client.get("/api/graph/setting-resolve/no-such-prefix-xyz")
+    assert r.status_code == 404
+
+
+def test_setting_resolve_409_ambiguous(graph_db_env, example_schema, client, monkeypatch):
+    import tools.graph.settings_ops as so
+    forced = ["abcd5678-aaaa-aaaa-aaaa-000000000001",
+              "abcd5678-bbbb-bbbb-bbbb-000000000002"]
+    counter = iter(forced)
+    monkeypatch.setattr(so, "uuid4", lambda: next(counter))
+    ops.add_setting("autonomy.test.api", 1, "k1", {"x": 1})
+    ops.add_setting("autonomy.test.api", 1, "k2", {"x": 2})
+    r = client.get("/api/graph/setting-resolve/abcd5678")
+    assert r.status_code == 409
+    candidates = r.json()["candidates"]
+    assert {c["id"] for c in candidates} == set(forced)
+
+
+def test_settings_chain_returns_layers(graph_db_env, example_schema, client):
+    base = ops.add_setting(
+        "autonomy.test.api", 1, "k", {"name": "B", "v": 1}, state="canonical",
+    )
+    ov = ops.override_setting(base, {"name": "O"})
+    r = client.get("/api/graph/settings/autonomy.test.api/k/chain")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["set_id"] == "autonomy.test.api"
+    assert body["key"] == "k"
+    assert len(body["layers"]) == 2
+    assert body["layers"][0]["id"] == base
+    assert body["layers"][1]["id"] == ov
+    assert body["final"] == {"name": "O", "v": 1}
+
+
+def test_settings_chain_404(graph_db_env, example_schema, client):
+    r = client.get("/api/graph/settings/autonomy.test.api/missing/chain")
+    assert r.status_code == 404

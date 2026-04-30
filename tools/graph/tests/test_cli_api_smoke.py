@@ -1084,3 +1084,70 @@ def test_forbidden_sqlite_fires_when_tripped(monkeypatch):
     code = compile(src, "/workspace/repo/tools/graph/cli.py", "exec")
     with pytest.raises(_SqliteForbiddenError):
         exec(code, {})
+
+
+# ── New set ergonomics smoke tests (auto-xhimi) ──────────────
+
+
+def test_cmd_set_show_partial_id_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph set show <8-char-prefix>`` resolves via /api/graph/setting-resolve."""
+    from tools.graph import schemas, ops as graph_ops
+    from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS
+
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    snap_s, snap_u = dict(SCHEMAS), dict(UPCONVERTERS)
+    try:
+        class V1(schemas.SettingSchema):
+            set_id = "smoke.via.api"
+            schema_revision = 1
+        schemas.register_schema("smoke.via.api", 1, V1)
+        sid = graph_ops.add_setting(
+            "smoke.via.api", 1, "k", {"v": 1}, org="autonomy",
+        )
+        GraphDB.close_all_pooled()
+        args = _cli_args()
+        args.id_parts = [sid[:8]]
+        set_cmd.cmd_set_show(args)
+        out = capsys.readouterr().out
+        body = json.loads(out)
+        assert body["id"] == sid
+    finally:
+        SCHEMAS.clear(); SCHEMAS.update(snap_s)
+        UPCONVERTERS.clear(); UPCONVERTERS.update(snap_u)
+
+
+def test_cmd_set_read_chain_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """``graph set read <set_id> <key> --chain`` hits /api/graph/settings/.../chain."""
+    from tools.graph import schemas, ops as graph_ops
+    from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS
+
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    snap_s, snap_u = dict(SCHEMAS), dict(UPCONVERTERS)
+    try:
+        class V1(schemas.SettingSchema):
+            set_id = "smoke.chain.api"
+            schema_revision = 1
+        schemas.register_schema("smoke.chain.api", 1, V1)
+        base = graph_ops.add_setting(
+            "smoke.chain.api", 1, "ws",
+            {"name": "B", "v": 1}, state="canonical", org="autonomy",
+        )
+        graph_ops.override_setting(base, {"name": "O"}, org="autonomy")
+        GraphDB.close_all_pooled()
+        args = _cli_args()
+        args.id_parts = ["smoke.chain.api", "ws"]
+        args.chain = True
+        set_cmd.cmd_set_read(args)
+        out = capsys.readouterr().out
+        body = json.loads(out)
+        assert body["set_id"] == "smoke.chain.api"
+        assert len(body["layers"]) == 2
+        assert body["final"]["name"] == "O"
+        assert body["final"]["v"] == 1
+    finally:
+        SCHEMAS.clear(); SCHEMAS.update(snap_s)
+        UPCONVERTERS.clear(); UPCONVERTERS.update(snap_u)

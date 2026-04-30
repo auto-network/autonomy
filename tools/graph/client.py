@@ -635,6 +635,39 @@ class HttpClient:
     def remove_setting(self, setting_id, *, org=None):
         self._delete(f"/api/graph/setting/{setting_id}", org=org)
 
+    def resolve_setting_strict(self, value, *, org=None):
+        """Resolve a Setting by full id or id-prefix.
+
+        Returns dict (unique match), list[dict] (ambiguous candidates),
+        or None (no match). Mirrors :func:`ops.resolve_setting_strict`.
+        """
+        try:
+            result = self._get(
+                f"/api/graph/setting-resolve/{urllib.parse.quote(value, safe='')}",
+                org=org,
+            )
+        except LookupError:
+            return None
+        except GraphHttpError as e:
+            if e.status == 409 and isinstance(e.body, dict) and "candidates" in e.body:
+                return list(e.body.get("candidates") or [])
+            raise
+        return result
+
+    def chain_setting(self, set_id, key, *, org=None):
+        """Return the supersedes chain for ``(set_id, key)``.
+
+        ``None`` if no member resolves under the caller's scope.
+        """
+        try:
+            return self._get(
+                f"/api/graph/settings/{urllib.parse.quote(set_id, safe='')}/"
+                f"{urllib.parse.quote(key, safe='')}/chain",
+                org=org,
+            )
+        except LookupError:
+            return None
+
     def migrate_setting_revisions(
         self, set_id, to_rev, *, dry_run=False, org=None,
     ):

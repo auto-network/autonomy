@@ -7914,6 +7914,54 @@ async def api_graph_settings_migrate(request):
     return JSONResponse(report.to_dict())
 
 
+async def api_graph_setting_resolve(request):
+    """GET /api/graph/setting-resolve/<value>?org=<slug>.
+
+    Resolve a Setting by full id or id-prefix using the same own-first /
+    peer-public-surface rules as :func:`graph_ops.resolve_setting_strict`.
+
+    * 200 ``{"id": ..., "set_id": ..., "key": ..., ...}`` — unique match.
+    * 409 ``{"candidates": [{"id": ..., "set_id": ..., "key": ...}, ...]}`` —
+      ambiguous prefix; CLI surfaces full UUIDs so the operator can pick.
+    * 404 ``{"error": "no setting matches '<value>'"}`` — no match.
+    """
+    value = request.path_params["value"]
+    org = _caller_org(request)
+    hit = graph_ops.resolve_setting_strict(value, org=org)
+    if hit is None:
+        return JSONResponse(
+            {"error": f"no setting matches {value!r}"}, status_code=404,
+        )
+    if isinstance(hit, list):
+        return JSONResponse(
+            {"candidates": [
+                {"id": r["id"], "set_id": r["set_id"], "key": r["key"]}
+                for r in hit
+            ]},
+            status_code=409,
+        )
+    return JSONResponse(hit)
+
+
+async def api_graph_settings_chain(request):
+    """GET /api/graph/settings/<set_id>/<key>/chain?org=<slug>.
+
+    Return the supersedes chain for ``(set_id, key)`` as ordered layer
+    contributions (base → override-1 → override-2 → ...). 404 when no
+    base resolves under the caller's scope.
+    """
+    set_id = request.path_params["set_id"]
+    key = request.path_params["key"]
+    org = _caller_org(request)
+    chain = graph_ops.chain_setting(set_id, key, org=org)
+    if chain is None:
+        return JSONResponse(
+            {"error": f"no member matches ({set_id!r}, {key!r})"},
+            status_code=404,
+        )
+    return JSONResponse(chain)
+
+
 # ── Agentic actions dispatch (auto-pqgrl) ────────────────────
 
 
@@ -9237,6 +9285,8 @@ routes = [
     Route("/api/graph/entity/{id}/thoughts", api_graph_entity_thoughts, methods=["GET"]),
     # Settings primitive (graph://0d3f750f-f9c). Routes ordered specific → generic.
     Route("/api/graph/sets", api_graph_set_ids, methods=["GET"]),
+    Route("/api/graph/setting-resolve/{value}", api_graph_setting_resolve, methods=["GET"]),
+    Route("/api/graph/settings/{set_id}/{key}/chain", api_graph_settings_chain, methods=["GET"]),
     Route("/api/graph/settings/{set_id}/{key}", api_graph_settings_get_by_key, methods=["GET"]),
     Route("/api/graph/settings/{set_id}/migrate", api_graph_settings_migrate, methods=["POST"]),
     Route("/api/graph/settings/{set_id}", api_graph_settings_list, methods=["GET"]),

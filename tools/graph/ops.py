@@ -54,6 +54,9 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
     get_setting,
     read_set,
     migrate_setting_revisions,
+    resolve_setting_strict,
+    resolve_set_key,
+    chain_setting,
     json_merge_patch,
 )
 

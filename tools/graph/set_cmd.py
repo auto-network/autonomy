@@ -26,7 +26,22 @@ _VALID_PROMOTION_STATES = ("curated", "published", "canonical")
 
 
 def _read_payload_file(path: str) -> dict:
-    """Load a payload from JSON or YAML. Falls back to JSON if PyYAML missing."""
+    """Load a payload from JSON or YAML. Falls back to JSON if PyYAML missing.
+
+    ``path == "-"`` reads from stdin (JSON only — YAML over stdin would
+    require sniffing or an explicit format flag).
+    """
+    if path == "-":
+        text = sys.stdin.read()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            print(f"Error: invalid JSON on stdin: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(data, dict):
+            print("Error: stdin must contain a JSON object", file=sys.stderr)
+            sys.exit(1)
+        return data
     text = Path(path).read_text()
     p = path.lower()
     if p.endswith((".yaml", ".yml")):
@@ -47,6 +62,41 @@ def _read_payload_file(path: str) -> dict:
         print(f"Error: {path} must contain a JSON/YAML object", file=sys.stderr)
         sys.exit(1)
     return data
+
+
+def _resolve_payload_input(args) -> dict:
+    """Pick the payload source for ``set add`` / ``set override``.
+
+    Order of precedence (mutually exclusive — checked at parse time):
+
+    * ``--inline JSON`` — small payloads on the command line.
+    * ``--from PATH`` (``-`` reads stdin) — file path.
+    * neither, and stdin is not a TTY — implicit stdin read.
+    * neither, stdin is a TTY — error (no payload supplied).
+    """
+    inline = getattr(args, "inline", None)
+    from_path = getattr(args, "from_file", None)
+    if inline is not None and from_path is not None:
+        print("Error: --inline and --from are mutually exclusive",
+              file=sys.stderr)
+        sys.exit(1)
+    if inline is not None:
+        try:
+            data = json.loads(inline)
+        except json.JSONDecodeError as e:
+            print(f"Error: invalid JSON for --inline: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(data, dict):
+            print("Error: --inline must be a JSON object", file=sys.stderr)
+            sys.exit(1)
+        return data
+    if from_path is not None:
+        return _read_payload_file(from_path)
+    if not sys.stdin.isatty():
+        return _read_payload_file("-")
+    print("Error: no payload supplied — pass --inline JSON, --from FILE, "
+          "--from -, or pipe JSON on stdin", file=sys.stderr)
+    sys.exit(1)
 
 
 def _parse_set_at_rev(spec: str) -> tuple[str, int]:
@@ -75,7 +125,104 @@ def _print_table(rows: list[dict], cols: list[tuple[str, str, int]]) -> None:
         print(line)
 
 
-# ── list / members / show ────────────────────────────────────
+# ── address resolution ──────────────────────────────────────
+
+
+def _looks_like_set_id(value: str) -> bool:
+    """Heuristic: dotted set_id (``autonomy.workspace``) vs UUID/prefix.
+
+    UUIDs/prefixes are hex with dashes only; set_ids contain dots. Used
+    only to decide between addressing modes when two positionals were
+    given — we still attempt resolution and surface a clear error if the
+    guess was wrong.
+    """
+    return "." in value
+
+
+def _resolve_address(args, *, accept_key: bool = True) -> str:
+    """Resolve the ``id [key]`` positional pair to a single Setting id.
+
+    * 1 positional → treat as full id or prefix; call
+      ``client.resolve_setting_strict``.
+    * 2 positionals (and ``accept_key`` is True) → treat as
+      ``(set_id, key)``; call ``client.read_set`` and pick the member
+      with matching key.
+
+    On miss / ambiguity the function prints a candidate list (for
+    ambiguity) or a "no match" error and ``sys.exit(1)``s. On success
+    it returns the canonical id string.
+    """
+    org = _org(args)
+    parts: list[str] = list(getattr(args, "id_parts", []) or [])
+    if not parts:
+        print("Error: missing positional argument: id (or set_id key)",
+              file=sys.stderr)
+        sys.exit(1)
+    if len(parts) > 2:
+        print(f"Error: too many positional arguments: {parts!r}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    if len(parts) == 2:
+        if not accept_key:
+            print(f"Error: this command takes one positional id, got {parts!r}",
+                  file=sys.stderr)
+            sys.exit(1)
+        set_id, key = parts
+        return _resolve_set_key(set_id, key, org=org)
+
+    # Single positional — id or prefix.
+    return _resolve_id_or_prefix(parts[0], org=org)
+
+
+def _resolve_id_or_prefix(value: str, *, org: str | None) -> str:
+    """Resolve an id or id-prefix to a single Setting id.
+
+    Prints diagnostics + ``sys.exit(1)`` on miss or ambiguity.
+    """
+    client = get_client()
+    hit = client.resolve_setting_strict(value, org=org)
+    if hit is None:
+        scope = f" in org {org!r}" if org else ""
+        print(
+            f"Error: no Setting with id starting with {value!r}{scope}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if isinstance(hit, list):
+        print(
+            f"Error: ambiguous prefix {value!r} matches {len(hit)} Settings:",
+            file=sys.stderr,
+        )
+        for r in hit:
+            sid = r.get("id", "")
+            sset = r.get("set_id", "")
+            skey = r.get("key", "")
+            print(f"  {sid}  {sset}  key={skey}", file=sys.stderr)
+        sys.exit(1)
+    return hit["id"]
+
+
+def _resolve_set_key(set_id: str, key: str, *, org: str | None) -> str:
+    """Resolve ``(set_id, key)`` to the winning base Setting id.
+
+    Uses ``client.read_set`` so the answer matches what consumers see.
+    Errors with ``sys.exit(1)`` if no member matches.
+    """
+    client = get_client()
+    members = client.read_set(set_id, org=org)
+    for m in members.members:
+        if m.key == key:
+            return m.id
+    scope = f" in org {org!r}" if org else ""
+    print(
+        f"Error: no Setting with set_id={set_id!r} key={key!r}{scope}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+# ── list / members / show / read ────────────────────────────
 
 
 def _org(args) -> str | None:
@@ -142,11 +289,13 @@ def cmd_set_show(args) -> None:
     target, _, _, no_upconvert = _resolve_read_flags(args)
     if no_upconvert:
         target = None
+    sid = _resolve_address(args)
     got = get_client().get_setting(
-        args.id, target_revision=target, org=_org(args),
+        sid, target_revision=target, org=_org(args),
     )
     if got is None:
-        print(f"Setting not found (or dropped by --as-rev): {args.id}",
+        suffix = " (or dropped by --as-rev)" if target is not None else ""
+        print(f"Error: Setting not found: {sid}{suffix}",
               file=sys.stderr)
         sys.exit(1)
     out = {
@@ -167,12 +316,83 @@ def cmd_set_show(args) -> None:
     print(json.dumps(out, indent=2))
 
 
+def cmd_set_read(args) -> None:
+    """``graph set read <id-or-prefix> | <set_id> <key>`` — resolved payload.
+
+    Mirrors ``graph read <src_id>`` semantics: returns the effective
+    content the consumer sees at runtime. With ``--chain``, walks the
+    supersedes chain and shows per-layer contributions.
+    """
+    parts: list[str] = list(getattr(args, "id_parts", []) or [])
+    org = _org(args)
+    if not parts:
+        print("Error: missing positional argument: id (or set_id key)",
+              file=sys.stderr)
+        sys.exit(1)
+    if len(parts) > 2:
+        print(f"Error: too many positional arguments: {parts!r}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    chain_mode = bool(getattr(args, "chain", False))
+
+    if len(parts) == 2:
+        set_id, key = parts
+    else:
+        # Single positional — resolve to row, then derive (set_id, key).
+        client = get_client()
+        hit = client.resolve_setting_strict(parts[0], org=org)
+        if hit is None:
+            scope = f" in org {org!r}" if org else ""
+            print(
+                f"Error: no Setting with id starting with {parts[0]!r}{scope}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if isinstance(hit, list):
+            print(
+                f"Error: ambiguous prefix {parts[0]!r} matches "
+                f"{len(hit)} Settings:",
+                file=sys.stderr,
+            )
+            for r in hit:
+                print(f"  {r.get('id','')}  {r.get('set_id','')}  "
+                      f"key={r.get('key','')}", file=sys.stderr)
+            sys.exit(1)
+        set_id = hit["set_id"]
+        key = hit["key"]
+
+    if chain_mode:
+        chain = get_client().chain_setting(set_id, key, org=org)
+        if chain is None:
+            scope = f" in org {org!r}" if org else ""
+            print(
+                f"Error: no member matches ({set_id!r}, {key!r}){scope}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(json.dumps(chain, indent=2))
+        return
+
+    members = get_client().read_set(set_id, org=org)
+    for m in members.members:
+        if m.key == key:
+            print(json.dumps(m.payload, indent=2, default=str))
+            return
+    scope = f" in org {org!r}" if org else ""
+    print(
+        f"Error: no member matches ({set_id!r}, {key!r}){scope}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 # ── add / override / exclude ────────────────────────────────
 
 
 def cmd_set_add(args) -> None:
     set_id, rev = _parse_set_at_rev(args.set_at_rev)
-    payload = _read_payload_file(args.from_file)
+    payload = _resolve_payload_input(args)
     try:
         sid = get_client().add_setting(
             set_id, rev, args.key, payload, state=args.state,
@@ -185,10 +405,11 @@ def cmd_set_add(args) -> None:
 
 
 def cmd_set_override(args) -> None:
-    payload = _read_payload_file(args.from_file)
+    payload = _resolve_payload_input(args)
+    target_id = _resolve_target_address(args)
     try:
         sid = get_client().override_setting(
-            args.target_id, payload, state=args.state,
+            target_id, payload, state=args.state,
             org=_org(args),
         )
     except LookupError as e:
@@ -197,18 +418,34 @@ def cmd_set_override(args) -> None:
     except SchemaValidationError as e:
         print(f"Error: merged payload fails validation: {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"  ✓ Override: {sid[:11]}  supersedes={args.target_id[:11]}  [{args.state}]")
+    print(f"  ✓ Override: {sid[:11]}  supersedes={target_id[:11]}  [{args.state}]")
 
 
 def cmd_set_exclude(args) -> None:
+    target_id = _resolve_target_address(args)
     try:
         sid = get_client().exclude_setting(
-            args.target_id, state=args.state, org=_org(args),
+            target_id, state=args.state, org=_org(args),
         )
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"  ✓ Exclude: {sid[:11]}  excludes={args.target_id[:11]}  [{args.state}]")
+    print(f"  ✓ Exclude: {sid[:11]}  excludes={target_id[:11]}  [{args.state}]")
+
+
+def _resolve_target_address(args) -> str:
+    """Resolve the target positional (id-or-prefix or set_id+key) for
+    override/exclude. The two argparse positionals come in as ``target``
+    and (optionally) ``target_key``."""
+    target = getattr(args, "target", None)
+    target_key = getattr(args, "target_key", None)
+    org = _org(args)
+    if not target:
+        print("Error: missing target id (or set_id key)", file=sys.stderr)
+        sys.exit(1)
+    if target_key is not None:
+        return _resolve_set_key(target, target_key, org=org)
+    return _resolve_id_or_prefix(target, org=org)
 
 
 # ── promote / deprecate / remove ────────────────────────────
@@ -221,37 +458,40 @@ def cmd_set_promote(args) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    sid = _resolve_address(args)
     try:
-        get_client().promote_setting(args.id, args.to, org=_org(args))
+        get_client().promote_setting(sid, args.to, org=_org(args))
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"  ✓ Promoted: {args.id[:11]} → {args.to}")
+    print(f"  ✓ Promoted: {sid[:11]} → {args.to}")
 
 
 def cmd_set_deprecate(args) -> None:
+    sid = _resolve_address(args)
     try:
         get_client().deprecate_setting(
-            args.id, successor_id=args.successor,
+            sid, successor_id=args.successor,
             org=_org(args),
         )
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     suc = f" successor={args.successor[:11]}" if args.successor else ""
-    print(f"  ✓ Deprecated: {args.id[:11]}{suc}")
+    print(f"  ✓ Deprecated: {sid[:11]}{suc}")
 
 
 def cmd_set_remove(args) -> None:
+    sid = _resolve_address(args)
     try:
-        get_client().remove_setting(args.id, org=_org(args))
+        get_client().remove_setting(sid, org=_org(args))
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"  ✓ Removed: {args.id[:11]}")
+    print(f"  ✓ Removed: {sid[:11]}")
 
 
 # ── migrate ─────────────────────────────────────────────────
@@ -303,6 +543,14 @@ def _add_org_arg(parser) -> None:
     )
 
 
+def _add_address_arg(parser, *, help_text: str) -> None:
+    """Wire the dual positional ``id [key]`` form onto a subparser."""
+    parser.add_argument(
+        "id_parts", nargs="+", metavar="ID",
+        help=help_text,
+    )
+
+
 def attach_set_subparser(sub) -> None:
     """Wire up ``graph set ...`` subcommands onto an existing subparsers obj."""
     p_set = sub.add_parser(
@@ -327,18 +575,39 @@ def attach_set_subparser(sub) -> None:
 
     # show
     p_show = set_sub.add_parser("show", help="Show a single Setting in detail")
-    p_show.add_argument("id")
+    _add_address_arg(
+        p_show,
+        help_text="Setting id (full or unique prefix), or `set_id key`",
+    )
     add_read_flags(p_show)
     _add_org_arg(p_show)
     p_show.set_defaults(func=cmd_set_show)
+
+    # read — resolved payload by (set_id, key) or id-prefix
+    p_read = set_sub.add_parser(
+        "read",
+        help="Resolved effective payload (post-merge) for a Setting member",
+    )
+    _add_address_arg(
+        p_read,
+        help_text="`set_id key`, or a Setting id (full or unique prefix)",
+    )
+    p_read.add_argument(
+        "--chain", action="store_true", dest="chain",
+        help="Show per-layer contributions through the supersedes chain",
+    )
+    _add_org_arg(p_read)
+    p_read.set_defaults(func=cmd_set_read)
 
     # add
     p_add = set_sub.add_parser("add", help="Create a base Setting")
     p_add.add_argument("set_at_rev",
                        help="set_id#schema_revision, e.g. autonomy.workspace#1")
     p_add.add_argument("--key", required=True, help="Identity within (set_id, this DB)")
-    p_add.add_argument("--from", dest="from_file", required=True,
-                       help="Path to JSON or YAML payload file")
+    p_add.add_argument("--from", dest="from_file",
+                       help="Path to JSON or YAML payload file (use '-' for stdin)")
+    p_add.add_argument("--inline", dest="inline",
+                       help="Inline JSON object (mutually exclusive with --from)")
     p_add.add_argument("--state", default="raw",
                        choices=("raw", "curated", "published", "canonical"))
     _add_org_arg(p_add)
@@ -346,9 +615,19 @@ def attach_set_subparser(sub) -> None:
 
     # override
     p_over = set_sub.add_parser("override", help="Create an override Setting")
-    p_over.add_argument("target_id", help="Setting id being overridden")
-    p_over.add_argument("--from", dest="from_file", required=True,
-                        help="Path to partial JSON/YAML payload (merge-patch)")
+    p_over.add_argument(
+        "target", metavar="ID",
+        help="Target Setting id (full or unique prefix)",
+    )
+    p_over.add_argument(
+        "target_key", metavar="KEY", nargs="?",
+        help="Optional: when given, treat the previous arg as set_id and "
+             "look up by (set_id, key)",
+    )
+    p_over.add_argument("--from", dest="from_file",
+                        help="Path to partial JSON/YAML payload (use '-' for stdin)")
+    p_over.add_argument("--inline", dest="inline",
+                        help="Inline JSON object (mutually exclusive with --from)")
     p_over.add_argument("--state", default="raw",
                         choices=("raw", "curated", "published", "canonical"))
     _add_org_arg(p_over)
@@ -356,7 +635,15 @@ def attach_set_subparser(sub) -> None:
 
     # exclude
     p_excl = set_sub.add_parser("exclude", help="Create an exclude Setting")
-    p_excl.add_argument("target_id", help="Setting id being excluded")
+    p_excl.add_argument(
+        "target", metavar="ID",
+        help="Target Setting id (full or unique prefix)",
+    )
+    p_excl.add_argument(
+        "target_key", metavar="KEY", nargs="?",
+        help="Optional: when given, treat the previous arg as set_id and "
+             "look up by (set_id, key)",
+    )
     p_excl.add_argument("--state", default="raw",
                         choices=("raw", "curated", "published", "canonical"))
     _add_org_arg(p_excl)
@@ -364,7 +651,10 @@ def attach_set_subparser(sub) -> None:
 
     # promote
     p_prom = set_sub.add_parser("promote", help="Transition publication_state")
-    p_prom.add_argument("id")
+    _add_address_arg(
+        p_prom,
+        help_text="Setting id (full or unique prefix), or `set_id key`",
+    )
     p_prom.add_argument("--to", required=True,
                         choices=_VALID_PROMOTION_STATES)
     _add_org_arg(p_prom)
@@ -372,14 +662,20 @@ def attach_set_subparser(sub) -> None:
 
     # deprecate
     p_dep = set_sub.add_parser("deprecate", help="Mark a Setting deprecated")
-    p_dep.add_argument("id")
+    _add_address_arg(
+        p_dep,
+        help_text="Setting id (full or unique prefix), or `set_id key`",
+    )
     p_dep.add_argument("--successor", help="Optional successor Setting id")
     _add_org_arg(p_dep)
     p_dep.set_defaults(func=cmd_set_deprecate)
 
     # remove
     p_rem = set_sub.add_parser("remove", help="Hard-delete a raw Setting")
-    p_rem.add_argument("id")
+    _add_address_arg(
+        p_rem,
+        help_text="Setting id (full or unique prefix), or `set_id key`",
+    )
     _add_org_arg(p_rem)
     p_rem.set_defaults(func=cmd_set_remove)
 
