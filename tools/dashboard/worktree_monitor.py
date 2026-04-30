@@ -47,14 +47,54 @@ NAG_MODES = frozenset({NAG_SILENT, NAG_ALL_CHANGES, NAG_WHEN_DONE})
 NAG_DEFAULT = NAG_SILENT
 
 
-def _degraded_snapshot(*, state: str, reason: str | None, watch_mode: str = NAG_DEFAULT) -> dict:
-    return {
+def _degraded_snapshot(
+    *,
+    state: str,
+    reason: str | None,
+    watch_mode: str = NAG_DEFAULT,
+    details: dict | None = None,
+) -> dict:
+    snapshot = {
         "state": state,
         "implementation": "autonomy/github",
         "reason": reason,
         "review": None,
         "watch": {"mode": watch_mode},
     }
+    if details:
+        # Only emit non-empty details so the snapshot stays compact when
+        # the failure mode doesn't carry extra context.
+        snapshot["details"] = details
+    return snapshot
+
+
+def _details_from_op_result(op_result: WorktreeGithubExecResult) -> dict:
+    """Pull operator-actionable diagnostics out of a failed gh op.
+
+    ``exec_failed`` and similar non-auth failures are otherwise opaque
+    via ``/api/worktrees`` — the operator gets the canonical reason
+    code but no clue *why* gh didn't like the call. Surfacing the
+    truncated stderr (and the gh argv tail) closes the loop without
+    forcing host-side docker access for diagnosis.
+    """
+    details: dict = {}
+    if op_result.error_message:
+        details["error"] = op_result.error_message
+    stderr = (op_result.stderr or "").strip()
+    if stderr:
+        details["stderr"] = stderr[:600]
+    if op_result.exit_code:
+        details["exit_code"] = op_result.exit_code
+    if op_result.command:
+        # Drop the docker exec prefix so the relevant gh argv reads
+        # cleanly. Keep paths/refs intact for debug.
+        cmd = op_result.command
+        for marker in ("gh", "docker"):
+            if marker in cmd:
+                cmd = cmd[cmd.index(marker):]
+                break
+        details["command"] = cmd
+    return details
 
 
 async def _fetch_source_control(
@@ -89,7 +129,10 @@ async def _fetch_source_control(
     )
     if not op_result.ok:
         return _degraded_snapshot(
-            state="degraded", reason=op_result.failure, watch_mode=watch_mode,
+            state="degraded",
+            reason=op_result.failure,
+            watch_mode=watch_mode,
+            details=_details_from_op_result(op_result),
         )
 
     review = normalize_review_payload(op_result.stdout)
