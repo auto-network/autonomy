@@ -53,10 +53,10 @@ async def _fetch_source_control(
         row.session_name,
         timeout=int(_GITHUB_PROBE_TIMEOUT),
     )
-    if probe_result["state"] != github_probe.STATE_READY:
+    if probe_result.state != github_probe.STATE_READY:
         return _degraded_snapshot(
-            state=probe_result["state"],
-            reason=probe_result["reason"],
+            state=probe_result.state,
+            reason=probe_result.reason,
         )
 
     if not row.branch:
@@ -79,7 +79,7 @@ async def _fetch_source_control(
         "state": "ready",
         "implementation": "autonomy/github",
         "reason": None,
-        "review": review,
+        "review": review.to_dict() if review is not None else None,
     }
 
 

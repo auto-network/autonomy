@@ -125,6 +125,12 @@ class WorktreeGithubExecResult:
 # separate ``running`` overlay. ``normalize_review_payload`` maps gh's
 # rollup into that shape so callers don't have to know which rollup
 # entries carry ``state`` vs ``status``+``conclusion``.
+#
+# Return shapes are typed dataclasses with ``.to_dict()`` at the JSON
+# boundary. This is the transitional shape ahead of auto-0425-010430's
+# typed-fields-on-SettingSchema substrate (Bead 1A) — when that lands,
+# these dataclasses become the canonical declaration and ``.to_dict()``
+# is generated from the same metadata. Zero-rework migration.
 
 
 _CHECK_PASS = "pass"
@@ -134,6 +140,58 @@ _CHECK_PENDING = "pending"
 
 _AGGREGATE_GREEN = "green"
 _AGGREGATE_YELLOW = "yellow"
+
+
+@dataclass(frozen=True)
+class CheckEntry:
+    """One normalized merge-gate check (CheckRun or StatusContext)."""
+
+    id: str
+    icon: str
+    label: str
+    status: str  # one of ``pass`` / ``fail`` / ``running`` / ``pending``
+    detail: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "icon": self.icon,
+            "label": self.label,
+            "status": self.status,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class ReviewPayload:
+    """Normalized ``source_control.review`` block for one PR."""
+
+    number: int | None
+    url: str
+    title: str
+    body: str
+    head_sha: str
+    base_branch: str
+    state: str  # ``open`` / ``closed`` / ``merged`` / ``unknown``
+    is_draft: bool
+    aggregate_state: str  # ``green`` / ``yellow``
+    running: bool
+    checks: tuple[CheckEntry, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "number": self.number,
+            "url": self.url,
+            "title": self.title,
+            "body": self.body,
+            "head_sha": self.head_sha,
+            "base_branch": self.base_branch,
+            "state": self.state,
+            "is_draft": self.is_draft,
+            "aggregate_state": self.aggregate_state,
+            "running": self.running,
+            "checks": [c.to_dict() for c in self.checks],
+        }
 
 
 def _icon_from_label(label: str) -> str:
@@ -170,8 +228,8 @@ def _icon_from_label(label: str) -> str:
     return glyph[:2] or "?"
 
 
-def _normalize_check(entry: dict) -> dict | None:
-    """Map one ``statusCheckRollup`` entry to ``{id, icon, label, status, detail}``.
+def _normalize_check(entry: dict) -> CheckEntry | None:
+    """Map one ``statusCheckRollup`` entry to a :class:`CheckEntry`.
 
     ``gh`` returns two flavors of rollup entry:
       - check runs: ``{__typename: 'CheckRun', name, status, conclusion, ...}``
@@ -192,7 +250,8 @@ def _normalize_check(entry: dict) -> dict | None:
     if detail is not None:
         detail = str(detail).strip()[:500] or None
 
-    base = {"id": entry_id, "icon": icon, "label": label, "detail": detail}
+    def make(status: str) -> CheckEntry:
+        return CheckEntry(id=entry_id, icon=icon, label=label, status=status, detail=detail)
 
     # Check-run flavor: status + conclusion.
     status = entry.get("status")
@@ -203,39 +262,34 @@ def _normalize_check(entry: dict) -> dict | None:
             if conclusion == "SKIPPED":
                 return None
             if conclusion == "SUCCESS":
-                return {**base, "status": _CHECK_PASS}
-            return {**base, "status": _CHECK_FAIL}
+                return make(_CHECK_PASS)
+            return make(_CHECK_FAIL)
         if status_norm in {"IN_PROGRESS", "PENDING"}:
-            return {**base, "status": _CHECK_RUNNING}
+            return make(_CHECK_RUNNING)
         if status_norm == "QUEUED":
-            return {**base, "status": _CHECK_PENDING}
+            return make(_CHECK_PENDING)
 
     # Status-context flavor: state.
     state = entry.get("state")
     if state is not None:
         state_norm = str(state).upper()
         if state_norm == "SUCCESS":
-            return {**base, "status": _CHECK_PASS}
+            return make(_CHECK_PASS)
         if state_norm in {"FAILURE", "ERROR"}:
-            return {**base, "status": _CHECK_FAIL}
+            return make(_CHECK_FAIL)
         if state_norm == "PENDING":
-            return {**base, "status": _CHECK_PENDING}
+            return make(_CHECK_PENDING)
 
     return None
 
 
-def normalize_review_payload(raw_stdout: str) -> dict | None:
-    """Shape ``gh pr view --json`` stdout into the Dashboard review block.
+def normalize_review_payload(raw_stdout: str) -> ReviewPayload | None:
+    """Shape ``gh pr view --json`` stdout into a typed :class:`ReviewPayload`.
 
     Returns ``None`` when stdout is empty (gh returns nothing when the
     branch has no PR) or unparseable. Callers should treat that as
-    ``review: null`` in the source_control snapshot.
-
-    The returned shape covers the v1 PR-badge + navigator needs:
-        {
-          number, url, title, body, head_sha, base_branch,
-          state, is_draft, aggregate_state, running, checks
-        }
+    ``review: null`` in the source_control snapshot, and ``.to_dict()``
+    the returned object at the JSON boundary.
     """
     import json
 
@@ -249,32 +303,32 @@ def normalize_review_payload(raw_stdout: str) -> dict | None:
         return None
 
     rollup = data.get("statusCheckRollup") or []
-    checks: list[dict] = []
+    checks: list[CheckEntry] = []
     for entry in rollup:
         normalized = _normalize_check(entry)
         if normalized is not None:
             checks.append(normalized)
 
     aggregate_yellow = (
-        any(c["status"] == _CHECK_FAIL for c in checks)
+        any(c.status == _CHECK_FAIL for c in checks)
         or str(data.get("reviewDecision") or "").upper() == "CHANGES_REQUESTED"
         or str(data.get("mergeable") or "").upper() == "CONFLICTING"
     )
-    running = any(c["status"] in (_CHECK_RUNNING, _CHECK_PENDING) for c in checks)
+    running = any(c.status in (_CHECK_RUNNING, _CHECK_PENDING) for c in checks)
 
-    return {
-        "number": data.get("number"),
-        "url": data.get("url") or "",
-        "title": (data.get("title") or "").strip(),
-        "body": data.get("body") or "",
-        "head_sha": data.get("headRefOid") or "",
-        "base_branch": data.get("baseRefName") or "",
-        "state": str(data.get("state") or "").lower() or "unknown",
-        "is_draft": bool(data.get("isDraft")),
-        "aggregate_state": _AGGREGATE_YELLOW if aggregate_yellow else _AGGREGATE_GREEN,
-        "running": running,
-        "checks": checks,
-    }
+    return ReviewPayload(
+        number=data.get("number"),
+        url=data.get("url") or "",
+        title=(data.get("title") or "").strip(),
+        body=data.get("body") or "",
+        head_sha=data.get("headRefOid") or "",
+        base_branch=data.get("baseRefName") or "",
+        state=str(data.get("state") or "").lower() or "unknown",
+        is_draft=bool(data.get("isDraft")),
+        aggregate_state=_AGGREGATE_YELLOW if aggregate_yellow else _AGGREGATE_GREEN,
+        running=running,
+        checks=tuple(checks),
+    )
 
 
 # ── Subprocess helpers ────────────────────────────────────────────────
@@ -736,6 +790,8 @@ __all__ = [
     "PR_VIEW_FIELDS",
     "DEFAULT_TIMEOUT_SECONDS",
     "WorktreeGithubExecResult",
+    "CheckEntry",
+    "ReviewPayload",
     "find_live_worktree_row",
     "resolve_live_container",
     "derive_repo_slug",
