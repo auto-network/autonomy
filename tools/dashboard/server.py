@@ -1041,6 +1041,10 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         kind = row["kind"] or "bead"
     except (IndexError, KeyError):
         kind = "bead"
+    try:
+        agentic_source_id = row["agentic_source_id"] or None
+    except (IndexError, KeyError):
+        agentic_source_id = None
     return {
         "run_id": row["id"] or "",
         "bead_id": row["bead_id"] or "",
@@ -1064,10 +1068,73 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         "token_count": row["token_count"],
         "librarian_type": librarian_type,
         "kind": kind,
+        # Agentic identity — populated below in _enrich_timeline_agentic
+        # (which fetches the agentic source row + target asset title).
+        # Bead/librarian rows leave these as None.
+        "agentic_source_id": agentic_source_id,
+        "target_source_id": None,
+        "target_org": None,
+        "member_key": None,
+        "action_label": None,
         "librarian_review": None,  # populated by _enrich_with_librarian_data
         "smoke_result": _read_smoke_result(row["output_dir"]),
         "_output_dir": row["output_dir"] or "",  # internal field, stripped before response
     }
+
+
+def _enrich_timeline_agentic(entries: list[dict]) -> None:
+    """Populate the agentic-only timeline fields in-place.
+
+    For each ``kind='agentic'`` entry, look up the agentic source by
+    ``agentic_source_id`` (set in :func:`_row_to_timeline_entry`) and
+    pull ``member_key`` / ``target_source_id`` / ``target_org`` from
+    its metadata. Then resolve the target asset's title once per
+    unique target so each card can render "<asset_title>" instead of
+    a blank string. ``action_label`` mirrors the agentic source row's
+    own title (the action's display label).
+    """
+    agentic_entries = [
+        e for e in entries
+        if e.get("kind") == "agentic" and e.get("agentic_source_id")
+    ]
+    if not agentic_entries:
+        return
+
+    target_ids: set[str] = set()
+    for entry in agentic_entries:
+        try:
+            src = graph_ops.get_source(entry["agentic_source_id"])
+        except Exception:  # noqa: BLE001
+            src = None
+        if not src:
+            continue
+        entry["action_label"] = src.get("title") or None
+        meta = src.get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        entry["member_key"] = meta.get("member_key") or None
+        entry["target_source_id"] = meta.get("target_source_id") or None
+        entry["target_org"] = meta.get("target_org") or None
+        if entry["target_source_id"]:
+            target_ids.add(entry["target_source_id"])
+
+    target_titles: dict[str, str] = {}
+    for tid in target_ids:
+        try:
+            tsrc = graph_ops.get_source(tid)
+        except Exception:  # noqa: BLE001
+            tsrc = None
+        if tsrc and tsrc.get("title"):
+            target_titles[tid] = str(tsrc["title"])
+    for entry in agentic_entries:
+        tid = entry.get("target_source_id")
+        if tid and tid in target_titles:
+            entry["title"] = target_titles[tid]
+        elif not entry.get("title"):
+            entry["title"] = entry.get("action_label") or ""
 
 
 def _parse_review_summary(text: str) -> dict | None:
@@ -1365,6 +1432,11 @@ async def api_timeline(request):
         entries = await asyncio.to_thread(_query)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+    # Agentic identity enrichment: fills in member_key, action_label,
+    # target_source_id, target_org, and a card-friendly title for every
+    # ``kind='agentic'`` entry. Bead/librarian entries are unaffected.
+    await asyncio.to_thread(_enrich_timeline_agentic, entries)
 
     # Enrich with bead title and priority from Dolt
     bead_ids = [e["bead_id"] for e in entries if e.get("bead_id")]
