@@ -1,8 +1,31 @@
 // Coordinator Board plugin — frontend Alpine factory.
-// Mirrors the design at revision f710c702 of design 59dd05c1-...
-// (graph://81e126c8-75e App spec). The mock's inline `data: { ... }`
-// literal is replaced by a fetch from `/api/coordinator/board`; the
-// composer POSTs to `/api/coordinator/message`.
+// Mirrors the design at revision f710c702 of design 59dd05c1-... (graph
+// id 81e126c8-75e). Bead auto-lffg5 retired the v1 ``api.py`` facade —
+// the page now reads + writes graph Settings directly:
+//
+//   reads:
+//     GET /api/graph/settings/dashboard.coordinator-canvas
+//     GET /api/graph/settings/dashboard.operator-message-to-coordinator
+//     GET /api/graph/settings/dashboard.coordinator-tile
+//     GET /api/graph/settings/dashboard.coordinator-thread
+//     GET /api/graph/settings/dashboard.coordinator-decision
+//
+//   writes:
+//     POST /api/graph/setting   (set_id=<one of the above>)
+//
+// A 5-second decision-log poll keeps a since-cursor on the decision set
+// so taps surface back to their tile as "you said: …" feedback. The
+// substrate-level action mediator (auto-e5vus) translates each decision
+// into a session_send to ``target_session``.
+const SET_CANVAS = 'dashboard.coordinator-canvas';
+const SET_OPERATOR_MSG = 'dashboard.operator-message-to-coordinator';
+const SET_TILE = 'dashboard.coordinator-tile';
+const SET_THREAD = 'dashboard.coordinator-thread';
+const SET_DECISION = 'dashboard.coordinator-decision';
+const SCHEMA_REVISION = 1;
+const DECISION_POLL_MS = 5000;
+const OPERATOR_MSG_KEY = 'default';
+
 function coordinatorBoard() {
   return {
     // ─────── UI state ───────
@@ -26,9 +49,6 @@ function coordinatorBoard() {
     sending: false,
 
     // ─────── Data ───────
-    // Populated from /api/coordinator/board on init; the empty shape
-    // here is just a render-safe placeholder so the template doesn't
-    // throw on its first paint before the fetch resolves.
     data: {
       snapshotTime: '',
       broadcastPlaceholder: 'Message me…',
@@ -36,55 +56,217 @@ function coordinatorBoard() {
       operatorMessage: { text: '', sentAt: null },
       tiles: [],
       threads: [],
+      // tile_id → { kind, choice, sentAt } for the most-recent decision
+      // applied to that tile. Iterated on render to surface the "you
+      // said: …" mark beneath the tile body.
+      decisionsByTile: {},
       beads: [],
       convergentDecisions: [],
       openFollowups: [],
       docs: { coordMap: '', walkthrough: '' },
     },
 
+    // Decision since-cursor — the highest ``updated_at`` (or ``created_at``)
+    // we've seen. The 5s poll asks for the full member list and skips
+    // any row at or before this cursor.
+    _decisionCursor: '',
+    _decisionPollTimer: null,
+
     // ─────── Lifecycle ───────
     async init() {
       await this.loadBoard();
+      this._startDecisionPoll();
+    },
+
+    destroy() {
+      this._stopDecisionPoll();
     },
 
     async loadBoard() {
-      try {
-        const res = await fetch('/api/coordinator/board', { credentials: 'same-origin' });
-        if (!res.ok) return;
-        const payload = await res.json();
-        this.data = this._normalizePayload(payload);
-        // Fresh data landed → release any pending refresh affordance.
-        if (this.refreshState !== 'idle') this.refreshState = 'idle';
-      } catch (e) {
-        // Silent — UI keeps the prior payload.
+      // Parallel fetches — each set is independent.
+      const [canvas, op, tiles, threads, decisions] = await Promise.all([
+        this._readSet(SET_CANVAS),
+        this._readSet(SET_OPERATOR_MSG),
+        this._readSet(SET_TILE),
+        this._readSet(SET_THREAD),
+        this._readSet(SET_DECISION),
+      ]);
+
+      this.data.canvas = this._normalizeCanvas(this._latest(canvas));
+      this.data.operatorMessage = this._normalizeOperatorMessage(this._latest(op));
+      this.data.tiles = (tiles || []).map(m => this._normalizeTile(m));
+      this.data.threads = (threads || []).map(m => this._normalizeThread(m));
+
+      const sorted = this._sortByTime(decisions || []);
+      this.data.decisionsByTile = {};
+      for (const m of sorted) {
+        const p = m.payload || {};
+        if (!p.tile_id) continue;
+        this.data.decisionsByTile[p.tile_id] = {
+          kind: p.kind, choice: p.choice || '', sentAt: p.sentAt || '',
+        };
+      }
+      // Cursor = max time across decisions so the poll skips them.
+      this._decisionCursor = sorted.length
+        ? this._memberTime(sorted[sorted.length - 1]) : '';
+      // Snapshot timestamp: render-time stamp; the canvas's ageMin is
+      // authoritative for "when did the coordinator publish this".
+      this.data.snapshotTime = new Date().toLocaleString(undefined, {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit',
+      });
+      if (this.refreshState !== 'idle') this.refreshState = 'idle';
+    },
+
+    _startDecisionPoll() {
+      if (this._decisionPollTimer) return;
+      this._decisionPollTimer = setInterval(
+        () => this._pollDecisions(), DECISION_POLL_MS,
+      );
+    },
+
+    _stopDecisionPoll() {
+      if (this._decisionPollTimer) {
+        clearInterval(this._decisionPollTimer);
+        this._decisionPollTimer = null;
       }
     },
 
-    // Normalize a server payload into the render-safe shape. Any field
-    // the server omits gets a sensible default so x-show / template
-    // iteration doesn't blow up downstream.
-    _normalizePayload(p) {
-      p = p || {};
-      const canvas = p.canvas || {};
+    async _pollDecisions() {
+      const decisions = await this._readSet(SET_DECISION);
+      if (!decisions) return;
+      const sorted = this._sortByTime(decisions);
+      let advanced = false;
+      for (const m of sorted) {
+        const t = this._memberTime(m);
+        if (t && this._decisionCursor && t <= this._decisionCursor) continue;
+        const p = m.payload || {};
+        if (!p.tile_id) continue;
+        this.data.decisionsByTile[p.tile_id] = {
+          kind: p.kind, choice: p.choice || '', sentAt: p.sentAt || '',
+        };
+        if (t && t > this._decisionCursor) {
+          this._decisionCursor = t;
+          advanced = true;
+        }
+      }
+      if (advanced) {
+        // Force Alpine to re-render the decisionsByTile map by
+        // reassigning. Mutating a child of ``data`` doesn't always
+        // trigger reactivity for nested keys.
+        this.data.decisionsByTile = { ...this.data.decisionsByTile };
+      }
+    },
+
+    async _readSet(setId) {
+      try {
+        const res = await fetch(
+          `/api/graph/settings/${encodeURIComponent(setId)}`,
+          { credentials: 'same-origin' },
+        );
+        if (!res.ok) return [];
+        const body = await res.json().catch(() => ({}));
+        return Array.isArray(body.members) ? body.members : [];
+      } catch (e) {
+        return [];
+      }
+    },
+
+    async _writeSetting(setId, key, payload) {
+      try {
+        const res = await fetch('/api/graph/setting', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            set_id: setId,
+            schema_revision: SCHEMA_REVISION,
+            key,
+            payload,
+          }),
+          credentials: 'same-origin',
+        });
+        if (!res.ok) return null;
+        return await res.json().catch(() => ({}));
+      } catch (e) {
+        return null;
+      }
+    },
+
+    // Pick the latest member from a list (highest updated_at or
+    // created_at; fallback to last entry when timestamps absent).
+    _latest(members) {
+      if (!members || !members.length) return null;
+      const sorted = this._sortByTime(members);
+      return sorted[sorted.length - 1];
+    },
+
+    _memberTime(m) {
+      return (m && (m.updated_at || m.created_at)) || '';
+    },
+
+    _sortByTime(members) {
+      return [...members].sort((a, b) => {
+        const ta = this._memberTime(a);
+        const tb = this._memberTime(b);
+        if (ta < tb) return -1;
+        if (ta > tb) return 1;
+        return 0;
+      });
+    },
+
+    _normalizeCanvas(member) {
+      const p = (member && member.payload) || {};
       return {
-        snapshotTime: p.snapshotTime || '',
-        broadcastPlaceholder: p.broadcastPlaceholder || 'Message me…',
-        canvas: {
-          ageMin: typeof canvas.ageMin === 'number' ? canvas.ageMin : 0,
-          question: canvas.question || '',
-          context: canvas.context || '',
-          quickReplies: Array.isArray(canvas.quickReplies) ? canvas.quickReplies : [],
-        },
-        operatorMessage: {
-          text: (p.operatorMessage && p.operatorMessage.text) || '',
-          sentAt: (p.operatorMessage && p.operatorMessage.sentAt) || null,
-        },
-        tiles: Array.isArray(p.tiles) ? p.tiles : [],
-        threads: Array.isArray(p.threads) ? p.threads : [],
-        beads: Array.isArray(p.beads) ? p.beads : [],
-        convergentDecisions: Array.isArray(p.convergentDecisions) ? p.convergentDecisions : [],
-        openFollowups: Array.isArray(p.openFollowups) ? p.openFollowups : [],
-        docs: p.docs || { coordMap: '', walkthrough: '' },
+        ageMin: typeof p.ageMin === 'number' ? p.ageMin : 0,
+        question: p.question || '',
+        context: p.context || '',
+        quickReplies: Array.isArray(p.quickReplies) ? p.quickReplies : [],
+      };
+    },
+
+    _normalizeOperatorMessage(member) {
+      const p = (member && member.payload) || {};
+      return {
+        text: p.text || '',
+        sentAt: p.sentAt || null,
+      };
+    },
+
+    _normalizeTile(member) {
+      const p = (member && member.payload) || {};
+      // Key is ``<coord>:<tile-session>`` per the schema; the tile's
+      // own session is the segment after the colon. Members without
+      // a colon-separated key fall back to the bare key.
+      const key = (member && member.key) || '';
+      const sep = key.indexOf(':');
+      const session = sep >= 0 ? key.slice(sep + 1) : key;
+      return {
+        session,
+        role: p.role || '',
+        label: p.label || session,
+        thing: p.thing || '',
+        asks: p.asks || 'fyi',
+        ageMin: typeof p.ageMin === 'number' ? p.ageMin : 0,
+        updateKind: p.updateKind || 'refresh',
+        detail: p.detail || '',
+      };
+    },
+
+    _normalizeThread(member) {
+      const p = (member && member.payload) || {};
+      const key = (member && member.key) || '';
+      const sep = key.indexOf(':');
+      const session = sep >= 0 ? key.slice(sep + 1) : key;
+      return {
+        session,
+        role: p.role || '',
+        label: p.label || session,
+        status: p.status || 'paused',
+        lead: p.lead || '',
+        bullets: Array.isArray(p.bullets) ? p.bullets : [],
+        ageMin: typeof p.ageMin === 'number' ? p.ageMin : 0,
+        totalTurns: typeof p.totalTurns === 'number' ? p.totalTurns : 0,
+        needs: p.needs || '',
       };
     },
 
@@ -95,7 +277,6 @@ function coordinatorBoard() {
       return Math.max(fromTiles, fromThreads);
     },
     get pendingCommitCount() {
-      // Server-provided when wired; otherwise zero.
       return Number(this.data.pendingCommitCount || 0);
     },
     get beadsLandedCount() {
@@ -120,7 +301,24 @@ function coordinatorBoard() {
       return arr;
     },
 
-    // ─────── Handlers ───────
+    decisionForTile(session) {
+      return this.data.decisionsByTile[session] || null;
+    },
+
+    decisionLabel(d) {
+      if (!d) return '';
+      switch (d.kind) {
+        case 'thumb_yes':       return 'thumb yes';
+        case 'thumb_no':        return 'thumb no';
+        case 'choice':          return d.choice || 'chose';
+        case 'custom':          return d.choice || 'replied';
+        case 'sitrep_request':  return 'requested sitrep';
+        case 'refresh_request': return 'requested refresh';
+      }
+      return d.kind || '';
+    },
+
+    // ─────── Operator message ───────
     async onOperatorMessage() {
       const text = this.operatorDraft.trim();
       if (!text || this.sending) return;
@@ -128,25 +326,14 @@ function coordinatorBoard() {
       const isVerbatim = replies.includes(text);
 
       this.sending = true;
-      let ok = false;
-      try {
-        const res = await fetch('/api/coordinator/message', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
-          credentials: 'same-origin',
-        });
-        const body = await res.json().catch(() => ({}));
-        ok = res.ok && body.ok !== false;
-        // Optimistic update — surfaces the message even before the
-        // next /api/coordinator/board refresh.
-        this.data.operatorMessage = { text, sentAt: body.sentAt || new Date().toISOString() };
-      } catch (e) {
-        // Treat network error as non-fatal; the optimistic update
-        // already gave the operator visual confirmation.
-      } finally {
-        this.sending = false;
-      }
+      const sentAt = new Date().toISOString();
+      const result = await this._writeSetting(
+        SET_OPERATOR_MSG, OPERATOR_MSG_KEY, { text, sentAt },
+      );
+      const ok = result !== null && (result.id || result.ok !== false);
+      // Optimistic update — show the message even before the next read.
+      this.data.operatorMessage = { text, sentAt };
+      this.sending = false;
 
       this.operatorDraft = '';
       if (this.$refs.composer) this.$refs.composer.innerText = '';
@@ -162,6 +349,40 @@ function coordinatorBoard() {
       }
     },
 
+    // ─────── Tile decisions ───────
+    async _writeDecision(tile, kind, choice) {
+      // Each decision row is append-only — uuidv4 key so the substrate
+      // stores them all rather than collapsing to one.
+      const key = (window.crypto && window.crypto.randomUUID)
+        ? window.crypto.randomUUID()
+        : `dec-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const payload = {
+        tile_id: tile.session,
+        kind,
+        target_session: tile.session,
+        sentAt: new Date().toISOString(),
+      };
+      if (choice !== undefined && choice !== null && choice !== '') {
+        payload.choice = choice;
+      }
+      const result = await this._writeSetting(SET_DECISION, key, payload);
+      // Optimistic decoration so the operator gets immediate visual
+      // feedback; the 5s poll later confirms via the same path.
+      this.data.decisionsByTile = {
+        ...this.data.decisionsByTile,
+        [tile.session]: { kind, choice: choice || '', sentAt: payload.sentAt },
+      };
+      return result;
+    },
+
+    onTileThumbYes(tile)        { return this._writeDecision(tile, 'thumb_yes'); },
+    onTileThumbNo(tile)         { return this._writeDecision(tile, 'thumb_no'); },
+    onTileChoice(tile, choice)  { return this._writeDecision(tile, 'choice', choice); },
+    onTileCustom(tile, text)    { return this._writeDecision(tile, 'custom', text); },
+    onTileSitrep(tile)          { return this._writeDecision(tile, 'sitrep_request'); },
+    onTileRefresh(tile)         { return this._writeDecision(tile, 'refresh_request'); },
+
+    // ─────── Misc UI ───────
     celebrateWin() {
       this.wins += 1;
       this.winCelebrating = true;
@@ -202,15 +423,12 @@ function coordinatorBoard() {
     },
 
     onRefreshAll() {
-      // Tap-to-dismiss when already requested.
       if (this.refreshState === 'requested') {
         this.refreshState = 'idle';
         return;
       }
       if (this.refreshState !== 'idle') return;
       this.refreshState = 'pending';
-      // Brief spinner while the refetch is firing, then transition to
-      // 'requested' until fresh data arrives (loadBoard resets to 'idle').
       setTimeout(() => {
         if (this.refreshState === 'pending') this.refreshState = 'requested';
       }, 700);
@@ -285,8 +503,6 @@ if (typeof window !== 'undefined') {
   window.coordinatorBoard = coordinatorBoard;
 }
 
-// Node-friendly export so L1 unit tests can pull the helpers without
-// touching a browser. Browsers ignore `module`.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { coordinatorBoard };
 }

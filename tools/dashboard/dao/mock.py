@@ -1233,6 +1233,40 @@ def get_settings_members(set_id: str, org: str | None = None) -> list[dict]:
     return out
 
 
+def add_setting_member(
+    set_id: str,
+    key: str,
+    payload: dict,
+    *,
+    org: str | None = None,
+) -> str:
+    """Append a Setting member to the fixture file under ``set_id``.
+
+    Mirrors :func:`tools.graph.settings_ops.add_setting` for the mock DAO:
+    the next ``get_settings_members(set_id)`` call surfaces the new row.
+    Existing rows with the same ``key`` are *replaced* (latest-write-wins
+    semantics for non-append-only sets like ``operator-message``); for
+    append-only sets the caller passes a unique key (e.g. uuid) so the
+    replace is a no-op. Returns the synthetic id assigned to the row.
+    """
+    from uuid import uuid4
+    sid = str(uuid4())
+    data = _load()
+    block = data.setdefault("settings", {})
+    raw = block.setdefault(set_id, {})
+    if isinstance(raw, list):
+        raw = {"_all": list(raw)}
+        block[set_id] = raw
+    all_list = raw.setdefault("_all", [])
+    all_list[:] = [m for m in all_list if m.get("key") != key]
+    member = {"id": sid, "key": key, "payload": dict(payload)}
+    if org:
+        member["org"] = org
+    all_list.append(member)
+    FIXTURE_PATH.write_text(json.dumps(data, indent=2))
+    return sid
+
+
 # ── session mutation stubs (no-ops in mock mode) ────────────────────
 # These prevent crashes when session management endpoints are called in mock mode.
 

@@ -20,10 +20,12 @@ frontend:
   alpine_root: coordinatorBoard
 
 entrypoints:
-  api: tools.dashboard.plugins.coordinator_board.entrypoints.api:routes
   schemas:
     - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorCanvasV1
     - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:OperatorMessageToCoordinatorV1
+    - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorTileV1
+    - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorThreadV1
+    - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorDecisionV1
   # Importing each module fires register_action(...) at top-level — the
   # substrate's REGISTRY is the contract, no attribute resolution needed.
   actions:

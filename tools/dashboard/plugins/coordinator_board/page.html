@@ -221,6 +221,7 @@
     <section class="space-y-3">
       <template x-for="t in data.tiles" :key="t.session">
         <article data-testid="coord-tile"
+                 :data-tile-session="t.session"
                  class="rounded-xl border bg-slate-900/60 p-4 space-y-2.5"
                  :class="askBorder(t.asks)">
           <div class="flex items-start justify-between gap-3">
@@ -238,6 +239,45 @@
             <span x-text="ageStr(t.ageMin)"></span>
             <span class="text-slate-600">·</span>
             <span x-text="t.updateKind === 'discovery' ? 'discovery' : 'on refresh'"></span>
+          </p>
+
+          <!-- Tile actions: thumb yes/no, sitrep, refresh. Decision rows
+               POST through /api/graph/setting; the substrate's action
+               mediator (auto-e5vus) translates them into session_send. -->
+          <div class="flex items-center gap-1.5 pt-1">
+            <button type="button"
+                    data-testid="coord-tile-thumb-yes"
+                    :data-tile-session="t.session"
+                    @click="onTileThumbYes(t)"
+                    class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 transition-colors"
+                    title="Thumb yes">👍</button>
+            <button type="button"
+                    data-testid="coord-tile-thumb-no"
+                    :data-tile-session="t.session"
+                    @click="onTileThumbNo(t)"
+                    class="text-[11px] px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 transition-colors"
+                    title="Thumb no">👎</button>
+            <button type="button"
+                    data-testid="coord-tile-sitrep"
+                    :data-tile-session="t.session"
+                    @click="onTileSitrep(t)"
+                    class="text-[11px] px-2 py-0.5 rounded-full bg-slate-800/60 text-slate-300 hover:bg-slate-800 transition-colors">sitrep</button>
+            <button type="button"
+                    data-testid="coord-tile-refresh"
+                    :data-tile-session="t.session"
+                    @click="onTileRefresh(t)"
+                    class="text-[11px] px-2 py-0.5 rounded-full bg-slate-800/60 text-slate-300 hover:bg-slate-800 transition-colors">refresh</button>
+          </div>
+
+          <!-- Decision feedback mark — surfaces the operator's most
+               recent decision on this tile. Driven by the 5s decision
+               poll plus optimistic local update on tap. -->
+          <p x-show="decisionForTile(t.session)"
+             data-testid="coord-tile-decision-mark"
+             :data-decision-tile="t.session"
+             class="text-[11px] text-violet-300/90 leading-snug">
+            <span class="text-slate-500">you said:</span>
+            <span x-text="decisionLabel(decisionForTile(t.session))"></span>
           </p>
         </article>
       </template>
