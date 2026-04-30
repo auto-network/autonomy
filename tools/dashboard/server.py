@@ -5793,6 +5793,45 @@ async def api_worktree_cherry_pick(request):
     })
 
 
+async def api_worktree_watch_set(request):
+    """Persist the source_control nag mode for a worktree row.
+
+    Mode is one of ``silent`` / ``nag_all`` / ``nag_done`` (the UI's
+    Silent / Nag All Changes / Nag When Done buttons). Storage is
+    in-memory on :class:`WorktreeMonitor` for v1 — CrossTalk delivery
+    of nag transitions is a separate follow-up bead.
+    """
+    from tools.dashboard.worktree_monitor import NAG_MODES, NAG_DEFAULT
+
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mode = (body or {}).get("mode") if isinstance(body, dict) else None
+    if mode is None:
+        mode = NAG_DEFAULT
+    if mode not in NAG_MODES:
+        return JSONResponse(
+            {
+                "error": "invalid mode",
+                "valid": sorted(NAG_MODES),
+            },
+            status_code=400,
+        )
+    try:
+        worktree_monitor.set_nag_mode(session_name, repo_name, mode)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({
+        "ok": True,
+        "session_name": session_name,
+        "repo_name": repo_name,
+        "mode": mode,
+    })
+
+
 async def api_worktree_sync_base(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
@@ -9974,6 +10013,7 @@ routes = [
     Route("/api/worktrees/{session}/{repo}/commits/{sha}/merge", api_worktree_commit_merge, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/sync-base", api_worktree_sync_base, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/request-rebase", api_worktree_request_rebase, methods=["POST"]),
+    Route("/api/worktrees/{session}/{repo}/watch", api_worktree_watch_set, methods=["PUT"]),
     Route("/api/worktrees/{session}/{repo}/merge", api_worktree_merge, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/cherry-pick", api_worktree_cherry_pick, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/discard", api_worktree_discard, methods=["POST"]),

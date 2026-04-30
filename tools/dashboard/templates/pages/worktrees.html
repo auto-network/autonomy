@@ -263,6 +263,26 @@
 
               <template x-if="rowPr(item.row)">
                 <div class="mt-4 min-w-0" data-testid="pr-navigator">
+                  <div class="mb-2 flex justify-end">
+                    <div class="grid grid-cols-3 gap-1 rounded-2xl border border-white/10 bg-slate-950/75 p-1 text-[11px] font-semibold shadow-[0_10px_24px_rgba(0,0,0,0.22)]"
+                         data-testid="pr-nag-controls">
+                      <button type="button"
+                              class="rounded-xl border border-transparent px-2.5 py-1 transition"
+                              :class="nagButtonClass(item.row, 'silent')"
+                              @click="setNagMode(item.row, 'silent')"
+                              data-testid="pr-nag-silent">Silent</button>
+                      <button type="button"
+                              class="rounded-xl border border-transparent px-2.5 py-1 transition"
+                              :class="nagButtonClass(item.row, 'nag_all')"
+                              @click="setNagMode(item.row, 'nag_all')"
+                              data-testid="pr-nag-all">Nag All Changes</button>
+                      <button type="button"
+                              class="rounded-xl border border-transparent px-2.5 py-1 transition"
+                              :class="nagButtonClass(item.row, 'nag_done')"
+                              @click="setNagMode(item.row, 'nag_done')"
+                              data-testid="pr-nag-done">Nag When Done</button>
+                    </div>
+                  </div>
                   <div class="divide-y divide-white/10 border-y border-white/10">
                     <button type="button"
                             class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"

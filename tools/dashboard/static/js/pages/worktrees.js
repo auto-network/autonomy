@@ -443,6 +443,7 @@
       rowPr(row) {
         const review = row && row.source_control && row.source_control.review;
         if (!review) return null;
+        const mode = this.rowNagMode(row);
         return {
           number: review.number,
           url: review.url,
@@ -450,7 +451,11 @@
           body: review.body,
           state: review.aggregate_state,
           running: review.running,
-          watch_active: false,  // Wired in P4 (gates.watch_set lifecycle).
+          // animate-pulse fires only when the user opted in to nags AND
+          // something is in flight (settled design's running-overlay
+          // semantics — running alone is a state, watch_active is the
+          // user's intent to be notified).
+          watch_active: mode !== 'silent',
           pr_checks: review.checks || [],
         };
       },
@@ -477,6 +482,45 @@
       rowPrChecks(row) {
         const pr = this.rowPr(row);
         return (pr && pr.pr_checks) || [];
+      },
+
+      // ── Nag controls (Silent / Nag All Changes / Nag When Done) ─────
+      // Backend mode strings (worktree_monitor.py NAG_*) are
+      // 'silent' / 'nag_all' / 'nag_done'. UI labels match auto-r098a.
+      rowNagMode(row) {
+        const watch = row && row.source_control && row.source_control.watch;
+        return (watch && watch.mode) || 'silent';
+      },
+
+      nagButtonClass(row, mode) {
+        const active = this.rowNagMode(row) === mode;
+        return active
+          ? 'border-white/10 bg-white/10 text-white'
+          : 'text-slate-400 hover:border-white/10 hover:bg-white/[0.05] hover:text-slate-200';
+      },
+
+      async setNagMode(row, mode) {
+        if (!row) return;
+        // Optimistic update — write the new mode locally so the click
+        // feels instant; revert on error.
+        const prev = this.rowNagMode(row);
+        if (!row.source_control) row.source_control = {state: 'unavailable', review: null, watch: {mode}};
+        if (!row.source_control.watch) row.source_control.watch = {mode};
+        row.source_control.watch.mode = mode;
+        try {
+          const url = '/api/worktrees/'
+            + encodeURIComponent(row.session_name) + '/'
+            + encodeURIComponent(row.repo_name) + '/watch';
+          const resp = await fetch(url, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({mode}),
+          });
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        } catch (err) {
+          row.source_control.watch.mode = prev;
+          _toast('Failed to update nag mode: ' + (err.message || err));
+        }
       },
 
       // Per-commit checks. gh's statusCheckRollup is keyed to the PR's

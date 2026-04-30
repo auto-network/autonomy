@@ -577,6 +577,38 @@ class TestWorktreePage:
         assert "bg-amber-200" in js
         assert "animate-pulse" in js
 
+    def test_pr_nag_controls_wired(self):
+        """The card-level Silent / Nag All Changes / Nag When Done
+        controls (settled design 3435e03f, lines 485-498) bind to the
+        rowNagMode / setNagMode helpers and route writes through
+        PUT /api/worktrees/{session}/{repo}/watch."""
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        # All three buttons render with the design's labels.
+        assert 'data-testid="pr-nag-controls"' in template
+        assert 'data-testid="pr-nag-silent"' in template
+        assert 'data-testid="pr-nag-all"' in template
+        assert 'data-testid="pr-nag-done"' in template
+        assert ">Silent<" in template
+        assert ">Nag All Changes<" in template
+        assert ">Nag When Done<" in template
+        # Buttons drive setNagMode with the backend's mode strings.
+        assert "setNagMode(item.row, 'silent')" in template
+        assert "setNagMode(item.row, 'nag_all')" in template
+        assert "setNagMode(item.row, 'nag_done')" in template
+
+        # JS helpers exist and read source_control.watch.mode.
+        assert "rowNagMode(row) {" in js
+        assert "row.source_control && row.source_control.watch" in js
+        assert "nagButtonClass(row, mode) {" in js
+        assert "setNagMode(row, mode) {" in js
+        # Watch writes go through the new endpoint.
+        assert "'/watch'" in js
+        assert "method: 'PUT'" in js
+        # rowPr derives watch_active from nag mode (not literal false).
+        assert "mode !== 'silent'" in js
+
     def test_pr_navigator_template_and_helpers_wired(self):
         """The on-card PR/commit navigator (settled design 3435e03f, lines
         205-258) renders only when the row has a PR, exposes one PR row
@@ -1278,7 +1310,7 @@ class TestWorktreeMonitorCapabilityCache:
         snapshots = snapshots or {}
         exceptions = exceptions or {}
 
-        async def fake_fetch(row, all_rows):
+        async def fake_fetch(row, all_rows, *, watch_mode="silent"):
             key = (row.session_name, row.repo_name)
             if key in exceptions:
                 raise exceptions[key]
@@ -1287,6 +1319,7 @@ class TestWorktreeMonitorCapabilityCache:
                 "implementation": "autonomy/github",
                 "reason": None,
                 "review": None,
+                "watch": {"mode": watch_mode},
             })
 
         async def fake_scan_thread():  # to_thread expects sync; sub via attr
@@ -1424,3 +1457,115 @@ class TestWorktreeApiSourceControlBlock:
         data = resp.json()
         assert len(data) == 1
         assert "source_control" not in data[0]
+
+
+# ── Watch / nag mode persistence (P4) ─────────────────────────────────
+
+
+class TestWorktreeMonitorNagMode:
+    """``WorktreeMonitor`` persists the per-row nag mode in memory and
+    exposes it on the cached source_control snapshot.
+    """
+
+    def test_default_nag_mode_is_silent(self):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+        assert monitor.get_nag_mode("auto-x", "autonomy") == "silent"
+
+    def test_set_nag_mode_persists_across_lookups(self):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_all")
+        assert monitor.get_nag_mode("auto-x", "autonomy") == "nag_all"
+        # Distinct repo on the same session keeps its own default.
+        assert monitor.get_nag_mode("auto-x", "enterprise") == "silent"
+
+    def test_set_nag_mode_rejects_invalid_value(self):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+        with pytest.raises(ValueError):
+            monitor.set_nag_mode("auto-x", "autonomy", "loud")
+
+    def test_set_nag_mode_updates_cached_snapshot_in_place(self):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+        monitor._source_control_cache[("auto-x", "autonomy")] = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "review": None,
+            "watch": {"mode": "silent"},
+        }
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_done")
+        cached = monitor.get_source_control("auto-x", "autonomy")
+        assert cached["watch"] == {"mode": "nag_done"}
+
+
+class TestWorktreeWatchEndpoint:
+    """``PUT /api/worktrees/{session}/{repo}/watch`` writes the nag mode."""
+
+    def test_put_watch_sets_mode(self, test_client, monkeypatch):
+        from tools.dashboard import server
+
+        captured = {}
+
+        def fake_set(session, repo, mode):
+            captured["args"] = (session, repo, mode)
+            return mode
+
+        monkeypatch.setattr(server.worktree_monitor, "set_nag_mode", fake_set)
+
+        resp = test_client.put(
+            "/api/worktrees/auto-x/autonomy/watch",
+            json={"mode": "nag_all"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {
+            "ok": True,
+            "session_name": "auto-x",
+            "repo_name": "autonomy",
+            "mode": "nag_all",
+        }
+        assert captured["args"] == ("auto-x", "autonomy", "nag_all")
+
+    def test_put_watch_rejects_unknown_mode(self, test_client, monkeypatch):
+        from tools.dashboard import server
+
+        called = {"set": False}
+
+        def fake_set(*_):
+            called["set"] = True
+            raise AssertionError("set_nag_mode should not run on invalid mode")
+
+        monkeypatch.setattr(server.worktree_monitor, "set_nag_mode", fake_set)
+
+        resp = test_client.put(
+            "/api/worktrees/auto-x/autonomy/watch",
+            json={"mode": "loud"},
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid mode"
+        assert called["set"] is False
+
+    def test_put_watch_defaults_missing_mode_to_silent(self, test_client, monkeypatch):
+        from tools.dashboard import server
+
+        captured = {}
+
+        def fake_set(session, repo, mode):
+            captured["args"] = (session, repo, mode)
+            return mode
+
+        monkeypatch.setattr(server.worktree_monitor, "set_nag_mode", fake_set)
+
+        resp = test_client.put("/api/worktrees/auto-x/autonomy/watch", json={})
+
+        assert resp.status_code == 200
+        assert captured["args"] == ("auto-x", "autonomy", "silent")
