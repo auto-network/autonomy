@@ -6770,6 +6770,111 @@ async def api_graph_note(request):
     })
 
 
+async def api_graph_note_versions_list(request):
+    """GET /api/graph/note/<id>/versions — list every saved version of a note.
+
+    Returns ``{"source_id": str, "versions": [{version, content, created_at}, ...]}``
+    ordered ascending. Cross-org aware via the same resolution path as
+    ``/api/source/<id>``. 404 if the source doesn't exist or isn't a note.
+    """
+    source_id = request.path_params["id"]
+    e = _graph_validate_source_id(source_id)
+    if e:
+        return JSONResponse({"error": e}, status_code=400)
+    org = _caller_org(request)
+
+    src = await asyncio.to_thread(graph_ops.get_source, source_id, org=org)
+    if src is None:
+        return JSONResponse({"error": "source not found"}, status_code=404)
+    if src.get("type") != "note":
+        return JSONResponse(
+            {"error": f"not a note (type={src.get('type')!r})"},
+            status_code=400,
+        )
+
+    home = src.get("org") or org
+    versions = await asyncio.to_thread(
+        _list_note_versions_in_org, src["id"], home,
+    )
+    return JSONResponse({
+        "source_id": src["id"],
+        "org": home or "",
+        "versions": versions,
+    })
+
+
+async def api_graph_note_version_read(request):
+    """GET /api/graph/note/<id>/version/<n> — read a specific version's body.
+
+    Returns ``{"source_id", "org", "version", "content", "created_at"}``.
+    404 if the source or version does not exist.
+    """
+    source_id = request.path_params["id"]
+    e = _graph_validate_source_id(source_id)
+    if e:
+        return JSONResponse({"error": e}, status_code=400)
+    try:
+        version = int(request.path_params["n"])
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "version must be a positive integer"}, status_code=400)
+    if version < 1:
+        return JSONResponse({"error": "version must be a positive integer"}, status_code=400)
+    org = _caller_org(request)
+
+    src = await asyncio.to_thread(graph_ops.get_source, source_id, org=org)
+    if src is None:
+        return JSONResponse({"error": "source not found"}, status_code=404)
+    if src.get("type") != "note":
+        return JSONResponse(
+            {"error": f"not a note (type={src.get('type')!r})"},
+            status_code=400,
+        )
+
+    home = src.get("org") or org
+    row = await asyncio.to_thread(
+        _read_note_version_in_org, src["id"], version, home,
+    )
+    if row is None:
+        return JSONResponse({"error": f"version {version} not found"}, status_code=404)
+    return JSONResponse({
+        "source_id": src["id"],
+        "org": home or "",
+        "version": row["version"],
+        "content": row["content"],
+        "created_at": row.get("created_at"),
+    })
+
+
+def _list_note_versions_in_org(source_id: str, org: str | None) -> list[dict]:
+    """Helper for the version-list endpoint: open the source's home-org DB
+    and return ``list_note_versions`` rows."""
+    from tools.graph.db import GraphDB
+    from tools.graph.cross_org import open_peer_db
+
+    if org:
+        db = open_peer_db(org)
+        if db is None:
+            return []
+    else:
+        db = GraphDB(graph_ops._db_path(None))
+    return db.list_note_versions(source_id)
+
+
+def _read_note_version_in_org(source_id: str, version: int, org: str | None) -> dict | None:
+    """Helper for the version-read endpoint: open the source's home-org DB
+    and return the matching version row (or None)."""
+    from tools.graph.db import GraphDB
+    from tools.graph.cross_org import open_peer_db
+
+    if org:
+        db = open_peer_db(org)
+        if db is None:
+            return None
+    else:
+        db = GraphDB(graph_ops._db_path(None))
+    return db.get_note_version(source_id, version)
+
+
 async def api_graph_note_update(request):
     """Update a note via direct ops call. JSON or multipart (attachments).
 
@@ -9204,6 +9309,8 @@ routes = [
     # Graph write API (single-writer proxy for containers)
     Route("/api/graph/note", api_graph_note, methods=["POST"]),
     Route("/api/graph/note/update", api_graph_note_update, methods=["POST"]),
+    Route("/api/graph/note/{id}/versions", api_graph_note_versions_list, methods=["GET"]),
+    Route("/api/graph/note/{id}/version/{n}", api_graph_note_version_read, methods=["GET"]),
     Route("/api/graph/comment", api_graph_comment, methods=["POST"]),
     Route("/api/graph/comment/integrate", api_graph_comment_integrate, methods=["POST"]),
     Route("/api/graph/comment/{id}", api_graph_comment_get, methods=["GET"]),

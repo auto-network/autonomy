@@ -312,6 +312,109 @@ def test_api_graph_note_update_empty_title_rejected(dashboard_client, orgs_root)
     assert resp.status_code == 400, resp.text
 
 
+# ── Note version history endpoints ──────────────────────────────
+
+
+def test_api_graph_note_versions_list_round_trips(dashboard_client, orgs_root):
+    """GET /api/graph/note/<id>/versions returns every version of an
+    edited note. Containers use this to recover from agent-induced
+    body damage without needing host shell access."""
+    note_id = _make_peer_note(orgs_root / "autonomy.db", title="initial")
+
+    # Three body updates → three saved versions (v1 captures the initial
+    # body; v2 + v3 are the explicit updates).
+    for body in ("v2 body", "v3 body", "v4 body"):
+        resp = dashboard_client.post(
+            "/api/graph/note/update",
+            json={"source_id": note_id, "content": body},
+        )
+        assert resp.status_code == 200, resp.text
+
+    resp = dashboard_client.get(f"/api/graph/note/{note_id}/versions")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["source_id"] == note_id
+    versions = body["versions"]
+    assert len(versions) >= 3
+    contents = [v["content"] for v in versions]
+    assert "v2 body" in contents
+    assert "v3 body" in contents
+    assert "v4 body" in contents
+
+
+def test_api_graph_note_version_read_specific(dashboard_client, orgs_root):
+    """GET /api/graph/note/<id>/version/<n> returns exactly the body
+    saved at that version. Lets containers recover the pre-corruption
+    state of a damaged note (the c64d0f5d-480 motivating regression)."""
+    note_id = _make_peer_note(orgs_root / "autonomy.db", title="t")
+
+    # Snapshot v2: an explicit, distinguishable body.
+    resp = dashboard_client.post(
+        "/api/graph/note/update",
+        json={"source_id": note_id, "content": "the original clean body"},
+    )
+    assert resp.status_code == 200, resp.text
+    v2 = resp.json()["new_version"]
+
+    # Then a noisy update that simulates agent-induced corruption.
+    resp = dashboard_client.post(
+        "/api/graph/note/update",
+        json={"source_id": note_id, "content": "──── corrupt ────\n\nbroken body"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Recover v2.
+    resp = dashboard_client.get(f"/api/graph/note/{note_id}/version/{v2}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["version"] == v2
+    assert body["content"] == "the original clean body"
+
+
+def test_api_graph_note_version_read_missing_returns_404(dashboard_client, orgs_root):
+    note_id = _make_peer_note(orgs_root / "autonomy.db", title="t")
+    resp = dashboard_client.get(f"/api/graph/note/{note_id}/version/99")
+    assert resp.status_code == 404, resp.text
+
+
+def test_api_graph_note_versions_list_unknown_source_404(dashboard_client):
+    resp = dashboard_client.get(
+        "/api/graph/note/00000000-0000-0000-0000-000000000000/versions",
+    )
+    assert resp.status_code == 404, resp.text
+
+
+def test_api_graph_note_version_endpoints_reject_non_notes(dashboard_client, orgs_root):
+    """Sources that exist but aren't notes → 400 not 404 (clearer error)."""
+    # Insert a session-type source by hand.
+    import json as _json
+    db_path = orgs_root / "autonomy.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "INSERT INTO sources(id, type, platform, project, title, file_path, "
+            "metadata, publication_state) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                "11111111-2222-3333-4444-555555555555",
+                "session", "claude-code", "autonomy",
+                "session source", "session:test",
+                _json.dumps({}), "raw",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    resp = dashboard_client.get(
+        "/api/graph/note/11111111-2222-3333-4444-555555555555/versions",
+    )
+    assert resp.status_code == 400, resp.text
+    resp = dashboard_client.get(
+        "/api/graph/note/11111111-2222-3333-4444-555555555555/version/1",
+    )
+    assert resp.status_code == 400, resp.text
+
+
 # ── Comment handler migration smoke ─────────────────────────────
 
 

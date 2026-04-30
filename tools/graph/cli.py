@@ -767,9 +767,9 @@ def _save_read_entries(
 def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") -> None:
     """Container path: fetch the source + content via /api/graph/{id}.
 
-    Version history + HTML-body-export are host-only for now (no server
-    endpoints yet); the common ``graph read <id>`` path covers what
-    container agents need day-to-day.
+    Version-pinned reads (``<id>@N`` and ``<id>@`` for list) round-trip
+    through ``/api/graph/note/<id>/version[s]``. HTML-body export is
+    still host-only for rich-content notes.
     """
     org = os.environ.get("GRAPH_ORG")
     try:
@@ -787,10 +787,58 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") 
     _mark_read(source.get("id", ""))
     entries = payload.get("entries") or []
     if version_req is not None:
-        print(
-            "Error: @version reads are only available on the host today",
-            file=sys.stderr,
-        )
+        if source.get("type") != "note":
+            print(
+                f"Error: @version reads are only valid for notes "
+                f"(source is {source.get('type')!r})",
+                file=sys.stderr,
+            )
+            return
+        sid = source.get("id") or source_arg
+        if version_req == "list":
+            try:
+                versions = client.list_note_versions(sid, org=org)
+            except LookupError:
+                print(f"No source found matching '{sid}'")
+                return
+            if not versions:
+                print(f"No version history for {sid[:12]} (note has not been updated)")
+                return
+            print(f"Versions for {sid[:12]}:")
+            for v in versions:
+                preview = (v.get("content") or "")[:60].replace("\n", " ")
+                if len(v.get("content") or "") > 60:
+                    preview += "…"
+                created = (v.get("created_at") or "")[:16]
+                print(f"  v{v.get('version')}  {created}  {preview}")
+            return
+        try:
+            ver = client.get_note_version(sid, version_req, org=org)
+        except LookupError:
+            print(
+                f"Version {version_req} not found for {sid[:12]}",
+                file=sys.stderr,
+            )
+            return
+        save_path = getattr(args, "save", None)
+        if save_path:
+            _save_read_entries(
+                [{"content": ver.get("content") or ""}],
+                source_type="note",
+                save_path=save_path,
+                max_chars=args.max_chars,
+            )
+            return
+        proj = f" [{source.get('project')}]" if source.get("project") else ""
+        print(f"Source: {sid[:12]}  note{proj}  (version {version_req})")
+        print(f"Title:  {source.get('title', '?')}")
+        if ver.get("created_at"):
+            print(f"Date:   {ver['created_at'][:10]}")
+        print(f"{'─' * 72}")
+        content = ver.get("content") or ""
+        if args.max_chars and len(content) > args.max_chars:
+            content = content[: args.max_chars] + f"\n... [{len(content) - args.max_chars} chars truncated]"
+        print(f"\n{content}")
         return
     save_path = getattr(args, "save", None)
     if save_path:
