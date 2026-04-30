@@ -53,3 +53,8 @@ class PluginManifest(BaseModel):
     nav: PluginNav
     frontend: PluginFrontend
     entrypoints: PluginEntrypoints = Field(default_factory=PluginEntrypoints)
+    # Bootstrap default for when no `dashboard.plugin#1` Setting row
+    # exists yet. Plugins that should ship dormant (operator opts in)
+    # set this to false; the directory-name convention (``_``-prefix)
+    # still applies as a fallback so existing samples keep working.
+    default_enabled: Optional[bool] = None

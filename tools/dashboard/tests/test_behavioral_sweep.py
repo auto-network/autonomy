@@ -6541,3 +6541,265 @@ class TestPluginSubstrate:
         assert status_example == 404, (
             f"/example returned {status_example} when disabled"
         )
+
+
+# ── Coordinator-board plugin sweep ───────────────────────────────────
+
+
+COORD_BOARD_FIXTURE_KEY = "coordinator-session"
+COORD_BOARD_QUESTION = "Direct-GitHub or capability-layer?"
+COORD_BOARD_QUICK_REPLIES = [
+    "Sequence them — direct GitHub first",
+    "Capability layer supersedes",
+    "Neither — file a fresh bead",
+]
+
+
+def _set_coord_plugin_enabled(fixture_path: str, enabled: bool | None) -> None:
+    """Toggle the dashboard.plugin#1 row for the coordinator-board id."""
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    plugin_block = block.setdefault("dashboard.plugin", {})
+    all_list = plugin_block.setdefault("_all", [])
+    all_list[:] = [m for m in all_list if m.get("key") != "coordinator-board"]
+    if enabled is not None:
+        all_list.append({
+            "key": "coordinator-board",
+            "payload": {"enabled": enabled},
+        })
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _set_coord_canvas(fixture_path: str, payload: dict | None) -> None:
+    """Seed the dashboard.coordinator-canvas Setting in the mock fixture."""
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    canvas_block = block.setdefault("dashboard.coordinator-canvas", {})
+    all_list = canvas_block.setdefault("_all", [])
+    all_list[:] = [m for m in all_list if m.get("key") != COORD_BOARD_FIXTURE_KEY]
+    if payload is not None:
+        all_list.append({"key": COORD_BOARD_FIXTURE_KEY, "payload": payload})
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _clear_coord_operator_message(fixture_path: str) -> None:
+    """Drop any prior operator-message Setting rows from the fixture."""
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    block.pop("dashboard.operator-message-to-coordinator", None)
+    path.write_text(json.dumps(data, indent=2))
+
+
+COORD_BOARD_RENDER_CHECKS = """
+    var nav = document.querySelector('[data-page="coordinator-board"]');
+    r.nav_present = nav !== null;
+    r.nav_label = nav ? nav.textContent.trim().split(' ')[0] : null;
+    var frag = document.querySelector('[data-testid="coordinator-fragment-root"]');
+    r.fragment_present = frag !== null;
+    r.fragment_visible = frag !== null && frag.offsetParent !== null;
+    var qEl = document.querySelector('[data-testid="coord-canvas-question"]');
+    r.canvas_question_text = qEl ? qEl.textContent.trim() : '';
+    var pills = document.querySelectorAll('[data-testid="coord-quick-reply"]');
+    r.quick_reply_count = pills.length;
+    r.quick_reply_texts = Array.from(pills).map(function(p) {
+        return p.textContent.trim();
+    });
+    var tabs = document.querySelectorAll('[data-testid="coord-tab"]');
+    r.tab_count = tabs.length;
+"""
+
+COORD_BOARD_DISABLED_CHECKS = """
+    r.nav_absent = document.querySelector('[data-page="coordinator-board"]') === null;
+    var frag = document.querySelector('[data-testid="coordinator-fragment-root"]');
+    r.fragment_absent = frag === null;
+"""
+
+
+class TestCoordinatorBoard:
+    """L2.B sweep for the coordinator-board plugin (bead auto-1runm).
+
+    Six checks: enable + render canvas, click quick-reply fills composer,
+    send fires win celebration + bumps wins counter, send POSTs through
+    /api/coordinator/message, Tracking tab + sort-by-urgent renders thread
+    cards in correct order, disable hides the route.
+    """
+
+    @pytest.fixture(scope="function", autouse=True)
+    def _seed_coord_state(self, sweep_server):
+        """Enable the plugin + seed a canvas Setting before each test;
+        reset to dormant on teardown so other test classes start clean.
+        """
+        _set_coord_plugin_enabled(sweep_server["fixture_path"], True)
+        _set_coord_canvas(sweep_server["fixture_path"], {
+            "ageMin": 1,
+            "question": COORD_BOARD_QUESTION,
+            "context": "[auto-3nill](/bead/auto-3nill) blocks the P0 start.",
+            "quickReplies": list(COORD_BOARD_QUICK_REPLIES),
+        })
+        _clear_coord_operator_message(sweep_server["fixture_path"])
+        yield
+        _set_coord_plugin_enabled(sweep_server["fixture_path"], None)
+        _set_coord_canvas(sweep_server["fixture_path"], None)
+        _clear_coord_operator_message(sweep_server["fixture_path"])
+
+    def test_canvas_renders_with_live_payload(self, browser, sweep_server):
+        # Bounce through /sessions so app.js refetches /api/plugins.
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        result = _navigate_and_check("/coordinator", COORD_BOARD_RENDER_CHECKS, wait_ms=1500)
+
+        assert result.get("nav_present"), (
+            "Coordinator sidebar link missing after enabling plugin "
+            f"(result: {result})"
+        )
+        assert result.get("fragment_visible"), (
+            "Coordinator board fragment did not render at /coordinator "
+            f"(result: {result})"
+        )
+        assert COORD_BOARD_QUESTION in (result.get("canvas_question_text") or ""), (
+            f"Canvas question did not surface from coordinator-canvas "
+            f"Setting; got {result.get('canvas_question_text')!r}"
+        )
+        assert result.get("quick_reply_count") == len(COORD_BOARD_QUICK_REPLIES), (
+            f"Expected {len(COORD_BOARD_QUICK_REPLIES)} quick-reply pills, "
+            f"got {result.get('quick_reply_count')}"
+        )
+        for expected in COORD_BOARD_QUICK_REPLIES:
+            assert expected in (result.get("quick_reply_texts") or []), (
+                f"Quick-reply pill {expected!r} not rendered"
+            )
+        assert result.get("tab_count") == 2, (
+            f"Expected two tabs (One thing / Tracking); got {result.get('tab_count')}"
+        )
+
+        # /api/plugins surfaces the coordinator-board id.
+        status, body = _http_get(f"{sweep_server['url']}/api/plugins")
+        assert status == 200
+        ids = [p["id"] for p in json.loads(body).get("plugins", [])]
+        assert "coordinator-board" in ids
+
+    def test_quick_reply_pick_then_send_bumps_wins(self, browser, sweep_server):
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        _navigate_and_check("/coordinator", "", wait_ms=1500)
+
+        # Click the first quick-reply pill: the composer should fill verbatim.
+        result = _ab_eval_batch(
+            "var pill = document.querySelector('[data-testid=\"coord-quick-reply\"]'); "
+            "pill.click(); "
+            "return { composerText: document.querySelector('[data-testid=\"coord-composer\"]').innerText, "
+            "         pillText: pill.textContent.trim() };"
+        )
+        assert result["composerText"] == COORD_BOARD_QUICK_REPLIES[0], (
+            f"Quick-reply did not populate composer verbatim: "
+            f"composer={result['composerText']!r}, pill={result['pillText']!r}"
+        )
+
+        # Click send and let the POST + win-celebration unfold.
+        _ab_eval_batch(
+            "document.querySelector('[data-testid=\"coord-send\"]').click(); "
+            "return null;"
+        )
+        time.sleep(1.0)
+
+        wins = _ab_eval_batch(
+            "var el = document.querySelector('[data-testid=\"coord-wins\"]'); "
+            "var sent = document.querySelector('[data-testid=\"coord-last-sent\"]'); "
+            "return { wins: el ? el.textContent.trim() : '', "
+            "         lastSent: sent ? sent.textContent.trim() : '', "
+            "         lastSentVisible: sent ? sent.offsetParent !== null : false };"
+        )
+        assert "1" in (wins.get("wins") or ""), (
+            f"Win badge did not bump after verbatim quick-reply send: {wins}"
+        )
+        assert COORD_BOARD_QUICK_REPLIES[0] in (wins.get("lastSent") or ""), (
+            f"Composer's last-sent line did not surface the message: {wins}"
+        )
+
+    def test_send_persists_via_api(self, browser, sweep_server):
+        # POST directly so we exercise the backend path without any UI noise.
+        import urllib.request
+        req = urllib.request.Request(
+            f"{sweep_server['url']}/api/coordinator/message",
+            data=json.dumps({"text": "ack — sequencing approved"}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            body = json.loads(resp.read().decode())
+
+        assert body.get("ok") is True, f"POST did not return ok=true: {body}"
+        assert body.get("persisted") is True, (
+            f"Operator message did not persist to fixture: {body}"
+        )
+
+        # GET the board back; the operator message should round-trip.
+        status, board_body = _http_get(f"{sweep_server['url']}/api/coordinator/board")
+        assert status == 200
+        board = json.loads(board_body)
+        assert board.get("operatorMessage", {}).get("text") == "ack — sequencing approved", (
+            f"GET /api/coordinator/board did not surface the persisted message: {board}"
+        )
+
+    def test_tracking_tab_renders_thread_cards_sorted_urgent(self, browser, sweep_server):
+        # Inject a thread payload directly into the Alpine component state
+        # so we can verify the urgent-sort ordering without standing up
+        # the (still-mocked) thread projection.
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        _navigate_and_check("/coordinator", "", wait_ms=1500)
+
+        threads_payload = [
+            {"session": "auto-shipping", "role": "implementer", "label": "Shipping",
+             "ageMin": 5, "totalTurns": 100, "status": "shipping", "lead": "ships",
+             "bullets": [], "needs": None},
+            {"session": "auto-blocked", "role": "pair", "label": "Blocked",
+             "ageMin": 10, "totalTurns": 50, "status": "blocked", "lead": "blocked",
+             "bullets": [], "needs": "Make a call"},
+            {"session": "auto-research", "role": "researcher", "label": "Researching",
+             "ageMin": 1, "totalTurns": 200, "status": "researching", "lead": "exploring",
+             "bullets": [], "needs": None},
+        ]
+
+        result = _ab_eval_batch(
+            "var root = document.querySelector('[data-testid=\"coordinator-fragment-root\"]'); "
+            "var c = Alpine.$data(root); "
+            f"c.data.threads = {json.dumps(threads_payload)}; "
+            "c.tab = 'tracking'; "
+            "c.sortKey = 'urgent'; "
+            "return null;"
+        )
+        time.sleep(0.6)
+
+        cards = _ab_eval_batch(
+            "var cards = document.querySelectorAll('[data-testid=\"coord-thread\"]'); "
+            "return Array.from(cards).map(function(c) { "
+            "  return { session: c.dataset.threadSession, "
+            "           status: c.dataset.threadStatus }; "
+            "});"
+        )
+        assert isinstance(cards, list) and len(cards) == 3, (
+            f"Expected 3 thread cards in tracking tab; got {cards}"
+        )
+        # Urgent sort: needs-from-you first → blocked > investigating > shipping >
+        # researching > designing > paused → recency tie-break.
+        assert cards[0]["session"] == "auto-blocked", (
+            f"Urgent sort should put blocked-with-needs first; got {cards}"
+        )
+
+    def test_disable_hides_route_and_sidebar(self, browser, sweep_server):
+        _set_coord_plugin_enabled(sweep_server["fixture_path"], False)
+
+        result = _navigate_and_check("/sessions", COORD_BOARD_DISABLED_CHECKS, wait_ms=1500)
+        assert result.get("nav_absent"), (
+            "Coordinator sidebar link still visible when disabled"
+        )
+
+        # /api/plugins excludes the plugin id; /coordinator returns 404.
+        status, body = _http_get(f"{sweep_server['url']}/api/plugins")
+        ids = [p["id"] for p in json.loads(body).get("plugins", [])]
+        assert "coordinator-board" not in ids
+
+        status_route, _ = _http_get(f"{sweep_server['url']}/coordinator")
+        assert status_route == 404

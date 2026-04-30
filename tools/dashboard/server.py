@@ -194,7 +194,9 @@ def _plugin_enabled_map(org: str | None = None) -> dict[str, bool]:
     """
     settings = plugin_loader._read_plugin_settings(org=org)
     return {
-        p.id: plugin_loader.is_enabled(p.id, p.plugin_dir, settings)
+        p.id: plugin_loader.is_enabled(
+            p.id, p.plugin_dir, settings, manifest=p.manifest,
+        )
         for p in PLUGIN_REGISTRY
     }
 
@@ -9546,7 +9548,9 @@ async def api_plugins(request):
     settings = plugin_loader._read_plugin_settings(org=org)
     out = []
     for idx, p in enumerate(PLUGIN_REGISTRY):
-        if not plugin_loader.is_enabled(p.id, p.plugin_dir, settings):
+        if not plugin_loader.is_enabled(
+            p.id, p.plugin_dir, settings, manifest=p.manifest,
+        ):
             continue
         out.append({
             "id": p.id,

@@ -8,3 +8,5 @@
 
 @source "./templates/**/*.html";
 @source "./static/**/*.js";
+@source "./plugins/**/*.html";
+@source "./plugins/**/*.js";

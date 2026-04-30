@@ -1,0 +1,412 @@
+<div x-data="coordinatorBoard()"
+     data-testid="coordinator-fragment-root"
+     class="coord-board max-w-2xl mx-auto px-3 md:px-6">
+
+<style>
+  /* Quick-reply pill: full-width left-aligned bubble. Wrapping text
+     stays balanced and reads naturally; layout works at any width. */
+  .coord-board .quick-reply {
+    display: block;
+    width: 100%;
+    text-align: left;
+    font-size: 14px;
+    line-height: 1.45;
+    padding: 11px 16px;
+    border-radius: 14px;
+    background: rgb(30 41 59 / 0.65);
+    color: rgb(226 232 240);
+    border: 1px solid rgb(51 65 85);
+    cursor: pointer;
+    text-wrap: balance;
+    transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .coord-board .quick-reply:hover {
+    background: rgb(139 92 246 / 0.18);
+    color: rgb(243 232 255);
+    border-color: rgb(167 139 250 / 0.45);
+  }
+  .coord-board .quick-reply:active { transform: scale(0.99); }
+
+  /* Request-state button: a control that initiates an async request
+     and tracks pending-until-resolved state on a single element.
+
+       data-state="idle"       — affordance is shown (e.g. ↻)
+       data-state="pending"    — request firing (spinner animation)
+       data-state="requested"  — request acknowledged, awaiting result
+                                 (persists until the result lands or
+                                 the user taps to dismiss)
+
+     The owning component is responsible for resetting state to 'idle'
+     when fresh data actually arrives. The button itself only handles
+     idle → pending → requested and the explicit dismiss-on-click. */
+  .coord-board .req-button {
+    height: 28px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 500;
+    border: none; cursor: pointer; flex-shrink: 0;
+    border-radius: 9999px;
+    transition: background-color 0.2s, color 0.2s, width 0.25s, padding 0.25s;
+  }
+  .coord-board .req-button[data-state="idle"],
+  .coord-board .req-button[data-state="pending"] {
+    width: 28px; padding: 0;
+    background: rgb(139 92 246 / 0.18);
+    color: rgb(221 214 254);
+  }
+  .coord-board .req-button[data-state="idle"]:hover {
+    background: rgb(139 92 246 / 0.28);
+  }
+  .coord-board .req-button[data-state="pending"] { animation: coord-req-spin 0.9s linear infinite; }
+  .coord-board .req-button[data-state="requested"] {
+    padding: 0 12px;
+    background: rgb(16 185 129 / 0.15);
+    color: rgb(110 231 183);
+  }
+  .coord-board .req-button[data-state="requested"]:hover {
+    background: rgb(16 185 129 / 0.22);
+  }
+  @keyframes coord-req-spin { to { transform: rotate(360deg); } }
+
+  /* Win badge — counter that pulses + glows when the operator
+     sends a verbatim quick-reply. */
+  .coord-board .win-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; font-weight: 600;
+    padding: 2px 8px; border-radius: 9999px;
+    background: rgb(234 179 8 / 0.12);
+    color: rgb(252 211 77);
+    border: 1px solid rgb(234 179 8 / 0.25);
+    transition: transform 0.4s cubic-bezier(.34,1.6,.64,1), background-color 0.4s;
+  }
+  .coord-board .win-badge[data-celebrating="true"] {
+    animation: coord-win-pop 0.6s cubic-bezier(.34,1.6,.64,1);
+    background: rgb(234 179 8 / 0.28);
+  }
+  @keyframes coord-win-pop {
+    0%   { transform: scale(1) rotate(0deg); }
+    35%  { transform: scale(1.35) rotate(-6deg); }
+    65%  { transform: scale(1.1)  rotate(4deg); }
+    100% { transform: scale(1)   rotate(0deg); }
+  }
+
+  /* Floating "+1" mark that drifts up + fades when a win lands. */
+  .coord-board .win-burst {
+    position: absolute; pointer-events: none; z-index: 30;
+    font-size: 13px; font-weight: 700; color: rgb(252 211 77);
+    text-shadow: 0 0 12px rgb(234 179 8 / 0.6);
+    animation: coord-win-burst-rise 1.1s ease-out forwards;
+  }
+  @keyframes coord-win-burst-rise {
+    0%   { transform: translateY(0) scale(0.8); opacity: 0; }
+    15%  { transform: translateY(-4px) scale(1); opacity: 1; }
+    100% { transform: translateY(-32px) scale(1); opacity: 0; }
+  }
+
+  /* Confetti chips that briefly burst from the send button. */
+  .coord-board .confetti-chip {
+    position: absolute; pointer-events: none; z-index: 30;
+    width: 6px; height: 10px; border-radius: 1.5px;
+    animation: coord-confetti-fly 0.9s ease-out forwards;
+  }
+  @keyframes coord-confetti-fly {
+    0%   { transform: translate(0,0) rotate(0); opacity: 1; }
+    100% { transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); opacity: 0; }
+  }
+</style>
+
+  <!-- TABS -->
+  <nav class="sticky top-0 z-20 -mx-3 md:-mx-6 px-3 md:px-6 py-2 bg-slate-950/95 backdrop-blur border-b border-slate-800/50">
+    <div class="flex gap-1.5 text-xs md:text-sm">
+      <template x-for="t in tabs" :key="t.key">
+        <button
+          data-testid="coord-tab"
+          :data-tab-key="t.key"
+          @click="tab = t.key"
+          :class="tab === t.key
+            ? 'bg-violet-500/20 text-violet-100 ring-1 ring-violet-400/40'
+            : 'bg-slate-900/60 text-slate-400 hover:bg-slate-800/60'"
+          class="flex-1 px-2.5 py-2 rounded-lg font-medium transition-colors text-center min-w-0">
+          <span class="block truncate" x-text="t.label"></span>
+        </button>
+      </template>
+    </div>
+  </nav>
+
+  <!-- ============== SCREEN 1: ONE THING ============== -->
+  <div x-cloak x-show="tab === 'primary'" class="pt-3 pb-8 space-y-5">
+
+    <!-- CANVAS — the one banger I want answered right now. -->
+    <section data-testid="coord-canvas"
+             class="relative rounded-2xl border border-violet-400/30 bg-violet-500/5 p-5 md:p-6 space-y-4">
+      <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="text-[10px] uppercase tracking-wider text-violet-300/70 font-medium">
+            From me · <span x-text="ageStr(data.canvas.ageMin)"></span>
+          </span>
+          <span x-show="wins > 0"
+                x-ref="winBadge"
+                data-testid="coord-wins"
+                :data-celebrating="winCelebrating"
+                class="win-badge" title="Wins — operator picked a suggestion unchanged">
+            🏆 <span x-text="wins"></span>
+          </span>
+        </div>
+        <button type="button" class="req-button"
+          data-testid="coord-refresh"
+          :data-state="refreshState"
+          :title="refreshState === 'requested' ? 'Tap to dismiss' : 'Refresh'"
+          @click="onRefreshAll"
+          x-text="refreshState === 'requested' ? 'Refresh requested' : '↻'"></button>
+      </div>
+
+      <h2 data-testid="coord-canvas-question"
+          class="text-2xl md:text-3xl font-semibold leading-tight tracking-tight text-slate-50 [&_a]:text-violet-300 [&_a]:underline [&_a]:decoration-violet-400/40 [&_a]:underline-offset-4 hover:[&_a]:decoration-violet-400/80"
+          x-html="renderInlineLinks(data.canvas.question)"></h2>
+
+      <p x-show="data.canvas.context"
+         data-testid="coord-canvas-context"
+         class="text-sm md:text-base text-slate-300 leading-relaxed [&_a]:text-violet-300 [&_a]:underline [&_a]:decoration-violet-400/30 [&_a]:underline-offset-4 hover:[&_a]:decoration-violet-400/70"
+         x-html="renderInlineLinks(data.canvas.context)"></p>
+
+      <div x-show="data.canvas.quickReplies && data.canvas.quickReplies.length"
+           class="space-y-2 pt-1">
+        <template x-for="r in (data.canvas.quickReplies || [])" :key="r">
+          <button type="button" data-testid="coord-quick-reply"
+                  class="quick-reply" @click="useQuickReply(r)" x-text="r"></button>
+        </template>
+      </div>
+    </section>
+
+    <!-- OPERATOR → COORDINATOR — reuse session-viewer composer styles -->
+    <div class="sv-input rounded-2xl !border !border-slate-800 !bg-slate-900/40"
+         style="position: relative; padding: 6px;">
+      <div class="sv-input-row" style="padding: 0;">
+        <div class="sv-input-bubble">
+          <div class="sv-editable"
+               data-testid="coord-composer"
+               x-ref="composer"
+               contenteditable="true"
+               data-placeholder="Message me…"
+               role="textbox"
+               aria-multiline="true"
+               @input="operatorDraft = $event.target.innerText"
+               @keydown="if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault(); onOperatorMessage();}"></div>
+          <button class="sv-send"
+                  data-testid="coord-send"
+                  :disabled="!operatorDraft.trim() || sending"
+                  @click="onOperatorMessage()"
+                  onmousedown="event.preventDefault()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94l18.04-8.5a.75.75 0 000-1.38l-18.04-8.5z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <p x-show="data.operatorMessage.text"
+         data-testid="coord-last-sent"
+         class="px-3 pb-2 pt-1 text-[11px] text-slate-400 leading-snug">
+        <span class="text-slate-500">last sent:</span>
+        <span x-text="data.operatorMessage.text"></span>
+      </p>
+      <p x-show="lastAction" class="px-3 pb-2 text-xs text-emerald-400" x-text="lastAction"></p>
+    </div>
+
+    <!-- TILES — my perspective on each session -->
+    <header class="pt-2">
+      <p class="text-[11px] uppercase tracking-wider text-slate-400">
+        <span x-text="data.tiles.length"></span> session tiles
+      </p>
+    </header>
+
+    <section class="space-y-3">
+      <template x-for="t in data.tiles" :key="t.session">
+        <article data-testid="coord-tile"
+                 class="rounded-xl border bg-slate-900/60 p-4 space-y-2.5"
+                 :class="askBorder(t.asks)">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-slate-100 truncate" x-text="t.label"></p>
+              <p class="text-[11px] text-slate-500 tabular-nums truncate">
+                <span x-text="t.session"></span> · <span x-text="t.role"></span>
+              </p>
+            </div>
+            <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-medium shrink-0"
+                  :class="askBadge(t.asks)" x-text="askLabel(t.asks)"></span>
+          </div>
+          <p class="text-[15px] leading-snug text-slate-100" x-text="t.thing"></p>
+          <p class="text-[11px] text-slate-500 tabular-nums">
+            <span x-text="ageStr(t.ageMin)"></span>
+            <span class="text-slate-600">·</span>
+            <span x-text="t.updateKind === 'discovery' ? 'discovery' : 'on refresh'"></span>
+          </p>
+        </article>
+      </template>
+    </section>
+
+  </div>
+
+  <!-- ============== SCREEN 2: TRACKING (threads + system, merged) ============== -->
+  <div x-cloak x-show="tab === 'tracking'" class="pt-3 pb-8 space-y-5">
+
+    <header class="flex items-baseline justify-between gap-3">
+      <h1 class="text-xl md:text-2xl font-semibold tracking-tight">Tracking</h1>
+      <span class="text-xs text-slate-500 tabular-nums" x-text="data.snapshotTime"></span>
+    </header>
+
+    <!-- Headline metrics — at-a-glance, operator-focused -->
+    <section class="grid grid-cols-3 gap-2 md:gap-3">
+      <div class="rounded-xl border p-3 md:p-4 text-center"
+           :class="needYourCall > 0 ? 'border-amber-500/40 bg-amber-500/5' : 'border-slate-800 bg-slate-900/60'">
+        <p class="text-2xl md:text-3xl font-semibold tabular-nums"
+           :class="needYourCall > 0 ? 'text-amber-300' : 'text-slate-100'"
+           x-text="needYourCall"></p>
+        <p class="text-[11px] uppercase tracking-wider text-slate-400 mt-1 leading-tight">need<br>your call</p>
+      </div>
+      <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-3 md:p-4 text-center">
+        <p class="text-2xl md:text-3xl font-semibold text-slate-100 tabular-nums" x-text="pendingCommitCount"></p>
+        <p class="text-[11px] uppercase tracking-wider text-slate-400 mt-1 leading-tight">pending<br>commits</p>
+      </div>
+      <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-3 md:p-4 text-center">
+        <p class="text-2xl md:text-3xl font-semibold text-emerald-300 tabular-nums" x-text="beadsLandedCount"></p>
+        <p class="text-[11px] uppercase tracking-wider text-slate-400 mt-1 leading-tight">beads<br>landed</p>
+      </div>
+    </section>
+
+    <!-- Threads: per-session editorial cards -->
+    <section class="space-y-3">
+      <div class="flex items-baseline justify-between gap-3">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          Threads <span class="text-slate-600 normal-case font-normal" x-text="'(' + data.threads.length + ')'"></span>
+        </h2>
+        <div class="flex items-center gap-1.5 text-[11px]">
+          <template x-for="opt in sortOptions" :key="opt.key">
+            <button
+              data-testid="coord-sort"
+              :data-sort-key="opt.key"
+              @click="sortKey = opt.key"
+              :class="sortKey === opt.key
+                ? 'bg-violet-500/20 text-violet-200 ring-1 ring-violet-400/40'
+                : 'bg-slate-800/60 text-slate-400 hover:bg-slate-800'"
+              class="px-2 py-0.5 rounded-full font-medium transition-colors"
+              x-text="opt.label"></button>
+          </template>
+        </div>
+      </div>
+      <template x-for="t in sortedThreads" :key="t.session">
+        <article data-testid="coord-thread"
+                 :data-thread-status="t.status"
+                 :data-thread-session="t.session"
+                 class="rounded-xl border bg-slate-900/60 p-4 space-y-3"
+                 :class="t.needs ? 'border-amber-500/30' : 'border-slate-800'">
+
+          <!-- header row: label, status pill, age -->
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2 flex-wrap">
+                <p class="text-[15px] font-medium text-slate-100 leading-snug" x-text="t.label"></p>
+                <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-medium shrink-0"
+                      :class="statusBadge(t.status)"
+                      x-text="t.status"></span>
+              </div>
+              <p class="text-[11px] text-slate-500 tabular-nums truncate mt-0.5">
+                <span x-text="t.session"></span> ·
+                <span x-text="t.role"></span> ·
+                <span class="text-slate-400" x-text="t.totalTurns + ' turns'"></span>
+              </p>
+            </div>
+            <span class="text-[11px] tabular-nums text-slate-400 shrink-0 mt-0.5"
+                  x-text="ageStr(t.ageMin)"></span>
+          </div>
+
+          <!-- editorial lead -->
+          <p class="text-[15px] text-slate-100 leading-snug" x-text="t.lead"></p>
+
+          <!-- supporting bullets -->
+          <ul x-show="t.bullets && t.bullets.length" class="space-y-1.5 list-none">
+            <template x-for="(b, i) in t.bullets" :key="i">
+              <li class="text-sm text-slate-300 pl-4 relative leading-snug">
+                <span class="absolute left-0 top-2 w-1.5 h-1.5 rounded-full bg-slate-600"></span>
+                <span x-text="b"></span>
+              </li>
+            </template>
+          </ul>
+
+          <!-- highlighted needs callout -->
+          <div x-show="t.needs"
+               class="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2">
+            <p class="text-[10px] uppercase tracking-wider text-amber-300/90 mb-0.5">needs from you</p>
+            <p class="text-sm text-amber-100 leading-snug" x-text="t.needs"></p>
+          </div>
+
+        </article>
+      </template>
+    </section>
+
+    <!-- Beads landed during this session -->
+    <section x-show="data.beads.length">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+        Beads — turn-reader saga
+      </h2>
+      <ul class="space-y-2">
+        <template x-for="b in data.beads" :key="b.id">
+          <li class="rounded-xl border border-slate-800 bg-slate-900/60 p-3 flex items-start gap-3">
+            <span class="mt-0.5 inline-flex items-center justify-center w-6 h-6 rounded-full text-sm shrink-0"
+                  :class="{
+                    'bg-emerald-500/15 text-emerald-300': b.status === 'landed',
+                    'bg-amber-500/15 text-amber-300': b.status === 'closed-duplicate',
+                  }"
+                  x-text="b.status === 'landed' ? '✓' : '⊘'"></span>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-baseline gap-2 flex-wrap">
+                <code class="text-sm text-emerald-300" x-text="b.id"></code>
+                <code x-show="b.commit && b.commit !== '(host)'" class="text-[11px] text-slate-500" x-text="b.commit"></code>
+              </div>
+              <p class="text-sm text-slate-200" x-text="b.scope"></p>
+              <p x-show="b.note" class="text-xs text-amber-300/90 mt-1" x-text="b.note"></p>
+            </div>
+          </li>
+        </template>
+      </ul>
+    </section>
+
+    <!-- Convergent decisions -->
+    <section x-show="data.convergentDecisions.length">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+        Convergent design decisions
+        <span class="text-slate-500 normal-case font-normal">— same problem, multiple sessions</span>
+      </h2>
+      <ul class="space-y-2">
+        <template x-for="d in data.convergentDecisions" :key="d.title">
+          <li class="rounded-xl border border-violet-500/25 bg-violet-500/5 p-3">
+            <p class="text-sm font-medium text-slate-100" x-text="d.title"></p>
+            <p class="text-[11px] text-slate-400 mt-0.5">
+              raised by <span x-text="d.raisedBy.join(' + ')"></span>
+            </p>
+          </li>
+        </template>
+      </ul>
+    </section>
+
+    <!-- Open follow-ups -->
+    <section x-show="data.openFollowups.length">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+        Open follow-ups (not yet beaded)
+      </h2>
+      <ul class="space-y-1.5 list-none">
+        <template x-for="(t, i) in data.openFollowups" :key="i">
+          <li class="text-sm text-slate-300 pl-4 relative leading-snug">
+            <span class="absolute left-0 top-2 w-1.5 h-1.5 rounded-full bg-slate-600"></span>
+            <span x-text="t"></span>
+          </li>
+        </template>
+      </ul>
+    </section>
+
+    <footer class="pt-3 pb-8 text-[11px] text-slate-500 leading-relaxed border-t border-slate-800/50">
+      <p>Coord map: <code class="text-slate-400" x-text="data.docs.coordMap"></code></p>
+      <p>Walkthrough: <code class="text-slate-400" x-text="data.docs.walkthrough"></code></p>
+    </footer>
+
+  </div>
+
+</div>
