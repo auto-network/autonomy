@@ -70,9 +70,12 @@ def _run_cli(argv: list[str]) -> tuple[int, str, str]:
 
 
 def test_parser_recognises_set_list(graph_db_env):
+    # First DB op flushes registered schema metadata in (auto-82xyq), so
+    # an "empty" DB still surfaces autonomy.schema / autonomy.schema.synopsis.
     rc, out, _ = _run_cli(["set", "list"])
     assert rc == 0
-    assert "no Settings yet" in out
+    assert "autonomy.schema" in out
+    assert "autonomy.schema.synopsis" in out
 
 
 def test_parser_set_members_no_set_id_errors(graph_db_env):

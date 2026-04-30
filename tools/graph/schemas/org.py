@@ -30,6 +30,21 @@ ORG_REVISION = 1
 VALID_ORG_TYPES = ("shared", "personal")
 
 
+SYNOPSIS = {
+    "summary": (
+        "Org identity: display name, byline, brand color, favicon, type"
+    ),
+    "nouns": [
+        "org", "organization", "identity", "branding",
+        "rename org", "byline", "favicon",
+    ],
+    "related_set_ids": [
+        "autonomy.org.peer-subscription#1",
+        "autonomy.org.capability.install#1",
+    ],
+}
+
+
 class OrgV1(SettingSchema):
     """Shape of an ``autonomy.org#1`` Setting payload.
 
@@ -46,6 +61,34 @@ class OrgV1(SettingSchema):
         "color": str,
         "favicon": str,
         "type": str,
+    }
+
+    _field_metadata: dict[str, dict] = {
+        "name": {
+            "type": "string",
+            "required": True,
+            "description": "Display name of the org (the Setting key carries the slug)",
+        },
+        "byline": {
+            "type": "string",
+            "description": "Tagline shown on org cards / dashboard headers",
+        },
+        "color": {
+            "type": "string",
+            "description": "Brand color (hex string, e.g. #3366ff) for UI accents",
+        },
+        "favicon": {
+            "type": "string",
+            "description": "Path or URL to the favicon shown in dashboard tabs",
+        },
+        "type": {
+            "type": "string",
+            "description": (
+                "Mirror of the bootstrap orgs row type so consumers can render "
+                "a personal-vs-shared indicator without a second lookup"
+            ),
+            "enum": list(VALID_ORG_TYPES),
+        },
     }
 
     @classmethod

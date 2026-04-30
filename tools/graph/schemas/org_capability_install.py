@@ -33,6 +33,23 @@ SET_ID = "autonomy.org.capability.install"
 SCHEMA_REVISION = 1
 
 
+SYNOPSIS = {
+    "summary": (
+        "Org-level capability binding: which implementation the org runs "
+        "for a given contract, plus env/secret/mount bindings"
+    ),
+    "nouns": [
+        "capability", "install", "binding", "org install",
+        "env binding", "secret binding", "mount binding",
+    ],
+    "related_set_ids": [
+        "autonomy.capability.contract#1",
+        "autonomy.capability.impl#1",
+        "autonomy.workspace.capability.enable#1",
+    ],
+}
+
+
 _ALLOWED_TOP_LEVEL = {
     "contract",
     "contract_version",
@@ -76,6 +93,45 @@ class OrgCapabilityInstallV1(SettingSchema):
 
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "contract": {
+            "type": "string",
+            "required": True,
+            "description": "Contract identifier (unpinned name; version is the integer field)",
+        },
+        "contract_version": {
+            "type": "integer",
+            "required": True,
+            "description": "Pinned canonical contract version (>= 1)",
+        },
+        "implementation": {
+            "type": "string",
+            "required": True,
+            "description": "Implementation identifier (e.g. autonomy/github)",
+        },
+        "implementation_version": {
+            "type": "integer",
+            "required": True,
+            "description": "Pinned canonical implementation version (>= 1)",
+        },
+        "env_bindings": {
+            "type": "object",
+            "description": "Env var bindings: env name -> source identifier",
+        },
+        "secret_file_bindings": {
+            "type": "object",
+            "description": "Secret-file bindings: container path -> source identifier",
+        },
+        "mount_bindings": {
+            "type": "object",
+            "description": "Mount bindings: container path -> source identifier",
+        },
+        "notes": {
+            "type": "string",
+            "description": "Free-form notes",
+        },
+    }
 
     @classmethod
     def validate(cls, payload: Any) -> None:  # noqa: C901 — flat checks
