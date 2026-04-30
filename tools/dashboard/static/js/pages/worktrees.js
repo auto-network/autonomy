@@ -434,6 +434,43 @@
         return { name: repo || 'Unknown', initial, color: '#64748b' };
       },
 
+      // ── source_control / autonomy/github capability bridge ────────
+      // Backend exposes review state under row.source_control.review
+      // (see auto-4ze9o). The settled design template uses a flatter
+      // ``row.pr`` shape with ``state`` ∈ green|yellow. rowPr() adapts
+      // between them so the design's HTML/Alpine bindings can be used
+      // verbatim.
+      rowPr(row) {
+        const review = row && row.source_control && row.source_control.review;
+        if (!review) return null;
+        return {
+          number: review.number,
+          url: review.url,
+          title: review.title,
+          body: review.body,
+          state: review.aggregate_state,
+          running: review.running,
+          watch_active: false,  // Wired in P4 (gates.watch_set lifecycle).
+          pr_checks: review.checks || [],
+        };
+      },
+
+      prIsFlashing(pr) {
+        return !!pr && !!pr.watch_active && !!pr.running;
+      },
+
+      prBadgeClass(pr) {
+        if (!pr) return 'border-white/10 bg-white/[0.03] text-slate-300';
+        if (pr.state === 'green') return 'border-emerald-300/20 bg-emerald-300/10 text-emerald-100';
+        return 'border-amber-300/20 bg-amber-300/10 text-amber-100';
+      },
+
+      prDotClass(pr) {
+        if (!pr) return 'bg-slate-400';
+        const tone = pr.state === 'green' ? 'bg-emerald-300' : 'bg-amber-200';
+        return tone + (this.prIsFlashing(pr) ? ' animate-pulse' : '');
+      },
+
       repoName(row) {
         return (row && row.repo_name) || 'unknown';
       },

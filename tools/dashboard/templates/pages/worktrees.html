@@ -202,6 +202,21 @@
                   <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
                         :class="statusClass(item.row)"
                         x-text="statusLabel(item.row)"></span>
+                  <template x-if="rowPr(item.row)">
+                    <a :href="rowPr(item.row).url"
+                       target="_blank"
+                       rel="noreferrer"
+                       class="rounded-full border px-2 py-0.5 text-[10px] font-semibold transition"
+                       :class="prBadgeClass(rowPr(item.row))"
+                       @click.stop
+                       data-testid="pr-badge">
+                      <span class="inline-flex items-center gap-1.5">
+                        <span class="h-1.5 w-1.5 rounded-full"
+                              :class="prDotClass(rowPr(item.row))"></span>
+                        <span x-text="'PR #' + rowPr(item.row).number"></span>
+                      </span>
+                    </a>
+                  </template>
                   <span class="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
                         x-text="'commit 1 of ' + item.total"></span>
                 </div>
