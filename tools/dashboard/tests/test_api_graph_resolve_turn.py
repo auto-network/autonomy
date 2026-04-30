@@ -104,3 +104,64 @@ def test_api_graph_resolve_invalid_turn_400(test_app):
         with TestClient(test_app) as client:
             r = client.get(f"/api/graph/{_RESOLVED_SOURCE['id']}?turn=abc")
             assert r.status_code == 400
+
+
+def test_api_graph_resolve_passes_tail_through(test_app):
+    """``GET /api/graph/{id}?from=-7`` invokes ``read_source_full`` with
+    ``tail_n=7`` so the dashboard / CLI / agents can read the trailing
+    slice of a session in one round trip — no metadata-string parsing
+    on the client side."""
+    from tools.dashboard import server
+
+    captured: dict = {}
+
+    def fake_read_source_full(source_id, **kwargs):
+        captured["source_id"] = source_id
+        captured["kwargs"] = kwargs
+        return {
+            "source": _RESOLVED_SOURCE,
+            "entries": [{"turn_number": 100, "role": "user",
+                         "content": "x", "created_at": ""}],
+            "truncated": False,
+            "total_chars": 1,
+            "comments": [],
+        }
+
+    with patch.object(server.graph_ops, "get_source",
+                      return_value=_RESOLVED_SOURCE):
+        with patch.object(server.graph_ops, "read_source_full",
+                          side_effect=fake_read_source_full):
+            with TestClient(test_app) as client:
+                r = client.get(f"/api/graph/{_RESOLVED_SOURCE['id']}"
+                               "?from=-7")
+                assert r.status_code == 200, r.text
+
+    assert captured["source_id"] == _RESOLVED_SOURCE["id"]
+    assert captured["kwargs"].get("tail_n") == 7
+    assert captured["kwargs"].get("around_turn") is None
+
+
+def test_api_graph_resolve_invalid_from_400(test_app):
+    """A non-integer ``from`` is rejected with 400, same as ``turn``."""
+    from tools.dashboard import server
+
+    with patch.object(server.graph_ops, "get_source",
+                      return_value=_RESOLVED_SOURCE):
+        with TestClient(test_app) as client:
+            r = client.get(f"/api/graph/{_RESOLVED_SOURCE['id']}?from=abc")
+            assert r.status_code == 400
+
+
+def test_api_graph_resolve_positive_from_400(test_app):
+    """Positive ``from`` is reserved for a future forward-range mode and
+    must be rejected — silently treating it as no-op would surface the
+    front-of-source slice and confuse callers expecting a tail."""
+    from tools.dashboard import server
+
+    with patch.object(server.graph_ops, "get_source",
+                      return_value=_RESOLVED_SOURCE):
+        with TestClient(test_app) as client:
+            r = client.get(f"/api/graph/{_RESOLVED_SOURCE['id']}?from=5")
+            assert r.status_code == 400
+            r2 = client.get(f"/api/graph/{_RESOLVED_SOURCE['id']}?from=0")
+            assert r2.status_code == 400
