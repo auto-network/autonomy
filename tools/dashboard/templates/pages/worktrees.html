@@ -526,8 +526,24 @@
                 <div class="mx-auto max-w-6xl">
                   <div class="relative mb-2 pr-12">
                     <div class="flex min-w-0 flex-wrap items-center gap-2">
-                      <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
-                            x-text="selectedCommit.commit.short_sha || shortSha(selectedCommit.commit.sha)"></span>
+                      <template x-if="isPrReview()">
+                        <a :href="selectedCommit.pr.url"
+                           target="_blank"
+                           rel="noreferrer"
+                           class="rounded-full border px-2 py-0.5 text-[10px] font-semibold transition"
+                           :class="prBadgeClass(selectedCommit.pr)"
+                           data-testid="review-pr-badge">
+                          <span class="inline-flex items-center gap-1.5">
+                            <span class="h-1.5 w-1.5 rounded-full"
+                                  :class="prDotClass(selectedCommit.pr)"></span>
+                            <span x-text="'PR #' + selectedCommit.pr.number"></span>
+                          </span>
+                        </a>
+                      </template>
+                      <template x-if="!isPrReview()">
+                        <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
+                              x-text="selectedCommit.commit.short_sha || shortSha(selectedCommit.commit.sha)"></span>
+                      </template>
                       <!-- Session badge — links back to the session viewer
                            when the session is still live and we know its
                            project; otherwise renders as a plain badge. -->
@@ -541,9 +557,11 @@
                         <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                               x-text="selectedCommit.row.session_name"></span>
                       </template>
-                      <span class="rounded-full bg-slate-800 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-400"
-                            x-text="selectedCommit.commit.date"></span>
-                      <template x-if="selectedCommit.total > 1">
+                      <template x-if="!isPrReview() && selectedCommit.commit.date">
+                        <span class="rounded-full bg-slate-800 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-400"
+                              x-text="selectedCommit.commit.date"></span>
+                      </template>
+                      <template x-if="!isPrReview() && selectedCommit.total > 1">
                         <div class="flex items-center gap-1">
                           <button type="button"
                                   class="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-sm font-semibold text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
@@ -669,7 +687,7 @@
               </div>
 
               <div class="relative mt-6">
-                <template x-if="supportsDashboardMerge(selectedCommit.row)">
+                <template x-if="!isPrReview() && supportsDashboardMerge(selectedCommit.row)">
                   <div class="mx-auto flex max-w-6xl flex-col gap-2 md:flex-row md:items-center">
                     <template x-if="mergeBurstActive">
                       <div class="pointer-events-none absolute inset-x-0 -top-16 z-10 flex justify-center overflow-visible">
@@ -756,7 +774,7 @@
                   </div>
                 </template>
 
-                <template x-if="!supportsDashboardMerge(selectedCommit.row)">
+                <template x-if="isPrReview() || !supportsDashboardMerge(selectedCommit.row)">
                   <div class="mx-auto flex max-w-6xl justify-end">
                     <button type="button"
                             class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300"

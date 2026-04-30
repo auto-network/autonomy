@@ -618,6 +618,35 @@ class TestWorktreePage:
         assert "bg-amber-200" in js
         assert "animate-pulse" in js
 
+    def test_pr_review_overlay_wired(self):
+        """The overlay (settled design 3435e03f, lines 460+) renders the
+        PR title/body + integrated diff when ``selectedCommit.prMode``
+        is true. PR-row click on the navigator opens this view; pager
+        and per-commit merge buttons are hidden in PR mode."""
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        # Template fork on isPrReview().
+        assert "isPrReview()" in template
+        assert 'data-testid="review-pr-badge"' in template
+        # Pager + commit-merge buttons gated off in PR mode.
+        assert '!isPrReview() && selectedCommit.total > 1' in template
+        assert '!isPrReview() && supportsDashboardMerge' in template
+        # PR badge in the overlay header reuses prBadgeClass / prDotClass.
+        assert ':class="prBadgeClass(selectedCommit.pr)"' in template
+        assert ':class="prDotClass(selectedCommit.pr)"' in template
+        assert "'PR #' + selectedCommit.pr.number" in template
+
+        # JS: openReviewPr now actually fetches /pr-diff and slots the
+        # integrated diff into selectedCommit with prMode: true.
+        assert "openReviewPr(row)" in js
+        assert "'/pr-diff'" in js
+        assert "prMode: true" in js
+        assert "isPrReview()" in js
+        # PR-mode commit subject comes from the PR title; body from PR body.
+        assert "subject: pr.title" in js
+        assert "body: pr.body" in js
+
     def test_pr_nag_controls_wired(self):
         """The card-level Silent / Nag All Changes / Nag When Done
         controls (settled design 3435e03f, lines 485-498) bind to the
