@@ -58,6 +58,7 @@ FAILURE_INVALID_MODE = "invalid_mode"
 FAILURE_GH_MISSING = "gh_missing"
 FAILURE_AUTH_MISSING = "auth_missing"
 FAILURE_TIMED_OUT = "timed_out"
+FAILURE_RATE_LIMITED = "rate_limited"
 FAILURE_EXEC_FAILED = "exec_failed"
 
 # Fields requested from ``gh pr list --head <branch>`` for review
@@ -642,6 +643,14 @@ _AUTH_MISSING_PATTERNS = (
     "requires authentication",
 )
 
+_RATE_LIMITED_PATTERNS = (
+    "rate limit exceeded",
+    "rate limit already exceeded",
+    "api rate limit",
+    "x-ratelimit-remaining: 0",
+    "secondary rate limit",
+)
+
 
 def classify_failure(stdout: str, stderr: str, exit_code: int, timed_out: bool) -> str | None:
     """Map a docker/gh exit to a canonical failure code, or None on success."""
@@ -654,6 +663,11 @@ def classify_failure(stdout: str, stderr: str, exit_code: int, timed_out: bool) 
         return FAILURE_GH_MISSING
     if any(p in haystack for p in _AUTH_MISSING_PATTERNS):
         return FAILURE_AUTH_MISSING
+    # Rate-limited check goes BEFORE the EXEC_FAILED catch-all so callers
+    # can implement back-off without parsing free-form stderr. GitHub
+    # returns rate-limit text inside a normal rc=1 gh response.
+    if any(p in haystack for p in _RATE_LIMITED_PATTERNS):
+        return FAILURE_RATE_LIMITED
     return FAILURE_EXEC_FAILED
 
 
@@ -820,6 +834,7 @@ async def _execute_op(
                 FAILURE_GH_MISSING: "gh CLI is not installed in the live container",
                 FAILURE_AUTH_MISSING: "gh CLI is not authenticated to GitHub",
                 FAILURE_TIMED_OUT: f"gh invocation timed out after {timeout}s",
+                FAILURE_RATE_LIMITED: "GitHub API rate limit exceeded",
                 FAILURE_EXEC_FAILED: f"gh invocation failed (exit {exit_code})",
             }.get(failure, f"gh invocation failed: {failure}"),
         )
@@ -976,6 +991,7 @@ __all__ = [
     "FAILURE_GH_MISSING",
     "FAILURE_AUTH_MISSING",
     "FAILURE_TIMED_OUT",
+    "FAILURE_RATE_LIMITED",
     "FAILURE_EXEC_FAILED",
     "PR_VIEW_FIELDS",
     "PR_LIST_FIELDS",

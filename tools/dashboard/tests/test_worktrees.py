@@ -1,6 +1,7 @@
 """HTTP and wiring tests for the Worktrees dashboard page."""
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -23,12 +24,14 @@ class _FakeMonitor:
     def __init__(self, rows):
         self.rows = rows
         self.refresh_count = 0
+        self.last_force = None
 
     def get_all(self):
         return list(self.rows)
 
-    async def refresh(self):
+    async def refresh(self, *, force_capabilities: bool = False):
         self.refresh_count += 1
+        self.last_force = force_capabilities
         return list(self.rows)
 
 
@@ -1543,6 +1546,215 @@ class TestWorktreeMonitorCapabilityCache:
         assert snapshot["state"] == "degraded"
         assert snapshot["reason"] == "probe_failed"
         assert snapshot["review"] is None
+
+
+class TestWorktreeMonitorTtlCache:
+    """The 30s scan loop is right for derivable local-git signals but
+    wasteful for remote PR queries (graph://c64d0f5d-480 § Why we must
+    become stateful). TTL caching skips ``gh pr list`` when the cached
+    snapshot is fresh; operator-forced refresh bypasses the TTL.
+
+    Tests use the real clock with tiny TTLs (5-50ms) instead of mocking
+    ``time.monotonic`` — patching the global was unreliable because
+    asyncio's event loop also reads it.
+    """
+
+    def _make_monitor(self, monkeypatch, *, rows):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        call_count = {"n": 0}
+
+        async def fake_fetch(row, all_rows, *, watch_mode="silent"):
+            call_count["n"] += 1
+            return {
+                "state": "ready",
+                "implementation": "autonomy/github",
+                "reason": None,
+                "review": None,
+                "watch": {"mode": watch_mode},
+            }
+
+        monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
+        return wm_module.WorktreeMonitor(), call_count
+
+    def test_second_refresh_within_ttl_skips_fetch(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as wm_module
+        # Long TTL so the second refresh is comfortably within it.
+        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_TTL_SECONDS", 60.0)
+
+        rows = [_row(session="auto-live", live=True)]
+        monitor, call_count = self._make_monitor(monkeypatch, rows=rows)
+
+        asyncio.run(monitor.refresh())
+        asyncio.run(monitor.refresh())
+        # Second refresh hit the cache — only one underlying fetch.
+        assert call_count["n"] == 1
+        # And the snapshot is still served.
+        assert monitor.get_source_control("auto-live", "autonomy") is not None
+
+    def test_second_refresh_after_ttl_fetches_again(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as wm_module
+        # 1ms TTL so any sleep > 1ms expires the cache.
+        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_TTL_SECONDS", 0.001)
+        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_WATCH_TTL_SECONDS", 0.001)
+
+        rows = [_row(session="auto-live", live=True)]
+        monitor, call_count = self._make_monitor(monkeypatch, rows=rows)
+
+        asyncio.run(monitor.refresh())
+        time.sleep(0.005)  # blow past the 1ms TTL
+        asyncio.run(monitor.refresh())
+        assert call_count["n"] == 2
+
+    def test_force_capabilities_bypasses_ttl(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as wm_module
+        # Long TTL — without force we'd skip; with force we re-fetch.
+        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_TTL_SECONDS", 60.0)
+
+        rows = [_row(session="auto-live", live=True)]
+        monitor, call_count = self._make_monitor(monkeypatch, rows=rows)
+
+        asyncio.run(monitor.refresh())
+        asyncio.run(monitor.refresh(force_capabilities=True))
+        assert call_count["n"] == 2
+
+    def test_watch_active_row_uses_shorter_ttl(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as wm_module
+        # Silent TTL stays long; watch TTL is tiny so a sub-tick sleep
+        # expires it for nag-active rows but not silent ones.
+        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_TTL_SECONDS", 60.0)
+        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_WATCH_TTL_SECONDS", 0.001)
+
+        rows = [_row(session="auto-live", live=True)]
+        monitor, call_count = self._make_monitor(monkeypatch, rows=rows)
+        # Nag-active row gets the shorter TTL.
+        monitor.set_nag_mode("auto-live", "autonomy", "nag_all")
+
+        asyncio.run(monitor.refresh())
+        time.sleep(0.005)  # past watch TTL, within silent TTL
+        asyncio.run(monitor.refresh())
+        assert call_count["n"] == 2
+
+
+class TestWorktreeMonitorRateLimitBackoff:
+    """When gh reports rate-limited, the monitor backs off all
+    capability fetches for a window so we don't deepen the hole.
+    Operator-forced refresh resets the back-off when the limit recovers.
+    """
+
+    def _make_monitor(self, monkeypatch, *, rows, responses):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        idx = {"n": 0}
+
+        async def fake_fetch(row, all_rows, *, watch_mode="silent"):
+            i = idx["n"]
+            idx["n"] += 1
+            return responses[min(i, len(responses) - 1)]
+
+        monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
+        return wm_module.WorktreeMonitor(), idx
+
+    def test_rate_limited_response_arms_backoff_and_skips_subsequent(
+        self, monkeypatch,
+    ):
+        from tools.dashboard import worktree_monitor as wm_module
+        # Long backoff so the second refresh is comfortably inside it.
+        monkeypatch.setattr(wm_module, "RATE_LIMIT_BACKOFF_SECONDS", 60.0)
+
+        rate_limited = {
+            "state": "degraded",
+            "implementation": "autonomy/github",
+            "reason": "rate_limited",
+            "review": None,
+            "watch": {"mode": "silent"},
+            "details": {"error": "GitHub API rate limit exceeded"},
+        }
+        rows = [_row(session="auto-live", live=True)]
+        monitor, idx = self._make_monitor(
+            monkeypatch, rows=rows, responses=[rate_limited],
+        )
+
+        asyncio.run(monitor.refresh())
+        asyncio.run(monitor.refresh())
+
+        # Only one actual fetch — the second was skipped due to back-off.
+        assert idx["n"] == 1
+        snap = monitor.get_source_control("auto-live", "autonomy")
+        assert snap is not None
+        assert snap["reason"] == "rate_limited"
+
+    def test_force_capabilities_clears_backoff_on_clean_refresh(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as wm_module
+        monkeypatch.setattr(wm_module, "RATE_LIMIT_BACKOFF_SECONDS", 60.0)
+
+        rate_limited = {
+            "state": "degraded",
+            "implementation": "autonomy/github",
+            "reason": "rate_limited",
+            "review": None,
+            "watch": {"mode": "silent"},
+        }
+        ready = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "review": None,
+            "watch": {"mode": "silent"},
+        }
+        rows = [_row(session="auto-live", live=True)]
+        monitor, idx = self._make_monitor(
+            monkeypatch, rows=rows, responses=[rate_limited, ready],
+        )
+        asyncio.run(monitor.refresh())
+        assert monitor._capability_backoff_until > 0.0
+
+        asyncio.run(monitor.refresh(force_capabilities=True))
+        assert monitor._capability_backoff_until == 0.0
+        snap = monitor.get_source_control("auto-live", "autonomy")
+        assert snap["reason"] is None
+
+    def test_rate_limited_synth_for_previously_uncached_row(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as wm_module
+        monkeypatch.setattr(wm_module, "RATE_LIMIT_BACKOFF_SECONDS", 60.0)
+
+        rate_limited = {
+            "state": "degraded",
+            "implementation": "autonomy/github",
+            "reason": "rate_limited",
+            "review": None,
+            "watch": {"mode": "silent"},
+        }
+
+        rows_first = [_row(session="auto-old", live=True)]
+        idx = {"n": 0}
+
+        async def fake_fetch(row, all_rows, *, watch_mode="silent"):
+            idx["n"] += 1
+            return rate_limited
+
+        monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows_first))
+        monitor = wm_module.WorktreeMonitor()
+
+        asyncio.run(monitor.refresh())
+        # New row appears in the next scan — no cached snapshot for it.
+        rows_second = [
+            _row(session="auto-old", live=True),
+            _row(session="auto-new", live=True),
+        ]
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows_second))
+        asyncio.run(monitor.refresh())
+
+        # Still only one underlying fetch — second refresh was
+        # back-off-skipped for both rows.
+        assert idx["n"] == 1
+        new_snap = monitor.get_source_control("auto-new", "autonomy")
+        assert new_snap is not None
+        assert new_snap["reason"] == "rate_limited"
+        assert "backoff_seconds_remaining" in (new_snap.get("details") or {})
 
 
 # ── /api/worktrees row JSON includes source_control when cached ───────
