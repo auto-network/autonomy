@@ -451,6 +451,101 @@ def reconcile_graph_source_ids(*, live_only: bool = True) -> int:
     return repaired
 
 
+def reconcile_session_graph_source_id(session: dict | None) -> str:
+    """Return a *verified-resolving* ``graph_source_id`` for ``session``.
+
+    Defense-in-depth read-side complement to :func:`reconcile_graph_source_ids`.
+    Surfaces that hand a session's ``graph_source_id`` to a caller (the
+    ``/api/session/{tmux_name}`` endpoint, the CrossTalk envelope) call this
+    just-in-time so a drifted or empty stored value does not leak out.
+
+    Resolution order:
+
+    1. If the stored ID resolves to a row in any org DB, return it.
+    2. Otherwise, look up the canonical ID via ``sources.file_path =
+       jsonl_path``. If found, persist the repair back to
+       ``tmux_sessions`` and return the new ID.
+    3. Otherwise, return ``""`` — never leak a non-resolving ID. Callers
+       MUST treat the empty string as "no verified source yet" and either
+       omit the ID or render a placeholder.
+    """
+    if not session:
+        return ""
+    stored = (session.get("graph_source_id") or "").strip()
+    if stored and _resolve_source_in_orgs_by_id(stored):
+        return stored
+    jpath = (session.get("jsonl_path") or "").strip()
+    if not jpath:
+        return ""
+    real_id = _resolve_source_id_by_path(jpath)
+    if not real_id:
+        return ""
+    if real_id == stored:
+        return stored
+    tmux_name = session.get("tmux_name") or ""
+    if tmux_name:
+        try:
+            update_graph_source(tmux_name, real_id)
+            logger.info(
+                "dashboard_db: read-side reconcile %s graph_source_id %s → %s",
+                tmux_name, stored[:11] if stored else "(empty)", real_id[:11],
+            )
+        except Exception:
+            logger.warning(
+                "dashboard_db: read-side reconcile write failed for %s",
+                tmux_name, exc_info=True,
+            )
+    return real_id
+
+
+def get_source_max_turn_number(graph_source_id: str) -> int | None:
+    """Return ``MAX(turn_number)`` over thoughts ∪ derivations for ``graph_source_id``.
+
+    Used by CrossTalk to write the graph turn number into the envelope's
+    ``turn=`` attribute (per auto-4nr14 §B). Distinct from
+    ``tmux_sessions.entry_count``, which is the JSONL/viewer-tail line
+    count and is ~10–20× larger because graph ingest filters tool-use /
+    tool-result messages and only counts operator-visible text turns
+    (plus compact summaries for Claude).
+
+    Returns ``None`` when the source is unknown to every org DB or has no
+    thoughts/derivations yet — callers should omit ``turn=`` rather than
+    fall back to a different counter on a different scale.
+    """
+    if not graph_source_id:
+        return None
+    try:
+        from tools.graph.cross_org import list_org_slugs, open_peer_db
+    except Exception:
+        return None
+    for slug in list_org_slugs():
+        peer = open_peer_db(slug)
+        if peer is None:
+            continue
+        try:
+            row = peer.get_source(graph_source_id)
+        except Exception:
+            row = None
+        if row is None:
+            continue
+        try:
+            max_row = peer.conn.execute(
+                """SELECT MAX(turn_number) AS m FROM (
+                       SELECT turn_number FROM thoughts WHERE source_id = ?
+                       UNION ALL
+                       SELECT turn_number FROM derivations WHERE source_id = ?
+                   )""",
+                (graph_source_id, graph_source_id),
+            ).fetchone()
+        except Exception:
+            return None
+        if max_row is None:
+            return None
+        m = max_row["m"] if hasattr(max_row, "keys") else max_row[0]
+        return int(m) if m is not None else None
+    return None
+
+
 def update_tail_state(
     tmux_name: str,
     *,
