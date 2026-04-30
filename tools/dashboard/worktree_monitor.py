@@ -77,6 +77,13 @@ NAG_ALL_CHANGES = "nag_all"
 NAG_WHEN_DONE = "nag_done"
 NAG_MODES = frozenset({NAG_SILENT, NAG_ALL_CHANGES, NAG_WHEN_DONE})
 NAG_DEFAULT = NAG_SILENT
+# Hard time-limit on every nag request. Per Jeremy (2026-04-30): "A
+# request to watch / nag should always be time limited. You can never
+# request infinite nags." Default is 1 hour; the API can shorten it
+# but cannot extend past NAG_MAX_DURATION_SECONDS so a stuck or
+# forgotten nag mode auto-reverts to silent.
+NAG_DEFAULT_DURATION_SECONDS = 3600.0   # 1 hour by default
+NAG_MAX_DURATION_SECONDS = 14400.0      # 4-hour absolute ceiling
 
 
 def _degraded_snapshot(
@@ -194,7 +201,8 @@ class WorktreeMonitor:
         # fetch — set when gh reports rate-limited, cleared on the next
         # successful operator-forced refresh that actually probes.
         self._capability_backoff_until: float = 0.0
-        self._nag_modes: dict[tuple[str, str], str] = {}
+        # Per-row (mode, expiry_monotonic) — silent has no entry.
+        self._nag_modes: dict[tuple[str, str], tuple[str, float]] = {}
         self._task: asyncio.Task | None = None
         self._lock: asyncio.Lock | None = None
         self._started = False
@@ -208,25 +216,89 @@ class WorktreeMonitor:
         return self._source_control_cache.get((session_name, repo_name))
 
     def get_nag_mode(self, session_name: str, repo_name: str) -> str:
-        """Return the persisted nag mode for a row (defaults to ``silent``)."""
-        return self._nag_modes.get((session_name, repo_name), NAG_DEFAULT)
+        """Return the live nag mode for a row.
 
-    def set_nag_mode(self, session_name: str, repo_name: str, mode: str) -> str:
-        """Persist a nag mode for a row. Raises ValueError on invalid mode.
+        ``silent`` is returned both when no row entry exists and when
+        the row's nag mode has expired — there's no concept of an
+        "infinite" nag request (per Jeremy 2026-04-30). Callers don't
+        have to know about expiry; the timer is invisible to the
+        polling decision tree.
+        """
+        entry = self._nag_modes.get((session_name, repo_name))
+        if entry is None:
+            return NAG_DEFAULT
+        mode, expiry = entry
+        if time.monotonic() >= expiry:
+            return NAG_DEFAULT
+        return mode
 
-        Updates the cached source_control snapshot in place when present
-        so the next ``GET /api/worktrees`` reflects the new mode without
-        waiting for the 30s background refresh.
+    def get_nag_expiry_remaining(self, session_name: str, repo_name: str) -> float:
+        """Seconds remaining on the row's nag mode (0.0 if silent/expired).
+
+        UI surfaces this as a countdown so the operator knows when the
+        nag will lapse and can re-arm if they still want to be paged.
+        """
+        entry = self._nag_modes.get((session_name, repo_name))
+        if entry is None:
+            return 0.0
+        _mode, expiry = entry
+        return max(0.0, expiry - time.monotonic())
+
+    def set_nag_mode(
+        self,
+        session_name: str,
+        repo_name: str,
+        mode: str,
+        *,
+        duration_seconds: float | None = None,
+    ) -> str:
+        """Persist a nag mode for a row with a hard time limit.
+
+        Per Jeremy (2026-04-30) every watch request is time-limited —
+        an operator can never request infinite nags. ``mode=silent``
+        clears the entry. Other modes record an expiry monotonic
+        instant; ``duration_seconds`` defaults to
+        :data:`NAG_DEFAULT_DURATION_SECONDS` and is clamped down to
+        :data:`NAG_MAX_DURATION_SECONDS`. The poll decision tree then
+        treats an expired entry exactly as silent — no further fetches.
+
+        Updates the cached source_control snapshot in place when
+        present so the next ``GET /api/worktrees`` reflects the new
+        mode + remaining duration without waiting on the 30s loop.
         """
         if mode not in NAG_MODES:
             raise ValueError(
                 f"invalid nag mode: {mode!r}; expected one of {sorted(NAG_MODES)}"
             )
         key = (session_name, repo_name)
-        self._nag_modes[key] = mode
+
+        if mode == NAG_SILENT:
+            # Silent doesn't need a timer — clear the entry so
+            # get_nag_mode + the watch block both reflect plain silent.
+            self._nag_modes.pop(key, None)
+            cached = self._source_control_cache.get(key)
+            if cached is not None:
+                cached["watch"] = {"mode": NAG_SILENT}
+            return mode
+
+        if duration_seconds is None:
+            duration_seconds = NAG_DEFAULT_DURATION_SECONDS
+        if duration_seconds <= 0:
+            raise ValueError(
+                f"invalid nag duration: {duration_seconds!r}; must be > 0"
+            )
+        # Clamp to the absolute ceiling — even an explicit longer
+        # request gets capped here so the safety guarantee holds.
+        duration_seconds = min(float(duration_seconds), NAG_MAX_DURATION_SECONDS)
+        expiry = time.monotonic() + duration_seconds
+        self._nag_modes[key] = (mode, expiry)
+
         cached = self._source_control_cache.get(key)
         if cached is not None:
-            cached["watch"] = {"mode": mode}
+            cached["watch"] = {
+                "mode": mode,
+                "expires_in_seconds": int(duration_seconds),
+            }
         return mode
 
     async def refresh(self, *, force_capabilities: bool = False) -> list[WorktreeState]:
