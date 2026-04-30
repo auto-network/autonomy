@@ -61,12 +61,13 @@ FAILURE_AUTH_MISSING = "auth_missing"
 FAILURE_TIMED_OUT = "timed_out"
 FAILURE_EXEC_FAILED = "exec_failed"
 
-# Fields requested from ``gh pr view`` for snapshot/refresh. Kept compact so
-# the JSON fits comfortably in a single response and so callers don't end up
-# depending on incidental fields the spec didn't promise.
+# Fields requested from ``gh pr view`` for review read/refresh. Kept compact
+# so the JSON fits comfortably in a single response and so callers don't end
+# up depending on incidental fields the spec didn't promise. ``body`` and
+# ``headRefOid`` feed the review payload's ``body`` and ``head_sha``.
 PR_VIEW_FIELDS = (
-    "number,state,title,url,headRefName,baseRefName,isDraft,mergeable,"
-    "mergeStateStatus,reviewDecision,statusCheckRollup,updatedAt"
+    "number,state,title,body,url,headRefName,headRefOid,baseRefName,isDraft,"
+    "mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,updatedAt"
 )
 
 DEFAULT_TIMEOUT_SECONDS = 30
@@ -115,6 +116,129 @@ class WorktreeGithubExecResult:
             "failure": self.failure,
             "error_message": self.error_message,
         }
+
+
+# ── Review payload normalization ──────────────────────────────────────
+#
+# The Dashboard does not consume raw ``gh pr view --json`` output. It
+# composes a typed ``review`` block per the source_control snapshot
+# shape (auto-4ze9o), with a ``green``/``yellow`` aggregate and a
+# separate ``running`` overlay. ``normalize_review_payload`` maps gh's
+# rollup into that shape so callers don't have to know which rollup
+# entries carry ``state`` vs ``status``+``conclusion``.
+
+
+_CHECK_PASS = "pass"
+_CHECK_FAIL = "fail"
+_CHECK_RUNNING = "running"
+_CHECK_PENDING = "pending"
+
+_AGGREGATE_GREEN = "green"
+_AGGREGATE_YELLOW = "yellow"
+
+
+def _normalize_check(entry: dict) -> dict | None:
+    """Map one ``statusCheckRollup`` entry to ``{id, label, status, detail}``.
+
+    ``gh`` returns two flavors of rollup entry:
+      - check runs: ``{__typename: 'CheckRun', name, status, conclusion, ...}``
+      - status contexts: ``{__typename: 'StatusContext', context, state, ...}``
+    Older gh versions omit ``__typename`` and we have to sniff fields.
+    Returns ``None`` for entries we can't classify (defensive, never raises).
+    """
+    if not isinstance(entry, dict):
+        return None
+
+    # Pull a stable label and id no matter which flavor.
+    label = entry.get("name") or entry.get("context") or entry.get("title") or ""
+    label = str(label).strip() or "(unnamed check)"
+    entry_id = entry.get("id") or entry.get("name") or entry.get("context") or label
+
+    detail = entry.get("description") or entry.get("title") or None
+    if detail is not None:
+        detail = str(detail).strip()[:500] or None
+
+    # Check-run flavor: status + conclusion.
+    status = entry.get("status")
+    if status is not None:
+        status_norm = str(status).upper()
+        if status_norm == "COMPLETED":
+            conclusion = str(entry.get("conclusion") or "").upper()
+            if conclusion == "SKIPPED":
+                return None
+            if conclusion == "SUCCESS":
+                return {"id": entry_id, "label": label, "status": _CHECK_PASS, "detail": detail}
+            return {"id": entry_id, "label": label, "status": _CHECK_FAIL, "detail": detail}
+        if status_norm in {"IN_PROGRESS", "PENDING"}:
+            return {"id": entry_id, "label": label, "status": _CHECK_RUNNING, "detail": detail}
+        if status_norm == "QUEUED":
+            return {"id": entry_id, "label": label, "status": _CHECK_PENDING, "detail": detail}
+
+    # Status-context flavor: state.
+    state = entry.get("state")
+    if state is not None:
+        state_norm = str(state).upper()
+        if state_norm == "SUCCESS":
+            return {"id": entry_id, "label": label, "status": _CHECK_PASS, "detail": detail}
+        if state_norm in {"FAILURE", "ERROR"}:
+            return {"id": entry_id, "label": label, "status": _CHECK_FAIL, "detail": detail}
+        if state_norm == "PENDING":
+            return {"id": entry_id, "label": label, "status": _CHECK_PENDING, "detail": detail}
+
+    return None
+
+
+def normalize_review_payload(raw_stdout: str) -> dict | None:
+    """Shape ``gh pr view --json`` stdout into the Dashboard review block.
+
+    Returns ``None`` when stdout is empty (gh returns nothing when the
+    branch has no PR) or unparseable. Callers should treat that as
+    ``review: null`` in the source_control snapshot.
+
+    The returned shape covers the v1 PR-badge + navigator needs:
+        {
+          number, url, title, body, head_sha, base_branch,
+          state, is_draft, aggregate_state, running, checks
+        }
+    """
+    import json
+
+    if not raw_stdout or not raw_stdout.strip():
+        return None
+    try:
+        data = json.loads(raw_stdout)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    rollup = data.get("statusCheckRollup") or []
+    checks: list[dict] = []
+    for entry in rollup:
+        normalized = _normalize_check(entry)
+        if normalized is not None:
+            checks.append(normalized)
+
+    aggregate_yellow = (
+        any(c["status"] == _CHECK_FAIL for c in checks)
+        or str(data.get("reviewDecision") or "").upper() == "CHANGES_REQUESTED"
+        or str(data.get("mergeable") or "").upper() == "CONFLICTING"
+    )
+    running = any(c["status"] in (_CHECK_RUNNING, _CHECK_PENDING) for c in checks)
+
+    return {
+        "number": data.get("number"),
+        "url": data.get("url") or "",
+        "title": (data.get("title") or "").strip(),
+        "body": data.get("body") or "",
+        "head_sha": data.get("headRefOid") or "",
+        "base_branch": data.get("baseRefName") or "",
+        "state": str(data.get("state") or "").lower() or "unknown",
+        "is_draft": bool(data.get("isDraft")),
+        "aggregate_state": _AGGREGATE_YELLOW if aggregate_yellow else _AGGREGATE_GREEN,
+        "running": running,
+        "checks": checks,
+    }
 
 
 # ── Subprocess helpers ────────────────────────────────────────────────
@@ -569,6 +693,7 @@ __all__ = [
     "derive_repo_slug",
     "classify_failure",
     "run_cli",
+    "normalize_review_payload",
     "source_control_review_read_v1",
     "source_control_review_refresh_v1",
     "source_control_gates_watch_set_v1",
