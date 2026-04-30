@@ -33,6 +33,16 @@ from pathlib import Path
 
 import pytest
 
+from tools.dashboard.test_lib.l2b_harness import (
+    _ab_eval_batch,
+    _http_get,
+    _navigate_and_check,
+    _run_async_eval,
+    close_browser,
+    open_browser,
+    start_mock_server,
+    stop_mock_server,
+)
 from tools.dashboard.tests._xdist import worker_test_port
 
 # ── Fixture data ──────────────────────────────────────────────────────
@@ -1351,80 +1361,19 @@ def _build_fixture() -> dict:
 def sweep_server(tmp_path_factory):
     """Boot a DASHBOARD_MOCK uvicorn server on a test port, tear down after module."""
     tmpdir = tmp_path_factory.mktemp("sweep")
-    fixture_path = tmpdir / "fixtures.json"
-    fixture_path.write_text(json.dumps(_build_fixture(), indent=2))
-
-    events_path = tmpdir / "events.jsonl"
-    events_path.write_text("")  # empty — SSE events written after browser connects
-
-    port = worker_test_port(8094)
-    env = {
-        **os.environ,
-        "DASHBOARD_MOCK": str(fixture_path),
-        "DASHBOARD_MOCK_EVENTS": str(events_path),
-        "PYTHONPATH": str(Path(__file__).resolve().parents[3]),  # repo root
-        # Isolate EventBus snapshot so neither prior runs nor sibling tests
-        # can replay stale session:registry into our subscribers via restore().
-        "DASHBOARD_EVENT_BUS_STATE": str(tmpdir / "event_bus.state"),
-    }
-
-    proc = subprocess.Popen(
-        [
-            sys.executable, "-m", "uvicorn",
-            "tools.dashboard.server:app",
-            "--host", "127.0.0.1",
-            "--port", str(port),
-            "--log-level", "warning",
-        ],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    state = start_mock_server(
+        _build_fixture(), tmpdir, port=worker_test_port(8094),
     )
-
-    # Wait for server to be ready (up to 8s)
-    deadline = time.time() + 8
-    ready = False
-    while time.time() < deadline:
-        try:
-            import urllib.request
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/dao/active_sessions", timeout=1)
-            ready = True
-            break
-        except Exception:
-            time.sleep(0.2)
-
-    if not ready:
-        proc.kill()
-        out, err = proc.communicate(timeout=3)
-        pytest.fail(f"Sweep server failed to start:\nstdout: {out.decode()}\nstderr: {err.decode()}")
-
-    yield {
-        "port": port,
-        "url": f"http://127.0.0.1:{port}",
-        "fixture_path": str(fixture_path),
-        "events_path": str(events_path),
-    }
-
-    proc.terminate()
     try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=3)
+        yield state
+    finally:
+        stop_mock_server(state)
 
 
 @pytest.fixture(scope="module")
 def browser(sweep_server):
     """Open one agent-browser session, reuse across all tests in module."""
-    url = sweep_server["url"] + "/sessions"
-    subprocess.run(
-        ["agent-browser", "open", url],
-        capture_output=True, timeout=10,
-    )
-    subprocess.run(
-        ["agent-browser", "wait", "--load", "networkidle"],
-        capture_output=True, timeout=10,
-    )
+    open_browser(sweep_server["url"] + "/sessions")
 
     # Push dispatch SSE events so _sseCache is populated for /dispatch page
     events_path = sweep_server["events_path"]
@@ -1437,61 +1386,7 @@ def browser(sweep_server):
     # Give Alpine + HTTP fallback + SSE events time to propagate
     time.sleep(1.5)
     yield sweep_server
-    subprocess.run(["agent-browser", "close"], capture_output=True, timeout=5)
-
-
-# ── Helpers ───────────────────────────────────────────────────────────
-
-def _ab_eval_batch(js: str) -> dict | list | str | None:
-    """Single agent-browser --json eval call, returns parsed result.
-
-    The JS expression is wrapped in an IIFE to avoid const redeclaration
-    across multiple eval calls sharing the same page context.
-    """
-    wrapped = f"(() => {{ {js} }})()"
-    result = subprocess.run(
-        ["agent-browser", "--json", "eval", wrapped],
-        capture_output=True, text=True, timeout=10,
-    )
-    stdout = result.stdout.strip()
-    if not stdout:
-        return None
-    # Parse last JSON line that has success+data shape
-    for line in reversed(stdout.split("\n")):
-        try:
-            parsed = json.loads(line)
-            if isinstance(parsed, dict) and "data" in parsed:
-                data = parsed["data"]
-                # Unwrap {origin, result} from eval
-                if isinstance(data, dict) and "result" in data:
-                    return data["result"]
-                return data
-            return parsed
-        except json.JSONDecodeError:
-            continue
-    return None
-
-
-def _navigate_and_check(path: str, js_checks: str, wait_ms: int = 800) -> dict:
-    """SPA-navigate to a page, wait, run one batched JS eval, return dict.
-
-    Args:
-        path: URL path to navigate to (e.g., "/sessions")
-        js_checks: JS code that populates a `r` object with check results
-                   and ends with `return r;`
-        wait_ms: milliseconds to wait after navigation for Alpine to render
-    """
-    # Navigate via JS (SPA-style)
-    nav_js = f"navigateTo('{path}')"
-    subprocess.run(
-        ["agent-browser", "eval", nav_js],
-        capture_output=True, timeout=10,
-    )
-    time.sleep(wait_ms / 1000)
-
-    # Run all checks in one eval
-    full_js = f"var r = {{}}; {js_checks} return r;"
-    return _ab_eval_batch(full_js) or {}
+    close_browser()
 
 
 # ── Sessions page JS check bundle ────────────────────────────────────
@@ -6440,14 +6335,35 @@ def _set_plugin_setting(fixture_path: str, enabled: bool | None) -> None:
     path.write_text(json.dumps(data, indent=2))
 
 
-def _http_get(url: str) -> tuple[int, str]:
-    import urllib.error
-    import urllib.request
-    try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            return resp.status, resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        return e.code, ""
+def _force_plugin_disabled(fixture_path: str, plugin_id: str) -> None:
+    """Pin a non-test plugin (e.g. the shipped Settings plugin) to
+    ``enabled: false`` for tests that need a dormant baseline.
+
+    ``TestPluginSubstrate`` asserts ``#sidebar-plugins`` is empty when
+    "no plugin is enabled" — that invariant pre-dated us shipping
+    plugins that boot enabled by default. We pin those off here so the
+    sweep stays focused on the substrate's toggle behavior rather than
+    the production-default catalog.
+    """
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    plugin_block = block.setdefault("dashboard.plugin", {})
+    all_list = plugin_block.setdefault("_all", [])
+    all_list[:] = [m for m in all_list if m.get("key") != plugin_id]
+    all_list.append({"key": plugin_id, "payload": {"enabled": False}})
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _clear_forced_plugin(fixture_path: str, plugin_id: str) -> None:
+    """Remove the row written by :func:`_force_plugin_disabled`."""
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    plugin_block = block.setdefault("dashboard.plugin", {})
+    all_list = plugin_block.setdefault("_all", [])
+    all_list[:] = [m for m in all_list if m.get("key") != plugin_id]
+    path.write_text(json.dumps(data, indent=2))
 
 
 class TestPluginSubstrate:
@@ -6470,10 +6386,26 @@ class TestPluginSubstrate:
         """Strip the dashboard.plugin row before each test so dormant
         bootstrap drives the next test's start state. Restore on teardown
         so subsequent test classes see a clean fixture.
+
+        Also pins the ``settings`` plugin (which ships enabled by
+        default — bead auto-yurkd) to ``enabled: false`` so this
+        sweep's "no plugin is enabled" baseline still holds, and
+        force-refreshes the in-browser plugin list so a navigation that
+        short-circuits ``route()`` (same-path) still sees fresh state.
         """
         _set_plugin_setting(sweep_server["fixture_path"], None)
+        _force_plugin_disabled(sweep_server["fixture_path"], "settings")
+        _ab_eval_batch(
+            "return (window.Autonomy && window.Autonomy.refreshPlugins) "
+            "  ? window.Autonomy.refreshPlugins().then(function () { "
+            "      if (typeof _renderSidebarPlugins === 'function') "
+            "        _renderSidebarPlugins(); "
+            "    }) "
+            "  : null;"
+        )
         yield
         _set_plugin_setting(sweep_server["fixture_path"], None)
+        _clear_forced_plugin(sweep_server["fixture_path"], "settings")
 
     def test_dormant_substrate_preserves_legacy_sidebar(self, browser, sweep_server):
         # Default state: no dashboard.plugin Setting → bootstrap rule
@@ -6658,35 +6590,6 @@ _PLUGIN_FETCH_SPY_AND_PROBE_TEMPLATE = """(async () => {{
     }}
 }})();
 """
-
-
-def _run_async_eval(js_expr: str) -> dict:
-    """Run an async IIFE on the live page; return parsed dict."""
-    result = subprocess.run(
-        ["agent-browser", "--json", "eval", js_expr],
-        capture_output=True, text=True, timeout=20,
-    )
-    stdout = result.stdout.strip()
-    if not stdout:
-        return {}
-    for line in reversed(stdout.split("\n")):
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict) and "data" in parsed:
-            data = parsed["data"]
-            if isinstance(data, dict) and "result" in data:
-                val = data["result"]
-                if isinstance(val, str):
-                    try:
-                        return json.loads(val)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                if isinstance(val, dict):
-                    return val
-                return {}
-    return {}
 
 
 class TestPluginOrgScoping:
