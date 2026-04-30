@@ -594,20 +594,27 @@ def _install_github_stubs(
     gh_results=None,
     repo_slug="anchore/autonomy",
 ):
+    """Stub the capability service for tests and return ``(wg, recorder, rows)``.
+
+    The capability service no longer reaches into Dashboard caches —
+    callers pass ``rows`` to each public op. Tests use the returned
+    ``rows`` value to invoke ops with the same row list the recorder
+    is rigged for.
+    """
     from agents.capabilities.github import service as wg
 
-    monkeypatch.setattr(wg.worktree_monitor, "get_all", lambda: list(rows))
+    rows_list = list(rows)
     recorder = _DockerExecRecorder(
         container_running=container_running,
         gh_results=gh_results,
     )
     monkeypatch.setattr(wg, "run_cli", recorder.run_cli)
     monkeypatch.setattr(wg, "derive_repo_slug", lambda _path: repo_slug)
-    return wg, recorder
+    return wg, recorder, rows_list
 
 
 class TestWorktreeGithubResolution:
-    def test_find_live_worktree_row_returns_only_live_match(self, monkeypatch):
+    def test_find_live_worktree_row_returns_only_live_match(self):
         from agents.capabilities.github import service as wg
 
         rows = [
@@ -615,23 +622,20 @@ class TestWorktreeGithubResolution:
             _row(session="auto-live", repo="autonomy", live=True),
             _row(session="auto-live", repo="enterprise", live=True),
         ]
-        monkeypatch.setattr(wg.worktree_monitor, "get_all", lambda: list(rows))
 
-        live = wg.find_live_worktree_row("auto-live", "enterprise")
+        live = wg.find_live_worktree_row("auto-live", "enterprise", rows)
         assert live is not None
         assert live.session_name == "auto-live"
         assert live.repo_name == "enterprise"
 
-        dead = wg.find_live_worktree_row("auto-dead", "autonomy")
+        dead = wg.find_live_worktree_row("auto-dead", "autonomy", rows)
         assert dead is None
 
-    def test_find_live_worktree_row_with_explicit_rows_arg(self):
+    def test_find_live_worktree_row_returns_none_for_empty_rows(self):
         from agents.capabilities.github import service as wg
 
-        rows = [_row(session="auto-x", live=True)]
-        match = wg.find_live_worktree_row("auto-x", "autonomy", rows=rows)
-        assert match is not None
-        assert match.session_name == "auto-x"
+        match = wg.find_live_worktree_row("auto-x", "autonomy", [])
+        assert match is None
 
     def test_classify_failure_maps_canonical_states(self):
         from agents.capabilities.github import service as wg
@@ -656,7 +660,7 @@ class TestWorktreeGithubResolution:
 
 class TestWorktreePRSnapshot:
     def test_snapshot_runs_gh_pr_view_in_live_container(self, monkeypatch):
-        wg, recorder = _install_github_stubs(
+        wg, recorder, rows = _install_github_stubs(
             monkeypatch,
             rows=[_live_row()],
             gh_results=[(
@@ -668,7 +672,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
         )
 
         assert result.ok is True
@@ -698,13 +702,13 @@ class TestWorktreePRSnapshot:
         assert result.command == gh_call
 
     def test_snapshot_returns_no_live_row_when_session_is_dead(self, monkeypatch):
-        wg, recorder = _install_github_stubs(
+        wg, recorder, rows = _install_github_stubs(
             monkeypatch,
             rows=[_row(session="auto-dead", live=False)],
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-dead", "autonomy")
+            wg.source_control_review_read_v1("auto-dead", "autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -716,7 +720,7 @@ class TestWorktreePRSnapshot:
         assert recorder.calls == []
 
     def test_snapshot_returns_no_live_container_when_inspect_fails(self, monkeypatch):
-        wg, recorder = _install_github_stubs(
+        wg, recorder, rows = _install_github_stubs(
             monkeypatch,
             rows=[_live_row()],
             container_running=False,
@@ -724,7 +728,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -735,14 +739,14 @@ class TestWorktreePRSnapshot:
         assert not any(c[:2] == ["docker", "exec"] for c in recorder.calls)
 
     def test_snapshot_surfaces_gh_missing_when_exit_127(self, monkeypatch):
-        wg, _recorder = _install_github_stubs(
+        wg, _recorder, rows = _install_github_stubs(
             monkeypatch,
             rows=[_live_row()],
             gh_results=[("", "gh: command not found", 127, False)],
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -751,14 +755,14 @@ class TestWorktreePRSnapshot:
         assert "command not found" in (result.error_message or "")
 
     def test_snapshot_surfaces_auth_missing_when_gh_says_login(self, monkeypatch):
-        wg, _recorder = _install_github_stubs(
+        wg, _recorder, rows = _install_github_stubs(
             monkeypatch,
             rows=[_live_row()],
             gh_results=[("", "Run `gh auth login` to authenticate.", 4, False)],
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -766,14 +770,14 @@ class TestWorktreePRSnapshot:
         assert "gh auth login" in (result.error_message or "")
 
     def test_snapshot_surfaces_timeout(self, monkeypatch):
-        wg, _recorder = _install_github_stubs(
+        wg, _recorder, rows = _install_github_stubs(
             monkeypatch,
             rows=[_live_row()],
             gh_results=[("", "timeout after 30s", -1, True)],
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -783,7 +787,7 @@ class TestWorktreePRSnapshot:
     def test_snapshot_surfaces_no_repo_slug_when_remote_unparseable(self, monkeypatch):
         from agents.capabilities.github import service as wg
 
-        monkeypatch.setattr(wg.worktree_monitor, "get_all", lambda: [_live_row()])
+        rows = [_live_row()]
         monkeypatch.setattr(wg, "derive_repo_slug", lambda _p: None)
         # run_cli must NOT be called — we should fail before reaching docker.
         async def _explode(*a, **k):
@@ -791,7 +795,7 @@ class TestWorktreePRSnapshot:
         monkeypatch.setattr(wg, "run_cli", _explode)
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -801,14 +805,14 @@ class TestWorktreePRSnapshot:
 
 class TestWorktreePRRefresh:
     def test_refresh_runs_same_gh_pr_view_template_as_snapshot(self, monkeypatch):
-        wg, recorder = _install_github_stubs(
+        wg, recorder, rows = _install_github_stubs(
             monkeypatch,
             rows=[_live_row()],
             gh_results=[("{}", "", 0, False)],
         )
 
         result = asyncio.run(
-            wg.source_control_review_refresh_v1("auto-test", "autonomy")
+            wg.source_control_review_refresh_v1("auto-test", "autonomy", rows=rows)
         )
 
         assert result.ok is True
@@ -830,14 +834,14 @@ class TestWorktreePRWatchSet:
     def test_watch_set_put_subscribed_and_ignored(
         self, monkeypatch, mode, expected_subscribed, expected_ignored, expected_method,
     ):
-        wg, recorder = _install_github_stubs(
+        wg, recorder, rows = _install_github_stubs(
             monkeypatch,
             rows=[_live_row()],
             gh_results=[("", "", 0, False)],
         )
 
         result = asyncio.run(
-            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", mode)
+            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", mode, rows=rows)
         )
 
         assert result.ok is True
@@ -851,14 +855,14 @@ class TestWorktreePRWatchSet:
         assert expected_ignored in gh_call
 
     def test_watch_set_default_clears_subscription_via_delete(self, monkeypatch):
-        wg, recorder = _install_github_stubs(
+        wg, recorder, rows = _install_github_stubs(
             monkeypatch,
             rows=[_live_row()],
             gh_results=[("", "", 0, False)],
         )
 
         result = asyncio.run(
-            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", "default")
+            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", "default", rows=rows)
         )
 
         assert result.ok is True
@@ -867,14 +871,14 @@ class TestWorktreePRWatchSet:
         assert "/repos/anchore/autonomy/subscription" in gh_call
 
     def test_watch_set_rejects_unknown_mode_without_executing(self, monkeypatch):
-        wg, recorder = _install_github_stubs(
+        wg, recorder, rows = _install_github_stubs(
             monkeypatch,
             rows=[_live_row()],
             gh_results=[],
         )
 
         result = asyncio.run(
-            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", "muted")
+            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", "muted", rows=rows)
         )
 
         assert result.ok is False
@@ -1150,3 +1154,165 @@ class TestGithubProbe:
         assert result["reason"] == "probe_failed"
         assert result["details"]["exit_code"] == 7
         assert "weird state" in result["details"]["stderr"]
+
+
+# ── WorktreeMonitor source_control composition ────────────────────────
+
+
+class TestWorktreeMonitorCapabilityCache:
+    """Refresh fans out source_control fetches for live rows; the result
+    is cached and exposed via ``get_source_control``.
+    """
+
+    def _make_monitor(self, monkeypatch, *, rows, snapshots=None, exceptions=None):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        snapshots = snapshots or {}
+        exceptions = exceptions or {}
+
+        async def fake_fetch(row, all_rows):
+            key = (row.session_name, row.repo_name)
+            if key in exceptions:
+                raise exceptions[key]
+            return snapshots.get(key, {
+                "state": "ready",
+                "implementation": "autonomy/github",
+                "reason": None,
+                "review": None,
+            })
+
+        async def fake_scan_thread():  # to_thread expects sync; sub via attr
+            return list(rows)
+
+        monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
+        return wm_module.WorktreeMonitor()
+
+    def test_refresh_caches_snapshots_for_live_rows_only(self, monkeypatch):
+        rows = [
+            _row(session="auto-live", live=True),
+            _row(session="auto-dead", live=False),
+        ]
+        snapshot = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "review": {"number": 7},
+        }
+        monitor = self._make_monitor(
+            monkeypatch,
+            rows=rows,
+            snapshots={("auto-live", "autonomy"): snapshot},
+        )
+
+        asyncio.run(monitor.refresh())
+
+        assert monitor.get_source_control("auto-live", "autonomy") == snapshot
+        # Non-live row got no fetch and therefore no cache entry.
+        assert monitor.get_source_control("auto-dead", "autonomy") is None
+
+    def test_refresh_drops_cache_when_no_live_rows(self, monkeypatch):
+        # Seed the cache via one refresh, then refresh again with no live rows.
+        rows_first = [_row(session="auto-live", live=True)]
+        snapshot = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "review": None,
+        }
+        monitor = self._make_monitor(
+            monkeypatch,
+            rows=rows_first,
+            snapshots={("auto-live", "autonomy"): snapshot},
+        )
+        asyncio.run(monitor.refresh())
+        assert monitor.get_source_control("auto-live", "autonomy") is not None
+
+        from tools.dashboard import worktree_monitor as wm_module
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: [])
+        asyncio.run(monitor.refresh())
+
+        assert monitor.get_source_control("auto-live", "autonomy") is None
+
+    def test_refresh_swallows_per_row_exception_with_degraded_marker(self, monkeypatch):
+        rows = [_row(session="auto-live", live=True)]
+        monitor = self._make_monitor(
+            monkeypatch,
+            rows=rows,
+            exceptions={("auto-live", "autonomy"): RuntimeError("boom")},
+        )
+
+        # Refresh must not raise even though the per-row fetch did.
+        asyncio.run(monitor.refresh())
+
+        snapshot = monitor.get_source_control("auto-live", "autonomy")
+        assert snapshot is not None
+        assert snapshot["state"] == "degraded"
+        assert snapshot["reason"] == "probe_failed"
+        assert snapshot["review"] is None
+
+
+# ── /api/worktrees row JSON includes source_control when cached ───────
+
+
+class TestWorktreeApiSourceControlBlock:
+    """Row JSON emits ``source_control`` only when the monitor has a
+    cached snapshot. Non-live rows must not carry the field.
+    """
+
+    def test_get_worktrees_includes_source_control_when_cached(
+        self, test_client, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        rows = [_row(session="auto-live", live=True)]
+        snapshot = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "review": {
+                "number": 99,
+                "url": "https://github.com/x/y/pull/99",
+                "title": "Wire it",
+                "body": "",
+                "head_sha": "deadbeef",
+                "base_branch": "main",
+                "state": "open",
+                "is_draft": False,
+                "aggregate_state": "green",
+                "running": False,
+                "checks": [],
+            },
+        }
+
+        monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: list(rows))
+        monkeypatch.setattr(
+            server.worktree_monitor,
+            "get_source_control",
+            lambda session, repo: snapshot if (session, repo) == ("auto-live", "autonomy") else None,
+        )
+
+        resp = test_client.get("/api/worktrees")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["source_control"] == snapshot
+
+    def test_get_worktrees_omits_source_control_when_not_cached(
+        self, test_client, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        rows = [_row(session="auto-dead", live=False)]
+        monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: list(rows))
+        monkeypatch.setattr(
+            server.worktree_monitor, "get_source_control", lambda *_: None,
+        )
+
+        resp = test_client.get("/api/worktrees")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert "source_control" not in data[0]

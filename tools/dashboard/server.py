@@ -5560,7 +5560,7 @@ def _session_meta_for_tmux(tmux_name: str) -> dict:
 
 def _worktree_state_json(row: WorktreeState) -> dict:
     meta = _session_meta_for_tmux(row.session_name)
-    return {
+    payload: dict = {
         "session_name": row.session_name,
         "session_title": meta["title"],
         "session_project": meta["project"],
@@ -5588,6 +5588,10 @@ def _worktree_state_json(row: WorktreeState) -> dict:
         "commits": [_worktree_commit_json(commit) for commit in row.commits],
         "dirty_files": [_worktree_file_json(file) for file in row.dirty_files],
     }
+    snapshot = worktree_monitor.get_source_control(row.session_name, row.repo_name)
+    if snapshot is not None:
+        payload["source_control"] = snapshot
+    return payload
 
 def _cleanup_result_json(result) -> dict:
     return {

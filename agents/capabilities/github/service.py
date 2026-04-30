@@ -30,7 +30,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agents.workspace_manager import WorktreeState, parse_repo_url
-from tools.dashboard.worktree_monitor import worktree_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -283,8 +282,7 @@ async def run_cli(
 def find_live_worktree_row(
     session_name: str,
     repo_name: str,
-    *,
-    rows: list[WorktreeState] | None = None,
+    rows: list[WorktreeState],
 ) -> WorktreeState | None:
     """Return the cached worktree row for ``(session_name, repo_name)`` if live.
 
@@ -292,9 +290,12 @@ def find_live_worktree_row(
     worktree's owning session is currently registered as live in
     ``dashboard.db``. A row that exists on disk but whose session is dead
     does NOT qualify; GitHub operations require the backing container.
+
+    ``rows`` must be supplied by the caller. The capability service does
+    not reach into Dashboard caches; composition is the orchestrator's
+    job (see :mod:`tools.dashboard.worktree_monitor`).
     """
-    candidates = list(rows) if rows is not None else worktree_monitor.get_all()
-    for row in candidates:
+    for row in rows:
         if (
             row.session_name == session_name
             and row.repo_name == repo_name
@@ -464,13 +465,14 @@ async def _execute_op(
     operation: str,
     session_name: str,
     repo_name: str,
+    rows: list[WorktreeState],
     gh_args_for: callable,
     timeout: int,
     mode: str | None = None,
     require_branch: bool = True,
 ) -> WorktreeGithubExecResult:
     """Resolve the row + container, build gh argv, exec, classify."""
-    row = find_live_worktree_row(session_name, repo_name)
+    row = find_live_worktree_row(session_name, repo_name, rows)
     if row is None:
         return _failure_result(
             operation, session_name, repo_name,
@@ -574,12 +576,16 @@ async def source_control_review_read_v1(
     session_name: str,
     repo_name: str,
     *,
+    rows: list[WorktreeState],
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WorktreeGithubExecResult:
     """Read the current PR review state for the worktree's branch.
 
     Implementation of ``source_control.review.read`` for the
-    ``autonomy/github`` capability. Maps internally to::
+    ``autonomy/github`` capability. ``rows`` is the live worktree row
+    list — typically supplied by the caller from
+    :class:`tools.dashboard.worktree_monitor.WorktreeMonitor`. Maps
+    internally to::
 
         docker exec <container> gh pr view <branch> --repo <owner>/<repo> --json <fields>
     """
@@ -591,6 +597,7 @@ async def source_control_review_read_v1(
         operation=OP_REVIEW_READ,
         session_name=session_name,
         repo_name=repo_name,
+        rows=rows,
         gh_args_for=_args,
         timeout=timeout,
     )
@@ -600,6 +607,7 @@ async def source_control_review_refresh_v1(
     session_name: str,
     repo_name: str,
     *,
+    rows: list[WorktreeState],
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WorktreeGithubExecResult:
     """Re-fetch the PR review state for the worktree's branch.
@@ -617,6 +625,7 @@ async def source_control_review_refresh_v1(
         operation=OP_REVIEW_REFRESH,
         session_name=session_name,
         repo_name=repo_name,
+        rows=rows,
         gh_args_for=_args,
         timeout=timeout,
     )
@@ -627,6 +636,7 @@ async def source_control_gates_watch_set_v1(
     repo_name: str,
     mode: str,
     *,
+    rows: list[WorktreeState],
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WorktreeGithubExecResult:
     """Set the merge-gate watch mode for the worktree's repo.
@@ -662,6 +672,7 @@ async def source_control_gates_watch_set_v1(
         operation=OP_GATES_WATCH_SET,
         session_name=session_name,
         repo_name=repo_name,
+        rows=rows,
         gh_args_for=_args,
         timeout=timeout,
         mode=mode,
