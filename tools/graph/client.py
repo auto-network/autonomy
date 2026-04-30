@@ -394,13 +394,14 @@ class HttpClient:
         return _normalize_note_result(result, content)
 
     def update_note(
-        self, source_id, content, *, integrate_comments=None,
+        self, source_id, content=None, *, title=None, integrate_comments=None,
         attachments=None, html_path=None, short_description=None,
         keywords=None, org=None,
     ):
         if attachments or html_path:
             return self._update_note_multipart(
                 source_id, content,
+                title=title,
                 integrate_comments=integrate_comments,
                 attachments=attachments, html_path=html_path,
                 short_description=short_description,
@@ -408,8 +409,11 @@ class HttpClient:
             )
         body: dict[str, Any] = {
             "source_id": source_id,
-            "content": content,
         }
+        if content is not None:
+            body["content"] = content
+        if title is not None:
+            body["title"] = title
         if integrate_comments:
             body["integrate_ids"] = list(integrate_comments)
         if short_description is not None:
@@ -420,13 +424,16 @@ class HttpClient:
         return _normalize_update_result(result, content)
 
     def _update_note_multipart(
-        self, source_id, content, *, integrate_comments, attachments,
+        self, source_id, content, *, title, integrate_comments, attachments,
         html_path, short_description, keywords, org,
     ):
         fields: dict[str, str] = {
             "source_id": source_id,
-            "content": content,
         }
+        if content is not None:
+            fields["content"] = content
+        if title is not None:
+            fields["title"] = title
         if integrate_comments:
             fields["integrate_ids"] = _json.dumps(list(integrate_comments))
         if short_description is not None:
@@ -856,22 +863,30 @@ def _normalize_note_result(result: dict, content: str) -> dict:
     }
 
 
-def _normalize_update_result(result: dict, content: str) -> dict:
-    """Map server-side note-update response into the ``ops.update_note`` shape."""
+def _normalize_update_result(result: dict, content: str | None) -> dict:
+    """Map server-side note-update response into the ``ops.update_note`` shape.
+
+    Metadata-only updates pass ``content=None`` and the server omits
+    ``new_version`` / ``lines`` / ``chars`` from the response. Both shapes
+    round-trip cleanly here.
+    """
     if not isinstance(result, dict):
         result = {}
-    lines = content.count("\n") + (1 if content else 0)
+    has_body = content is not None
+    lines = (content.count("\n") + (1 if content else 0)) if has_body else 0
+    chars = len(content) if has_body else 0
     return {
         "source_id": result.get("source_id"),
         "new_version": result.get("new_version"),
         "org": result.get("org") or "",
         "lines": result.get("lines", lines),
-        "chars": result.get("chars", len(content)),
+        "chars": result.get("chars", chars),
         "content": content,
         "integrated": result.get("integrated") or [],
         "not_found_comments": result.get("not_found_comments") or [],
         "attachments": result.get("attachments") or [],
         "rich_content": bool(result.get("rich_content")),
+        "title": result.get("title"),
         "short_description": result.get("short_description"),
         "keywords": result.get("keywords"),
     }

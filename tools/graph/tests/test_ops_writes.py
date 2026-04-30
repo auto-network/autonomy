@@ -162,13 +162,18 @@ def test_update_note_bumps_version(orgs_root):
     assert upd["source_id"] == r["id"]
     assert upd["content"] == "v2 content"
 
-    # Re-fetch to confirm thought + title updated to v2.
+    # Re-fetch to confirm thought updated to v2. Title is PRESERVED on
+    # body-only updates — the auto-rederive that used to happen here
+    # was the regression that bricked the agentic Update Title flow.
+    # Title-changes require an explicit ``title=`` argument.
     conn = sqlite3.connect(str(orgs_root / "personal.db"))
     try:
         row = conn.execute(
             "SELECT title FROM sources WHERE id = ?", (r["id"],),
         ).fetchone()
-        assert row[0] == "v2 content"
+        assert row[0] == "v1 content", (
+            "title must be preserved on body-only updates"
+        )
         row = conn.execute(
             "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = 1",
             (r["id"],),
@@ -176,6 +181,143 @@ def test_update_note_bumps_version(orgs_root):
         assert row[0] == "v2 content"
     finally:
         conn.close()
+
+
+def test_update_note_explicit_title_overrides(orgs_root):
+    """Passing ``title=`` rewrites the title column. Body unchanged."""
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    r = ops.create_note("first body")
+    upd = ops.update_note(r["id"], title="My Real Title")
+    assert upd["title"] == "My Real Title"
+    assert upd["new_version"] is None, "metadata-only update doesn't bump version"
+
+    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    try:
+        row = conn.execute(
+            "SELECT title FROM sources WHERE id = ?", (r["id"],),
+        ).fetchone()
+        assert row[0] == "My Real Title"
+        # Body untouched.
+        row = conn.execute(
+            "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = 1",
+            (r["id"],),
+        ).fetchone()
+        assert row[0] == "first body"
+        # No new version row.
+        row = conn.execute(
+            "SELECT MAX(version) FROM note_versions WHERE source_id = ?", (r["id"],),
+        ).fetchone()
+        assert (row[0] or 0) <= 1, "no version bump on metadata-only update"
+    finally:
+        conn.close()
+
+
+def test_update_note_title_preserved_when_body_changes(orgs_root):
+    """Body update without ``title=`` keeps the existing title intact —
+    even if the new body has a leading ``# heading`` that would have
+    auto-derived to a different value pre-fix."""
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    r = ops.create_note("first body", title="Pinned Title")
+    ops.update_note(r["id"], "# Different Heading\n\nNew body content here")
+
+    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    try:
+        row = conn.execute(
+            "SELECT title FROM sources WHERE id = ?", (r["id"],),
+        ).fetchone()
+        assert row[0] == "Pinned Title", (
+            "explicit title must survive body edits"
+        )
+    finally:
+        conn.close()
+
+
+def test_update_note_lazy_derive_when_title_empty(orgs_root):
+    """Legacy lazy-fallback: body update on a note with empty title and
+    a leading ``# heading`` *does* derive the title. Only fires when
+    title is empty AND content is provided AND no explicit ``title=``."""
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    r = ops.create_note("first body")
+    # Force-clear the title to simulate a legacy note without one.
+    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    try:
+        conn.execute(
+            "UPDATE sources SET title = '' WHERE id = ?", (r["id"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ops.update_note(r["id"], "# Derived From Body\n\ncontent")
+
+    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    try:
+        row = conn.execute(
+            "SELECT title FROM sources WHERE id = ?", (r["id"],),
+        ).fetchone()
+        assert row[0] == "Derived From Body"
+    finally:
+        conn.close()
+
+
+def test_update_note_metadata_only_no_version_bump(orgs_root):
+    """Metadata-only update: no version row, no thought touch."""
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    r = ops.create_note("body")
+    ops.update_note(
+        r["id"],
+        title="T",
+        short_description="SD",
+        keywords="k1,k2",
+    )
+
+    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    try:
+        row = conn.execute(
+            "SELECT title, short_description, keywords "
+            "FROM sources WHERE id = ?", (r["id"],),
+        ).fetchone()
+        assert row[0] == "T"
+        assert row[1] == "SD"
+        assert row[2] == "k1,k2"
+        # Body untouched.
+        thought = conn.execute(
+            "SELECT content FROM thoughts WHERE source_id = ? AND turn_number = 1",
+            (r["id"],),
+        ).fetchone()
+        assert thought[0] == "body"
+        # No new version row.
+        max_v = conn.execute(
+            "SELECT MAX(version) FROM note_versions WHERE source_id = ?", (r["id"],),
+        ).fetchone()[0] or 0
+        assert max_v <= 1, "metadata-only update must not bump version"
+    finally:
+        conn.close()
+
+
+def test_update_note_rejects_no_op(orgs_root):
+    """Calling update_note with no content and no metadata fields must
+    error — there's nothing to do, and silently succeeding masks bugs."""
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    r = ops.create_note("body", title="T")
+    with pytest.raises(ValueError, match="at least one"):
+        ops.update_note(r["id"])
+
+
+def test_update_note_rejects_empty_title(orgs_root):
+    """Explicit empty title is a caller bug. Reject."""
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    r = ops.create_note("body", title="T")
+    with pytest.raises(ValueError, match="title cannot be empty"):
+        ops.update_note(r["id"], title="")
+    with pytest.raises(ValueError, match="title cannot be empty"):
+        ops.update_note(r["id"], title="   ")
 
 
 def test_update_note_integrates_comments(orgs_root):

@@ -6771,7 +6771,14 @@ async def api_graph_note(request):
 
 
 async def api_graph_note_update(request):
-    """Update a note via direct ops call. JSON or multipart (attachments)."""
+    """Update a note via direct ops call. JSON or multipart (attachments).
+
+    Body changes (``content``) are optional. When omitted, the call is a
+    metadata-only update — touches only ``title`` / ``short_description``
+    / ``keywords`` columns, no body write, no version bump. At least one
+    of ``content`` / ``title`` / ``short_description`` / ``keywords``
+    must be provided; otherwise 400.
+    """
     content_type = request.headers.get("content-type", "")
     org = _caller_org(request)
 
@@ -6784,11 +6791,14 @@ async def api_graph_note_update(request):
         e = _graph_validate_source_id(source_id)
         if e:
             return JSONResponse({"error": e}, status_code=400)
-        content = str(form.get("content", ""))
-        if not content:
-            return JSONResponse({"error": "content required"}, status_code=400)
-        if len(content) > _GRAPH_MAX_CONTENT:
-            return JSONResponse({"error": "content exceeds 100KB limit"}, status_code=400)
+        content_raw = form.get("content")
+        if content_raw is None or content_raw == "":
+            content = None
+        else:
+            content = str(content_raw)
+            if len(content) > _GRAPH_MAX_CONTENT:
+                return JSONResponse({"error": "content exceeds 100KB limit"}, status_code=400)
+        title = str(form["title"]) if form.get("title") is not None else None
         integrate_raw = form.get("integrate_ids")
         integrate_ids: list[str] = []
         if integrate_raw:
@@ -6807,10 +6817,20 @@ async def api_graph_note_update(request):
         e = _graph_validate_source_id(source_id)
         if e:
             return JSONResponse({"error": e}, status_code=400)
-        e = _graph_validate_content(body)
-        if e:
-            return JSONResponse({"error": e}, status_code=400)
-        content = body["content"]
+        # Content is optional — when present, validate length. When absent,
+        # the request must carry at least one metadata field (the early
+        # gate in graph_ops.update_note enforces the must-have-something
+        # rule and surfaces a 400).
+        if "content" in body and body["content"] is not None and body["content"] != "":
+            content = body["content"]
+            if len(content) > _GRAPH_MAX_CONTENT:
+                return JSONResponse(
+                    {"error": f"content exceeds 100KB limit ({len(content)} bytes)"},
+                    status_code=400,
+                )
+        else:
+            content = None
+        title = body.get("title")
         integrate_ids = [str(x) for x in body.get("integrate_ids") or []]
         short_description = body.get("short_description")
         keywords = body.get("keywords")
@@ -6821,6 +6841,7 @@ async def api_graph_note_update(request):
             graph_ops.update_note,
             source_id,
             content,
+            title=title,
             integrate_comments=integrate_ids,
             attachments=tmp_paths or None,
             short_description=short_description,
@@ -6850,6 +6871,7 @@ async def api_graph_note_update(request):
         "integrated": result["integrated"],
         "not_found_comments": result["not_found_comments"],
         "attachments": result["attachments"],
+        "title": result.get("title"),
         "short_description": result.get("short_description"),
         "keywords": result.get("keywords"),
     })
