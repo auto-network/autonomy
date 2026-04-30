@@ -224,11 +224,8 @@ def test_dispatch_unknown_member_404(client, per_org_universe):
     asset_id = "11111111-1111-1111-1111-111111111111"
     _insert_note_source(org="autonomy", source_id=asset_id, title="Test note")
     r = client.post("/api/agent-actions/dispatch", json={
-        "set_id": AGENT_ACTIONS_SET_ID,
         "member_key": "note.does-not-exist",
         "asset_id": asset_id,
-        "page_context": {},
-        "dispatched_by_session": "auto-test",
     })
     assert r.status_code == 404
     body = r.json()
@@ -241,16 +238,12 @@ def test_dispatch_creates_agentic_source(client, per_org_universe):
     _insert_note_source(
         org="autonomy", source_id=asset_id, title="Architectural Signpost",
     )
+    # Minimal request body. The server resolves title / org / type / url
+    # from the asset's source row; client-side scrape would be
+    # redundant at best and a placeholder leak at worst.
     r = client.post("/api/agent-actions/dispatch", json={
-        "set_id": AGENT_ACTIONS_SET_ID,
         "member_key": "note.update-summary",
         "asset_id": asset_id,
-        "page_context": {
-            "asset_title": "Architectural Signpost",
-            "asset_url": "/graph/" + asset_id,
-            "asset_type": "note",
-        },
-        "dispatched_by_session": "auto-test-sender",
     })
     assert r.status_code == 201
     body = r.json()
@@ -270,26 +263,32 @@ def test_dispatch_creates_agentic_source(client, per_org_universe):
     assert md["member_key"] == "note.update-summary"
     assert md["target_source_id"] == asset_id
     assert md["target_org"] == "autonomy"
-    assert md["dispatched_by_session"] == "auto-test-sender"
+    # Browser-initiated dispatch → server-side sentinel sender.
+    assert md["dispatched_by_session"] == "dashboard"
 
 
-def test_dispatch_includes_dispatched_by_session_provenance(
+def test_dispatch_dispatched_by_session_is_server_sentinel(
     client, per_org_universe,
 ):
+    """The browser cannot pick the sender id; the server stamps a
+    fixed sentinel ('dashboard') for every browser-initiated dispatch.
+    Any value the client sends in the request body is ignored.
+    """
     asset_id = "33333333-3333-3333-3333-333333333333"
     _insert_note_source(org="autonomy", source_id=asset_id, title="x")
     r = client.post("/api/agent-actions/dispatch", json={
         "member_key": "note.update-summary",
         "asset_id": asset_id,
-        "page_context": {"asset_url": "/graph/" + asset_id},
-        "dispatched_by_session": "auto-host-guardian",
+        # Even if a malicious / out-of-spec client tries to pin a
+        # specific session id here, the server overrides.
+        "dispatched_by_session": "auto-spoofed-sender",
     })
     assert r.status_code == 201
     src = graph_ops.get_source(r.json()["agentic_source_id"])
     md = src["metadata"]
     if isinstance(md, str):
         md = json.loads(md)
-    assert md["dispatched_by_session"] == "auto-host-guardian"
+    assert md["dispatched_by_session"] == "dashboard"
 
 
 def test_dispatch_writes_dispatch_runs_row(
@@ -300,8 +299,6 @@ def test_dispatch_writes_dispatch_runs_row(
     r = client.post("/api/agent-actions/dispatch", json={
         "member_key": "note.update-summary",
         "asset_id": asset_id,
-        "page_context": {"asset_url": "/graph/" + asset_id},
-        "dispatched_by_session": "auto-test-sender",
     })
     assert r.status_code == 201
     body = r.json()
@@ -340,8 +337,6 @@ def test_dispatch_uses_target_asset_workspace(
         json={
             "member_key": "note.update-summary",
             "asset_id": asset_id,
-            "page_context": {"asset_url": "/graph/" + asset_id},
-            "dispatched_by_session": "auto-test",
         },
         # Operator's caller-org is autonomy (header), but routing must be
         # by the asset's owning org (anchore).
@@ -395,13 +390,7 @@ def test_dispatch_send_to_uses_crosstalk(
     r = client.post("/api/agent-actions/dispatch", json={
         "member_key": "session.send-to",
         "asset_id": asset_id,
-        "page_context": {
-            "asset_title": "Note",
-            "asset_url": "/graph/" + asset_id,
-            "asset_type": "note",
-        },
         "target_session_name": "auto-target-1234",
-        "dispatched_by_session": "auto-sender-5678",
     })
     assert r.status_code == 200, r.json()
     body = r.json()
@@ -419,14 +408,14 @@ def test_dispatch_send_to_uses_crosstalk(
     # bare 'dashboard' sentinel.
     assert 'label="Dashboard Send-To"' in envelope, envelope
     # Primer fields: full asset id, action key, no asset_url, no
-    # sender_session line. The sender session name still appears in the
-    # crosstalk envelope's `from="..."` attribute (transport metadata),
-    # but not as a primer field.
+    # sender_session line. The crosstalk envelope's ``from`` attribute
+    # is the server-side sentinel ``dashboard`` for browser-initiated
+    # dispatches.
     assert f"asset_id: {asset_id}" in envelope
     assert "action: session.send-to" in envelope
     assert "asset_url:" not in envelope, "asset_url line must be removed"
     assert "sender_session:" not in envelope, "sender_session line must be removed"
-    assert f'from="auto-sender-5678"' in envelope
+    assert 'from="dashboard"' in envelope
 
     # No agentic source row should have been created.
     assert _list_agentic_sources() == pre_sources
@@ -446,9 +435,7 @@ def test_dispatch_send_to_dead_session_404(
     r = client.post("/api/agent-actions/dispatch", json={
         "member_key": "session.send-to",
         "asset_id": asset_id,
-        "page_context": {},
         "target_session_name": "auto-dead-session",
-        "dispatched_by_session": "auto-sender",
     })
     assert r.status_code == 404
     body = r.json()
@@ -466,15 +453,11 @@ def test_dispatch_idempotency_window(
     first = client.post("/api/agent-actions/dispatch", json={
         "member_key": "note.update-summary",
         "asset_id": asset_id,
-        "page_context": {"asset_url": "/graph/" + asset_id},
-        "dispatched_by_session": "auto-test-double-click",
     })
     assert first.status_code == 201, first.json()
     second = client.post("/api/agent-actions/dispatch", json={
         "member_key": "note.update-summary",
         "asset_id": asset_id,
-        "page_context": {"asset_url": "/graph/" + asset_id},
-        "dispatched_by_session": "auto-test-double-click",
     })
     assert second.status_code in (200, 201)
 
@@ -496,10 +479,60 @@ def test_dispatch_unknown_asset_404(client, per_org_universe):
     r = client.post("/api/agent-actions/dispatch", json={
         "member_key": "note.update-summary",
         "asset_id": "deadbeef-dead-beef-dead-beefdeadbeef",
-        "page_context": {},
-        "dispatched_by_session": "auto-test",
     })
     assert r.status_code == 404
+
+
+def test_dispatch_request_body_is_minimal(client, per_org_universe):
+    """The dispatch request body carries only ``asset_id`` + ``member_key``
+    (plus action-specific params like ``target_session_name`` for
+    Send-To). Everything else — title, short_description, type, org,
+    url, sender — is server-derived from the resolved source row.
+
+    This test pins the wire contract: a dispatch with the bare-minimum
+    body must succeed, and the agentic source's metadata must reflect
+    server-side values (not anything the client could spoof).
+    """
+    asset_id = "99999999-9999-9999-9999-999999999999"
+    _insert_note_source(
+        org="autonomy", source_id=asset_id, title="Real DB Title",
+    )
+
+    r = client.post(
+        "/api/agent-actions/dispatch",
+        json={"member_key": "note.update-summary", "asset_id": asset_id},
+    )
+    assert r.status_code == 201, r.json()
+    src = graph_ops.get_source(r.json()["agentic_source_id"])
+    md = src["metadata"]
+    if isinstance(md, str):
+        md = json.loads(md)
+    # Server-derived: target_org from the source row, target_source_id is
+    # the canonical UUID, dispatched_by_session is the sentinel.
+    assert md["target_org"] == "autonomy"
+    assert md["target_source_id"] == asset_id
+    assert md["dispatched_by_session"] == "dashboard"
+
+
+def test_dispatch_canonicalises_prefix_asset_id(client, per_org_universe):
+    """Browser sends a 12-char prefix (the URL-derived form);
+    downstream uses must see the canonical UUID — the agent's
+    ``graph read`` and the dispatch_runs row both depend on it."""
+    asset_id = "abcdef12-3456-7890-abcd-ef1234567890"
+    _insert_note_source(org="autonomy", source_id=asset_id, title="t")
+
+    prefix = asset_id[:12]
+    r = client.post(
+        "/api/agent-actions/dispatch",
+        json={"member_key": "note.update-summary", "asset_id": prefix},
+    )
+    assert r.status_code == 201, r.json()
+    src = graph_ops.get_source(r.json()["agentic_source_id"])
+    md = src["metadata"]
+    if isinstance(md, str):
+        md = json.loads(md)
+    # target_source_id is the full canonical UUID, not the prefix.
+    assert md["target_source_id"] == asset_id
 
 
 # ── Helpers ────────────────────────────────────────────────

@@ -8243,16 +8243,23 @@ def _render_agent_action_prompt(
 async def api_agent_action_dispatch(request):
     """POST /api/agent-actions/dispatch — spawn an agentic action.
 
-    Body schema::
+    Body schema (minimal — anything else is derived server-side from
+    the resolved source row)::
 
         {
-          "set_id":            "dashboard.agent-actions",
-          "member_key":        "note.update-summary",
-          "asset_id":          "abc12345-...",
-          "page_context":      {"asset_title": ..., "asset_url": ..., ...},
-          "target_session_name": "auto-..."   // universal Send-To only
-          "dispatched_by_session": "auto-..." // provenance
+          "asset_id":          "abc12345-...",       // required
+          "member_key":        "note.update-summary",// required
+          "target_session_name": "auto-..."          // optional, Send-To only
         }
+
+    The set id is fixed to ``dashboard.agent-actions``; the asset's
+    title / short_description / type / org / url come from the
+    resolved source row in its home-org DB; ``dispatched_by_session``
+    defaults to a ``"dashboard"`` sentinel since browser-initiated
+    dispatches don't have a specific operator session id. None of
+    those should travel on the wire — the database is the source of
+    truth and round-tripping DOM-scraped values invites placeholder
+    leakage and stale-state bugs (see source.js page-title fallback).
 
     The endpoint enforces own-org-of-asset routing — the action's
     Setting member is resolved from the *target asset's* org, not the
@@ -8264,12 +8271,18 @@ async def api_agent_action_dispatch(request):
     except Exception:
         return JSONResponse({"error": "invalid JSON body"}, status_code=400)
 
-    set_id = body.get("set_id") or "dashboard.agent-actions"
+    set_id = "dashboard.agent-actions"
     member_key = body.get("member_key") or ""
     asset_id = body.get("asset_id") or ""
-    page_context = body.get("page_context") or {}
     target_session_name = body.get("target_session_name") or ""
-    dispatched_by_session = body.get("dispatched_by_session") or ""
+    # Optional operator-typed note for Send-To primers. This is genuine
+    # user input (not data the server already has), so it travels on
+    # the wire. Empty string ⇒ no custom message in the primer body.
+    custom_message = str(body.get("custom_message") or "")
+    # Browser-initiated dispatches have no specific operator session id.
+    # Use a stable sentinel so dispatch_runs.dispatched_by_session is
+    # never NULL and the agent's prompt has something to render.
+    dispatched_by_session = "dashboard"
 
     if not member_key or not isinstance(member_key, str):
         return JSONResponse(
@@ -8277,12 +8290,6 @@ async def api_agent_action_dispatch(request):
         )
     if not asset_id or not isinstance(asset_id, str):
         return JSONResponse({"error": "asset_id required"}, status_code=400)
-    if not isinstance(page_context, dict):
-        return JSONResponse(
-            {"error": "page_context must be an object"}, status_code=400,
-        )
-    if not isinstance(dispatched_by_session, str):
-        dispatched_by_session = ""
 
     if os.environ.get("DASHBOARD_MOCK"):
         from tools.dashboard.dao import mock as dao_mock
@@ -8320,7 +8327,7 @@ async def api_agent_action_dispatch(request):
             src.setdefault("org", target_org)
             primer_body = _build_send_to_primer(
                 source=src,
-                custom_message=str(page_context.get("custom_message") or ""),
+                custom_message=custom_message,
             )
             return JSONResponse({
                 "ok": True,
@@ -8343,6 +8350,15 @@ async def api_agent_action_dispatch(request):
         return JSONResponse(
             {"error": "asset has no owning org"}, status_code=409,
         )
+
+    # Canonicalise the asset id from the resolved source. The browser
+    # may send a 12-char prefix derived from the URL; templates and the
+    # idempotency key downstream want the full UUID so the agent can
+    # ``graph read`` cleanly and a re-dispatch within the window is
+    # correctly de-duped regardless of how each call addressed the
+    # source. The ``asset_id`` variable shadows the body input from
+    # here on out.
+    asset_id = str(source["id"])
 
     # ── Step 2: look up the action member in target_org's DB ─────
     payload = _resolve_agent_action_member(
@@ -8380,7 +8396,7 @@ async def api_agent_action_dispatch(request):
             )
         primer = _build_send_to_primer(
             source=source,
-            custom_message=str(page_context.get("custom_message") or ""),
+            custom_message=custom_message,
         )
         ok, err = await _send_to_via_crosstalk(
             target_session=target_session_name,
@@ -8425,20 +8441,13 @@ async def api_agent_action_dispatch(request):
             status_code=409,
         )
 
-    # Inject the org's current tag taxonomy so prompts that need a tag
-    # whitelist (e.g. note.update-summary) can render ``{tag_list}``
-    # without making the action author thread it through page_context.
-    rendered_context = dict(page_context)
-    if "tag_list" not in rendered_context:
-        rendered_context["tag_list"] = ", ".join(_get_tag_taxonomy(target_org))
-
-    # Backfill source-derived placeholders that the front-end's
-    # pageContext() may not have populated. The page builder is best-
-    # effort; the dispatch endpoint owns the asset's authoritative state
-    # so we trust the resolved ``source`` row here over whatever the
-    # browser sent. This keeps templates that reference
-    # ``{asset_short_description}`` from leaking literal braces to the
-    # agent (auto-gh2iv: Round 7g/7h placeholder regression).
+    # Build the prompt-render context entirely from the resolved source
+    # row + the tag taxonomy. The browser used to send a ``page_context``
+    # dict scraped from the DOM, but every field in it was either data
+    # the server already owned (title, short_description, type, org) or
+    # a UI fallback that leaked into the agent's prompt as if it were
+    # truth (e.g. ``"Source: <prefix>"`` from source.js's title-element
+    # fallback). The database row is the only authoritative source.
     src_meta_raw = source.get("metadata") or {}
     if isinstance(src_meta_raw, str):
         try:
@@ -8447,18 +8456,22 @@ async def api_agent_action_dispatch(request):
             src_meta = {}
     else:
         src_meta = src_meta_raw
-    if not rendered_context.get("asset_short_description"):
-        rendered_context["asset_short_description"] = (
+    asset_url = (
+        f"{request.url.scheme}://{request.url.netloc}/graph/{asset_id}"
+    )
+    rendered_context = {
+        "asset_id": asset_id,
+        "asset_title": source.get("title") or "",
+        "asset_short_description": (
             source.get("short_description")
             or src_meta.get("short_description")
             or ""
-        )
-    if not rendered_context.get("asset_title"):
-        rendered_context["asset_title"] = source.get("title") or ""
-    if not rendered_context.get("asset_type"):
-        rendered_context["asset_type"] = source.get("type") or ""
-    if not rendered_context.get("asset_org"):
-        rendered_context["asset_org"] = target_org
+        ),
+        "asset_url": asset_url,
+        "asset_type": source.get("type") or "",
+        "asset_org": target_org,
+        "tag_list": ", ".join(_get_tag_taxonomy(target_org)),
+    }
 
     try:
         rendered_prompt = _render_agent_action_prompt(

@@ -136,53 +136,6 @@
     return 'icon-default';
   }
 
-  function pageTitle() {
-    var el = document.getElementById('page-title');
-    return (el && el.textContent && el.textContent.trim()) || '';
-  }
-
-  function pageShortDescription() {
-    // The graph/source page exposes the loaded source on a few shapes
-    // depending on the page. Prefer the canonical Alpine store; fall
-    // back to a DOM data-attribute the template stamps on the asset
-    // root. Returns '' when nothing is available — server backfills
-    // from the resolved source row.
-    if (window.Alpine && typeof window.Alpine.store === 'function') {
-      try {
-        var src = window.Alpine.store('asset');
-        if (src && (src.short_description || (src.source && src.source.short_description))) {
-          return String(src.short_description || src.source.short_description || '');
-        }
-      } catch (e) {}
-    }
-    var el = document.querySelector('[data-asset-short-description]');
-    if (el) {
-      return String(el.getAttribute('data-asset-short-description') || '');
-    }
-    if (window.__dashboardAsset && window.__dashboardAsset.short_description) {
-      return String(window.__dashboardAsset.short_description);
-    }
-    return '';
-  }
-
-  function pageContext(asset) {
-    return {
-      asset_id: asset.id,
-      asset_type: asset.type,
-      asset_url: window.location.origin + window.location.pathname,
-      asset_title: pageTitle(),
-      asset_short_description: pageShortDescription(),
-    };
-  }
-
-  function dispatchedBySession() {
-    // Best-effort. The dashboard does not always know the operator's
-    // session name; fall back to a sentinel so server-side provenance
-    // still records *something*.
-    var existing = (window.__dashboardSessionName || '').trim();
-    return existing || 'dashboard';
-  }
-
   function agentActionsComponent() {
     var helpers = window.sessionCardHelpers || {};
     return {
@@ -281,12 +234,14 @@
         this.pendingDispatch = true;
         this.lastError = '';
         try {
+          // Minimal payload: the server resolves title / org / type /
+          // url / etc. from the asset's source row. Sending DOM-scraped
+          // values from the page would round-trip data the server
+          // already owns and risks UI fallbacks (e.g. ``"Source: <id>"``
+          // page-title placeholder) leaking into the agent's prompt.
           var body = {
-            set_id: SET_ID,
-            member_key: member.key,
             asset_id: this.asset.id,
-            page_context: pageContext(this.asset),
-            dispatched_by_session: dispatchedBySession(),
+            member_key: member.key,
           };
           var resp = await fetch('/api/agent-actions/dispatch', {
             method: 'POST',
@@ -335,12 +290,9 @@
         this.lastError = '';
         try {
           var body = {
-            set_id: SET_ID,
-            member_key: 'session.send-to',
             asset_id: this.asset.id,
-            page_context: pageContext(this.asset),
+            member_key: 'session.send-to',
             target_session_name: target,
-            dispatched_by_session: dispatchedBySession(),
           };
           var resp = await fetch('/api/agent-actions/dispatch', {
             method: 'POST',
