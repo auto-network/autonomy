@@ -5267,6 +5267,45 @@ def _worktree_dirty_detail_json(detail: WorktreeDirtyDetail) -> dict:
     }
 
 
+async def _signal_session_merge_celebration(
+    *,
+    target_session: str,
+    repo_name: str,
+    commit_sha: str,
+    commit_message: str,
+    kind: str,
+) -> None:
+    """Send a "you got merged" CrossTalk into the target session.
+
+    Reuses ``_send_dashboard_ui_crosstalk`` (the same path the
+    rebase-required notification uses) so the message lands in the
+    session's tmux pane with the canonical Dashboard UI envelope.
+    Best-effort: tmux failures are logged but never re-raised — the
+    merge already succeeded.
+    """
+    if not target_session:
+        return
+    short_sha = (commit_sha or "")[:7]
+    first_line = (commit_message or "").split("\n", 1)[0].strip()
+    if len(first_line) > 200:
+        first_line = first_line[:200] + "…"
+    message = (
+        f"You got merged! {repo_name}@{short_sha}"
+        + (f" — {first_line}" if first_line else "")
+        + (" (ff merge)" if kind == "ff" else "")
+    )
+    try:
+        await _send_dashboard_ui_crosstalk(target_session, message)
+    except WorkspaceError:
+        # Session went dead between merge and signal — nothing to do.
+        pass
+    except Exception:
+        logger.exception(
+            "merge celebration: dashboard-ui crosstalk failed for target=%s",
+            target_session,
+        )
+
+
 def _find_worktree_row(rows: list[WorktreeState], session_name: str, repo_name: str) -> WorktreeState | None:
     return next(
         (
@@ -5441,6 +5480,13 @@ async def api_worktree_commit_merge(request):
         return JSONResponse({"error": str(exc)}, status_code=409)
 
     await worktree_monitor.refresh()
+    await _signal_session_merge_celebration(
+        target_session=session_name,
+        repo_name=repo_name,
+        commit_sha=result.get("commit", ""),
+        commit_message=result.get("message", ""),
+        kind="commit",
+    )
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
@@ -5472,6 +5518,13 @@ async def api_worktree_merge(request):
         return JSONResponse({"error": str(exc)}, status_code=409)
 
     await worktree_monitor.refresh()
+    await _signal_session_merge_celebration(
+        target_session=session_name,
+        repo_name=repo_name,
+        commit_sha=result.get("commit", ""),
+        commit_message=result.get("message", ""),
+        kind="ff",
+    )
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
