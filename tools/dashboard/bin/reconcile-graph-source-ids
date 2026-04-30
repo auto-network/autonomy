@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""One-shot ``tmux_sessions.graph_source_id`` audit + backfill (auto-4jpa8).
+
+Wraps :func:`tools.dashboard.dao.dashboard_db.reconcile_graph_source_ids`
+so an operator can fix drifted / missing IDs without restarting the
+dashboard. Safe to run repeatedly — the reconciler is idempotent.
+
+Usage::
+
+    ./tools/dashboard/bin/reconcile-graph-source-ids                  # live rows only
+    ./tools/dashboard/bin/reconcile-graph-source-ids --include-dead   # every row
+    ./tools/dashboard/bin/reconcile-graph-source-ids --dry-run        # print, don't write
+
+Print-out mirrors the audit script in the bead description: every live
+row with an ingested JSONL must have ``graph_source_id`` matching the
+real ``sources.id``; rows whose JSONL hasn't been ingested yet are
+silently OK (they retry next tick).
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+# Run from anywhere — find the repo root and add it to sys.path.
+_HERE = Path(__file__).resolve()
+_REPO = _HERE.parents[3]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+
+def _audit(live_only: bool) -> tuple[int, int, int]:
+    """Return (drift, race, ok) counts before any writes."""
+    from tools.dashboard.dao import dashboard_db as ddb
+    from tools.dashboard.dao.dashboard_db import (
+        _resolve_source_id_by_path,
+        _resolve_source_in_orgs_by_id,
+    )
+
+    conn = ddb.get_conn()
+    sql = (
+        "SELECT tmux_name, graph_source_id, jsonl_path FROM tmux_sessions"
+        " WHERE jsonl_path IS NOT NULL AND jsonl_path != ''"
+    )
+    if live_only:
+        sql += " AND is_live=1"
+    rows = conn.execute(sql).fetchall()
+
+    drift = race = ok = pending = 0
+    for row in rows:
+        gid = row["graph_source_id"] or ""
+        jpath = row["jsonl_path"]
+        if gid and _resolve_source_in_orgs_by_id(gid):
+            ok += 1
+            continue
+        real = _resolve_source_id_by_path(jpath)
+        if real is None:
+            pending += 1
+            continue
+        if not gid:
+            print(f"  RACE  {row['tmux_name']:48s}  empty → {real}")
+            race += 1
+        else:
+            print(f"  DRIFT {row['tmux_name']:48s}  {gid} → {real}")
+            drift += 1
+    if pending:
+        print(f"  ({pending} session(s) not yet ingested — silent skip)")
+    return drift, race, ok
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    parser.add_argument(
+        "--include-dead", action="store_true",
+        help="Also reconcile dead sessions (default: live only).",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Print drift/race rows without writing repairs.",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    print("Auditing tmux_sessions.graph_source_id...")
+    drift, race, ok = _audit(live_only=not args.include_dead)
+    print(f"\n  ok={ok}  drift={drift}  race={race}")
+    if drift == race == 0:
+        print("  Nothing to repair.")
+        return 0
+    if args.dry_run:
+        print("\nDry run — no writes performed.")
+        return 0
+
+    from tools.dashboard.dao.dashboard_db import reconcile_graph_source_ids
+    repaired = reconcile_graph_source_ids(live_only=not args.include_dead)
+    print(f"\nReconciled {repaired} row(s).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
