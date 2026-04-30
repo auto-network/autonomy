@@ -34,6 +34,16 @@
             x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
+      <!-- Workspace-changes indicator. Same shape as the page-mode
+           header anchor; shows when this session has commits-ahead
+           or dirty files in any of its worktrees. Optional helpers —
+           gracefully no-ops on surfaces that don't define them. -->
+      <a x-show="typeof hasWorkspaceChanges === 'function' && hasWorkspaceChanges(s)"
+         :href="typeof workspaceStatusHref === 'function' ? workspaceStatusHref(s) : '/worktrees'"
+         :title="typeof workspaceStatusTooltip === 'function' ? workspaceStatusTooltip(s) : 'Workspace has tracked changes'"
+         @click.stop
+         class="text-xs text-amber-400 hover:text-amber-200 px-1"
+         style="display:none;">⌥</a>
       <!-- Merged org-glyph + actions button: paints org.color only when favicon is null.
            Enabled when showSessionActions is available and the session is either live or
            on a recent-card surface (indicated by the presence of resumable). Resume
@@ -81,6 +91,16 @@
             x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
+      <!-- Workspace-changes indicator. Same shape as the page-mode
+           header anchor; shows when this session has commits-ahead
+           or dirty files in any of its worktrees. Optional helpers —
+           gracefully no-ops on surfaces that don't define them. -->
+      <a x-show="typeof hasWorkspaceChanges === 'function' && hasWorkspaceChanges(s)"
+         :href="typeof workspaceStatusHref === 'function' ? workspaceStatusHref(s) : '/worktrees'"
+         :title="typeof workspaceStatusTooltip === 'function' ? workspaceStatusTooltip(s) : 'Workspace has tracked changes'"
+         @click.stop
+         class="text-xs text-amber-400 hover:text-amber-200 px-1"
+         style="display:none;">⌥</a>
       <span class="sc-t3">
         <span class="sc-t3-val" :class="ctxWarn(s) ? 'warn' : ''" x-text="turnsStr(s)"></span>
         <span class="sc-t3-sep" x-show="turnsStr(s) && ctxStr(s)">·</span>
