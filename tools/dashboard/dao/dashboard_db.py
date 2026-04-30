@@ -190,6 +190,12 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN todos TEXT DEFAULT '[]'")
         _conn.commit()
+    # Migrate: add model column if missing (auto-ngis4 — session card harness/model)
+    try:
+        _conn.execute("SELECT model FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN model TEXT DEFAULT NULL")
+        _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
 
@@ -554,6 +560,7 @@ def update_tail_state(
     last_message: str | None = None,
     entry_count: int | None = None,
     context_tokens: int | None = None,
+    model: str | None = None,
 ) -> None:
     """TAIL step: update read position and latest content."""
     conn = get_conn()
@@ -574,6 +581,9 @@ def update_tail_state(
     if context_tokens is not None:
         parts.append("context_tokens=?")
         vals.append(context_tokens)
+    if model is not None:
+        parts.append("model=?")
+        vals.append(model)
     if not parts:
         return
     vals.append(tmux_name)

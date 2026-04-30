@@ -87,6 +87,14 @@ class SessionHarness(Protocol):
     def extract_context_tokens(self, raw_entry: dict, current_tokens: int) -> int:
         """Update the current context-token estimate from a raw transcript event."""
 
+    def extract_model(self, raw_entry: dict, current_model: str | None) -> str | None:
+        """Return the model id observed in this entry, or ``current_model`` if none.
+
+        Called once per parsed JSONL line during ingest. Implementations must
+        be cheap and tolerant of missing fields; callers persist the latest
+        non-empty value to ``tmux_sessions.model`` (auto-ngis4).
+        """
+
 
 class ClaudeSessionHarness:
     """Adapter over the current Claude-only implementation."""
@@ -224,6 +232,14 @@ class ClaudeSessionHarness:
         )
         return ctx if ctx > 0 else current_tokens
 
+    def extract_model(self, raw_entry: dict, current_model: str | None) -> str | None:
+        if raw_entry.get("type") != "assistant":
+            return current_model
+        model = raw_entry.get("message", {}).get("model")
+        if isinstance(model, str) and model:
+            return model
+        return current_model
+
 
 CLAUDE_HARNESS = ClaudeSessionHarness()
 
@@ -318,12 +334,22 @@ class CodexSessionHarness:
     def extract_context_tokens(self, raw_entry: dict, current_tokens: int) -> int:
         return extract_codex_context_tokens(raw_entry, current_tokens)
 
+    def extract_model(self, raw_entry: dict, current_model: str | None) -> str | None:
+        return extract_codex_model(raw_entry, current_model)
+
 
 CODEX_HARNESS = CodexSessionHarness()
 
 
+# auto-ngis4: harness + model are optional (additive) so legacy envelopes
+# without those attrs continue to parse and pre-existing callers see the
+# same group set. Named groups insulate consumers from positional shifts.
 _CROSSTALK_RE = re.compile(
-    r'<crosstalk\s+from="([^"]+)"\s+label="([^"]*)"\s+source="([^"]*)"\s+turn="([^"]*)"\s+timestamp="([^"]+)">\n(.*)\n</crosstalk>',
+    r'<crosstalk\s+from="(?P<from_>[^"]+)"\s+label="(?P<label>[^"]*)"'
+    r'\s+source="(?P<source>[^"]*)"\s+turn="(?P<turn>[^"]*)"'
+    r'(?:\s+harness="(?P<harness>[^"]*)")?'
+    r'(?:\s+model="(?P<model>[^"]*)")?'
+    r'\s+timestamp="(?P<timestamp>[^"]+)">\n(?P<body>.*)\n</crosstalk>',
     re.DOTALL,
 )
 
@@ -337,15 +363,17 @@ def _classify_crosstalk(text: str) -> dict | None:
     m = _CROSSTALK_RE.fullmatch(stripped)
     if not m:
         return None
-    body = m.group(6)
+    body = m.group("body")
     if "<" in body or ">" in body:
         return None
     return {
-        "from": m.group(1),
-        "label": m.group(2),
-        "source": m.group(3),
-        "turn": m.group(4),
-        "timestamp": m.group(5),
+        "from": m.group("from_"),
+        "label": m.group("label"),
+        "source": m.group("source"),
+        "turn": m.group("turn"),
+        "timestamp": m.group("timestamp"),
+        "harness": m.group("harness") or "",
+        "model": m.group("model") or "",
         "message": body,
     }
 
@@ -1725,6 +1753,44 @@ def extract_codex_message_text(raw_entry: dict) -> str:
     if not _is_codex_visible_message(role, text):
         return ""
     return text[:150]
+
+
+def extract_codex_model(raw_entry: dict, current_model: str | None) -> str | None:
+    """Return the model id observed in a Codex JSONL entry, else ``current_model``.
+
+    Codex serializes the active model in two places:
+      1. ``session_meta`` envelope at session start, under ``payload.cli_version``
+         siblings — the model field is ``payload.model`` or, for newer rollouts,
+         nested in ``payload.config.model`` / ``payload.originator.model``.
+      2. ``event_msg`` / ``response_item`` envelopes per turn — sometimes carry
+         a ``model`` field on the payload root for newly-bound models. We pick
+         up either to keep the value fresh on per-turn ingest.
+    """
+    payload = raw_entry.get("payload") or {}
+    if not isinstance(payload, dict):
+        return current_model
+    entry_type = raw_entry.get("type")
+    if entry_type == "session_meta":
+        for candidate in (
+            payload.get("model"),
+            (payload.get("config") or {}).get("model") if isinstance(payload.get("config"), dict) else None,
+            (payload.get("originator") or {}).get("model") if isinstance(payload.get("originator"), dict) else None,
+        ):
+            if isinstance(candidate, str) and candidate:
+                return candidate
+        return current_model
+    # Per-turn payloads: response_item / event_msg may include model on the
+    # outer payload (Codex normaliser surfaces it consistently per
+    # graph://0ac8e52c-2de). Prefer payload.model, then nested response.model.
+    candidate = payload.get("model")
+    if isinstance(candidate, str) and candidate:
+        return candidate
+    response = payload.get("response")
+    if isinstance(response, dict):
+        candidate = response.get("model")
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return current_model
 
 
 def extract_codex_context_tokens(raw_entry: dict, current_tokens: int) -> int:

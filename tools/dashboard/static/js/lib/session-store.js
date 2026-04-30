@@ -46,6 +46,11 @@ document.addEventListener('alpine:init', function() {
         if (s.dispatch_nag_enabled !== undefined) store.dispatchNagEnabled = !!s.dispatch_nag_enabled;
         if (s.resolved !== undefined) store.resolved = !!s.resolved;
         if (s.org) store.org = s.org;
+        // auto-ngis4: surface harness + model into the per-session store
+        // so the canonical session-card partial can paint the icon-rail
+        // badge alongside role/type/org.
+        if (s.harness) store.harness = s.harness;
+        if (s.model !== undefined) store.model = s.model;
       }
     })
     .catch(function(e) { console.warn('[session-store] seed fetch error', e); });
@@ -81,6 +86,8 @@ window.getSessionStore = function(sessionId) {
       resultMap: {},     // tool_id -> tool_result entry
       activityState: 'idle',       // server-derived: idle | thinking | tool_running | dead
       pendingToolIds: {},          // server-derived: tool_id -> true (set-like object)
+      harness: '',                 // auto-ngis4: claude | codex | future
+      model: null,                 // auto-ngis4: most-recent assistant-turn model id
       loaded: false,
       _loading: false,   // true during initial fetch — buffers SSE
       _pendingSSE: [],

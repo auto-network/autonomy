@@ -1,0 +1,31 @@
+{# Canonical session-harness badge — auto-ngis4.
+
+   Renders a small pill that surfaces a session's harness (claude / codex /
+   future). Per the icon-rail principle (graph://553c7437-036): wherever a
+   session is rendered, its identity-defining metadata should be visible
+   at-a-glance. Unknown harness still gets a placeholder so the affordance
+   doesn't drop on legacy rows.
+
+   Expects an Alpine scope where ``harness`` is the per-row harness id
+   (e.g. ``s.harness`` on session cards, ``e.sender_harness`` on timeline
+   rows). Drop into a row by setting Alpine context:
+
+       <span x-data="{ harness: s.harness }">
+         {% include 'partials/session-harness-badge.html' %}
+       </span>
+
+   Or pass directly via ``x-data="{ harness: ... }"`` on a wrapping span.
+
+   The partial does NOT surface model in v1 per operator directive — model
+   is queryable via the API contract but not painted on cards.
+#}
+<span class="sc-harness"
+      :class="harness === 'codex' ? 'sc-harness-codex' :
+              harness === 'claude' ? 'sc-harness-claude' :
+              'sc-harness-unknown'"
+      :title="'Harness: ' + (harness || 'unknown')"
+      data-testid="session-harness-badge"
+      :data-harness="harness || 'unknown'"
+      x-text="harness === 'codex' ? 'codex' :
+              harness === 'claude' ? 'claude' :
+              harness || '?'"></span>

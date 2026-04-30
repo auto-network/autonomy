@@ -233,6 +233,7 @@ def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
         f'<crosstalk from="dashboard-nag"\n'
         f'           label="Session Nag"\n'
         f'           source="" turn="0"\n'
+        f'           harness="dashboard" model=""\n'
         f'           timestamp="{iso_now}">\n'
         f'{message}\n'
         f'</crosstalk>'
@@ -741,6 +742,8 @@ class SessionMonitor:
             "is_live": bool(row.get("is_live")),
             "jsonl_path": row.get("jsonl_path"),
             "type": row.get("type"),
+            "harness": row.get("harness") or "claude",
+            "model": row.get("model") or None,
         }
 
     def resolve_session_file(self, session_id: str) -> Path | None:
@@ -876,6 +879,10 @@ class SessionMonitor:
                 "dispatch_nag_enabled": bool(s.get("dispatch_nag")),
                 "activity_state": s.get("activity_state", "idle"),
                 "harness": s.get("harness", "claude"),
+                # auto-ngis4: surface the most-recent assistant-turn model so
+                # session listings can cite it without a separate lookup.
+                # Stored only — UI does not yet render this.
+                "model": s.get("model") or None,
                 # jsonl_path is the legacy bridge; session_uuids is canonical after Phase 4
                 "resolved": bool(s.get("jsonl_path")) or (
                     bool(s.get("session_uuids")) and s["session_uuids"] != "[]"
@@ -1817,6 +1824,8 @@ class SessionMonitor:
         parsed_entries: list = []
         last_message = row.get("last_message", "")
         context_tokens = row.get("context_tokens", 0)
+        prior_model = row.get("model") or None
+        model = prior_model
         harness = resolve_harness_for_session_row(row)
 
         for raw_line in complete.splitlines():
@@ -1838,6 +1847,7 @@ class SessionMonitor:
                 last_message = text
 
             context_tokens = harness.extract_context_tokens(entry, context_tokens)
+            model = harness.extract_model(entry, model)
 
             # Parse full entry for SSE broadcast
             try:
@@ -1854,6 +1864,8 @@ class SessionMonitor:
 
         tmux_name = row["tmux_name"]
         if new_entry_count > 0:
+            # Only push model when it changed; the column is sticky once set.
+            model_to_write = model if (model and model != prior_model) else None
             update_tail_state(
                 tmux_name,
                 file_offset=new_offset,
@@ -1861,6 +1873,7 @@ class SessionMonitor:
                 last_message=last_message,
                 entry_count=(row.get("entry_count", 0) + new_entry_count),
                 context_tokens=context_tokens,
+                model=model_to_write,
             )
             return True, parsed_entries
 

@@ -34,6 +34,12 @@
             x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
+      <!-- Harness badge — auto-ngis4 / icon-rail principle 553c7437-036.
+           Surfaces the running CLI (claude / codex) so peers can tell at
+           a glance. Falls through to "?" for legacy / unknown rows. -->
+      <span x-data="{ harness: s.harness }">
+        {% include 'partials/session-harness-badge.html' %}
+      </span>
       <!-- Workspace-changes indicator. Same shape as the page-mode
            header anchor; shows when this session has commits-ahead
            or dirty files in any of its worktrees. Optional helpers —
@@ -91,6 +97,12 @@
             x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
+      <!-- Harness badge mirrored on the stats row for the same reason
+           the role/type badges are duplicated: zoom modes hide one row
+           or the other via CSS. -->
+      <span x-data="{ harness: s.harness }">
+        {% include 'partials/session-harness-badge.html' %}
+      </span>
       <!-- Workspace-changes indicator. Same shape as the page-mode
            header anchor; shows when this session has commits-ahead
            or dirty files in any of its worktrees. Optional helpers —

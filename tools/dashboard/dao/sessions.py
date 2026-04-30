@@ -118,6 +118,11 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
             "session_uuid": row.get("session_uuid"),
             "bead_id": row.get("bead_id"),
             "activity_state": row.get("activity_state", "idle"),
+            # auto-ngis4: harness + model are session identity (icon-rail note
+            # graph://553c7437-036). harness is the running CLI shell;
+            # model is the most-recent assistant turn's model id.
+            "harness": row.get("harness") or "claude",
+            "model": row.get("model") or None,
         }
         entry["org"] = resolve_session_org(entry)
         sessions.append(entry)
@@ -545,6 +550,11 @@ def get_recent_sessions(
             row["activity_state"] = db_row.get("activity_state", "dead")
             row["bead_id"] = row["bead_id"] or db_row.get("bead_id", "")
             row["tmux_session"] = db_row.get("tmux_name", "")
+            # auto-ngis4: surface harness + model (stored on tmux_sessions)
+            # so /sessions Recent + every other session-rendering surface can
+            # consume them via a single DAO contract.
+            row["harness"] = db_row.get("harness") or "claude"
+            row["model"] = db_row.get("model") or None
             # Prefer dashboard.db's last_activity (epoch float) for ordering
             # when newer than graph.db's last_activity_at (ISO).
             db_la = db_row.get("last_activity") or 0

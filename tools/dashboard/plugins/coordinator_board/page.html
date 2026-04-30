@@ -227,8 +227,17 @@
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <p class="text-sm font-medium text-slate-100 truncate" x-text="t.label"></p>
-              <p class="text-[11px] text-slate-500 tabular-nums truncate">
-                <span x-text="t.session"></span> · <span x-text="t.role"></span>
+              <p class="text-[11px] text-slate-500 tabular-nums truncate flex items-center gap-1.5 flex-wrap">
+                <span x-text="t.session"></span>
+                <!-- Harness badge — auto-ngis4 / icon-rail. Settings-driven
+                     tile payload may include ``harness``; gracefully no-op
+                     when absent. -->
+                <template x-if="t.harness">
+                  <span x-data="{ harness: t.harness }">
+                    {% include 'partials/session-harness-badge.html' %}
+                  </span>
+                </template>
+                <span>· <span x-text="t.role"></span></span>
               </p>
             </div>
             <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-medium shrink-0"
@@ -348,9 +357,16 @@
                       :class="statusBadge(t.status)"
                       x-text="t.status"></span>
               </div>
-              <p class="text-[11px] text-slate-500 tabular-nums truncate mt-0.5">
-                <span x-text="t.session"></span> ·
-                <span x-text="t.role"></span> ·
+              <p class="text-[11px] text-slate-500 tabular-nums truncate mt-0.5 flex items-center gap-1.5 flex-wrap">
+                <span x-text="t.session"></span>
+                <!-- Harness badge — auto-ngis4 / icon-rail. -->
+                <template x-if="t.harness">
+                  <span x-data="{ harness: t.harness }">
+                    {% include 'partials/session-harness-badge.html' %}
+                  </span>
+                </template>
+                <span>· <span x-text="t.role"></span></span>
+                <span>·</span>
                 <span class="text-slate-400" x-text="t.totalTurns + ' turns'"></span>
               </p>
             </div>
