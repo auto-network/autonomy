@@ -600,6 +600,12 @@ def _enrich_dispatch_runs(runs: list[dict]) -> None:
         run["member_key"] = meta.get("member_key") or None
         run["target_source_id"] = meta.get("target_source_id") or None
         run["target_org"] = meta.get("target_org") or None
+        # Sender provenance: who initiated the dispatch. Browser-initiated
+        # dispatches set this to the literal "dashboard" sentinel; session-
+        # initiated dispatches carry the originating session's tmux name.
+        # Surfacing it here lets the front-end render the sender as a
+        # clickable badge that routes back to that session.
+        run["dispatched_by_session"] = meta.get("dispatched_by_session") or None
         if run["target_source_id"]:
             target_ids.add(run["target_source_id"])
 
@@ -1118,6 +1124,7 @@ def _enrich_timeline_agentic(entries: list[dict]) -> None:
         entry["member_key"] = meta.get("member_key") or None
         entry["target_source_id"] = meta.get("target_source_id") or None
         entry["target_org"] = meta.get("target_org") or None
+        entry["dispatched_by_session"] = meta.get("dispatched_by_session") or None
         if entry["target_source_id"]:
             target_ids.add(entry["target_source_id"])
 
