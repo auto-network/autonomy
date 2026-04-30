@@ -93,7 +93,11 @@
   }
 </style>
 
-<div x-data="worktreesPage()" class="pb-safe text-gray-100" data-testid="worktrees-page">
+<div x-data="worktreesPage()"
+     class="pb-safe text-gray-100"
+     data-testid="worktrees-page"
+     @click.window="hideCheckTooltip()"
+     @keydown.escape.window="hideCheckTooltip()">
   <section class="px-4 py-4 md:px-6 md:py-6">
     <div class="mx-auto max-w-7xl">
       <div x-show="!hasOverlayOpen()">
@@ -293,9 +297,15 @@
                             x-text="rowPr(item.row).title"></span>
                       <span class="flex shrink-0 items-center gap-1.5">
                         <template x-for="check in rowPrChecks(item.row)" :key="'card-pr-' + check.id">
-                          <span class="inline-flex h-7 w-7 items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
+                          <span class="inline-flex h-7 w-7 cursor-help items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
                                 :class="checkIconClass(check.status)"
-                                :title="check.label + ' — ' + check.status + (check.detail ? ': ' + check.detail : '')">
+                                tabindex="0"
+                                @mouseenter="showCheckTooltip($event, check)"
+                                @mousemove="showCheckTooltip($event, check)"
+                                @mouseleave="hideCheckTooltip()"
+                                @focus="showCheckTooltip($event, check)"
+                                @blur="hideCheckTooltip()"
+                                @click.stop.prevent="toggleCheckTooltip($event, check)">
                             <span x-text="check.icon"></span>
                           </span>
                         </template>
@@ -312,9 +322,15 @@
                               x-text="commit.subject"></span>
                         <span class="flex shrink-0 items-center gap-1.5">
                           <template x-for="check in reviewCommitChecks(commit)" :key="'card-' + commit.sha + '-' + check.id">
-                            <span class="inline-flex h-7 w-7 items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
+                              <span class="inline-flex h-7 w-7 cursor-help items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
                                   :class="checkIconClass(check.status)"
-                                  :title="check.label + ' — ' + check.status">
+                                  tabindex="0"
+                                  @mouseenter="showCheckTooltip($event, check)"
+                                  @mousemove="showCheckTooltip($event, check)"
+                                  @mouseleave="hideCheckTooltip()"
+                                  @focus="showCheckTooltip($event, check)"
+                                  @blur="hideCheckTooltip()"
+                                  @click.stop.prevent="toggleCheckTooltip($event, check)">
                               <span x-text="check.icon"></span>
                             </span>
                           </template>
@@ -630,7 +646,8 @@
                   <div x-ref="commitFilesHeader"
                        class="sticky z-[8] -mx-2 mb-2 flex items-center justify-between gap-3 border-y border-white/10 bg-gray-950/95 px-2 py-2 backdrop-blur"
                        :style="'top:' + commitStickyTop + 'px'">
-                    <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Files in this commit</div>
+                    <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500"
+                         x-text="isPrReview() ? 'Files in this PR' : 'Files in this commit'"></div>
                     <div class="flex items-center gap-3">
                       <div class="flex shrink-0 items-center gap-2 font-mono text-[10px] text-slate-500">
                         <span x-text="selectedCommit.commit.stats.files + ' files'"></span>
@@ -907,5 +924,22 @@
       </template>
     </div>
   </section>
+
+  <!-- Floating check-tooltip popover (auto-r098a). Anchored to the
+       hovered/focused disc via :style left/top from showCheckTooltip;
+       hidden on click-outside / Escape via the root @click.window /
+       @keydown.escape.window listeners. Lifted from settled design
+       3435e03f, lines 779-788. -->
+  <div x-show="checkTooltip.visible"
+       x-transition.opacity.duration.75ms
+       class="pointer-events-none fixed z-[90] w-[min(22rem,calc(100vw-1.5rem))] -translate-x-1/2 -translate-y-[calc(100%+10px)] rounded-lg border border-white/10 bg-slate-900/96 px-2.5 py-2 text-xs text-slate-100 shadow-[0_16px_40px_rgba(0,0,0,0.45)]"
+       :style="'left:' + checkTooltip.x + 'px; top:' + checkTooltip.y + 'px;'"
+       data-testid="check-tooltip">
+    <div class="font-medium" x-text="checkTooltip.text"></div>
+    <template x-if="checkTooltip.detail">
+      <div class="mt-1 whitespace-normal text-[11px] leading-4 text-slate-300"
+           x-text="checkTooltip.detail"></div>
+    </template>
+  </div>
 </div>
 </div>

@@ -618,6 +618,41 @@ class TestWorktreePage:
         assert "bg-amber-200" in js
         assert "animate-pulse" in js
 
+    def test_check_tooltip_popover_wired(self):
+        """The rich check-tooltip popover (settled design 3435e03f, lines
+        779-788) replaces the native ``title`` attribute on each
+        navigator disc. Hover/focus opens it; click-outside / Escape
+        closes it; click-on-disc toggles."""
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        # Tooltip element with the right anchor + transition.
+        assert 'data-testid="check-tooltip"' in template
+        assert 'x-show="checkTooltip.visible"' in template
+        assert "x-transition.opacity.duration.75ms" in template
+        assert "'left:' + checkTooltip.x + 'px; top:' + checkTooltip.y + 'px;'" in template
+        # Outside-click + Escape close.
+        assert '@click.window="hideCheckTooltip()"' in template
+        assert '@keydown.escape.window="hideCheckTooltip()"' in template
+        # Discs bind hover/focus/click — no native ``title`` attribute.
+        assert '@mouseenter="showCheckTooltip($event, check)"' in template
+        assert '@mouseleave="hideCheckTooltip()"' in template
+        assert '@focus="showCheckTooltip($event, check)"' in template
+        assert '@click.stop.prevent="toggleCheckTooltip($event, check)"' in template
+        # The old native title attribute must be gone (we replaced it
+        # specifically because it didn't carry the rich detail body).
+        assert ":title=\"check.label" not in template
+
+        # JS state + helpers exist.
+        assert "checkTooltip:" in js
+        assert "showCheckTooltip(event, check) {" in js
+        assert "hideCheckTooltip()" in js
+        assert "toggleCheckTooltip(event, check) {" in js
+        assert "tooltipAnchorPoint(event)" in js
+        assert "describeCheckStatus(status) {" in js
+        # Tooltip text format matches the design ("label — passing/running/...").
+        assert "describeCheckStatus(check.status)" in js
+
     def test_pr_review_overlay_wired(self):
         """The overlay (settled design 3435e03f, lines 460+) renders the
         PR title/body + integrated diff when ``selectedCommit.prMode``
