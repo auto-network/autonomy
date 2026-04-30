@@ -956,6 +956,8 @@
       <a href="/search" class="nav-link" data-page="search" onclick="closeSidebar()">Search <span id="badge-search" data-testid="badge-search" class="nav-badge nav-badge-gray"></span></a>
       <a href="/test/input?v=99" class="nav-link" onclick="event.preventDefault(); closeSidebar(); window.location.href='/test/input?v=99';">Test Input</a>
     </div>
+    <!-- Plugin sidebar slot — populated client-side from /api/plugins. -->
+    <div id="sidebar-plugins" class="space-y-1 mb-6"></div>
     <div class="mt-auto">
       <div id="sidebar-designs" class="mb-2 space-y-1"></div>
       <div class="text-xs text-gray-500" id="stats-summary">loading...</div>

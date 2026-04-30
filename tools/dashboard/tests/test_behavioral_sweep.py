@@ -6362,3 +6362,182 @@ class TestAgenticDispatchObservability:
         assert "short=A short blurb" in out
         # No stray literal braces from a missed substitution.
         assert "{asset_short_description}" not in out
+
+
+# ── Plugin substrate (bead auto-a79f6) ─────────────────────────────
+
+PLUGIN_DORMANT_CHECKS = """
+    var slot = document.getElementById('sidebar-plugins');
+    r.plugin_slot_present = !!slot;
+    r.plugin_slot_child_count = slot ? slot.children.length : -1;
+    var legacy = ['beads', 'dispatch', 'sessions', 'worktrees',
+                  'collab', 'streams', 'timeline', 'search'];
+    legacy.forEach(function(name) {
+        r['has_' + name] = !!document.querySelector('[data-page="' + name + '"]');
+    });
+    r.example_link_visible = !!document.querySelector('[data-page="example"]');
+"""
+
+PLUGIN_ENABLED_CHECKS = """
+    var nav = document.querySelector('[data-page="example"]');
+    r.nav_present = nav !== null;
+    r.nav_visible = nav !== null && nav.offsetParent !== null;
+    var frag = document.querySelector('[data-testid="example-fragment-root"]');
+    r.fragment_present = frag !== null;
+    r.fragment_visible = frag !== null && frag.offsetParent !== null;
+"""
+
+PLUGIN_DISABLED_CHECKS = """
+    r.nav_absent = document.querySelector('[data-page="example"]') === null;
+    var slot = document.getElementById('sidebar-plugins');
+    r.plugin_slot_empty = slot ? slot.children.length === 0 : false;
+"""
+
+
+def _set_plugin_setting(fixture_path: str, enabled: bool | None) -> None:
+    """Update the dashboard.plugin Setting for the ``example`` plugin in
+    the live mock fixture.
+
+    ``enabled=None`` removes the row entirely so the loader's bootstrap
+    rule kicks in — for plugins shipped under ``_example/`` that means
+    "default disabled".
+    """
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    plugin_block = block.setdefault("dashboard.plugin", {})
+    # Front-end omits X-Graph-Org for plugin endpoints, so the mock DAO
+    # reads with org=None — populate the ``_all`` list, not ``_orgs``.
+    all_list = plugin_block.setdefault("_all", [])
+    all_list[:] = [m for m in all_list if m.get("key") != "example"]
+    if enabled is not None:
+        all_list.append({"key": "example", "payload": {"enabled": enabled}})
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _http_get(url: str) -> tuple[int, str]:
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return resp.status, resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+
+
+class TestPluginSubstrate:
+    """L2.B substrate sweep — runtime ``dashboard.plugin#1`` toggles drive
+    sidebar/route visibility for the shipped ``_example`` plugin.
+
+    Three rows of the state matrix in bead auto-a79f6:
+
+    1. ``test_dormant_substrate_preserves_legacy_sidebar`` — regression
+       guard: with no Setting row (substrate bootstrap → disabled), the
+       legacy sidebar is unchanged and ``#sidebar-plugins`` is empty.
+    2. ``test_enabled_plugin_appears_and_routes`` — Setting row with
+       ``enabled: true`` brings the plugin online.
+    3. ``test_disabled_plugin_hidden`` — Setting row with
+       ``enabled: false`` hides it.
+    """
+
+    @pytest.fixture(scope="function", autouse=True)
+    def _restore_plugin_state(self, sweep_server):
+        """Strip the dashboard.plugin row before each test so dormant
+        bootstrap drives the next test's start state. Restore on teardown
+        so subsequent test classes see a clean fixture.
+        """
+        _set_plugin_setting(sweep_server["fixture_path"], None)
+        yield
+        _set_plugin_setting(sweep_server["fixture_path"], None)
+
+    def test_dormant_substrate_preserves_legacy_sidebar(self, browser, sweep_server):
+        # Default state: no dashboard.plugin Setting → bootstrap rule
+        # (directory `_example/` starts with `_`) → disabled.
+        result = _navigate_and_check("/sessions", PLUGIN_DORMANT_CHECKS, wait_ms=1500)
+
+        assert result.get("plugin_slot_present"), (
+            "#sidebar-plugins slot is missing from base.html; substrate "
+            "must add it even when no plugins are enabled"
+        )
+        assert result.get("plugin_slot_child_count") == 0, (
+            f"Expected #sidebar-plugins empty when no plugin enabled; "
+            f"got {result.get('plugin_slot_child_count')} children"
+        )
+        # Legacy sidebar — every entry hand-coded in base.html still present.
+        for legacy in ("beads", "dispatch", "sessions", "worktrees",
+                       "collab", "streams", "timeline", "search"):
+            assert result.get(f"has_{legacy}"), (
+                f"Legacy nav link [data-page={legacy!r}] missing — "
+                f"substrate must not remove existing sidebar entries"
+            )
+        assert not result.get("example_link_visible"), (
+            "Example plugin link visible in dormant state"
+        )
+
+        # /api/plugins runtime check: empty list.
+        status, body = _http_get(f"{sweep_server['url']}/api/plugins")
+        assert status == 200
+        plugins = json.loads(body).get("plugins", [])
+        assert plugins == [], f"/api/plugins returned {plugins} when dormant"
+
+        # /example route returns 404 when plugin not enabled.
+        status_example, _ = _http_get(f"{sweep_server['url']}/example")
+        assert status_example == 404, (
+            f"/example returned {status_example} when plugin not enabled"
+        )
+
+    def test_enabled_plugin_appears_and_routes(self, browser, sweep_server):
+        _set_plugin_setting(sweep_server["fixture_path"], True)
+
+        # First, navigate to a non-plugin path so route() refetches /api/plugins
+        # (which now includes example). Then navigate to /example.
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        result = _navigate_and_check("/example", PLUGIN_ENABLED_CHECKS, wait_ms=1500)
+
+        assert result.get("nav_present"), (
+            "Example sidebar link not present after enabling Setting"
+        )
+        assert result.get("nav_visible"), (
+            "Example sidebar link present but offsetParent is null (hidden)"
+        )
+        assert result.get("fragment_visible"), (
+            "Example plugin fragment did not render at /example "
+            f"(check result: {result})"
+        )
+
+        # /api/plugins includes the plugin id.
+        status, body = _http_get(f"{sweep_server['url']}/api/plugins")
+        assert status == 200
+        plugins = json.loads(body).get("plugins", [])
+        ids = [p["id"] for p in plugins]
+        assert "example" in ids, (
+            f"/api/plugins did not include 'example' when enabled: ids={ids}"
+        )
+
+    def test_disabled_plugin_hidden(self, browser, sweep_server):
+        _set_plugin_setting(sweep_server["fixture_path"], False)
+
+        # Bounce navigate so app.js refetches /api/plugins.
+        result = _navigate_and_check("/sessions", PLUGIN_DISABLED_CHECKS, wait_ms=1500)
+
+        assert result.get("nav_absent"), (
+            "Example sidebar link still present when Setting=enabled:false"
+        )
+        assert result.get("plugin_slot_empty"), (
+            "#sidebar-plugins not empty when plugin disabled"
+        )
+
+        # /api/plugins excludes the plugin id.
+        status, body = _http_get(f"{sweep_server['url']}/api/plugins")
+        assert status == 200
+        plugins = json.loads(body).get("plugins", [])
+        ids = [p["id"] for p in plugins]
+        assert "example" not in ids, (
+            f"/api/plugins still includes 'example' when disabled: ids={ids}"
+        )
+
+        # /example returns 404 when plugin disabled at request time.
+        status_example, _ = _http_get(f"{sweep_server['url']}/example")
+        assert status_example == 404, (
+            f"/example returned {status_example} when disabled"
+        )

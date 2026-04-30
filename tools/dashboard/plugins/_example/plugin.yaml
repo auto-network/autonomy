@@ -1,0 +1,15 @@
+id: example
+api_version: 1
+
+paths:
+  - /example
+
+assets:
+  template: page.html
+  script: page.js
+
+nav:
+  label: Example
+
+frontend:
+  alpine_root: examplePage
