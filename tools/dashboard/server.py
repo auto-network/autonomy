@@ -5415,10 +5415,14 @@ async def _signal_session_merge_celebration(
     first_line = (commit_message or "").split("\n", 1)[0].strip()
     if len(first_line) > 200:
         first_line = first_line[:200] + "…"
+    suffix_by_kind = {
+        "ff": " (ff merge)",
+        "cherry-pick": " (cherry-pick)",
+    }
     message = (
         f"You got merged! {repo_name}@{short_sha}"
         + (f" — {first_line}" if first_line else "")
-        + (" (ff merge)" if kind == "ff" else "")
+        + suffix_by_kind.get(kind, "")
     )
     try:
         await _send_dashboard_ui_crosstalk(target_session, message)
@@ -5695,6 +5699,17 @@ async def api_worktree_cherry_pick(request):
         return JSONResponse({"error": str(exc)}, status_code=409)
 
     await worktree_monitor.refresh()
+    # Cherry-pick to base lands the session's commit on master too, so
+    # the session deserves the same "You got merged!" CrossTalk that
+    # ff-merge and commit-merge already fire — without it the operator
+    # cherry-picked the work and the dispatcher session never heard.
+    await _signal_session_merge_celebration(
+        target_session=session_name,
+        repo_name=repo_name,
+        commit_sha=result.get("commit", ""),
+        commit_message=result.get("message", ""),
+        kind="cherry-pick",
+    )
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
