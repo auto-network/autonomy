@@ -1,0 +1,29 @@
+/* Settings UI plugin — scoped page styling.
+ *
+ * The design uses Tailwind utility classes throughout; this file holds
+ * only the few rules that benefit from being expressed as CSS rather
+ * than inline classes (overflow / focus-ring polish on the JSON
+ * editor, mobile safe-area on the page root).
+ */
+
+.settings-page {
+  /* iOS / mobile: keep content above the home indicator without
+     pulling the rest of the page off the bottom of the viewport.
+     The Tailwind ``pb-safe`` class on the root maps here. */
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+/* JSON editor textarea — preserve fixed-width JSON layout while still
+   wrapping long string values that would otherwise force a horizontal
+   scrollbar on mobile. */
+.settings-page [data-testid="payload-editor"] {
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* Read-only payload viewer — same baseline, but allow horizontal
+   overflow (the design specifies overflow-x-auto on the <pre>, this
+   reinforces that monospace rendering stays crisp). */
+.settings-page [data-testid="member-payload"] {
+  white-space: pre;
+}

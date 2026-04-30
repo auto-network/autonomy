@@ -1,0 +1,177 @@
+<link rel="stylesheet" href="/static/plugins/settings/page.css">
+<div data-testid="settings-fragment-root" x-data="settingsPage()" x-init="init()" class="settings-page pb-safe">
+
+  <!-- Header: org picker -->
+  <div class="flex items-center gap-3 mb-4 px-1">
+    <label class="text-xs uppercase tracking-wider text-gray-500 font-semibold">Org</label>
+    <select
+      :value="selectedOrg"
+      @change="selectedOrg = $event.target.value; onOrgChange()"
+      class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm font-mono"
+      data-testid="org-picker">
+      <template x-for="org in orgs" :key="org">
+        <option :value="org" x-text="org"></option>
+      </template>
+    </select>
+    <span class="ml-auto text-[11px] font-mono text-gray-500">
+      <span x-text="(sets[selectedOrg] || []).length"></span> sets ·
+      <span x-text="totalMembers"></span> members
+    </span>
+  </div>
+
+  <!-- Three-pane layout -->
+  <div class="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-4">
+
+    <!-- Left rail: set_id list -->
+    <aside class="md:border-r md:border-gray-700 md:pr-4">
+      <h2 class="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-2 px-2">Sets</h2>
+      <template x-if="(sets[selectedOrg] || []).length === 0">
+        <div class="text-xs text-gray-500 italic px-2 py-3" data-testid="settings-no-sets">
+          No sets in this org
+        </div>
+      </template>
+      <ul class="space-y-0.5" data-testid="set-list">
+        <template x-for="setRow in (sets[selectedOrg] || [])" :key="setRow.set_id">
+          <li>
+            <button
+              class="w-full text-left px-3 py-1.5 rounded-md hover:bg-gray-800 flex items-center justify-between gap-2 font-mono text-sm transition-colors"
+              :class="selectedSetId === setRow.set_id ? 'bg-indigo-900/40 text-indigo-200 ring-1 ring-indigo-500/50' : 'text-gray-300'"
+              @click="selectSet(setRow.set_id)"
+              data-testid="set-row"
+              :data-set-id="setRow.set_id">
+              <span class="truncate" x-text="setRow.set_id"></span>
+              <span class="text-[10px] text-gray-500 font-mono shrink-0" x-text="setRow.count"></span>
+            </button>
+          </li>
+        </template>
+      </ul>
+    </aside>
+
+    <!-- Right pane: members + detail -->
+    <main class="min-w-0">
+
+      <!-- No set selected -->
+      <template x-if="!selectedSetId">
+        <div class="rounded-2xl border border-dashed border-gray-700 bg-gray-900/60 p-12 text-center"
+             data-testid="settings-empty">
+          <div class="text-gray-500 text-sm">Select a set on the left to see its members</div>
+        </div>
+      </template>
+
+      <!-- Set selected: members table + detail drawer below -->
+      <template x-if="selectedSetId">
+        <div class="space-y-4">
+
+          <!-- Members table -->
+          <div class="rounded-2xl border border-gray-700 bg-gray-900/60 overflow-hidden">
+            <div class="px-4 py-2.5 border-b border-gray-700 flex items-center justify-between">
+              <span class="text-sm font-mono text-indigo-200" x-text="selectedSetId"></span>
+              <span class="text-[11px] text-gray-500" x-text="(members[selectedSetId] || []).length + ' members'"></span>
+            </div>
+            <template x-if="(members[selectedSetId] || []).length === 0">
+              <div class="px-4 py-6 text-center text-xs text-gray-500 italic" data-testid="settings-no-members">
+                No members in this set
+              </div>
+            </template>
+            <table x-show="(members[selectedSetId] || []).length > 0" class="w-full text-sm">
+              <thead class="bg-gray-800/50">
+                <tr class="text-left text-[10px] uppercase tracking-wider text-gray-500 font-semibold">
+                  <th class="px-4 py-2">Key</th>
+                  <th class="px-4 py-2 w-24">State</th>
+                  <th class="px-4 py-2 w-16">Rev</th>
+                  <th class="px-4 py-2 w-20">Flags</th>
+                  <th class="px-4 py-2 w-32"></th>
+                </tr>
+              </thead>
+              <tbody data-testid="member-table">
+                <template x-for="m in (members[selectedSetId] || [])" :key="m.key">
+                  <tr
+                    class="border-t border-gray-800 hover:bg-gray-800/40 cursor-pointer transition-colors"
+                    :class="selectedKey === m.key ? 'bg-indigo-950/40' : ''"
+                    @click="selectMember(m.key)"
+                    data-testid="member-row"
+                    :data-member-key="m.key">
+                    <td class="px-4 py-2 font-mono text-gray-200 truncate" x-text="m.key"></td>
+                    <td class="px-4 py-2">
+                      <span class="text-[10px] font-mono px-1.5 py-0.5 rounded"
+                            :class="stateClass(m.state)"
+                            x-text="m.state"></span>
+                    </td>
+                    <td class="px-4 py-2 font-mono text-gray-500" x-text="m.stored_revision"></td>
+                    <td class="px-4 py-2 text-[11px] font-mono text-gray-500">
+                      <span x-show="m.deprecated" class="text-amber-400" title="deprecated">D</span>
+                      <span x-show="m.supersedes" class="text-purple-400 ml-1" title="override">▸</span>
+                    </td>
+                    <td class="px-4 py-2 text-right">
+                      <!-- Plugin toggle (specific to dashboard.plugin#1 rows) -->
+                      <button
+                        x-show="selectedSetId === 'dashboard.plugin'"
+                        class="text-[11px] font-mono px-2 py-0.5 rounded border transition-colors"
+                        :class="m.payload && m.payload.enabled
+                          ? 'border-green-700 text-green-300 hover:bg-green-900/30'
+                          : 'border-gray-700 text-gray-500 hover:bg-gray-800'"
+                        @click.stop="togglePlugin(m)"
+                        data-testid="plugin-toggle">
+                        <span x-text="m.payload && m.payload.enabled ? 'on → off' : 'off → on'"></span>
+                      </button>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Detail drawer -->
+          <template x-if="selectedKey">
+            <div class="rounded-2xl border border-gray-700 bg-gray-900/60 overflow-hidden"
+                 data-testid="member-detail">
+              <div class="px-4 py-2.5 border-b border-gray-700 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-[10px] uppercase tracking-wider text-gray-500">Member</span>
+                  <span class="font-mono text-sm text-gray-200" x-text="selectedKey"></span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button
+                    class="text-[11px] font-mono px-2 py-1 rounded border border-gray-700 hover:bg-gray-800"
+                    @click="toggleEdit()"
+                    data-testid="edit-button">
+                    <span x-show="!editing">Edit payload</span>
+                    <span x-show="editing">Cancel</span>
+                  </button>
+                  <button
+                    x-show="editing"
+                    class="text-[11px] font-mono px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white"
+                    @click="save()"
+                    data-testid="save-button">Save</button>
+                </div>
+              </div>
+
+              <div class="p-4 space-y-3">
+                <!-- Read-only view -->
+                <template x-if="!editing">
+                  <pre class="text-xs font-mono text-gray-200 bg-gray-950/60 rounded p-3 overflow-x-auto"
+                       data-testid="member-payload"
+                       x-text="formatPayload(currentMember && currentMember.payload)"></pre>
+                </template>
+
+                <!-- Editor -->
+                <template x-if="editing">
+                  <div class="space-y-2">
+                    <textarea
+                      x-model="editorText"
+                      class="w-full min-h-[180px] text-xs font-mono bg-gray-950/60 border border-gray-700 rounded p-3 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      data-testid="payload-editor"></textarea>
+                    <template x-if="errorMessage">
+                      <div class="text-xs text-red-300 font-mono" data-testid="settings-error" x-text="errorMessage"></div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+
+    </main>
+  </div>
+</div>
