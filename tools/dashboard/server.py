@@ -2331,18 +2331,26 @@ async def api_crosstalk_send(request):
     if not target or not _tmux_session_exists(target):
         return JSONResponse({"error": f"target session not found: {target}"}, status_code=404)
 
-    # Resolve sender metadata from dashboard_db
+    # Resolve sender metadata from dashboard_db. Reconcile-on-read so a
+    # drifted graph_source_id never makes it into the envelope (auto-4nr14
+    # §A); use graph MAX(turn_number) for the envelope's turn= attribute,
+    # NOT entry_count (auto-4nr14 §B — entry_count is the JSONL/viewer-tail
+    # line count and lives on a different scale).
     sender_row = dashboard_db.get_session(sender)
     sender_label = (sender_row or {}).get("label", "") or sender
-    sender_source_id = (sender_row or {}).get("graph_source_id", "") or ""
-    sender_entry_count = (sender_row or {}).get("entry_count", 0) or 0
+    sender_source_id = dashboard_db.reconcile_session_graph_source_id(sender_row)
+    sender_turn = dashboard_db.get_source_max_turn_number(sender_source_id)
 
-    # Build envelope
+    # Build envelope. When MAX(turn_number) is unavailable (source not yet
+    # ingested) emit an empty turn="" rather than fall back to a
+    # different-scale counter (auto-4nr14 §B). The CrossTalk parser regex
+    # requires the attribute to be present; empty string is valid.
     iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    turn_str = str(sender_turn) if sender_turn is not None else ""
     envelope = (
         f'<crosstalk from="{sender}"\n'
         f'           label="{sender_label}"\n'
-        f'           source="{sender_source_id}" turn="{sender_entry_count}"\n'
+        f'           source="{sender_source_id}" turn="{turn_str}"\n'
         f'           timestamp="{iso_now}">\n'
         f'{message}\n'
         f'</crosstalk>'
@@ -2355,7 +2363,7 @@ async def api_crosstalk_send(request):
     await asyncio.to_thread(
         auth_db.insert_message,
         sender, sender_label, target,
-        sender_source_id or None, sender_entry_count or None,
+        sender_source_id or None, sender_turn,
         message, time.time(),
     )
 
@@ -2364,7 +2372,7 @@ async def api_crosstalk_send(request):
         "from": sender,
         "label": sender_label,
         "source_id": sender_source_id or None,
-        "turn": sender_entry_count or None,
+        "turn": sender_turn,
         "target": target,
     })
 
@@ -2433,18 +2441,20 @@ async def api_crosstalk_broadcast(request):
             continue
         targets.append(r["tmux_name"])
 
-    # Resolve sender metadata
+    # Resolve sender metadata. Reconcile-on-read + graph MAX(turn_number)
+    # (auto-4nr14 §A/§B) — see api_crosstalk_send for full rationale.
     sender_row = dashboard_db.get_session(sender)
     sender_label = (sender_row or {}).get("label", "") or sender
-    sender_source_id = (sender_row or {}).get("graph_source_id", "") or ""
-    sender_entry_count = (sender_row or {}).get("entry_count", 0) or 0
+    sender_source_id = dashboard_db.reconcile_session_graph_source_id(sender_row)
+    sender_turn = dashboard_db.get_source_max_turn_number(sender_source_id)
 
-    # Build envelope
+    # Build envelope. Empty turn="" when graph turn number is unavailable.
     iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    turn_str = str(sender_turn) if sender_turn is not None else ""
     envelope = (
         f'<crosstalk from="{sender}"\n'
         f'           label="{sender_label}"\n'
-        f'           source="{sender_source_id}" turn="{sender_entry_count}"\n'
+        f'           source="{sender_source_id}" turn="{turn_str}"\n'
         f'           timestamp="{iso_now}">\n'
         f'{message}\n'
         f'</crosstalk>'
@@ -2458,7 +2468,7 @@ async def api_crosstalk_broadcast(request):
             await asyncio.to_thread(
                 auth_db.insert_message,
                 sender, sender_label, target,
-                sender_source_id or None, sender_entry_count or None,
+                sender_source_id or None, sender_turn,
                 message, time.time(),
             )
             sent += 1
@@ -3745,10 +3755,13 @@ async def api_session_get(request):
     if not session:
         return JSONResponse({"error": "not found"}, status_code=404)
     from tools.dashboard.org_identity import resolve_session_org
+    # Read-side reconcile so a drifted/empty stored ID does not leak out
+    # the session-detail surface (auto-4nr14 §A).
+    resolved_source_id = dashboard_db.reconcile_session_graph_source_id(session)
     return JSONResponse({
         "session_id": session["tmux_name"],
         "session_uuid": session.get("session_uuid"),
-        "graph_source_id": session.get("graph_source_id"),
+        "graph_source_id": resolved_source_id or None,
         "type": session.get("type"),
         "role": session.get("role", ""),
         "activity_state": session.get("activity_state", "idle"),
@@ -8223,13 +8236,15 @@ async def _send_to_via_crosstalk(
 
     sender_row = dashboard_db.get_session(sender_session)
     sender_label = label or (sender_row or {}).get("label", "") or sender_session
-    sender_source_id = (sender_row or {}).get("graph_source_id", "") or ""
-    sender_entry_count = (sender_row or {}).get("entry_count", 0) or 0
+    # Reconcile-on-read + graph MAX(turn_number) (auto-4nr14 §A/§B).
+    sender_source_id = dashboard_db.reconcile_session_graph_source_id(sender_row)
+    sender_turn = dashboard_db.get_source_max_turn_number(sender_source_id)
     iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    turn_str = str(sender_turn) if sender_turn is not None else ""
     envelope = (
         f'<crosstalk from="{sender_session}"\n'
         f'           label="{sender_label}"\n'
-        f'           source="{sender_source_id}" turn="{sender_entry_count}"\n'
+        f'           source="{sender_source_id}" turn="{turn_str}"\n'
         f'           timestamp="{iso_now}">\n'
         f'{primer}\n'
         f'</crosstalk>'
@@ -8245,7 +8260,7 @@ async def _send_to_via_crosstalk(
         await asyncio.to_thread(
             auth_db.insert_message,
             sender_session, sender_label, target_session,
-            sender_source_id or None, sender_entry_count or None,
+            sender_source_id or None, sender_turn,
             primer, time.time(),
         )
     except Exception:
