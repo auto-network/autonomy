@@ -58,6 +58,7 @@ from agents.workspace_manager import (
     cleanup_session_worktrees,
     get_session_worktree_commit_detail,
     get_session_worktree_dirty_detail,
+    get_session_worktree_integrated_diff,
     get_session_worktree_rebase_info,
     cherry_pick_session_worktree,
     merge_session_worktree,
@@ -5669,6 +5670,40 @@ async def api_worktree_changes(request):
 
     return JSONResponse(_worktree_dirty_detail_json(detail))
 
+
+async def api_worktree_integrated_diff(request):
+    """Integrated PR diff for one worktree (``merge-base..HEAD``).
+
+    Powers the auto-r098a PR-mode review overlay: when the operator
+    clicks the PR row in the on-card navigator, the overlay fetches
+    this endpoint instead of an individual commit. Same JSON shape as
+    ``/changes`` (file list + patch) since :class:`WorktreeDirtyDetail`
+    is reused.
+    """
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        detail = dao_sessions.get_worktree_integrated_diff_detail(
+            session_name, repo_name,
+        )
+        if not detail:
+            return JSONResponse(
+                {"error": "worktree integrated diff not found"}, status_code=404,
+            )
+        return JSONResponse(detail)
+
+    try:
+        detail = await asyncio.to_thread(
+            get_session_worktree_integrated_diff,
+            session_name,
+            repo_name,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+
+    return JSONResponse(_worktree_dirty_detail_json(detail))
+
 async def api_worktree_commit_merge(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
@@ -10010,6 +10045,7 @@ routes = [
     Route("/api/worktrees/refresh", api_worktrees_refresh, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/commits/{sha}", api_worktree_commit, methods=["GET"]),
     Route("/api/worktrees/{session}/{repo}/changes", api_worktree_changes, methods=["GET"]),
+    Route("/api/worktrees/{session}/{repo}/pr-diff", api_worktree_integrated_diff, methods=["GET"]),
     Route("/api/worktrees/{session}/{repo}/commits/{sha}/merge", api_worktree_commit_merge, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/sync-base", api_worktree_sync_base, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/request-rebase", api_worktree_request_rebase, methods=["POST"]),

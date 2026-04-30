@@ -646,6 +646,19 @@ def get_worktree_changes_detail(session_name: str, repo_name: str) -> dict | Non
     return item
 
 
+def get_worktree_integrated_diff_detail(session_name: str, repo_name: str) -> dict | None:
+    """Mock-mode integrated PR diff. Same shape as the dirty-changes detail."""
+    data = _load()
+    details = data.get("worktree_integrated_diff_details", {})
+    key = f"{session_name}/{repo_name}"
+    detail = details.get(key)
+    if detail is None:
+        return None
+    item = _fill(detail, WORKTREE_DIRTY_DETAIL_DEFAULTS)
+    item["files"] = [_worktree_file(file) for file in item.get("files", [])]
+    return item
+
+
 # ── dispatch DAO interface ───────────────────────────────────────────
 
 def get_running_with_stats() -> list[dict]:
