@@ -777,13 +777,17 @@ def test_graph_comment_router_roundtrip_via_api(
 def test_cmd_set_list_routes_through_api(
     api_client, forbid_cli_sqlite, capsys, monkeypatch,
 ):
-    """``graph set list`` hits GET /api/graph/sets — empty on clean fixture."""
+    """``graph set list`` hits GET /api/graph/sets — fixture DB only carries
+    the schema-meta Settings auto-flushed at first connection (auto-82xyq).
+    """
     monkeypatch.setenv("GRAPH_ORG", "autonomy")
     args = _cli_args()
     set_cmd.cmd_set_list(args)
     out = capsys.readouterr().out
-    # An empty fixture DB has no Settings yet.
-    assert "no Settings yet" in out or out.strip() == ""
+    # The flush surfaces autonomy.schema / autonomy.schema.synopsis on
+    # every writable DB; absence of either means the request didn't reach
+    # the server or the flush regressed.
+    assert "autonomy.schema" in out
 
 
 def test_cmd_set_add_then_show_routes_through_api(

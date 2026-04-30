@@ -48,6 +48,23 @@ SCHEMA_REVISION = 1
 VALID_DELIVERY_MODES = ("image_baked", "mounted_tools", "host_proxy", "hybrid")
 
 
+SYNOPSIS = {
+    "summary": (
+        "Concrete capability implementation: provider, delivery mode, "
+        "package root, probe, env/secret/tool requirements"
+    ),
+    "nouns": [
+        "capability", "implementation", "impl", "provider",
+        "delivery", "probe", "tool bundle", "package",
+    ],
+    "related_set_ids": [
+        "autonomy.capability.contract#1",
+        "autonomy.org.capability.install#1",
+        "autonomy.workspace.capability.enable#1",
+    ],
+}
+
+
 _ALLOWED_TOP_LEVEL = {
     "name",
     "version",
@@ -327,6 +344,80 @@ class CapabilityImplV1(SettingSchema):
 
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "name": {
+            "type": "string",
+            "required": True,
+            "description": "Identifier for the implementation (e.g. autonomy/github)",
+        },
+        "version": {
+            "type": "integer",
+            "required": True,
+            "description": "Single monotonic integer version (>= 1)",
+        },
+        "implements": {
+            "type": "array",
+            "required": True,
+            "description": "Contract refs this implementation satisfies",
+            "element": {
+                "contract": {"type": "string", "required": True,
+                             "description": "Contract name"},
+                "version": {"type": "integer", "required": True,
+                            "description": "Pinned contract version"},
+            },
+        },
+        "delivery_mode": {
+            "type": "string",
+            "required": True,
+            "description": "How the implementation reaches the workspace at launch",
+            "enum": list(VALID_DELIVERY_MODES),
+        },
+        "package_root": {
+            "type": "string",
+            "required": True,
+            "description": "Repo-local path that holds the implementation package",
+        },
+        "probe": {
+            "type": "object",
+            "required": True,
+            "description": "Probe descriptor (kind + entrypoint) for runtime verification",
+        },
+        "required_env": {
+            "type": "array",
+            "description": "Env var names the implementation requires at runtime",
+            "element": {"type": "string"},
+        },
+        "required_secret_files": {
+            "type": "array",
+            "description": "Secret-file paths the implementation requires at runtime",
+            "element": {"type": "string"},
+        },
+        "tool_paths": {
+            "type": "array",
+            "description": "Repo-local paths to tools provided by this implementation",
+            "element": {"type": "string"},
+        },
+        "tool_target": {
+            "type": "object",
+            "description": (
+                "Optional tool-bundle mount target: source (repo-local), "
+                "target (absolute container path), expose_commands (PATH shims)"
+            ),
+        },
+        "skill_path": {
+            "type": "string",
+            "description": "Repo-local path to the implementation's skill bundle",
+        },
+        "primer_path": {
+            "type": "string",
+            "description": "Repo-local path to the implementation's primer doc",
+        },
+        "notes": {
+            "type": "string",
+            "description": "Free-form notes",
+        },
+    }
 
     @classmethod
     def validate(cls, payload: Any) -> None:  # noqa: C901 — flat checks

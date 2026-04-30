@@ -22,6 +22,19 @@ VALID_ASSET_TYPES = (
     "docs", "musing", "status", "*",
 )
 
+
+SYNOPSIS = {
+    "summary": (
+        "Per-(org, asset_type) agentic actions exposed in the dashboard's "
+        "actions dropdown"
+    ),
+    "nouns": [
+        "agent action", "dashboard action", "action menu",
+        "agentic action", "asset action",
+    ],
+    "related_set_ids": [],
+}
+
 _ALLOWED_FIELDS = {
     "asset_type", "label", "icon", "model", "prompt_template",
     "estimated_seconds", "writes", "universal",
@@ -38,6 +51,51 @@ class AgentActionV1(SettingSchema):
 
     set_id = AGENT_ACTIONS_SET_ID
     schema_revision = AGENT_ACTIONS_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "asset_type": {
+            "type": "string",
+            "required": True,
+            "description": "Asset kind this action applies to",
+            "enum": list(VALID_ASSET_TYPES),
+        },
+        "label": {
+            "type": "string",
+            "required": True,
+            "description": "Human-readable label shown in the dashboard dropdown",
+        },
+        "model": {
+            "type": "string",
+            "required": True,
+            "description": "Anthropic model id for the action (required unless universal)",
+        },
+        "prompt_template": {
+            "type": "string",
+            "required": True,
+            "description": "Prompt template fed to the model (required unless universal)",
+        },
+        "icon": {
+            "type": "string",
+            "description": "Icon identifier for the dropdown row",
+        },
+        "estimated_seconds": {
+            "type": "integer",
+            "description": "Approximate runtime in seconds, used for the progress UI",
+        },
+        "writes": {
+            "type": "array",
+            "description": "Identifiers of assets this action writes to (e.g. for cache invalidation)",
+            "element": {"type": "string"},
+        },
+        "universal": {
+            "type": "boolean",
+            "description": (
+                "When true, the action runs without a model/prompt_template "
+                "(universal harness handles it)"
+            ),
+            "default": False,
+        },
+    }
 
     @classmethod
     def validate(cls, payload: Any) -> None:  # noqa: C901 — flat checks
