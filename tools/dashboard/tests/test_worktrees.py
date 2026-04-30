@@ -577,6 +577,41 @@ class TestWorktreePage:
         assert "bg-amber-200" in js
         assert "animate-pulse" in js
 
+    def test_pr_navigator_template_and_helpers_wired(self):
+        """The on-card PR/commit navigator (settled design 3435e03f, lines
+        205-258) renders only when the row has a PR, exposes one PR row
+        plus one row per commit, and ties click handlers to
+        ``openReviewPr`` / ``openReviewCommit``."""
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        # Navigator gate: only renders when rowPr is non-null.
+        assert 'data-testid="pr-navigator"' in template
+        assert 'data-testid="pr-navigator-pr-row"' in template
+        assert 'data-testid="pr-navigator-commit-row"' in template
+        # PR row binds to openReviewPr; per-commit rows bind to openReviewCommit.
+        assert '@click="openReviewPr(item.row)"' in template
+        assert '@click="openReviewCommit(item.row, idx)"' in template
+        # Both rows render the icon disc strip with checkIconClass coloring.
+        assert ':class="checkIconClass(check.status)"' in template
+        assert 'x-text="check.icon"' in template
+        # PR row uses rowPrChecks; commit rows use reviewCommitChecks.
+        assert 'check in rowPrChecks(item.row)' in template
+        assert 'check in reviewCommitChecks(commit)' in template
+
+        # Helpers exist with the expected shapes.
+        assert "rowPrChecks(row) {" in js
+        assert "reviewCommitChecks(_commit)" in js  # Returns [] until per-commit data lands.
+        assert "checkIconClass(status) {" in js
+        assert "openReviewPr(row) {" in js
+        assert "openReviewCommit(row, idx) {" in js
+        assert "openReviewDefault(row) {" in js
+        # Disc colors lifted from the design — emerald pass, amber running,
+        # rose fail, white pending.
+        assert "border-emerald-300/20 bg-emerald-300/12 text-emerald-100" in js
+        assert "border-amber-300/20 bg-amber-300/12 text-amber-100" in js
+        assert "border-rose-300/20 bg-rose-300/12 text-rose-100" in js
+
 
 # ── Worktrees row-scoped GitHub operation surface (auto-ltibi) ─────────
 
@@ -1003,7 +1038,7 @@ class TestNormalizeReviewPayload:
         assert review["aggregate_state"] == "green"
         assert review["running"] is False
         assert review["checks"] == [
-            {"id": "build", "label": "build", "status": "pass", "detail": None}
+            {"id": "build", "icon": "B", "label": "build", "status": "pass", "detail": None}
         ]
 
     def test_check_run_completed_failure_marks_yellow(self):
@@ -1044,8 +1079,12 @@ class TestNormalizeReviewPayload:
         )
         review = wg.normalize_review_payload(raw)
         assert review["aggregate_state"] == "yellow"
+        # ``ci/circleci`` strips the ``ci/`` prefix and yields ``C`` (a single
+        # alpha glyph from the trailing token); navigator collisions across
+        # CI providers are disambiguated by the full ``label``.
         assert review["checks"] == [{
             "id": "ci/circleci",
+            "icon": "C",
             "label": "ci/circleci",
             "status": "fail",
             "detail": "step failed: build",
@@ -1093,6 +1132,46 @@ class TestNormalizeReviewPayload:
         review = wg.normalize_review_payload(raw)
         assert review["checks"] == []
         assert review["aggregate_state"] == "green"
+
+    def test_check_icon_derives_glyph_from_label(self):
+        """``icon`` is a 1–2 char glyph derived from the check label so
+        the navigator can render disc-sized badges. Path prefixes are
+        stripped; multi-token labels yield two-char glyphs."""
+        from agents.capabilities.github import service as wg
+
+        # Single-token label → first letter uppercased.
+        assert wg._icon_from_label("build") == "B"
+        assert wg._icon_from_label("test") == "T"
+        # Path prefix is stripped (last segment after / wins).
+        assert wg._icon_from_label("ci/circleci") == "C"
+        # Multi-token labels (separated by space, dash, underscore) yield
+        # the first alpha char of each of the first two tokens.
+        assert wg._icon_from_label("build_lint") == "BL"
+        assert wg._icon_from_label("integration test") == "IT"
+        assert wg._icon_from_label("e2e-suite") == "ES"
+        # Defensive: empty / non-alpha → ``?``.
+        assert wg._icon_from_label("") == "?"
+        assert wg._icon_from_label("   ") == "?"
+        assert wg._icon_from_label("///") == "?"
+
+    def test_running_check_carries_icon(self):
+        """End-to-end: an in-progress check normalizes with both status
+        and icon so the UI's check disc renders correctly."""
+        from agents.capabilities.github import service as wg
+
+        raw = (
+            '{"number": 1, "state": "OPEN", "statusCheckRollup": ['
+            '{"__typename": "CheckRun", "name": "tests", "status": "IN_PROGRESS"}'
+            ']}'
+        )
+        review = wg.normalize_review_payload(raw)
+        assert review["checks"] == [{
+            "id": "tests",
+            "icon": "T",
+            "label": "tests",
+            "status": "running",
+            "detail": None,
+        }]
 
 
 # ── Capability probe (autonomy/github) ────────────────────────────────

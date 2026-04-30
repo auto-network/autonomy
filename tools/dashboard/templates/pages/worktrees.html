@@ -261,6 +261,50 @@
                 </button>
               </div>
 
+              <template x-if="rowPr(item.row)">
+                <div class="mt-4 min-w-0" data-testid="pr-navigator">
+                  <div class="divide-y divide-white/10 border-y border-white/10">
+                    <button type="button"
+                            class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"
+                            @click="openReviewPr(item.row)"
+                            data-testid="pr-navigator-pr-row">
+                      <span class="rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-300">PR</span>
+                      <span class="min-w-0 truncate text-sm text-slate-200"
+                            x-text="rowPr(item.row).title"></span>
+                      <span class="flex shrink-0 items-center gap-1.5">
+                        <template x-for="check in rowPrChecks(item.row)" :key="'card-pr-' + check.id">
+                          <span class="inline-flex h-7 w-7 items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
+                                :class="checkIconClass(check.status)"
+                                :title="check.label + ' — ' + check.status + (check.detail ? ': ' + check.detail : '')">
+                            <span x-text="check.icon"></span>
+                          </span>
+                        </template>
+                      </span>
+                    </button>
+                    <template x-for="(commit, idx) in commitList(item.row)" :key="'card-' + rowKey(item.row) + '/' + commit.sha">
+                      <button type="button"
+                              class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"
+                              @click="openReviewCommit(item.row, idx)"
+                              data-testid="pr-navigator-commit-row">
+                        <span class="rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-300"
+                              x-text="commit.short_sha || shortSha(commit.sha)"></span>
+                        <span class="min-w-0 truncate text-sm text-slate-200"
+                              x-text="commit.subject"></span>
+                        <span class="flex shrink-0 items-center gap-1.5">
+                          <template x-for="check in reviewCommitChecks(commit)" :key="'card-' + commit.sha + '-' + check.id">
+                            <span class="inline-flex h-7 w-7 items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
+                                  :class="checkIconClass(check.status)"
+                                  :title="check.label + ' — ' + check.status">
+                              <span x-text="check.icon"></span>
+                            </span>
+                          </template>
+                        </span>
+                      </button>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
               <div class="mt-4 min-w-0">
                 <div class="mb-2 flex items-center justify-between gap-3">
                   <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Changed in this commit</div>

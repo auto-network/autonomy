@@ -471,6 +471,77 @@
         return tone + (this.prIsFlashing(pr) ? ' animate-pulse' : '');
       },
 
+      // Per-PR check list for the on-card navigator. Each entry has
+      // ``{id, icon, label, status, detail}`` from the capability's
+      // normalize_review_payload (settled design 3435e03f, lines 215-226).
+      rowPrChecks(row) {
+        const pr = this.rowPr(row);
+        return (pr && pr.pr_checks) || [];
+      },
+
+      // Per-commit checks. gh's statusCheckRollup is keyed to the PR's
+      // head SHA, not individual commits, so the v1 capability surface
+      // doesn't expose per-commit checks. Return [] until that lands.
+      reviewCommitChecks(_commit) {
+        return [];
+      },
+
+      // Disc styling for navigator check icons. Lifted verbatim from
+      // the settled design's checkIconClass helper.
+      checkIconClass(status) {
+        if (status === 'pass') return 'border-emerald-300/20 bg-emerald-300/12 text-emerald-100';
+        if (status === 'running') return 'border-amber-300/20 bg-amber-300/12 text-amber-100';
+        if (status === 'pending') return 'border-white/10 bg-white/[0.03] text-slate-300';
+        if (status === 'fail') return 'border-rose-300/20 bg-rose-300/12 text-rose-100';
+        return 'border-white/10 bg-white/[0.03] text-slate-300';
+      },
+
+      // Compact "X commits" label used by the navigator card header.
+      commitCountLabel(row) {
+        const n = this.commitList(row).length;
+        if (n === 0) return 'no commits';
+        if (n === 1) return '1 commit';
+        return n + ' commits';
+      },
+
+      // Navigator click handlers. Until the PR-mode review overlay lands
+      // (separate chunk), all three route to the existing commit-review
+      // path: PR row falls through to commit 0, individual rows pick the
+      // chosen commit. The bindings are faithful to the settled design so
+      // the PR-mode overlay can replace these without template churn.
+      _itemForCommit(row, idx) {
+        const commits = this.commitList(row);
+        const commit = commits[idx];
+        if (!commit) return null;
+        return {
+          row,
+          commit,
+          commitIndex: idx,
+          position: idx + 1,
+          total: commits.length,
+        };
+      },
+
+      openReviewCommit(row, idx) {
+        const item = this._itemForCommit(row, idx);
+        if (item) this.selectCommit(item);
+      },
+
+      openReviewPr(row) {
+        // PR-mode overlay arrives in a follow-up chunk. For now, open
+        // the first commit as a stand-in so the PR row click is not a
+        // dead button.
+        this.openReviewCommit(row, 0);
+      },
+
+      openReviewDefault(row) {
+        if (this.rowPr(row)) {
+          this.openReviewPr(row);
+        } else {
+          this.openReviewCommit(row, 0);
+        }
+      },
+
       repoName(row) {
         return (row && row.repo_name) || 'unknown';
       },

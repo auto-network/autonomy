@@ -136,8 +136,42 @@ _AGGREGATE_GREEN = "green"
 _AGGREGATE_YELLOW = "yellow"
 
 
+def _icon_from_label(label: str) -> str:
+    """Derive a short glyph (1–2 chars) from a check label.
+
+    The Worktrees navigator renders one small disc per check with an
+    icon glyph inside (see settled design 3435e03f). gh's check names
+    are typically single tokens (``build``, ``test``, ``lint``) but
+    sometimes carry a path prefix like ``ci/circleci``. Strip the
+    prefix, uppercase the first alpha char, and grab a second from the
+    next token if there is one — that gives operator-recognizable
+    glyphs (``BL`` for build/lint, ``CC`` for ci/circleci) without
+    forcing the capability surface to know about every CI provider.
+    """
+    text = (label or "").strip()
+    if not text:
+        return "?"
+    # Path prefix: keep the segment after the last slash or colon.
+    for sep in ("/", ":"):
+        if sep in text:
+            text = text.rsplit(sep, 1)[-1]
+    text = text.strip()
+    if not text:
+        return "?"
+    # First two alpha characters from the leading word(s).
+    parts = [p for p in text.replace("_", " ").replace("-", " ").split() if p]
+    if not parts:
+        return "?"
+    first = next((c for c in parts[0] if c.isalpha()), "")
+    second = ""
+    if len(parts) >= 2:
+        second = next((c for c in parts[1] if c.isalpha()), "")
+    glyph = (first + second).upper()
+    return glyph[:2] or "?"
+
+
 def _normalize_check(entry: dict) -> dict | None:
-    """Map one ``statusCheckRollup`` entry to ``{id, label, status, detail}``.
+    """Map one ``statusCheckRollup`` entry to ``{id, icon, label, status, detail}``.
 
     ``gh`` returns two flavors of rollup entry:
       - check runs: ``{__typename: 'CheckRun', name, status, conclusion, ...}``
@@ -152,10 +186,13 @@ def _normalize_check(entry: dict) -> dict | None:
     label = entry.get("name") or entry.get("context") or entry.get("title") or ""
     label = str(label).strip() or "(unnamed check)"
     entry_id = entry.get("id") or entry.get("name") or entry.get("context") or label
+    icon = _icon_from_label(label)
 
     detail = entry.get("description") or entry.get("title") or None
     if detail is not None:
         detail = str(detail).strip()[:500] or None
+
+    base = {"id": entry_id, "icon": icon, "label": label, "detail": detail}
 
     # Check-run flavor: status + conclusion.
     status = entry.get("status")
@@ -166,23 +203,23 @@ def _normalize_check(entry: dict) -> dict | None:
             if conclusion == "SKIPPED":
                 return None
             if conclusion == "SUCCESS":
-                return {"id": entry_id, "label": label, "status": _CHECK_PASS, "detail": detail}
-            return {"id": entry_id, "label": label, "status": _CHECK_FAIL, "detail": detail}
+                return {**base, "status": _CHECK_PASS}
+            return {**base, "status": _CHECK_FAIL}
         if status_norm in {"IN_PROGRESS", "PENDING"}:
-            return {"id": entry_id, "label": label, "status": _CHECK_RUNNING, "detail": detail}
+            return {**base, "status": _CHECK_RUNNING}
         if status_norm == "QUEUED":
-            return {"id": entry_id, "label": label, "status": _CHECK_PENDING, "detail": detail}
+            return {**base, "status": _CHECK_PENDING}
 
     # Status-context flavor: state.
     state = entry.get("state")
     if state is not None:
         state_norm = str(state).upper()
         if state_norm == "SUCCESS":
-            return {"id": entry_id, "label": label, "status": _CHECK_PASS, "detail": detail}
+            return {**base, "status": _CHECK_PASS}
         if state_norm in {"FAILURE", "ERROR"}:
-            return {"id": entry_id, "label": label, "status": _CHECK_FAIL, "detail": detail}
+            return {**base, "status": _CHECK_FAIL}
         if state_norm == "PENDING":
-            return {"id": entry_id, "label": label, "status": _CHECK_PENDING, "detail": detail}
+            return {**base, "status": _CHECK_PENDING}
 
     return None
 
