@@ -1131,9 +1131,25 @@ def cmd_context(args):
     Cross-org aware: resolves the source via ``ops.get_source`` (own-first,
     then peer public surface) and opens the source's home-org DB for the
     turn read.
+
+    Accepts ``<turn>``, ``last`` (latest turn centered with --window), or
+    ``last:N`` (last N turns of the source as a tail-read).
     """
     org = os.environ.get("GRAPH_ORG")
     client = get_client()
+
+    # Parse the turn argument: integer | "last" | "last:N"
+    tail_n: int | None = None
+    raw_turn = args.turn
+    if isinstance(raw_turn, str) and raw_turn.startswith("last:"):
+        try:
+            tail_n = int(raw_turn.split(":", 1)[1])
+        except ValueError:
+            print(f"Invalid 'last:N' value: {raw_turn!r}", file=sys.stderr)
+            return
+        if tail_n < 1:
+            print("'last:N' requires N >= 1", file=sys.stderr)
+            return
 
     # Host-only carve-out: refresh session ingest so fresh local sessions
     # are searchable. Container delegates to the dashboard's own schedule.
@@ -1156,10 +1172,12 @@ def cmd_context(args):
     db = None
     close_db = False
     if isinstance(client, HttpClient):
-        # For integer turns we can push the slice server-side; for "last"
-        # we still need the full entry list to discover the max turn
-        # (no ?turn=last endpoint yet — see bead description, out of scope).
-        if args.turn != "last":
+        if tail_n is not None:
+            # Server resolves max turn + slice in a single round trip.
+            entries = (_read_source_full_via_api(
+                source["id"], org=org, tail_n=tail_n,
+            ) or {}).get("entries") or []
+        elif args.turn != "last":
             entries = (_read_source_full_via_api(
                 source["id"], org=org,
                 around_turn=int(args.turn), window=args.window,
@@ -1187,6 +1205,42 @@ def cmd_context(args):
             # CLIENT_EXEMPT: host-only — db is only bound in the non-HttpClient branch above.
             entries = db.get_source_content(source["id"])
         entries = entries or []
+
+        # last:N — render the trailing N turns as a tail (no centered
+        # window, no marker). For container mode the server already
+        # delivered exactly the trailing slice; for host mode we filter
+        # locally off the full entry list.
+        if tail_n is not None:
+            if db is not None:
+                # CLIENT_EXEMPT: host-only — see cmd_context db-binding comment above.
+                max_turn = db.get_latest_turn(source["id"])
+            else:
+                max_turn = max(
+                    (e.get("turn_number") or 0 for e in entries),
+                    default=None,
+                )
+            if max_turn is None:
+                print("No turns found for this source", file=sys.stderr)
+                return
+            lo = max_turn - tail_n + 1
+            relevant = [
+                e for e in entries
+                if (e.get("turn_number") or 0) >= lo
+            ]
+            proj = f" [{source['project']}]" if source.get('project') else ""
+            print(f"Source: {source.get('title', '?')[:60]}{proj}")
+            print(f"Showing last {tail_n} turns ({lo}–{max_turn})")
+            print(f"{'─' * 72}")
+            for e in relevant:
+                turn = e.get("turn_number", "?")
+                etype = e.get("entry_type", "?")
+                label = "USER" if etype == "thought" else "ASSISTANT"
+                content = e["content"]
+                if args.max_chars and len(content) > args.max_chars:
+                    content = content[:args.max_chars] + f"\n... [{len(content) - args.max_chars} chars truncated]"
+                print(f"\n## Turn {turn} — {label}")
+                print(content)
+            return
 
         # Resolve "last" keyword to max turn number
         if args.turn == "last":
@@ -1233,34 +1287,45 @@ def cmd_context(args):
             db.close()
 
 
+def cmd_tail(args):
+    """Read the last N turns of a source.
+
+    Convenience wrapper around ``graph context <src> last:N`` for the
+    common case of "give me the bottom of this session, full stop."
+    """
+    args.turn = f"last:{args.n}"
+    args.window = 0
+    cmd_context(args)
+
+
 def _read_source_full_via_api(
     source_id: str,
     *,
     org: str | None,
     around_turn: int | None = None,
     window: int | None = None,
+    tail_n: int | None = None,
 ) -> dict | None:
     """Container-mode source-content read: go through /api/graph/{id}
     which returns the full ``read_source_full`` payload.
 
-    When ``around_turn`` / ``window`` are supplied, push the slice
-    server-side via ``?turn=&window=`` so the CLI doesn't fetch every
-    entry only to filter in Python.
+    Thin wrapper around :meth:`HttpClient.read_source_full`. When
+    ``around_turn`` / ``window`` are supplied, the slice is pushed
+    server-side; when ``tail_n`` is supplied, the call goes out as
+    ``?from=-N`` so the server resolves max-turn + slice in one round
+    trip.
     """
     client = get_client()
     if not isinstance(client, HttpClient):
         return None
-    params: dict[str, str] = {}
+    kwargs: dict = {"org": org}
     if around_turn is not None:
-        params["turn"] = str(around_turn)
+        kwargs["around_turn"] = around_turn
     if window is not None:
-        params["window"] = str(window)
-    try:
-        return client._get(
-            f"/api/graph/{source_id}", params=params or None, org=org,
-        )
-    except LookupError:
-        return None
+        kwargs["window"] = window
+    if tail_n is not None:
+        kwargs["tail_n"] = tail_n
+    return client.read_source_full(source_id, **kwargs)
 
 
 def cmd_entities(args):
@@ -4071,10 +4136,24 @@ def main():
     # context
     p = sub.add_parser("context", help="Show turns around a search hit")
     p.add_argument("source", help="Source ID or prefix")
-    p.add_argument("turn", type=str, help="Turn number to center on (or 'last')")
+    p.add_argument(
+        "turn",
+        type=str,
+        help="Turn number to center on, 'last' (latest turn + window), "
+             "or 'last:N' (trailing N turns of the source)",
+    )
     p.add_argument("--window", type=int, default=3, help="Turns before/after (default 3)")
     p.add_argument("--max-chars", type=int, default=0, help="Max chars per turn (0=unlimited)")
     p.set_defaults(func=cmd_context)
+
+    # tail
+    p = sub.add_parser("tail", help="Read the last N turns of a source")
+    p.add_argument("source", help="Source ID or prefix")
+    p.add_argument("n", type=int, nargs="?", default=10,
+                   help="Number of trailing turns to print (default 10)")
+    p.add_argument("--max-chars", type=int, default=0,
+                   help="Max chars per turn (0=unlimited)")
+    p.set_defaults(func=cmd_tail)
 
     # entities
     p = sub.add_parser("entities", help="List or search entities")

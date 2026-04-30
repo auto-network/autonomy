@@ -144,3 +144,84 @@ def test_read_source_full_window_clamps_at_source_bounds(graph_db_env):
     result = ops.read_source_full(src.id, around_turn=999, window=2)
     assert result is not None
     assert result["entries"] == []
+
+
+def test_read_source_full_tail_n_returns_last_n_turns(graph_db_env):
+    """``tail_n=N`` returns exactly the last N turns of the source.
+
+    Locks in the ``?from=-N`` server-side resolution: callers ask for
+    "the tail" without doing two round trips + JSON-string metadata
+    parsing to find ``MAX(turn_number)`` first.
+    """
+    db = GraphDB(str(graph_db_env))
+    src = _seed_long_session(db, turns=50)
+    db.close()
+
+    result = ops.read_source_full(src.id, max_chars=2000, tail_n=7)
+    assert result is not None
+    entries = result["entries"]
+    turns = [e["turn_number"] for e in entries]
+    assert turns == list(range(44, 51))
+    # max_chars cap must not truncate inside the tail slice — same rule
+    # as ``around_turn`` mode (live readers need complete trailing turns).
+    for e in entries:
+        assert len(e["content"]) >= 800
+
+
+def test_read_source_full_tail_n_clamps_at_source_size(graph_db_env):
+    """``tail_n`` larger than the total turn count returns every entry,
+    not an error."""
+    db = GraphDB(str(graph_db_env))
+    src = _seed_long_session(db, turns=5)
+    db.close()
+
+    result = ops.read_source_full(src.id, tail_n=100)
+    assert result is not None
+    turns = [e["turn_number"] for e in result["entries"]]
+    assert turns == [1, 2, 3, 4, 5]
+
+
+def test_read_source_full_tail_n_bypasses_max_chars_cap(graph_db_env):
+    """A 50-turn session at ~800 chars/turn exceeds the default 50K cap
+    when read front-to-back (the legacy default truncates). ``tail_n``
+    must skip the cap so live tails always render in full — that's the
+    whole point of the bead, per ``a5134fd1-…`` (679 turns)."""
+    db = GraphDB(str(graph_db_env))
+    # 80 turns * ~800 chars > 50K — front-of-source read truncates.
+    src = _seed_long_session(db, turns=80)
+    db.close()
+
+    # Front-of-source read truncates at default cap (sanity check).
+    front = ops.read_source_full(src.id)
+    assert front is not None
+    assert front["truncated"] is True
+
+    # Tail read does not truncate, even though total content > 50K.
+    tail = ops.read_source_full(src.id, tail_n=20)
+    assert tail is not None
+    assert tail["truncated"] is False
+    turns = [e["turn_number"] for e in tail["entries"]]
+    assert turns == list(range(61, 81))
+    for e in tail["entries"]:
+        assert len(e["content"]) >= 800
+
+
+def test_read_source_full_tail_n_empty_source(graph_db_env):
+    """A source with no thoughts/derivations returns an empty list under
+    ``tail_n`` — no SQL error from the MAX() resolver."""
+    db = GraphDB(str(graph_db_env))
+    src = Source(
+        type="session",
+        platform="claude-code",
+        project="autonomy",
+        title="empty",
+        file_path="session:empty",
+        metadata={},
+    )
+    db.insert_source(src)
+    db.conn.commit()
+    db.close()
+
+    result = ops.read_source_full(src.id, tail_n=5)
+    assert result is not None
+    assert result["entries"] == []
