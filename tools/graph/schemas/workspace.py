@@ -31,6 +31,23 @@ WORKSPACE_SET_ID = "autonomy.workspace"
 WORKSPACE_REVISION = 1
 
 
+SYNOPSIS = {
+    "summary": (
+        "Workspace declarations: container image, harness, repos, "
+        "mounts, env, dispatch labels"
+    ),
+    "nouns": [
+        "workspace", "session container", "rename workspace",
+        "image", "harness", "dispatch labels", "repos",
+    ],
+    "related_set_ids": [
+        "autonomy.workspace.artifact#1",
+        "autonomy.workspace.mount#1",
+        "autonomy.workspace.capability.enable#1",
+    ],
+}
+
+
 # ── Valid repo mount shape ──────────────────────────────────
 
 _REPO_REQUIRED = ("url", "mount")
@@ -91,6 +108,78 @@ class WorkspaceV1(SettingSchema):
         "env_from_host": list,
         "tags": list,
         "dispatch_labels": list,
+    }
+
+    _field_metadata: dict[str, dict] = {
+        "name": {
+            "type": "string",
+            "required": True,
+            "description": "Workspace identifier (matches the Setting key)",
+        },
+        "image": {
+            "type": "string",
+            "required": True,
+            "description": "Container image to launch (e.g. autonomy-base:latest)",
+        },
+        "description": {
+            "type": "string",
+            "description": "Human-readable description of the workspace",
+        },
+        "harness": {
+            "type": "string",
+            "description": "Agent CLI to launch inside the container",
+            "enum": sorted(_VALID_HARNESSES),
+            "default": "claude",
+        },
+        "working_dir": {
+            "type": "string",
+            "description": "Working directory inside the container at agent start",
+        },
+        "startup": {
+            "type": "string",
+            "description": "Shell command(s) to run before launching the harness",
+        },
+        "dind": {
+            "type": "boolean",
+            "description": "Mount host docker socket (Docker-in-Docker)",
+            "default": False,
+        },
+        "network_host": {
+            "type": "boolean",
+            "description": "Use --network=host so the container can reach localhost services",
+            "default": False,
+        },
+        "repos": {
+            "type": "array",
+            "description": "Repos to mount as worktrees inside the container",
+            "element": {
+                "url": {"type": "string", "required": True,
+                        "description": "Git repository URL or path"},
+                "mount": {"type": "string", "required": True,
+                          "description": "Container path to mount the worktree at"},
+                "writable": {"type": "boolean", "default": False,
+                             "description": "Whether the worktree mount is writable"},
+            },
+        },
+        "env": {
+            "type": "object",
+            "description": "Environment variables (string -> string) passed into the container",
+        },
+        "env_from_host": {
+            "type": "array",
+            "description": "Names of host env vars to forward into the container",
+            "element": {"type": "string"},
+        },
+        "tags": {
+            "type": "array",
+            "description": "Free-form tags (e.g. dashboard filters)",
+            "element": {"type": "string"},
+        },
+        "dispatch_labels": {
+            "type": "array",
+            "description": "Dispatch routing labels — beads matching any label dispatch here",
+            "element": {"type": "string"},
+        },
     }
 
     @classmethod

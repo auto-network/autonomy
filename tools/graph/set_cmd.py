@@ -399,7 +399,10 @@ def cmd_set_add(args) -> None:
             org=_org(args),
         )
     except SchemaValidationError as e:
-        print(f"Error: schema validation failed: {e}", file=sys.stderr)
+        # Surface the validator's message verbatim — schemas already name
+        # the failing field, expected shape, and observed value. Wrapping
+        # with a generic prefix would mask that signal.
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"  ✓ Setting: {sid[:11]}  {set_id}#{rev}  key={args.key}  [{args.state}]")
 
@@ -416,7 +419,8 @@ def cmd_set_override(args) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except SchemaValidationError as e:
-        print(f"Error: merged payload fails validation: {e}", file=sys.stderr)
+        # Surface the validator's message verbatim (see cmd_set_add).
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"  ✓ Override: {sid[:11]}  supersedes={target_id[:11]}  [{args.state}]")
 
@@ -492,6 +496,293 @@ def cmd_set_remove(args) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"  ✓ Removed: {sid[:11]}")
+
+
+# ── schema / example / find ─────────────────────────────────
+
+
+def _split_schema_addr(spec: str) -> tuple[str, int | None]:
+    """Parse ``autonomy.workspace`` or ``autonomy.workspace#1`` into
+    ``(set_id, revision-or-None)``. Errors with ``sys.exit(1)`` if the
+    revision suffix is malformed.
+    """
+    if "#" not in spec:
+        return spec, None
+    set_id, rev = spec.rsplit("#", 1)
+    try:
+        return set_id, int(rev)
+    except ValueError:
+        print(f"Error: revision must be an integer in {spec!r}",
+              file=sys.stderr)
+        sys.exit(1)
+
+
+def _resolve_schema_member(
+    spec: str, *, org: str | None,
+):
+    """Look up the ``autonomy.schema`` Setting that holds *spec*'s json-schema.
+
+    *spec* is ``set_id`` (latest revision wins) or ``set_id#rev`` (exact).
+    On miss prints to stderr and exits 1; on success returns the
+    :class:`ResolvedSetting` member whose payload is the json-schema.
+    """
+    set_id, rev = _split_schema_addr(spec)
+    members = get_client().read_set("autonomy.schema", org=org)
+    matches = [
+        m for m in members.members
+        if m.key.startswith(f"{set_id}#")
+    ]
+    if not matches:
+        scope = f" in org {org!r}" if org else ""
+        print(
+            f"Error: no schema registered for {set_id!r}{scope}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if rev is None:
+        # Latest revision wins. Tie-break is unlikely (revisions are unique
+        # per set_id), but sort numerically just in case.
+        matches.sort(key=lambda m: _key_revision(m.key))
+        return matches[-1]
+    target_key = f"{set_id}#{rev}"
+    chosen = next((m for m in matches if m.key == target_key), None)
+    if chosen is None:
+        print(
+            f"Error: no schema for {target_key} (registered: "
+            f"{[m.key for m in matches]})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return chosen
+
+
+def _key_revision(key: str) -> int:
+    """Pull the integer revision out of a ``set_id#N`` key, defaulting to 0."""
+    try:
+        return int(key.rsplit("#", 1)[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _format_property(
+    name: str, prop: dict, *, indent: str = "    ",
+) -> list[str]:
+    """Render one property as a list of pretty-printed lines."""
+    type_str = prop.get("type", "any")
+    parts = [f"{name} ({type_str})"]
+    if "enum" in prop:
+        parts.append(f"[enum: {', '.join(map(str, prop['enum']))}]")
+    if "default" in prop:
+        parts.append(f"[default: {json.dumps(prop['default'])}]")
+    head = f"{indent}{' '.join(parts)}"
+    lines = [head]
+    desc = prop.get("description")
+    if desc:
+        lines.append(f"{indent}  {desc}")
+    element = prop.get("element")
+    if isinstance(element, dict):
+        # Two flavors of element shape:
+        #   1) a per-field dict of {field_name: meta_dict}
+        #   2) a single shape dict (e.g. {"type": "string"})
+        if all(isinstance(v, dict) for v in element.values()):
+            lines.append(f"{indent}  Element shape:")
+            for sub_name, sub_meta in element.items():
+                sub_lines = _format_property(
+                    sub_name, sub_meta, indent=indent + "    ",
+                )
+                # Mark required sub-fields inline.
+                if sub_meta.get("required"):
+                    sub_lines[0] = sub_lines[0] + "  [required]"
+                lines.extend(sub_lines)
+        else:
+            lines.append(f"{indent}  Element type: {element.get('type','any')}")
+    return lines
+
+
+def _print_schema(key: str, payload: Any) -> None:
+    """Pretty-print a json-schema payload for ``graph set schema``."""
+    if not isinstance(payload, dict):
+        print(json.dumps(payload, indent=2))
+        return
+    set_id = payload.get("set_id", key.rsplit("#", 1)[0])
+    rev = payload.get("schema_revision", _key_revision(key))
+    properties: dict = payload.get("properties") or {}
+    required_list: list = list(payload.get("required") or [])
+    required_set = set(required_list)
+
+    print(f"{set_id}#{rev}")
+    print()
+    if not properties:
+        print("  (no fields declared in _field_metadata)")
+        return
+
+    # Walk the canonical ``required`` list first to preserve the schema's
+    # declared field order — sorting is for storage, not for display.
+    req_props = [(n, properties[n]) for n in required_list if n in properties]
+    opt_props = sorted(
+        ((n, p) for n, p in properties.items() if n not in required_set),
+        key=lambda kv: kv[0],
+    )
+
+    if req_props:
+        print("  Required fields:")
+        for n, p in req_props:
+            for line in _format_property(n, p):
+                print(line)
+        print()
+    if opt_props:
+        print("  Optional fields:")
+        for n, p in opt_props:
+            for line in _format_property(n, p):
+                print(line)
+
+
+def cmd_set_schema(args) -> None:
+    member = _resolve_schema_member(args.spec, org=_org(args))
+    _print_schema(member.key, member.payload)
+
+
+def _placeholder(name: str, prop: dict) -> Any:
+    """Pick a placeholder value for ``set example`` JSON output.
+
+    Order: explicit ``default`` > first ``enum`` value > type-driven
+    placeholder (``"<name>"`` for strings; type-appropriate empty for
+    arrays/objects/booleans/numbers).
+    """
+    if "default" in prop:
+        return prop["default"]
+    if prop.get("enum"):
+        return prop["enum"][0]
+    t = prop.get("type", "string")
+    if t == "string":
+        return f"<{name}>"
+    if t == "integer":
+        return 0
+    if t == "number":
+        return 0
+    if t == "boolean":
+        return False
+    if t == "array":
+        # If the element shape declares required sub-fields, hand the
+        # operator a single populated stub element instead of an empty
+        # list. Required-array fields with rich element shapes are the
+        # ones operators actually need a starter for (e.g. workspace
+        # `repos` -> `[{"url": "<url>", "mount": "<mount>"}]`).
+        element = prop.get("element")
+        if (isinstance(element, dict)
+                and all(isinstance(v, dict) for v in element.values())
+                and any(v.get("required") for v in element.values())):
+            stub = {}
+            for sub_name, sub_meta in element.items():
+                if sub_meta.get("required"):
+                    stub[sub_name] = _placeholder(sub_name, sub_meta)
+            return [stub]
+        return []
+    if t == "object":
+        return {}
+    return None
+
+
+def _build_example(json_schema: dict) -> dict:
+    """Build a stub payload from an exported json-schema.
+
+    Includes only required fields — optional fields are omitted so the
+    output is a minimal valid starting point. Operators add optional
+    fields by reading ``set schema`` for descriptions.
+    """
+    out: dict = {}
+    required = json_schema.get("required") or []
+    properties = json_schema.get("properties") or {}
+    for name in required:
+        prop = properties.get(name) or {}
+        out[name] = _placeholder(name, prop)
+    return out
+
+
+def cmd_set_example(args) -> None:
+    member = _resolve_schema_member(args.spec, org=_org(args))
+    payload = member.payload if isinstance(member.payload, dict) else {}
+    stub = _build_example(payload)
+    print(json.dumps(stub, indent=2))
+
+
+def _haystack_for_synopsis(
+    key: str,
+    synopsis: Any,
+    schema_payload: Any,
+) -> str:
+    """Build the lowercase haystack used by ``set find`` ranking.
+
+    Combines (a) the synopsis's summary + nouns + related_set_ids and
+    (b) flattened schema field names, descriptions, and enum values.
+    Schema-side text is what lets ``find harness codex`` hit
+    ``autonomy.workspace#1`` even though "codex" only appears as an
+    enum value.
+    """
+    parts: list[str] = [key.lower()]
+    if isinstance(synopsis, dict):
+        s = synopsis.get("summary")
+        if isinstance(s, str):
+            parts.append(s.lower())
+        for n in synopsis.get("nouns") or []:
+            if isinstance(n, str):
+                parts.append(n.lower())
+        for r in synopsis.get("related_set_ids") or []:
+            if isinstance(r, str):
+                parts.append(r.lower())
+    if isinstance(schema_payload, dict):
+        for name, prop in (schema_payload.get("properties") or {}).items():
+            parts.append(str(name).lower())
+            if isinstance(prop, dict):
+                d = prop.get("description")
+                if isinstance(d, str):
+                    parts.append(d.lower())
+                for ev in prop.get("enum") or []:
+                    parts.append(str(ev).lower())
+    return " ".join(parts)
+
+
+def _all_terms_score(haystack: str, terms: list[str]) -> int:
+    """Return total occurrence count if ALL terms appear, else 0."""
+    score = 0
+    for t in terms:
+        c = haystack.count(t)
+        if c == 0:
+            return 0
+        score += c
+    return score
+
+
+def cmd_set_find(args) -> None:
+    terms = [t.lower() for t in (args.terms or []) if t]
+    if not terms:
+        print("Error: at least one search term required", file=sys.stderr)
+        sys.exit(1)
+    org = _org(args)
+    syn = get_client().read_set("autonomy.schema.synopsis", org=org)
+    sch = get_client().read_set("autonomy.schema", org=org)
+    schema_by_key = {
+        m.key: m.payload for m in sch.members if isinstance(m.payload, dict)
+    }
+    ranked: list[tuple[int, str, str]] = []
+    for m in syn.members:
+        haystack = _haystack_for_synopsis(
+            m.key, m.payload, schema_by_key.get(m.key),
+        )
+        score = _all_terms_score(haystack, terms)
+        if score > 0:
+            summary = ""
+            if isinstance(m.payload, dict):
+                summary = m.payload.get("summary") or ""
+            ranked.append((score, m.key, summary))
+    if not ranked:
+        print(f"(no schema matches: {' '.join(terms)})")
+        return
+    # Highest score first; ties broken by key for deterministic output.
+    ranked.sort(key=lambda r: (-r[0], r[1]))
+    width = max(len(k) for _, k, _ in ranked)
+    for _score, key, summary in ranked:
+        print(f"{key:<{width}}  {summary}")
 
 
 # ── migrate ─────────────────────────────────────────────────
@@ -678,6 +969,40 @@ def attach_set_subparser(sub) -> None:
     )
     _add_org_arg(p_rem)
     p_rem.set_defaults(func=cmd_set_remove)
+
+    # schema — pretty-print field shape for a registered schema
+    p_schema = set_sub.add_parser(
+        "schema",
+        help="Print the registered schema for set_id (or set_id#rev)",
+    )
+    p_schema.add_argument(
+        "spec", metavar="SET_ID[#REV]",
+        help="Schema set_id (latest revision) or set_id#rev (exact)",
+    )
+    _add_org_arg(p_schema)
+    p_schema.set_defaults(func=cmd_set_schema)
+
+    # example — emit a JSON stub matching the schema's required fields
+    p_example = set_sub.add_parser(
+        "example",
+        help="Emit a stub JSON payload for a registered schema",
+    )
+    p_example.add_argument(
+        "spec", metavar="SET_ID[#REV]",
+        help="Schema set_id (latest revision) or set_id#rev (exact)",
+    )
+    _add_org_arg(p_example)
+    p_example.set_defaults(func=cmd_set_example)
+
+    # find — search curated synopses for a noun-layer match
+    p_find = set_sub.add_parser(
+        "find",
+        help="Find schemas by noun: searches synopsis + schema fields",
+    )
+    p_find.add_argument("terms", nargs="+", metavar="TERM",
+                        help="One or more search terms (all must match)")
+    _add_org_arg(p_find)
+    p_find.set_defaults(func=cmd_set_find)
 
     # migrate
     p_mig = set_sub.add_parser(

@@ -61,9 +61,12 @@ def test_existing_db_gains_orgs_table_on_reopen(tmp_path):
                 "PRAGMA table_info(orgs)"
             ).fetchall()
         }
-        # Survives.
+        # Survives. The fixture row remains; schema-meta rows are
+        # auto-flushed by every writable connection (auto-82xyq) so we
+        # exclude them from the count to keep the assertion stable.
         n_settings = db2.conn.execute(
-            "SELECT COUNT(*) FROM settings"
+            "SELECT COUNT(*) FROM settings "
+            "WHERE set_id NOT IN ('autonomy.schema', 'autonomy.schema.synopsis')"
         ).fetchone()[0]
     finally:
         db2.close()

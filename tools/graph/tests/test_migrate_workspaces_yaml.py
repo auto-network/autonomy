@@ -119,11 +119,18 @@ def orgs_dir(tmp_path) -> Path:
 
 
 def _settings_rows(org_db: Path) -> list[dict]:
+    """Return settings rows excluding the auto-flushed schema metadata.
+
+    ``autonomy.schema`` / ``autonomy.schema.synopsis`` rows land in every
+    writable DB at first connection (auto-82xyq) and would drown the
+    workspace-migration assertions in this module — filter them out.
+    """
     db = GraphDB(org_db)
     try:
         rows = db.conn.execute(
             "SELECT id, set_id, schema_revision, key, payload, "
-            "publication_state FROM settings"
+            "publication_state FROM settings "
+            "WHERE set_id NOT IN ('autonomy.schema', 'autonomy.schema.synopsis')"
         ).fetchall()
     finally:
         db.close()

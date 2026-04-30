@@ -33,6 +33,22 @@ SET_ID = "autonomy.workspace.mount"
 SCHEMA_REVISION = 1
 
 
+SYNOPSIS = {
+    "summary": (
+        "Workspace mount declarations: bind-mounted host directories at "
+        "arbitrary container paths"
+    ),
+    "nouns": [
+        "mount", "bind mount", "directory", "host path", "container path",
+        "ro", "rw", "read-only",
+    ],
+    "related_set_ids": [
+        "autonomy.workspace#1",
+        "autonomy.workspace.artifact#1",
+    ],
+}
+
+
 class WorkspaceMountV1(BaseModel):
     """Host directory bind-mounted into a workspace container.
 
@@ -83,6 +99,34 @@ class _WorkspaceMountSchemaAdapter(SettingSchema):
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
     model = WorkspaceMountV1
+
+    _field_metadata: dict[str, dict] = {
+        "host_path": {
+            "type": "string",
+            "required": True,
+            "description": "Absolute host path to the directory to mount",
+        },
+        "container_path": {
+            "type": "string",
+            "required": True,
+            "description": "Absolute path inside the container to mount at",
+        },
+        "mode": {
+            "type": "string",
+            "description": "Mount mode — 'ro' for read-only, 'rw' for writable",
+            "enum": ["ro", "rw"],
+            "default": "ro",
+        },
+        "description": {
+            "type": "string",
+            "description": "Operator-facing description of what this mount provides",
+        },
+        "required": {
+            "type": "boolean",
+            "description": "Whether the mount is required at workspace launch",
+            "default": True,
+        },
+    }
 
     @classmethod
     def validate(cls, payload) -> None:

@@ -26,9 +26,35 @@ SET_ID = "autonomy.org.peer-subscription"
 SCHEMA_REVISION = 1
 
 
+SYNOPSIS = {
+    "summary": (
+        "Per-operator peer-org subscription list for cross-org reads"
+    ),
+    "nouns": [
+        "peer", "subscription", "cross-org", "isolation", "subscribe",
+    ],
+    "related_set_ids": [
+        "autonomy.org#1",
+    ],
+}
+
+
 class OrgPeerSubscriptionV1(SettingSchema):
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "peers": {
+            "type": "array",
+            "required": True,
+            "description": (
+                "Peer-org slugs whose public surface this caller subscribes to. "
+                "Empty list = full isolation; omit the Setting entirely for the "
+                "default 'subscribe to all peers'."
+            ),
+            "element": {"type": "string"},
+        },
+    }
 
     @classmethod
     def validate(cls, payload: dict) -> None:
