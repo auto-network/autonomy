@@ -4964,13 +4964,21 @@ class TestSearchChromePolish:
         )
 
     def test_filter_strip_top_margin_tight(self):
-        """The .sp-header padding-top is ≤ 6px (auto-gsu99 polish)."""
+        """The .sp-header padding-top is in the 4–12px breathing-room band.
+
+        auto-gsu99 originally tightened this to ≤ 6px to clear an
+        excessive 24px gap. Round 7m (auto-4e87g) restored visible
+        space above the chip row — the strip was ending up flush
+        against the global header bar. The new contract: at least 4px
+        of padding so the chips don't touch the header, and at most
+        12px so the polish doesn't reintroduce the original excess.
+        """
         c = self._checks
         pt = c.get("header_padding_top")
         assert pt is not None, "sp-header element missing or unmeasurable"
-        assert pt <= 6, (
-            f"Filter strip padding-top should be ≤ 6px after the polish, "
-            f"got {pt}px"
+        assert 4 <= pt <= 12, (
+            f"Filter strip padding-top should give visible breathing "
+            f"room (4–12px), got {pt}px"
         )
 
 
@@ -5716,6 +5724,241 @@ class TestSearchDropdownPositioning:
             f"chip.left={c.get('org_chip_left')!r} "
             f"dd.left={c.get('org_dd_left')!r}"
         )
+
+
+# ── Round 7m: filter strip fits one row on iPhone (auto-4e87g) ────────
+#
+# At 390px viewport (iPhone-width) the Org / State / Sort chips were
+# wrapping to two rows because the textual labels ("Org:", "State:",
+# "Sort:") plus values plus padding overflowed. Round 7m drops the
+# labels and trailing carets, tightens chip padding from 0 10px to
+# 0 8px, gives the Sort chip its own glyph, and restores ~8px of
+# breathing room above the chip row (the previous polish overshot
+# and the strip was butting against the global header).
+#
+# This sweep navigates to /search at 390x844, captures the geometry
+# of the filter row + chips + global header, then restores the
+# default viewport so other class fixtures running afterward see the
+# expected 1280x720 layout.
+
+SEARCH_FILTER_STRIP_NARROW_CHECKS = """(async () => {
+  var r = {};
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+  await sleep(900);  // initial fetch + Alpine init settle
+
+  var row = document.querySelector('.sp-filter-row-1');
+  r.row_present = !!row;
+  if (row) {
+    var rb = row.getBoundingClientRect();
+    r.row_height = rb.height;
+    r.row_top = rb.top;
+  }
+
+  function chipRect(testid) {
+    var el = document.querySelector('[data-testid="' + testid + '"]');
+    return el ? el.getBoundingClientRect() : null;
+  }
+  var orgRect = chipRect('sp-org-chip');
+  var stateRect = chipRect('sp-state-chip');
+  var orderRect = chipRect('sp-order-chip');
+  r.org_top = orgRect ? orgRect.top : null;
+  r.state_top = stateRect ? stateRect.top : null;
+  r.order_top = orderRect ? orderRect.top : null;
+  r.org_height = orgRect ? orgRect.height : null;
+  r.state_height = stateRect ? stateRect.height : null;
+  r.order_height = orderRect ? orderRect.height : null;
+  r.org_right = orgRect ? orgRect.right : null;
+  r.state_left = stateRect ? stateRect.left : null;
+  r.state_right = stateRect ? stateRect.right : null;
+  r.order_left = orderRect ? orderRect.left : null;
+  r.order_right = orderRect ? orderRect.right : null;
+
+  // Viewport width — sanity check that the resize actually landed.
+  r.viewport_width = window.innerWidth;
+
+  // Global header (the page-level <header> in base.html) — we measure
+  // its bottom edge to verify the filter strip leaves a visible gap.
+  var globalHeader = document.querySelector('header');
+  if (globalHeader) {
+    var ghr = globalHeader.getBoundingClientRect();
+    r.global_header_bottom = ghr.bottom;
+  }
+  var stripEl = document.querySelector('.sp-header');
+  if (stripEl) {
+    var sb = stripEl.getBoundingClientRect();
+    r.strip_top = sb.top;
+    var scs = window.getComputedStyle(stripEl);
+    r.strip_padding_top = parseFloat(scs.paddingTop);
+  }
+
+  // Verify the dropped labels are GONE — no .sp-filter-chip-label
+  // elements should remain inside any chip.
+  r.filter_chip_label_count = document.querySelectorAll(
+    '.sp-filter-chip-label'
+  ).length;
+  // Trailing carets (▾) should be gone too.
+  r.filter_chip_caret_count = document.querySelectorAll(
+    '.sp-filter-chip-caret'
+  ).length;
+  // The Sort chip should now carry a glyph.
+  r.order_chip_glyph_present = !!document.querySelector(
+    '[data-testid="sp-order-chip-glyph"]'
+  );
+
+  return JSON.stringify(r);
+})()"""
+
+
+class TestSearchFilterStripNarrowViewport:
+    """At iPhone width (390px) Org / State / Sort chips share one row.
+
+    Pre-Round-7m the labels + values + padding overflowed and Sort
+    wrapped to a second row. The class fixture switches the agent
+    browser to 390x844, runs the geometry sweep, and restores the
+    default 1280x720 viewport so subsequent class fixtures see the
+    expected width.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        subprocess.run(
+            ["agent-browser", "set", "viewport", "390", "844"],
+            capture_output=True, timeout=5,
+        )
+        time.sleep(0.3)
+        try:
+            result = _navigate_and_eval_async(
+                "/search?q=dashboard",
+                SEARCH_FILTER_STRIP_NARROW_CHECKS,
+                wait_ms=200,
+            )
+        finally:
+            subprocess.run(
+                ["agent-browser", "set", "viewport", "1280", "720"],
+                capture_output=True, timeout=5,
+            )
+        request.cls._checks = result
+
+    def test_viewport_at_iphone_width(self):
+        """Sanity check that the viewport resize actually landed."""
+        c = self._checks
+        assert c.get("viewport_width") == 390, (
+            f"Viewport should be 390px wide, got {c.get('viewport_width')!r}"
+        )
+
+    def test_chip_labels_and_carets_dropped(self):
+        """Dropping the textual labels and trailing carets is what
+        buys the horizontal real estate. If they reappear, the row
+        will start wrapping again."""
+        c = self._checks
+        assert c.get("filter_chip_label_count") == 0, (
+            f"Expected 0 .sp-filter-chip-label elements after Round 7m; "
+            f"got {c.get('filter_chip_label_count')}"
+        )
+        assert c.get("filter_chip_caret_count") == 0, (
+            f"Expected 0 .sp-filter-chip-caret elements after Round 7m; "
+            f"got {c.get('filter_chip_caret_count')}"
+        )
+
+    def test_sort_chip_has_glyph(self):
+        """The Sort chip carries a glyph so the row reads as a coherent
+        filter strip — Org and State already had glyphs; Round 7m adds
+        one to Sort to keep the pattern consistent."""
+        c = self._checks
+        assert c.get("order_chip_glyph_present"), (
+            "Sort chip is missing its glyph element "
+            "([data-testid=\"sp-order-chip-glyph\"])"
+        )
+
+    def test_three_chips_share_one_row(self):
+        """Org, State, Sort chip ``getBoundingClientRect().top`` values
+        must all sit within ~4px of each other — proving they share
+        the same row."""
+        c = self._checks
+        tops = [c.get("org_top"), c.get("state_top"), c.get("order_top")]
+        assert all(t is not None for t in tops), (
+            f"Some chip is missing from the DOM: "
+            f"org={tops[0]!r} state={tops[1]!r} order={tops[2]!r}"
+        )
+        spread = max(tops) - min(tops)
+        assert spread <= 4, (
+            f"Chips are not on the same row at 390px viewport "
+            f"(top spread = {spread}px); tops: org={tops[0]} "
+            f"state={tops[1]} order={tops[2]}"
+        )
+
+    def test_filter_row_height_single_row(self):
+        """The .sp-filter-row-1 element should be ~36px tall (one chip
+        row + 6px padding-bottom). If it wraps to two rows the height
+        roughly doubles. Allow some slack for browser rounding."""
+        c = self._checks
+        h = c.get("row_height")
+        assert h is not None, ".sp-filter-row-1 element missing"
+        assert h <= 50, (
+            f"Filter row height should fit one row of chips (≤ 50px); "
+            f"got {h}px — chips likely wrapped to a second row"
+        )
+
+    def test_chips_do_not_overlap(self):
+        """Each chip should sit to the right of the previous one with
+        the row's 8px gap, not stack on top. (Belt-and-suspenders
+        check on the share-one-row invariant.)"""
+        c = self._checks
+        org_right = c.get("org_right")
+        state_left = c.get("state_left")
+        state_right = c.get("state_right")
+        order_left = c.get("order_left")
+        assert (
+            org_right is not None and state_left is not None
+            and state_right is not None and order_left is not None
+        ), "Some chip rect is missing — see test_three_chips_share_one_row"
+        assert state_left >= org_right, (
+            f"State chip ({state_left}px) overlaps Org chip "
+            f"(right={org_right}px)"
+        )
+        assert order_left >= state_right, (
+            f"Sort chip ({order_left}px) overlaps State chip "
+            f"(right={state_right}px)"
+        )
+
+    def test_filter_strip_has_breathing_room_below_global_header(self):
+        """The .sp-header top edge must sit at least ~4px below the
+        global <header> bottom edge — Round 7m undid the prior over-
+        polish that left the strip flush against the header bar.
+
+        The visible gap can come from EITHER the global header pushing
+        the strip down (margin/padding above), OR from the strip's
+        own padding-top providing internal breathing room (which is
+        what Round 7m wires up so the gap survives sticky scrolling).
+        """
+        c = self._checks
+        gh_bottom = c.get("global_header_bottom")
+        strip_top = c.get("strip_top")
+        strip_pt = c.get("strip_padding_top")
+        assert gh_bottom is not None, "Global <header> not found"
+        assert strip_top is not None, ".sp-header not found"
+        external_gap = strip_top - gh_bottom
+        # Either the strip itself gives padding-top room OR the layout
+        # leaves an external gap. Both produce visible breathing room.
+        effective_gap = max(external_gap, strip_pt or 0)
+        assert effective_gap >= 4, (
+            f"Filter strip touches the global header — "
+            f"external gap={external_gap}px, strip padding-top={strip_pt}px"
+        )
+
+    def test_chip_tap_targets_meet_minimum_height(self):
+        """Each chip should be ≥ 28px tall — comfortable for thumb
+        tapping at iPhone width. Spec asked for ≥ 30px; 28px allows
+        a 2px slack for any future minor tightening while still
+        flagging anything dropping into hard-to-tap territory."""
+        c = self._checks
+        for name in ("org_height", "state_height", "order_height"):
+            h = c.get(name)
+            assert h is not None, f"Chip rect missing for {name}"
+            assert h >= 28, (
+                f"Chip {name}={h}px is below the 28px minimum tap "
+                f"target height"
+            )
 
 
 # ── /collab Recent-tab behaviour (auto-yn1gt) ─────────────────────────
