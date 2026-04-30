@@ -916,3 +916,237 @@ class TestWorktreeGithubExecResultSerialization:
         assert data["branch"] == "session/auto-x"
         assert data["repo_slug"] == "anchore/autonomy"
         assert data["error_message"] == "gh CLI is not installed in the live container"
+
+
+# ── Review payload normalization ──────────────────────────────────────
+
+
+class TestNormalizeReviewPayload:
+    def test_returns_none_for_empty_or_whitespace(self):
+        from agents.capabilities.github import service as wg
+
+        assert wg.normalize_review_payload("") is None
+        assert wg.normalize_review_payload("   \n  ") is None
+
+    def test_returns_none_for_unparseable_or_non_object(self):
+        from agents.capabilities.github import service as wg
+
+        assert wg.normalize_review_payload("not json") is None
+        assert wg.normalize_review_payload("[1, 2, 3]") is None
+
+    def test_minimal_payload_yields_green_aggregate_with_no_checks(self):
+        from agents.capabilities.github import service as wg
+
+        raw = (
+            '{"number": 42, "state": "OPEN", "title": "Add thing", "body": "body",'
+            ' "url": "https://github.com/x/y/pull/42", "headRefName": "feat",'
+            ' "headRefOid": "abc1234", "baseRefName": "main", "isDraft": false,'
+            ' "mergeable": "MERGEABLE", "reviewDecision": "APPROVED",'
+            ' "statusCheckRollup": []}'
+        )
+        review = wg.normalize_review_payload(raw)
+        assert review is not None
+        assert review["number"] == 42
+        assert review["title"] == "Add thing"
+        assert review["body"] == "body"
+        assert review["url"] == "https://github.com/x/y/pull/42"
+        assert review["head_sha"] == "abc1234"
+        assert review["base_branch"] == "main"
+        assert review["state"] == "open"
+        assert review["is_draft"] is False
+        assert review["aggregate_state"] == "green"
+        assert review["running"] is False
+        assert review["checks"] == []
+
+    def test_check_run_completed_success_normalizes_to_pass(self):
+        from agents.capabilities.github import service as wg
+
+        raw = (
+            '{"number": 1, "state": "OPEN", "statusCheckRollup": ['
+            '{"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"}'
+            ']}'
+        )
+        review = wg.normalize_review_payload(raw)
+        assert review["aggregate_state"] == "green"
+        assert review["running"] is False
+        assert review["checks"] == [
+            {"id": "build", "label": "build", "status": "pass", "detail": None}
+        ]
+
+    def test_check_run_completed_failure_marks_yellow(self):
+        from agents.capabilities.github import service as wg
+
+        raw = (
+            '{"number": 1, "state": "OPEN", "statusCheckRollup": ['
+            '{"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"}'
+            ']}'
+        )
+        review = wg.normalize_review_payload(raw)
+        assert review["aggregate_state"] == "yellow"
+        assert review["running"] is False
+        assert review["checks"][0]["status"] == "fail"
+
+    def test_in_progress_check_marks_running_overlay_not_color(self):
+        from agents.capabilities.github import service as wg
+
+        raw = (
+            '{"number": 1, "state": "OPEN", "statusCheckRollup": ['
+            '{"__typename": "CheckRun", "name": "tests", "status": "IN_PROGRESS"}'
+            ']}'
+        )
+        review = wg.normalize_review_payload(raw)
+        # Running is a separate overlay — color stays green when nothing has failed yet.
+        assert review["aggregate_state"] == "green"
+        assert review["running"] is True
+        assert review["checks"][0]["status"] == "running"
+
+    def test_status_context_state_failure_marks_yellow(self):
+        from agents.capabilities.github import service as wg
+
+        raw = (
+            '{"number": 1, "state": "OPEN", "statusCheckRollup": ['
+            '{"__typename": "StatusContext", "context": "ci/circleci", "state": "FAILURE",'
+            ' "description": "step failed: build"}'
+            ']}'
+        )
+        review = wg.normalize_review_payload(raw)
+        assert review["aggregate_state"] == "yellow"
+        assert review["checks"] == [{
+            "id": "ci/circleci",
+            "label": "ci/circleci",
+            "status": "fail",
+            "detail": "step failed: build",
+        }]
+
+    def test_skipped_check_is_filtered_out(self):
+        from agents.capabilities.github import service as wg
+
+        raw = (
+            '{"number": 1, "state": "OPEN", "statusCheckRollup": ['
+            '{"__typename": "CheckRun", "name": "optional", "status": "COMPLETED", "conclusion": "SKIPPED"}'
+            ']}'
+        )
+        review = wg.normalize_review_payload(raw)
+        assert review["checks"] == []
+
+    def test_changes_requested_review_marks_yellow(self):
+        from agents.capabilities.github import service as wg
+
+        raw = (
+            '{"number": 1, "state": "OPEN", "statusCheckRollup": [],'
+            ' "reviewDecision": "CHANGES_REQUESTED"}'
+        )
+        review = wg.normalize_review_payload(raw)
+        assert review["aggregate_state"] == "yellow"
+
+    def test_conflicting_mergeable_marks_yellow(self):
+        from agents.capabilities.github import service as wg
+
+        raw = (
+            '{"number": 1, "state": "OPEN", "statusCheckRollup": [],'
+            ' "mergeable": "CONFLICTING"}'
+        )
+        review = wg.normalize_review_payload(raw)
+        assert review["aggregate_state"] == "yellow"
+
+    def test_unrecognized_rollup_entry_is_dropped_not_raised(self):
+        from agents.capabilities.github import service as wg
+
+        raw = (
+            '{"number": 1, "state": "OPEN", "statusCheckRollup": ['
+            '{"weird": "shape"}'
+            ']}'
+        )
+        review = wg.normalize_review_payload(raw)
+        assert review["checks"] == []
+        assert review["aggregate_state"] == "green"
+
+
+# ── Capability probe (autonomy/github) ────────────────────────────────
+
+
+class TestGithubProbe:
+    def _patched_probe(self, monkeypatch, *, container_running, gh_results):
+        from agents.capabilities.github import probe as gh_probe
+        from agents.capabilities.github import service as wg
+
+        recorder = _DockerExecRecorder(
+            container_running=container_running,
+            gh_results=gh_results,
+        )
+        # Probe imports run_cli + resolve_live_container from service; patch service.
+        monkeypatch.setattr(wg, "run_cli", recorder.run_cli)
+        return gh_probe, recorder
+
+    def test_no_live_container_returns_unavailable(self, monkeypatch):
+        gh_probe, _recorder = self._patched_probe(
+            monkeypatch, container_running=False, gh_results=[],
+        )
+
+        result = asyncio.run(gh_probe.probe_v1("auto-dead"))
+
+        assert result["state"] == "unavailable"
+        assert result["reason"] == "no_live_container"
+        assert result["contract"] == "source_control"
+        assert result["implementation"] == "autonomy/github"
+        assert result["delivery_mode"] == "image_baked"
+        assert result["missing_tools"] == []
+        assert result["missing_env"] == []
+
+    def test_ready_when_gh_auth_status_succeeds(self, monkeypatch):
+        gh_probe, recorder = self._patched_probe(
+            monkeypatch,
+            container_running=True,
+            gh_results=[("Logged in to github.com as foo", "", 0, False)],
+        )
+
+        result = asyncio.run(gh_probe.probe_v1("auto-live"))
+
+        assert result["state"] == "ready"
+        assert result["reason"] is None
+        assert result["missing_tools"] == []
+        assert result["missing_env"] == []
+        # docker exec hit gh auth status, not gh pr view.
+        assert recorder.calls[-1][3:] == ["gh", "auth", "status"]
+
+    def test_gh_missing_marks_degraded_with_missing_tool(self, monkeypatch):
+        gh_probe, _recorder = self._patched_probe(
+            monkeypatch,
+            container_running=True,
+            gh_results=[("", "executable file not found in $PATH", 127, False)],
+        )
+
+        result = asyncio.run(gh_probe.probe_v1("auto-live"))
+
+        assert result["state"] == "degraded"
+        assert result["reason"] == "tool_missing"
+        assert result["missing_tools"] == ["gh"]
+        assert result["missing_env"] == []
+
+    def test_auth_missing_marks_degraded_with_missing_env(self, monkeypatch):
+        gh_probe, _recorder = self._patched_probe(
+            monkeypatch,
+            container_running=True,
+            gh_results=[("", "You are not logged into any GitHub hosts. Run gh auth login", 1, False)],
+        )
+
+        result = asyncio.run(gh_probe.probe_v1("auto-live"))
+
+        assert result["state"] == "degraded"
+        assert result["reason"] == "env_missing"
+        assert result["missing_env"] == ["GH_TOKEN"]
+        assert result["missing_tools"] == []
+
+    def test_other_failure_marks_degraded_probe_failed_with_details(self, monkeypatch):
+        gh_probe, _recorder = self._patched_probe(
+            monkeypatch,
+            container_running=True,
+            gh_results=[("", "weird state", 7, False)],
+        )
+
+        result = asyncio.run(gh_probe.probe_v1("auto-live"))
+
+        assert result["state"] == "degraded"
+        assert result["reason"] == "probe_failed"
+        assert result["details"]["exit_code"] == 7
+        assert "weird state" in result["details"]["stderr"]
