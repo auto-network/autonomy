@@ -1,0 +1,160 @@
+<link rel="stylesheet" href="/static/plugins/primers/page.css">
+<div data-testid="primers-fragment-root" x-data="primersPage()" x-init="init()" class="primers-page pb-safe">
+
+  <!-- Tab strip — Workspace primers (active) + Dispatch (v2 placeholder) -->
+  <div class="flex items-center gap-2 mb-3 px-1 border-b border-gray-800">
+    <button
+      class="px-3 py-1.5 text-sm font-semibold border-b-2 -mb-px transition-colors border-indigo-500 text-indigo-200"
+      data-testid="tab-workspace"
+      type="button">
+      Workspace primers
+    </button>
+    <button
+      class="px-3 py-1.5 text-sm font-semibold border-b-2 -mb-px text-gray-600 cursor-not-allowed"
+      data-testid="tab-dispatch"
+      disabled
+      aria-disabled="true"
+      title="Coming in v2"
+      type="button">
+      Dispatch
+      <span class="ml-1 text-[10px] font-mono text-gray-700">Coming in v2</span>
+    </button>
+  </div>
+
+  <!-- Two-pane layout (mobile stacks, list collapses after selection) -->
+  <div class="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-4">
+
+    <!-- Left rail: workspace list -->
+    <aside
+      class="md:border-r md:border-gray-700 md:pr-4"
+      :class="(selectedId && !showListOnMobile) ? 'hidden md:block' : ''">
+      <div class="flex items-center justify-between mb-2 px-2">
+        <h2 class="text-xs uppercase tracking-wider text-gray-500 font-semibold">
+          Workspaces
+          <span class="ml-1 text-[10px] font-mono text-gray-600" x-text="workspaces.length + ' total'"></span>
+        </h2>
+      </div>
+      <ul class="space-y-1" data-testid="workspace-list">
+        <template x-for="ws in workspaces" :key="ws.id">
+          <li>
+            <button
+              class="w-full text-left px-3 py-2 rounded-lg hover:bg-gray-800 flex flex-col gap-0.5 transition-colors"
+              :class="selectedId === ws.id ? 'bg-indigo-900/40 ring-1 ring-indigo-500/50' : ''"
+              @click="select(ws.id)"
+              data-testid="workspace-row"
+              :data-workspace-id="ws.id">
+              <span class="text-sm font-semibold" x-text="ws.name"></span>
+              <span class="text-[11px] font-mono text-gray-500">
+                <span x-text="ws.org" class="text-gray-400"></span>
+                <span class="text-gray-700">·</span>
+                <span x-text="ws.image"></span>
+              </span>
+            </button>
+          </li>
+        </template>
+      </ul>
+    </aside>
+
+    <!-- Right pane: primer surface -->
+    <main class="min-w-0">
+
+      <!-- Empty state -->
+      <template x-if="!selectedId">
+        <div class="rounded-2xl border border-dashed border-gray-700 bg-gray-900/60 p-12 text-center"
+             data-testid="primers-empty">
+          <div class="text-gray-500 text-sm">Select a workspace to preview its primer</div>
+          <div class="text-gray-600 text-xs mt-1">The primer is the markdown that ships as <code class="text-gray-400">~/.claude/CLAUDE.md</code> when an agent boots into this workspace.</div>
+        </div>
+      </template>
+
+      <!-- Loading state -->
+      <template x-if="selectedId && loading">
+        <div class="rounded-2xl border border-gray-700 bg-gray-900/60 p-8 text-center" data-testid="primers-loading">
+          <div class="text-gray-500 text-sm animate-pulse">Rendering primer…</div>
+        </div>
+      </template>
+
+      <!-- Error state -->
+      <template x-if="selectedId && !loading && error">
+        <div class="rounded-2xl border border-red-900 bg-red-950/40 p-6 space-y-3" data-testid="primers-error">
+          <div>
+            <div class="text-sm font-semibold text-red-200">Render failed</div>
+            <div class="text-xs text-red-300/80 mt-1 font-mono break-all" x-text="error"></div>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              class="px-3 py-1.5 text-[11px] font-semibold rounded-md bg-red-800 hover:bg-red-700 text-red-100 transition-colors"
+              @click="retry()"
+              data-testid="primers-retry"
+              type="button">Retry</button>
+            <button
+              class="px-3 py-1.5 text-[11px] font-mono rounded-md border border-red-900 text-red-300 hover:bg-red-900/40 transition-colors"
+              @click="copyError()"
+              data-testid="primers-copy-error"
+              type="button">
+              <span x-show="!errorCopied">Copy error</span>
+              <span x-show="errorCopied" class="text-green-400">Copied ✓</span>
+            </button>
+            <a
+              :href="'/settings?org=' + (selectedWorkspace.org || '') + '&set=autonomy.workspace&key=' + selectedId"
+              class="px-3 py-1.5 text-[11px] font-mono rounded-md border border-red-900 text-red-300 hover:bg-red-900/40 transition-colors"
+              data-testid="primers-open-setting">Open workspace setting →</a>
+          </div>
+        </div>
+      </template>
+
+      <!-- Loaded state -->
+      <template x-if="selectedId && !loading && !error && currentPrimer">
+        <div data-testid="primers-loaded">
+
+          <!-- Orientation strip -->
+          <div class="rounded-2xl border border-gray-700 bg-gray-900/60 p-4 mb-3" data-testid="primer-orientation">
+            <div class="flex items-start justify-between gap-3 flex-wrap">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 mb-1">
+                  <h2 class="text-base font-semibold text-gray-100 truncate" x-text="selectedWorkspace.name"></h2>
+                  <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-950/60 text-indigo-300"
+                        x-text="selectedWorkspace.org"></span>
+                </div>
+                <div class="font-mono text-[11px] text-gray-500 truncate" x-text="selectedWorkspace.image"></div>
+                <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+                  <span data-testid="primer-writable-summary" :class="writability.color">
+                    <span x-text="writability.label"></span>
+                  </span>
+                  <span class="text-gray-700">·</span>
+                  <span class="font-mono text-gray-400" data-testid="token-count">
+                    <span x-text="(currentPrimer.token_estimate || 0).toLocaleString()"></span>
+                    <span class="text-gray-600 ml-0.5">tokens</span>
+                  </span>
+                </div>
+              </div>
+              <div class="flex items-center gap-2">
+                <button
+                  class="md:hidden px-2 py-1 text-[11px] font-mono rounded border border-gray-700 hover:bg-gray-800"
+                  @click="showListOnMobile = !showListOnMobile"
+                  type="button">
+                  <span x-show="!showListOnMobile">Switch</span>
+                  <span x-show="showListOnMobile">Hide list</span>
+                </button>
+                <button
+                  class="px-2 py-1 text-[11px] font-mono rounded border border-gray-700 hover:bg-gray-800"
+                  @click="copy()"
+                  data-testid="copy-button"
+                  type="button">
+                  <span x-show="!copied">Copy</span>
+                  <span x-show="copied" class="text-green-400">Copied ✓</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Rendered markdown -->
+          <article class="rounded-2xl border border-gray-700 bg-gray-900/60 p-5 md:p-6 markdown-body min-w-0"
+                   data-testid="primer-markdown"
+                   x-html="renderedMarkdown"></article>
+        </div>
+      </template>
+
+    </main>
+  </div>
+</div>
