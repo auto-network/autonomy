@@ -2441,23 +2441,39 @@ def update_note(
 
     # Try own-org first; if that misses, scan peers (including raw rows
     # so the auto-derive path works even for internal-state peer notes).
+    # A moved-stub row (deprecated=1, moved_to_org set) means the live
+    # data has relocated to another org — treat it as not-found-here and
+    # fall through to peer scan, preferring the forwarding org.
     own_db = _open(org)
+    forward: str | None = None
     try:
         resolved: dict | None = own_db.get_source(source_id)
+        if resolved is not None and resolved.get("moved_to_org"):
+            forward = resolved["moved_to_org"]
+            resolved = None
     finally:
         own_db.close()
 
     origin_org = caller if resolved else ""
     if resolved is None:
-        for peer in sorted(resolve_peers(caller or None, None)):
+        peers = sorted(resolve_peers(caller or None, None))
+        if forward:
+            # Try the forwarding pointer first, then everyone else.
+            peers = [forward] + [p for p in peers if p != forward]
+        for peer in peers:
             peer_db = open_peer_db(peer)
             if peer_db is None:
                 continue
             hit = peer_db.get_source(source_id)
-            if hit is not None:
-                resolved = hit
-                origin_org = peer
-                break
+            if hit is None:
+                continue
+            # Skip chained moved-stubs in peers — only a live row counts.
+            if hit.get("moved_to_org"):
+                forward = hit["moved_to_org"]
+                continue
+            resolved = hit
+            origin_org = peer
+            break
 
     if resolved is None:
         raise LookupError(f"No source found matching '{source_id}'")
@@ -2497,6 +2513,20 @@ def update_note(
     not_found: list[str] = []
     next_version: int | None = None
     try:
+        # Defence in depth: the write target must own the actual data,
+        # not just a source row. A bare source row without thoughts is
+        # a corrupt/orphaned state (moved-stub leak, half-finished
+        # migration, manual SQL); refuse to write into it rather than
+        # producing a broken metadata-only update.
+        thoughts = db.get_thoughts_by_source(src_id)
+        if not thoughts:
+            raise LookupError(
+                f"no thought found for source {src_id[:12]} in "
+                f"{write_org or 'caller'} db — refusing to write "
+                f"into a source row without backing data"
+            )
+        thought = thoughts[0]
+
         if has_body_change:
             if attachments:
                 att_ids = []
@@ -2511,11 +2541,6 @@ def update_note(
                     content = content.replace(
                         '{' + str(i) + '}', f'graph://{att_id[:12]}',
                     )
-
-            thoughts = db.get_thoughts_by_source(src_id)
-            if not thoughts:
-                raise LookupError(f"no thought found for source {src_id[:12]}")
-            thought = thoughts[0]
 
             current_max = db.get_max_note_version(src_id)
             if current_max == 0:

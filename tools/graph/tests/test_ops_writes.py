@@ -369,6 +369,110 @@ def test_update_note_not_found_raises_lookup(orgs_root):
         ops.update_note("nonexistent-id", "anything")
 
 
+def test_update_note_scopeless_caller_against_moved_source(orgs_root):
+    """Reported in auto-tcj8q: a scopeless caller (no ``X-Graph-Org``,
+    no ``GRAPH_ORG``) updating a source that has been moved out of
+    personal.db must follow the ``moved_to_org`` forwarding pointer
+    instead of treating the deprecated stub as the live row.
+
+    Pre-fix: own-db (personal) returned the stub; the resolver locked
+    in ``origin_org=""``, ``write_org=None`` (personal); the subsequent
+    ``get_thoughts_by_source`` came back empty and the call 404'd.
+    """
+    GraphDB.create_org_db("autonomy").close()
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    moved = ops.create_note("body before move", title="Moved Title", org="personal")
+    ops.move_source(
+        moved["source_id"], "personal", "autonomy", reason="bead repro",
+    )
+
+    upd = ops.update_note(moved["source_id"], "body after move")
+    assert upd["new_version"] == 2
+    assert upd["org"] == "autonomy"
+
+    # Body landed in the new home org, NOT in the personal stub.
+    ac = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    try:
+        autonomy_thought = ac.execute(
+            "SELECT content FROM thoughts WHERE source_id = ?",
+            (moved["source_id"],),
+        ).fetchone()
+        assert autonomy_thought is not None
+        assert autonomy_thought[0] == "body after move"
+
+        autonomy_versions = ac.execute(
+            "SELECT MAX(version) FROM note_versions WHERE source_id = ?",
+            (moved["source_id"],),
+        ).fetchone()[0]
+        assert autonomy_versions == 2
+
+        # Stub in personal.db must remain a stub — not resurrected with
+        # body content. moved_to_org pointer preserved for audit.
+        stub_thoughts = pc.execute(
+            "SELECT COUNT(*) FROM thoughts WHERE source_id = ?",
+            (moved["source_id"],),
+        ).fetchone()[0]
+        assert stub_thoughts == 0
+        stub_meta = pc.execute(
+            "SELECT moved_to_org, deprecated FROM sources WHERE id = ?",
+            (moved["source_id"],),
+        ).fetchone()
+        assert stub_meta == ("autonomy", 1)
+    finally:
+        ac.close()
+        pc.close()
+
+
+def test_update_note_scopeless_metadata_only_against_moved_source(orgs_root):
+    """Same forwarding behaviour for metadata-only updates — title and
+    keywords must land in the home org, not the stub."""
+    GraphDB.create_org_db("autonomy").close()
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    moved = ops.create_note("body", title="Original", org="personal")
+    ops.move_source(moved["source_id"], "personal", "autonomy")
+
+    ops.update_note(
+        moved["source_id"], title="Renamed", keywords="alpha,beta",
+    )
+
+    ac = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    try:
+        autonomy_row = ac.execute(
+            "SELECT title, keywords FROM sources WHERE id = ?",
+            (moved["source_id"],),
+        ).fetchone()
+        assert autonomy_row == ("Renamed", "alpha,beta")
+        # Stub title untouched.
+        stub_title = pc.execute(
+            "SELECT title FROM sources WHERE id = ?",
+            (moved["source_id"],),
+        ).fetchone()[0]
+        assert stub_title == "Original"
+    finally:
+        ac.close()
+        pc.close()
+
+
+def test_update_note_explicit_org_against_moved_source_still_refuses(orgs_root):
+    """An explicit caller pinned to the origin org of a moved source
+    must still raise CrossOrgWriteError — the moved-stub fix only
+    relaxes the scopeless auto-derive path; the explicit-mismatch gate
+    remains. Caller wanting to update a moved source must move with it."""
+    GraphDB.create_org_db("autonomy").close()
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    moved = ops.create_note("body", org="personal")
+    ops.move_source(moved["source_id"], "personal", "autonomy")
+
+    with pytest.raises(ops.CrossOrgWriteError) as exc:
+        ops.update_note(moved["source_id"], "hijack", org="personal")
+    assert exc.value.origin_org == "autonomy"
+
+
 # ── attach_file ──────────────────────────────────────────────
 
 
