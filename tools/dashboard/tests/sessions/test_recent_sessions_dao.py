@@ -766,3 +766,50 @@ class TestTypeQuotas:
         )
         assert results == [], \
             f"expected no padding from other groups; got {[r['session_type'] for r in results]}"
+
+
+class TestSessionStatusGraphSourceRepair:
+    """Live session status should prefer a resolvable graph source id."""
+
+    def test_repairs_stale_graph_source_id_from_session_uuid(self, isolated_dao):
+        from tools.dashboard.dao import dashboard_db as ddb
+        from tools.graph.db import GraphDB
+
+        conn = ddb.get_conn()
+        conn.execute(
+            """INSERT INTO tmux_sessions
+               (tmux_name, graph_source_id, type, project, jsonl_path, session_uuid,
+                created_at, is_live, last_activity, activity_state)
+               VALUES (?, ?, 'container', 'autonomy', ?, ?, ?, 1, ?, 'idle')""",
+            (
+                "auto-live-stale-graph",
+                "src-stale-missing",
+                "/home/jeremy/sessions/live-stale.jsonl",
+                "uuid-live-stale",
+                time.time() - 300,
+                time.time() - 10,
+            ),
+        )
+        conn.commit()
+
+        g = GraphDB.for_org("autonomy", mode="rw")
+        g.conn.execute(
+            """INSERT INTO sources
+               (id, type, platform, project, title, file_path, metadata, created_at,
+                ingested_at, last_activity_at)
+               VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+            (
+                "src-live-current",
+                "Live stale repaired",
+                "/home/jeremy/sessions/live-stale.jsonl",
+                json.dumps({"session_uuid": "uuid-live-stale", "total_turns": 12}),
+                "2026-04-30T03:30:00Z",
+                "2026-04-30T03:30:05Z",
+                "2026-04-30T03:49:59Z",
+            ),
+        )
+        g.commit()
+
+        rows = isolated_dao.get_session_status_rows()
+        repaired = next(r for r in rows if r["tmux_name"] == "auto-live-stale-graph")
+        assert repaired["graph_source_id"] == "src-live-current"

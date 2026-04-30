@@ -133,7 +133,135 @@ def get_session_status_rows(since: str | None = None) -> list[dict]:
     activity falls within the requested window.
     """
     cutoff = (time.time() - parse_duration(since)) if since is not None else None
-    return _db_session_status_rows(live_only=(since is None), since_cutoff=cutoff)
+    rows = _db_session_status_rows(live_only=(since is None), since_cutoff=cutoff)
+    _repair_status_graph_source_ids(rows)
+    return rows
+
+
+def _repair_status_graph_source_ids(rows: list[dict]) -> None:
+    """Overlay missing or non-resolving ``graph_source_id`` values in place.
+
+    ``tmux_sessions.graph_source_id`` is a cached hint written when the JSONL
+    is first linked to the graph. It can drift: a stale value may point at a
+    deleted/old source row while the current session source is still resolvable
+    via ``session_uuid`` or ``jsonl_path``. The status table is a coordination
+    surface, so it should prefer a currently-resolving source id over a stale
+    cached one.
+    """
+    if not rows:
+        return
+
+    from tools.graph.cross_org import list_org_slugs, open_peer_db
+
+    slugs = sorted(list_org_slugs())
+    if not slugs:
+        return
+
+    candidate_ids = sorted({
+        str(row.get("graph_source_id") or "").strip()
+        for row in rows
+        if row.get("graph_source_id")
+    })
+    valid_ids: set[str] = set()
+
+    if candidate_ids:
+        placeholders = ",".join("?" * len(candidate_ids))
+        sql = f"SELECT id FROM sources WHERE id IN ({placeholders})"
+        for slug in slugs:
+            db = open_peer_db(slug)
+            if db is None:
+                continue
+            try:
+                valid_ids.update(
+                    r["id"] for r in db.conn.execute(sql, candidate_ids).fetchall()
+                )
+            except sqlite3.OperationalError:
+                continue
+
+    needs_resolve = [
+        row for row in rows
+        if not row.get("graph_source_id") or row.get("graph_source_id") not in valid_ids
+    ]
+    if not needs_resolve:
+        return
+
+    session_uuids = sorted({
+        str(row.get("session_uuid") or "").strip()
+        for row in needs_resolve
+        if row.get("session_uuid")
+    })
+    jsonl_paths = sorted({
+        str(row.get("jsonl_path") or "").strip()
+        for row in needs_resolve
+        if row.get("jsonl_path")
+    })
+    if not session_uuids and not jsonl_paths:
+        return
+
+    best_by_uuid: dict[str, tuple[float, str]] = {}
+    best_by_path: dict[str, tuple[float, str]] = {}
+
+    for slug in slugs:
+        db = open_peer_db(slug)
+        if db is None:
+            continue
+
+        where_parts: list[str] = []
+        params: list[str] = []
+        if session_uuids:
+            placeholders = ",".join("?" * len(session_uuids))
+            where_parts.append(
+                f"json_extract(metadata, '$.session_uuid') IN ({placeholders})"
+            )
+            params.extend(session_uuids)
+        if jsonl_paths:
+            placeholders = ",".join("?" * len(jsonl_paths))
+            where_parts.append(f"file_path IN ({placeholders})")
+            params.extend(jsonl_paths)
+        if not where_parts:
+            continue
+
+        sql = (
+            "SELECT id, file_path, metadata, created_at, "
+            "COALESCE(last_activity_at, created_at) AS activity_at "
+            "FROM sources WHERE type IN ('session', 'agentic') AND ("
+            + " OR ".join(where_parts)
+            + ")"
+        )
+        try:
+            matches = db.conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            continue
+
+        for match in matches:
+            try:
+                meta = _json.loads(match["metadata"] or "{}")
+            except Exception:
+                meta = {}
+            score = _iso_to_epoch(match["activity_at"] or match["created_at"])
+            source_id = match["id"]
+            session_uuid = str(meta.get("session_uuid") or "").strip()
+            file_path = str(match["file_path"] or "").strip()
+
+            if session_uuid:
+                prev = best_by_uuid.get(session_uuid)
+                if prev is None or score > prev[0]:
+                    best_by_uuid[session_uuid] = (score, source_id)
+            if file_path:
+                prev = best_by_path.get(file_path)
+                if prev is None or score > prev[0]:
+                    best_by_path[file_path] = (score, source_id)
+
+    for row in needs_resolve:
+        session_uuid = str(row.get("session_uuid") or "").strip()
+        jsonl_path = str(row.get("jsonl_path") or "").strip()
+        resolved = None
+        if session_uuid and session_uuid in best_by_uuid:
+            resolved = best_by_uuid[session_uuid][1]
+        elif jsonl_path and jsonl_path in best_by_path:
+            resolved = best_by_path[jsonl_path][1]
+        if resolved:
+            row["graph_source_id"] = resolved
 
 
 def _librarian_targets_by_job_id(job_ids: list[str]) -> dict[str, dict]:
