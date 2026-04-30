@@ -1659,6 +1659,17 @@ def _group_search_results(rows: list, *, order: str = "relevance") -> list:
             new = r.get("rank")
             if new is not None and (cur is None or new < cur):
                 g["rank"] = new
+        # Round 7l: db.search caps emitted excerpts at
+        # SEARCH_EXCERPTS_PER_SOURCE per source but stamps the true
+        # ``hit_count`` on every row of that source. Promote it to the
+        # group-level match_count so a 30-hit session card shows
+        # "30 matches" even though only ~10 excerpts surface in the
+        # API payload. Falls back to the count-as-we-go when hit_count
+        # is absent (legacy callers / tests that don't go through the
+        # source-aware db.search path).
+        hit_count = r.get("hit_count")
+        if isinstance(hit_count, int) and hit_count > g.get("match_count", 0):
+            g["match_count"] = hit_count
     for g in groups.values():
         g["excerpts"].sort(
             key=lambda e: (e.get("rank") if e.get("rank") is not None else 0)

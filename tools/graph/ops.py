@@ -334,11 +334,17 @@ def search(
             org_lists.append((slug, rows))
         if not org_lists:
             return []
+        # Round 7l: source-aware merge — both rrf_merge and
+        # chronological_merge apply LIMIT at the source_id level so a
+        # 30-hit session can't drown out other distinct sources at the
+        # cross-org merge step. Head + tail rows of a source ride the
+        # same slot together.
         if order == "recent":
             return chronological_merge(
                 org_lists, limit=limit, time_field="source_created_at",
+                key="source_id",
             )
-        return rrf_merge(org_lists, limit=limit, own_org=None, key="id")
+        return rrf_merge(org_lists, limit=limit, own_org=None, key="source_id")
 
     # Single-org pin: skip peer resolution entirely.
     if only_org is not None:
@@ -399,16 +405,20 @@ def search(
         # Own-org only → preserve legacy shape (no RRF re-ranking) so
         # existing tests keep passing. Still annotate ``org`` for
         # consumers that expect it.
+        # Round 7l: db.search already applies the source-level LIMIT,
+        # so don't re-truncate at the row level here — it could split
+        # a source's head + tail row group across the cut.
         rows = org_lists[0][1] if org_lists else []
         for r in rows:
             r.setdefault("org", resolved_org or "")
-        return rows[:limit]
+        return rows
     if order == "recent":
         return chronological_merge(
             org_lists, limit=limit, time_field="source_created_at",
+            key="source_id",
         )
     return rrf_merge(
-        org_lists, limit=limit, own_org=resolved_org, key="id",
+        org_lists, limit=limit, own_org=resolved_org, key="source_id",
     )
 
 

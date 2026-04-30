@@ -5019,8 +5019,11 @@ SEARCH_PILL_SEMANTICS_CHECKS = """(async () => {
   });
 
   // ── 2. Sessions pill activated → only terminal/chatwith rows remain
+  // Round 7l: setType() now triggers a re-fetch when the chip maps to a
+  // server-side ``session_type`` filter (Sessions, Dispatch, or back to
+  // All). The 400ms sleep window covers the local fetch round-trip.
   spScope.setType('session');
-  await sleep(60);
+  await sleep(400);
   var filtered = spScope.filteredResults || [];
   r.sessions_titles = filtered.map(function(x) { return x.source_title || ''; });
   r.sessions_session_types = filtered.map(function(x) {
@@ -5029,7 +5032,7 @@ SEARCH_PILL_SEMANTICS_CHECKS = """(async () => {
 
   // ── 3. Dispatch pill activated → dispatch/librarian/agentic only
   spScope.setType('dispatch');
-  await sleep(60);
+  await sleep(400);
   filtered = spScope.filteredResults || [];
   r.dispatch_titles = filtered.map(function(x) { return x.source_title || ''; });
   r.dispatch_session_types = filtered.map(function(x) {
@@ -5038,7 +5041,7 @@ SEARCH_PILL_SEMANTICS_CHECKS = """(async () => {
 
   // ── 4. Per-row badges: drive from rowChipKey / typeLabel
   spScope.setType('all');
-  await sleep(60);
+  await sleep(400);
   var badges = (spScope.results || []).map(function(x) {
     return {
       title: x.source_title || '',
@@ -5372,6 +5375,346 @@ class TestSearchSortChip:
         assert "order=" not in fetch_url, (
             f"After toggle back, outgoing fetch must drop order=; "
             f"got {fetch_url!r}"
+        )
+
+
+SEARCH_PILL_REFETCH_CHECKS = """(async () => {
+  var r = {};
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+  await sleep(900);  // initial fetch settles
+
+  var spRoot = document.querySelector('[x-data^="searchPage"]');
+  var spScope = spRoot && Alpine ? Alpine.$data(spRoot) : null;
+  r.has_alpine_root = !!spScope;
+  if (!spScope) return JSON.stringify(r);
+
+  // Stub fetch so subsequent setType()-driven refetches' URLs are
+  // observable. We forward to the real fetch so the result data still
+  // populates spScope.results.
+  var capturedURLs = [];
+  var origFetch = window.fetch;
+  window.fetch = function(url, opts) {
+    capturedURLs.push(String(url));
+    return origFetch.call(window, url, opts);
+  };
+
+  // ── 1. Pre-state: activeType='all', no session_type pushed ─────────
+  r.initial_active = spScope.activeType;
+  r.initial_url_search = window.location.search;
+
+  // ── 2. setType('session') triggers a refetch with session_type=
+  //       terminal,chatwith on the wire (not a client-only filter) ────
+  capturedURLs.length = 0;
+  spScope.setType('session');
+  await sleep(500);
+  r.session_active = spScope.activeType;
+  r.session_fetch_url = capturedURLs.length
+    ? capturedURLs[capturedURLs.length - 1] : null;
+  // Distinct source_ids returned for the Sessions pill.
+  var sessionResults = (spScope.results || []);
+  r.session_result_count = sessionResults.length;
+  r.session_titles = sessionResults.map(function(x) {
+    return x.source_title || '';
+  });
+
+  // ── 3. setType('dispatch') re-fetches with dispatch session_types ──
+  capturedURLs.length = 0;
+  spScope.setType('dispatch');
+  await sleep(500);
+  r.dispatch_active = spScope.activeType;
+  r.dispatch_fetch_url = capturedURLs.length
+    ? capturedURLs[capturedURLs.length - 1] : null;
+  var dispatchResults = (spScope.results || []);
+  r.dispatch_result_count = dispatchResults.length;
+  r.dispatch_titles = dispatchResults.map(function(x) {
+    return x.source_title || '';
+  });
+
+  // ── 4. setType('all') from a server-filtered chip refetches WITHOUT
+  //       session_type so the unfiltered surface comes back ───────────
+  capturedURLs.length = 0;
+  spScope.setType('all');
+  await sleep(500);
+  r.back_to_all_active = spScope.activeType;
+  r.back_to_all_fetch_url = capturedURLs.length
+    ? capturedURLs[capturedURLs.length - 1] : null;
+  r.back_to_all_result_count = (spScope.results || []).length;
+
+  // ── 5. setType('all') from already-'all' is a noop (no extra fetch) —
+  //       the source-aware LIMIT means client-side filter is enough
+  //       once the unfiltered surface is in hand. ──────────────────────
+  capturedURLs.length = 0;
+  spScope.setType('all');
+  await sleep(200);
+  r.noop_setType_all_fetch_count = capturedURLs.length;
+
+  window.fetch = origFetch;
+  return JSON.stringify(r);
+})()"""
+
+
+class TestSearchPillRefetch:
+    """Round 7l: pill click triggers a /api/search re-fetch with the
+    type filter pushed to the URL — no longer a client-only filter
+    over ``this.results``.
+
+    Pre-Round-7l, ``setType()`` only narrowed the in-memory result set;
+    a global LIMIT-N query that trimmed away all rows of the clicked
+    type would render the chip as empty even when matches exist
+    further down. The fix: when the chip maps to a server-side
+    ``session_type`` filter (Sessions / Dispatch / clearing back to
+    All), the click triggers a fresh fetch with the right query
+    string.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            "/search?q=pillsweep",
+            SEARCH_PILL_REFETCH_CHECKS,
+            wait_ms=200,
+        )
+        request.cls._checks = result
+
+    def test_initial_state_has_alpine_root(self):
+        c = self._checks
+        assert c.get("has_alpine_root"), "searchPage Alpine component missing"
+        assert c.get("initial_active") == "all", (
+            f"Default activeType should be 'all'; got "
+            f"{c.get('initial_active')!r}"
+        )
+
+    def test_sessions_pill_pushes_session_type_to_api(self):
+        """Click → outgoing fetch carries
+        ``session_type=terminal,chatwith`` and Sessions-only rows come
+        back."""
+        c = self._checks
+        url = c.get("session_fetch_url") or ""
+        assert "/api/search" in url, (
+            f"setType('session') did not trigger an /api/search fetch; "
+            f"got url={url!r}"
+        )
+        # The exact subset {terminal,chatwith} must appear (URL-encoded
+        # comma is %2C, but our refetch uses raw commas via
+        # encodeURIComponent — chars below 0x80 minus reserved subset
+        # passthrough actually URL-encodes commas. Accept either shape).
+        assert "session_type=" in url, (
+            f"Outgoing fetch missing session_type filter; got {url!r}"
+        )
+        assert "terminal" in url and "chatwith" in url, (
+            f"Sessions pill must push terminal+chatwith on the wire; "
+            f"got {url!r}"
+        )
+        # Returned rows are exactly the interactive sessions from the
+        # pillsweep fixture.
+        titles = c.get("session_titles") or []
+        assert "pillsweep terminal session" in titles, (
+            f"Terminal session missing from Sessions refetch; "
+            f"titles={titles!r}"
+        )
+        assert "pillsweep chatwith session" in titles, (
+            f"Chatwith session missing from Sessions refetch; "
+            f"titles={titles!r}"
+        )
+        # Non-interactive rows must not surface — the server is doing
+        # the filtering now.
+        assert "pillsweep dispatch run" not in titles
+        assert "pillsweep null sessiontype" not in titles
+        assert "pillsweep ranking note" not in titles
+
+    def test_dispatch_pill_pushes_dispatched_session_types_to_api(self):
+        """Click → outgoing fetch carries
+        ``session_type=dispatch,librarian,agentic`` and Dispatch-only
+        rows come back."""
+        c = self._checks
+        url = c.get("dispatch_fetch_url") or ""
+        assert "/api/search" in url, (
+            f"setType('dispatch') did not trigger an /api/search fetch; "
+            f"got url={url!r}"
+        )
+        assert "session_type=" in url
+        for st in ("dispatch", "librarian", "agentic"):
+            assert st in url, (
+                f"Dispatch pill must push {st!r} on the wire; got {url!r}"
+            )
+        titles = c.get("dispatch_titles") or []
+        for expected in ("pillsweep dispatch run",
+                         "pillsweep librarian run",
+                         "pillsweep agentic action"):
+            assert expected in titles, (
+                f"Dispatched row {expected!r} missing from Dispatch "
+                f"refetch; titles={titles!r}"
+            )
+        assert "pillsweep terminal session" not in titles
+        assert "pillsweep null sessiontype" not in titles
+        assert "pillsweep ranking note" not in titles
+
+    def test_all_pill_clears_session_type_on_refetch(self):
+        """``setType('all')`` from a server-filtered chip re-fetches
+        WITHOUT a session_type query parameter. The unfiltered surface
+        — including NULL-session_type and legacy agent-run rows —
+        comes back."""
+        c = self._checks
+        url = c.get("back_to_all_fetch_url") or ""
+        assert "/api/search" in url, (
+            f"setType('all') from a filtered chip did not refetch; "
+            f"got url={url!r}"
+        )
+        assert "session_type=" not in url, (
+            f"All pill must clear session_type from the URL; got {url!r}"
+        )
+        # All 8 pillsweep rows surface.
+        assert c.get("back_to_all_result_count") == 8, (
+            f"Expected 8 rows under All; got "
+            f"{c.get('back_to_all_result_count')}"
+        )
+
+    def test_setType_all_from_all_is_noop(self):
+        """setType('all') called when already on 'all' must NOT trigger
+        an extra fetch — saves a network round-trip on chip-click
+        bouncing."""
+        c = self._checks
+        assert c.get("noop_setType_all_fetch_count") == 0, (
+            f"setType('all') from 'all' triggered an unnecessary "
+            f"fetch (count={c.get('noop_setType_all_fetch_count')})"
+        )
+
+
+SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
+  var r = {};
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+  await sleep(800);  // initial fetch settles
+
+  var spRoot = document.querySelector('[x-data^="searchPage"]');
+  var spScope = spRoot && Alpine ? Alpine.$data(spRoot) : null;
+  r.has_alpine_root = !!spScope;
+  if (!spScope) return JSON.stringify(r);
+
+  function chipRect(testid) {
+    var el = document.querySelector('[data-testid="' + testid + '"]');
+    return el ? el.getBoundingClientRect() : null;
+  }
+  function dropdownRect(testid) {
+    var el = document.querySelector('[data-testid="' + testid + '"]');
+    if (!el) return null;
+    // Alpine x-show toggles display; getBoundingClientRect on a
+    // display:none element returns all zeros, so opening the dropdown
+    // first is mandatory before the position check.
+    return el.getBoundingClientRect();
+  }
+
+  // ── 1. Open the State dropdown — verify it lands under its OWN chip,
+  //       not at the row's left edge. ─────────────────────────────────
+  var stateChip = chipRect('sp-state-chip');
+  spScope.toggleStateDropdown();
+  await sleep(120);
+  var stateDD = dropdownRect('sp-state-dropdown');
+  r.state_chip_left = stateChip ? stateChip.left : null;
+  r.state_dd_left = stateDD ? stateDD.left : null;
+  // Whether the dropdown is anchored to the chip (within a few px) or
+  // to the row's left edge.
+  if (stateChip && stateDD) {
+    r.state_dd_anchored = Math.abs(stateDD.left - stateChip.left) <= 6;
+  }
+  spScope.stateDropdownOpen = false;
+  await sleep(80);
+
+  // ── 2. Open the Sort (Order) dropdown — same anchor invariant ─────
+  var orderChip = chipRect('sp-order-chip');
+  spScope.toggleOrderDropdown();
+  await sleep(120);
+  var orderDD = dropdownRect('sp-order-dropdown');
+  r.order_chip_left = orderChip ? orderChip.left : null;
+  r.order_dd_left = orderDD ? orderDD.left : null;
+  if (orderChip && orderDD) {
+    r.order_dd_anchored = Math.abs(orderDD.left - orderChip.left) <= 6;
+  }
+  spScope.orderDropdownOpen = false;
+  await sleep(80);
+
+  // ── 3. Open the Org dropdown ──────────────────────────────────────
+  var orgChip = chipRect('sp-org-chip');
+  spScope.toggleOrgDropdown();
+  await sleep(120);
+  var orgDD = dropdownRect('sp-org-dropdown');
+  r.org_chip_left = orgChip ? orgChip.left : null;
+  r.org_dd_left = orgDD ? orgDD.left : null;
+  if (orgChip && orgDD) {
+    r.org_dd_anchored = Math.abs(orgDD.left - orgChip.left) <= 6;
+  }
+  spScope.orgDropdownOpen = false;
+
+  // Every chip+dropdown pair sits inside a .sp-filter-anchor wrapper.
+  // The wrapper IS the dropdown's positioning ancestor — so the row's
+  // own left:0 no longer wins.
+  r.anchor_wrappers = document.querySelectorAll('.sp-filter-anchor').length;
+
+  return JSON.stringify(r);
+})()"""
+
+
+class TestSearchDropdownPositioning:
+    """Round 7l: filter-strip dropdowns anchor under their OWN chip,
+    not at the row's left edge.
+
+    Pre-fix, the Org / State / Sort dropdown panels were
+    absolute-positioned siblings of the chip buttons; they anchored to
+    the nearest positioned ancestor (``.sp-filter-row-1``) at
+    ``left: 0`` regardless of which chip was clicked. The fix wraps
+    each chip+dropdown pair in a ``position: relative`` container
+    (``.sp-filter-anchor``) so each dropdown lands under its own
+    button.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            "/search?q=pillsweep",
+            SEARCH_DROPDOWN_POSITIONING_CHECKS,
+            wait_ms=200,
+        )
+        request.cls._checks = result
+
+    def test_alpine_root_present(self):
+        c = self._checks
+        assert c.get("has_alpine_root"), "searchPage Alpine component missing"
+        # Three chips → three anchor wrappers.
+        assert c.get("anchor_wrappers") == 3, (
+            f"Expected 3 .sp-filter-anchor wrappers (Org/State/Sort); "
+            f"got {c.get('anchor_wrappers')}"
+        )
+
+    def test_state_dropdown_anchors_under_state_chip(self):
+        """State dropdown's left edge sits within ~6px of the State
+        chip's left edge — proving it's positioned under its own
+        button, not at the row's left edge."""
+        c = self._checks
+        assert c.get("state_dd_anchored"), (
+            f"State dropdown not anchored under its chip: "
+            f"chip.left={c.get('state_chip_left')!r} "
+            f"dd.left={c.get('state_dd_left')!r}"
+        )
+
+    def test_order_dropdown_anchors_under_order_chip(self):
+        """Sort dropdown's left edge sits within ~6px of the Sort chip's
+        left edge."""
+        c = self._checks
+        assert c.get("order_dd_anchored"), (
+            f"Sort dropdown not anchored under its chip: "
+            f"chip.left={c.get('order_chip_left')!r} "
+            f"dd.left={c.get('order_dd_left')!r}"
+        )
+
+    def test_org_dropdown_anchors_under_org_chip(self):
+        """Org dropdown's left edge sits within ~6px of the Org chip's
+        left edge — Org is the leftmost chip so its dropdown always
+        landed correctly under the old layout, but the new wrapper
+        contract should still hold."""
+        c = self._checks
+        assert c.get("org_dd_anchored"), (
+            f"Org dropdown not anchored under its chip: "
+            f"chip.left={c.get('org_chip_left')!r} "
+            f"dd.left={c.get('org_dd_left')!r}"
         )
 
 

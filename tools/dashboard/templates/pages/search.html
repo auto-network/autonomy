@@ -41,7 +41,15 @@
   .sp-filter-row-1 {
     display: flex; gap: 8px; padding-bottom: 6px;
     align-items: center; flex-wrap: wrap;
-    position: relative;  /* anchors org dropdown + state dropdown */
+  }
+  /* Round 7l: each chip + its dropdown sit inside a position:relative
+     wrapper so the dropdown anchors under its OWN button. Previously the
+     row itself was the positioned ancestor and every dropdown rendered
+     at the row's left:0 regardless of which chip was clicked. */
+  .sp-filter-anchor {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
   }
 
   /* ── Filter chips (org + publication state) ───── */
@@ -318,138 +326,147 @@
        only the centered "type a query" hint. -->
   <div class="sp-header" data-testid="sp-filter-strip" x-show="query !== ''">
 
-    <!-- Row 1: org chip + publication-state chip -->
+    <!-- Row 1: org chip + publication-state chip + sort chip.
+         Round 7l: each chip + its dropdown live inside a
+         ``.sp-filter-anchor`` (position:relative) so the dropdown panel
+         anchors under its OWN button instead of the row's left edge. -->
     <div class="sp-filter-row-1">
       <!-- Org pin chip — opens dropdown to pin search caller to one org -->
-      <button class="sp-filter-chip"
-              data-testid="sp-org-chip"
-              @click.stop="toggleOrgDropdown()"
-              :title="orgChip.title">
-        <span class="sp-filter-chip-glyph"
-              :class="orgChip.allOrgs ? 'sp-filter-chip-all' : ''"
-              :style="orgChip.glyphStyle">
-          <template x-if="!orgChip.favicon">
-            <span x-text="orgChip.initial"></span>
+      <div class="sp-filter-anchor">
+        <button class="sp-filter-chip"
+                data-testid="sp-org-chip"
+                @click.stop="toggleOrgDropdown()"
+                :title="orgChip.title">
+          <span class="sp-filter-chip-glyph"
+                :class="orgChip.allOrgs ? 'sp-filter-chip-all' : ''"
+                :style="orgChip.glyphStyle">
+            <template x-if="!orgChip.favicon">
+              <span x-text="orgChip.initial"></span>
+            </template>
+            <template x-if="orgChip.favicon">
+              <img :src="orgChip.favicon" :alt="orgChip.label">
+            </template>
+          </span>
+          <span class="sp-filter-chip-label">Org:</span>
+          <span class="sp-filter-chip-value" x-text="orgChip.label"></span>
+          <span class="sp-filter-chip-caret">▾</span>
+        </button>
+
+        <!-- Org dropdown panel (open state) -->
+        <div class="sp-org-dropdown"
+             data-testid="sp-org-dropdown"
+             x-show="orgDropdownOpen"
+             @click.outside="orgDropdownOpen = false"
+             x-cloak>
+          <button class="sp-org-option"
+                  :class="!selectedOrg ? 'sp-org-option-selected' : ''"
+                  @click="pickOrg('')">
+            <span class="sp-org-option-glyph sp-org-option-glyph-all">∞</span>
+            <span>All orgs</span>
+            <span class="sp-org-option-meta">default</span>
+          </button>
+          <template x-for="o in orgList" :key="o.slug">
+            <button class="sp-org-option"
+                    :class="selectedOrg === o.slug ? 'sp-org-option-selected' : ''"
+                    @click="pickOrg(o.slug)">
+              <span class="sp-org-option-glyph"
+                    :style="o.favicon ? '' : `background:${o.color}`">
+                <template x-if="!o.favicon">
+                  <span x-text="o.initial"></span>
+                </template>
+                <template x-if="o.favicon">
+                  <img :src="o.favicon" :alt="o.name">
+                </template>
+              </span>
+              <span x-text="o.name"></span>
+              <span class="sp-org-option-meta" x-text="o.kind"></span>
+            </button>
           </template>
-          <template x-if="orgChip.favicon">
-            <img :src="orgChip.favicon" :alt="orgChip.label">
-          </template>
-        </span>
-        <span class="sp-filter-chip-label">Org:</span>
-        <span class="sp-filter-chip-value" x-text="orgChip.label"></span>
-        <span class="sp-filter-chip-caret">▾</span>
-      </button>
+        </div>
+      </div>
 
       <!-- Publication-state chip — minimum-state filter. Picking a state
            clamps results to that state OR more restrictive. Raw is the
            floor (everything qualifies, including raw rows from other
            sessions via include_raw=1); Canonical is the ceiling. The
            glyph mirrors the active selection's restrictiveness. -->
-      <button class="sp-filter-chip"
-              data-testid="sp-state-chip"
-              @click.stop="toggleStateDropdown()"
-              title="Filter by minimum publication state (more bars = more restrictive)">
-        <span class="sp-state-glyph" data-testid="sp-state-chip-glyph">
-          <template x-for="i in 4" :key="i">
-            <span class="sp-state-glyph-bar"
-                  :class="i <= stateChipFilledBars ? 'sp-state-glyph-bar-filled' : ''"></span>
+      <div class="sp-filter-anchor">
+        <button class="sp-filter-chip"
+                data-testid="sp-state-chip"
+                @click.stop="toggleStateDropdown()"
+                title="Filter by minimum publication state (more bars = more restrictive)">
+          <span class="sp-state-glyph" data-testid="sp-state-chip-glyph">
+            <template x-for="i in 4" :key="i">
+              <span class="sp-state-glyph-bar"
+                    :class="i <= stateChipFilledBars ? 'sp-state-glyph-bar-filled' : ''"></span>
+            </template>
+          </span>
+          <span class="sp-filter-chip-label">State:</span>
+          <span class="sp-filter-chip-value" x-text="stateChipLabel"></span>
+          <span class="sp-filter-chip-caret">▾</span>
+        </button>
+
+        <!-- Publication-state dropdown panel (open state).
+             Order is Raw → Curated → Published → Canonical — top of list is
+             least restrictive (= "Any"); bottom is most restrictive. Each
+             option carries a 4-bar ladder where the number of filled bars
+             communicates restrictiveness. -->
+        <div class="sp-state-dropdown"
+             data-testid="sp-state-dropdown"
+             x-show="stateDropdownOpen"
+             @click.outside="stateDropdownOpen = false"
+             x-cloak>
+          <template x-for="opt in stateOptions" :key="opt.key">
+            <button class="sp-org-option"
+                    :data-state-key="opt.key"
+                    :class="selectedState === opt.key ? 'sp-org-option-selected' : ''"
+                    @click="pickState(opt.key)">
+              <span class="sp-state-option-bars" data-testid="sp-state-option-bars">
+                <template x-for="i in 4" :key="i">
+                  <span class="sp-state-option-bar"
+                        :class="(i <= opt.bars ? 'sp-state-option-bar-filled ' : '') + 'sp-state-h' + i"></span>
+                </template>
+              </span>
+              <span x-text="opt.label"></span>
+              <span class="sp-state-option-hint" x-text="opt.hint"></span>
+            </button>
           </template>
-        </span>
-        <span class="sp-filter-chip-label">State:</span>
-        <span class="sp-filter-chip-value" x-text="stateChipLabel"></span>
-        <span class="sp-filter-chip-caret">▾</span>
-      </button>
+        </div>
+      </div>
 
       <!-- Sort chip (Round 7k) — toggles between Relevance (BM25) and
            Recent (created_at DESC). URL is the source of truth via
            ?order=recent. The chip mirrors the State chip's pattern
            (filter chip + dropdown) so the row reads as a coherent
            filter strip. -->
-      <button class="sp-filter-chip"
-              data-testid="sp-order-chip"
-              @click.stop="toggleOrderDropdown()"
-              title="Sort results by relevance or recency">
-        <span class="sp-filter-chip-label">Sort:</span>
-        <span class="sp-filter-chip-value" x-text="orderChipLabel"></span>
-        <span class="sp-filter-chip-caret">▾</span>
-      </button>
-
-      <!-- Org dropdown panel (open state) -->
-      <div class="sp-org-dropdown"
-           data-testid="sp-org-dropdown"
-           x-show="orgDropdownOpen"
-           @click.outside="orgDropdownOpen = false"
-           x-cloak>
-        <button class="sp-org-option"
-                :class="!selectedOrg ? 'sp-org-option-selected' : ''"
-                @click="pickOrg('')">
-          <span class="sp-org-option-glyph sp-org-option-glyph-all">∞</span>
-          <span>All orgs</span>
-          <span class="sp-org-option-meta">default</span>
+      <div class="sp-filter-anchor">
+        <button class="sp-filter-chip"
+                data-testid="sp-order-chip"
+                @click.stop="toggleOrderDropdown()"
+                title="Sort results by relevance or recency">
+          <span class="sp-filter-chip-label">Sort:</span>
+          <span class="sp-filter-chip-value" x-text="orderChipLabel"></span>
+          <span class="sp-filter-chip-caret">▾</span>
         </button>
-        <template x-for="o in orgList" :key="o.slug">
-          <button class="sp-org-option"
-                  :class="selectedOrg === o.slug ? 'sp-org-option-selected' : ''"
-                  @click="pickOrg(o.slug)">
-            <span class="sp-org-option-glyph"
-                  :style="o.favicon ? '' : `background:${o.color}`">
-              <template x-if="!o.favicon">
-                <span x-text="o.initial"></span>
-              </template>
-              <template x-if="o.favicon">
-                <img :src="o.favicon" :alt="o.name">
-              </template>
-            </span>
-            <span x-text="o.name"></span>
-            <span class="sp-org-option-meta" x-text="o.kind"></span>
-          </button>
-        </template>
-      </div>
 
-      <!-- Publication-state dropdown panel (open state).
-           Order is Raw → Curated → Published → Canonical — top of list is
-           least restrictive (= "Any"); bottom is most restrictive. Each
-           option carries a 4-bar ladder where the number of filled bars
-           communicates restrictiveness. -->
-      <div class="sp-state-dropdown"
-           data-testid="sp-state-dropdown"
-           x-show="stateDropdownOpen"
-           @click.outside="stateDropdownOpen = false"
-           x-cloak>
-        <template x-for="opt in stateOptions" :key="opt.key">
-          <button class="sp-org-option"
-                  :data-state-key="opt.key"
-                  :class="selectedState === opt.key ? 'sp-org-option-selected' : ''"
-                  @click="pickState(opt.key)">
-            <span class="sp-state-option-bars" data-testid="sp-state-option-bars">
-              <template x-for="i in 4" :key="i">
-                <span class="sp-state-option-bar"
-                      :class="(i <= opt.bars ? 'sp-state-option-bar-filled ' : '') + 'sp-state-h' + i"></span>
-              </template>
-            </span>
-            <span x-text="opt.label"></span>
-            <span class="sp-state-option-hint" x-text="opt.hint"></span>
-          </button>
-        </template>
-      </div>
-
-      <!-- Sort dropdown panel (open state). Mirrors the State dropdown
-           pattern; ``data-order-key`` lets the L2.B sweep address each
-           option deterministically. -->
-      <div class="sp-state-dropdown"
-           data-testid="sp-order-dropdown"
-           x-show="orderDropdownOpen"
-           @click.outside="orderDropdownOpen = false"
-           x-cloak>
-        <template x-for="opt in orderOptions" :key="opt.key">
-          <button class="sp-org-option"
-                  :data-order-key="opt.key"
-                  :class="selectedOrder === opt.key ? 'sp-org-option-selected' : ''"
-                  @click="pickOrder(opt.key)">
-            <span x-text="opt.label"></span>
-            <span class="sp-state-option-hint" x-text="opt.hint"></span>
-          </button>
-        </template>
+        <!-- Sort dropdown panel (open state). Mirrors the State dropdown
+             pattern; ``data-order-key`` lets the L2.B sweep address each
+             option deterministically. -->
+        <div class="sp-state-dropdown"
+             data-testid="sp-order-dropdown"
+             x-show="orderDropdownOpen"
+             @click.outside="orderDropdownOpen = false"
+             x-cloak>
+          <template x-for="opt in orderOptions" :key="opt.key">
+            <button class="sp-org-option"
+                    :data-order-key="opt.key"
+                    :class="selectedOrder === opt.key ? 'sp-org-option-selected' : ''"
+                    @click="pickOrder(opt.key)">
+              <span x-text="opt.label"></span>
+              <span class="sp-state-option-hint" x-text="opt.hint"></span>
+            </button>
+          </template>
+        </div>
       </div>
     </div>
 

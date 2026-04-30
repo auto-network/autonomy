@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -106,6 +107,23 @@ _CONNECTION_POOL: dict[tuple[str, str], "GraphDB"] = {}
 SEARCH_TITLE_BOOST = -50          # rank delta applied to sources_fts matches
 SEARCH_TAG_OVERLAP_BOOST = -5     # rank delta per matching tag
 SEARCH_TAG_OVERLAP_CAP = -25      # cumulative tag-overlap boost cap
+# Round 7l: source-aware search. Multi-hit sources rank higher (more hits =
+# stronger signal), but we don't let one source's hits drown out other
+# sources' visibility. The bonus is a small log-shaped delta that nudges
+# multi-hit sources up the ranking without overwhelming the title boost.
+#   1 hit  → 0
+#   2 hits → -1.0
+#   8 hits → -3.0
+#   30 hits → -4.95
+SEARCH_HIT_COUNT_BONUS_FACTOR = -1.0
+# Per-source excerpt cap returned to consumers in phase 2 of source-aware
+# search. Cards on /search render a few excerpts max, and we don't want a
+# 50-turn session to balloon the API payload.
+SEARCH_EXCERPTS_PER_SOURCE = 10
+# Phase 1 ceiling — how many candidate (source_id, rank) hits we pull
+# from each FTS table before grouping. Generous so a single source's hits
+# can't crowd out other distinct sources at the candidate-collection step.
+SEARCH_PHASE1_FANOUT = 200
 
 
 import re as _re
@@ -1032,6 +1050,15 @@ class GraphDB:
         whose JSON ``session_type`` is NULL or absent are NEVER returned
         when the filter is active. ``None`` disables the filter; ``[]``
         returns zero rows.
+
+        Round 7l: ``LIMIT`` applies to **distinct sources**, not raw FTS
+        rows. A 30-hit session contributes one source-row to the result
+        set (with hit_count attached), not 30 rows competing for slots.
+        Multi-hit sources rank higher via a log-shaped hit-count bonus.
+        Excerpts (the per-turn FTS hits) come back as additional rows
+        after the source-row, capped at ``SEARCH_EXCERPTS_PER_SOURCE``
+        per source — the dashboard's ``_group_search_results`` collapses
+        them back into per-card excerpt arrays.
         """
         if order not in self.SEARCH_VALID_ORDERS:
             raise ValueError(
@@ -1045,7 +1072,6 @@ class GraphDB:
                 excluded_source_types=excluded_source_types,
             )
 
-        results = []
         fts_query = _sanitize_fts_query(query, or_mode=or_mode)
 
         tag_clause = ""
@@ -1061,182 +1087,228 @@ class GraphDB:
         excl_clause, excl_params = self._build_excluded_types_clause(excluded_source_types)
         st_clause, st_params = self._build_session_type_clause(session_type)
 
-        # ``order='recent'`` swaps the per-query ORDER BY to source.created_at
-        # DESC. The post-process tag-overlap boost applies only under the
-        # default 'relevance' ordering — boosting a recency feed would defeat
-        # the purpose of the toggle. ``rank`` is still selected so callers
-        # that inspect it under recency see the underlying BM25 score.
-        order_by_sql = (
-            "s.created_at DESC, rank"
-            if order == "recent" else "rank"
+        project_clause = " AND s.project = ?" if project else ""
+        project_params: list = [project] if project else []
+        common_filters = (
+            project_clause + tag_clause + state_clause + excl_clause + st_clause
+        )
+        common_params: list = (
+            project_params + tag_params + state_params + excl_params + st_params
         )
 
-        if project:
-            # Project-scoped search
-            rows = self.conn.execute(
-                f"""SELECT s.id, s.title as content, NULL as turn_number, NULL as tags,
-                          s.id as source_id,
-                          s.title as source_title, s.platform, s.project,
-                          s.type as source_type,
-                          s.created_at as source_created_at,
-                          s.short_description, s.keywords,
-                          s.metadata as source_metadata,
-                          'source' as result_type,
-                          (rank + ?) as rank
-                   FROM sources_fts fts
-                   JOIN sources s ON s.rowid = fts.rowid
-                   WHERE sources_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}{st_clause}
-                   ORDER BY {order_by_sql}
-                   LIMIT ?""",
-                (SEARCH_TITLE_BOOST, fts_query, project,
-                 *tag_params, *state_params, *excl_params, *st_params, limit),
-            ).fetchall()
-            results.extend(dict(r) for r in rows)
+        # ── Phase 1: collect hit-rows per FTS table ─────────────────────
+        # Each query is capped at SEARCH_PHASE1_FANOUT so one pathological
+        # source can't drown out other candidates at the collection step.
+        # We pull the raw FTS hits then aggregate per source_id in Python.
+        hit_rows: list[dict] = []
 
-            rows = self.conn.execute(
-                f"""SELECT t.id, t.content, t.turn_number, t.tags, t.source_id,
-                          s.title as source_title, s.platform, s.project,
-                          s.type as source_type,
-                          s.created_at as source_created_at,
-                          s.short_description, s.keywords,
-                          s.metadata as source_metadata,
-                          'thought' as result_type,
-                          rank
-                   FROM thoughts_fts fts
-                   JOIN thoughts t ON t.rowid = fts.rowid
-                   JOIN sources s ON s.id = t.source_id
-                   WHERE thoughts_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}{st_clause}
-                   ORDER BY {order_by_sql}
-                   LIMIT ?""",
-                (fts_query, project,
-                 *tag_params, *state_params, *excl_params, *st_params, limit),
-            ).fetchall()
-            results.extend(dict(r) for r in rows)
+        sources_hits = self.conn.execute(
+            f"""SELECT s.id as source_id,
+                      (rank + ?) as rank,
+                      s.title as content,
+                      NULL as turn_number,
+                      NULL as tags,
+                      s.id as id,
+                      s.title as source_title, s.platform, s.project,
+                      s.type as source_type,
+                      s.created_at as source_created_at,
+                      s.short_description, s.keywords,
+                      s.metadata as source_metadata,
+                      'source' as result_type
+               FROM sources_fts fts
+               JOIN sources s ON s.rowid = fts.rowid
+               WHERE sources_fts MATCH ?{common_filters}
+               ORDER BY rank
+               LIMIT ?""",
+            (SEARCH_TITLE_BOOST, fts_query, *common_params, SEARCH_PHASE1_FANOUT),
+        ).fetchall()
+        hit_rows.extend(dict(r) for r in sources_hits)
 
-            rows = self.conn.execute(
-                f"""SELECT d.id, d.content, d.turn_number, d.thought_id, d.source_id,
-                          s.title as source_title, s.platform, s.project,
-                          s.type as source_type,
-                          s.created_at as source_created_at,
-                          s.short_description, s.keywords,
-                          s.metadata as source_metadata,
-                          'derivation' as result_type,
-                          rank
-                   FROM derivations_fts fts
-                   JOIN derivations d ON d.rowid = fts.rowid
-                   JOIN sources s ON s.id = d.source_id
-                   WHERE derivations_fts MATCH ? AND s.project = ?{tag_clause}{state_clause}{excl_clause}{st_clause}
-                   ORDER BY {order_by_sql}
-                   LIMIT ?""",
-                (fts_query, project,
-                 *tag_params, *state_params, *excl_params, *st_params, limit),
-            ).fetchall()
-            results.extend(dict(r) for r in rows)
-        else:
-            # Global search — sources_fts (curated metadata) ranked first.
-            rows = self.conn.execute(
-                f"""SELECT s.id, s.title as content, NULL as turn_number, NULL as tags,
-                          s.id as source_id,
-                          s.title as source_title, s.platform, s.project,
-                          s.type as source_type,
-                          s.created_at as source_created_at,
-                          s.short_description, s.keywords,
-                          s.metadata as source_metadata,
-                          'source' as result_type,
-                          (rank + ?) as rank
-                   FROM sources_fts fts
-                   JOIN sources s ON s.rowid = fts.rowid
-                   WHERE sources_fts MATCH ?{tag_clause}{state_clause}{excl_clause}{st_clause}
-                   ORDER BY {order_by_sql}
-                   LIMIT ?""",
-                (SEARCH_TITLE_BOOST, fts_query,
-                 *tag_params, *state_params, *excl_params, *st_params, limit),
-            ).fetchall()
-            results.extend(dict(r) for r in rows)
+        thoughts_hits = self.conn.execute(
+            f"""SELECT t.source_id as source_id,
+                      rank as rank,
+                      t.content as content,
+                      t.turn_number as turn_number,
+                      t.tags as tags,
+                      t.id as id,
+                      s.title as source_title, s.platform, s.project,
+                      s.type as source_type,
+                      s.created_at as source_created_at,
+                      s.short_description, s.keywords,
+                      s.metadata as source_metadata,
+                      'thought' as result_type
+               FROM thoughts_fts fts
+               JOIN thoughts t ON t.rowid = fts.rowid
+               JOIN sources s ON s.id = t.source_id
+               WHERE thoughts_fts MATCH ?{common_filters}
+               ORDER BY rank
+               LIMIT ?""",
+            (fts_query, *common_params, SEARCH_PHASE1_FANOUT),
+        ).fetchall()
+        hit_rows.extend(dict(r) for r in thoughts_hits)
 
-            rows = self.conn.execute(
-                f"""SELECT t.id, t.content, t.turn_number, t.tags, t.source_id,
-                          s.title as source_title, s.platform, s.project,
-                          s.type as source_type,
-                          s.created_at as source_created_at,
-                          s.short_description, s.keywords,
-                          s.metadata as source_metadata,
-                          'thought' as result_type,
-                          rank
-                   FROM thoughts_fts fts
-                   JOIN thoughts t ON t.rowid = fts.rowid
-                   JOIN sources s ON s.id = t.source_id
-                   WHERE thoughts_fts MATCH ?{tag_clause}{state_clause}{excl_clause}{st_clause}
-                   ORDER BY {order_by_sql}
-                   LIMIT ?""",
-                (fts_query,
-                 *tag_params, *state_params, *excl_params, *st_params, limit),
-            ).fetchall()
-            results.extend(dict(r) for r in rows)
+        deriv_hits = self.conn.execute(
+            f"""SELECT d.source_id as source_id,
+                      rank as rank,
+                      d.content as content,
+                      d.turn_number as turn_number,
+                      NULL as tags,
+                      d.id as id,
+                      s.title as source_title, s.platform, s.project,
+                      s.type as source_type,
+                      s.created_at as source_created_at,
+                      s.short_description, s.keywords,
+                      s.metadata as source_metadata,
+                      'derivation' as result_type
+               FROM derivations_fts fts
+               JOIN derivations d ON d.rowid = fts.rowid
+               JOIN sources s ON s.id = d.source_id
+               WHERE derivations_fts MATCH ?{common_filters}
+               ORDER BY rank
+               LIMIT ?""",
+            (fts_query, *common_params, SEARCH_PHASE1_FANOUT),
+        ).fetchall()
+        hit_rows.extend(dict(r) for r in deriv_hits)
 
-            rows = self.conn.execute(
-                f"""SELECT d.id, d.content, d.turn_number, d.thought_id, d.source_id,
-                          s.title as source_title, s.platform, s.project,
-                          s.type as source_type,
-                          s.created_at as source_created_at,
-                          s.short_description, s.keywords,
-                          s.metadata as source_metadata,
-                          'derivation' as result_type,
-                          rank
-                   FROM derivations_fts fts
-                   JOIN derivations d ON d.rowid = fts.rowid
-                   JOIN sources s ON s.id = d.source_id
-                   WHERE derivations_fts MATCH ?{tag_clause}{state_clause}{excl_clause}{st_clause}
-                   ORDER BY {order_by_sql}
-                   LIMIT ?""",
-                (fts_query,
-                 *tag_params, *state_params, *excl_params, *st_params, limit),
-            ).fetchall()
-            results.extend(dict(r) for r in rows)
+        if not hit_rows:
+            return []
 
-        # Tag-overlap soft signal: query terms that match a source's
-        # navigational tags get a small additional boost (capped). Lets a
-        # search for "pitfall failures" surface pitfall-tagged notes above
-        # equally-ranked rows that just happen to mention the words.
-        # Skipped under ``order='recent'`` — boosting a recency feed would
-        # blunt the toggle's intent.
-        if order == "relevance":
-            query_tokens = {t.lower() for t in query.split() if len(t) > 2}
-            if query_tokens:
-                for r in results:
-                    meta = r.get("source_metadata")
-                    if isinstance(meta, str):
-                        try:
-                            meta = json.loads(meta)
-                        except (json.JSONDecodeError, TypeError):
-                            meta = {}
-                    if not isinstance(meta, dict):
-                        continue
+        # ── Phase 1b: aggregate per source ──────────────────────────────
+        # Per source: best (most-negative) rank wins as the source-rank
+        # baseline; hit-count adds a log-shaped negative bonus so a
+        # 30-hit session ranks above a 1-hit session for the same query.
+        # Title-boost is already folded into individual sources_fts rows
+        # via (rank + SEARCH_TITLE_BOOST) above, so MIN(rank) carries it.
+        per_source: dict[str, dict] = {}
+        per_source_excerpts: dict[str, list[dict]] = {}
+        for h in hit_rows:
+            sid = h.get("source_id")
+            if sid is None:
+                continue
+            cur = per_source.get(sid)
+            r_rank = h.get("rank") or 0
+            if cur is None:
+                # Capture source-level fields from the first hit; later
+                # hits enrich the excerpt list and update best-rank.
+                source_row = {
+                    k: h.get(k) for k in (
+                        "source_id", "source_title", "platform", "project",
+                        "source_type", "source_created_at",
+                        "short_description", "keywords", "source_metadata",
+                    )
+                }
+                source_row["id"] = sid
+                source_row["best_rank"] = r_rank
+                source_row["hit_count"] = 1
+                per_source[sid] = source_row
+                per_source_excerpts[sid] = [h]
+            else:
+                cur["hit_count"] += 1
+                if r_rank < cur["best_rank"]:
+                    cur["best_rank"] = r_rank
+                per_source_excerpts[sid].append(h)
+
+        # ── Phase 2: compute per-source rank, apply tag-overlap, sort ───
+        query_tokens = {t.lower() for t in query.split() if len(t) > 2}
+        for sid, src in per_source.items():
+            hit_count = src["hit_count"]
+            best_rank = src["best_rank"]
+            # Multi-hit bonus — log-shaped so it nudges without dominating.
+            # log2(1+1)=1 → 0 bonus; log2(1+30)≈4.95 → ~-4.95 bonus.
+            bonus = SEARCH_HIT_COUNT_BONUS_FACTOR * math.log2(1 + hit_count)
+            src_rank = best_rank + bonus
+            # Tag-overlap soft signal: query tokens matching source tags
+            # add a capped negative delta. Skipped under recency.
+            if order == "relevance" and query_tokens:
+                meta = src.get("source_metadata")
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except (json.JSONDecodeError, TypeError):
+                        meta = {}
+                if isinstance(meta, dict):
                     tags = [
                         t.lower() for t in (meta.get("tags") or [])
                         if isinstance(t, str)
                     ]
                     overlap = len(query_tokens & set(tags))
                     if overlap > 0:
-                        boost = max(
+                        src_rank += max(
                             SEARCH_TAG_OVERLAP_BOOST * overlap,
                             SEARCH_TAG_OVERLAP_CAP,
                         )
-                        cur = r.get("rank") or 0
-                        r["rank"] = cur + boost
+            src["rank"] = src_rank
 
+        # Order sources at the source level (not row level) so LIMIT N
+        # picks N distinct sources — this is the core Round 7l fix.
         if order == "recent":
-            # Stable-sort by source.created_at DESC. Fall back to empty
-            # string so rows with NULL created_at sort last.
-            results.sort(
-                key=lambda r: r.get("source_created_at") or "",
+            # Stable sort: created_at DESC primary, rank ASC tiebreak
+            # (BM25 is negative — lower wins). Python's sorted is stable,
+            # so apply the secondary key first then the primary key.
+            ordered_sources = sorted(
+                per_source.values(), key=lambda s: s.get("rank") or 0,
+            )
+            ordered_sources.sort(
+                key=lambda s: s.get("source_created_at") or "",
                 reverse=True,
             )
         else:
-            # Default: relevance — sort by rank ascending (BM25 ranks are
-            # negative, so the strongest hits are most-negative).
-            results.sort(key=lambda r: r.get("rank", 0))
-        return results[:limit]
+            ordered_sources = sorted(
+                per_source.values(), key=lambda s: s.get("rank") or 0,
+            )
+
+        top_sources = ordered_sources[:limit]
+
+        # ── Phase 3: shape output ───────────────────────────────────────
+        # Emit one "source" result_type row per surviving source, then
+        # the per-turn excerpt rows beneath it. Downstream consumers
+        # (CLI: read row.result_type; dashboard: _group_search_results
+        # collapses by source_id). Excerpts inherit the source-level
+        # rank so they stay clustered when the merged list is re-sorted
+        # in ops.search / cross-org merge layers.
+        results: list[dict] = []
+        for src in top_sources:
+            sid = src["source_id"]
+            src_rank = src["rank"]
+            # Pick the top excerpt to drive the source-row's content.
+            # If there's a sources_fts hit, that one wins (its content
+            # is the source title and its rank carries the title boost).
+            excerpts = per_source_excerpts[sid]
+            excerpts_sorted = sorted(
+                excerpts,
+                key=lambda h: (
+                    0 if h.get("result_type") == "source" else 1,
+                    h.get("rank") or 0,
+                ),
+            )
+            head = excerpts_sorted[0]
+            head_row = dict(head)
+            # Source-level fields override per-hit values where they
+            # differ (rank in particular — the source-level rank carries
+            # hit-count + tag-overlap deltas).
+            head_row["source_id"] = sid
+            head_row["rank"] = src_rank
+            head_row["hit_count"] = src["hit_count"]
+            results.append(head_row)
+            # Emit additional excerpts (capped) for the dashboard's
+            # group step. Skip the head row to avoid duplication.
+            tail = excerpts_sorted[1:SEARCH_EXCERPTS_PER_SOURCE]
+            for ex in tail:
+                ex_row = dict(ex)
+                ex_row["source_id"] = sid
+                # Tail rows carry hit_count so downstream aggregators
+                # (the dashboard's _group_search_results) can show the
+                # real match count even though excerpts are capped at
+                # SEARCH_EXCERPTS_PER_SOURCE — a 30-hit session still
+                # surfaces "30 matches" rather than the visible 10.
+                ex_row["hit_count"] = src["hit_count"]
+                # Excerpts keep their own rank so the per-source excerpt
+                # sort in _group_search_results lands the strongest
+                # excerpt first within the card. Source-level rank lives
+                # only on the head row.
+                results.append(ex_row)
+
+        return results
 
     def _search_source_id(self, query: str, limit: int = 20, project: str | None = None, tag: str | None = None,
                           excluded_source_types: list[str] | None = None) -> list[dict]:
