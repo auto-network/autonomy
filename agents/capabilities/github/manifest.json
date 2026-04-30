@@ -13,5 +13,5 @@
         "entrypoint": "gh auth status"
     },
     "required_env": ["GH_TOKEN"],
-    "notes": "Placeholder manifest. Populated in a later bead — see auto-uqq0i and graph://86e04207-a25. v1 model (graph://86e04207-a25) collapses review and merge-gate concerns under source_control@1; the nested op inventory is finalized in a later bead."
+    "notes": "Implementation lives in agents/capabilities/github/service.py. Operations exposed under source_control@1: source_control.review.read, source_control.review.refresh, source_control.gates.watch_set. Per the v1 capability model (graph://86e04207-a25), review and merge-gate concerns nest under source_control rather than appearing as separate top-level contracts. Probe runs `gh auth status` inside the live workspace container."
 }

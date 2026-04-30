@@ -553,7 +553,7 @@ class TestWorktreePage:
 
 
 class _DockerExecRecorder:
-    """Capture ``run_cli`` calls made by worktree_github and replay scripted
+    """Capture ``run_cli`` calls made by the GitHub capability service and replay scripted
     ``(stdout, stderr, returncode, timed_out)`` tuples in order.
 
     First inspect call is treated as the container liveness probe and is
@@ -594,7 +594,7 @@ def _install_github_stubs(
     gh_results=None,
     repo_slug="anchore/autonomy",
 ):
-    from tools.dashboard import worktree_github as wg
+    from agents.capabilities.github import service as wg
 
     monkeypatch.setattr(wg.worktree_monitor, "get_all", lambda: list(rows))
     recorder = _DockerExecRecorder(
@@ -608,7 +608,7 @@ def _install_github_stubs(
 
 class TestWorktreeGithubResolution:
     def test_find_live_worktree_row_returns_only_live_match(self, monkeypatch):
-        from tools.dashboard import worktree_github as wg
+        from agents.capabilities.github import service as wg
 
         rows = [
             _row(session="auto-dead", repo="autonomy", live=False),
@@ -626,7 +626,7 @@ class TestWorktreeGithubResolution:
         assert dead is None
 
     def test_find_live_worktree_row_with_explicit_rows_arg(self):
-        from tools.dashboard import worktree_github as wg
+        from agents.capabilities.github import service as wg
 
         rows = [_row(session="auto-x", live=True)]
         match = wg.find_live_worktree_row("auto-x", "autonomy", rows=rows)
@@ -634,7 +634,7 @@ class TestWorktreeGithubResolution:
         assert match.session_name == "auto-x"
 
     def test_classify_failure_maps_canonical_states(self):
-        from tools.dashboard import worktree_github as wg
+        from agents.capabilities.github import service as wg
 
         assert wg.classify_failure("", "", 0, False) is None
         assert wg.classify_failure("", "timeout", -1, True) == wg.FAILURE_TIMED_OUT
@@ -668,12 +668,12 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy")
         )
 
         assert result.ok is True
         assert result.failure is None
-        assert result.operation == wg.OP_PR_SNAPSHOT
+        assert result.operation == wg.OP_REVIEW_READ
         assert result.session_name == "auto-test"
         assert result.repo_name == "autonomy"
         assert result.exit_code == 0
@@ -704,7 +704,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.worktree_pr_snapshot_v1("auto-dead", "autonomy")
+            wg.source_control_review_read_v1("auto-dead", "autonomy")
         )
 
         assert result.ok is False
@@ -724,7 +724,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy")
         )
 
         assert result.ok is False
@@ -742,7 +742,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy")
         )
 
         assert result.ok is False
@@ -758,7 +758,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy")
         )
 
         assert result.ok is False
@@ -773,7 +773,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy")
         )
 
         assert result.ok is False
@@ -781,7 +781,7 @@ class TestWorktreePRSnapshot:
         assert result.timed_out is True
 
     def test_snapshot_surfaces_no_repo_slug_when_remote_unparseable(self, monkeypatch):
-        from tools.dashboard import worktree_github as wg
+        from agents.capabilities.github import service as wg
 
         monkeypatch.setattr(wg.worktree_monitor, "get_all", lambda: [_live_row()])
         monkeypatch.setattr(wg, "derive_repo_slug", lambda _p: None)
@@ -791,7 +791,7 @@ class TestWorktreePRSnapshot:
         monkeypatch.setattr(wg, "run_cli", _explode)
 
         result = asyncio.run(
-            wg.worktree_pr_snapshot_v1("auto-test", "autonomy")
+            wg.source_control_review_read_v1("auto-test", "autonomy")
         )
 
         assert result.ok is False
@@ -808,11 +808,11 @@ class TestWorktreePRRefresh:
         )
 
         result = asyncio.run(
-            wg.worktree_pr_refresh_v1("auto-test", "autonomy")
+            wg.source_control_review_refresh_v1("auto-test", "autonomy")
         )
 
         assert result.ok is True
-        assert result.operation == wg.OP_PR_REFRESH
+        assert result.operation == wg.OP_REVIEW_REFRESH
         gh_call = recorder.calls[1]
         assert gh_call[:4] == ["docker", "exec", "auto-test", "gh"]
         assert "pr" in gh_call and "view" in gh_call
@@ -837,11 +837,11 @@ class TestWorktreePRWatchSet:
         )
 
         result = asyncio.run(
-            wg.worktree_pr_watch_set_v1("auto-test", "autonomy", mode)
+            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", mode)
         )
 
         assert result.ok is True
-        assert result.operation == wg.OP_PR_WATCH_SET
+        assert result.operation == wg.OP_GATES_WATCH_SET
         gh_call = recorder.calls[1]
         assert gh_call[:4] == ["docker", "exec", "auto-test", "gh"]
         assert "api" in gh_call
@@ -858,7 +858,7 @@ class TestWorktreePRWatchSet:
         )
 
         result = asyncio.run(
-            wg.worktree_pr_watch_set_v1("auto-test", "autonomy", "default")
+            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", "default")
         )
 
         assert result.ok is True
@@ -874,7 +874,7 @@ class TestWorktreePRWatchSet:
         )
 
         result = asyncio.run(
-            wg.worktree_pr_watch_set_v1("auto-test", "autonomy", "muted")
+            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", "muted")
         )
 
         assert result.ok is False
@@ -887,10 +887,10 @@ class TestWorktreePRWatchSet:
 
 class TestWorktreeGithubExecResultSerialization:
     def test_to_dict_round_trips_all_fields(self):
-        from tools.dashboard import worktree_github as wg
+        from agents.capabilities.github import service as wg
 
         result = wg.WorktreeGithubExecResult(
-            operation=wg.OP_PR_SNAPSHOT,
+            operation=wg.OP_REVIEW_READ,
             session_name="auto-x",
             repo_name="autonomy",
             ok=False,
@@ -906,7 +906,7 @@ class TestWorktreeGithubExecResultSerialization:
             error_message="gh CLI is not installed in the live container",
         )
         data = result.to_dict()
-        assert data["operation"] == wg.OP_PR_SNAPSHOT
+        assert data["operation"] == wg.OP_REVIEW_READ
         assert data["ok"] is False
         assert data["failure"] == wg.FAILURE_GH_MISSING
         assert data["command"] == ["docker", "exec", "auto-x", "gh", "pr", "view"]
