@@ -1477,6 +1477,36 @@ def _deregister_session_with_monitor(tmux_name: str) -> None:
     )
 
 
+def _register_agentic_session(
+    run_id: str, output_dir: str, jsonl_file: Path,
+) -> None:
+    """Register an agentic dispatch session with the monitor.
+
+    Agentic launches happen in the dashboard process
+    (``api_agent_action_dispatch``), not the dispatcher's RunningAgent
+    loop. Without explicit registration the monitor never sets up an
+    inotify watch on the JSONL, no ``session:messages`` broadcasts
+    fire, and the live-trace overlay can only show new turns after a
+    full close/reopen. The agentic poll loop calls this once the
+    JSONL appears; ``register_session`` on the monitor side is
+    idempotent on the (tmux_name, jsonl_path) tuple.
+
+    ``run_id`` is both the dispatch_runs row id AND the tmux/container
+    name (Round 5 contract for kind='agentic' rows), so it doubles as
+    the SSE session_id the front-end's session-store handler routes by.
+    """
+    tmux_name = run_id
+    project = jsonl_file.parent.name if jsonl_file.is_file() else "autonomy"
+    body = {
+        "tmux_name": tmux_name,
+        "type": "agentic",
+        "jsonl_path": str(jsonl_file),
+        "project": project,
+        "run_dir": output_dir or None,
+    }
+    _monitor_post("/api/monitor/register", body, tmux_name=tmux_name)
+
+
 def _read_stats_via_monitor(
     tmux_name: str,
     holder: "RunningAgent | RunningLibrarian",
@@ -2215,16 +2245,23 @@ def poll_and_collect_agentic() -> None:
         if not container_name:
             continue
 
-        finished, exit_code = poll_container(container_name)
-        if not finished:
-            continue
-
-        # Pull JSONL-derived metrics.
+        # Register the agentic session with the monitor as soon as its
+        # JSONL appears. Without this the monitor never inotifies the
+        # file, no ``session:messages`` events fire, and the live-trace
+        # overlay can't event-based-refresh — the operator has to close
+        # and re-open the panel to see new turns. Registration is
+        # idempotent on the monitor side.
         sessions_dir = Path(output_dir) / "sessions" if output_dir else None
         jsonl_files = (
             sorted(sessions_dir.rglob("*.jsonl")) if sessions_dir and sessions_dir.exists() else []
         )
         jsonl_file = jsonl_files[0] if jsonl_files else None
+        if jsonl_file is not None:
+            _register_agentic_session(run_id, output_dir, jsonl_file)
+
+        finished, exit_code = poll_container(container_name)
+        if not finished:
+            continue
         last_snippet, turn_count, tool_count, last_ts = _agentic_jsonl_metrics(
             jsonl_file
         ) if jsonl_file else ("", 0, 0, None)
