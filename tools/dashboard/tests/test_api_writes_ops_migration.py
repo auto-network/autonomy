@@ -202,6 +202,116 @@ def test_api_graph_note_update_malformed_source_id(dashboard_client):
     assert resp.status_code == 400
 
 
+# ── Note update: title flag + metadata-only updates ─────────────
+
+
+def test_api_graph_note_update_title_metadata_only(dashboard_client, orgs_root):
+    """POST with only ``title`` (no ``content``) updates the title
+    column without bumping the note version. Closes the regression
+    chain that bricked Worktrees note c64d0f5d-480 — agent had no
+    way to set title without round-tripping the body."""
+    auto_id = _make_peer_note(orgs_root / "autonomy.db", title="placeholder")
+
+    resp = dashboard_client.post(
+        "/api/graph/note/update",
+        json={"source_id": auto_id, "title": "Real Note Title"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["title"] == "Real Note Title"
+    assert body["new_version"] is None, "metadata-only update doesn't bump version"
+
+    au = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    try:
+        row = au.execute(
+            "SELECT title FROM sources WHERE id = ?", (auto_id,),
+        ).fetchone()
+        assert row[0] == "Real Note Title"
+        # No new version row.
+        max_v = au.execute(
+            "SELECT MAX(version) FROM note_versions WHERE source_id = ?", (auto_id,),
+        ).fetchone()[0] or 0
+        assert max_v <= 1
+    finally:
+        au.close()
+
+
+def test_api_graph_note_update_title_with_body_change(dashboard_client, orgs_root):
+    """Body update + explicit title both apply; title from body's
+    leading heading is NOT auto-derived (the regression fix)."""
+    auto_id = _make_peer_note(orgs_root / "autonomy.db", title="initial")
+
+    resp = dashboard_client.post(
+        "/api/graph/note/update",
+        json={
+            "source_id": auto_id,
+            "content": "# Body Heading\n\nNew body content.",
+            "title": "Explicit Title Wins",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["title"] == "Explicit Title Wins"
+    assert body["new_version"] == 2
+
+    au = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    try:
+        row = au.execute(
+            "SELECT title FROM sources WHERE id = ?", (auto_id,),
+        ).fetchone()
+        assert row[0] == "Explicit Title Wins", (
+            "explicit title must win over body's # heading"
+        )
+    finally:
+        au.close()
+
+
+def test_api_graph_note_update_body_preserves_title(dashboard_client, orgs_root):
+    """Body update without ``title`` keeps the existing title intact —
+    even when the new body has a leading ``# heading`` that the old
+    code would have auto-derived from."""
+    auto_id = _make_peer_note(orgs_root / "autonomy.db", title="Pinned")
+
+    resp = dashboard_client.post(
+        "/api/graph/note/update",
+        json={
+            "source_id": auto_id,
+            "content": "# Different Heading\n\nbody text",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    au = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    try:
+        row = au.execute(
+            "SELECT title FROM sources WHERE id = ?", (auto_id,),
+        ).fetchone()
+        assert row[0] == "Pinned", "title preserved across body edits"
+    finally:
+        au.close()
+
+
+def test_api_graph_note_update_no_op_rejected(dashboard_client, orgs_root):
+    """Empty request body (no content, no metadata) → 400."""
+    auto_id = _make_peer_note(orgs_root / "autonomy.db", title="t")
+    resp = dashboard_client.post(
+        "/api/graph/note/update",
+        json={"source_id": auto_id},
+    )
+    assert resp.status_code == 400, resp.text
+
+
+def test_api_graph_note_update_empty_title_rejected(dashboard_client, orgs_root):
+    """Explicit empty title → 400 (caller bug, never silently ignore)."""
+    auto_id = _make_peer_note(orgs_root / "autonomy.db", title="t")
+    resp = dashboard_client.post(
+        "/api/graph/note/update",
+        json={"source_id": auto_id, "title": "   "},
+    )
+    assert resp.status_code == 400, resp.text
+
+
 # ── Comment handler migration smoke ─────────────────────────────
 
 

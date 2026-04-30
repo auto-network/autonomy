@@ -2922,17 +2922,41 @@ def cmd_note_update(args):
 
     if getattr(args, "html", None):
         _require_read("c62b0142", "Agents must read the Rich-Content Creation Guide before creating/updating rich-content notes.\n  See: graph://c62b0142-fb3")
-    _require_read("843a8137", "Agents must read the Note Revision Protocol before updating notes.\n  See: graph://843a8137-3c7")
+
+    title = getattr(args, "title", None)
+    short_description = getattr(args, "short_description", None)
+    keywords = getattr(args, "keywords", None)
 
     if getattr(args, 'content_stdin', None) == "-":
         new_content = sys.stdin.read().strip()
     else:
         new_content = " ".join(args.text) if args.text else ""
 
-    if not new_content:
-        print("Error: no content provided", file=sys.stderr)
+    has_body = bool(new_content)
+    has_metadata = (
+        title is not None
+        or short_description is not None
+        or keywords is not None
+    )
+    if not has_body and not has_metadata:
+        print(
+            "Error: nothing to update — provide content (-c -) and/or "
+            "--title / --short-description / --keywords",
+            file=sys.stderr,
+        )
         sys.exit(1)
-    _check_single_line_content(new_content, getattr(args, 'force', False))
+
+    # Body changes go through the Revision Protocol gate. Metadata-only
+    # updates (title / short-description / keywords) are bookkeeping —
+    # they don't replace the canonical body, so the protocol-read gate
+    # doesn't apply.
+    if has_body:
+        _require_read(
+            "843a8137",
+            "Agents must read the Note Revision Protocol before updating "
+            "notes.\n  See: graph://843a8137-3c7",
+        )
+        _check_single_line_content(new_content, getattr(args, 'force', False))
 
     html_path = getattr(args, "html", None)
     attach_paths = getattr(args, "attach", None) or []
@@ -2943,12 +2967,13 @@ def cmd_note_update(args):
         try:
             result = get_client().update_note(
                 args.source,
-                new_content,
+                new_content if has_body else None,
+                title=title,
                 integrate_comments=integrate_ids,
                 attachments=attach_paths,
                 html_path=html_path,
-                short_description=getattr(args, "short_description", None),
-                keywords=getattr(args, "keywords", None),
+                short_description=short_description,
+                keywords=keywords,
                 org=getattr(args, "org", None),
             )
         except _ops.CrossOrgWriteError as e:
@@ -2971,17 +2996,33 @@ def cmd_note_update(args):
             print(f"  ✓ Attached {att['filename']} ({att['id'][:12]})")
 
     src_id = result["source_id"]
-    print(
-        f"  ✓ Note updated to version {result['new_version']} (src:{src_id[:12]}) — "
-        f"{result['lines']} lines, {result['chars']} chars"
-    )
+    if has_body:
+        print(
+            f"  ✓ Note updated to version {result['new_version']} (src:{src_id[:12]}) — "
+            f"{result['lines']} lines, {result['chars']} chars"
+        )
+    else:
+        # Metadata-only update: no body or version change. Show which
+        # fields landed so the caller knows the update wasn't a no-op.
+        changed = []
+        if title is not None:
+            changed.append(f"title={title!r}")
+        if short_description is not None:
+            changed.append("short_description")
+        if keywords is not None:
+            changed.append("keywords")
+        print(
+            f"  ✓ Metadata updated (src:{src_id[:12]}) — "
+            f"{', '.join(changed)} (no version bump)"
+        )
     for cid in result.get("integrated") or []:
         print(f"  ✓ Comment {cid[:12]} integrated")
     for cid in result.get("not_found_comments") or []:
         print(f"  ⚠ Comment {cid} not found on this note", file=sys.stderr)
 
-    local_path = _auto_save_note(src_id, result["content"])
-    print(f"  Local copy: {local_path}")
+    if has_body:
+        local_path = _auto_save_note(src_id, result["content"])
+        print(f"  Local copy: {local_path}")
 
 
 def cmd_agent_runs(args):
@@ -4103,6 +4144,8 @@ def main():
     p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
     p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement. For images use markdown syntax: ![alt]({1}). Unplaced attachments appear as downloads")
     p_note.add_argument("--html", help="HTML file for rich-content note (creates version-paired attachment)")
+    p_note.add_argument("--title", dest="title",
+                        help="Set the note's title directly (first-class metadata, never derived from body). On create: preferred over body-derive. On update: required to change the title — body edits do not touch the title column.")
     p_note.add_argument("--short-description", dest="short_description",
                         help="One or two sentences explaining the note's purpose (used in card previews / hover tooltips / search summaries)")
     p_note.add_argument("--keywords", dest="keywords",

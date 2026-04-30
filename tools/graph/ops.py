@@ -2195,6 +2195,7 @@ def _store_attachment_db(
 def create_note(
     content: str,
     *,
+    title: str | None = None,
     tags: list[str] | None = None,
     author: str | None = None,
     project: str | None = None,
@@ -2214,9 +2215,12 @@ def create_note(
     (optional dict ``{source_id, turn}``). Mirrors :func:`cli.cmd_note`
     output fields so callers can render the same echo lines.
 
-    If ``content`` begins with a markdown ``# heading``, the leading marker
-    is stripped from ``title`` (the body content is unchanged). The new
-    ``short_description`` field is stored as-is when provided; absent, the
+    Title resolution: explicit ``title`` (non-empty) wins. Otherwise the
+    body's leading ``# heading`` is the lazy-fallback (the leading
+    marker is stripped). If neither is available the column stores the
+    first 80 chars of content. The body is never modified.
+
+    ``short_description`` is stored as-is when provided; absent, the
     column stays NULL.
 
     ``html_path`` enables rich-content mode — the HTML is stored as a
@@ -2224,6 +2228,8 @@ def create_note(
     files are stored and ``{1}``/``{2}`` positional placeholders in
     ``content`` are rewritten to ``graph://<id>`` markers.
     """
+    if title is not None and not title.strip():
+        raise ValueError("title cannot be empty when set explicitly")
     from .models import Source, Thought, Edge, new_id
     from .ingest import extract_entities
 
@@ -2242,7 +2248,7 @@ def create_note(
         type="note",
         platform="local",
         project=project or "autonomy",
-        title=_title_from_content(content),
+        title=title if title is not None else _title_from_content(content),
         file_path=source_key,
         metadata=meta,
         publication_state="curated",
@@ -2334,8 +2340,9 @@ def create_note(
 
 def update_note(
     source_id: str,
-    content: str,
+    content: str | None = None,
     *,
+    title: str | None = None,
     integrate_comments: list[str] | None = None,
     attachments: list[str] | None = None,
     html_path: str | None = None,
@@ -2343,24 +2350,85 @@ def update_note(
     keywords: str | None = None,
     org: str | None = None,
 ) -> dict:
-    """Append a new version to an existing note.
+    """Update a note's body and/or metadata.
 
     Cross-org resolves ``source_id``; refuses peer-origin targets with
-    :class:`CrossOrgWriteError`. Returns a dict with ``new_version``,
-    ``source_id``, ``org``, ``lines``, ``chars``, ``integrated``
-    (list of integrated comment ids), ``rich_content`` (post-update),
-    ``attachments`` (list of new attachment records).
+    :class:`CrossOrgWriteError`. At least one of ``content``, ``title``,
+    ``short_description``, ``keywords`` (or attachments / integrated
+    comments) must be provided.
 
-    The title row is refreshed from the new content (the leading ``#``
-    heading marker, if any, is stripped). When ``short_description`` is
-    passed it overwrites the column; pass ``None`` to leave the existing
-    value untouched.
+    **Body vs metadata semantics:**
+
+    - When ``content`` is provided, the body is rewritten and a new
+      version row is appended to ``note_versions``. The thought row
+      backing the source is updated.
+    - When ``content`` is ``None``, this is a *metadata-only* update —
+      no body write, no version bump, no thought-row touch. Useful for
+      changing only the title / short_description / keywords / tags.
+
+    **Title semantics:**
+
+    - ``title="..."`` (non-empty): write that string to the title column.
+    - ``title=None`` AND existing title is non-empty: title is preserved
+      regardless of body changes.
+    - ``title=None`` AND existing title is empty AND ``content`` is
+      provided: derive from content's leading ``# heading`` (lazy
+      fallback for legacy notes). This branch never fires when content
+      is None.
+
+    The auto-rederive on body update is intentionally gone — title is a
+    first-class metadata field, not a derived view of the body.
+
+    Returns a dict with ``source_id``, ``org``, ``content`` (when body
+    updated), ``new_version`` (when body updated), ``lines`` / ``chars``
+    (when body updated), ``integrated``, ``not_found_comments``,
+    ``rich_content``, ``attachments``, ``title``, ``short_description``,
+    ``keywords``.
 
     Rich-content notes (``metadata.rich_content == True``) require
-    ``html_path``; the dual HTML/markdown update keeps the version
-    pair consistent.
+    ``html_path`` whenever ``content`` is provided; the dual
+    HTML/markdown update keeps the version pair consistent.
     """
     from .ingest import extract_entities
+
+    # Reject pure no-op calls early. At least one mutation must be
+    # specified; otherwise the caller is asking for nothing and we'd
+    # silently no-op while still claiming success in the response.
+    has_body_change = content is not None
+    has_metadata_change = (
+        title is not None
+        or short_description is not None
+        or keywords is not None
+        or bool(integrate_comments)
+        or bool(attachments)
+        or html_path is not None
+    )
+    if not has_body_change and not has_metadata_change:
+        raise ValueError(
+            "update_note requires at least one of content, title, "
+            "short_description, keywords, attachments, html_path, or "
+            "integrate_comments"
+        )
+
+    # If the caller is doing a metadata-only update, content-shaped
+    # operations (attachment placeholder substitution, version bumping,
+    # rich-content HTML pairing, comment integration into a new version)
+    # are not applicable. Reject mixing these with content=None so the
+    # boundary is clean.
+    if not has_body_change:
+        if attachments or html_path:
+            raise ValueError(
+                "attachments and html_path require a body update "
+                "(content cannot be None)"
+            )
+        if integrate_comments:
+            raise ValueError(
+                "integrate_comments requires a body update "
+                "(content cannot be None)"
+            )
+
+    if title is not None and not title.strip():
+        raise ValueError("title cannot be empty when set explicitly")
 
     # Resolve source cross-org. Scopeless callers auto-derive the write
     # target to the source's home org. Callers with an explicit caller
@@ -2410,7 +2478,7 @@ def update_note(
             meta = {}
     is_rich = bool(meta.get("rich_content"))
 
-    if is_rich and not html_path:
+    if has_body_change and is_rich and not html_path:
         raise ValueError(
             "rich-content note requires html_path on update "
             "(both markdown and HTML must be updated together)"
@@ -2421,57 +2489,94 @@ def update_note(
     # identical does the explicit-org path apply.
     write_org = origin_org or None
     db = _open(write_org)
+    att_records: list[dict] = []
+    integrated: list[str] = []
+    not_found: list[str] = []
+    next_version: int | None = None
     try:
-        att_records: list[dict] = []
-        if attachments:
-            att_ids = []
-            for fp in attachments:
-                att = _store_attachment_db(db, fp, source_id=src_id)
-                att_ids.append(att.id)
+        if has_body_change:
+            if attachments:
+                att_ids = []
+                for fp in attachments:
+                    att = _store_attachment_db(db, fp, source_id=src_id)
+                    att_ids.append(att.id)
+                    att_records.append({
+                        "id": att.id, "filename": att.filename,
+                        "kind": "file", "source_id": src_id,
+                    })
+                for i, att_id in enumerate(att_ids, 1):
+                    content = content.replace(
+                        '{' + str(i) + '}', f'graph://{att_id[:12]}',
+                    )
+
+            thoughts = db.get_thoughts_by_source(src_id)
+            if not thoughts:
+                raise LookupError(f"no thought found for source {src_id[:12]}")
+            thought = thoughts[0]
+
+            current_max = db.get_max_note_version(src_id)
+            if current_max == 0:
+                db.insert_note_version(src_id, 1, thought["content"])
+                next_version = 2
+            else:
+                next_version = current_max + 1
+
+            db.insert_note_version(src_id, next_version, content)
+
+            if html_path:
+                html_att = _store_attachment_db(
+                    db, html_path, source_id=f"{src_id}@{next_version}",
+                )
                 att_records.append({
-                    "id": att.id, "filename": att.filename,
-                    "kind": "file", "source_id": src_id,
+                    "id": html_att.id, "filename": html_att.filename,
+                    "kind": "html", "source_id": f"{src_id}@{next_version}",
                 })
-            for i, att_id in enumerate(att_ids, 1):
-                content = content.replace(
-                    '{' + str(i) + '}', f'graph://{att_id[:12]}',
-                )
+                if not is_rich:
+                    meta["rich_content"] = True
+                    db.conn.execute(
+                        "UPDATE sources SET metadata = ? WHERE id = ?",
+                        (json.dumps(meta), src_id),
+                    )
+                    is_rich = True
 
-        thoughts = db.get_thoughts_by_source(src_id)
-        if not thoughts:
-            raise LookupError(f"no thought found for source {src_id[:12]}")
-        thought = thoughts[0]
+            db.update_thought_content(thought["id"], content)
 
-        current_max = db.get_max_note_version(src_id)
-        if current_max == 0:
-            db.insert_note_version(src_id, 1, thought["content"])
-            next_version = 2
-        else:
-            next_version = current_max + 1
+            for name, etype in extract_entities(content):
+                eid = db.upsert_entity(name, etype)
+                db.add_mention(eid, thought["id"], "thought")
 
-        db.insert_note_version(src_id, next_version, content)
+            for cid in (integrate_comments or []):
+                row = db.conn.execute(
+                    "SELECT id FROM note_comments "
+                    "WHERE (id = ? OR id LIKE ?) AND source_id = ?",
+                    (cid, f"{cid}%", src_id),
+                ).fetchone()
+                if row:
+                    db.integrate_comment(row["id"])
+                    integrated.append(row["id"])
+                else:
+                    not_found.append(cid)
 
-        if html_path:
-            html_att = _store_attachment_db(
-                db, html_path, source_id=f"{src_id}@{next_version}",
+        # ── Title update ────────────────────────────────────────────
+        # Title is a first-class metadata column. We only rewrite it when
+        # the caller is explicit (via ``title=``) or when the existing
+        # title is empty AND we have new body content to derive from
+        # (lazy fallback for legacy notes that were created without a
+        # title). Body edits never silently mutate the title — that was
+        # the regression that bricked auto-network notes via the
+        # Update Title & Summary action's body-edit dance.
+        existing_title = (resolved.get("title") or "").strip()
+        if title is not None:
+            db.conn.execute(
+                "UPDATE sources SET title = ? WHERE id = ?",
+                (title, src_id),
             )
-            att_records.append({
-                "id": html_att.id, "filename": html_att.filename,
-                "kind": "html", "source_id": f"{src_id}@{next_version}",
-            })
-            if not is_rich:
-                meta["rich_content"] = True
-                db.conn.execute(
-                    "UPDATE sources SET metadata = ? WHERE id = ?",
-                    (json.dumps(meta), src_id),
-                )
-                is_rich = True
+        elif has_body_change and not existing_title:
+            db.conn.execute(
+                "UPDATE sources SET title = ? WHERE id = ?",
+                (_title_from_content(content), src_id),
+            )
 
-        db.update_thought_content(thought["id"], content)
-        db.conn.execute(
-            "UPDATE sources SET title = ? WHERE id = ?",
-            (_title_from_content(content), src_id),
-        )
         if short_description is not None:
             db.conn.execute(
                 "UPDATE sources SET short_description = ? WHERE id = ?",
@@ -2483,40 +2588,24 @@ def update_note(
                 (keywords, src_id),
             )
 
-        for name, etype in extract_entities(content):
-            eid = db.upsert_entity(name, etype)
-            db.add_mention(eid, thought["id"], "thought")
-
-        integrated: list[str] = []
-        not_found: list[str] = []
-        for cid in (integrate_comments or []):
-            row = db.conn.execute(
-                "SELECT id FROM note_comments "
-                "WHERE (id = ? OR id LIKE ?) AND source_id = ?",
-                (cid, f"{cid}%", src_id),
-            ).fetchone()
-            if row:
-                db.integrate_comment(row["id"])
-                integrated.append(row["id"])
-            else:
-                not_found.append(cid)
-
         db.commit()
     finally:
         db.close()
 
-    lines = content.count("\n") + (1 if content else 0)
+    body_lines = content.count("\n") + (1 if content else 0) if has_body_change else 0
+    body_chars = len(content) if has_body_change else 0
     return {
         "new_version": next_version,
         "source_id": src_id,
         "org": origin_org or caller or "",
-        "lines": lines,
-        "chars": len(content),
-        "content": content,
+        "lines": body_lines,
+        "chars": body_chars,
+        "content": content if has_body_change else None,
         "integrated": integrated,
         "not_found_comments": not_found,
         "rich_content": is_rich,
         "attachments": att_records,
+        "title": title,
         "short_description": short_description,
         "keywords": keywords,
     }
