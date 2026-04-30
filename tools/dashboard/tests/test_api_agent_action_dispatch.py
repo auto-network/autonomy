@@ -514,6 +514,66 @@ def test_dispatch_request_body_is_minimal(client, per_org_universe):
     assert md["dispatched_by_session"] == "dashboard"
 
 
+def test_api_dispatch_runs_surfaces_agentic_identity(
+    client, per_org_universe, isolated_dispatch_db,
+):
+    """``/api/dispatch/runs`` must surface the agentic identity fields
+    that drive timeline-card display and routing:
+
+    - ``bead_id`` is empty for ``kind='agentic'`` (the run-id used to
+      get stuffed in there, which made ``routeForRun`` compose
+      ``/bead/<run-id>`` → 404).
+    - ``agentic_source_id`` is present (typed pointer to the agent's
+      session source row).
+    - ``target_source_id`` is present (the asset the action operates
+      on; this is what ``routeForRun`` should send the operator to).
+    - ``target_org`` is present.
+    - ``member_key`` is present (the action key, for badges).
+    - ``action_label`` is the agentic source's display label
+      ("Update Title & Summary").
+    - ``title`` is the target asset's title for card display.
+    """
+    asset_title = "Architectural Signpost — Worktrees Spec"
+    asset_id = "abcdef00-0000-0000-0000-000000000abc"
+    _insert_note_source(
+        org="autonomy", source_id=asset_id, title=asset_title,
+    )
+    r = client.post(
+        "/api/agent-actions/dispatch",
+        json={"member_key": "note.update-summary", "asset_id": asset_id},
+    )
+    assert r.status_code == 201, r.json()
+    agentic_source_id = r.json()["agentic_source_id"]
+
+    runs_resp = client.get("/api/dispatch/runs")
+    assert runs_resp.status_code == 200
+    runs = runs_resp.json()
+    matches = [
+        run for run in runs
+        if run.get("kind") == "agentic"
+        and run.get("agentic_source_id") == agentic_source_id
+    ]
+    assert len(matches) == 1, (
+        f"agentic run not surfaced; got: {[r for r in runs if r.get('kind') == 'agentic']}"
+    )
+    row = matches[0]
+    assert (row.get("bead_id") or "") == "", (
+        "bead_id must stay empty for kind='agentic' so routing falls "
+        "through to the agentic_source_id / target_source_id branch"
+    )
+    assert row["agentic_source_id"] == agentic_source_id
+    assert row.get("target_source_id") == asset_id
+    assert row.get("target_org") == "autonomy"
+    assert row.get("member_key") == "note.update-summary"
+    # Action label comes from the action's Setting payload `label` field.
+    # The fixture's agent-action member is registered with label
+    # "Update Title & Summary"; if that fixture changes, this assertion
+    # follows.
+    assert row.get("action_label"), "action_label must populate"
+    # Title shows the asset, not the action — the card reads "<asset>".
+    assert row.get("title") == asset_title
+
+
 def test_dispatch_canonicalises_prefix_asset_id(client, per_org_universe):
     """Browser sends a 12-char prefix (the URL-derived form);
     downstream uses must see the canonical UUID — the agent's
