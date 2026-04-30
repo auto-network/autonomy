@@ -6593,6 +6593,52 @@ def _clear_coord_operator_message(fixture_path: str) -> None:
     path.write_text(json.dumps(data, indent=2))
 
 
+# Live-data Setting set IDs surfaced through /api/graph/settings/<set_id>.
+COORD_TILE_SET_ID = "dashboard.coordinator-tile"
+COORD_THREAD_SET_ID = "dashboard.coordinator-thread"
+COORD_DECISION_SET_ID = "dashboard.coordinator-decision"
+COORD_OPERATOR_MSG_SET_ID = "dashboard.operator-message-to-coordinator"
+
+
+def _seed_coord_setting_member(
+    fixture_path: str, set_id: str, key: str, payload: dict,
+) -> None:
+    """Append a Setting member to the mock fixture under *set_id*."""
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    set_block = block.setdefault(set_id, {})
+    if isinstance(set_block, list):
+        set_block = {"_all": list(set_block)}
+        block[set_id] = set_block
+    all_list = set_block.setdefault("_all", [])
+    all_list[:] = [m for m in all_list if m.get("key") != key]
+    all_list.append({"key": key, "payload": payload})
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _clear_coord_set(fixture_path: str, set_id: str) -> None:
+    """Drop every fixture row for *set_id*."""
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    block.pop(set_id, None)
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _read_coord_set(fixture_path: str, set_id: str) -> list[dict]:
+    """Return the current fixture members for *set_id*."""
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.get("settings") or {}
+    raw = block.get(set_id)
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        return list(raw.get("_all") or [])
+    return list(raw)
+
+
 COORD_BOARD_RENDER_CHECKS = """
     var nav = document.querySelector('[data-page="coordinator-board"]');
     r.nav_present = nav !== null;
@@ -6618,13 +6664,33 @@ COORD_BOARD_DISABLED_CHECKS = """
 """
 
 
-class TestCoordinatorBoard:
-    """L2.B sweep for the coordinator-board plugin (bead auto-1runm).
+COORD_TILE_KEY = "auto-coord-1:auto-foo"
+COORD_TILE_SESSION = "auto-foo"
+COORD_THREAD_KEY = "auto-coord-1:auto-blocked"
+COORD_THREAD_SESSION = "auto-blocked"
 
-    Six checks: enable + render canvas, click quick-reply fills composer,
-    send fires win celebration + bumps wins counter, send POSTs through
-    /api/coordinator/message, Tracking tab + sort-by-urgent renders thread
-    cards in correct order, disable hides the route.
+
+class TestCoordinatorBoard:
+    """L2.B sweep for the coordinator-board plugin.
+
+    Originally landed by auto-1runm against the now-retired
+    ``/api/coordinator/board`` + ``/api/coordinator/message`` facade.
+    Bead auto-lffg5 deletes that facade; the page now reads + writes
+    graph Settings directly through ``/api/graph/settings/<set_id>``
+    (lists), ``/api/graph/setting`` (POST writes), and
+    ``/api/graph/setting-resolve/<value>`` (id resolve). The three
+    test methods that pinned the dead endpoints have been rewritten to
+    drive the new paths.
+
+    Coverage map:
+    * canvas + tabs render from the live ``coordinator-canvas`` Setting
+    * quick-reply pick + send bumps the ``wins`` counter via the new
+      ``/api/graph/setting`` write path
+    * composer write produces a ``operator-message-to-coordinator``
+      Setting member visible through ``/api/graph/settings/...``
+    * Tracking-tab urgent sort still ranks blocked-with-needs first
+    * disabling the plugin hides the sidebar entry and route 404s
+    * the deleted ``/api/coordinator/*`` facade is gone (acceptance #1)
     """
 
     @pytest.fixture(scope="function", autouse=True)
@@ -6640,10 +6706,16 @@ class TestCoordinatorBoard:
             "quickReplies": list(COORD_BOARD_QUICK_REPLIES),
         })
         _clear_coord_operator_message(sweep_server["fixture_path"])
+        _clear_coord_set(sweep_server["fixture_path"], COORD_TILE_SET_ID)
+        _clear_coord_set(sweep_server["fixture_path"], COORD_THREAD_SET_ID)
+        _clear_coord_set(sweep_server["fixture_path"], COORD_DECISION_SET_ID)
         yield
         _set_coord_plugin_enabled(sweep_server["fixture_path"], None)
         _set_coord_canvas(sweep_server["fixture_path"], None)
         _clear_coord_operator_message(sweep_server["fixture_path"])
+        _clear_coord_set(sweep_server["fixture_path"], COORD_TILE_SET_ID)
+        _clear_coord_set(sweep_server["fixture_path"], COORD_THREAD_SET_ID)
+        _clear_coord_set(sweep_server["fixture_path"], COORD_DECISION_SET_ID)
 
     def test_canvas_renders_with_live_payload(self, browser, sweep_server):
         # Bounce through /sessions so app.js refetches /api/plugins.
@@ -6679,6 +6751,18 @@ class TestCoordinatorBoard:
         assert status == 200
         ids = [p["id"] for p in json.loads(body).get("plugins", [])]
         assert "coordinator-board" in ids
+
+    def test_dead_facade_endpoints_404(self, browser, sweep_server):
+        """Acceptance #1 — the v1 ``/api/coordinator/*`` facade is gone.
+
+        Plugin is enabled (autouse fixture) so this is a real "route
+        absent", not "plugin disabled". Both URLs must return 404.
+        """
+        for path in ("/api/coordinator/board", "/api/coordinator/message"):
+            status, _ = _http_get(f"{sweep_server['url']}{path}")
+            assert status == 404, (
+                f"{path} should be gone under bead auto-lffg5; got {status}"
+            )
 
     def test_quick_reply_pick_then_send_bumps_wins(self, browser, sweep_server):
         _navigate_and_check("/sessions", "", wait_ms=600)
@@ -6717,30 +6801,47 @@ class TestCoordinatorBoard:
             f"Composer's last-sent line did not surface the message: {wins}"
         )
 
-    def test_send_persists_via_api(self, browser, sweep_server):
-        # POST directly so we exercise the backend path without any UI noise.
+    def test_composer_writes_operator_message_setting(self, browser, sweep_server):
+        """Acceptance #4 (rewrite of the dead-endpoint method).
+
+        POST directly to ``/api/graph/setting`` with a freshly-formed
+        ``operator-message-to-coordinator`` payload, then assert the
+        member shows up at ``/api/graph/settings/<set_id>`` — which is
+        the live read path the page now uses on every load + 5s poll.
+        """
         import urllib.request
+
+        body = {
+            "set_id": COORD_OPERATOR_MSG_SET_ID,
+            "schema_revision": 1,
+            "key": "default",
+            "payload": {
+                "text": "ack — sequencing approved",
+                "sentAt": "2026-04-30T12:00:00Z",
+            },
+        }
         req = urllib.request.Request(
-            f"{sweep_server['url']}/api/coordinator/message",
-            data=json.dumps({"text": "ack — sequencing approved"}).encode(),
+            f"{sweep_server['url']}/api/graph/setting",
+            data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
-            assert resp.status == 200
-            body = json.loads(resp.read().decode())
+            assert resp.status == 201, (
+                f"POST /api/graph/setting did not return 201; got {resp.status}"
+            )
 
-        assert body.get("ok") is True, f"POST did not return ok=true: {body}"
-        assert body.get("persisted") is True, (
-            f"Operator message did not persist to fixture: {body}"
+        # Round-trip through the public list endpoint.
+        status, list_body = _http_get(
+            f"{sweep_server['url']}/api/graph/settings/{COORD_OPERATOR_MSG_SET_ID}"
         )
-
-        # GET the board back; the operator message should round-trip.
-        status, board_body = _http_get(f"{sweep_server['url']}/api/coordinator/board")
         assert status == 200
-        board = json.loads(board_body)
-        assert board.get("operatorMessage", {}).get("text") == "ack — sequencing approved", (
-            f"GET /api/coordinator/board did not surface the persisted message: {board}"
+        members = json.loads(list_body).get("members") or []
+        texts = [
+            (m.get("payload") or {}).get("text") for m in members
+        ]
+        assert "ack — sequencing approved" in texts, (
+            f"operator-message Setting member did not round-trip: {members}"
         )
 
     def test_tracking_tab_renders_thread_cards_sorted_urgent(self, browser, sweep_server):
@@ -6803,3 +6904,271 @@ class TestCoordinatorBoard:
 
         status_route, _ = _http_get(f"{sweep_server['url']}/coordinator")
         assert status_route == 404
+
+
+class TestCoordinatorBoardSettingsWiring:
+    """L2.B sweep for the live-data Settings wiring (bead auto-lffg5).
+
+    The four assertions in the bead's "Acceptance" §:
+    2. Seed members for every set → page renders canvas, tile, thread,
+       operator-message, and the decision mark on the tile.
+    3. Tapping a thumb on a tile produces a new
+       ``dashboard.coordinator-decision`` member visible on the
+       Settings list endpoint.
+    4. Submitting the composer produces a new
+       ``dashboard.operator-message-to-coordinator`` member.
+    5. Decision-log poll surfaces a new decision row within ~6s of
+       being written.
+
+    Substrate-level end-to-end (decision row → action handler →
+    ``session_send``) is covered by ``test_actions.py`` (auto-e5vus);
+    bundling it into the live-server sweep would require running the
+    ``settings_mediator`` poll loop alongside the mock dashboard, which
+    the substrate doesn't currently expose. Discovered as a P3 follow-up
+    via the bead's decision.json.
+    """
+
+    @pytest.fixture(scope="function", autouse=True)
+    def _seed_full_board(self, sweep_server):
+        fp = sweep_server["fixture_path"]
+        _set_coord_plugin_enabled(fp, True)
+        _set_coord_canvas(fp, {
+            "ageMin": 1,
+            "question": COORD_BOARD_QUESTION,
+            "context": "[auto-3nill](/bead/auto-3nill) blocks the P0 start.",
+            "quickReplies": list(COORD_BOARD_QUICK_REPLIES),
+        })
+        _clear_coord_operator_message(fp)
+        _clear_coord_set(fp, COORD_TILE_SET_ID)
+        _clear_coord_set(fp, COORD_THREAD_SET_ID)
+        _clear_coord_set(fp, COORD_DECISION_SET_ID)
+
+        _seed_coord_setting_member(
+            fp, COORD_TILE_SET_ID, COORD_TILE_KEY,
+            {
+                "label": "Foo session",
+                "role": "implementer",
+                "thing": "Drafting the schema rewrite",
+                "asks": "yes_no",
+                "ageMin": 3,
+                "updateKind": "refresh",
+            },
+        )
+        _seed_coord_setting_member(
+            fp, COORD_THREAD_SET_ID, COORD_THREAD_KEY,
+            {
+                "label": "Blocked thread",
+                "role": "pair",
+                "status": "blocked",
+                "lead": "Awaiting operator decision",
+                "bullets": [],
+                "ageMin": 10,
+                "totalTurns": 50,
+                "needs": "Make a call",
+            },
+        )
+        _seed_coord_setting_member(
+            fp, COORD_OPERATOR_MSG_SET_ID, "default",
+            {"text": "noted, keep going", "sentAt": "2026-04-30T11:50:00Z"},
+        )
+        _seed_coord_setting_member(
+            fp, COORD_DECISION_SET_ID, "seed-decision-1",
+            {
+                "tile_id": COORD_TILE_SESSION,
+                "kind": "thumb_yes",
+                "target_session": COORD_TILE_SESSION,
+                "sentAt": "2026-04-30T11:55:00Z",
+            },
+        )
+        yield
+        _set_coord_plugin_enabled(fp, None)
+        _set_coord_canvas(fp, None)
+        _clear_coord_operator_message(fp)
+        _clear_coord_set(fp, COORD_TILE_SET_ID)
+        _clear_coord_set(fp, COORD_THREAD_SET_ID)
+        _clear_coord_set(fp, COORD_DECISION_SET_ID)
+
+    def test_seed_members_render_full_board(self, browser, sweep_server):
+        """Acceptance #2 — all five seeded members surface on the page."""
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        result = _navigate_and_check("/coordinator", """
+            r.canvas_text = (document.querySelector(
+                '[data-testid="coord-canvas-question"]'
+            ) || {}).textContent || '';
+            var tiles = document.querySelectorAll('[data-testid="coord-tile"]');
+            r.tile_count = tiles.length;
+            r.tile_sessions = Array.from(tiles).map(function(t) {
+                return t.dataset.tileSession;
+            });
+            r.tile_thing = tiles[0]
+                ? (tiles[0].querySelector('p.text-\\\\[15px\\\\]') || {}).textContent || ''
+                : '';
+            r.last_sent = (document.querySelector(
+                '[data-testid="coord-last-sent"]'
+            ) || {}).textContent || '';
+            var marks = document.querySelectorAll(
+                '[data-testid="coord-tile-decision-mark"]'
+            );
+            r.decision_marks = Array.from(marks).map(function(m) {
+                return m.dataset.decisionTile + '|' + (m.textContent || '').trim();
+            });
+        """, wait_ms=1500)
+
+        assert COORD_BOARD_QUESTION in (result.get("canvas_text") or ""), (
+            f"Canvas question did not render; got {result.get('canvas_text')!r}"
+        )
+        assert result.get("tile_count") == 1, (
+            f"Expected one tile from seeded coordinator-tile member; "
+            f"got {result.get('tile_count')}"
+        )
+        assert COORD_TILE_SESSION in (result.get("tile_sessions") or []), (
+            f"Tile session did not match seeded key; got {result.get('tile_sessions')}"
+        )
+        assert "noted, keep going" in (result.get("last_sent") or ""), (
+            f"Operator-message Setting did not surface; got {result.get('last_sent')!r}"
+        )
+        marks = result.get("decision_marks") or []
+        assert any(COORD_TILE_SESSION + "|" in m and "thumb yes" in m for m in marks), (
+            f"Seeded decision did not surface its 'you said: thumb yes' mark; got {marks}"
+        )
+
+        # Tracking tab — switch and verify the seeded thread renders.
+        _ab_eval_batch(
+            "var root = document.querySelector('[data-testid=\"coordinator-fragment-root\"]'); "
+            "Alpine.$data(root).tab = 'tracking'; return null;"
+        )
+        time.sleep(0.5)
+        threads = _ab_eval_batch(
+            "var cards = document.querySelectorAll('[data-testid=\"coord-thread\"]'); "
+            "return Array.from(cards).map(function(c) { "
+            "  return c.dataset.threadSession; "
+            "});"
+        )
+        assert isinstance(threads, list) and COORD_THREAD_SESSION in threads, (
+            f"Seeded coordinator-thread member did not render in Tracking tab; "
+            f"got {threads}"
+        )
+
+    def test_thumb_tap_writes_decision_setting(self, browser, sweep_server):
+        """Acceptance #3 — tapping a thumb produces a decision member."""
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        _navigate_and_check("/coordinator", "", wait_ms=1500)
+
+        baseline = len(_read_coord_set(
+            sweep_server["fixture_path"], COORD_DECISION_SET_ID,
+        ))
+
+        # Tap the thumb-no button on the tile.
+        _ab_eval_batch(
+            "var btn = document.querySelector('[data-testid=\"coord-tile-thumb-no\"]'); "
+            "if (btn) btn.click(); "
+            "return null;"
+        )
+        # Allow the fetch + fixture write to land.
+        time.sleep(1.2)
+
+        members = _read_coord_set(
+            sweep_server["fixture_path"], COORD_DECISION_SET_ID,
+        )
+        assert len(members) > baseline, (
+            f"thumb-no tap did not write a new decision member; "
+            f"baseline={baseline}, after={len(members)}"
+        )
+        new_payloads = [m.get("payload") or {} for m in members[baseline:]]
+        thumb_no = [p for p in new_payloads if p.get("kind") == "thumb_no"]
+        assert thumb_no, (
+            f"No thumb_no decision row appeared; got {new_payloads!r}"
+        )
+        assert thumb_no[0].get("tile_id") == COORD_TILE_SESSION
+        assert thumb_no[0].get("target_session") == COORD_TILE_SESSION
+
+        # Confirm the row is visible through the public Settings list
+        # endpoint — this is the same route the page itself reads on
+        # every poll cycle.
+        status, body = _http_get(
+            f"{sweep_server['url']}/api/graph/settings/{COORD_DECISION_SET_ID}"
+        )
+        assert status == 200
+        api_kinds = [
+            (m.get("payload") or {}).get("kind")
+            for m in json.loads(body).get("members") or []
+        ]
+        assert "thumb_no" in api_kinds, (
+            f"Decision member not visible via /api/graph/settings; got kinds={api_kinds}"
+        )
+
+    def test_composer_submit_writes_operator_message(self, browser, sweep_server):
+        """Acceptance #4 — the composer write hits the substrate, not a facade."""
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        _navigate_and_check("/coordinator", "", wait_ms=1500)
+
+        baseline_members = _read_coord_set(
+            sweep_server["fixture_path"], COORD_OPERATOR_MSG_SET_ID,
+        )
+        baseline_texts = {
+            (m.get("payload") or {}).get("text") for m in baseline_members
+        }
+
+        # Drive the Alpine component directly — bypass the
+        # ``operatorDraft`` reactivity gate (the ``:disabled`` binding
+        # on the send button needs Alpine's tick before the click
+        # would land) by invoking the method.
+        _ab_eval_batch(
+            "var root = document.querySelector('[data-testid=\"coordinator-fragment-root\"]'); "
+            "var c = Alpine.$data(root); "
+            "c.operatorDraft = 'hold off until Friday'; "
+            "c.onOperatorMessage(); "
+            "return null;"
+        )
+        time.sleep(1.5)
+
+        members = _read_coord_set(
+            sweep_server["fixture_path"], COORD_OPERATOR_MSG_SET_ID,
+        )
+        texts = {(m.get("payload") or {}).get("text") for m in members}
+        new_texts = texts - baseline_texts
+        assert "hold off until Friday" in new_texts, (
+            f"composer write did not produce a new operator-message member; "
+            f"baseline={baseline_texts!r}, after={texts!r}"
+        )
+
+    def test_decision_poll_surfaces_new_row(self, browser, sweep_server):
+        """Acceptance #5 — the 5s decision poll picks up an external write
+        within 6s (5s poll cadence + 1s slack).
+        """
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        _navigate_and_check("/coordinator", "", wait_ms=1500)
+
+        # Confirm the seeded "thumb yes" mark is what's currently shown.
+        before = _ab_eval_batch(
+            "var m = document.querySelector('[data-testid=\"coord-tile-decision-mark\"]'); "
+            "return m ? (m.textContent || '').trim() : '';"
+        )
+        assert isinstance(before, str) and "thumb yes" in before, (
+            f"Pre-poll seed mark missing; got {before!r}"
+        )
+
+        # Drop a fresh decision row directly into the fixture — this is
+        # what a coordinator-side write looks like to the page.
+        _seed_coord_setting_member(
+            sweep_server["fixture_path"],
+            COORD_DECISION_SET_ID,
+            "fresh-poll-row",
+            {
+                "tile_id": COORD_TILE_SESSION,
+                "kind": "sitrep_request",
+                "target_session": COORD_TILE_SESSION,
+                "sentAt": "2026-04-30T12:30:00Z",
+            },
+        )
+
+        # Poll cadence is 5s + a 1s slack → wait 6.5s and re-read.
+        time.sleep(6.5)
+
+        after = _ab_eval_batch(
+            "var m = document.querySelector('[data-testid=\"coord-tile-decision-mark\"]'); "
+            "return m ? (m.textContent || '').trim() : '';"
+        )
+        assert isinstance(after, str) and "requested sitrep" in after, (
+            f"Decision poll did not surface the new row within 6s; got {after!r}"
+        )

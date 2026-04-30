@@ -8140,6 +8140,23 @@ async def api_graph_setting_create(request):
             {"error": f"missing fields: {missing}"}, status_code=400,
         )
     org = _caller_org(request)
+    if os.environ.get("DASHBOARD_MOCK"):
+        from tools.dashboard.dao import mock as dao_mock
+        sid = dao_mock.add_setting_member(
+            body["set_id"], body["key"], body["payload"], org=org,
+        )
+        await _emit_setting_changed(
+            operation="write",
+            org=org,
+            snapshot={
+                "set_id": body["set_id"],
+                "schema_revision": int(body["schema_revision"]),
+                "key": body["key"],
+                "publication_state": body.get("state", "raw"),
+                "deprecated": False,
+            },
+        )
+        return JSONResponse({"id": sid}, status_code=201)
     try:
         sid = graph_ops.add_setting(
             body["set_id"],
