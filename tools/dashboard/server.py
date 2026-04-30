@@ -8030,6 +8030,50 @@ def _parse_settings_read_params(query_params) -> tuple[int | None, int | None, i
     )
 
 
+def _settings_emit_hook(
+    *,
+    operation: str,
+    snapshot: dict,
+    org: str | None,
+) -> None:
+    """Hook registered with ``settings_ops.set_emit_hook`` at lifespan startup.
+
+    Every ``settings_ops`` mutation fires this hook AFTER its transaction
+    commits. The hook publishes a ``setting.changed`` event on the
+    process-local EventBus. Subscribers re-resolve via ``read_set`` if
+    they need payload data — a fast subscriber that resolves on receipt
+    sees the just-committed row by construction (commit-then-emit
+    invariant; see bead auto-5mz65 acceptance #2).
+
+    Sync by design: ``broadcast_sync`` mirrors ``broadcast`` but uses
+    ``put_nowait`` against the unbounded subscriber queues, so settings
+    mutators never block on the event loop and CLI / test contexts that
+    happen to register a hook against this dashboard process still get
+    deterministic delivery.
+    """
+    payload = {
+        "set_id": snapshot["set_id"],
+        "schema_revision": snapshot["schema_revision"],
+        "key": snapshot["key"],
+        "org": org,
+        "publication_state": snapshot["publication_state"],
+        "deprecated": snapshot["deprecated"],
+        "operation": operation,
+    }
+    try:
+        event_bus.broadcast_sync("setting.changed", payload, dedup=False)
+    except Exception:
+        logger.warning(
+            "setting.changed broadcast failed", exc_info=True,
+        )
+
+
+# Register at module import. ASGITransport-based tests that bypass
+# lifespan still get function-level emits this way; ``_on_startup``
+# re-arms on every lifespan cycle.
+graph_ops.set_emit_hook(_settings_emit_hook)
+
+
 async def _emit_setting_changed(
     *,
     operation: str,
@@ -8037,13 +8081,14 @@ async def _emit_setting_changed(
     org: str | None = None,
     snapshot: dict | None = None,
 ) -> None:
-    """Publish a ``setting.changed`` SSE event for a Settings mutation.
+    """Mock-mode emit shim.
 
-    Either pass a fully-formed ``snapshot`` (used by delete / migrate where
-    we capture row state outside this helper) or a ``setting_id`` we can
-    resolve via ``get_setting``. Best-effort: a missing row or fetch
-    failure silently skips the broadcast — Settings writes never block on
-    event delivery.
+    Real (non-mock) Settings writes go through ``settings_ops`` and emit
+    via :func:`_settings_emit_hook` at the function level, so HTTP
+    routes never need to call this. The mock-mode write path uses
+    ``dao_mock`` (fixture state, not ``settings_ops``) and is the only
+    remaining caller — kept so the dashboard's mock harness still
+    surfaces ``setting.changed`` for browser-driven design work.
     """
     if snapshot is None:
         if setting_id is None:
@@ -8173,7 +8218,8 @@ async def api_graph_setting_create(request):
         )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    await _emit_setting_changed(operation="write", setting_id=sid, org=org)
+    # setting.changed fires from settings_ops.add_setting via the
+    # function-level emit hook — see _settings_emit_hook.
     return JSONResponse({"id": sid}, status_code=201)
 
 
@@ -8198,7 +8244,6 @@ async def api_graph_setting_override(request):
         )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    await _emit_setting_changed(operation="override", setting_id=sid, org=org)
     return JSONResponse({"id": sid}, status_code=201)
 
 
@@ -8219,7 +8264,6 @@ async def api_graph_setting_exclude(request):
         return JSONResponse({"error": str(e)}, status_code=404)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    await _emit_setting_changed(operation="exclude", setting_id=sid, org=org)
     return JSONResponse({"id": sid}, status_code=201)
 
 
@@ -8237,7 +8281,6 @@ async def api_graph_setting_promote(request):
         return JSONResponse({"error": str(e)}, status_code=404)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    await _emit_setting_changed(operation="promote", setting_id=sid, org=org)
     return JSONResponse({"ok": True})
 
 
@@ -8286,7 +8329,6 @@ async def api_graph_setting_deprecate(request):
         )
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
-    await _emit_setting_changed(operation="deprecate", setting_id=sid, org=org)
     return JSONResponse({"ok": True})
 
 
@@ -8294,28 +8336,14 @@ async def api_graph_setting_delete(request):
     """DELETE /api/graph/setting/<id> — hard-delete (raw only)."""
     sid = request.path_params["id"]
     org = _caller_org(request)
-    # Snapshot row state before delete so we still know set_id/key when emitting.
-    try:
-        pre = graph_ops.get_setting(sid, org=org)
-    except Exception:
-        pre = None
     try:
         graph_ops.remove_setting(sid, org=org)
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    if pre is not None:
-        await _emit_setting_changed(
-            operation="delete", org=org,
-            snapshot={
-                "set_id": pre.set_id,
-                "schema_revision": pre.stored_revision,
-                "key": pre.key,
-                "publication_state": pre.state,
-                "deprecated": bool(pre.deprecated),
-            },
-        )
+    # setting.changed (operation=delete) fires from settings_ops via the
+    # emit hook with the pre-delete snapshot.
     return JSONResponse({"ok": True})
 
 
@@ -8347,11 +8375,8 @@ async def api_graph_settings_migrate(request):
         )
     except Exception as e:  # noqa: BLE001 — mirror CLI surface
         return JSONResponse({"error": str(e)}, status_code=500)
-    if not dry_run:
-        for affected_id in report.affected_ids:
-            await _emit_setting_changed(
-                operation="migrate", setting_id=affected_id, org=org,
-            )
+    # Per-affected setting.changed events fire from settings_ops via the
+    # emit hook (only when ``dry_run=False``).
     return JSONResponse(report.to_dict())
 
 
@@ -9998,6 +10023,13 @@ def _build_settings_mediator_services():
 
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task
+    # Re-arm the emit hook on every lifespan startup. Module import
+    # already wires it (so ASGITransport-based tests that skip lifespan
+    # still get function-level emits), but we re-arm here so that
+    # uvicorn --reload cycles or in-process module reloads always end
+    # up with a hook bound to *this* module's ``event_bus`` name.
+    from tools.graph import settings_ops as _settings_ops
+    _settings_ops.set_emit_hook(_settings_emit_hook)
     # Restore EventBus state from the prior process so a uvicorn --reload
     # cycle preserves seq/epoch and avoids the client "Server restarted"
     # banner. Failure modes (missing/corrupt/version-mismatched snapshot)
@@ -10070,6 +10102,7 @@ async def _on_startup():
         from tools.dashboard import settings_mediator
         settings_mediator.start_action_loop(
             _build_settings_mediator_services(),
+            event_bus=event_bus,
         )
         _settings_mediator_started = True
     except Exception:
@@ -10080,6 +10113,13 @@ async def _on_startup():
 
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task, _settings_mediator_started
+    # Clear the emit hook so a subsequent process / test reload doesn't
+    # leak a stale binding into a swapped module-level event_bus.
+    try:
+        from tools.graph import settings_ops as _settings_ops
+        _settings_ops.set_emit_hook(None)
+    except Exception:
+        logger.exception("settings_ops.set_emit_hook(None) failed; continuing")
     # Drain settings-mediator BEFORE cancelling the dispatcher tasks so
     # any in-flight action handler that calls back into the dashboard
     # (tmux_send, find_session_by_role) still has those primitives
