@@ -1,0 +1,71 @@
+/* Primers UI plugin — scoped page styling.
+ *
+ * Most layout uses Tailwind classes inline. This file holds the
+ * markdown rendering rules from the approved design (revision iter=4),
+ * which restore the list markers Tailwind preflight strips so primers
+ * with bulleted/numbered content don't render as flat stacks. */
+
+.primers-page {
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+.primers-page .markdown-body h1 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin: 1rem 0 0.5rem;
+  color: #e5e7eb;
+}
+.primers-page .markdown-body h2 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0.85rem 0 0.4rem;
+  border-bottom: 1px solid #374151;
+  padding-bottom: 0.2rem;
+  color: #e5e7eb;
+}
+.primers-page .markdown-body h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0.7rem 0 0.25rem;
+  color: #c7d2fe;
+}
+.primers-page .markdown-body p {
+  margin: 0.5rem 0;
+  line-height: 1.5;
+  color: #d1d5db;
+}
+.primers-page .markdown-body ul,
+.primers-page .markdown-body ol {
+  margin: 0.5rem 0;
+  padding-left: 1.4rem;
+  color: #d1d5db;
+}
+.primers-page .markdown-body ul { list-style: disc outside; }
+.primers-page .markdown-body ol { list-style: decimal outside; }
+.primers-page .markdown-body li { margin: 0.2rem 0; }
+.primers-page .markdown-body li::marker { color: #6b7280; }
+.primers-page .markdown-body code {
+  background: #1f2937;
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.25rem;
+  font-size: 0.85em;
+  color: #fcd34d;
+}
+.primers-page .markdown-body pre {
+  background: #0f172a;
+  padding: 0.85rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+  border: 1px solid #1e293b;
+}
+.primers-page .markdown-body pre code {
+  background: none;
+  padding: 0;
+  color: #e5e7eb;
+}
+.primers-page .markdown-body strong { color: #f3f4f6; }
+.primers-page .markdown-body a {
+  color: #818cf8;
+  text-decoration: underline;
+}

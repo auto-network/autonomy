@@ -6387,14 +6387,16 @@ class TestPluginSubstrate:
         bootstrap drives the next test's start state. Restore on teardown
         so subsequent test classes see a clean fixture.
 
-        Also pins the ``settings`` plugin (which ships enabled by
-        default — bead auto-yurkd) to ``enabled: false`` so this
-        sweep's "no plugin is enabled" baseline still holds, and
-        force-refreshes the in-browser plugin list so a navigation that
-        short-circuits ``route()`` (same-path) still sees fresh state.
+        Also pins production plugins that ship enabled by default
+        (``settings`` from bead auto-yurkd, ``primers`` from bead
+        auto-9fyy0) to ``enabled: false`` so this sweep's "no plugin
+        is enabled" baseline still holds, and force-refreshes the
+        in-browser plugin list so a navigation that short-circuits
+        ``route()`` (same-path) still sees fresh state.
         """
         _set_plugin_setting(sweep_server["fixture_path"], None)
         _force_plugin_disabled(sweep_server["fixture_path"], "settings")
+        _force_plugin_disabled(sweep_server["fixture_path"], "primers")
         _ab_eval_batch(
             "return (window.Autonomy && window.Autonomy.refreshPlugins) "
             "  ? window.Autonomy.refreshPlugins().then(function () { "
@@ -6406,6 +6408,7 @@ class TestPluginSubstrate:
         yield
         _set_plugin_setting(sweep_server["fixture_path"], None)
         _clear_forced_plugin(sweep_server["fixture_path"], "settings")
+        _clear_forced_plugin(sweep_server["fixture_path"], "primers")
 
     def test_dormant_substrate_preserves_legacy_sidebar(self, browser, sweep_server):
         # Default state: no dashboard.plugin Setting → bootstrap rule
