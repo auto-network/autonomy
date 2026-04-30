@@ -1013,6 +1013,17 @@
             <span class="actions-btn-caret">▾</span>
           </button>
 
+          <!-- Post-dispatch acknowledgement toast.
+               Replaces the old behaviour of redirecting the operator to
+               the agent's session row. The change happens in-place on
+               the asset; the toast just confirms the dispatch went out. -->
+          <div class="agent-actions-toast"
+               data-testid="agent-actions-toast"
+               x-show="lastDispatchLabel"
+               x-cloak
+               x-transition.opacity
+               x-text="'Dispatched: ' + lastDispatchLabel"></div>
+
           <!-- Dropdown panel -->
           <div class="actions-panel"
                data-testid="agent-actions-panel"
