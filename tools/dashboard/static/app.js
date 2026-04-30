@@ -133,22 +133,11 @@ async function renderBeadDetailFragment(id) {
 const _fragmentCache = new Map();
 let _serverVersion = null;
 
-let _versionToastShown = false;
 async function _checkVersion() {
   try {
     const { version } = await fetch('/api/version').then(r => r.json());
     if (_serverVersion && _serverVersion !== version) {
       _fragmentCache.clear();
-      // Static JS/CSS already loaded into this tab is stuck on the
-      // old version — fragment swap won't pick up new component code.
-      // We deliberately don't auto-reload (the open conversation /
-      // unsent input shouldn't get blown away mid-session). Instead
-      // surface a single sticky toast that the operator can click
-      // to refresh when ready.
-      if (!_versionToastShown && typeof showVersionUpdateToast === 'function') {
-        _versionToastShown = true;
-        showVersionUpdateToast();
-      }
     }
     _serverVersion = version;
   } catch (_) {}
@@ -1763,23 +1752,6 @@ function showToast(message, type) {
     }
   }, 8000);
 }
-
-// Sticky version-update toast. Stays until clicked (no 8s timeout)
-// because dismissing it without reloading leaves the operator on
-// stale JS — exactly the bug we're trying to surface.
-function showVersionUpdateToast() {
-  const container = document.getElementById('toast-container');
-  if (!container) return;
-  const el = document.createElement('div');
-  el.className = 'toast toast-info';
-  el.textContent = 'New dashboard version available — click to refresh';
-  el.style.cursor = 'pointer';
-  el.onclick = () => {
-    window.location.reload();
-  };
-  container.appendChild(el);
-}
-window.showVersionUpdateToast = showVersionUpdateToast;
 
 // ── Dispatcher state watcher (global, all pages) ─────────────
 
