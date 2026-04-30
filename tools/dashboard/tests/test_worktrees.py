@@ -548,6 +548,35 @@ class TestWorktreePage:
         assert collab.startswith('<div data-testid="collab-fragment-root">')
         assert design.startswith('<div data-testid="design-fragment-root">')
 
+    def test_pr_badge_template_and_helpers_wired(self):
+        """The PR badge fragment from the settled design (3435e03f) is in
+        the template and the Alpine helpers ``rowPr`` / ``prBadgeClass`` /
+        ``prDotClass`` / ``prIsFlashing`` are wired in worktrees.js."""
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        # Badge fragment renders only when rowPr returns a PR object.
+        assert 'data-testid="pr-badge"' in template
+        assert 'x-if="rowPr(item.row)"' in template
+        assert ':class="prBadgeClass(rowPr(item.row))"' in template
+        assert ':class="prDotClass(rowPr(item.row))"' in template
+        assert "'PR #' + rowPr(item.row).number" in template
+
+        # Helpers map source_control.review -> design's flatter pr shape.
+        assert "rowPr(row) {" in js
+        assert "row.source_control && row.source_control.review" in js
+        assert "state: review.aggregate_state" in js  # green | yellow
+        assert "running: review.running" in js
+        assert "pr_checks: review.checks" in js
+        # Visual classes come straight from the design — green is passing,
+        # yellow is the not-passing color, animate-pulse is the running
+        # overlay (only on green when watch is active).
+        assert "border-emerald-300/20 bg-emerald-300/10 text-emerald-100" in js
+        assert "border-amber-300/20 bg-amber-300/10 text-amber-100" in js
+        assert "bg-emerald-300" in js
+        assert "bg-amber-200" in js
+        assert "animate-pulse" in js
+
 
 # ── Worktrees row-scoped GitHub operation surface (auto-ltibi) ─────────
 
