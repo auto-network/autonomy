@@ -216,6 +216,7 @@
 
     const isLibrarian = !!e.librarian_type;
     const libTitle = isLibrarian ? (_LIB_NAMES[e.librarian_type] || e.librarian_type) : '';
+    const isAgentic = e.kind === 'agentic';
 
     // Review items for experience_reviewer expanded view
     let reviewItems = null;
@@ -248,6 +249,7 @@
       _barD: barD,
       _barT: barT,
       _isLibrarian: isLibrarian,
+      _isAgentic: isAgentic,
       _libTitle: libTitle,
       _tokenFmt: tokenFmt,
       _reviewCollapsed: _reviewCollapsedLabel(e.librarian_review),

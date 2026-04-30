@@ -88,16 +88,24 @@
         @click="e._open = !e._open"
       >
 
-        <!-- Row 1: dot/icon · title · (bead-id) · time -->
+        <!-- Row 1: dot/icon · title · (bead-id / action) · time -->
         <div class="tl-row1">
           <!-- Librarian: book icon -->
           <span x-show="e._isLibrarian" class="tl-lib-icon" style="display:none">📚</span>
-          <!-- Dispatch: status dot -->
-          <span x-show="!e._isLibrarian" class="tl-dot" :class="e._dotCls"></span>
+          <!-- Agentic: lightning icon -->
+          <span x-show="e._isAgentic" class="tl-lib-icon" style="display:none">⚡</span>
+          <!-- Bead dispatch: status dot -->
+          <span x-show="!e._isLibrarian && !e._isAgentic" class="tl-dot" :class="e._dotCls"></span>
 
-          <span class="tl-title" x-text="e._isLibrarian ? e._libTitle : (e.title || e.bead_id)"></span>
+          <span
+            class="tl-title"
+            x-text="e._isLibrarian ? e._libTitle : (e.title || e.bead_id || '(no title)')"
+          ></span>
           <div class="tl-top-right">
-            <span x-show="!e._isLibrarian && e.bead_id" class="tl-bead-id" x-text="'(' + e.bead_id + ')'" style="display:none"></span>
+            <!-- Bead dispatch: show bead id in parens -->
+            <span x-show="!e._isLibrarian && !e._isAgentic && e.bead_id" class="tl-bead-id" x-text="'(' + e.bead_id + ')'" style="display:none"></span>
+            <!-- Agentic: show action label in parens (e.g. "Update Title & Summary") -->
+            <span x-show="e._isAgentic && e.action_label" class="tl-bead-id" x-text="'(' + e.action_label + ')'" style="display:none"></span>
             <span class="tl-ts" x-text="e._ts"></span>
           </div>
         </div>
@@ -130,7 +138,14 @@
           <div class="tl-exp-row">
             <div class="tl-exp-links">
               <a class="tl-exp-link" :href="'/dispatch/trace/' + e.run_id">Trace &#8594;</a>
-              <a class="tl-exp-link" :href="'/bead/' + e.bead_id">Bead &#8594;</a>
+              <!-- Bead dispatch: link to the bead -->
+              <template x-if="!e._isAgentic && e.bead_id">
+                <a class="tl-exp-link" :href="'/bead/' + e.bead_id">Bead &#8594;</a>
+              </template>
+              <!-- Agentic: link to the asset the action operated on -->
+              <template x-if="e._isAgentic && e.target_source_id">
+                <a class="tl-exp-link" :href="'/graph/' + e.target_source_id">Asset &#8594;</a>
+              </template>
             </div>
             <template x-if="e.scores">
               <div class="tl-exp-scores" style="margin-left:auto">
