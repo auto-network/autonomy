@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -27,6 +28,8 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_IMAGE = "autonomy-agent:dashboard"
@@ -131,18 +134,128 @@ def _capability_command_surface(
     )
 
 
+_HOST_ENV_PREFIX = "host:"
+_FILE_ENV_PREFIX = "file:"
+
+
+def _resolve_env_source(env_name: str, source: str) -> str | None:
+    """Resolve a single ``env_bindings`` source identifier to a literal value.
+
+    Supported source schemes (graph://86e04207-a25 § Runtime
+    materialization, "today the idea was you could forward it from the
+    host env directly, or a file source would be <file> + <var_name>"):
+
+    * ``host:VAR_NAME`` — read ``os.environ["VAR_NAME"]`` at launch
+      time. Drops the binding if the host env var is unset.
+    * ``file:/abs/path:VAR_NAME`` — parse the file as dotenv-style
+      ``KEY=VALUE`` pairs (``#`` comments and blank lines skipped;
+      values may be optionally double- or single-quoted) and return
+      ``VAR_NAME``'s value. Drops the binding if the file is missing,
+      unreadable, or the var is absent.
+    * any other string — passed through verbatim. Keeps test fixtures
+      and any direct-literal callers working without migration; a
+      future vault-backed scheme will register here.
+
+    Returns ``None`` when the binding can't be resolved, in which case
+    the caller drops it. The capability's runtime probe (e.g.
+    ``probe_v1`` for autonomy/github) then surfaces the missing env
+    via ``state=degraded reason=env_missing`` — the operator gets the
+    diagnostic without us having to fail the launch.
+    """
+    if source.startswith(_HOST_ENV_PREFIX):
+        var = source[len(_HOST_ENV_PREFIX):].strip()
+        if not var:
+            logger.warning(
+                "capability env %s: malformed host source %r (empty var name)",
+                env_name, source,
+            )
+            return None
+        value = os.environ.get(var)
+        if value is None:
+            logger.info(
+                "capability env %s: host env %r unset; binding dropped",
+                env_name, var,
+            )
+            return None
+        return value
+
+    if source.startswith(_FILE_ENV_PREFIX):
+        rest = source[len(_FILE_ENV_PREFIX):]
+        # ``rest`` is ``/abs/path:VAR_NAME``. Split from the right so a
+        # path that itself contains ``:`` (rare but possible on POSIX)
+        # still works as long as the var name doesn't contain ``:``.
+        if ":" not in rest:
+            logger.warning(
+                "capability env %s: malformed file source %r (expected "
+                "file:/path:VAR_NAME)", env_name, source,
+            )
+            return None
+        path_str, var = rest.rsplit(":", 1)
+        var = var.strip()
+        if not path_str or not var:
+            logger.warning(
+                "capability env %s: malformed file source %r", env_name, source,
+            )
+            return None
+        path = Path(path_str)
+        if not path.is_file():
+            logger.info(
+                "capability env %s: file %s missing; binding dropped",
+                env_name, path,
+            )
+            return None
+        try:
+            text = path.read_text()
+        except OSError:
+            logger.exception(
+                "capability env %s: failed reading %s", env_name, path,
+            )
+            return None
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "=" not in stripped:
+                continue
+            key, val = stripped.split("=", 1)
+            if key.strip() != var:
+                continue
+            val = val.strip()
+            # Strip a single matching pair of surrounding quotes.
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                val = val[1:-1]
+            return val
+        logger.info(
+            "capability env %s: var %r not in %s; binding dropped",
+            env_name, var, path,
+        )
+        return None
+
+    # Plain literal value — backward compat with test fixtures and any
+    # caller that hasn't migrated to the source-scheme syntax.
+    return source
+
+
 def _capability_env(capabilities) -> dict[str, str]:
     """Return ``{env_name: value}`` for non-secret capability env bindings.
 
     Pulls from each capability's ``env_bindings`` (the org install's
-    declared non-secret env). Secret values are deliberately excluded —
-    they go through ``secret_file_bindings`` and surface as file mounts,
-    not env vars (graph://86e04207-a25 § Runtime materialization).
+    declared non-secret env), resolving each value via
+    :func:`_resolve_env_source`. Bindings that fail to resolve are
+    dropped — the capability's probe surfaces the missing env so the
+    Dashboard can show ``state=degraded reason=env_missing`` rather
+    than the launcher hard-failing the session.
+
+    Secret values are deliberately excluded from this path — they go
+    through ``secret_file_bindings`` and surface as file mounts, not
+    env vars (graph://86e04207-a25 § Runtime materialization).
     """
     out: dict[str, str] = {}
     for cap in capabilities:
-        for env_name, value in cap.env_bindings.items():
-            out[env_name] = value
+        for env_name, source in cap.env_bindings.items():
+            value = _resolve_env_source(env_name, source)
+            if value is not None:
+                out[env_name] = value
     return out
 
 
