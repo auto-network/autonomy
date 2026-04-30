@@ -453,6 +453,32 @@ class HttpClient:
         )
         return _normalize_update_result(result, content)
 
+    def list_note_versions(self, source_id, *, org=None):
+        """List every saved version of a note (oldest first).
+
+        Returns ``[{version, content, created_at}, ...]``. Empty list if
+        the note has no recorded version history yet (no updates since
+        creation). Raises :class:`LookupError` when the source doesn't
+        exist or isn't a note.
+        """
+        result = self._get(f"/api/graph/note/{source_id}/versions", org=org)
+        if isinstance(result, dict):
+            return result.get("versions") or []
+        return []
+
+    def get_note_version(self, source_id, version, *, org=None):
+        """Read a specific saved version of a note.
+
+        Returns ``{"version", "content", "created_at", "source_id", "org"}``.
+        Raises :class:`LookupError` for missing source or version.
+        """
+        result = self._get(
+            f"/api/graph/note/{source_id}/version/{int(version)}", org=org,
+        )
+        if not isinstance(result, dict):
+            raise LookupError(f"version {version} not found for {source_id}")
+        return result
+
     def add_comment(self, source_id, content, *, actor="user", org=None):
         body = {"source_id": source_id, "content": content, "actor": actor}
         result = self._post("/api/graph/comment", body, org=org)
