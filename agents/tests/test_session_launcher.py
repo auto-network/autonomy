@@ -498,6 +498,125 @@ def test_tool_target_without_expose_commands_skips_shim_dir(
     assert not (run_dir / "cap-bin").exists()
 
 
+# ── env_bindings source resolver ────────────────────────────────────────
+
+
+class TestResolveEnvSource:
+    """``env_bindings`` values support source schemes so the actual
+    secret never sits in the graph DB. ``host:VAR_NAME`` forwards a
+    dashboard-host env var; ``file:/path:VAR_NAME`` reads VAR_NAME from
+    a dotenv-style file. Plain strings still pass through verbatim
+    for backward compat with test fixtures and direct-literal callers.
+    """
+
+    def test_host_scheme_resolves_from_environ(self, monkeypatch):
+        monkeypatch.setenv("DEMO_TOKEN", "ghp_resolved")
+        assert session_launcher._resolve_env_source(
+            "GH_TOKEN", "host:DEMO_TOKEN",
+        ) == "ghp_resolved"
+
+    def test_host_scheme_drops_when_unset(self, monkeypatch):
+        monkeypatch.delenv("DEMO_MISSING", raising=False)
+        assert session_launcher._resolve_env_source(
+            "GH_TOKEN", "host:DEMO_MISSING",
+        ) is None
+
+    def test_host_scheme_rejects_empty_var_name(self):
+        assert session_launcher._resolve_env_source("GH_TOKEN", "host:") is None
+
+    def test_file_scheme_resolves_from_dotenv(self, tmp_path):
+        envfile = tmp_path / "secrets.env"
+        envfile.write_text(
+            "# comment\n"
+            "OTHER=ignored\n"
+            'GH_TOKEN="ghp_from_file"\n'
+            "BLANK=\n"
+        )
+        assert session_launcher._resolve_env_source(
+            "GH_TOKEN", f"file:{envfile}:GH_TOKEN",
+        ) == "ghp_from_file"
+
+    def test_file_scheme_handles_unquoted_values(self, tmp_path):
+        envfile = tmp_path / "secrets.env"
+        envfile.write_text("GH_TOKEN=ghp_unquoted\n")
+        assert session_launcher._resolve_env_source(
+            "GH_TOKEN", f"file:{envfile}:GH_TOKEN",
+        ) == "ghp_unquoted"
+
+    def test_file_scheme_drops_when_file_missing(self, tmp_path):
+        missing = tmp_path / "nope.env"
+        assert session_launcher._resolve_env_source(
+            "GH_TOKEN", f"file:{missing}:GH_TOKEN",
+        ) is None
+
+    def test_file_scheme_drops_when_var_absent(self, tmp_path):
+        envfile = tmp_path / "secrets.env"
+        envfile.write_text("OTHER=value\n")
+        assert session_launcher._resolve_env_source(
+            "GH_TOKEN", f"file:{envfile}:GH_TOKEN",
+        ) is None
+
+    def test_file_scheme_rejects_malformed_source(self):
+        assert session_launcher._resolve_env_source(
+            "GH_TOKEN", "file:/no/var/separator",
+        ) is None
+
+    def test_plain_literal_passes_through_for_backward_compat(self):
+        # Existing test fixtures (e.g. _github_capability with
+        # GH_TOKEN: ghp_value) and any direct-literal callers stay
+        # working.
+        assert session_launcher._resolve_env_source(
+            "GH_TOKEN", "ghp_literal_value",
+        ) == "ghp_literal_value"
+
+
+def test_capability_env_drops_unresolved_host_binding_softly(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch,
+):
+    """An ``env_bindings`` value of ``host:GH_TOKEN`` with that env
+    unset on the dashboard host must NOT crash launch — the binding
+    drops silently and the capability's runtime probe later surfaces
+    the ``env_missing`` reason for the operator."""
+    cap = MaterializedCapability(
+        contract="source_control",
+        contract_version=1,
+        implementation="autonomy/github",
+        implementation_version=1,
+        delivery_mode="image_baked",
+        package_root="agents/capabilities/github",
+        mount_target="/opt/autonomy/capabilities/autonomy-github",
+        env_bindings={"GH_TOKEN": "host:DEMO_NOT_SET"},
+    )
+    monkeypatch.delenv("DEMO_NOT_SET", raising=False)
+
+    _run(output_dir=str(tmp_path / "run"), capabilities=(cap,))
+    cmd = captured_run[0]
+    envs = _envs(cmd)
+    # No GH_TOKEN env spec — binding silently dropped.
+    assert not any(e.startswith("GH_TOKEN=") for e in envs)
+
+
+def test_capability_env_resolves_host_binding_from_environ(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch,
+):
+    monkeypatch.setenv("DEMO_GH", "ghp_from_host_env")
+    cap = MaterializedCapability(
+        contract="source_control",
+        contract_version=1,
+        implementation="autonomy/github",
+        implementation_version=1,
+        delivery_mode="image_baked",
+        package_root="agents/capabilities/github",
+        mount_target="/opt/autonomy/capabilities/autonomy-github",
+        env_bindings={"GH_TOKEN": "host:DEMO_GH"},
+    )
+
+    _run(output_dir=str(tmp_path / "run"), capabilities=(cap,))
+    cmd = captured_run[0]
+    envs = _envs(cmd)
+    assert "GH_TOKEN=ghp_from_host_env" in envs
+
+
 def test_no_hardcoded_license_mount(tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch):
     """The ad-hoc /home/jeremy/workspace/license.yaml overlay must be gone.
 
