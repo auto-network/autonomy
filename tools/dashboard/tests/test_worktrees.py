@@ -117,6 +117,10 @@ class TestWorktreeAPI:
         row = data[0]
         assert row["session_name"] == "auto-test"
         assert row["session_title"] == ""
+        # ``session_project`` lets the review screen link the session
+        # badge back to the page-mode session viewer for live rows.
+        # Empty when no tmux_sessions row matches (the case here).
+        assert row["session_project"] == ""
         assert row["repo_name"] == "autonomy"
         assert row["worktree_path"] == "/tmp/worktrees/auto-test/autonomy"
         assert row["managed_clone"] == "/tmp/repos/autonomy.git"
@@ -520,6 +524,13 @@ class TestWorktreePage:
         assert 'x-show="!refreshing"' not in template
         assert 'x-show="refreshing"' not in template
         assert "Are you sure you want to delete this Worktree?" in template
+        # Session badge in the review screen links back to the session
+        # viewer for live rows — both the commit-review and the
+        # dirty-review badge route to /session/<project>/<tmux>.
+        assert "selectedCommit.row.session_project" in template
+        assert "selectedDirtyRow.session_project" in template
+        assert "'/session/' + encodeURIComponent(selectedCommit.row.session_project)" in template
+        assert "'/session/' + encodeURIComponent(selectedDirtyRow.session_project)" in template
         assert 'x-ref="dirtyDetailScroller"' in template
         assert 'x-ref="commitTitleSentinel"' in template
         assert 'x-ref="dirtyTitleSentinel"' in template
