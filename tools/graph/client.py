@@ -201,6 +201,42 @@ class HttpClient:
         except LookupError:
             return None
 
+    def read_source_full(
+        self,
+        source_id,
+        *,
+        max_chars: int = 50000,
+        org: str | None = None,
+        peers: list[str] | None = None,
+        around_turn: int | None = None,
+        window: int = 5,
+        tail_n: int | None = None,
+    ):
+        """Mirror of :func:`ops.read_source_full` over HTTP.
+
+        Routes through ``/api/graph/{id}``. ``tail_n=N`` is sent as
+        ``?from=-N`` so the server resolves ``MAX(turn_number)`` and the
+        trailing slice in a single round trip. ``around_turn`` /
+        ``window`` map to ``?turn=&window=``. ``peers`` is accepted for
+        API parity with the local ``ops`` function but is not forwarded
+        — the dashboard handler already does own-first + peer-public
+        resolution server-side.
+        """
+        params: dict[str, str] = {}
+        if around_turn is not None:
+            params["turn"] = str(around_turn)
+            params["window"] = str(window)
+        if tail_n is not None:
+            params["from"] = str(-int(tail_n))
+        try:
+            return self._get(
+                f"/api/graph/{source_id}",
+                params=params or None,
+                org=org,
+            )
+        except LookupError:
+            return None
+
     def get_attachment(self, attachment_id, *, org=None, peers=None):
         try:
             return self._get(f"/api/graph/attachment/{attachment_id}", org=org)

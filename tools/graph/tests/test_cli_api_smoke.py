@@ -358,6 +358,136 @@ def test_read_source_full_via_api_uses_resolve_endpoint(monkeypatch):
     assert org == "autonomy"
 
 
+def test_read_source_full_via_api_tail_n_uses_from(monkeypatch):
+    """Pin the URL pattern for ``tail_n``: the helper must round-trip
+    ``?from=-N``, not two requests.
+
+    Bead spec: a coordinator should be able to read "the last N turns of
+    a session" in *one* call, not two (max-turn discovery + window). The
+    network spy here is the canonical assertion that we avoid the old
+    metadata-fishing pattern.
+    """
+    from tools.graph import client as client_mod
+
+    captured: list[tuple[str, dict | None, str | None]] = []
+
+    class _StubHttpClient(client_mod.HttpClient):
+        def __init__(self):
+            pass
+
+        def _get(self, path, params=None, *, org=None):
+            captured.append((path, params, org))
+            return {
+                "source": {"id": "abc"},
+                "entries": [
+                    {"turn_number": 99, "role": "user",
+                     "content": "tail entry", "created_at": ""},
+                ],
+            }
+
+    monkeypatch.setattr(graph_cli, "get_client", lambda: _StubHttpClient())
+
+    result = graph_cli._read_source_full_via_api(
+        "abc-def", org="autonomy", tail_n=7,
+    )
+
+    assert result is not None
+    assert result["entries"] != []
+    assert len(captured) == 1, (
+        "tail_n must reach the server in a single round trip — multiple "
+        "calls indicate a regression to the two-call (max-turn discovery + "
+        "window) pattern this bead was created to remove"
+    )
+    path, params, _org = captured[0]
+    assert path == "/api/graph/abc-def"
+    assert params == {"from": "-7"}
+
+
+def test_cmd_tail_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch, orgs_root,
+):
+    """``graph tail <id> N`` hits /api/graph/{id}?from=-N and renders the
+    trailing N turns. End-to-end check that the new CLI command, the
+    HttpClient helper, and the API endpoint compose cleanly.
+    """
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+
+    # Seed a 25-turn session so a tail of 5 is unambiguous.
+    db = GraphDB.open_org_db("autonomy", mode="rw")
+    sid = str(uuid.uuid4())
+    try:
+        src = Source(
+            id=sid, type="session", platform="claude-code",
+            project="autonomy", title="long tail session",
+            file_path=f"session:{sid}", metadata={"author": "test"},
+        )
+        db.insert_source(src)
+        for n in range(1, 26):
+            db.insert_thought(Thought(
+                source_id=sid,
+                content=f"turn {n} content body",
+                role="user",
+                turn_number=n,
+            ))
+        db.commit()
+    finally:
+        db.close()
+    GraphDB.close_all_pooled()
+
+    args = _cli_args(source=sid, max_chars=0)
+    args.n = 5
+    graph_cli.cmd_tail(args)
+    out = capsys.readouterr().out
+
+    assert "long tail session" in out
+    # Last 5 turns: 21..25.
+    for n in (21, 22, 23, 24, 25):
+        assert f"Turn {n}" in out, f"missing turn {n} in tail output"
+    # Earlier turns must NOT appear in a tail of 5.
+    for n in (1, 5, 10, 15, 20):
+        assert f"Turn {n} —" not in out, f"unexpected turn {n} in tail of 5"
+
+
+def test_cmd_context_last_n_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch, orgs_root,
+):
+    """``graph context <id> last:N`` is the cleanest extension of the
+    existing ``last`` keyword — it should produce the same trailing slice
+    as ``graph tail <id> N`` and route through the API the same way."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+
+    db = GraphDB.open_org_db("autonomy", mode="rw")
+    sid = str(uuid.uuid4())
+    try:
+        src = Source(
+            id=sid, type="session", platform="claude-code",
+            project="autonomy", title="context-last session",
+            file_path=f"session:{sid}", metadata={"author": "test"},
+        )
+        db.insert_source(src)
+        for n in range(1, 16):
+            db.insert_thought(Thought(
+                source_id=sid,
+                content=f"turn {n} content body",
+                role="user",
+                turn_number=n,
+            ))
+        db.commit()
+    finally:
+        db.close()
+    GraphDB.close_all_pooled()
+
+    args = _cli_args(source=sid, turn="last:3", window=0, max_chars=0)
+    graph_cli.cmd_context(args)
+    out = capsys.readouterr().out
+
+    assert "context-last session" in out
+    for n in (13, 14, 15):
+        assert f"Turn {n}" in out
+    for n in (1, 10, 12):
+        assert f"Turn {n} —" not in out
+
+
 def test_read_source_full_via_api_no_window_omits_params(monkeypatch):
     """Without ``around_turn`` / ``window`` the helper sends no query
     string — preserves the legacy front-of-source slice for the
