@@ -402,11 +402,21 @@
         this._recentTimer = setInterval(() => this._fetchRecent(), 30000);
 
         // Workspace-changes status per session (drives the ⌥ indicator
-        // on each session card). Same data source as the page-mode
-        // header so a merge/discard clears within ~15s on both
-        // surfaces.
-        this._fetchWorkspaceStatus();
-        this._workspaceTimer = setInterval(() => this._fetchWorkspaceStatus(), 15000);
+        // on each session card). Pushed live via the ``worktrees`` SSE
+        // topic — the bus replays cached state on registerHandler so
+        // the cards paint immediately on mount, and updates flow
+        // through the same path within ~5s of the backend monitor
+        // detecting a change.
+        var self = this;
+        this._workspaceHandler = function (rows) { self._applyWorkspaceRows(rows); };
+        if (typeof window.registerHandler === 'function') {
+          window.registerHandler('worktrees', this._workspaceHandler);
+        }
+        // One-shot fallback for the cold-start window before the
+        // backend has emitted its first 'worktrees' broadcast.
+        if (!Object.keys(this._workspaceStatusByTmux).length) {
+          this._fetchWorkspaceStatus();
+        }
 
         // Fetch workspace registry for the launch dropdown
         this._fetchProjects();
@@ -520,28 +530,32 @@
         }
       },
 
+      // Update _workspaceStatusByTmux from a worktree-rows payload.
+      // Aggregate per tmux_name — a session can own multiple repo
+      // worktrees (autonomy + enterprise_ng), and the indicator
+      // should reflect the union of dirty + commits-ahead.
+      _applyWorkspaceRows(rows) {
+        if (!Array.isArray(rows)) return;
+        var by = {};
+        for (var i = 0; i < rows.length; i++) {
+          var r = rows[i];
+          var key = r.session_name;
+          if (!key) continue;
+          if (!by[key]) by[key] = { dirtyCount: 0, commitsAhead: 0 };
+          if (r.is_dirty) by[key].dirtyCount += (r.dirty_files || []).length;
+          by[key].commitsAhead += r.commits_ahead || 0;
+        }
+        for (var k in by) {
+          by[k].hasChanges = (by[k].dirtyCount + by[k].commitsAhead) > 0;
+        }
+        this._workspaceStatusByTmux = by;
+      },
       async _fetchWorkspaceStatus() {
         try {
           var rows = await fetch('/api/worktrees').then(function (r) {
             return r.ok ? r.json() : [];
           });
-          if (!Array.isArray(rows)) return;
-          // Aggregate per tmux_name — a session can own multiple repo
-          // worktrees (autonomy + enterprise_ng), and the indicator
-          // should reflect the union of dirty + commits-ahead.
-          var by = {};
-          for (var i = 0; i < rows.length; i++) {
-            var r = rows[i];
-            var key = r.session_name;
-            if (!key) continue;
-            if (!by[key]) by[key] = { dirtyCount: 0, commitsAhead: 0 };
-            if (r.is_dirty) by[key].dirtyCount += (r.dirty_files || []).length;
-            by[key].commitsAhead += r.commits_ahead || 0;
-          }
-          for (var k in by) {
-            by[k].hasChanges = (by[k].dirtyCount + by[k].commitsAhead) > 0;
-          }
-          this._workspaceStatusByTmux = by;
+          this._applyWorkspaceRows(rows);
         } catch (_) {
           // Best-effort; sessions list shouldn't crash on a worktree fetch hiccup.
         }
@@ -677,6 +691,10 @@
       destroy() {
         if (this._storeWatcher) clearInterval(this._storeWatcher);
         if (this._recentTimer) clearInterval(this._recentTimer);
+        if (this._workspaceHandler && typeof window.unregisterHandler === 'function') {
+          window.unregisterHandler('worktrees', this._workspaceHandler);
+          this._workspaceHandler = null;
+        }
         if (this._onCreateTerminal) window.removeEventListener('create-terminal', this._onCreateTerminal);
       },
     }));

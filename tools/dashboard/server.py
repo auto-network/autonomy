@@ -6656,6 +6656,12 @@ _WATCHER_HELPERS = [
 ]
 _watcher_errors: dict[str, str] = {}  # helper_name -> last error string
 
+# Last-broadcast signature for the ``worktrees`` SSE topic. Lets the
+# watcher emit only on change (worktree_monitor refreshes every 30s,
+# the watcher loops every 5s — without this we'd flood every connected
+# client with identical payloads 6x more often than the data changes).
+_worktrees_last_signature: str | None = None
+
 
 async def _collect_dispatch_data() -> dict:
     """Collect data for the 'dispatch' topic: active, waiting, blocked.
@@ -6894,6 +6900,35 @@ async def _dispatch_watcher():
             await event_bus.broadcast("dispatch", dispatch_data)
             await event_bus.broadcast("nav", nav_data)
             await event_bus.broadcast("dispatcher_state", dispatcher_state)
+
+            # Per-row worktree state — drives the ⌥ workspace-changes
+            # indicator on session cards / page-mode header. Emit only
+            # on signature change so connected clients aren't flooded
+            # with identical payloads (worktree_monitor caches refresh
+            # every 30s, this watcher loops every 5s).
+            try:
+                wt_rows = [
+                    _worktree_state_json(row)
+                    for row in worktree_monitor.get_all()
+                ]
+            except Exception:
+                logger.exception("[dispatch_watcher] worktree state serialization failed")
+                wt_rows = []
+            global _worktrees_last_signature
+            wt_signature = json.dumps(
+                [
+                    [
+                        r.get("session_name"), r.get("repo_name"),
+                        r.get("commits_ahead"), r.get("is_dirty"),
+                        len(r.get("dirty_files") or []),
+                    ]
+                    for r in wt_rows
+                ],
+                sort_keys=True,
+            )
+            if wt_signature != _worktrees_last_signature:
+                _worktrees_last_signature = wt_signature
+                await event_bus.broadcast("worktrees", wt_rows)
         except Exception:
             logger.exception("[dispatch_watcher] unexpected top-level error")
         await asyncio.sleep(_DISPATCH_WATCHER_INTERVAL)
