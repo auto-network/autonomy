@@ -1501,7 +1501,10 @@ class TestWorktreeMonitorCapabilityCache:
             snapshots={("auto-live", "autonomy"): snapshot},
         )
 
-        asyncio.run(monitor.refresh())
+        # Use force_capabilities=True since the new background policy
+        # never fetches silent rows by default. Operator-forced refresh
+        # is the seeding path.
+        asyncio.run(monitor.refresh(force_capabilities=True))
 
         assert monitor.get_source_control("auto-live", "autonomy") == snapshot
         # Non-live row got no fetch and therefore no cache entry.
@@ -1521,7 +1524,7 @@ class TestWorktreeMonitorCapabilityCache:
             rows=rows_first,
             snapshots={("auto-live", "autonomy"): snapshot},
         )
-        asyncio.run(monitor.refresh())
+        asyncio.run(monitor.refresh(force_capabilities=True))
         assert monitor.get_source_control("auto-live", "autonomy") is not None
 
         from tools.dashboard import worktree_monitor as wm_module
@@ -1539,7 +1542,8 @@ class TestWorktreeMonitorCapabilityCache:
         )
 
         # Refresh must not raise even though the per-row fetch did.
-        asyncio.run(monitor.refresh())
+        # Force-refresh because the new policy gates silent rows.
+        asyncio.run(monitor.refresh(force_capabilities=True))
 
         snapshot = monitor.get_source_control("auto-live", "autonomy")
         assert snapshot is not None
@@ -1548,93 +1552,154 @@ class TestWorktreeMonitorCapabilityCache:
         assert snapshot["review"] is None
 
 
-class TestWorktreeMonitorTtlCache:
-    """The 30s scan loop is right for derivable local-git signals but
-    wasteful for remote PR queries (graph://c64d0f5d-480 § Why we must
-    become stateful). TTL caching skips ``gh pr list`` when the cached
-    snapshot is fresh; operator-forced refresh bypasses the TTL.
+class TestWorktreeMonitorBackgroundFetchPolicy:
+    """Per Jeremy's directive (2026-04-30) the background poll must not
+    do external network. Only exception: a watch-active row whose
+    cached snapshot shows ``review.running == True`` AND poll budget
+    remaining AND watch TTL elapsed. Operator-forced refresh bypasses
+    every gate (subject only to the rate-limit backoff).
 
-    Tests use the real clock with tiny TTLs (5-50ms) instead of mocking
-    ``time.monotonic`` — patching the global was unreliable because
-    asyncio's event loop also reads it.
+    Tests use the real clock with tiny TTLs / budgets — patching
+    ``time.monotonic`` globally is unreliable because asyncio's event
+    loop also reads it.
     """
 
-    def _make_monitor(self, monkeypatch, *, rows):
+    def _make_monitor(self, monkeypatch, *, rows, snapshot=None):
         from tools.dashboard import worktree_monitor as wm_module
 
         call_count = {"n": 0}
+        snapshot = snapshot or {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "review": None,
+            "watch": {"mode": "silent"},
+        }
 
         async def fake_fetch(row, all_rows, *, watch_mode="silent"):
             call_count["n"] += 1
-            return {
-                "state": "ready",
-                "implementation": "autonomy/github",
-                "reason": None,
-                "review": None,
-                "watch": {"mode": watch_mode},
-            }
+            # Echo through the watch_mode so the snapshot reflects the
+            # row's current nag state.
+            return {**snapshot, "watch": {"mode": watch_mode}}
 
         monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
         monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
         return wm_module.WorktreeMonitor(), call_count
 
-    def test_second_refresh_within_ttl_skips_fetch(self, monkeypatch):
-        from tools.dashboard import worktree_monitor as wm_module
-        # Long TTL so the second refresh is comfortably within it.
-        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_TTL_SECONDS", 60.0)
-
+    def test_silent_row_never_fetches_in_background(self, monkeypatch):
+        """No matter how many ticks, a silent row's background path
+        does ZERO gh calls. Cards rely on operator-forced refresh or
+        watch-active opt-in to populate."""
         rows = [_row(session="auto-live", live=True)]
         monitor, call_count = self._make_monitor(monkeypatch, rows=rows)
 
-        asyncio.run(monitor.refresh())
-        asyncio.run(monitor.refresh())
-        # Second refresh hit the cache — only one underlying fetch.
+        for _ in range(5):
+            asyncio.run(monitor.refresh())
+
+        assert call_count["n"] == 0
+        # Without a cached seed, no source_control block surfaces.
+        assert monitor.get_source_control("auto-live", "autonomy") is None
+
+    def test_force_capabilities_seeds_silent_row(self, monkeypatch):
+        """An operator-forced refresh fetches even for silent rows —
+        that's how the badge gets its first cached snapshot."""
+        rows = [_row(session="auto-live", live=True)]
+        monitor, call_count = self._make_monitor(monkeypatch, rows=rows)
+
+        asyncio.run(monitor.refresh(force_capabilities=True))
+
         assert call_count["n"] == 1
-        # And the snapshot is still served.
+        # Subsequent silent background ticks carry the snapshot
+        # forward without re-fetching.
+        asyncio.run(monitor.refresh())
+        assert call_count["n"] == 1
         assert monitor.get_source_control("auto-live", "autonomy") is not None
 
-    def test_second_refresh_after_ttl_fetches_again(self, monkeypatch):
-        from tools.dashboard import worktree_monitor as wm_module
-        # 1ms TTL so any sleep > 1ms expires the cache.
-        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_TTL_SECONDS", 0.001)
-        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_WATCH_TTL_SECONDS", 0.001)
-
+    def test_watch_active_with_non_running_review_does_not_fetch(self, monkeypatch):
+        """Watch-active rows still skip when cached.review.running is
+        False — there's nothing transitioning to poll for."""
         rows = [_row(session="auto-live", live=True)]
-        monitor, call_count = self._make_monitor(monkeypatch, rows=rows)
-
-        asyncio.run(monitor.refresh())
-        time.sleep(0.005)  # blow past the 1ms TTL
-        asyncio.run(monitor.refresh())
-        assert call_count["n"] == 2
-
-    def test_force_capabilities_bypasses_ttl(self, monkeypatch):
-        from tools.dashboard import worktree_monitor as wm_module
-        # Long TTL — without force we'd skip; with force we re-fetch.
-        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_TTL_SECONDS", 60.0)
-
-        rows = [_row(session="auto-live", live=True)]
-        monitor, call_count = self._make_monitor(monkeypatch, rows=rows)
-
-        asyncio.run(monitor.refresh())
-        asyncio.run(monitor.refresh(force_capabilities=True))
-        assert call_count["n"] == 2
-
-    def test_watch_active_row_uses_shorter_ttl(self, monkeypatch):
-        from tools.dashboard import worktree_monitor as wm_module
-        # Silent TTL stays long; watch TTL is tiny so a sub-tick sleep
-        # expires it for nag-active rows but not silent ones.
-        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_TTL_SECONDS", 60.0)
-        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_WATCH_TTL_SECONDS", 0.001)
-
-        rows = [_row(session="auto-live", live=True)]
-        monitor, call_count = self._make_monitor(monkeypatch, rows=rows)
-        # Nag-active row gets the shorter TTL.
+        non_running_snapshot = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "review": {"running": False, "aggregate_state": "green", "checks": []},
+            "watch": {"mode": "nag_all"},
+        }
+        monitor, call_count = self._make_monitor(
+            monkeypatch, rows=rows, snapshot=non_running_snapshot,
+        )
         monitor.set_nag_mode("auto-live", "autonomy", "nag_all")
 
+        # Seed via force, then any number of background ticks must skip.
+        asyncio.run(monitor.refresh(force_capabilities=True))
+        seeded = call_count["n"]
+        for _ in range(3):
+            asyncio.run(monitor.refresh())
+
+        assert call_count["n"] == seeded  # no additional fetches
+
+    def test_watch_active_with_running_review_polls_in_background(
+        self, monkeypatch,
+    ):
+        """The one allowed background-fetch path: watch-active row whose
+        cached snapshot shows running checks. TTL gates frequency."""
+        from tools.dashboard import worktree_monitor as wm_module
+        # 1ms TTL so a tiny sleep lets the next background tick poll.
+        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_WATCH_TTL_SECONDS", 0.001)
+
+        rows = [_row(session="auto-live", live=True)]
+        running_snapshot = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "review": {"running": True, "aggregate_state": "green", "checks": []},
+            "watch": {"mode": "nag_all"},
+        }
+        monitor, call_count = self._make_monitor(
+            monkeypatch, rows=rows, snapshot=running_snapshot,
+        )
+        monitor.set_nag_mode("auto-live", "autonomy", "nag_all")
+
+        # Seed via force.
+        asyncio.run(monitor.refresh(force_capabilities=True))
+        time.sleep(0.005)
+        # Background tick: row is watch-active + running + TTL lapsed,
+        # so it polls.
         asyncio.run(monitor.refresh())
-        time.sleep(0.005)  # past watch TTL, within silent TTL
-        asyncio.run(monitor.refresh())
-        assert call_count["n"] == 2
+        assert call_count["n"] >= 2
+
+    def test_watch_active_running_blocked_by_poll_budget(self, monkeypatch):
+        """Stuck-running PR can't drain quota indefinitely — the
+        per-row hourly budget caps polling frequency."""
+        from tools.dashboard import worktree_monitor as wm_module
+        # 1ms TTL + 3-poll hourly cap. Anything past 3 polls in the
+        # rolling hour stops fetching.
+        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_WATCH_TTL_SECONDS", 0.001)
+        monkeypatch.setattr(wm_module, "MAX_POLLS_PER_HOUR_PER_ROW", 3)
+
+        rows = [_row(session="auto-live", live=True)]
+        running_snapshot = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "review": {"running": True, "aggregate_state": "green", "checks": []},
+            "watch": {"mode": "nag_all"},
+        }
+        monitor, call_count = self._make_monitor(
+            monkeypatch, rows=rows, snapshot=running_snapshot,
+        )
+        monitor.set_nag_mode("auto-live", "autonomy", "nag_all")
+
+        # Seed (counts as one poll), then run many background ticks.
+        asyncio.run(monitor.refresh(force_capabilities=True))
+        for _ in range(10):
+            time.sleep(0.002)
+            asyncio.run(monitor.refresh())
+
+        # Force seed = 1, plus at most 2 more background polls until
+        # we hit the cap of 3 in the rolling window.
+        assert call_count["n"] <= 3
 
 
 class TestWorktreeMonitorRateLimitBackoff:
@@ -1677,7 +1742,11 @@ class TestWorktreeMonitorRateLimitBackoff:
             monkeypatch, rows=rows, responses=[rate_limited],
         )
 
-        asyncio.run(monitor.refresh())
+        # Force the seed since silent rows don't fetch in background
+        # under the new policy; rate-limit reply is what we want to
+        # arm the back-off.
+        asyncio.run(monitor.refresh(force_capabilities=True))
+        # Subsequent unforced refresh is back-off-skipped.
         asyncio.run(monitor.refresh())
 
         # Only one actual fetch — the second was skipped due to back-off.
@@ -1708,7 +1777,8 @@ class TestWorktreeMonitorRateLimitBackoff:
         monitor, idx = self._make_monitor(
             monkeypatch, rows=rows, responses=[rate_limited, ready],
         )
-        asyncio.run(monitor.refresh())
+        # Force seed — rate-limited reply arms the back-off.
+        asyncio.run(monitor.refresh(force_capabilities=True))
         assert monitor._capability_backoff_until > 0.0
 
         asyncio.run(monitor.refresh(force_capabilities=True))
@@ -1739,7 +1809,8 @@ class TestWorktreeMonitorRateLimitBackoff:
         monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows_first))
         monitor = wm_module.WorktreeMonitor()
 
-        asyncio.run(monitor.refresh())
+        # Force seed — rate-limited reply arms the back-off.
+        asyncio.run(monitor.refresh(force_capabilities=True))
         # New row appears in the next scan — no cached snapshot for it.
         rows_second = [
             _row(session="auto-old", live=True),
