@@ -1125,6 +1125,25 @@ def _auto_ingest(db: GraphDB) -> None:
     ingest_all_claude_code(sessions_db, force=False)
 
 
+def _entry_role_label(entry: dict) -> str:
+    """Render a USER/ASSISTANT label for one ``entries`` row.
+
+    Two read paths feed ``cmd_context`` and they don't agree on shape: the
+    host path (``db.get_source_content``) returns both ``role`` and
+    ``entry_type`` (``thought`` | ``derivation``); the server path
+    (``read_source_full`` over HTTP) returns only ``role``. ``role`` is
+    the only field present in both — branch on it first, fall back to
+    ``entry_type`` when ``role`` isn't a recognised speaker (e.g. host
+    derivations whose ``role`` carries the model id, not "assistant").
+    """
+    role = (entry.get("role") or "").lower()
+    if role == "user":
+        return "USER"
+    if role == "assistant":
+        return "ASSISTANT"
+    return "USER" if entry.get("entry_type") == "thought" else "ASSISTANT"
+
+
 def cmd_context(args):
     """Show turns around a specific turn in a source — useful for expanding search hits.
 
@@ -1233,8 +1252,7 @@ def cmd_context(args):
             print(f"{'─' * 72}")
             for e in relevant:
                 turn = e.get("turn_number", "?")
-                etype = e.get("entry_type", "?")
-                label = "USER" if etype == "thought" else "ASSISTANT"
+                label = _entry_role_label(e)
                 content = e["content"]
                 if args.max_chars and len(content) > args.max_chars:
                     content = content[:args.max_chars] + f"\n... [{len(content) - args.max_chars} chars truncated]"
@@ -1273,8 +1291,7 @@ def cmd_context(args):
 
         for e in relevant:
             turn = e.get("turn_number", "?")
-            etype = e.get("entry_type", "?")
-            label = "USER" if etype == "thought" else "ASSISTANT"
+            label = _entry_role_label(e)
             marker = " ◀" if turn == target_turn else ""
             content = e["content"]
             if args.max_chars and len(content) > args.max_chars:
