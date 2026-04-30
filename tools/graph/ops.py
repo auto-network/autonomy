@@ -3069,7 +3069,7 @@ def read_source_full(
     """Return a dashboard-ready full read of a source.
 
     Mirrors the ``graph read --json --first`` response shape so the
-    dashboard ``/api/graph/resolve/<id>`` handler (and any other
+    dashboard ``/api/graph/<id>`` handler (and any other
     full-read consumer) can drop the subprocess fork:
 
         {"source": {...}, "entries": [{turn, role, content, created_at}, ...],
