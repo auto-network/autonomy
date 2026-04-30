@@ -39,6 +39,7 @@ def _fake_badge_counter() -> int:  # pragma: no cover — never called
 _MIN_MANIFEST_FIELDS = {
     "id": "foo",
     "api_version": 1,
+    "org": "autonomy",
     "paths": ["/foo"],
     "assets": {"template": "page.html", "script": "page.js"},
     "nav": {"label": "Foo"},
@@ -46,10 +47,11 @@ _MIN_MANIFEST_FIELDS = {
 }
 
 
-def _min_manifest_yaml(plugin_id: str = "foo") -> str:
+def _min_manifest_yaml(plugin_id: str = "foo", org: str = "autonomy") -> str:
     return textwrap.dedent(f"""
         id: {plugin_id}
         api_version: 1
+        org: {org}
         paths:
           - /{plugin_id}
         assets:
@@ -82,7 +84,7 @@ def test_manifest_validates_required_fields():
     """PluginManifest rejects manifests missing any required field."""
     PluginManifest.model_validate(_MIN_MANIFEST_FIELDS)
 
-    for key in ("id", "api_version", "paths", "assets", "nav", "frontend"):
+    for key in ("id", "api_version", "org", "paths", "assets", "nav", "frontend"):
         bad = {k: v for k, v in _MIN_MANIFEST_FIELDS.items() if k != key}
         with pytest.raises(Exception):
             PluginManifest.model_validate(bad)
@@ -319,3 +321,106 @@ def test_manifest_default_enabled_true_overrides_underscore_dir(tmp_path, monkey
     monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: {})
     loaded = loader.load_enabled(plugins_dir=plugins_dir)
     assert {p.id for p in loaded} == {"active"}
+
+
+# ── Plugin install-org scoping (substrate v1.1) ──────────────────────
+
+
+def test_manifest_requires_org_field():
+    """``PluginManifest`` rejects manifests missing the ``org`` field.
+
+    The manifest's ``org`` declares the install scope — the org-DB
+    where the plugin's ``dashboard.plugin#1`` toggle row lives.
+    """
+    bad = {k: v for k, v in _MIN_MANIFEST_FIELDS.items() if k != "org"}
+    with pytest.raises(Exception):
+        PluginManifest.model_validate(bad)
+
+
+def test_loader_reads_each_plugin_org_independently(tmp_path, monkeypatch):
+    """Two plugins with different manifest orgs each read their toggle
+    row from their own org-DB — never from a sibling plugin's org.
+    """
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    _write_plugin(plugins_dir, "alpha", _min_manifest_yaml("alpha", org="autonomy"))
+    _write_plugin(plugins_dir, "bravo", _min_manifest_yaml("bravo", org="anchore"))
+
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_read_plugin_settings(org=None):
+        calls.append(("_read_plugin_settings", org))
+        if org == "autonomy":
+            return {"alpha": {"enabled": True}}
+        if org == "anchore":
+            return {"bravo": {"enabled": True}}
+        return {}
+
+    monkeypatch.setattr(loader, "_read_plugin_settings", fake_read_plugin_settings)
+
+    loaded = loader.load_enabled(plugins_dir=plugins_dir)
+    by_id = {p.id: p for p in loaded}
+    assert set(by_id) == {"alpha", "bravo"}
+
+    requested_orgs = {org for _, org in calls}
+    assert "autonomy" in requested_orgs
+    assert "anchore" in requested_orgs
+    # The unscoped sweep that caused the original bug must not happen.
+    assert None not in requested_orgs, (
+        f"_read_plugin_settings was called with org=None: {calls}"
+    )
+
+
+def test_loader_handles_missing_org_db(tmp_path, monkeypatch):
+    """Manifest declaring an org with no DB / no rows falls through to
+    ``default_enabled`` (existing v1 bootstrap rule).
+    """
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    _write_plugin(plugins_dir, "ghost", _min_manifest_yaml("ghost", org="nonexistent"))
+
+    # ``read_set`` against a missing org-DB returns no rows → empty dict.
+    monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: {})
+
+    loaded = loader.load_enabled(plugins_dir=plugins_dir)
+    # Bootstrap default (dir name does not start with ``_``) → enabled.
+    assert {p.id for p in loaded} == {"ghost"}
+
+
+def test_setting_payload_org_overrides_manifest_org(tmp_path, monkeypatch):
+    """Toggle row ``{enabled: true, org: anchore}`` causes
+    ``LoadedPlugin.effective_org`` to be ``anchore`` regardless of
+    ``manifest.org: autonomy``.
+    """
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    _write_plugin(plugins_dir, "switched", _min_manifest_yaml("switched", org="autonomy"))
+
+    def fake_settings(org=None):
+        if org == "autonomy":
+            return {"switched": {"enabled": True, "org": "anchore"}}
+        return {}
+
+    monkeypatch.setattr(loader, "_read_plugin_settings", fake_settings)
+    loaded = loader.load_enabled(plugins_dir=plugins_dir)
+    by_id = {p.id: p for p in loaded}
+    assert by_id["switched"].effective_org == "anchore"
+
+
+def test_setting_without_org_keeps_manifest_org(tmp_path, monkeypatch):
+    """Toggle row ``{enabled: true}`` (no ``org`` key) keeps
+    ``effective_org = manifest.org``.
+    """
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    _write_plugin(plugins_dir, "stable", _min_manifest_yaml("stable", org="autonomy"))
+
+    def fake_settings(org=None):
+        if org == "autonomy":
+            return {"stable": {"enabled": True}}
+        return {}
+
+    monkeypatch.setattr(loader, "_read_plugin_settings", fake_settings)
+    loaded = loader.load_enabled(plugins_dir=plugins_dir)
+    by_id = {p.id: p for p in loaded}
+    assert by_id["stable"].effective_org == "autonomy"

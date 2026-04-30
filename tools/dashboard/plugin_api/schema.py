@@ -21,7 +21,13 @@ PLUGIN_SCHEMA_REVISION = 1
 
 
 class DashboardPluginV1(SettingSchema):
-    """Payload shape for ``dashboard.plugin#1`` Settings: ``{enabled: bool}``."""
+    """Payload shape for ``dashboard.plugin#1`` Settings.
+
+    ``{enabled: bool, org?: str}``. The optional ``org`` field is an
+    operator override of the manifest's declared install scope —
+    flipping it switches the plugin to a different org-DB at runtime
+    without a reinstall.
+    """
 
     set_id = PLUGIN_SET_ID
     schema_revision = PLUGIN_SCHEMA_REVISION
@@ -41,7 +47,11 @@ class DashboardPluginV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'enabled' must be a bool"
             )
-        extra = set(payload) - {"enabled"}
+        if "org" in payload and not isinstance(payload["org"], str):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'org' must be a string when present"
+            )
+        extra = set(payload) - {"enabled", "org"}
         if extra:
             raise SchemaValidationError(
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"

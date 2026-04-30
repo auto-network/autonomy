@@ -39,10 +39,32 @@ function renderMd(md) {
 
 // ── API Helpers ──────────────────────────────────────────────
 
+// Plugin install-org context. While a plugin's page is rendered,
+// `Autonomy._activePluginOrg` is set to the plugin's effective org so
+// every same-document `api()` / `Autonomy.fetch()` call carries the
+// `X-Graph-Org` header. Cleared on every `route()` call before the new
+// fragment renders, so non-plugin routes never inherit a stale value.
+window.Autonomy = window.Autonomy || {};
+window.Autonomy._activePluginOrg = null;
+
 async function api(path) {
-  const res = await fetch(path);
+  const res = await fetch(path, _withPluginOrgHeader());
   return res.json();
 }
+
+function _withPluginOrgHeader(opts) {
+  const org = window.Autonomy._activePluginOrg;
+  if (!org) return opts || undefined;
+  const init = Object.assign({}, opts || {});
+  const headers = new Headers(init.headers || {});
+  headers.set('X-Graph-Org', org);
+  init.headers = headers;
+  return init;
+}
+
+window.Autonomy.fetch = function (path, opts) {
+  return fetch(path, _withPluginOrgHeader(opts));
+};
 
 // ── Badge Helpers ────────────────────────────────────────────
 
@@ -1464,12 +1486,16 @@ function _renderSidebarPlugins() {
 
 async function renderPluginFragment(plugin) {
   pageTitle.textContent = plugin.label;
+  // Stamp the plugin's effective org so subsequent api() / Autonomy.fetch
+  // calls from inside the page carry X-Graph-Org. The fragment fetch
+  // itself goes through the wrapper too so the page shell is scoped.
+  window.Autonomy._activePluginOrg = plugin.org || null;
   const fragmentUrl = `/pages/${plugin.id}`;
   let html;
   if (_fragmentCache.has(fragmentUrl)) {
     html = _fragmentCache.get(fragmentUrl);
   } else {
-    const res = await fetch(fragmentUrl);
+    const res = await fetch(fragmentUrl, _withPluginOrgHeader());
     if (!res.ok) {
       content.innerHTML = '<div class="text-gray-400">Page not found</div>';
       return;
@@ -1493,6 +1519,11 @@ function navigateTo(path) {
 }
 
 async function route() {
+  // Drop any plugin-org context from the previous render so non-plugin
+  // routes (and plugin pages whose load_enabled state changed) don't
+  // inherit a stale X-Graph-Org. The plugin handler resets it below
+  // when the new path matches a plugin.
+  window.Autonomy._activePluginOrg = null;
   await _checkVersion();
   await window.Autonomy.refreshPlugins();
   _renderSidebarPlugins();
