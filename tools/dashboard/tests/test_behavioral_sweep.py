@@ -7132,10 +7132,19 @@ class TestCoordinatorBoardSettingsWiring:
             f"baseline={baseline_texts!r}, after={texts!r}"
         )
 
-    def test_decision_poll_surfaces_new_row(self, browser, sweep_server):
-        """Acceptance #5 — the 5s decision poll picks up an external write
-        within 6s (5s poll cadence + 1s slack).
+    def test_decision_setting_change_updates_under_one_second(
+        self, browser, sweep_server,
+    ):
+        """Acceptance #5 (auto-obo63 rewrite) — a coordinator-side decision
+        write surfaces on the page in <1s via the ``setting.changed`` SSE
+        subscription (was 5s with the polled timer this bead retired).
+
+        Pre-condition: the page must have rendered the seeded decision
+        mark before the new row is written, so we can detect the change
+        rather than the initial paint.
         """
+        import urllib.request
+
         _navigate_and_check("/sessions", "", wait_ms=600)
         _navigate_and_check("/coordinator", "", wait_ms=1500)
 
@@ -7145,30 +7154,53 @@ class TestCoordinatorBoardSettingsWiring:
             "return m ? (m.textContent || '').trim() : '';"
         )
         assert isinstance(before, str) and "thumb yes" in before, (
-            f"Pre-poll seed mark missing; got {before!r}"
+            f"Pre-update seed mark missing; got {before!r}"
         )
 
-        # Drop a fresh decision row directly into the fixture — this is
-        # what a coordinator-side write looks like to the page.
-        _seed_coord_setting_member(
-            sweep_server["fixture_path"],
-            COORD_DECISION_SET_ID,
-            "fresh-poll-row",
-            {
+        # POST a fresh decision row through /api/graph/setting — the mock
+        # server's add_setting_member path fires setting.changed on the
+        # in-process EventBus, which the page's onSettingChanged
+        # subscription receives via SSE.
+        body = {
+            "set_id": COORD_DECISION_SET_ID,
+            "schema_revision": 1,
+            "key": "fresh-sse-row",
+            "payload": {
                 "tile_id": COORD_TILE_SESSION,
                 "kind": "sitrep_request",
                 "target_session": COORD_TILE_SESSION,
                 "sentAt": "2026-04-30T12:30:00Z",
             },
+        }
+        req = urllib.request.Request(
+            f"{sweep_server['url']}/api/graph/setting",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
+        post_start = time.monotonic()
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 201, (
+                f"POST /api/graph/setting did not return 201; got {resp.status}"
+            )
 
-        # Poll cadence is 5s + a 1s slack → wait 6.5s and re-read.
-        time.sleep(6.5)
+        # Poll the DOM up to 1s. The substrate's commit-then-emit
+        # invariant + onSettingChanged dispatch should land the update
+        # well before that ceiling — the budget is generous to absorb
+        # CI/network jitter, not the data path.
+        deadline = post_start + 1.0
+        latest = before
+        while time.monotonic() < deadline:
+            latest = _ab_eval_batch(
+                "var m = document.querySelector('[data-testid=\"coord-tile-decision-mark\"]'); "
+                "return m ? (m.textContent || '').trim() : '';"
+            )
+            if isinstance(latest, str) and "requested sitrep" in latest:
+                break
+            time.sleep(0.05)
 
-        after = _ab_eval_batch(
-            "var m = document.querySelector('[data-testid=\"coord-tile-decision-mark\"]'); "
-            "return m ? (m.textContent || '').trim() : '';"
-        )
-        assert isinstance(after, str) and "requested sitrep" in after, (
-            f"Decision poll did not surface the new row within 6s; got {after!r}"
+        elapsed_ms = (time.monotonic() - post_start) * 1000.0
+        assert isinstance(latest, str) and "requested sitrep" in latest, (
+            f"setting.changed SSE did not surface the new decision within "
+            f"1s (saw {latest!r} after {elapsed_ms:.0f}ms)"
         )

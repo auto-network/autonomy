@@ -1,7 +1,7 @@
 // Coordinator Board plugin — frontend Alpine factory.
 // Mirrors the design at revision f710c702 of design 59dd05c1-... (graph
 // id 81e126c8-75e). Bead auto-lffg5 retired the v1 ``api.py`` facade —
-// the page now reads + writes graph Settings directly:
+// the page reads + writes graph Settings directly:
 //
 //   reads:
 //     GET /api/graph/settings/dashboard.coordinator-canvas
@@ -13,17 +13,18 @@
 //   writes:
 //     POST /api/graph/setting   (set_id=<one of the above>)
 //
-// A 5-second decision-log poll keeps a since-cursor on the decision set
-// so taps surface back to their tile as "you said: …" feedback. The
-// substrate-level action mediator (auto-e5vus) translates each decision
-// into a session_send to ``target_session``.
+// Bead auto-obo63 retired the 5s decision-log poll: the page now
+// subscribes to ``setting.changed`` per-set_id via
+// ``window.dashboardEvents.onSettingChanged`` (auto-5mz65) and
+// re-resolves the affected set on each event. The substrate's mediator
+// watchdog covers missed events at the handler layer; the operator gets
+// the existing canvas-corner ↻ button as a manual escape hatch.
 const SET_CANVAS = 'dashboard.coordinator-canvas';
 const SET_OPERATOR_MSG = 'dashboard.operator-message-to-coordinator';
 const SET_TILE = 'dashboard.coordinator-tile';
 const SET_THREAD = 'dashboard.coordinator-thread';
 const SET_DECISION = 'dashboard.coordinator-decision';
 const SCHEMA_REVISION = 1;
-const DECISION_POLL_MS = 5000;
 const OPERATOR_MSG_KEY = 'default';
 
 function coordinatorBoard() {
@@ -66,20 +67,20 @@ function coordinatorBoard() {
       docs: { coordMap: '', walkthrough: '' },
     },
 
-    // Decision since-cursor — the highest ``updated_at`` (or ``created_at``)
-    // we've seen. The 5s poll asks for the full member list and skips
-    // any row at or before this cursor.
-    _decisionCursor: '',
-    _decisionPollTimer: null,
+    // Active onSettingChanged unsubscribe callbacks; drained by destroy().
+    _unsubscribers: [],
 
     // ─────── Lifecycle ───────
     async init() {
       await this.loadBoard();
-      this._startDecisionPoll();
+      this._subscribeSettings();
     },
 
     destroy() {
-      this._stopDecisionPoll();
+      for (const u of this._unsubscribers) {
+        try { u(); } catch (_) { /* ignore unsubscribe errors */ }
+      }
+      this._unsubscribers = [];
     },
 
     async loadBoard() {
@@ -96,19 +97,7 @@ function coordinatorBoard() {
       this.data.operatorMessage = this._normalizeOperatorMessage(this._latest(op));
       this.data.tiles = (tiles || []).map(m => this._normalizeTile(m));
       this.data.threads = (threads || []).map(m => this._normalizeThread(m));
-
-      const sorted = this._sortByTime(decisions || []);
-      this.data.decisionsByTile = {};
-      for (const m of sorted) {
-        const p = m.payload || {};
-        if (!p.tile_id) continue;
-        this.data.decisionsByTile[p.tile_id] = {
-          kind: p.kind, choice: p.choice || '', sentAt: p.sentAt || '',
-        };
-      }
-      // Cursor = max time across decisions so the poll skips them.
-      this._decisionCursor = sorted.length
-        ? this._memberTime(sorted[sorted.length - 1]) : '';
+      this.data.decisionsByTile = this._buildDecisionsByTile(decisions);
       // Snapshot timestamp: render-time stamp; the canvas's ageMin is
       // authoritative for "when did the coordinator publish this".
       this.data.snapshotTime = new Date().toLocaleString(undefined, {
@@ -118,44 +107,54 @@ function coordinatorBoard() {
       if (this.refreshState !== 'idle') this.refreshState = 'idle';
     },
 
-    _startDecisionPoll() {
-      if (this._decisionPollTimer) return;
-      this._decisionPollTimer = setInterval(
-        () => this._pollDecisions(), DECISION_POLL_MS,
-      );
+    _subscribeSettings() {
+      const events = window.dashboardEvents;
+      if (!events || typeof events.onSettingChanged !== 'function') return;
+      // Listed individually (not in a loop) so a single grep can prove
+      // each subscribed set_id — see auto-obo63 acceptance #2.
+      this._unsubscribers.push(events.onSettingChanged(SET_CANVAS,       () => this._refreshCanvas()));
+      this._unsubscribers.push(events.onSettingChanged(SET_OPERATOR_MSG, () => this._refreshOperatorMessage()));
+      this._unsubscribers.push(events.onSettingChanged(SET_TILE,         () => this._refreshTiles()));
+      this._unsubscribers.push(events.onSettingChanged(SET_THREAD,       () => this._refreshThreads()));
+      this._unsubscribers.push(events.onSettingChanged(SET_DECISION,     () => this._refreshDecisions()));
     },
 
-    _stopDecisionPoll() {
-      if (this._decisionPollTimer) {
-        clearInterval(this._decisionPollTimer);
-        this._decisionPollTimer = null;
-      }
+    async _refreshCanvas() {
+      const members = await this._readSet(SET_CANVAS);
+      this.data.canvas = this._normalizeCanvas(this._latest(members));
     },
 
-    async _pollDecisions() {
-      const decisions = await this._readSet(SET_DECISION);
-      if (!decisions) return;
-      const sorted = this._sortByTime(decisions);
-      let advanced = false;
+    async _refreshOperatorMessage() {
+      const members = await this._readSet(SET_OPERATOR_MSG);
+      this.data.operatorMessage = this._normalizeOperatorMessage(this._latest(members));
+    },
+
+    async _refreshTiles() {
+      const members = await this._readSet(SET_TILE);
+      this.data.tiles = (members || []).map(m => this._normalizeTile(m));
+    },
+
+    async _refreshThreads() {
+      const members = await this._readSet(SET_THREAD);
+      this.data.threads = (members || []).map(m => this._normalizeThread(m));
+    },
+
+    async _refreshDecisions() {
+      const members = await this._readSet(SET_DECISION);
+      this.data.decisionsByTile = this._buildDecisionsByTile(members);
+    },
+
+    _buildDecisionsByTile(members) {
+      const out = {};
+      const sorted = this._sortByTime(members || []);
       for (const m of sorted) {
-        const t = this._memberTime(m);
-        if (t && this._decisionCursor && t <= this._decisionCursor) continue;
         const p = m.payload || {};
         if (!p.tile_id) continue;
-        this.data.decisionsByTile[p.tile_id] = {
+        out[p.tile_id] = {
           kind: p.kind, choice: p.choice || '', sentAt: p.sentAt || '',
         };
-        if (t && t > this._decisionCursor) {
-          this._decisionCursor = t;
-          advanced = true;
-        }
       }
-      if (advanced) {
-        // Force Alpine to re-render the decisionsByTile map by
-        // reassigning. Mutating a child of ``data`` doesn't always
-        // trigger reactivity for nested keys.
-        this.data.decisionsByTile = { ...this.data.decisionsByTile };
-      }
+      return out;
     },
 
     async _readSet(setId) {
@@ -367,7 +366,8 @@ function coordinatorBoard() {
       }
       const result = await this._writeSetting(SET_DECISION, key, payload);
       // Optimistic decoration so the operator gets immediate visual
-      // feedback; the 5s poll later confirms via the same path.
+      // feedback; the SET_DECISION setting.changed subscription confirms
+      // via re-resolve on the next event tick.
       this.data.decisionsByTile = {
         ...this.data.decisionsByTile,
         [tile.session]: { kind, choice: choice || '', sentAt: payload.sentAt },
