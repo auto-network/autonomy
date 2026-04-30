@@ -1,27 +1,43 @@
 """Setting schemas owned by the coordinator-board plugin.
 
-Five Settings drive the live data flow:
+The plugin owns ten Settings:
 
-* ``dashboard.coordinator-canvas`` — the coordinator's primary output: a
+* ``dashboard.coordinator-canvas`` — coordinator's primary output: a
   single perfectly-framed question with just enough context to be
   answerable, plus optional pre-canned quick-reply pills.
-* ``dashboard.operator-message-to-coordinator`` — the operator's most
+  Key: ``<coord-session>``.
+* ``dashboard.operator-message-to-coordinator`` — operator's most
   recent message back; latest-write-wins (the UI surfaces only the
-  newest member).
-* ``dashboard.coordinator-tile`` — per-(coordinator, tile) editorial
-  card published by the coordinator session. Keyed
-  ``<coord-session>:<tile-session>``.
-* ``dashboard.coordinator-thread`` — per-(coordinator, thread)
-  editorial thread on the Tracking tab. Keyed
-  ``<coord-session>:<thread-session>``.
+  newest member).  Key: ``default``.
+* ``dashboard.coordinator-tile`` — per-peer-session editorial card
+  (One thing tab). Bead auto-1aef5 rekeys this from
+  ``<coord-session>:<peer-session>`` (v1) to ``<peer-session>``
+  alone (v2): peers self-publish under their own session id, and
+  the coordinator curates via the publication-state machine
+  (auto-xhimi). Coordinator handoff becomes seamless — the new
+  coordinator inherits whatever each peer last wrote.
+* ``dashboard.coordinator-thread`` — per-peer-session editorial
+  thread (Tracking tab). Same rekey as tile.
 * ``dashboard.coordinator-decision`` — append-only event log of
   operator taps on a coordinator tile (thumb yes/no, choice, custom
   reply, sitrep request, refresh request). Keyed by uuid.
+* ``dashboard.coordinator-sprint`` — coordinator-owned multi-session
+  arc. Key ``<sprint-id>``.
+* ``dashboard.coordinator-bead`` — coordinator-curated bead landing /
+  closing summary (Tracking tab). Key ``<bead-id>``.
+* ``dashboard.coordinator-convergent-decision`` — coordinator-curated
+  cross-session design decision (Tracking tab). Key ``<title-slug>``.
+* ``dashboard.coordinator-open-followup`` — coordinator-curated
+  follow-up that hasn't been beaded yet (Tracking tab). Key uuid.
+* ``dashboard.coordinator-docs`` — singleton docs pointer
+  (coord map + walkthrough source ids). Key ``default``.
 
 Read paths flow through the standard ``/api/graph/settings/...``
-endpoints; write paths POST to ``/api/graph/setting``. No plugin-side
-facade — the coordinator board page is a thin client over the
-Settings substrate (bead auto-lffg5 retired the v1 ``api.py`` facade).
+endpoints; write paths POST to ``/api/graph/setting``. Sprints,
+beads, convergent-decisions, open-followups, and docs are
+coordinator-only writes (cross-session editorial); tiles + threads
+are peer-self-published with coordinator curation via the
+publication-state machine.
 """
 from __future__ import annotations
 
@@ -39,30 +55,50 @@ OPERATOR_MESSAGE_SET_ID = "dashboard.operator-message-to-coordinator"
 COORDINATOR_TILE_SET_ID = "dashboard.coordinator-tile"
 COORDINATOR_THREAD_SET_ID = "dashboard.coordinator-thread"
 COORDINATOR_DECISION_SET_ID = "dashboard.coordinator-decision"
+COORDINATOR_SPRINT_SET_ID = "dashboard.coordinator-sprint"
+COORDINATOR_BEAD_SET_ID = "dashboard.coordinator-bead"
+COORDINATOR_CONVERGENT_DECISION_SET_ID = (
+    "dashboard.coordinator-convergent-decision"
+)
+COORDINATOR_OPEN_FOLLOWUP_SET_ID = "dashboard.coordinator-open-followup"
+COORDINATOR_DOCS_SET_ID = "dashboard.coordinator-docs"
+
+# Most schemas live at revision 1. Tile + thread bumped to revision 2 by
+# bead auto-1aef5 (peer-session-only keying — see module docstring).
 SCHEMA_REVISION = 1
+TILE_SCHEMA_REVISION = 2
+THREAD_SCHEMA_REVISION = 2
 
 
 VALID_TILE_ASKS = ("yes_no", "decide", "merge", "approve", "fyi")
 VALID_TILE_UPDATE_KINDS = ("refresh", "discovery")
 VALID_THREAD_STATUSES = (
     "shipping", "blocked", "designing",
-    "researching", "investigating", "paused",
+    "researching", "investigating", "paused", "compacted",
 )
 VALID_DECISION_KINDS = (
     "thumb_yes", "thumb_no", "choice", "custom",
     "sitrep_request", "refresh_request",
 )
+VALID_SPRINT_STATUSES = (
+    "active", "shipping", "parked", "design", "done", "nascent",
+)
+VALID_BEAD_STATUSES = ("landed", "closed-duplicate", "specified")
 
 
 SYNOPSIS = {
     "summary": (
         "Coordinator board Settings: canvas (the banger), operator "
-        "message back, tile + thread editorial cards, append-only "
-        "decision log driving session_send via the action substrate"
+        "message back, tile + thread editorial cards (peer-session "
+        "keyed), decision log, sprints, beads, convergent decisions, "
+        "open follow-ups, docs"
     ),
     "nouns": [
         "coordinator board", "coordinator canvas", "operator message",
         "coordinator tile", "coordinator thread", "coordinator decision",
+        "coordinator sprint", "coordinator bead",
+        "coordinator convergent decision", "coordinator open follow-up",
+        "coordinator docs",
         "thumb yes", "thumb no", "sitrep", "tile refresh",
     ],
     "related_set_ids": [],
@@ -199,80 +235,70 @@ class OperatorMessageToCoordinatorV1(SettingSchema):
             )
 
 
-# ── Tile ─────────────────────────────────────────────────────────────
+# ── Tile (v1, retained for upconvert chain) ──────────────────────────
+
+
+def _validate_tile_common(cls, payload: Any) -> None:
+    if not isinstance(payload, dict):
+        raise SchemaValidationError(
+            f"{cls.__name__}: payload must be a dict, "
+            f"got {type(payload).__name__}"
+        )
+    for required in ("label", "role", "thing", "asks"):
+        v = payload.get(required)
+        if not isinstance(v, str) or not v:
+            raise SchemaValidationError(
+                f"{cls.__name__}: missing or empty required field {required!r}"
+            )
+    if payload["asks"] not in VALID_TILE_ASKS:
+        raise SchemaValidationError(
+            f"{cls.__name__}: 'asks' must be one of {VALID_TILE_ASKS}, "
+            f"got {payload['asks']!r}"
+        )
+    if "ageMin" in payload and not isinstance(payload["ageMin"], (int, float)):
+        raise SchemaValidationError(
+            f"{cls.__name__}: 'ageMin' must be a number"
+        )
+    if "updateKind" in payload \
+            and payload["updateKind"] not in VALID_TILE_UPDATE_KINDS:
+        raise SchemaValidationError(
+            f"{cls.__name__}: 'updateKind' must be one of "
+            f"{VALID_TILE_UPDATE_KINDS}"
+        )
 
 
 class CoordinatorTileV1(SettingSchema):
-    """Per-(coordinator, tile) card. Key: ``<coord>:<tile-session>``."""
+    """Per-(coordinator, peer) tile. Key: ``<coord>:<peer-session>``.
+
+    Retained so existing v1 rows remain readable while migration runs.
+    Use :class:`CoordinatorTileV2` for new writes.
+    """
 
     set_id = COORDINATOR_TILE_SET_ID
     schema_revision = SCHEMA_REVISION
 
     _field_metadata: dict[str, dict] = {
-        "label": {
-            "type": "string",
-            "required": True,
-            "description": "Human-readable tile label (the session's working title)",
-        },
-        "role": {
-            "type": "string",
-            "required": True,
-            "description": "Session role (implementer / pair / researcher / coordinator / ...)",
-        },
-        "thing": {
-            "type": "string",
-            "required": True,
-            "description": "Coordinator's editorial summary of what this session is doing right now",
-        },
-        "asks": {
-            "type": "string",
-            "required": True,
-            "enum": list(VALID_TILE_ASKS),
-            "description": "What the tile is asking the operator for; drives the action affordances",
-        },
-        "ageMin": {
-            "type": "integer",
-            "description": "Age in minutes since the tile last updated",
-        },
-        "updateKind": {
-            "type": "string",
-            "enum": list(VALID_TILE_UPDATE_KINDS),
-            "description": "Whether the latest update was a routine refresh or a discovery",
-        },
-        "detail": {
-            "type": "string",
-            "description": "Optional longer-form supporting detail",
-        },
+        "label":      {"type": "string", "required": True,
+                       "description": "Tile label (peer's working title)"},
+        "role":       {"type": "string", "required": True,
+                       "description": "Peer's session role"},
+        "thing":      {"type": "string", "required": True,
+                       "description": "Editorial summary of what the peer is doing"},
+        "asks":       {"type": "string", "required": True,
+                       "enum": list(VALID_TILE_ASKS),
+                       "description": "What the tile is asking the operator for"},
+        "ageMin":     {"type": "integer",
+                       "description": "Age in minutes since the tile last updated"},
+        "updateKind": {"type": "string",
+                       "enum": list(VALID_TILE_UPDATE_KINDS),
+                       "description": "Refresh vs discovery update"},
+        "detail":     {"type": "string",
+                       "description": "Optional longer-form supporting detail (string)"},
     }
 
     @classmethod
     def validate(cls, payload: Any) -> None:
-        if not isinstance(payload, dict):
-            raise SchemaValidationError(
-                f"{cls.__name__}: payload must be a dict, "
-                f"got {type(payload).__name__}"
-            )
-        for required in ("label", "role", "thing", "asks"):
-            v = payload.get(required)
-            if not isinstance(v, str) or not v:
-                raise SchemaValidationError(
-                    f"{cls.__name__}: missing or empty required field {required!r}"
-                )
-        if payload["asks"] not in VALID_TILE_ASKS:
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'asks' must be one of {VALID_TILE_ASKS}, "
-                f"got {payload['asks']!r}"
-            )
-        if "ageMin" in payload and not isinstance(payload["ageMin"], (int, float)):
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'ageMin' must be a number"
-            )
-        if "updateKind" in payload \
-                and payload["updateKind"] not in VALID_TILE_UPDATE_KINDS:
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'updateKind' must be one of "
-                f"{VALID_TILE_UPDATE_KINDS}"
-            )
+        _validate_tile_common(cls, payload)
         if "detail" in payload and payload["detail"] is not None \
                 and not isinstance(payload["detail"], str):
             raise SchemaValidationError(
@@ -285,100 +311,207 @@ class CoordinatorTileV1(SettingSchema):
             )
 
 
-# ── Thread ───────────────────────────────────────────────────────────
+# ── Tile (v2 — peer-session keyshape, structured detail) ─────────────
 
 
-class CoordinatorThreadV1(SettingSchema):
-    """Per-(coordinator, thread) tracking card. Key: ``<coord>:<thread-session>``."""
+class CoordinatorTileV2(SettingSchema):
+    """Per-peer-session tile. Key: ``<peer-session>``.
 
-    set_id = COORDINATOR_THREAD_SET_ID
-    schema_revision = SCHEMA_REVISION
+    Differences from v1:
+    - Key is the peer session id alone (no coord prefix).
+    - ``detail`` is an object ``{context, choices[]}`` instead of a
+      bare string. The detail panel renders ``context`` + a list of
+      ``choices`` operator can pick from.
+    """
+
+    set_id = COORDINATOR_TILE_SET_ID
+    schema_revision = TILE_SCHEMA_REVISION
 
     _field_metadata: dict[str, dict] = {
-        "label": {
-            "type": "string",
-            "required": True,
-            "description": "Human-readable thread label (working title)",
-        },
-        "role": {
-            "type": "string",
-            "required": True,
-            "description": "Session role driving the thread",
-        },
-        "status": {
-            "type": "string",
-            "required": True,
-            "enum": list(VALID_THREAD_STATUSES),
-            "description": "Current status of the thread; drives the status badge",
-        },
-        "lead": {
-            "type": "string",
-            "required": True,
-            "description": "Editorial lead — the one-sentence summary of what the thread is about",
-        },
-        "bullets": {
-            "type": "array",
-            "description": "Supporting bullets shown beneath the lead",
-            "element": {"type": "string"},
-        },
-        "ageMin": {
-            "type": "integer",
-            "description": "Age in minutes since the thread last updated",
-        },
-        "totalTurns": {
-            "type": "integer",
-            "description": "Total turn count for the thread (sort signal)",
-        },
-        "needs": {
-            "type": "string",
-            "description": (
-                "When set, the thread is asking the operator for "
-                "something specific — surfaced as a callout"
-            ),
-        },
+        "label":      {"type": "string", "required": True,
+                       "description": "Tile label (peer's working title)"},
+        "role":       {"type": "string", "required": True,
+                       "description": "Peer's session role"},
+        "thing":      {"type": "string", "required": True,
+                       "description": "Editorial summary of what the peer is doing"},
+        "asks":       {"type": "string", "required": True,
+                       "enum": list(VALID_TILE_ASKS),
+                       "description": "What the tile is asking the operator for"},
+        "ageMin":     {"type": "integer",
+                       "description": "Age in minutes since the tile last updated"},
+        "updateKind": {"type": "string",
+                       "enum": list(VALID_TILE_UPDATE_KINDS),
+                       "description": "Refresh vs discovery update"},
+        "detail":     {"type": "object",
+                       "description": (
+                           "Optional structured detail; renders the "
+                           "expanded panel. ``context`` carries longer-"
+                           "form prose; ``choices`` is a list of "
+                           "resolution-choice strings the operator can "
+                           "tap."
+                       )},
     }
 
     @classmethod
     def validate(cls, payload: Any) -> None:
-        if not isinstance(payload, dict):
-            raise SchemaValidationError(
-                f"{cls.__name__}: payload must be a dict, "
-                f"got {type(payload).__name__}"
-            )
-        for required in ("label", "role", "status", "lead"):
-            v = payload.get(required)
-            if not isinstance(v, str) or not v:
+        _validate_tile_common(cls, payload)
+        if "detail" in payload and payload["detail"] is not None:
+            d = payload["detail"]
+            if not isinstance(d, dict):
                 raise SchemaValidationError(
-                    f"{cls.__name__}: missing or empty required field {required!r}"
+                    f"{cls.__name__}: 'detail' must be an object or null"
                 )
-        if payload["status"] not in VALID_THREAD_STATUSES:
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'status' must be one of "
-                f"{VALID_THREAD_STATUSES}, got {payload['status']!r}"
-            )
-        if "bullets" in payload:
-            bullets = payload["bullets"]
-            if not isinstance(bullets, list) \
-                    or not all(isinstance(b, str) for b in bullets):
+            if "context" in d and d["context"] is not None \
+                    and not isinstance(d["context"], str):
                 raise SchemaValidationError(
-                    f"{cls.__name__}: 'bullets' must be a list of strings"
+                    f"{cls.__name__}: 'detail.context' must be a string or null"
                 )
-        for num_field in ("ageMin", "totalTurns"):
-            if num_field in payload \
-                    and not isinstance(payload[num_field], (int, float)):
+            if "choices" in d:
+                ch = d["choices"]
+                if not isinstance(ch, list) \
+                        or not all(isinstance(c, str) for c in ch):
+                    raise SchemaValidationError(
+                        f"{cls.__name__}: 'detail.choices' must be a list of strings"
+                    )
+            extra = set(d) - {"context", "choices"}
+            if extra:
                 raise SchemaValidationError(
-                    f"{cls.__name__}: {num_field!r} must be a number"
+                    f"{cls.__name__}: unknown 'detail' field(s): {sorted(extra)}"
                 )
-        if "needs" in payload and payload["needs"] is not None \
-                and not isinstance(payload["needs"], str):
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'needs' must be a string or null"
-            )
         extra = set(payload) - set(cls._field_metadata)
         if extra:
             raise SchemaValidationError(
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"
             )
+
+
+def _upconvert_tile_v1_to_v2(payload: dict) -> dict:
+    """Wrap a v1 tile payload (string ``detail``) into v2 shape.
+
+    The v1 ``detail`` was a free-text supporting blurb. v2 promotes it
+    to ``detail.context`` and adds an empty ``choices`` list — old rows
+    surface in the new detail panel without a Resolution-choices
+    section, just the prose.
+    """
+    out = dict(payload)
+    detail = payload.get("detail")
+    if detail is None:
+        out.pop("detail", None)
+    elif isinstance(detail, str):
+        out["detail"] = {"context": detail, "choices": []}
+    return out
+
+
+# ── Thread (v1, retained for upconvert chain) ────────────────────────
+
+
+def _validate_thread_common(cls, payload: Any) -> None:
+    if not isinstance(payload, dict):
+        raise SchemaValidationError(
+            f"{cls.__name__}: payload must be a dict, "
+            f"got {type(payload).__name__}"
+        )
+    for required in ("label", "role", "status", "lead"):
+        v = payload.get(required)
+        if not isinstance(v, str) or not v:
+            raise SchemaValidationError(
+                f"{cls.__name__}: missing or empty required field {required!r}"
+            )
+    if payload["status"] not in VALID_THREAD_STATUSES:
+        raise SchemaValidationError(
+            f"{cls.__name__}: 'status' must be one of "
+            f"{VALID_THREAD_STATUSES}, got {payload['status']!r}"
+        )
+    if "bullets" in payload:
+        bullets = payload["bullets"]
+        if not isinstance(bullets, list) \
+                or not all(isinstance(b, str) for b in bullets):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'bullets' must be a list of strings"
+            )
+    for num_field in ("ageMin", "totalTurns"):
+        if num_field in payload \
+                and not isinstance(payload[num_field], (int, float)):
+            raise SchemaValidationError(
+                f"{cls.__name__}: {num_field!r} must be a number"
+            )
+    if "needs" in payload and payload["needs"] is not None \
+            and not isinstance(payload["needs"], str):
+        raise SchemaValidationError(
+            f"{cls.__name__}: 'needs' must be a string or null"
+        )
+
+
+_THREAD_FIELDS = {
+    "label":     {"type": "string", "required": True,
+                  "description": "Thread label (working title)"},
+    "role":      {"type": "string", "required": True,
+                  "description": "Session role driving the thread"},
+    "status":    {"type": "string", "required": True,
+                  "enum": list(VALID_THREAD_STATUSES),
+                  "description": "Thread status; drives the badge"},
+    "lead":      {"type": "string", "required": True,
+                  "description": "Editorial lead (one-sentence summary)"},
+    "bullets":   {"type": "array",
+                  "description": "Supporting bullets shown beneath the lead",
+                  "element": {"type": "string"}},
+    "ageMin":    {"type": "integer",
+                  "description": "Age in minutes since the thread last updated"},
+    "totalTurns":{"type": "integer",
+                  "description": "Total turn count for the thread"},
+    "needs":     {"type": "string",
+                  "description": (
+                      "When set, the thread is asking the operator for "
+                      "something specific — surfaced as a callout"
+                  )},
+}
+
+
+class CoordinatorThreadV1(SettingSchema):
+    """Per-(coordinator, peer) thread. Key: ``<coord>:<peer-session>``.
+
+    Retained for the v1→v2 upconvert chain.
+    """
+
+    set_id = COORDINATOR_THREAD_SET_ID
+    schema_revision = SCHEMA_REVISION
+    _field_metadata = dict(_THREAD_FIELDS)
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        _validate_thread_common(cls, payload)
+        extra = set(payload) - set(cls._field_metadata)
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+
+class CoordinatorThreadV2(SettingSchema):
+    """Per-peer-session thread. Key: ``<peer-session>``.
+
+    Same payload shape as v1; only the keyshape changed (peers
+    self-publish under their own session id; coordinator curates
+    via the publication-state machine).
+    """
+
+    set_id = COORDINATOR_THREAD_SET_ID
+    schema_revision = THREAD_SCHEMA_REVISION
+    _field_metadata = dict(_THREAD_FIELDS)
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        _validate_thread_common(cls, payload)
+        extra = set(payload) - set(cls._field_metadata)
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+
+def _upconvert_thread_v1_to_v2(payload: dict) -> dict:
+    """Pass through — the payload shape is identical between v1 and v2."""
+    return dict(payload)
 
 
 # ── Decision (append-only event log) ─────────────────────────────────
@@ -441,9 +574,6 @@ class CoordinatorDecisionV1(SettingSchema):
                 f"{cls.__name__}: 'kind' must be one of "
                 f"{VALID_DECISION_KINDS}, got {payload['kind']!r}"
             )
-        # ``choice`` carries the operator's chosen text for ``choice`` /
-        # ``custom`` kinds; other kinds may omit it. When supplied it
-        # must be a string.
         if "choice" in payload and payload["choice"] is not None \
                 and not isinstance(payload["choice"], str):
             raise SchemaValidationError(
@@ -468,8 +598,286 @@ class CoordinatorDecisionV1(SettingSchema):
             )
 
 
+# ── Sprint (coordinator-owned editorial arc) ─────────────────────────
+
+
+class CoordinatorSprintV1(SettingSchema):
+    """Per-sprint-id editorial card. Key: ``<sprint-id>``.
+
+    Sprints are inherently cross-session arcs that no single peer sees
+    the full shape of; coordinator is the only writer.
+    """
+
+    set_id = COORDINATOR_SPRINT_SET_ID
+    schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "title":       {"type": "string", "required": True,
+                        "description": "Editorial sprint headline"},
+        "status":      {"type": "string", "required": True,
+                        "enum": list(VALID_SPRINT_STATUSES),
+                        "description": "Sprint status; drives the badge"},
+        "ageMin":      {"type": "integer",
+                        "description": "Age in minutes since last update"},
+        "participants":{"type": "array",
+                        "description": "Sessions involved in this sprint",
+                        "element": {"type": "string"}},
+        "commitCount": {"type": "integer",
+                        "description": "Commit count surfaced in the meta-row"},
+        "beadCount":   {"type": "integer",
+                        "description": "Bead count surfaced in the meta-row"},
+        "arc":         {"type": "string",
+                        "description": (
+                            "Editorial 1–2 sentence arc; supports inline "
+                            "``[label](href)`` markdown links"
+                        )},
+        "shipped":     {"type": "array",
+                        "description": "Landed work lines (with optional inline links)",
+                        "element": {"type": "string"}},
+        "inFlight":    {"type": "array",
+                        "description": "Active work lines",
+                        "element": {"type": "string"}},
+        "needs":       {"type": "string",
+                        "description": (
+                            "What would keep this sprint from falling by "
+                            "the wayside; surfaced as an amber callout"
+                        )},
+    }
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        for required in ("title", "status"):
+            v = payload.get(required)
+            if not isinstance(v, str) or not v:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: missing or empty required field {required!r}"
+                )
+        if payload["status"] not in VALID_SPRINT_STATUSES:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'status' must be one of "
+                f"{VALID_SPRINT_STATUSES}, got {payload['status']!r}"
+            )
+        for num_field in ("ageMin", "commitCount", "beadCount"):
+            if num_field in payload \
+                    and not isinstance(payload[num_field], (int, float)):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {num_field!r} must be a number"
+                )
+        for list_field in ("participants", "shipped", "inFlight"):
+            if list_field in payload:
+                v = payload[list_field]
+                if not isinstance(v, list) \
+                        or not all(isinstance(s, str) for s in v):
+                    raise SchemaValidationError(
+                        f"{cls.__name__}: {list_field!r} must be a list of strings"
+                    )
+        for str_field in ("arc", "needs"):
+            if str_field in payload and payload[str_field] is not None \
+                    and not isinstance(payload[str_field], str):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {str_field!r} must be a string or null"
+                )
+        extra = set(payload) - set(cls._field_metadata)
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+
+# ── Bead (coordinator-curated landing/closing summary) ───────────────
+
+
+class CoordinatorBeadV1(SettingSchema):
+    """Coordinator-curated bead summary. Key: ``<bead-id>``."""
+
+    set_id = COORDINATOR_BEAD_SET_ID
+    schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "commit": {"type": "string",
+                   "description": "Landing commit short-sha (or ``(host)`` for host work)"},
+        "scope":  {"type": "string", "required": True,
+                   "description": "One-line scope description"},
+        "status": {"type": "string", "required": True,
+                   "enum": list(VALID_BEAD_STATUSES),
+                   "description": "Bead status; drives the row glyph"},
+        "note":   {"type": "string",
+                   "description": "Optional editorial note"},
+    }
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        for required in ("scope", "status"):
+            v = payload.get(required)
+            if not isinstance(v, str) or not v:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: missing or empty required field {required!r}"
+                )
+        if payload["status"] not in VALID_BEAD_STATUSES:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'status' must be one of "
+                f"{VALID_BEAD_STATUSES}, got {payload['status']!r}"
+            )
+        for str_field in ("commit", "note"):
+            if str_field in payload and payload[str_field] is not None \
+                    and not isinstance(payload[str_field], str):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {str_field!r} must be a string or null"
+                )
+        extra = set(payload) - set(cls._field_metadata)
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+
+# ── Convergent decision (coordinator-curated cross-session call) ─────
+
+
+class CoordinatorConvergentDecisionV1(SettingSchema):
+    """Coordinator-curated convergent design decision. Key: ``<title-slug>``."""
+
+    set_id = COORDINATOR_CONVERGENT_DECISION_SET_ID
+    schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "title":   {"type": "string", "required": True,
+                    "description": "Headline of the convergent decision"},
+        "raisedBy":{"type": "array", "required": True,
+                    "description": "Sessions that surfaced the same problem",
+                    "element": {"type": "string"}},
+    }
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        title = payload.get("title")
+        if not isinstance(title, str) or not title:
+            raise SchemaValidationError(
+                f"{cls.__name__}: missing or empty required field 'title'"
+            )
+        raised = payload.get("raisedBy")
+        if not isinstance(raised, list) or not raised \
+                or not all(isinstance(s, str) and s for s in raised):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'raisedBy' must be a non-empty list of strings"
+            )
+        extra = set(payload) - set(cls._field_metadata)
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+
+# ── Open follow-up (coordinator-curated, not yet beaded) ─────────────
+
+
+class CoordinatorOpenFollowupV1(SettingSchema):
+    """Coordinator-curated open follow-up. Key: uuid."""
+
+    set_id = COORDINATOR_OPEN_FOLLOWUP_SET_ID
+    schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "text": {"type": "string", "required": True,
+                 "description": (
+                     "Follow-up body; supports inline ``[label](href)`` "
+                     "markdown links"
+                 )},
+    }
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        text = payload.get("text")
+        if not isinstance(text, str) or not text:
+            raise SchemaValidationError(
+                f"{cls.__name__}: missing or empty required field 'text'"
+            )
+        extra = set(payload) - {"text"}
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+
+# ── Docs (singleton coordMap + walkthrough pointers) ─────────────────
+
+
+class CoordinatorDocsV1(SettingSchema):
+    """Singleton coord-map + walkthrough doc pointers. Key: ``default``."""
+
+    set_id = COORDINATOR_DOCS_SET_ID
+    schema_revision = SCHEMA_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        "coordMap":   {"type": "string",
+                       "description": "Coord-map note source id"},
+        "walkthrough":{"type": "string",
+                       "description": "Walkthrough note source id"},
+    }
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        for str_field in ("coordMap", "walkthrough"):
+            if str_field in payload and payload[str_field] is not None \
+                    and not isinstance(payload[str_field], str):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {str_field!r} must be a string or null"
+                )
+        extra = set(payload) - set(cls._field_metadata)
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+
+# ── Registration ─────────────────────────────────────────────────────
+
 register_schema(COORDINATOR_CANVAS_SET_ID, SCHEMA_REVISION, CoordinatorCanvasV1)
 register_schema(OPERATOR_MESSAGE_SET_ID, SCHEMA_REVISION, OperatorMessageToCoordinatorV1)
 register_schema(COORDINATOR_TILE_SET_ID, SCHEMA_REVISION, CoordinatorTileV1)
+register_schema(
+    COORDINATOR_TILE_SET_ID, TILE_SCHEMA_REVISION, CoordinatorTileV2,
+    upconvert_from_prev=_upconvert_tile_v1_to_v2,
+)
 register_schema(COORDINATOR_THREAD_SET_ID, SCHEMA_REVISION, CoordinatorThreadV1)
+register_schema(
+    COORDINATOR_THREAD_SET_ID, THREAD_SCHEMA_REVISION, CoordinatorThreadV2,
+    upconvert_from_prev=_upconvert_thread_v1_to_v2,
+)
 register_schema(COORDINATOR_DECISION_SET_ID, SCHEMA_REVISION, CoordinatorDecisionV1)
+register_schema(COORDINATOR_SPRINT_SET_ID, SCHEMA_REVISION, CoordinatorSprintV1)
+register_schema(COORDINATOR_BEAD_SET_ID, SCHEMA_REVISION, CoordinatorBeadV1)
+register_schema(
+    COORDINATOR_CONVERGENT_DECISION_SET_ID, SCHEMA_REVISION,
+    CoordinatorConvergentDecisionV1,
+)
+register_schema(
+    COORDINATOR_OPEN_FOLLOWUP_SET_ID, SCHEMA_REVISION,
+    CoordinatorOpenFollowupV1,
+)
+register_schema(COORDINATOR_DOCS_SET_ID, SCHEMA_REVISION, CoordinatorDocsV1)
