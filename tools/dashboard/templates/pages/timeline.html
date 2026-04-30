@@ -88,7 +88,10 @@
         @click="e._open = !e._open"
       >
 
-        <!-- Row 1: dot/icon · title · (bead-id / action) · time -->
+        <!-- Row 1: dot/icon · (bead-id / action) · time
+             Title moved to its own row below so it never has to share
+             horizontal space with the right-aligned metadata. Mirrors
+             the bead-card.html partial used by /dispatch. -->
         <div class="tl-row1">
           <!-- Librarian: book icon -->
           <span x-show="e._isLibrarian" class="tl-lib-icon" style="display:none">📚</span>
@@ -97,17 +100,18 @@
           <!-- Bead dispatch: status dot -->
           <span x-show="!e._isLibrarian && !e._isAgentic" class="tl-dot" :class="e._dotCls"></span>
 
+          <!-- Bead dispatch: show bead id inline -->
+          <span x-show="!e._isLibrarian && !e._isAgentic && e.bead_id" class="tl-bead-id" x-text="e.bead_id" style="display:none"></span>
+          <!-- Agentic: show action label inline (e.g. "Update Title & Summary") -->
+          <span x-show="e._isAgentic && e.action_label" class="tl-bead-id" x-text="e.action_label" style="display:none"></span>
+          <span class="tl-ts" :class="{'tl-ts-auto': true}" x-text="e._ts" style="margin-left:auto"></span>
+        </div>
+        <!-- Title row: full-width, 2-line clamp on narrow viewports -->
+        <div class="tl-title-row">
           <span
-            class="tl-title"
+            class="tl-title-block"
             x-text="e._isLibrarian ? e._libTitle : (e.title || e.bead_id || '(no title)')"
           ></span>
-          <div class="tl-top-right">
-            <!-- Bead dispatch: show bead id in parens -->
-            <span x-show="!e._isLibrarian && !e._isAgentic && e.bead_id" class="tl-bead-id" x-text="'(' + e.bead_id + ')'" style="display:none"></span>
-            <!-- Agentic: show action label in parens (e.g. "Update Title & Summary") -->
-            <span x-show="e._isAgentic && e.action_label" class="tl-bead-id" x-text="'(' + e.action_label + ')'" style="display:none"></span>
-            <span class="tl-ts" x-text="e._ts"></span>
-          </div>
         </div>
 
         <!-- Row 2 (dispatch): reason + priority/status badges -->
