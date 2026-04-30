@@ -817,7 +817,10 @@ SWEEP_AGENT_ACTIONS_SOURCE_EMPTY_ORG = {
     "content": "Test note in an org with no seeded actions.",
 }
 
-# Same payload shape as tools/graph/migrations/seed_agent_actions.py SEEDS.
+# Test fixture mirroring the canonical agent-action members an org
+# would have in its ``dashboard.agent-actions`` Setting. Operators set
+# these up via ``graph set add`` (or canonical-promotion from autonomy);
+# the Setting payload is the source of truth at dispatch time.
 # The mock settings endpoint returns these verbatim as the dropdown's
 # resolved member list for the autonomy org. Other orgs return an empty
 # list, simulating a freshly-bootstrapped org awaiting promotion.
