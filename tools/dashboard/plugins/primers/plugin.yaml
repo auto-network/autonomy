@@ -1,0 +1,24 @@
+id: primers
+api_version: 1
+org: autonomy
+
+paths:
+  - /primers
+
+assets:
+  template: page.html
+  script: page.js
+  style: page.css
+
+nav:
+  label: Primers
+
+frontend:
+  alpine_root: primersPage
+
+# default_enabled OMITTED — Primers ships visible from day one;
+# the operator's primary use case is "show me what agents see"
+# which isn't gated on opt-in.
+
+entrypoints:
+  api: tools.dashboard.plugins.primers.entrypoints.api:routes
