@@ -571,11 +571,90 @@
         if (item) this.selectCommit(item);
       },
 
-      openReviewPr(row) {
-        // PR-mode overlay arrives in a follow-up chunk. For now, open
-        // the first commit as a stand-in so the PR row click is not a
-        // dead button.
-        this.openReviewCommit(row, 0);
+      // PR-mode review overlay (auto-r098a). Fetches the integrated
+      // ``merge-base..HEAD`` diff via /pr-diff and slots it into
+      // ``selectedCommit`` with ``prMode: true`` so the existing
+      // overlay renders the PR title/body + integrated patch with
+      // tiny conditional tweaks (no separate template block).
+      async openReviewPr(row) {
+        const pr = this.rowPr(row);
+        if (!pr) {
+          this.openReviewCommit(row, 0);
+          return;
+        }
+
+        this.selectedDirtyRow = null;
+        this.confirmDiscardRow = null;
+        this.detailLoading = true;
+        this.mergeState = 'idle';
+        this.mergeBurstActive = false;
+        this.reviewTitlePinned = false;
+        this.showDiff = false;
+
+        // Synthetic selectedCommit: the PR is treated as one big virtual
+        // "commit" so the existing overlay's diff machinery just works.
+        // ``prMode: true`` is the marker the template guards on; ``sha``
+        // is prefixed so it can never collide with a real commit key.
+        const requestKey = '_pr_/' + (pr.head_sha || pr.number || '') + '/' + Date.now();
+        this.selectedCommit = {
+          row,
+          commit: {
+            sha: requestKey,
+            short_sha: 'PR',
+            subject: pr.title || ('PR #' + (pr.number || '')),
+            body: pr.body || '',
+            author: '',
+            date: '',
+            files: [],
+            stats: {files: 0, additions: 0, deletions: 0},
+            patch: '',
+          },
+          commitIndex: -1,
+          position: 0,
+          total: 0,
+          patchFiles: {},
+          prMode: true,
+          pr,
+        };
+        this.queueCommitStickyOffsets();
+        this.queueBranchLayouts();
+        this.queuePathMeasurements();
+        this.queueReviewHeaderState();
+
+        try {
+          const resp = await fetch(
+            '/api/worktrees/' + encodeURIComponent(row.session_name) + '/'
+              + encodeURIComponent(row.repo_name) + '/pr-diff',
+          );
+          const detail = await _jsonOrError(resp);
+          // Bail if user navigated away while the fetch was in flight.
+          if (!this.selectedCommit || this.selectedCommit.commit.sha !== requestKey) return;
+          const files = detail.files || [];
+          this.selectedCommit = {
+            ...this.selectedCommit,
+            commit: {
+              ...this.selectedCommit.commit,
+              files,
+              patch: detail.patch || '',
+              stats: {
+                files: files.length,
+                additions: files.reduce((s, f) => s + (f.additions || 0), 0),
+                deletions: files.reduce((s, f) => s + (f.deletions || 0), 0),
+              },
+            },
+            patchFiles: _patchIndex(detail.patch || ''),
+          };
+          this.queueCommitStickyOffsets();
+          this.queueBranchLayouts();
+          this.queuePathMeasurements();
+          this.queueReviewHeaderState();
+        } catch (err) {
+          _toast('PR diff failed: ' + (err.message || String(err)), 'error');
+        } finally {
+          if (this.selectedCommit && this.selectedCommit.commit.sha === requestKey) {
+            this.detailLoading = false;
+          }
+        }
       },
 
       openReviewDefault(row) {
@@ -584,6 +663,10 @@
         } else {
           this.openReviewCommit(row, 0);
         }
+      },
+
+      isPrReview() {
+        return !!(this.selectedCommit && this.selectedCommit.prMode);
       },
 
       repoName(row) {
