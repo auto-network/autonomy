@@ -148,6 +148,9 @@
       liveSessions: [],
       pendingDispatch: false,
       lastError: '',
+      // Action label shown in the success toast for ~4s after a
+      // successful dispatch. Empty when no toast is active.
+      lastDispatchLabel: '',
 
       // Shared session-card helpers (from /static/js/lib/session-card-helpers.js
       // via window.sessionCardHelpers). The Send-To modal embeds the
@@ -252,10 +255,16 @@
             this.lastError = 'Dispatch failed (' + resp.status + ')';
             return;
           }
-          var result = await resp.json();
-          if (result.agentic_source_id) {
-            window.location.href = '/graph/' + result.agentic_source_id;
-          }
+          await resp.json();
+          // No redirect. The operator stays on the asset page so the
+          // metadata change (title/short_description/keywords) becomes
+          // visible inline as the agent finishes — no need to bounce
+          // them to the agent's own session row, which is mostly empty
+          // metadata. ``/dispatch`` and ``/timeline`` remain reachable
+          // if they want to watch the run.
+          this.lastDispatchLabel = (member.payload && member.payload.label) || member.key || '';
+          var self = this;
+          setTimeout(function () { self.lastDispatchLabel = ''; }, 4000);
         } finally {
           this.pendingDispatch = false;
         }
