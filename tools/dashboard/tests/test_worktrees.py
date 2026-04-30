@@ -281,6 +281,47 @@ class TestWorktreeAPI:
             "patch": "diff --git a/dirty.txt b/dirty.txt",
         }
 
+    def test_pr_diff_endpoint_returns_integrated_patch(self, test_client, monkeypatch):
+        """``GET /api/worktrees/{session}/{repo}/pr-diff`` returns the
+        ``merge-base..HEAD`` integrated diff in the same shape as
+        ``/changes``. Powers the auto-r098a PR-mode review overlay."""
+        server, _fake = _install_fake_monitor(monkeypatch, [_row(live=True)])
+
+        def fake_detail(session_name, repo_name):
+            assert (session_name, repo_name) == ("auto-test", "autonomy")
+            return server.WorktreeDirtyDetail(
+                files=[
+                    GitFileChange(status="M", path="a.txt", additions=8, deletions=2),
+                    GitFileChange(status="A", path="b.txt", additions=3, deletions=0),
+                ],
+                patch="diff --git a/a.txt b/a.txt\ndiff --git a/b.txt b/b.txt",
+            )
+
+        monkeypatch.setattr(server, "get_session_worktree_integrated_diff", fake_detail)
+
+        resp = test_client.get("/api/worktrees/auto-test/autonomy/pr-diff")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["patch"].startswith("diff --git a/a.txt")
+        assert body["files"] == [
+            {"status": "M", "path": "a.txt", "additions": 8, "deletions": 2},
+            {"status": "A", "path": "b.txt", "additions": 3, "deletions": 0},
+        ]
+
+    def test_pr_diff_endpoint_surfaces_workspace_error_as_404(self, test_client, monkeypatch):
+        from tools.dashboard import server
+
+        def fake_detail(*_args, **_kwargs):
+            raise WorkspaceError("could not resolve base ref")
+
+        monkeypatch.setattr(server, "get_session_worktree_integrated_diff", fake_detail)
+
+        resp = test_client.get("/api/worktrees/missing/autonomy/pr-diff")
+
+        assert resp.status_code == 404
+        assert "could not resolve base ref" in resp.json()["error"]
+
     def test_commit_merge_endpoint_merges_selected_sha_and_refreshes(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row()])
         called = {}

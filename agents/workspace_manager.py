@@ -653,6 +653,77 @@ def _worktree_dirty_patch(worktree: Path) -> str | None:
     return out.strip()
 
 
+def _worktree_integrated_patch(worktree: Path, base_ref: str | None) -> str | None:
+    """Return the unified diff for ``base_ref..HEAD`` (the integrated PR diff).
+
+    This is the same diff a reviewer sees on the PR page: every commit on
+    the branch combined into one patch. ``base_ref`` is the worktree's
+    merge-base ref (typically ``main``/``master``); when missing we
+    can't compute the integrated diff.
+    """
+    if base_ref is None:
+        return None
+    rc, out, _ = _git_output(
+        ["diff", "--patch", "--find-renames", f"{base_ref}...HEAD"],
+        worktree,
+        timeout=60,
+    )
+    if rc != 0:
+        return None
+    return out.strip()
+
+
+def _worktree_integrated_numstats(
+    worktree: Path, base_ref: str | None,
+) -> dict[str, tuple[int, int]]:
+    """Numstat per file for the integrated ``base_ref..HEAD`` diff."""
+    if base_ref is None:
+        return {}
+    rc, out, _ = _git_output(
+        ["diff", "--numstat", "--find-renames", f"{base_ref}...HEAD"],
+        worktree,
+        timeout=30,
+    )
+    if rc != 0:
+        return {}
+    out_map: dict[str, tuple[int, int]] = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        path = parts[-1].strip()
+        if not path:
+            continue
+        out_map[path] = (_parse_numstat(parts[0]), _parse_numstat(parts[1]))
+    return out_map
+
+
+def _worktree_integrated_name_status(
+    worktree: Path, base_ref: str | None,
+) -> list[GitFileChange]:
+    """File-level name/status list for the integrated diff (no additions/deletions)."""
+    if base_ref is None:
+        return []
+    rc, out, _ = _git_output(
+        ["diff", "--name-status", "--find-renames", f"{base_ref}...HEAD"],
+        worktree,
+        timeout=30,
+    )
+    if rc != 0:
+        return []
+    files: list[GitFileChange] = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0].strip()
+        path = parts[-1].strip()
+        if not path:
+            continue
+        files.append(GitFileChange(status=status[:1] or "M", path=path))
+    return files
+
+
 def _worktree_commit_shas(worktree: Path, *, base_ref: str | None = None) -> list[str]:
     """List commit SHAs reachable from HEAD but not from the merge base ref."""
     base_ref = base_ref or _worktree_merge_base_ref(worktree)
@@ -1710,6 +1781,47 @@ def get_session_worktree_dirty_detail(
     return WorktreeDirtyDetail(
         files=files,
         patch=_worktree_dirty_patch(worktree),
+    )
+
+
+def get_session_worktree_integrated_diff(
+    session_name: str,
+    repo_name: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> WorktreeDirtyDetail:
+    """Return the integrated PR diff (``merge-base..HEAD``) for one worktree.
+
+    The shape mirrors :class:`WorktreeDirtyDetail` (file list + patch)
+    so the existing ``_worktree_dirty_detail_json`` serializer can
+    render it; semantically this is the integrated commit-stack diff
+    a PR reviewer sees, not uncommitted changes. Used by the
+    auto-r098a PR-mode review overlay.
+    """
+    worktree = _session_worktree_path(
+        session_name,
+        repo_name,
+        worktrees_dir=worktrees_dir,
+    )
+    base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
+    if base_ref is None:
+        raise WorkspaceError(
+            f"could not resolve base ref for worktree: {worktree}",
+        )
+    name_status = _worktree_integrated_name_status(worktree, base_ref)
+    numstats = _worktree_integrated_numstats(worktree, base_ref)
+    files = [
+        GitFileChange(
+            status=f.status,
+            path=f.path,
+            additions=numstats.get(f.path, (0, 0))[0],
+            deletions=numstats.get(f.path, (0, 0))[1],
+        )
+        for f in name_status
+    ]
+    return WorktreeDirtyDetail(
+        files=files,
+        patch=_worktree_integrated_patch(worktree, base_ref),
     )
 
 def merge_session_worktree_commit(
