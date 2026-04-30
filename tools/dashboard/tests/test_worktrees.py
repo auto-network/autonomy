@@ -1014,17 +1014,17 @@ class TestNormalizeReviewPayload:
         )
         review = wg.normalize_review_payload(raw)
         assert review is not None
-        assert review["number"] == 42
-        assert review["title"] == "Add thing"
-        assert review["body"] == "body"
-        assert review["url"] == "https://github.com/x/y/pull/42"
-        assert review["head_sha"] == "abc1234"
-        assert review["base_branch"] == "main"
-        assert review["state"] == "open"
-        assert review["is_draft"] is False
-        assert review["aggregate_state"] == "green"
-        assert review["running"] is False
-        assert review["checks"] == []
+        assert review.number == 42
+        assert review.title == "Add thing"
+        assert review.body == "body"
+        assert review.url == "https://github.com/x/y/pull/42"
+        assert review.head_sha == "abc1234"
+        assert review.base_branch == "main"
+        assert review.state == "open"
+        assert review.is_draft is False
+        assert review.aggregate_state == "green"
+        assert review.running is False
+        assert review.checks == ()
 
     def test_check_run_completed_success_normalizes_to_pass(self):
         from agents.capabilities.github import service as wg
@@ -1035,9 +1035,9 @@ class TestNormalizeReviewPayload:
             ']}'
         )
         review = wg.normalize_review_payload(raw)
-        assert review["aggregate_state"] == "green"
-        assert review["running"] is False
-        assert review["checks"] == [
+        assert review.aggregate_state == "green"
+        assert review.running is False
+        assert [c.to_dict() for c in review.checks] == [
             {"id": "build", "icon": "B", "label": "build", "status": "pass", "detail": None}
         ]
 
@@ -1050,9 +1050,9 @@ class TestNormalizeReviewPayload:
             ']}'
         )
         review = wg.normalize_review_payload(raw)
-        assert review["aggregate_state"] == "yellow"
-        assert review["running"] is False
-        assert review["checks"][0]["status"] == "fail"
+        assert review.aggregate_state == "yellow"
+        assert review.running is False
+        assert review.checks[0].status == "fail"
 
     def test_in_progress_check_marks_running_overlay_not_color(self):
         from agents.capabilities.github import service as wg
@@ -1064,9 +1064,9 @@ class TestNormalizeReviewPayload:
         )
         review = wg.normalize_review_payload(raw)
         # Running is a separate overlay — color stays green when nothing has failed yet.
-        assert review["aggregate_state"] == "green"
-        assert review["running"] is True
-        assert review["checks"][0]["status"] == "running"
+        assert review.aggregate_state == "green"
+        assert review.running is True
+        assert review.checks[0].status == "running"
 
     def test_status_context_state_failure_marks_yellow(self):
         from agents.capabilities.github import service as wg
@@ -1078,11 +1078,11 @@ class TestNormalizeReviewPayload:
             ']}'
         )
         review = wg.normalize_review_payload(raw)
-        assert review["aggregate_state"] == "yellow"
+        assert review.aggregate_state == "yellow"
         # ``ci/circleci`` strips the ``ci/`` prefix and yields ``C`` (a single
         # alpha glyph from the trailing token); navigator collisions across
         # CI providers are disambiguated by the full ``label``.
-        assert review["checks"] == [{
+        assert [c.to_dict() for c in review.checks] == [{
             "id": "ci/circleci",
             "icon": "C",
             "label": "ci/circleci",
@@ -1099,7 +1099,7 @@ class TestNormalizeReviewPayload:
             ']}'
         )
         review = wg.normalize_review_payload(raw)
-        assert review["checks"] == []
+        assert review.checks == ()
 
     def test_changes_requested_review_marks_yellow(self):
         from agents.capabilities.github import service as wg
@@ -1109,7 +1109,7 @@ class TestNormalizeReviewPayload:
             ' "reviewDecision": "CHANGES_REQUESTED"}'
         )
         review = wg.normalize_review_payload(raw)
-        assert review["aggregate_state"] == "yellow"
+        assert review.aggregate_state == "yellow"
 
     def test_conflicting_mergeable_marks_yellow(self):
         from agents.capabilities.github import service as wg
@@ -1119,7 +1119,7 @@ class TestNormalizeReviewPayload:
             ' "mergeable": "CONFLICTING"}'
         )
         review = wg.normalize_review_payload(raw)
-        assert review["aggregate_state"] == "yellow"
+        assert review.aggregate_state == "yellow"
 
     def test_unrecognized_rollup_entry_is_dropped_not_raised(self):
         from agents.capabilities.github import service as wg
@@ -1130,8 +1130,8 @@ class TestNormalizeReviewPayload:
             ']}'
         )
         review = wg.normalize_review_payload(raw)
-        assert review["checks"] == []
-        assert review["aggregate_state"] == "green"
+        assert review.checks == ()
+        assert review.aggregate_state == "green"
 
     def test_check_icon_derives_glyph_from_label(self):
         """``icon`` is a 1–2 char glyph derived from the check label so
@@ -1165,7 +1165,7 @@ class TestNormalizeReviewPayload:
             ']}'
         )
         review = wg.normalize_review_payload(raw)
-        assert review["checks"] == [{
+        assert [c.to_dict() for c in review.checks] == [{
             "id": "tests",
             "icon": "T",
             "label": "tests",
@@ -1197,13 +1197,13 @@ class TestGithubProbe:
 
         result = asyncio.run(gh_probe.probe_v1("auto-dead"))
 
-        assert result["state"] == "unavailable"
-        assert result["reason"] == "no_live_container"
-        assert result["contract"] == "source_control"
-        assert result["implementation"] == "autonomy/github"
-        assert result["delivery_mode"] == "image_baked"
-        assert result["missing_tools"] == []
-        assert result["missing_env"] == []
+        assert result.state == "unavailable"
+        assert result.reason == "no_live_container"
+        assert result.contract == "source_control"
+        assert result.implementation == "autonomy/github"
+        assert result.delivery_mode == "image_baked"
+        assert result.missing_tools == ()
+        assert result.missing_env == ()
 
     def test_ready_when_gh_auth_status_succeeds(self, monkeypatch):
         gh_probe, recorder = self._patched_probe(
@@ -1214,10 +1214,10 @@ class TestGithubProbe:
 
         result = asyncio.run(gh_probe.probe_v1("auto-live"))
 
-        assert result["state"] == "ready"
-        assert result["reason"] is None
-        assert result["missing_tools"] == []
-        assert result["missing_env"] == []
+        assert result.state == "ready"
+        assert result.reason is None
+        assert result.missing_tools == ()
+        assert result.missing_env == ()
         # docker exec hit gh auth status, not gh pr view.
         assert recorder.calls[-1][3:] == ["gh", "auth", "status"]
 
@@ -1230,10 +1230,10 @@ class TestGithubProbe:
 
         result = asyncio.run(gh_probe.probe_v1("auto-live"))
 
-        assert result["state"] == "degraded"
-        assert result["reason"] == "tool_missing"
-        assert result["missing_tools"] == ["gh"]
-        assert result["missing_env"] == []
+        assert result.state == "degraded"
+        assert result.reason == "tool_missing"
+        assert result.missing_tools == ("gh",)
+        assert result.missing_env == ()
 
     def test_auth_missing_marks_degraded_with_missing_env(self, monkeypatch):
         gh_probe, _recorder = self._patched_probe(
@@ -1244,10 +1244,10 @@ class TestGithubProbe:
 
         result = asyncio.run(gh_probe.probe_v1("auto-live"))
 
-        assert result["state"] == "degraded"
-        assert result["reason"] == "env_missing"
-        assert result["missing_env"] == ["GH_TOKEN"]
-        assert result["missing_tools"] == []
+        assert result.state == "degraded"
+        assert result.reason == "env_missing"
+        assert result.missing_env == ("GH_TOKEN",)
+        assert result.missing_tools == ()
 
     def test_other_failure_marks_degraded_probe_failed_with_details(self, monkeypatch):
         gh_probe, _recorder = self._patched_probe(
@@ -1258,10 +1258,10 @@ class TestGithubProbe:
 
         result = asyncio.run(gh_probe.probe_v1("auto-live"))
 
-        assert result["state"] == "degraded"
-        assert result["reason"] == "probe_failed"
-        assert result["details"]["exit_code"] == 7
-        assert "weird state" in result["details"]["stderr"]
+        assert result.state == "degraded"
+        assert result.reason == "probe_failed"
+        assert result.details["exit_code"] == 7
+        assert "weird state" in result.details["stderr"]
 
 
 # ── WorktreeMonitor source_control composition ────────────────────────

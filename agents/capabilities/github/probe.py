@@ -7,31 +7,18 @@ auth env may not have flowed through, or the session may be dead.
 
 The probe is deliberately tiny: it shells ``gh auth status`` inside the
 target session's live container and maps the outcome to a normalized
-result that Dashboard surfaces (and the eventual generic probe runner
-in ``auto-hjr1d``) can render uniformly.
-
-Result shape::
-
-    {
-        "contract": "source_control",
-        "contract_version": 1,
-        "implementation": "autonomy/github",
-        "implementation_version": 1,
-        "delivery_mode": "image_baked",
-        "state": "ready" | "unavailable" | "degraded",
-        "reason": None | "no_live_container" | "tool_missing"
-                  | "env_missing" | "probe_failed",
-        "missing_tools": [],
-        "missing_env": [],
-        "missing_secret_files": [],  # always [] for image_baked
-        "details": {},
-    }
+:class:`ProbeResult` that Dashboard surfaces (and the eventual generic
+probe runner in ``auto-hjr1d``) can render uniformly. ``.to_dict()`` is
+the JSON-boundary serializer; the dataclass declaration is the
+canonical shape ahead of auto-0425-010430's typed-fields substrate.
 
 ``not_enabled`` is intentionally not produced here — it's a workspace-
 level question that the probe runner answers before invoking us.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass, field
 
 # Import the service *module* (not its names) so test monkeypatches on
 # ``service.run_cli`` / ``service.resolve_live_container`` reach the
@@ -52,58 +39,74 @@ REASON_ENV_MISSING = "env_missing"
 REASON_PROBE_FAILED = "probe_failed"
 
 
-def _result(
-    *,
-    state: str,
-    reason: str | None = None,
-    missing_tools: list[str] | None = None,
-    missing_env: list[str] | None = None,
-    details: dict | None = None,
-) -> dict:
-    return {
-        "contract": "source_control",
-        "contract_version": 1,
-        "implementation": "autonomy/github",
-        "implementation_version": 1,
-        "delivery_mode": "image_baked",
-        "state": state,
-        "reason": reason,
-        "missing_tools": list(missing_tools or []),
-        "missing_env": list(missing_env or []),
-        "missing_secret_files": [],
-        "details": dict(details or {}),
-    }
+@dataclass(frozen=True)
+class ProbeResult:
+    """Normalized capability-probe outcome for one workspace session.
+
+    The runner in ``auto-hjr1d`` will surface this shape uniformly across
+    every capability, so Dashboard / Worktrees can answer "ready,
+    unavailable, or degraded — and why" without provider-specific
+    branching. Defaults match a successful ``autonomy/github`` probe so
+    the helpers below only have to set the fields that diverge.
+    """
+
+    contract: str = "source_control"
+    contract_version: int = 1
+    implementation: str = "autonomy/github"
+    implementation_version: int = 1
+    delivery_mode: str = "image_baked"
+    state: str = STATE_READY
+    reason: str | None = None
+    missing_tools: tuple[str, ...] = ()
+    missing_env: tuple[str, ...] = ()
+    missing_secret_files: tuple[str, ...] = ()
+    details: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "contract": self.contract,
+            "contract_version": self.contract_version,
+            "implementation": self.implementation,
+            "implementation_version": self.implementation_version,
+            "delivery_mode": self.delivery_mode,
+            "state": self.state,
+            "reason": self.reason,
+            "missing_tools": list(self.missing_tools),
+            "missing_env": list(self.missing_env),
+            "missing_secret_files": list(self.missing_secret_files),
+            "details": dict(self.details),
+        }
 
 
 async def probe_v1(
     session_name: str,
     *,
     timeout: int = DEFAULT_PROBE_TIMEOUT_SECONDS,
-) -> dict:
+) -> ProbeResult:
     """Probe ``autonomy/github`` against ``session_name``'s live container."""
     container = await service.resolve_live_container(session_name, timeout=timeout)
     if container is None:
-        return _result(state=STATE_UNAVAILABLE, reason=REASON_NO_LIVE_CONTAINER)
+        return ProbeResult(state=STATE_UNAVAILABLE, reason=REASON_NO_LIVE_CONTAINER)
 
     cmd = ["docker", "exec", container, *PROBE_COMMAND]
     stdout, stderr, exit_code, timed_out = await service.run_cli(cmd, timeout=timeout)
     failure = service.classify_failure(stdout, stderr, exit_code, timed_out)
 
     if failure is None:
-        return _result(state=STATE_READY)
+        return ProbeResult(state=STATE_READY)
     if failure == service.FAILURE_GH_MISSING:
-        return _result(
+        return ProbeResult(
             state=STATE_DEGRADED,
             reason=REASON_TOOL_MISSING,
-            missing_tools=["gh"],
+            missing_tools=("gh",),
         )
     if failure == service.FAILURE_AUTH_MISSING:
-        return _result(
+        return ProbeResult(
             state=STATE_DEGRADED,
             reason=REASON_ENV_MISSING,
-            missing_env=["GH_TOKEN"],
+            missing_env=("GH_TOKEN",),
         )
-    return _result(
+    return ProbeResult(
         state=STATE_DEGRADED,
         reason=REASON_PROBE_FAILED,
         details={
@@ -124,5 +127,6 @@ __all__ = [
     "REASON_TOOL_MISSING",
     "REASON_ENV_MISSING",
     "REASON_PROBE_FAILED",
+    "ProbeResult",
     "probe_v1",
 ]
