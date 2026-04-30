@@ -8854,12 +8854,29 @@ async def api_graph_resolve(request):
     except ValueError:
         return JSONResponse({"error": "invalid window"}, status_code=400)
 
+    # ?from=-N → tail-read the last N turns. Positive ``from`` is reserved
+    # for a future forward-range mode and rejected here so callers don't
+    # silently get the front-of-source slice instead.
+    from_raw = request.query_params.get("from")
+    tail_n: int | None = None
+    if from_raw is not None:
+        try:
+            from_val = int(from_raw)
+        except ValueError:
+            return JSONResponse({"error": "invalid from"}, status_code=400)
+        if from_val >= 0:
+            return JSONResponse(
+                {"error": "from must be negative (e.g. from=-7)"},
+                status_code=400,
+            )
+        tail_n = -from_val
+
     org = _caller_org(request)
     source = graph_ops.get_source(id, org=org)
     if source:
         result = await asyncio.to_thread(
             graph_ops.read_source_full, source["id"], org=org, max_chars=50000,
-            around_turn=around_turn, window=window,
+            around_turn=around_turn, window=window, tail_n=tail_n,
         )
         if result is None:
             result = {"source": source, "entries": [], "truncated": False,
