@@ -118,6 +118,12 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
 from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 
+# Settings-mediator substrate (bead auto-f93wj) — imported eagerly so
+# its cursor + state schemas are in the registry before any GraphDB
+# connection runs ``flush_schema_meta``. The dispatch loop itself
+# starts inside the lifespan hook.
+from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
+
 # Load every valid plugin (regardless of Setting state) so route
 # registration covers plugins that operators may flip on at runtime.
 # Per-request handlers gate via ``_plugin_enabled_map``; plugins
@@ -9929,11 +9935,49 @@ routes = [
 # Background task handles — captured during startup, cancelled during shutdown
 _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
+_settings_mediator_started: bool = False
 
 # Task* tile enricher — per-session taskId → subject/status map. Populated by
 # the session monitor tailer as it walks JSONL entries; also used by the HTTP
 # history endpoint to produce identical annotations on page load.
 _task_state_tracker = TaskStateTracker()
+
+
+async def _settings_mediator_session_send(session: str, text: str) -> None:
+    """``Services.session_send`` — paste text into a tmux session."""
+    from tools.dashboard.tmux_send import tmux_send
+    await tmux_send(session, text)
+
+
+async def _settings_mediator_find_session_by_role(role: str) -> str | None:
+    """``Services.find_session_by_role`` — first live session with *role*.
+
+    Wraps ``session_monitor.get_registry()`` so action handlers don't
+    need to know about the registry shape. Returns the tmux name of the
+    first live row whose ``role`` matches, or ``None``.
+    """
+    target = (role or "").strip()
+    if not target:
+        return None
+    for entry in session_monitor.get_registry():
+        if (entry.get("role") or "").strip() != target:
+            continue
+        if not entry.get("is_live", True):
+            continue
+        tmux = (entry.get("tmux_name") or "").strip()
+        if tmux:
+            return tmux
+    return None
+
+
+def _build_settings_mediator_services():
+    """Construct the substrate's :class:`Services` for the running process."""
+    from tools.dashboard.settings_mediator import Services
+    return Services(
+        session_send=_settings_mediator_session_send,
+        find_session_by_role=_settings_mediator_find_session_by_role,
+        log=logging.getLogger("settings_mediator"),
+    )
 
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task
@@ -10000,9 +10044,37 @@ async def _on_startup():
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
         _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
+    # Settings-mediator action loop: walks per-set cursors and dispatches
+    # registered handlers on new rows. Mock-mode dashboards skip this —
+    # the loop reads through ``settings_ops`` against the real graph DB,
+    # which is unavailable in fixture-driven runs.
+    global _settings_mediator_started
+    try:
+        from tools.dashboard import settings_mediator
+        settings_mediator.start_action_loop(
+            _build_settings_mediator_services(),
+        )
+        _settings_mediator_started = True
+    except Exception:
+        logger.exception(
+            "settings_mediator.start_action_loop() failed; "
+            "continuing without action dispatch"
+        )
 
 async def _on_shutdown():
-    global _dispatch_watcher_task, _mock_event_watcher_task
+    global _dispatch_watcher_task, _mock_event_watcher_task, _settings_mediator_started
+    # Drain settings-mediator BEFORE cancelling the dispatcher tasks so
+    # any in-flight action handler that calls back into the dashboard
+    # (tmux_send, find_session_by_role) still has those primitives
+    # available. The loop's stop() awaits the in-flight tick — handlers
+    # complete naturally instead of being cancelled mid-call.
+    if _settings_mediator_started:
+        try:
+            from tools.dashboard import settings_mediator
+            await settings_mediator.stop_action_loop()
+        except Exception:
+            logger.exception("error during settings_mediator.stop_action_loop()")
+        _settings_mediator_started = False
     tasks = [t for t in (_dispatch_watcher_task, _mock_event_watcher_task) if t and not t.done()]
     for t in tasks:
         t.cancel()
