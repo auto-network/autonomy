@@ -33,6 +33,85 @@ PRECEDENCE = {"canonical": 0, "published": 1, "curated": 2, "raw": 3}
 PEER_VISIBLE_STATES = ("published", "canonical")
 
 
+# ── Emit hook (commit-then-emit) ─────────────────────────────
+
+
+# Registered by the dashboard at lifespan startup so every Settings mutation
+# — CLI, dashboard route, plugin, test fixture, future caller — fires a
+# uniform ``setting.changed`` notification. CLI / test processes that don't
+# import the dashboard register no hook; their writes commit normally and
+# the hook is a no-op.
+#
+# Hook signature::
+#
+#     def hook(*, operation: str, snapshot: dict, org: str | None) -> None
+#
+# ``operation`` is one of: write, override, exclude, promote, deprecate,
+# delete, migrate. ``snapshot`` is metadata-only: ``set_id``,
+# ``schema_revision``, ``key``, ``publication_state``, ``deprecated``.
+# Subscribers re-resolve via :func:`read_set` if they need payload data.
+#
+# Mutators call the hook AFTER ``db.conn.commit()`` returns — race-free
+# observability for subscribers that resolve on receipt. Hooks are
+# best-effort: exceptions are caught and logged; the mutator never blocks
+# on hook completion.
+_emit_hook: Callable[..., None] | None = None
+
+
+def set_emit_hook(hook: Callable[..., None] | None) -> None:
+    """Register (or clear with ``None``) the post-commit emit hook.
+
+    See module-level commentary above the ``_emit_hook`` definition for
+    the contract. Pattern mirrors the action-registry's services
+    injection — the dashboard wires this at lifespan startup; CLI / test
+    contexts that don't import the dashboard leave it unregistered.
+    """
+    global _emit_hook
+    _emit_hook = hook
+
+
+def _make_snapshot(
+    set_id: str,
+    schema_revision: int,
+    key: str,
+    publication_state: str,
+    deprecated: bool,
+) -> dict:
+    return {
+        "set_id": set_id,
+        "schema_revision": int(schema_revision),
+        "key": key,
+        "publication_state": publication_state,
+        "deprecated": bool(deprecated),
+    }
+
+
+def _call_emit_hook(
+    *,
+    operation: str,
+    snapshot: dict,
+    org: str | None,
+) -> None:
+    """Invoke the registered hook (best-effort).
+
+    Mutators call this AFTER their transaction commits and the DB
+    handle is closed, so a subscriber that re-resolves via ``read_set``
+    on receipt sees the new row. Exceptions are swallowed at WARN — a
+    broken subscriber must not corrupt write semantics.
+    """
+    hook = _emit_hook
+    if hook is None:
+        return
+    try:
+        hook(operation=operation, snapshot=snapshot, org=org)
+    except Exception:
+        logger.warning(
+            "settings_ops emit hook raised on %s for set_id=%s key=%s",
+            operation, snapshot.get("set_id"), snapshot.get("key"),
+            exc_info=True,
+        )
+
+
 # ── Result types ─────────────────────────────────────────────
 
 
@@ -321,6 +400,11 @@ def add_setting(
         db.conn.commit()
     finally:
         db.close()
+    _call_emit_hook(
+        operation="write",
+        snapshot=_make_snapshot(set_id, schema_revision, key, state, False),
+        org=org,
+    )
     return sid
 
 
@@ -363,9 +447,17 @@ def override_setting(
              state, target_id, now, now),
         )
         db.conn.commit()
-        return sid
     finally:
         db.close()
+    _call_emit_hook(
+        operation="override",
+        snapshot=_make_snapshot(
+            target["set_id"], int(target["schema_revision"]),
+            target["key"], state, False,
+        ),
+        org=org,
+    )
+    return sid
 
 
 def exclude_setting(
@@ -396,9 +488,17 @@ def exclude_setting(
              target["key"], "{}", state, target_id, now, now),
         )
         db.conn.commit()
-        return sid
     finally:
         db.close()
+    _call_emit_hook(
+        operation="exclude",
+        snapshot=_make_snapshot(
+            target["set_id"], int(target["schema_revision"]),
+            target["key"], state, False,
+        ),
+        org=org,
+    )
+    return sid
 
 
 def _reject_peer_setting_target(
@@ -441,6 +541,7 @@ def promote_setting(
         raise ValueError(f"invalid state {to_state!r}; valid: {VALID_STATES}")
     now = _now_iso()
     db = _open(org)
+    snapshot = None
     try:
         cur = db.conn.execute(
             "UPDATE settings SET publication_state = ?, updated_at = ? "
@@ -450,9 +551,21 @@ def promote_setting(
         if cur.rowcount == 0:
             _reject_peer_setting_target(setting_id, org)
             raise LookupError(f"setting not found: {setting_id!r}")
+        post = db.conn.execute(
+            "SELECT set_id, schema_revision, key, publication_state, "
+            "deprecated FROM settings WHERE id = ?",
+            (setting_id,),
+        ).fetchone()
+        if post is not None:
+            snapshot = _make_snapshot(
+                post["set_id"], post["schema_revision"], post["key"],
+                post["publication_state"], post["deprecated"],
+            )
         db.conn.commit()
     finally:
         db.close()
+    if snapshot is not None:
+        _call_emit_hook(operation="promote", snapshot=snapshot, org=org)
 
 
 def deprecate_setting(
@@ -467,6 +580,7 @@ def deprecate_setting(
     """
     now = _now_iso()
     db = _open(org)
+    snapshot = None
     try:
         cur = db.conn.execute(
             "UPDATE settings SET deprecated = 1, successor_id = ?, "
@@ -476,9 +590,21 @@ def deprecate_setting(
         if cur.rowcount == 0:
             _reject_peer_setting_target(setting_id, org)
             raise LookupError(f"setting not found: {setting_id!r}")
+        post = db.conn.execute(
+            "SELECT set_id, schema_revision, key, publication_state, "
+            "deprecated FROM settings WHERE id = ?",
+            (setting_id,),
+        ).fetchone()
+        if post is not None:
+            snapshot = _make_snapshot(
+                post["set_id"], post["schema_revision"], post["key"],
+                post["publication_state"], post["deprecated"],
+            )
         db.conn.commit()
     finally:
         db.close()
+    if snapshot is not None:
+        _call_emit_hook(operation="deprecate", snapshot=snapshot, org=org)
 
 
 def remove_setting(
@@ -492,9 +618,11 @@ def remove_setting(
     Peer-origin targets raise :class:`ops.CrossOrgWriteError`.
     """
     db = _open(org)
+    snapshot = None
     try:
         row = db.conn.execute(
-            "SELECT publication_state FROM settings WHERE id = ?",
+            "SELECT set_id, schema_revision, key, publication_state, "
+            "deprecated FROM settings WHERE id = ?",
             (setting_id,),
         ).fetchone()
         if not row:
@@ -505,10 +633,18 @@ def remove_setting(
                 f"can only remove raw Settings; this is "
                 f"{row['publication_state']!r} — deprecate first"
             )
+        # Capture pre-delete state so the post-commit hook still has
+        # set_id/key/etc. — the row is gone after DELETE.
+        snapshot = _make_snapshot(
+            row["set_id"], row["schema_revision"], row["key"],
+            row["publication_state"], row["deprecated"],
+        )
         db.conn.execute("DELETE FROM settings WHERE id = ?", (setting_id,))
         db.conn.commit()
     finally:
         db.close()
+    if snapshot is not None:
+        _call_emit_hook(operation="delete", snapshot=snapshot, org=org)
 
 
 # ── Read paths ───────────────────────────────────────────────
@@ -1143,9 +1279,11 @@ def migrate_setting_revisions(
     )
     now = _now_iso()
     db = _open(org)
+    affected_snapshots: list[dict] = []
     try:
         rows = db.conn.execute(
-            "SELECT id, schema_revision, payload FROM settings "
+            "SELECT id, schema_revision, payload, key, publication_state, "
+            "deprecated FROM settings "
             "WHERE set_id = ? AND excludes IS NULL",
             (set_id,),
         ).fetchall()
@@ -1172,10 +1310,19 @@ def migrate_setting_revisions(
                     "updated_at = ? WHERE id = ?",
                     (json.dumps(converted), int(to_revision), now, row["id"]),
                 )
+                # Schema revision is now to_revision; key / state /
+                # deprecated unchanged by migrate.
+                affected_snapshots.append(_make_snapshot(
+                    set_id, int(to_revision), row["key"],
+                    row["publication_state"], row["deprecated"],
+                ))
         if not dry_run:
             db.conn.commit()
     finally:
         db.close()
+    if not dry_run:
+        for snap in affected_snapshots:
+            _call_emit_hook(operation="migrate", snapshot=snap, org=org)
     return report
 
 

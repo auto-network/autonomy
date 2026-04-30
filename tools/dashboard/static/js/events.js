@@ -252,6 +252,12 @@
     });
   }
 
+  // All consumers MUST route through this helper. Direct
+  // registerHandler('setting.changed', ...) usage is forbidden — see
+  // bead auto-5mz65. Today the bus uses a single `setting.changed`
+  // topic with metadata payloads; if we ever migrate to per-set_id
+  // topic granularity (e.g. `setting:SET_ID`), this helper is the one
+  // place that needs to change.
   function onSettingChanged(setId, callback) {
     if (!setId || typeof callback !== 'function') {
       return function() {};

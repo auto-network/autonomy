@@ -153,6 +153,18 @@ class EventBus:
 
         Returns the number of subscribers that received the message.
         """
+        return self.broadcast_sync(topic, data, dedup=dedup)
+
+    def broadcast_sync(self, topic: str, data: Any, dedup: bool = True) -> int:
+        """Sync variant of :meth:`broadcast`.
+
+        Subscriber queues are unbounded ``asyncio.Queue`` instances, so
+        ``put_nowait`` is functionally equivalent to ``await put`` —
+        nothing ever blocks. Exposed so callers running in a sync context
+        (e.g. ``settings_ops`` mutator commit-then-emit hooks) can publish
+        without hopping back to the event loop, which is what makes
+        commit-then-emit ordering observable to subscribers.
+        """
         serialised = json.dumps(data, separators=(",", ":"), sort_keys=True)
         if dedup and self._last.get(topic) == serialised:
             self._dedup_skipped_total += 1
@@ -184,9 +196,15 @@ class EventBus:
             topic=topic, seq=seq, size=len(serialised), dedup_skipped=False,
         )
 
-        # Push 3-tuple to all subscribers
-        for q in list(self._subscribers):  # snapshot — don't hold lock across put()
-            await q.put((topic, data, seq))
+        # Push 3-tuple to all subscribers (unbounded queues never block).
+        for q in list(self._subscribers):  # snapshot
+            try:
+                q.put_nowait((topic, data, seq))
+            except asyncio.QueueFull:
+                # Defensive: a subscriber must use an unbounded queue.
+                meta = self._subscriber_meta.get(id(q))
+                if meta is not None:
+                    meta.dropped_count += 1
         return len(self._subscribers)
 
     def _record_recent_broadcast(

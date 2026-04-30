@@ -44,7 +44,13 @@ from .schemas import (
 logger = logging.getLogger("settings_mediator")
 
 
-DEFAULT_POLL_SECONDS = 5.0
+# Fallback watchdog interval. The primary wakeup path is the EventBus
+# ``setting.changed`` subscription; this timer covers missed events on
+# bus reconnect, in-process coalescing, or subscriber-disconnect windows
+# during shutdown. 30s gives a comfortable safety margin (6× the prior
+# 5s poll cadence) without being so slow as to feel broken on the
+# fail-over path. See bead auto-5mz65 § "Watchdog interval".
+DEFAULT_POLL_SECONDS = 30.0
 
 
 # ── Row / Services / RegisteredAction ────────────────────────────────
@@ -448,22 +454,99 @@ def _safe_write_marker(
         )
 
 
+async def _bus_demuxer(
+    bus_queue: asyncio.Queue,
+    wakeup_event: asyncio.Event,
+    stop_event: asyncio.Event,
+) -> None:
+    """Read the EventBus subscription queue and trigger ``wakeup_event``.
+
+    Filters incoming ``setting.changed`` events by ``set_id`` against
+    the live :data:`REGISTRY` so unrelated traffic doesn't wake the
+    loop. The bus replays cached topic state on subscribe with
+    ``seq=0`` — those replays are not "new events", so we skip them
+    and rely on the loop's startup tick + fallback watchdog instead.
+
+    Cancellation (driven by the loop's ``finally`` block at shutdown)
+    surfaces as :class:`asyncio.CancelledError` from
+    ``bus_queue.get()`` and exits the task cleanly.
+    """
+    while not stop_event.is_set():
+        try:
+            entry = await bus_queue.get()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "[settings_mediator] bus queue read failed; "
+                "demuxer will continue"
+            )
+            await asyncio.sleep(0.05)
+            continue
+        try:
+            topic, data, seq = entry
+        except (TypeError, ValueError):
+            continue
+        if topic != "setting.changed":
+            continue
+        if seq == 0:
+            # Cached-state replay on subscribe — not a new event.
+            continue
+        if not isinstance(data, dict):
+            continue
+        set_id = data.get("set_id")
+        if not set_id:
+            continue
+        if any(a.set_id == set_id for a in REGISTRY):
+            wakeup_event.set()
+
+
 async def _loop_main(
     services: Services,
-    poll_seconds: float,
+    fallback_seconds: float,
     stop_event: asyncio.Event,
     iterating_lock: asyncio.Lock,
+    event_bus: Any | None,
 ) -> None:
-    """Tick forever until *stop_event* is set; drain in-flight tick.
+    """Tick until *stop_event* is set; drain in-flight tick on shutdown.
 
-    The lock is held across the entire iteration so :func:`stop_action_loop`
-    can ``await`` it and observe the tick is fully drained before
-    returning. Sleep between ticks is interruptible via the stop event,
-    so shutdown is bounded by a single tick.
+    Wakeup signals (descending priority):
+
+    * ``stop_event`` — bounded shutdown.
+    * ``wakeup_event`` — set by :func:`_bus_demuxer` when a relevant
+      ``setting.changed`` arrives. Primary wakeup path.
+    * ``fallback_seconds`` watchdog — wakes ``iterate_once`` for all
+      registered sets unconditionally. Covers missed events on bus
+      reconnect or in-process coalescing; never the primary path.
+
+    The lock is held across the entire iteration so
+    :func:`stop_action_loop` can await it and observe the tick is fully
+    drained before returning.
     """
+    wakeup_event = asyncio.Event()
+    bus_queue: asyncio.Queue | None = None
+    demuxer_task: asyncio.Task | None = None
+    if event_bus is not None:
+        try:
+            bus_queue = event_bus.subscribe()
+            demuxer_task = asyncio.create_task(
+                _bus_demuxer(bus_queue, wakeup_event, stop_event),
+                name="settings_mediator.demuxer",
+            )
+        except Exception:
+            logger.exception(
+                "[settings_mediator] event_bus.subscribe() failed; "
+                "falling back to watchdog-only wakeup"
+            )
+            bus_queue = None
+            demuxer_task = None
+
     logger.info(
         "[settings_mediator] loop started — %d action(s) registered, "
-        "poll=%.1fs", len(REGISTRY), poll_seconds,
+        "fallback=%.1fs%s",
+        len(REGISTRY),
+        fallback_seconds,
+        " (event-driven)" if demuxer_task is not None else " (poll-only)",
     )
     try:
         while not stop_event.is_set():
@@ -477,13 +560,36 @@ async def _loop_main(
                     )
             if stop_event.is_set():
                 break
+            # Wait for: stop OR a relevant setting.changed wakeup OR the
+            # fallback watchdog timeout. Whichever fires first wins.
+            wakeup_task = asyncio.create_task(wakeup_event.wait())
+            stop_task = asyncio.create_task(stop_event.wait())
             try:
-                await asyncio.wait_for(
-                    stop_event.wait(), timeout=poll_seconds,
+                done, pending = await asyncio.wait(
+                    {wakeup_task, stop_task},
+                    timeout=fallback_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-            except asyncio.TimeoutError:
-                pass
+            finally:
+                for t in (wakeup_task, stop_task):
+                    if not t.done():
+                        t.cancel()
+            wakeup_event.clear()
     finally:
+        if demuxer_task is not None:
+            demuxer_task.cancel()
+            try:
+                await demuxer_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if bus_queue is not None and event_bus is not None:
+            try:
+                event_bus.unsubscribe(bus_queue)
+            except Exception:
+                logger.exception(
+                    "[settings_mediator] event_bus.unsubscribe() failed; "
+                    "continuing shutdown"
+                )
         logger.info("[settings_mediator] loop stopped")
 
 
@@ -491,8 +597,16 @@ def start_action_loop(
     services: Services,
     *,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
+    event_bus: Any | None = None,
 ) -> asyncio.Task:
     """Start the dispatch loop on the running event loop.
+
+    Wakeup is event-driven when ``event_bus`` is provided: the loop
+    subscribes to it at start, demuxes ``setting.changed`` events for
+    registered ``set_id``s, and ticks immediately on receipt. The
+    ``poll_seconds`` argument is the fallback watchdog interval (kept
+    under that name for compatibility with existing tests that pass
+    sub-second values for fast iteration).
 
     Idempotent: a second call while the loop is already running is a
     logged no-op and returns the existing task.
@@ -507,7 +621,9 @@ def start_action_loop(
     _stop_event = asyncio.Event()
     _iterating_lock = asyncio.Lock()
     _loop_task = asyncio.create_task(
-        _loop_main(services, poll_seconds, _stop_event, _iterating_lock),
+        _loop_main(
+            services, poll_seconds, _stop_event, _iterating_lock, event_bus,
+        ),
         name="settings_mediator.loop",
     )
     return _loop_task
