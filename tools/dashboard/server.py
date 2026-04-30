@@ -566,6 +566,63 @@ def _enrich_dispatch_runs(runs: list[dict]) -> None:
     for run in runs:
         run["smoke_result"] = _read_smoke_result(run.get("_output_dir") or None)
 
+    # Agentic identity: populate title (= action label), member_key, and
+    # target_source_id from the agentic source row's metadata. The
+    # dispatch_runs row only carries ``agentic_source_id``; everything
+    # else lives on the source. Front-end uses these for card display
+    # ("Update Title & Summary on <asset>") and routing
+    # (/graph/<target_source_id> when the operator wants to see the
+    # asset, /graph/<agentic_source_id> for the agent's session).
+    agentic_runs = [
+        r for r in runs
+        if r.get("kind") == "agentic" and r.get("agentic_source_id")
+    ]
+    target_ids: set[str] = set()
+    for run in agentic_runs:
+        try:
+            src = graph_ops.get_source(run["agentic_source_id"])
+        except Exception:  # noqa: BLE001
+            src = None
+        if not src:
+            continue
+        # The agentic source row's title was set to the action's display
+        # label at insert_agentic_session time (e.g. "Update Title &
+        # Summary"). We surface that as ``action_label`` and reserve
+        # ``title`` for the target asset's own title (set below) so the
+        # card reads "<action_label> on <title>".
+        run["action_label"] = src.get("title") or None
+        meta = src.get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        run["member_key"] = meta.get("member_key") or None
+        run["target_source_id"] = meta.get("target_source_id") or None
+        run["target_org"] = meta.get("target_org") or None
+        if run["target_source_id"]:
+            target_ids.add(run["target_source_id"])
+
+    # Resolve target-asset titles in one pass so each agentic card can
+    # render "<action> on <asset_title>". One graph_ops.get_source call
+    # per unique target — typically a small set per page.
+    target_titles: dict[str, str] = {}
+    for tid in target_ids:
+        try:
+            tsrc = graph_ops.get_source(tid)
+        except Exception:  # noqa: BLE001
+            tsrc = None
+        if tsrc and tsrc.get("title"):
+            target_titles[tid] = str(tsrc["title"])
+    for run in agentic_runs:
+        tid = run.get("target_source_id")
+        if tid and tid in target_titles:
+            run["title"] = target_titles[tid]
+        elif not run.get("title"):
+            # Fallback to the action label so the card never displays
+            # an empty title.
+            run["title"] = run.get("action_label")
+
     # Librarian entries — read review from their own output_dir
     for run in runs:
         if run.get("_librarian_type"):
@@ -749,13 +806,17 @@ async def api_dispatch_runs(request):
         kind = row.get("kind") or "bead"
         dir_name = row.get("id", "")
         bead_id = row.get("bead_id", "")
-        # Librarian runs have empty bead_id — use dir name as identifier
+        agentic_source_id = row.get("agentic_source_id") or None
+        # Librarian runs have empty bead_id — use dir name as identifier so
+        # the librarian review URL still resolves to the run's output dir.
         if not bead_id and librarian_type:
             bead_id = dir_name
-        # Agentic runs likewise have empty bead_id — use dir name as identifier
-        if not bead_id and kind == "agentic":
-            bead_id = dir_name
-        # Synthetic title for librarian runs
+        # ``kind='agentic'`` rows are addressed by ``agentic_source_id``
+        # in the UI (the click routes to ``/graph/<asset_id>``), so we
+        # leave ``bead_id`` empty here. Stuffing the run-id into bead_id
+        # used to make the timeline route to ``/bead/<run-id>`` (404).
+        # Synthetic title for librarian runs; agentic rows get their
+        # title from the agentic source's row in step _enrich_dispatch_runs.
         title = None
         if librarian_type:
             title = f"Librarian: {librarian_type}"
@@ -779,6 +840,10 @@ async def api_dispatch_runs(request):
             "librarian_type": librarian_type,
             "kind": kind,
             "title": title,
+            # ``agentic_source_id`` is the typed pointer for kind='agentic'
+            # rows. Front-end ``routeForRun`` reads this to compose
+            # ``/graph/<asset_id>``. None for bead/librarian rows.
+            "agentic_source_id": agentic_source_id,
             # internal fields for enrichment — stripped before response
             "_run_id": row.get("id", ""),
             "_output_dir": row.get("output_dir") or "",
