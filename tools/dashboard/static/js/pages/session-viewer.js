@@ -382,7 +382,15 @@
 
         // Worktree status — same anchor renders in page-mode header and
         // overlay title-bar; both bind to ``hasWorkspaceChanges``.
+        // Initial fetch + a slow poll so the indicator clears within
+        // 30s of a merge/discard without waiting for the next
+        // visibility/focus event. Resume-recovery still triggers a
+        // refresh on any blur/focus cycle for snappier feedback.
         this._refreshWorkspaceStatus();
+        var self = this;
+        this._workspaceTimer = setInterval(function () {
+          self._refreshWorkspaceStatus();
+        }, 30000);
 
         // Restore draft text into contenteditable + attach file-paste handler
         var self = this;
@@ -510,6 +518,10 @@
         if (this._resumeHeartbeatInterval) {
           clearInterval(this._resumeHeartbeatInterval);
           this._resumeHeartbeatInterval = null;
+        }
+        if (this._workspaceTimer) {
+          clearInterval(this._workspaceTimer);
+          this._workspaceTimer = null;
         }
         // Dispose terminal WS + xterm if the toggle was active. Leaking these
         // holds a server-side tmux attach and exhausts WebSocket slots.

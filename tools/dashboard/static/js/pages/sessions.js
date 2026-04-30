@@ -156,6 +156,35 @@
       _creating: false,
       zoom: localStorage.getItem('sessionZoom') || 'normal',
 
+      // Workspace-changes state per tmux name. Populated by
+      // _fetchWorkspaceStatus and consumed by ``wsStatus(s)`` /
+      // ``hasWorkspaceChanges(s)`` so the session-card partial can
+      // surface the same ⌥ indicator the page-mode header shows.
+      _workspaceStatusByTmux: {},
+
+      hasWorkspaceChanges(s) {
+        var key = (s && (s.tmux_session || s.id)) || '';
+        var ws = this._workspaceStatusByTmux[key];
+        return !!(ws && ws.hasChanges);
+      },
+      workspaceStatusTooltip(s) {
+        var key = (s && (s.tmux_session || s.id)) || '';
+        var ws = this._workspaceStatusByTmux[key];
+        if (!ws || !ws.hasChanges) return '';
+        var bits = [];
+        if (ws.commitsAhead > 0) {
+          bits.push(ws.commitsAhead + ' commit' + (ws.commitsAhead === 1 ? '' : 's') + ' to review');
+        }
+        if (ws.dirtyCount > 0) {
+          bits.push(ws.dirtyCount + ' dirty file' + (ws.dirtyCount === 1 ? '' : 's'));
+        }
+        return 'Workspace: ' + bits.join(', ') + ' — open Worktrees review';
+      },
+      workspaceStatusHref(s) {
+        var key = (s && (s.tmux_session || s.id)) || '';
+        return '/worktrees?session=' + encodeURIComponent(key);
+      },
+
       // --- Workspace dropdown state (fetched from /api/projects) ---
       // orgGroups[i].org is a resolved identity object
       // {slug,name,color,favicon,initial,resolved} — the header renders a
@@ -372,6 +401,13 @@
         this._fetchRecent();
         this._recentTimer = setInterval(() => this._fetchRecent(), 30000);
 
+        // Workspace-changes status per session (drives the ⌥ indicator
+        // on each session card). Same data source as the page-mode
+        // header so a merge/discard clears within ~15s on both
+        // surfaces.
+        this._fetchWorkspaceStatus();
+        this._workspaceTimer = setInterval(() => this._fetchWorkspaceStatus(), 15000);
+
         // Fetch workspace registry for the launch dropdown
         this._fetchProjects();
 
@@ -481,6 +517,33 @@
             s.session_id && interactiveTypes.indexOf(s.type) !== -1
           );
           this.loading = false;
+        }
+      },
+
+      async _fetchWorkspaceStatus() {
+        try {
+          var rows = await fetch('/api/worktrees').then(function (r) {
+            return r.ok ? r.json() : [];
+          });
+          if (!Array.isArray(rows)) return;
+          // Aggregate per tmux_name — a session can own multiple repo
+          // worktrees (autonomy + enterprise_ng), and the indicator
+          // should reflect the union of dirty + commits-ahead.
+          var by = {};
+          for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            var key = r.session_name;
+            if (!key) continue;
+            if (!by[key]) by[key] = { dirtyCount: 0, commitsAhead: 0 };
+            if (r.is_dirty) by[key].dirtyCount += (r.dirty_files || []).length;
+            by[key].commitsAhead += r.commits_ahead || 0;
+          }
+          for (var k in by) {
+            by[k].hasChanges = (by[k].dirtyCount + by[k].commitsAhead) > 0;
+          }
+          this._workspaceStatusByTmux = by;
+        } catch (_) {
+          // Best-effort; sessions list shouldn't crash on a worktree fetch hiccup.
         }
       },
 
