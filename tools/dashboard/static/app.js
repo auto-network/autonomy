@@ -1404,6 +1404,27 @@ window.Autonomy.refreshPlugins = async function () {
     }
     const data = await res.json();
     window.Autonomy.plugins = Array.isArray(data.plugins) ? data.plugins : [];
+    // Lazily inject any newly-enabled plugin's page.js so dynamically
+    // toggled plugins (operator flips dashboard.plugin#1 mid-session)
+    // get their Alpine factory loaded without a full page reload.
+    // Awaiting the script's onload before returning prevents the
+    // router from setting innerHTML + calling Alpine.initTree on a
+    // fragment whose alpine_root isn't defined yet.
+    const pending = [];
+    for (const p of window.Autonomy.plugins) {
+      if (document.querySelector(`script[data-plugin-id="${p.id}"]`)) continue;
+      const script = document.createElement('script');
+      script.src = `/static/plugins/${p.id}/page.js`;
+      script.dataset.pluginId = p.id;
+      pending.push(new Promise(resolve => {
+        script.onload = resolve;
+        script.onerror = resolve;
+      }));
+      document.body.appendChild(script);
+    }
+    if (pending.length) {
+      await Promise.all(pending);
+    }
     return window.Autonomy.plugins;
   } catch (e) {
     window.Autonomy.plugins = [];

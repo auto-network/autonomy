@@ -1,0 +1,26 @@
+id: coordinator-board
+api_version: 1
+
+# v1 ships dormant — operator flips the dashboard.plugin#1 row to
+# {enabled: true} when ready. Bead auto-1runm acceptance: "Disabling
+# the plugin (Setting → off) hides the sidebar entry; the route 404s."
+default_enabled: false
+
+paths:
+  - /coordinator
+
+assets:
+  template: page.html
+  script: page.js
+
+nav:
+  label: Coordinator
+
+frontend:
+  alpine_root: coordinatorBoard
+
+entrypoints:
+  api: tools.dashboard.plugins.coordinator_board.entrypoints.api:routes
+  schemas:
+    - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorCanvasV1
+    - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:OperatorMessageToCoordinatorV1

@@ -151,18 +151,38 @@ def discover(plugins_dir: Path | None = None) -> list[DiscoveredPlugin]:
 # ── Enable filtering ─────────────────────────────────────────────────
 
 
-def _bootstrap_default_enabled(plugin_dir: Path) -> bool:
-    """Plugins in directories starting with ``_`` (samples / scaffolds)
-    default to disabled. Other plugins default to enabled.
+def _bootstrap_default_enabled(
+    plugin_dir: Path,
+    manifest: PluginManifest | None = None,
+) -> bool:
+    """Resolve the no-Setting bootstrap default for a plugin.
+
+    Precedence:
+
+    1. ``manifest.default_enabled`` if explicitly set in ``plugin.yaml``.
+       Plugins that ship dormant (operator opts in) declare
+       ``default_enabled: false``.
+    2. Directory-name convention: dirs starting with ``_``
+       (e.g. ``_example/``) default disabled; everything else defaults
+       enabled. This keeps existing samples / scaffolds dormant without
+       requiring a manifest field.
     """
+    if manifest is not None and manifest.default_enabled is not None:
+        return manifest.default_enabled
     return not plugin_dir.name.startswith("_")
 
 
-def is_enabled(plugin_id: str, plugin_dir: Path, settings: dict[str, dict]) -> bool:
+def is_enabled(
+    plugin_id: str,
+    plugin_dir: Path,
+    settings: dict[str, dict],
+    *,
+    manifest: PluginManifest | None = None,
+) -> bool:
     """Resolve enable state for a single plugin from the Setting map."""
     payload = settings.get(plugin_id)
     if payload is None:
-        return _bootstrap_default_enabled(plugin_dir)
+        return _bootstrap_default_enabled(plugin_dir, manifest)
     return bool(payload.get("enabled", True))
 
 
@@ -281,7 +301,9 @@ def load_enabled(
 
     loaded: list[LoadedPlugin] = []
     for d in discovered:
-        if not is_enabled(d.manifest.id, d.plugin_dir, settings):
+        if not is_enabled(
+            d.manifest.id, d.plugin_dir, settings, manifest=d.manifest,
+        ):
             continue
         result = _resolve_entrypoints(d)
         if result is None:

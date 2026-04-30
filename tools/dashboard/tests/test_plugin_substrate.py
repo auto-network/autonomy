@@ -274,3 +274,48 @@ def test_pure_frontend_plugin_loads(tmp_path, monkeypatch):
     assert by_id["pure"].routes == []
     assert by_id["pure"].badge_counter is None
     assert by_id["pure"].schemas == []
+
+
+def test_manifest_default_enabled_false_ships_dormant(tmp_path, monkeypatch):
+    """``default_enabled: false`` in the manifest disables the plugin
+    until an operator flips the dashboard.plugin#1 row, even when the
+    directory name doesn't follow the ``_``-prefix sample convention.
+    """
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    yaml = _min_manifest_yaml("dormant") + "default_enabled: false\n"
+    _write_plugin(plugins_dir, "dormant", yaml)
+    _write_plugin(plugins_dir, "ordinary", _min_manifest_yaml("ordinary"))
+
+    # No Setting rows → bootstrap defaults run.
+    monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: {})
+    loaded = loader.load_enabled(plugins_dir=plugins_dir)
+    ids = {p.id for p in loaded}
+    assert ids == {"ordinary"}, (
+        f"default_enabled=false plugin should be dormant; got {ids}"
+    )
+
+    # An explicit enable flips it on.
+    monkeypatch.setattr(
+        loader,
+        "_read_plugin_settings",
+        lambda org=None: {"dormant": {"enabled": True}},
+    )
+    loaded = loader.load_enabled(plugins_dir=plugins_dir)
+    ids = {p.id for p in loaded}
+    assert ids == {"dormant", "ordinary"}
+
+
+def test_manifest_default_enabled_true_overrides_underscore_dir(tmp_path, monkeypatch):
+    """An ``_``-prefixed directory whose manifest declares
+    ``default_enabled: true`` boots enabled — the explicit field wins
+    over the directory-name fallback.
+    """
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    yaml = _min_manifest_yaml("active") + "default_enabled: true\n"
+    _write_plugin(plugins_dir, "_active", yaml)
+
+    monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: {})
+    loaded = loader.load_enabled(plugins_dir=plugins_dir)
+    assert {p.id for p in loaded} == {"active"}
