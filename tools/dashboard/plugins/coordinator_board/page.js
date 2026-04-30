@@ -159,7 +159,7 @@ function coordinatorBoard() {
 
     async _readSet(setId) {
       try {
-        const res = await fetch(
+        const res = await window.Autonomy.fetch(
           `/api/graph/settings/${encodeURIComponent(setId)}`,
           { credentials: 'same-origin' },
         );
@@ -173,7 +173,7 @@ function coordinatorBoard() {
 
     async _writeSetting(setId, key, payload) {
       try {
-        const res = await fetch('/api/graph/setting', {
+        const res = await window.Autonomy.fetch('/api/graph/setting', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

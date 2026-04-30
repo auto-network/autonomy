@@ -7340,6 +7340,71 @@ class TestCoordinatorBoardSettingsWiring:
             f"got {threads}"
         )
 
+    def test_canvas_read_uses_manifest_org_db(self, browser, sweep_server):
+        """Acceptance — page.js reads dashboard.coordinator-canvas via
+        ``window.Autonomy.fetch`` (auto-b9wzl), so the read carries
+        ``X-Graph-Org: autonomy`` (the plugin manifest's org) and lands
+        on autonomy.db, not the scopeless personal.db fall-through.
+
+        Probe (per the bead's Step 13): seed members in BOTH the
+        scopeless ``_all`` bucket — the personal.db equivalent that a
+        header-less fetch would surface — and the per-org
+        ``_orgs.autonomy`` bucket — only visible when
+        ``X-Graph-Org=autonomy`` is stamped. The mock DAO returns
+        ``_all + _orgs.autonomy`` for autonomy-scoped reads;
+        ``_latest`` picks the per-org row (last in the merged list,
+        no timestamps → stable sort), so the autonomy question
+        surfaces only when the page goes through ``Autonomy.fetch``.
+        Under raw ``fetch()`` the per-org row is invisible and the
+        page would render the ``_all`` text instead.
+        """
+        fp = sweep_server["fixture_path"]
+        autonomy_q = "autonomy.db question — manifest-org read"
+        path = Path(fp)
+        try:
+            data = json.loads(path.read_text())
+            canvas_block = data.setdefault("settings", {}).setdefault(
+                "dashboard.coordinator-canvas", {},
+            )
+            orgs = canvas_block.setdefault("_orgs", {})
+            orgs.setdefault("autonomy", []).append({
+                "key": COORD_BOARD_FIXTURE_KEY + "-autonomy",
+                "payload": {
+                    "ageMin": 2,
+                    "question": autonomy_q,
+                    "context": "scoped to the manifest org",
+                    "quickReplies": [],
+                },
+            })
+            path.write_text(json.dumps(data, indent=2))
+
+            _navigate_and_check("/sessions", "", wait_ms=600)
+            result = _navigate_and_check("/coordinator", """
+                r.canvas_text = (document.querySelector(
+                    '[data-testid="coord-canvas-question"]'
+                ) || {}).textContent || '';
+            """, wait_ms=1500)
+        finally:
+            data = json.loads(path.read_text())
+            canvas_block = data.get("settings", {}).get(
+                "dashboard.coordinator-canvas",
+            )
+            if isinstance(canvas_block, dict):
+                canvas_block.get("_orgs", {}).pop("autonomy", None)
+            path.write_text(json.dumps(data, indent=2))
+
+        text = result.get("canvas_text") or ""
+        assert autonomy_q in text, (
+            f"Page did not surface the autonomy.db (manifest-org) "
+            f"canvas member. The read most likely bypassed "
+            f"window.Autonomy.fetch and landed on personal.db. "
+            f"Got: {text!r}"
+        )
+        assert COORD_BOARD_QUESTION not in text, (
+            f"Page leaked the personal.db (_all) canvas member; "
+            f"got: {text!r}"
+        )
+
     def test_thumb_tap_writes_decision_setting(self, browser, sweep_server):
         """Acceptance #3 — tapping a thumb produces a decision member."""
         _navigate_and_check("/sessions", "", wait_ms=600)
