@@ -1156,7 +1156,18 @@ def cmd_context(args):
     db = None
     close_db = False
     if isinstance(client, HttpClient):
-        entries = (_read_source_full_via_api(source["id"], org=org) or {}).get("entries") or []
+        # For integer turns we can push the slice server-side; for "last"
+        # we still need the full entry list to discover the max turn
+        # (no ?turn=last endpoint yet — see bead description, out of scope).
+        if args.turn != "last":
+            entries = (_read_source_full_via_api(
+                source["id"], org=org,
+                around_turn=int(args.turn), window=args.window,
+            ) or {}).get("entries") or []
+        else:
+            entries = (_read_source_full_via_api(
+                source["id"], org=org,
+            ) or {}).get("entries") or []
     else:
         home_org = source.get("org") or ""
         caller = org or ""
@@ -1195,7 +1206,10 @@ def cmd_context(args):
 
         window = args.window
 
-        # Filter to turns within the window
+        # Filter to turns within the window. The server-side slice already
+        # respects the window for integer turns in container mode, but the
+        # host path and "last" container path return all entries — keep
+        # the filter so both modes converge on the same output.
         relevant = [e for e in entries if abs((e.get("turn_number") or 0) - target_turn) <= window]
 
         proj = f" [{source['project']}]" if source.get('project') else ""
@@ -1219,14 +1233,32 @@ def cmd_context(args):
             db.close()
 
 
-def _read_source_full_via_api(source_id: str, *, org: str | None) -> dict | None:
-    """Container-mode source-content read: go through /api/graph/resolve/{id}
-    which returns the full ``read_source_full`` payload."""
+def _read_source_full_via_api(
+    source_id: str,
+    *,
+    org: str | None,
+    around_turn: int | None = None,
+    window: int | None = None,
+) -> dict | None:
+    """Container-mode source-content read: go through /api/graph/{id}
+    which returns the full ``read_source_full`` payload.
+
+    When ``around_turn`` / ``window`` are supplied, push the slice
+    server-side via ``?turn=&window=`` so the CLI doesn't fetch every
+    entry only to filter in Python.
+    """
     client = get_client()
     if not isinstance(client, HttpClient):
         return None
+    params: dict[str, str] = {}
+    if around_turn is not None:
+        params["turn"] = str(around_turn)
+    if window is not None:
+        params["window"] = str(window)
     try:
-        return client._get(f"/api/graph/resolve/{source_id}", org=org)
+        return client._get(
+            f"/api/graph/{source_id}", params=params or None, org=org,
+        )
     except LookupError:
         return None
 

@@ -301,12 +301,84 @@ def test_cmd_sources_routes_through_api(
 def test_cmd_context_routes_through_api(
     api_client, forbid_cli_sqlite, seeded_source_id, capsys, monkeypatch,
 ):
-    """``graph context <id> <turn>`` hits /api/graph/source + resolve via HttpClient."""
+    """``graph context <id> <turn>`` hits /api/graph/source + /api/graph/{id}
+    via HttpClient and renders turn bodies.
+
+    Regression: the CLI was calling /api/graph/resolve/{id} (404), the
+    LookupError got swallowed, and ``cmd_context`` printed the header
+    line but no turn content (auto-5zess). Asserting only the title is
+    not enough — the title is rendered from ``client.get_source``, so it
+    showed up even with zero entries.
+    """
     monkeypatch.setenv("GRAPH_ORG", "autonomy")
     args = _cli_args(source=seeded_source_id, turn="1", window=3)
     graph_cli.cmd_context(args)
     out = capsys.readouterr().out
     assert "Dispatch Lifecycle Signpost" in out
+    assert "Turn 1" in out
+    assert "canonical signpost content" in out
+
+
+def test_read_source_full_via_api_uses_resolve_endpoint(monkeypatch):
+    """Pin the URL pattern for ``_read_source_full_via_api``.
+
+    Bead auto-5zess: the helper was hitting /api/graph/resolve/{id},
+    which the dashboard never registered, returning 404. The route is
+    /api/graph/{id} and supports ``?turn=N&window=W`` for a server-side
+    slice.
+    """
+    from tools.graph import client as client_mod
+
+    captured: list[tuple[str, dict | None, str | None]] = []
+
+    class _StubHttpClient(client_mod.HttpClient):
+        def __init__(self):
+            pass
+
+        def _get(self, path, params=None, *, org=None):
+            captured.append((path, params, org))
+            return {
+                "source": {"id": "abc"},
+                "entries": [{"turn_number": 5, "role": "user",
+                             "content": "hi", "created_at": ""}],
+            }
+
+    monkeypatch.setattr(graph_cli, "get_client", lambda: _StubHttpClient())
+
+    result = graph_cli._read_source_full_via_api(
+        "abc-def", org="autonomy", around_turn=5, window=2,
+    )
+
+    assert result is not None
+    assert result["entries"] != []
+    assert len(captured) == 1
+    path, params, org = captured[0]
+    assert path == "/api/graph/abc-def"
+    assert params == {"turn": "5", "window": "2"}
+    assert org == "autonomy"
+
+
+def test_read_source_full_via_api_no_window_omits_params(monkeypatch):
+    """Without ``around_turn`` / ``window`` the helper sends no query
+    string — preserves the legacy front-of-source slice for the
+    ``--turn last`` codepath where the CLI still has to fetch every
+    entry to discover the max turn."""
+    from tools.graph import client as client_mod
+
+    captured: list[tuple[str, dict | None]] = []
+
+    class _StubHttpClient(client_mod.HttpClient):
+        def __init__(self):
+            pass
+
+        def _get(self, path, params=None, *, org=None):
+            captured.append((path, params))
+            return {"source": {"id": "abc"}, "entries": []}
+
+    monkeypatch.setattr(graph_cli, "get_client", lambda: _StubHttpClient())
+    graph_cli._read_source_full_via_api("abc", org=None)
+
+    assert captured == [("/api/graph/abc", None)]
 
 
 def test_cmd_attachments_requires_source_id_in_container(
