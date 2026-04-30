@@ -279,8 +279,8 @@ class Harness:
         """Write session:messages events while browser is disconnected."""
         _write_session_messages(self.events_path, TEST_SESSION_ID, entries)
 
-    def write_large_events(self, count, size_per_entry=10000):
-        """Write many large events to overflow the 2MB ring buffer."""
+    def write_large_events(self, count, size_per_entry=160000):
+        """Write many large events to overflow the 32MB ring buffer."""
         for i in range(count):
             entry = {
                 "type": "assistant_text",
@@ -426,7 +426,7 @@ class TestBufferOverflow:
     """2 tests: overflow shows banner, new events accepted after overflow."""
 
     def test_overflow_shows_banner(self, harness):
-        """Close EventSource. Write enough large events to exceed 2MB buffer.
+        """Close EventSource. Write enough large events to exceed the buffer cap.
         Reconnect. Assert interruption banner visible."""
         harness.open_session_page()
         result = harness.wait_for_backfill(len(INITIAL_ENTRIES))
@@ -439,9 +439,9 @@ class TestBufferOverflow:
         # Disconnect
         ab_eval("window._es.close(); return 'disconnected';")
 
-        # Write large events to overflow the 2MB buffer
-        # Each entry ~10KB × 250 = ~2.5MB > 2MB buffer
-        harness.write_large_events(count=250, size_per_entry=10000)
+        # Write large events to overflow the 32MB buffer
+        # Each entry ~160KB × 250 = ~40MB > 32MB cap → eviction
+        harness.write_large_events(count=250, size_per_entry=160000)
 
         # Wait for mock event watcher to process
         time.sleep(3)

@@ -63,8 +63,15 @@ async def _broadcast_n(bus, n, topic="test"):
         await bus.broadcast(topic, {"n": i}, dedup=False)
 
 
-async def _broadcast_large(bus, n, payload_size=1024):
-    """Broadcast n events with large payloads."""
+async def _broadcast_large(bus, n, payload_size=None):
+    """Broadcast n events with large payloads.
+
+    When ``payload_size`` is omitted, sized so that ``n`` broadcasts overflow
+    the bus' configured ``_BUFFER_MAX_BYTES`` by ~50% — keeps eviction tests
+    stable when the buffer cap is changed.
+    """
+    if payload_size is None:
+        payload_size = max(1024, (bus._BUFFER_MAX_BYTES * 3 // 2) // n)
     payload = "x" * payload_size
     for i in range(n):
         await bus.broadcast("test", {"d": payload, "n": i}, dedup=False)
@@ -107,10 +114,14 @@ class TestReplayCoversGap:
 
 
 class TestBufferOverflow:
-    """Buffer eviction under the 2MB size limit."""
+    """Buffer eviction under the configured size limit."""
+
+    def test_buffer_max_bytes_constant(self, bus):
+        """Buffer cap is 32 MB (auto-y7270 bump from 2 MB)."""
+        assert bus._BUFFER_MAX_BYTES == 32 * 1024 * 1024
 
     def test_eviction_on_size_limit(self, bus):
-        """Broadcast large payloads until buffer exceeds 2MB.
+        """Broadcast large payloads until buffer overflows the cap.
         Assert oldest events evicted, buffer stays under limit."""
         asyncio.run(_broadcast_large(bus, 3000))
 

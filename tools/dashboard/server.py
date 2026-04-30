@@ -5790,6 +5790,7 @@ def _diag_build_bus_block() -> dict:
         "subscribers_count": event_bus.subscribers_count(),
         "buffer_entries": len(event_bus._buffer),
         "buffer_bytes": event_bus._buffer_bytes,
+        "buffer_max_bytes": event_bus._BUFFER_MAX_BYTES,
         "buffer_first_seq": first_seq,
         "buffer_last_seq": last_seq,
         "buffer_first_ts": first_ts,

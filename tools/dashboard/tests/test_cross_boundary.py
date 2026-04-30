@@ -310,13 +310,14 @@ class TestSSEGapRecovery:
 
     @pytest.mark.asyncio
     async def test_replay_incomplete_when_evicted(self):
-        """Broadcast enough events to overflow the 2MB buffer.
+        """Broadcast enough events to overflow the buffer cap.
         Call replay() for old seq range. Assert: complete=False."""
         from tools.dashboard.event_bus import EventBus
 
         bus = EventBus()
-        # Each event ~1KB of payload — need ~2048 to overflow 2MB buffer
-        big_payload = "x" * 1024
+        # Size payload so 3000 broadcasts overflow the buffer by ~50%.
+        payload_size = max(1024, (bus._BUFFER_MAX_BYTES * 3 // 2) // 3000)
+        big_payload = "x" * payload_size
         for i in range(3000):
             await bus.broadcast(
                 "session:messages",
