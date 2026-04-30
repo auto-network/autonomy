@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 
 from agents.capabilities.github import probe as github_probe
 from agents.capabilities.github.service import (
@@ -37,25 +38,34 @@ logger = logging.getLogger(__name__)
 _GITHUB_PROBE_TIMEOUT = 3.0
 _GITHUB_REVIEW_TIMEOUT = 10.0
 
-# TTL caching for source_control snapshots — graph://c64d0f5d-480 §
-# Why we must become stateful (minimally). The 30s scan loop is right
-# for derivable local-git signals but wasteful for remote PR queries:
-# 15 live rows × 2 calls/row × 120 refreshes/hour = 3,600 GitHub API
-# requests/hour just from worktree polling, easily blowing the
-# authenticated 5,000/hour PAT quota when shared with release-pull
-# tooling. Open-PR state is *not* terminal (checks transition), so we
-# can't cache forever — but a 5-min TTL with operator-action
-# invalidation cuts the rate ~10x without losing freshness on the
-# operator timescale. Watch-active rows shorten to 60s since the
-# operator's already in active-feedback mode.
-SOURCE_CONTROL_TTL_SECONDS = 300.0
+# Background fetch policy for source_control snapshots.
+#
+# The 30s scan loop is right for derivable local-git signals (graph://
+# c64d0f5d-480 § Why we must become stateful) but should NOT make any
+# external-network calls in the background. Per Jeremy's directive
+# (2026-04-30): the only conceivable polling is for an active running
+# PR in non-terminal state, and even that requires a safety valve.
+#
+# So the rules below are deliberately conservative:
+#   - Silent (NAG_SILENT) rows: never fetch in background. Period.
+#   - Watch-active rows: only fetch when the cached snapshot's
+#     review.running flag is True AND the row is within its hourly
+#     poll budget AND its watch TTL has elapsed.
+#   - Force-refresh (POST /api/worktrees/refresh): always fetches,
+#     bypasses TTL and budget. This is the operator-explicit path.
+#
+# Rate-limit backoff still applies as a circuit breaker on top of the
+# above — when gh reports rate-limited, we suspend ALL fetches
+# (including operator-triggered) for a window so we don't deepen the
+# hole. Force-refresh that returns clean clears the backoff.
 SOURCE_CONTROL_WATCH_TTL_SECONDS = 60.0
-# When gh reports rate-limited, set a backoff window during which we
-# skip every capability fetch — re-fetching while the limit is hot
-# only deepens the hole and risks secondary rate-limit penalties.
-# 10 min covers most short-burst rate-limit windows; the actual reset
-# is hourly so a follow-up could parse the X-RateLimit-Reset header.
 RATE_LIMIT_BACKOFF_SECONDS = 600.0
+# Hard ceiling on background polls per (session, repo) per rolling
+# hour. ~1/min average upper bound; in practice the running-gate
+# means most rows poll far less. Stuck PRs (e.g. CI hangs) hit this
+# cap and stop polling instead of draining quota indefinitely.
+MAX_POLLS_PER_HOUR_PER_ROW = 60
+_POLL_WINDOW_SECONDS = 3600.0
 
 
 # Nag modes for the source_control.watch block. The UI maps these onto
@@ -174,9 +184,12 @@ class WorktreeMonitor:
         self._interval_seconds = interval_seconds
         self._cache: list[WorktreeState] = []
         self._source_control_cache: dict[tuple[str, str], dict] = {}
-        # Per-row last-fetch monotonic timestamp for TTL caching. Reset
-        # when an operator forces a refresh.
+        # Per-row last-fetch monotonic timestamp (used for the
+        # watch-active TTL gate).
         self._source_control_fetched_at: dict[tuple[str, str], float] = {}
+        # Per-row deque of recent poll timestamps (sliding-window
+        # budget — graph://c64d0f5d-480 § safety valve discussion).
+        self._poll_history: dict[tuple[str, str], deque[float]] = {}
         # Monotonic-clock instant before which we skip every capability
         # fetch — set when gh reports rate-limited, cleared on the next
         # successful operator-forced refresh that actually probes.
@@ -236,24 +249,61 @@ class WorktreeMonitor:
             )
             return list(rows)
 
-    def _row_ttl(self, key: tuple[str, str]) -> float:
-        """TTL for a row's source_control snapshot.
-
-        Watch-active rows (Nag All / Nag When Done) shorten the TTL so
-        the operator's active feedback loop sees check transitions
-        sooner. Silent rows use the default 5-min TTL.
-        """
-        mode = self.get_nag_mode(*key)
-        if mode != NAG_SILENT:
-            return SOURCE_CONTROL_WATCH_TTL_SECONDS
-        return SOURCE_CONTROL_TTL_SECONDS
-
-    def _row_is_fresh(self, key: tuple[str, str], now: float) -> bool:
-        """True when the row's cached snapshot is within its TTL."""
+    def _watch_ttl_elapsed(self, key: tuple[str, str], now: float) -> bool:
+        """True when the watch-active row's TTL window has lapsed."""
         last = self._source_control_fetched_at.get(key)
         if last is None:
+            return True
+        return (now - last) >= SOURCE_CONTROL_WATCH_TTL_SECONDS
+
+    def _record_poll(self, key: tuple[str, str], now: float) -> None:
+        """Stamp a poll timestamp into the row's sliding-window budget."""
+        history = self._poll_history.setdefault(key, deque())
+        history.append(now)
+        # Trim entries outside the rolling-hour window so the deque
+        # length is the count of recent polls.
+        cutoff = now - _POLL_WINDOW_SECONDS
+        while history and history[0] < cutoff:
+            history.popleft()
+
+    def _poll_budget_remaining(self, key: tuple[str, str], now: float) -> int:
+        """Polls left in the row's sliding-hour budget (≥ 0)."""
+        history = self._poll_history.get(key)
+        if history is None:
+            return MAX_POLLS_PER_HOUR_PER_ROW
+        cutoff = now - _POLL_WINDOW_SECONDS
+        recent = sum(1 for t in history if t >= cutoff)
+        return max(0, MAX_POLLS_PER_HOUR_PER_ROW - recent)
+
+    def _should_poll_in_background(
+        self, key: tuple[str, str], cached: dict | None, now: float,
+    ) -> bool:
+        """Decide whether to fetch this row in a background tick.
+
+        Returns ``True`` only when every gate clears:
+          - row is watch-active (operator opted in),
+          - cached snapshot exists and shows ``review.running == True``
+            (something is actually transitioning — no point polling
+            otherwise),
+          - the watch TTL has elapsed since the last fetch,
+          - the per-row sliding-hour poll budget has not been spent.
+
+        Force-refresh callers do not consult this — they always fetch.
+        """
+        if self.get_nag_mode(*key) == NAG_SILENT:
             return False
-        return (now - last) < self._row_ttl(key)
+        if cached is None:
+            return False  # never had a snapshot; an operator refresh has to seed it
+        review = cached.get("review")
+        if not review:
+            return False
+        if not review.get("running"):
+            return False
+        if not self._watch_ttl_elapsed(key, now):
+            return False
+        if self._poll_budget_remaining(key, now) <= 0:
+            return False
+        return True
 
     async def _refresh_source_control(
         self,
@@ -285,6 +335,14 @@ class WorktreeMonitor:
         backoff_remaining = max(0, int(self._capability_backoff_until - now))
 
         # Decide per row: fetch or reuse the cached snapshot.
+        #
+        # Background ticks (force_capabilities=False) NEVER fetch by
+        # default. The only exception is a watch-active row whose
+        # cached snapshot shows running checks AND has poll budget
+        # left — caught by ``_should_poll_in_background``. Every
+        # other path carries the cached snapshot forward unchanged.
+        # Operator-forced refreshes ignore all gates (subject only
+        # to the rate-limit backoff above).
         rows_to_fetch: list[WorktreeState] = []
         carried: dict[tuple[str, str], dict] = {}
         for row in live_rows:
@@ -301,10 +359,18 @@ class WorktreeMonitor:
                         details={"backoff_seconds_remaining": backoff_remaining},
                     )
                 continue
-            if not force_capabilities and self._row_is_fresh(key, now) and cached is not None:
-                carried[key] = cached
+            if force_capabilities:
+                rows_to_fetch.append(row)
                 continue
-            rows_to_fetch.append(row)
+            if self._should_poll_in_background(key, cached, now):
+                rows_to_fetch.append(row)
+                continue
+            # Default background path: keep the cached snapshot
+            # untouched. Rows with no cache stay absent from the
+            # snapshot map — UI shows no source_control block for
+            # them until an operator refresh seeds it.
+            if cached is not None:
+                carried[key] = cached
 
         # Fan out only the rows that actually need a fresh fetch.
         results: list = []
@@ -327,6 +393,10 @@ class WorktreeMonitor:
         rate_limit_seen = False
         for row, snapshot in zip(rows_to_fetch, results):
             key = (row.session_name, row.repo_name)
+            # Stamp the poll history regardless of outcome so a stuck
+            # row that errors repeatedly still consumes its budget
+            # rather than retrying forever.
+            self._record_poll(key, now)
             if isinstance(snapshot, Exception):
                 logger.warning(
                     "worktree_monitor: source_control fetch failed for %s/%s: %s",
