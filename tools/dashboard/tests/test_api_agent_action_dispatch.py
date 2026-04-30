@@ -572,6 +572,11 @@ def test_api_dispatch_runs_surfaces_agentic_identity(
     assert row.get("action_label"), "action_label must populate"
     # Title shows the asset, not the action — the card reads "<asset>".
     assert row.get("title") == asset_title
+    # Sender provenance: browser-initiated dispatches carry the
+    # "dashboard" sentinel; the front-end uses this to decide whether
+    # to render a clickable link back to the originating session
+    # (real tmux name) vs plain text (sentinel).
+    assert row.get("dispatched_by_session") == "dashboard"
 
 
 def test_dispatch_canonicalises_prefix_asset_id(client, per_org_universe):
