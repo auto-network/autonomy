@@ -1,0 +1,17 @@
+id: settings
+api_version: 1
+org: autonomy
+
+paths:
+  - /settings
+
+assets:
+  template: page.html
+  script: page.js
+  style: page.css
+
+nav:
+  label: Settings
+
+frontend:
+  alpine_root: settingsPage
