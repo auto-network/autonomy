@@ -47,6 +47,15 @@
             <template x-if="!isLive">
               <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
             </template>
+            <!-- Workspace-changes indicator. Same shape as the overlay
+                 anchor in base.html; both bind to the same component
+                 getter so they stay in lock-step. -->
+            <a href="/worktrees"
+               @click.stop
+               class="text-xs text-amber-400 hover:text-amber-200 px-1"
+               x-show="hasWorkspaceChanges"
+               :title="workspaceStatusTooltip"
+               style="display:none;">⌥</a>
             <template x-if="_tmuxSession && isLive">
               <button class="sv-term-toggle"
                       :class="{ 'active': showTerminal }"
