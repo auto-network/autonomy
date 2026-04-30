@@ -57,6 +57,12 @@ class LoadedPlugin:
 
     ``routes`` / ``badge_counter`` / ``schemas`` are populated only when
     the corresponding entrypoint is declared and imported successfully.
+
+    ``effective_org`` is the org slug the substrate uses to scope this
+    plugin's runtime: the manifest's ``org`` by default, overridden by
+    the toggle row's ``payload.org`` when present. ``load_all`` (which
+    skips Setting reads) leaves this equal to ``manifest.org``;
+    ``load_enabled`` resolves the override.
     """
     id: str
     paths: list[str]
@@ -67,6 +73,7 @@ class LoadedPlugin:
     style: str | None
     plugin_dir: Path
     manifest: PluginManifest
+    effective_org: str = ""
     routes: list = field(default_factory=list)
     badge_counter: Callable[[], Any] | None = None
     schemas: list = field(default_factory=list)
@@ -288,6 +295,7 @@ def _resolve_entrypoints(
         style=manifest.assets.style,
         plugin_dir=discovered.plugin_dir,
         manifest=manifest,
+        effective_org=manifest.org,
         routes=routes,
         badge_counter=badge_counter,
         schemas=schemas,
@@ -300,17 +308,28 @@ def _resolve_entrypoints(
 
 def load_enabled(
     *,
-    org: str | None = None,
     plugins_dir: Path | None = None,
 ) -> list[LoadedPlugin]:
     """Discover, filter by Setting, resolve entrypoints. Returns the
     surviving ``LoadedPlugin`` list.
+
+    Each plugin's enable state is read from *its own* ``manifest.org``'s
+    DB — never from the caller's org or an unscoped sweep. Reads are
+    cached per-org for the duration of a single ``load_enabled`` call so
+    plugins sharing an install scope don't double-fetch.
+
+    ``LoadedPlugin.effective_org`` resolves to the toggle row's
+    ``payload.org`` override when present, else ``manifest.org``.
     """
     discovered = discover(plugins_dir=plugins_dir)
-    settings = _read_plugin_settings(org=org)
+    cache: dict[str, dict[str, dict]] = {}
 
     loaded: list[LoadedPlugin] = []
     for d in discovered:
+        manifest_org = d.manifest.org
+        if manifest_org not in cache:
+            cache[manifest_org] = _read_plugin_settings(org=manifest_org)
+        settings = cache[manifest_org]
         if not is_enabled(
             d.manifest.id, d.plugin_dir, settings, manifest=d.manifest,
         ):
@@ -318,6 +337,10 @@ def load_enabled(
         result = _resolve_entrypoints(d)
         if result is None:
             continue
+        payload = settings.get(d.manifest.id) or {}
+        override = payload.get("org")
+        if isinstance(override, str) and override:
+            result.effective_org = override
         loaded.append(result)
     return loaded
 

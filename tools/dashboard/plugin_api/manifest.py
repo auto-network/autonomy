@@ -52,6 +52,10 @@ class PluginManifest(BaseModel):
 
     id: str
     api_version: int
+    # Default install scope. The substrate reads this plugin's
+    # ``dashboard.plugin#1`` toggle row from ``<org>.db``. Operators
+    # override per-installation by writing a payload with ``org: <slug>``.
+    org: str
     paths: List[str] = Field(min_length=1)
     assets: PluginAssets
     nav: PluginNav

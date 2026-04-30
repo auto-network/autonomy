@@ -6543,6 +6543,297 @@ class TestPluginSubstrate:
         )
 
 
+# ── Plugin install-org scoping (substrate v1.1) ──────────────────────
+
+
+def _set_plugin_setting_for_org(
+    fixture_path: str,
+    plugin_id: str,
+    payload: dict | None,
+    *,
+    org: str = "autonomy",
+) -> None:
+    """Seed (or remove) a ``dashboard.plugin#1`` row inside *org*'s slice
+    of the mock fixture.
+
+    Substrate v1.1 reads each plugin's toggle from its manifest org's
+    DB; the mock DAO models that with ``settings.<set_id>._orgs.<org>``.
+    Passing ``payload=None`` removes any existing row for *plugin_id*.
+    """
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    plugin_block = block.setdefault("dashboard.plugin", {})
+    orgs = plugin_block.setdefault("_orgs", {})
+    org_list = orgs.setdefault(org, [])
+    org_list[:] = [m for m in org_list if m.get("key") != plugin_id]
+    if payload is not None:
+        org_list.append({"key": plugin_id, "payload": payload})
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _clear_org_plugin_settings(fixture_path: str, org: str = "autonomy") -> None:
+    """Drop every dashboard.plugin row inside *org*'s slice (test cleanup)."""
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    plugin_block = block.setdefault("dashboard.plugin", {})
+    orgs = plugin_block.setdefault("_orgs", {})
+    orgs.pop(org, None)
+    path.write_text(json.dumps(data, indent=2))
+
+
+_PLUGIN_FETCH_SPY_AND_PROBE_TEMPLATE = """(async () => {{
+    try {{
+        if (!window.__originalFetchForOrgSpy) {{
+            window.__originalFetchForOrgSpy = window.fetch;
+            window.fetch = function(input, init) {{
+                var url = typeof input === 'string'
+                    ? input
+                    : (input && input.url) || '';
+                var orgHeader = null;
+                try {{
+                    var hdrs = new Headers((init && init.headers) || {{}});
+                    orgHeader = hdrs.get('X-Graph-Org');
+                }} catch (e) {{ orgHeader = null; }}
+                window.__pluginOrgFetchCalls =
+                    window.__pluginOrgFetchCalls || [];
+                window.__pluginOrgFetchCalls.push(
+                    {{url: url, org: orgHeader}}
+                );
+                return window.__originalFetchForOrgSpy.apply(
+                    this, arguments,
+                );
+            }};
+        }}
+        // Reset capture before driving the under-test navigation.
+        window.__pluginOrgFetchCalls = [];
+
+        // Navigate via the SPA router so renderPluginFragment runs and
+        // stamps Autonomy._activePluginOrg.
+        navigateTo({path!r});
+        await new Promise(function (res) {{ setTimeout(res, 1200); }});
+
+        // Plugin-originated fetch — exercise the helper plugin authors
+        // are expected to use. The spy must see the X-Graph-Org header.
+        if (window.Autonomy && window.Autonomy.fetch) {{
+            try {{
+                await window.Autonomy.fetch('/api/version');
+            }} catch (e) {{ /* network errors irrelevant to header check */ }}
+        }}
+        await new Promise(function (res) {{ setTimeout(res, 100); }});
+
+        return JSON.stringify({{
+            calls: window.__pluginOrgFetchCalls || [],
+            active_plugin_org:
+                (window.Autonomy && window.Autonomy._activePluginOrg) || null,
+        }});
+    }} catch (e) {{
+        return JSON.stringify({{error: e.message, stack: e.stack}});
+    }}
+}})();
+"""
+
+
+def _run_async_eval(js_expr: str) -> dict:
+    """Run an async IIFE on the live page; return parsed dict."""
+    result = subprocess.run(
+        ["agent-browser", "--json", "eval", js_expr],
+        capture_output=True, text=True, timeout=20,
+    )
+    stdout = result.stdout.strip()
+    if not stdout:
+        return {}
+    for line in reversed(stdout.split("\n")):
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and "data" in parsed:
+            data = parsed["data"]
+            if isinstance(data, dict) and "result" in data:
+                val = data["result"]
+                if isinstance(val, str):
+                    try:
+                        return json.loads(val)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if isinstance(val, dict):
+                    return val
+                return {}
+    return {}
+
+
+class TestPluginOrgScoping:
+    """L2.B sweep — substrate v1.1 plugin install-org scoping.
+
+    State matrix coverage (bead auto-b9wzl):
+
+    * ``test_plugin_request_carries_manifest_org_header`` — manifest
+      ``org: autonomy`` with no payload override; assert plugin-page
+      fetches stamp ``X-Graph-Org: autonomy``.
+    * ``test_setting_payload_overrides_manifest_org_in_header`` —
+      payload ``{enabled: true, org: anchore}`` overrides manifest org
+      at runtime; ``/api/plugins`` returns ``org: anchore`` and
+      page fetches stamp ``X-Graph-Org: anchore``.
+    * ``test_non_plugin_routes_do_not_carry_plugin_org_header`` —
+      navigating away from a plugin page clears ``_activePluginOrg``;
+      subsequent fetches must omit the header.
+    """
+
+    @pytest.fixture(scope="function", autouse=True)
+    def _restore_plugin_state(self, sweep_server):
+        # Clean both legacy unscoped rows and per-org rows so each test
+        # starts from a known dormant state.
+        _set_plugin_setting(sweep_server["fixture_path"], None)
+        _clear_org_plugin_settings(sweep_server["fixture_path"], "autonomy")
+        _clear_org_plugin_settings(sweep_server["fixture_path"], "anchore")
+        yield
+        _set_plugin_setting(sweep_server["fixture_path"], None)
+        _clear_org_plugin_settings(sweep_server["fixture_path"], "autonomy")
+        _clear_org_plugin_settings(sweep_server["fixture_path"], "anchore")
+
+    def test_plugin_request_carries_manifest_org_header(
+        self, browser, sweep_server,
+    ):
+        # Enable the example plugin in its manifest org (autonomy), no
+        # payload override. /api/plugins must report org=autonomy.
+        _set_plugin_setting_for_org(
+            sweep_server["fixture_path"], "example",
+            {"enabled": True}, org="autonomy",
+        )
+
+        # Bounce through /sessions so app.js refetches /api/plugins.
+        _navigate_and_check("/sessions", "", wait_ms=600)
+
+        # /api/plugins surfaces the effective org.
+        status, body = _http_get(f"{sweep_server['url']}/api/plugins")
+        assert status == 200
+        plugins = json.loads(body).get("plugins", [])
+        by_id = {p["id"]: p for p in plugins}
+        assert "example" in by_id, (
+            f"/api/plugins did not list 'example' when enabled in autonomy: {plugins}"
+        )
+        assert by_id["example"].get("org") == "autonomy", (
+            f"expected org=autonomy in /api/plugins entry; got "
+            f"{by_id['example'].get('org')!r}"
+        )
+
+        # Install spy, navigate, exercise Autonomy.fetch — must carry header.
+        result = _run_async_eval(
+            _PLUGIN_FETCH_SPY_AND_PROBE_TEMPLATE.format(path="/example"),
+        )
+        assert "error" not in result, f"async eval failed: {result}"
+        assert result.get("active_plugin_org") == "autonomy", (
+            f"expected Autonomy._activePluginOrg=autonomy after rendering "
+            f"plugin page; got {result.get('active_plugin_org')!r}"
+        )
+        calls = result.get("calls") or []
+        autonomy_calls = [c for c in calls if c.get("org") == "autonomy"]
+        assert autonomy_calls, (
+            f"No fetch with X-Graph-Org=autonomy observed after navigating "
+            f"to /example. Calls: {calls}"
+        )
+        # Specifically: the Autonomy.fetch helper carried the header.
+        helper_calls = [
+            c for c in autonomy_calls if "/api/version" in (c.get("url") or "")
+        ]
+        assert helper_calls, (
+            f"Autonomy.fetch('/api/version') did not appear with "
+            f"X-Graph-Org=autonomy. Calls: {calls}"
+        )
+
+    def test_setting_payload_overrides_manifest_org_in_header(
+        self, browser, sweep_server,
+    ):
+        # Manifest org = autonomy, payload override → anchore.
+        _set_plugin_setting_for_org(
+            sweep_server["fixture_path"], "example",
+            {"enabled": True, "org": "anchore"}, org="autonomy",
+        )
+
+        _navigate_and_check("/sessions", "", wait_ms=600)
+
+        status, body = _http_get(f"{sweep_server['url']}/api/plugins")
+        assert status == 200
+        plugins = json.loads(body).get("plugins", [])
+        by_id = {p["id"]: p for p in plugins}
+        assert "example" in by_id, (
+            f"/api/plugins did not list 'example' when enabled with override: {plugins}"
+        )
+        assert by_id["example"].get("org") == "anchore", (
+            f"expected org=anchore (override) in /api/plugins entry; got "
+            f"{by_id['example'].get('org')!r}"
+        )
+
+        result = _run_async_eval(
+            _PLUGIN_FETCH_SPY_AND_PROBE_TEMPLATE.format(path="/example"),
+        )
+        assert "error" not in result, f"async eval failed: {result}"
+        assert result.get("active_plugin_org") == "anchore", (
+            f"expected Autonomy._activePluginOrg=anchore (override); got "
+            f"{result.get('active_plugin_org')!r}"
+        )
+        calls = result.get("calls") or []
+        helper_calls = [
+            c for c in calls
+            if "/api/version" in (c.get("url") or "")
+            and c.get("org") == "anchore"
+        ]
+        assert helper_calls, (
+            f"Autonomy.fetch('/api/version') did not carry "
+            f"X-Graph-Org=anchore (override). Calls: {calls}"
+        )
+
+    def test_non_plugin_routes_do_not_carry_plugin_org_header(
+        self, browser, sweep_server,
+    ):
+        # Enable example in autonomy so we can land on a plugin page first.
+        _set_plugin_setting_for_org(
+            sweep_server["fixture_path"], "example",
+            {"enabled": True}, org="autonomy",
+        )
+
+        # Bounce to /sessions first so the next /example navigation actually
+        # triggers route() — navigateTo() short-circuits on identical paths,
+        # which would otherwise let stale _activePluginOrg state from a
+        # prior test linger on the page.
+        _navigate_and_check("/sessions", "", wait_ms=400)
+
+        # Step 1: land on the plugin page so _activePluginOrg gets stamped.
+        first = _run_async_eval(
+            _PLUGIN_FETCH_SPY_AND_PROBE_TEMPLATE.format(path="/example"),
+        )
+        assert first.get("active_plugin_org") == "autonomy", (
+            f"setup precondition: did not stamp autonomy on plugin page "
+            f"({first})"
+        )
+
+        # Step 2: navigate to /sessions, then exercise fetch — header must
+        # NOT be present (route() clears _activePluginOrg).
+        result = _run_async_eval(
+            _PLUGIN_FETCH_SPY_AND_PROBE_TEMPLATE.format(path="/sessions"),
+        )
+        assert "error" not in result, f"async eval failed: {result}"
+        assert result.get("active_plugin_org") in (None, ""), (
+            f"_activePluginOrg leaked after navigating away from plugin: "
+            f"{result.get('active_plugin_org')!r}"
+        )
+        calls = result.get("calls") or []
+        # Specifically: the Autonomy.fetch('/api/version') call from
+        # within /sessions context must not carry the header.
+        helper_calls = [
+            c for c in calls if "/api/version" in (c.get("url") or "")
+        ]
+        assert helper_calls, (
+            f"Autonomy.fetch did not run on /sessions (probe broken?): {calls}"
+        )
+        leaked = [c for c in helper_calls if c.get("org")]
+        assert not leaked, (
+            f"X-Graph-Org leaked into /sessions Autonomy.fetch: {leaked}"
+        )
+
+
 # ── Coordinator-board plugin sweep ───────────────────────────────────
 
 

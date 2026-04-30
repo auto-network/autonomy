@@ -1,5 +1,6 @@
 id: example
 api_version: 1
+org: autonomy
 
 paths:
   - /example

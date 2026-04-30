@@ -190,21 +190,42 @@ def _plugin_badge_color(idx: int) -> str:
     return _PLUGIN_BADGE_PALETTE[idx % len(_PLUGIN_BADGE_PALETTE)]
 
 
-def _plugin_enabled_map(org: str | None = None) -> dict[str, bool]:
+def _plugin_enabled_map() -> dict[str, bool]:
     """Resolve current enable state for every loaded plugin.
+
+    Each plugin's toggle row lives in *its own* ``manifest.org``'s DB
+    — substrate v1.1 scopes per-plugin internally so unscoped browser
+    requests still see the canonical state. Reads are batched per-org
+    so two plugins sharing an install scope make one DB call.
 
     Per-request rather than cached: lets operators flip
     ``dashboard.plugin#1: {enabled: ...}`` without restart, and the
     L2.B sweep tests rely on the same path to drive plugin state via
     fixture toggles.
     """
-    settings = plugin_loader._read_plugin_settings(org=org)
-    return {
-        p.id: plugin_loader.is_enabled(
+    cache: dict[str, dict[str, dict]] = {}
+    out: dict[str, bool] = {}
+    for p in PLUGIN_REGISTRY:
+        manifest_org = p.manifest.org
+        if manifest_org not in cache:
+            cache[manifest_org] = plugin_loader._read_plugin_settings(
+                org=manifest_org,
+            )
+        settings = cache[manifest_org]
+        out[p.id] = plugin_loader.is_enabled(
             p.id, p.plugin_dir, settings, manifest=p.manifest,
         )
-        for p in PLUGIN_REGISTRY
-    }
+    return out
+
+
+def _plugin_effective_org(plugin: plugin_loader.LoadedPlugin) -> str:
+    """Resolve the runtime org for *plugin* — payload override or manifest."""
+    settings = plugin_loader._read_plugin_settings(org=plugin.manifest.org)
+    payload = settings.get(plugin.id) or {}
+    override = payload.get("org")
+    if isinstance(override, str) and override:
+        return override
+    return plugin.manifest.org
 
 
 def _static_version() -> str:
@@ -9681,8 +9702,7 @@ async def api_graph_collab_tag_describe(request):
 
 def _make_plugin_page_handler(plugin_id: str):
     async def handler(request):
-        org = _caller_org(request)
-        if not _plugin_enabled_map(org=org).get(plugin_id):
+        if not _plugin_enabled_map().get(plugin_id):
             return PlainTextResponse("Not Found", status_code=404)
         return HTMLResponse(_load_template("base.html"))
 
@@ -9692,8 +9712,7 @@ def _make_plugin_page_handler(plugin_id: str):
 
 def _make_plugin_fragment_handler(plugin_id: str, template_name: str):
     async def handler(request):
-        org = _caller_org(request)
-        if not _plugin_enabled_map(org=org).get(plugin_id):
+        if not _plugin_enabled_map().get(plugin_id):
             return PlainTextResponse("Not Found", status_code=404)
         return templates.TemplateResponse(request, template_name)
 
@@ -9702,27 +9721,41 @@ def _make_plugin_fragment_handler(plugin_id: str, template_name: str):
 
 
 async def api_plugins(request):
-    """Return plugins enabled in the caller's org with sidebar metadata.
+    """Return enabled plugins with sidebar metadata + their effective org.
 
-    Shape: ``{plugins: [{id, label, path, badge_color, alpine_root}]}``
-    — one entry per currently-enabled plugin. The set may shrink/grow
-    as operators flip ``dashboard.plugin#1`` Settings; the substrate
-    re-evaluates state on every request.
+    Shape: ``{plugins: [{id, label, path, badge_color, alpine_root, org}]}``
+    — one entry per currently-enabled plugin. Each plugin's toggle row
+    is read from *its own* ``manifest.org``'s DB, so unscoped browser
+    requests still see the canonical state (substrate v1.1 fix). The
+    ``org`` field is the runtime install scope: operator override
+    (``payload.org``) when set, else ``manifest.org``. The browser
+    stamps it as ``X-Graph-Org`` on plugin-originated fetches.
     """
-    org = _caller_org(request)
-    settings = plugin_loader._read_plugin_settings(org=org)
+    cache: dict[str, dict[str, dict]] = {}
     out = []
     for idx, p in enumerate(PLUGIN_REGISTRY):
+        manifest_org = p.manifest.org
+        if manifest_org not in cache:
+            cache[manifest_org] = plugin_loader._read_plugin_settings(
+                org=manifest_org,
+            )
+        settings = cache[manifest_org]
         if not plugin_loader.is_enabled(
             p.id, p.plugin_dir, settings, manifest=p.manifest,
         ):
             continue
+        payload = settings.get(p.id) or {}
+        override = payload.get("org")
+        effective_org = (
+            override if isinstance(override, str) and override else manifest_org
+        )
         out.append({
             "id": p.id,
             "label": p.nav_label,
             "path": p.paths[0],
             "badge_color": _plugin_badge_color(idx),
             "alpine_root": p.alpine_root,
+            "org": effective_org,
         })
     return JSONResponse({"plugins": out})
 
