@@ -441,8 +441,19 @@
                     <div class="flex min-w-0 flex-wrap items-center gap-2">
                       <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                             x-text="selectedCommit.commit.short_sha || shortSha(selectedCommit.commit.sha)"></span>
-                      <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
-                            x-text="selectedCommit.row.session_name"></span>
+                      <!-- Session badge — links back to the session viewer
+                           when the session is still live and we know its
+                           project; otherwise renders as a plain badge. -->
+                      <template x-if="selectedCommit.row.session_live && selectedCommit.row.session_project">
+                        <a :href="'/session/' + encodeURIComponent(selectedCommit.row.session_project) + '/' + encodeURIComponent(selectedCommit.row.session_name)"
+                           class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
+                           :title="'Open session viewer: ' + selectedCommit.row.session_name"
+                           x-text="selectedCommit.row.session_name"></a>
+                      </template>
+                      <template x-if="!(selectedCommit.row.session_live && selectedCommit.row.session_project)">
+                        <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
+                              x-text="selectedCommit.row.session_name"></span>
+                      </template>
                       <span class="rounded-full bg-slate-800 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-400"
                             x-text="selectedCommit.commit.date"></span>
                       <template x-if="selectedCommit.total > 1">
@@ -682,8 +693,19 @@
                 <div class="mx-auto max-w-6xl">
                   <div class="relative mb-2 pr-12">
                     <div class="flex min-w-0 flex-wrap items-center gap-2">
-                        <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
-                              x-text="selectedDirtyRow.session_name"></span>
+                        <!-- Session badge — links back to the session viewer
+                             when the session is still live and we know its
+                             project; otherwise renders as a plain badge. -->
+                        <template x-if="selectedDirtyRow.session_live && selectedDirtyRow.session_project">
+                          <a :href="'/session/' + encodeURIComponent(selectedDirtyRow.session_project) + '/' + encodeURIComponent(selectedDirtyRow.session_name)"
+                             class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
+                             :title="'Open session viewer: ' + selectedDirtyRow.session_name"
+                             x-text="selectedDirtyRow.session_name"></a>
+                        </template>
+                        <template x-if="!(selectedDirtyRow.session_live && selectedDirtyRow.session_project)">
+                          <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
+                                x-text="selectedDirtyRow.session_name"></span>
+                        </template>
                         <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
                           <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
                           <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"

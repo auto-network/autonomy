@@ -5403,15 +5403,27 @@ async def _send_dashboard_ui_crosstalk(target_session: str, message: str) -> Non
     )
 
 
-def _session_title_for_tmux(tmux_name: str) -> str:
-    row = dashboard_db.get_session(tmux_name)
-    return ((row or {}).get("label", "") or "").strip()
+def _session_meta_for_tmux(tmux_name: str) -> dict:
+    """Look up a session's title + project in one pass.
+
+    ``project`` lets the worktree review screen build a deeplink back
+    to the page-mode session viewer (``/session/<project>/<tmux>``)
+    for any live row, so the operator can hop from a commit/dirty
+    review straight to the conversation that produced it.
+    """
+    row = dashboard_db.get_session(tmux_name) or {}
+    return {
+        "title": (row.get("label") or "").strip(),
+        "project": (row.get("project") or "").strip(),
+    }
 
 
 def _worktree_state_json(row: WorktreeState) -> dict:
+    meta = _session_meta_for_tmux(row.session_name)
     return {
         "session_name": row.session_name,
-        "session_title": _session_title_for_tmux(row.session_name),
+        "session_title": meta["title"],
+        "session_project": meta["project"],
         "repo_name": row.repo_name,
         "worktree_path": str(row.worktree_path),
         "managed_clone": str(row.managed_clone) if row.managed_clone else None,
