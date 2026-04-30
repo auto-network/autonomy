@@ -151,11 +151,14 @@ class TestDiagSessionsBasics:
         bus = body["bus"]
         for key in [
             "global_seq", "epoch", "epoch_age_s", "subscribers_count",
-            "buffer_entries", "buffer_bytes", "buffer_first_seq",
-            "buffer_last_seq", "buffer_first_ts", "buffer_last_ts",
-            "broadcasts_last_60s", "last_snapshot_path", "last_snapshot_mtime",
+            "buffer_entries", "buffer_bytes", "buffer_max_bytes",
+            "buffer_first_seq", "buffer_last_seq", "buffer_first_ts",
+            "buffer_last_ts", "broadcasts_last_60s",
+            "last_snapshot_path", "last_snapshot_mtime",
         ]:
             assert key in bus, f"missing bus.{key}"
+        from tools.dashboard.event_bus import EventBus
+        assert bus["buffer_max_bytes"] == EventBus._BUFFER_MAX_BYTES
         # The diag broadcast itself counts.
         assert bus["broadcasts_last_60s"] >= 1
         # Per-row shape

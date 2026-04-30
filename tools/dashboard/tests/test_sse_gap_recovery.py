@@ -326,8 +326,8 @@ class GapRecoveryHarness:
         """Write session:messages events while browser is disconnected."""
         _write_session_messages(self.events_path, TEST_SESSION_ID, entries)
 
-    def write_large_events(self, count, size_per_entry=10000):
-        """Write many large events to overflow the 2MB ring buffer."""
+    def write_large_events(self, count, size_per_entry=160000):
+        """Write many large events to overflow the 32MB ring buffer."""
         for i in range(count):
             entry = {
                 "type": "assistant_text",
@@ -512,9 +512,9 @@ def buffer_overflow_recovered(harness):
     # Disconnect
     ab_eval("window._es.close(); return 'disconnected';")
 
-    # Write many large events to overflow the 2MB buffer
-    # Each entry ~10KB, need ~200+ to fill 2MB, then more to evict
-    harness.write_large_events(count=250, size_per_entry=10000)
+    # Write many large events to overflow the 32MB buffer
+    # Each entry ~160KB × 250 = ~40MB > 32MB cap → eviction
+    harness.write_large_events(count=250, size_per_entry=160000)
 
     # Wait for mock event watcher to process all events
     time.sleep(4)

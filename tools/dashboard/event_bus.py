@@ -61,7 +61,7 @@ class _SubscriberMeta:
 
 
 class EventBus:
-    _BUFFER_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
+    _BUFFER_MAX_BYTES = 32 * 1024 * 1024  # 32 MB
 
     def __init__(self) -> None:
         # Global list of subscriber queues — every queue receives every topic.
