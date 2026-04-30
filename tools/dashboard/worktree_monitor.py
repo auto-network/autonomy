@@ -36,17 +36,32 @@ _GITHUB_PROBE_TIMEOUT = 3.0
 _GITHUB_REVIEW_TIMEOUT = 10.0
 
 
-def _degraded_snapshot(*, state: str, reason: str | None) -> dict:
+# Nag modes for the source_control.watch block. The UI maps these onto
+# Silent / Nag All Changes / Nag When Done buttons (settled design
+# 3435e03f). Persistence is in-memory on the monitor for v1; CrossTalk
+# delivery (auto-f2quy-style) is a separate follow-up bead.
+NAG_SILENT = "silent"
+NAG_ALL_CHANGES = "nag_all"
+NAG_WHEN_DONE = "nag_done"
+NAG_MODES = frozenset({NAG_SILENT, NAG_ALL_CHANGES, NAG_WHEN_DONE})
+NAG_DEFAULT = NAG_SILENT
+
+
+def _degraded_snapshot(*, state: str, reason: str | None, watch_mode: str = NAG_DEFAULT) -> dict:
     return {
         "state": state,
         "implementation": "autonomy/github",
         "reason": reason,
         "review": None,
+        "watch": {"mode": watch_mode},
     }
 
 
 async def _fetch_source_control(
-    row: WorktreeState, all_rows: list[WorktreeState],
+    row: WorktreeState,
+    all_rows: list[WorktreeState],
+    *,
+    watch_mode: str = NAG_DEFAULT,
 ) -> dict:
     """Probe + read the row's source_control snapshot for one live row."""
     probe_result = await github_probe.probe_v1(
@@ -57,13 +72,14 @@ async def _fetch_source_control(
         return _degraded_snapshot(
             state=probe_result.state,
             reason=probe_result.reason,
+            watch_mode=watch_mode,
         )
 
     if not row.branch:
         # Probe ready but the worktree has no checked-out branch — we
         # can't ask gh for review state. Surface as degraded with a
         # specific reason rather than pretending review is null.
-        return _degraded_snapshot(state="degraded", reason="no_branch")
+        return _degraded_snapshot(state="degraded", reason="no_branch", watch_mode=watch_mode)
 
     op_result: WorktreeGithubExecResult = await source_control_review_read_v1(
         row.session_name,
@@ -72,7 +88,9 @@ async def _fetch_source_control(
         timeout=int(_GITHUB_REVIEW_TIMEOUT),
     )
     if not op_result.ok:
-        return _degraded_snapshot(state="degraded", reason=op_result.failure)
+        return _degraded_snapshot(
+            state="degraded", reason=op_result.failure, watch_mode=watch_mode,
+        )
 
     review = normalize_review_payload(op_result.stdout)
     return {
@@ -80,6 +98,7 @@ async def _fetch_source_control(
         "implementation": "autonomy/github",
         "reason": None,
         "review": review.to_dict() if review is not None else None,
+        "watch": {"mode": watch_mode},
     }
 
 
@@ -90,6 +109,7 @@ class WorktreeMonitor:
         self._interval_seconds = interval_seconds
         self._cache: list[WorktreeState] = []
         self._source_control_cache: dict[tuple[str, str], dict] = {}
+        self._nag_modes: dict[tuple[str, str], str] = {}
         self._task: asyncio.Task | None = None
         self._lock: asyncio.Lock | None = None
         self._started = False
@@ -101,6 +121,28 @@ class WorktreeMonitor:
     def get_source_control(self, session_name: str, repo_name: str) -> dict | None:
         """Return the cached source_control snapshot for a row, if any."""
         return self._source_control_cache.get((session_name, repo_name))
+
+    def get_nag_mode(self, session_name: str, repo_name: str) -> str:
+        """Return the persisted nag mode for a row (defaults to ``silent``)."""
+        return self._nag_modes.get((session_name, repo_name), NAG_DEFAULT)
+
+    def set_nag_mode(self, session_name: str, repo_name: str, mode: str) -> str:
+        """Persist a nag mode for a row. Raises ValueError on invalid mode.
+
+        Updates the cached source_control snapshot in place when present
+        so the next ``GET /api/worktrees`` reflects the new mode without
+        waiting for the 30s background refresh.
+        """
+        if mode not in NAG_MODES:
+            raise ValueError(
+                f"invalid nag mode: {mode!r}; expected one of {sorted(NAG_MODES)}"
+            )
+        key = (session_name, repo_name)
+        self._nag_modes[key] = mode
+        cached = self._source_control_cache.get(key)
+        if cached is not None:
+            cached["watch"] = {"mode": mode}
+        return mode
 
     async def refresh(self) -> list[WorktreeState]:
         """Force a scan and replace the cache."""
@@ -120,7 +162,13 @@ class WorktreeMonitor:
             return
 
         results = await asyncio.gather(
-            *(_fetch_source_control(row, rows) for row in live_rows),
+            *(
+                _fetch_source_control(
+                    row, rows,
+                    watch_mode=self.get_nag_mode(row.session_name, row.repo_name),
+                )
+                for row in live_rows
+            ),
             return_exceptions=True,
         )
 
@@ -133,7 +181,9 @@ class WorktreeMonitor:
                     row.session_name, row.repo_name, snapshot,
                 )
                 new_cache[key] = _degraded_snapshot(
-                    state="degraded", reason="probe_failed",
+                    state="degraded",
+                    reason="probe_failed",
+                    watch_mode=self.get_nag_mode(*key),
                 )
                 continue
             new_cache[key] = snapshot
