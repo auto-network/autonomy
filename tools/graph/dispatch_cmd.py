@@ -155,7 +155,7 @@ def cmd_dispatch_runs(args):
             label = "(librarian)"
         duration = _format_duration(r.get("duration_secs"))
         decision = r.get("decision") or {}
-        reason = (decision.get("reason", "") if isinstance(decision, dict) else "")[:50]
+        reason = ((decision.get("reason") if isinstance(decision, dict) else None) or "")[:50]
 
         status_col = f"{status:<7}"
         bead_col = f"{label:<12}"
