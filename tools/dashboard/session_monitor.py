@@ -2085,6 +2085,21 @@ class SessionMonitor:
                 tmux_name, jsonl_path, source="reconciliation",
             )
 
+        # graph_source_id reconciler (auto-4jpa8). Backfill empty IDs and
+        # repair drifted ones every tick. Idempotent: rows whose stored ID
+        # already resolves are left alone, and rows whose JSONL hasn't been
+        # ingested yet stay empty until the next pass.
+        try:
+            from tools.dashboard.dao.dashboard_db import reconcile_graph_source_ids
+            repaired = await asyncio.to_thread(reconcile_graph_source_ids)
+            if repaired:
+                logger.info(
+                    "session_monitor: reconciled graph_source_id for %d session(s)",
+                    repaired,
+                )
+        except Exception:
+            logger.exception("session_monitor: graph_source_id reconcile failed")
+
         if resolved:
             await self._broadcast_registry()
         return resolved
@@ -2265,8 +2280,8 @@ class SessionMonitor:
                     )
                     graph_id = result.stdout.strip()
                     if result.returncode == 0 and graph_id:
-                        from tools.dashboard.dao.dashboard_db import update_graph_source
-                        update_graph_source(row["tmux_name"], graph_id)
+                        from tools.dashboard.dao.dashboard_db import set_graph_source_validated
+                        set_graph_source_validated(row["tmux_name"], graph_id)
                         enriched += 1
                 except Exception:
                     pass

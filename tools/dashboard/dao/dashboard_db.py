@@ -297,7 +297,7 @@ def link_and_enrich(tmux_name: str, session_uuid: str, jsonl_path: str, project:
         )
         graph_source_id = result.stdout.strip()
         if result.returncode == 0 and graph_source_id:
-            update_graph_source(tmux_name, graph_source_id)
+            set_graph_source_validated(tmux_name, graph_source_id)
             logger.info("dashboard_db: ENRICH  %s → graph=%s", tmux_name, graph_source_id[:11])
         else:
             logger.warning("dashboard_db: ENRICH failed for %s: %s", tmux_name, result.stderr.strip())
@@ -306,13 +306,149 @@ def link_and_enrich(tmux_name: str, session_uuid: str, jsonl_path: str, project:
 
 
 def update_graph_source(tmux_name: str, graph_source_id: str) -> None:
-    """ENRICH step: set graph_source_id after graph ingestion."""
+    """ENRICH step: set graph_source_id after graph ingestion.
+
+    Raw writer — does not validate that ``graph_source_id`` resolves in any
+    org DB. Callers that received the ID from outside the dashboard process
+    (e.g. ``graph ingest-session`` stdout) should use
+    :func:`set_graph_source_validated` instead so a non-resolving ID is
+    surfaced as a warning.
+    """
     conn = get_conn()
     conn.execute(
         "UPDATE tmux_sessions SET graph_source_id=? WHERE tmux_name=?",
         (graph_source_id, tmux_name),
     )
     conn.commit()
+
+
+# ── graph_source_id reconciler (writer-side fix for auto-4jpa8) ─────────
+
+
+def _resolve_source_in_orgs_by_id(graph_source_id: str) -> bool:
+    """Return True if ``graph_source_id`` resolves to a sources row in any
+    org DB. Used by the registration verification + reconciler to detect
+    drift (non-empty IDs that no org DB has).
+    """
+    if not graph_source_id:
+        return False
+    try:
+        from tools.graph.cross_org import list_org_slugs, open_peer_db
+    except Exception:
+        return False
+    for slug in list_org_slugs():
+        peer = open_peer_db(slug)
+        if peer is None:
+            continue
+        try:
+            row = peer.get_source(graph_source_id)
+        except Exception:
+            row = None
+        if row is not None:
+            return True
+    return False
+
+
+def _resolve_source_id_by_path(jsonl_path: str) -> str | None:
+    """Look up the canonical ``sources.id`` for ``jsonl_path`` across every
+    org DB. Returns the first hit (alphabetical by org slug) or None.
+
+    Mirrors the keying ingestion uses (``sources.file_path = <abs_path>``).
+    """
+    if not jsonl_path:
+        return None
+    try:
+        from tools.graph.cross_org import list_org_slugs, open_peer_db
+    except Exception:
+        return None
+    for slug in list_org_slugs():
+        peer = open_peer_db(slug)
+        if peer is None:
+            continue
+        try:
+            row = peer.get_source_by_path(jsonl_path)
+        except Exception:
+            row = None
+        if row and row.get("id"):
+            return row["id"]
+    return None
+
+
+def set_graph_source_validated(tmux_name: str, graph_source_id: str) -> None:
+    """Set ``graph_source_id`` and log a warning if it doesn't resolve.
+
+    Used by every registration code path (`link_and_enrich`, the seed
+    monitor ENRICH pass, etc.). Empty string is acceptable — the reconciler
+    will fill it. A non-empty ID that no org DB recognises is the bug
+    described in auto-4jpa8 §B; we log a warning so future drift is
+    visible in the runtime log even before the reconciler corrects it.
+    """
+    if graph_source_id and not _resolve_source_in_orgs_by_id(graph_source_id):
+        logger.warning(
+            "dashboard_db: registration wrote non-resolving graph_source_id"
+            " for %s → %s (will be repaired by reconciler)",
+            tmux_name, graph_source_id,
+        )
+    update_graph_source(tmux_name, graph_source_id)
+
+
+def reconcile_graph_source_ids(*, live_only: bool = True) -> int:
+    """Reconcile ``tmux_sessions.graph_source_id`` against the org DBs.
+
+    For every (live, by default) session row with a ``jsonl_path``:
+
+    * If ``graph_source_id`` is empty/NULL, look up the real ID via
+      ``sources.file_path = jsonl_path`` across all org DBs and write it
+      back.
+    * If ``graph_source_id`` is non-empty but doesn't resolve in any org
+      DB (drift), look up the real ID by ``jsonl_path``. If found, replace
+      the stale value.
+    * If the real ID can't be found yet (JSONL not ingested), leave the
+      row alone — the next tick will retry.
+
+    Idempotent. Returns the number of rows repaired this pass.
+
+    This is the writer-side fix for auto-4jpa8: the dashboard's read paths
+    should always trust ``graph_source_id``, so we have to keep it
+    consistent with the org DB the ingester actually wrote into.
+    """
+    conn = get_conn()
+    if live_only:
+        rows = conn.execute(
+            "SELECT tmux_name, graph_source_id, jsonl_path FROM tmux_sessions"
+            " WHERE is_live=1 AND jsonl_path IS NOT NULL AND jsonl_path != ''"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT tmux_name, graph_source_id, jsonl_path FROM tmux_sessions"
+            " WHERE jsonl_path IS NOT NULL AND jsonl_path != ''"
+        ).fetchall()
+    repaired = 0
+    for row in rows:
+        tmux_name = row["tmux_name"]
+        gid = row["graph_source_id"] or ""
+        jpath = row["jsonl_path"]
+        if gid and _resolve_source_in_orgs_by_id(gid):
+            # Already correct — no cross-org by_path lookup needed.
+            continue
+        real_id = _resolve_source_id_by_path(jpath)
+        if not real_id:
+            # JSONL not yet ingested. Try again next tick.
+            continue
+        if real_id == gid:
+            # Defensive: file_path resolved to the same id we already store.
+            # _resolve_source_in_orgs_by_id said no, so this likely means
+            # the existing row is fine but the org-scan path threw — leave
+            # it. Skip the write.
+            continue
+        # Repair: drift or empty → real_id.
+        update_graph_source(tmux_name, real_id)
+        logger.info(
+            "dashboard_db: reconcile %s graph_source_id %s → %s",
+            tmux_name, gid[:11] if gid else "(empty)", real_id[:11],
+        )
+        repaired += 1
+    return repaired
 
 
 def update_tail_state(
