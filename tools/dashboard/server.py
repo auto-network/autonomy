@@ -560,74 +560,79 @@ AGENT_RUNS_DIR = Path(os.environ.get(
 ))
 
 
+def _resolve_agentic_identity(agentic_source_id: str | None) -> dict:
+    """Resolve agentic identity fields from the agentic source row.
+
+    The agentic source's own title is the action's display label
+    (e.g. "Update Title & Summary"); the asset the action operates on
+    is referenced by ``metadata.target_source_id`` and has its own
+    title. Returns a dict with: ``action_label``, ``member_key``,
+    ``target_source_id``, ``target_org``, ``dispatched_by_session``,
+    ``title`` (target asset's title, or action_label as fallback).
+
+    Single source of truth used by ``_enrich_dispatch_runs``,
+    ``_enrich_timeline_agentic``, and the live-active list builder so
+    every code path that surfaces an agentic dispatch resolves
+    identity the same way.
+    """
+    out: dict = {
+        "action_label": None,
+        "member_key": None,
+        "target_source_id": None,
+        "target_org": None,
+        "dispatched_by_session": None,
+        "title": None,
+    }
+    if not agentic_source_id:
+        return out
+    try:
+        src = graph_ops.get_source(agentic_source_id)
+    except Exception:  # noqa: BLE001
+        src = None
+    if not src:
+        return out
+    out["action_label"] = src.get("title") or None
+    meta = src.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+    out["member_key"] = meta.get("member_key") or None
+    out["target_source_id"] = meta.get("target_source_id") or None
+    out["target_org"] = meta.get("target_org") or None
+    out["dispatched_by_session"] = meta.get("dispatched_by_session") or None
+    if out["target_source_id"]:
+        try:
+            tsrc = graph_ops.get_source(out["target_source_id"])
+        except Exception:  # noqa: BLE001
+            tsrc = None
+        if tsrc and tsrc.get("title"):
+            out["title"] = str(tsrc["title"])
+    if not out["title"]:
+        out["title"] = out["action_label"]
+    return out
+
+
 def _enrich_dispatch_runs(runs: list[dict]) -> None:
     """Add smoke_result and librarian_review to dispatch run dicts in-place."""
     # Smoke results — read from each run's output directory
     for run in runs:
         run["smoke_result"] = _read_smoke_result(run.get("_output_dir") or None)
 
-    # Agentic identity: populate title (= action label), member_key, and
-    # target_source_id from the agentic source row's metadata. The
-    # dispatch_runs row only carries ``agentic_source_id``; everything
-    # else lives on the source. Front-end uses these for card display
-    # ("Update Title & Summary on <asset>") and routing
-    # (/graph/<target_source_id> when the operator wants to see the
-    # asset, /graph/<agentic_source_id> for the agent's session).
-    agentic_runs = [
-        r for r in runs
-        if r.get("kind") == "agentic" and r.get("agentic_source_id")
-    ]
-    target_ids: set[str] = set()
-    for run in agentic_runs:
-        try:
-            src = graph_ops.get_source(run["agentic_source_id"])
-        except Exception:  # noqa: BLE001
-            src = None
-        if not src:
+    # Agentic identity: resolve action_label / target_* / sender / title
+    # via the shared helper so all dispatch-surfacing endpoints agree.
+    for run in runs:
+        if run.get("kind") != "agentic" or not run.get("agentic_source_id"):
             continue
-        # The agentic source row's title was set to the action's display
-        # label at insert_agentic_session time (e.g. "Update Title &
-        # Summary"). We surface that as ``action_label`` and reserve
-        # ``title`` for the target asset's own title (set below) so the
-        # card reads "<action_label> on <title>".
-        run["action_label"] = src.get("title") or None
-        meta = src.get("metadata") or {}
-        if isinstance(meta, str):
-            try:
-                meta = json.loads(meta)
-            except (json.JSONDecodeError, TypeError):
-                meta = {}
-        run["member_key"] = meta.get("member_key") or None
-        run["target_source_id"] = meta.get("target_source_id") or None
-        run["target_org"] = meta.get("target_org") or None
-        # Sender provenance: who initiated the dispatch. Browser-initiated
-        # dispatches set this to the literal "dashboard" sentinel; session-
-        # initiated dispatches carry the originating session's tmux name.
-        # Surfacing it here lets the front-end render the sender as a
-        # clickable badge that routes back to that session.
-        run["dispatched_by_session"] = meta.get("dispatched_by_session") or None
-        if run["target_source_id"]:
-            target_ids.add(run["target_source_id"])
-
-    # Resolve target-asset titles in one pass so each agentic card can
-    # render "<action> on <asset_title>". One graph_ops.get_source call
-    # per unique target — typically a small set per page.
-    target_titles: dict[str, str] = {}
-    for tid in target_ids:
-        try:
-            tsrc = graph_ops.get_source(tid)
-        except Exception:  # noqa: BLE001
-            tsrc = None
-        if tsrc and tsrc.get("title"):
-            target_titles[tid] = str(tsrc["title"])
-    for run in agentic_runs:
-        tid = run.get("target_source_id")
-        if tid and tid in target_titles:
-            run["title"] = target_titles[tid]
-        elif not run.get("title"):
-            # Fallback to the action label so the card never displays
-            # an empty title.
-            run["title"] = run.get("action_label")
+        ident = _resolve_agentic_identity(run["agentic_source_id"])
+        run["action_label"] = ident["action_label"]
+        run["member_key"] = ident["member_key"]
+        run["target_source_id"] = ident["target_source_id"]
+        run["target_org"] = ident["target_org"]
+        run["dispatched_by_session"] = ident["dispatched_by_session"]
+        if ident["title"]:
+            run["title"] = ident["title"]
 
     # Librarian entries — read review from their own output_dir
     for run in runs:
@@ -1089,59 +1094,23 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
 
 
 def _enrich_timeline_agentic(entries: list[dict]) -> None:
-    """Populate the agentic-only timeline fields in-place.
-
-    For each ``kind='agentic'`` entry, look up the agentic source by
-    ``agentic_source_id`` (set in :func:`_row_to_timeline_entry`) and
-    pull ``member_key`` / ``target_source_id`` / ``target_org`` from
-    its metadata. Then resolve the target asset's title once per
-    unique target so each card can render "<asset_title>" instead of
-    a blank string. ``action_label`` mirrors the agentic source row's
-    own title (the action's display label).
-    """
-    agentic_entries = [
-        e for e in entries
-        if e.get("kind") == "agentic" and e.get("agentic_source_id")
-    ]
-    if not agentic_entries:
-        return
-
-    target_ids: set[str] = set()
-    for entry in agentic_entries:
-        try:
-            src = graph_ops.get_source(entry["agentic_source_id"])
-        except Exception:  # noqa: BLE001
-            src = None
-        if not src:
+    """Populate the agentic-only timeline fields in-place via the
+    shared identity resolver. See :func:`_resolve_agentic_identity`."""
+    for entry in entries:
+        if entry.get("kind") != "agentic" or not entry.get("agentic_source_id"):
             continue
-        entry["action_label"] = src.get("title") or None
-        meta = src.get("metadata") or {}
-        if isinstance(meta, str):
-            try:
-                meta = json.loads(meta)
-            except (json.JSONDecodeError, TypeError):
-                meta = {}
-        entry["member_key"] = meta.get("member_key") or None
-        entry["target_source_id"] = meta.get("target_source_id") or None
-        entry["target_org"] = meta.get("target_org") or None
-        entry["dispatched_by_session"] = meta.get("dispatched_by_session") or None
-        if entry["target_source_id"]:
-            target_ids.add(entry["target_source_id"])
-
-    target_titles: dict[str, str] = {}
-    for tid in target_ids:
-        try:
-            tsrc = graph_ops.get_source(tid)
-        except Exception:  # noqa: BLE001
-            tsrc = None
-        if tsrc and tsrc.get("title"):
-            target_titles[tid] = str(tsrc["title"])
-    for entry in agentic_entries:
-        tid = entry.get("target_source_id")
-        if tid and tid in target_titles:
-            entry["title"] = target_titles[tid]
+        ident = _resolve_agentic_identity(entry["agentic_source_id"])
+        entry["action_label"] = ident["action_label"]
+        entry["member_key"] = ident["member_key"]
+        entry["target_source_id"] = ident["target_source_id"]
+        entry["target_org"] = ident["target_org"]
+        entry["dispatched_by_session"] = ident["dispatched_by_session"]
+        # Always overwrite title for agentic entries so live and historical
+        # views agree even if the upstream row had a stale or wrong value.
+        if ident["title"]:
+            entry["title"] = ident["title"]
         elif not entry.get("title"):
-            entry["title"] = entry.get("action_label") or ""
+            entry["title"] = ""
 
 
 def _parse_review_summary(text: str) -> dict | None:
@@ -6539,31 +6508,26 @@ async def _collect_dispatch_data() -> dict:
                 "image": run.get("image"),
                 "status": None,
             }
-        # Agentic runs: id is the run's container_name (== run.id), title from
-        # the dispatch_runs row (set by the dashboard endpoint at launch).
+        # Agentic runs: id is the run's container_name (== run.id); title,
+        # action_label, target_*, and sender resolve via the shared agentic
+        # identity helper so live and historical views match.
         # Librarian runs: use dir name as id, synthetic title, no priority.
+        agentic_ident: dict | None = None
         if kind == "agentic":
             effective_id = run.get("id", "")
-            # For agentic runs the dispatch_runs row has no title column.
-            # Fixtures may stuff a "title" key on the row; otherwise resolve
-            # from the agentic source (set at insert_agentic_session time).
-            effective_title = run.get("title") or ""
-            if not effective_title and agentic_source_id:
-                try:
-                    src_row = graph_ops.get_source(agentic_source_id)
-                    if src_row:
-                        effective_title = src_row.get("title") or ""
-                except Exception:
-                    pass
-            if not effective_title:
-                effective_title = run.get("id", "")
+            agentic_ident = _resolve_agentic_identity(agentic_source_id)
+            effective_title = (
+                run.get("title")
+                or agentic_ident["title"]
+                or run.get("id", "")
+            )
         elif librarian_type:
             effective_id = bead_id or run.get("id", "")
             effective_title = f"Librarian: {librarian_type}"
         else:
             effective_id = bead_id or run.get("id", "")
             effective_title = meta.get("title") or bead_id
-        active.append({
+        active_row = {
             "id": effective_id,
             "title": effective_title,
             "priority": meta.get("priority") if not (librarian_type or kind == "agentic") else None,
@@ -6588,7 +6552,14 @@ async def _collect_dispatch_data() -> dict:
                 datetime.fromisoformat(run["last_activity"]).replace(tzinfo=timezone.utc).timestamp()
                 if run.get("last_activity") else None
             ),
-        })
+        }
+        if agentic_ident is not None:
+            active_row["action_label"] = agentic_ident["action_label"]
+            active_row["member_key"] = agentic_ident["member_key"]
+            active_row["target_source_id"] = agentic_ident["target_source_id"]
+            active_row["target_org"] = agentic_ident["target_org"]
+            active_row["dispatched_by_session"] = agentic_ident["dispatched_by_session"]
+        active.append(active_row)
 
     # Exclude running beads from waiting/blocked to avoid double-counting
     running_ids = set(running_bead_ids)

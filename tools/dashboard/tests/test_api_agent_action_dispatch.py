@@ -600,6 +600,81 @@ def test_dispatch_canonicalises_prefix_asset_id(client, per_org_universe):
     assert md["target_source_id"] == asset_id
 
 
+@pytest.mark.asyncio
+async def test_live_active_resolves_agentic_target_title(
+    test_app, per_org_universe, isolated_dispatch_db,
+    patch_launch_session, reset_idempotency_cache,
+):
+    """The SSE-fed live-active list (built by ``_collect_dispatch_data``)
+    must resolve the *target asset* title for ``kind='agentic'`` rows —
+    not the agentic source's own title (which is the action label
+    "Update Title & Summary").
+
+    Regression: production /dispatch page was rendering
+    "Update Title & Summary" as the bold title for a RUNNING agentic
+    because the live-active builder only read the agentic source's
+    own title and never followed ``metadata.target_source_id`` to
+    the asset. ``/api/dispatch/runs`` did the lookup correctly via
+    ``_enrich_dispatch_runs``; the live builder didn't. Now both
+    paths share ``_resolve_agentic_identity``.
+    """
+    # Reload the dao reader so its module-level DB_PATH picks up
+    # ``isolated_dispatch_db``'s tmp path. Without this, the writer
+    # (agents.dispatch_db) writes to the per-test DB while the reader
+    # (tools.dashboard.dao.dispatch) reads from conftest's pid-tmp DB,
+    # so the live-active builder finds zero rows.
+    importlib.reload(__import__("tools.dashboard.dao.dispatch", fromlist=["x"]))
+
+    asset_title = "Worktrees: per-SHA terminal-commits cache for squash-merge closure"
+    asset_id = "deadbeef-0000-0000-0000-000000000123"
+    _insert_note_source(org="autonomy", source_id=asset_id, title=asset_title)
+
+    # Dispatch via the API so we get a real agentic source row + a
+    # real dispatch_runs row (kind='agentic', no title column).
+    with TestClient(test_app) as client:
+        r = client.post(
+            "/api/agent-actions/dispatch",
+            json={"member_key": "note.update-summary", "asset_id": asset_id},
+        )
+    assert r.status_code == 201, r.json()
+    agentic_source_id = r.json()["agentic_source_id"]
+
+    # Sanity: the agentic source's own title is the action label, not
+    # the asset title. This is the trap the live builder fell into.
+    src = graph_ops.get_source(agentic_source_id)
+    assert src["title"] == "Update Title & Summary", (
+        f"agentic source's own title should be the action label; got {src['title']!r}"
+    )
+
+    # Drive the live-active builder directly. No HTTP — SSE consumers
+    # call this function and read its output.
+    from tools.dashboard import server as srvmod
+    payload = await srvmod._collect_dispatch_data()
+    active = payload.get("active") or []
+    matches = [
+        a for a in active
+        if a.get("kind") == "agentic"
+        and a.get("agentic_source_id") == agentic_source_id
+    ]
+    assert len(matches) == 1, (
+        f"agentic row missing from live-active payload; got: {active!r}"
+    )
+    row = matches[0]
+    # Title resolves to the *target asset*, not the action label.
+    assert row["title"] == asset_title, (
+        f"live-active title must be target asset title; got {row['title']!r}. "
+        "If this regresses, _collect_dispatch_data is reading the agentic "
+        "source's own title (the action_label) and not following "
+        "metadata.target_source_id to the asset."
+    )
+    # Agentic identity fields surfaced for downstream rendering/routing.
+    assert row.get("action_label") == "Update Title & Summary"
+    assert row.get("target_source_id") == asset_id
+    assert row.get("target_org") == "autonomy"
+    assert row.get("member_key") == "note.update-summary"
+    assert row.get("dispatched_by_session") == "dashboard"
+
+
 # ── Helpers ────────────────────────────────────────────────
 
 
