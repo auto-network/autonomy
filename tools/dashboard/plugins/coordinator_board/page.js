@@ -57,6 +57,11 @@ function coordinatorBoard() {
     lastAction: '',
     operatorDraft: '',
     refreshState: 'idle',
+    // Latest canvas member's key — the ``<coord-session>`` that owns the
+    // currently-rendered canvas. Captured on every canvas read so the
+    // canvas-corner refresh button can target the coordinator session
+    // without a separate server contract.
+    _coordSession: '',
     wins: 0,
     winCelebrating: false,
     // Transient — drives the picked-pill `.qr-confirm` + `.qr-check-pop`
@@ -133,7 +138,9 @@ function coordinatorBoard() {
         this._readSet(SET_DOCS),
       ]);
 
-      this.data.canvas = this._normalizeCanvas(this._latest(canvas));
+      const latestCanvas = this._latest(canvas);
+      this._coordSession = (latestCanvas && latestCanvas.key) || '';
+      this.data.canvas = this._normalizeCanvas(latestCanvas);
       this.data.operatorMessage = this._normalizeOperatorMessage(this._latest(op));
       this.data.tiles = (tiles || []).map(m => this._normalizeTile(m));
       this.data.threads = (threads || []).map(m => this._normalizeThread(m));
@@ -151,7 +158,11 @@ function coordinatorBoard() {
         year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit', minute: '2-digit',
       });
-      if (this.refreshState !== 'idle') this.refreshState = 'idle';
+      // Reset only the in-flight 'pending' marker; 'requested' must
+      // persist after a canvas-wide refresh write so the operator's
+      // tap is reflected even though loadBoard typically completes
+      // before the decision row reaches the coordinator session.
+      if (this.refreshState === 'pending') this.refreshState = 'idle';
     },
 
     _subscribeSettings() {
@@ -173,7 +184,9 @@ function coordinatorBoard() {
 
     async _refreshCanvas() {
       const members = await this._readSet(SET_CANVAS);
-      this.data.canvas = this._normalizeCanvas(this._latest(members));
+      const latest = this._latest(members);
+      this._coordSession = (latest && latest.key) || '';
+      this.data.canvas = this._normalizeCanvas(latest);
     },
 
     async _refreshOperatorMessage() {
@@ -678,10 +691,30 @@ function coordinatorBoard() {
       }
       if (this.refreshState !== 'idle') return;
       this.refreshState = 'pending';
-      setTimeout(() => {
-        if (this.refreshState === 'pending') this.refreshState = 'requested';
-      }, 700);
+      // Local re-read so the operator immediately sees any newer data
+      // already published to Settings (kicked off, not awaited).
       this.loadBoard();
+      // Write a decision row so the mediator forwards "operator
+      // requests a canvas refresh" to the coordinator session. The
+      // canvas is keyed by ``<coord-session>``; ``_coordSession`` is
+      // the latest canvas member's key, captured on every canvas read.
+      const coordSession = this._coordSession;
+      if (coordSession) {
+        const key = (window.crypto && window.crypto.randomUUID)
+          ? window.crypto.randomUUID()
+          : `dec-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        this._writeSetting(SET_DECISION, key, {
+          tile_id: coordSession,
+          kind: 'refresh_request',
+          target_session: coordSession,
+          sentAt: new Date().toISOString(),
+        });
+      }
+      // Settles to 'requested' synchronously after the write is
+      // queued, regardless of loadBoard's completion timing — the
+      // operator dismisses by tapping again (the `requested → idle`
+      // branch above).
+      this.refreshState = 'requested';
     },
 
     renderInlineLinks(s) {
