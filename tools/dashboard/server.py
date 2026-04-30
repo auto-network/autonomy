@@ -109,7 +109,95 @@ from tools.graph import ops as graph_ops
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
+PLUGINS_DIR = Path(__file__).parent / "plugins"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+
+
+# ── Plugin substrate ──────────────────────────────────────────
+# See bead auto-a79f6 + design note graph://f77a5415-04f.
+
+from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
+
+# Load every valid plugin (regardless of Setting state) so route
+# registration covers plugins that operators may flip on at runtime.
+# Per-request handlers gate via ``_plugin_enabled_map``; plugins
+# disabled at request time return 404 and are excluded from
+# ``/api/plugins``.
+PLUGIN_REGISTRY: list[plugin_loader.LoadedPlugin] = plugin_loader.load_all(
+    plugins_dir=PLUGINS_DIR,
+)
+
+
+def _build_plugin_jinja_loader(registry):
+    """Resolve `plugins/<id>/<file>` template paths to each plugin's dir.
+
+    Plugin directory names may not match the plugin id (e.g. shipped
+    sample lives under `plugins/_example/` but its id is `example`), so
+    a custom loader is needed instead of bolting `PLUGINS_DIR` onto the
+    Jinja search path.
+    """
+    from jinja2 import BaseLoader, TemplateNotFound
+
+    class _PluginTemplateLoader(BaseLoader):
+        def __init__(self, registry_):
+            self._registry = list(registry_)
+
+        def get_source(self, environment, template):
+            if not template.startswith("plugins/"):
+                raise TemplateNotFound(template)
+            rest = template[len("plugins/"):]
+            plugin_id, _, rel_path = rest.partition("/")
+            if not rel_path:
+                raise TemplateNotFound(template)
+            plugin = next(
+                (p for p in self._registry if p.id == plugin_id), None,
+            )
+            if plugin is None:
+                raise TemplateNotFound(template)
+            file_path = plugin.plugin_dir / rel_path
+            if not file_path.is_file():
+                raise TemplateNotFound(template)
+            mtime = file_path.stat().st_mtime
+            source = file_path.read_text(encoding="utf-8")
+            return source, str(file_path), lambda: file_path.stat().st_mtime == mtime
+
+    return _PluginTemplateLoader(registry)
+
+
+if PLUGIN_REGISTRY:
+    from jinja2 import ChoiceLoader as _PluginChoiceLoader
+    templates.env.loader = _PluginChoiceLoader([
+        templates.env.loader,
+        _build_plugin_jinja_loader(PLUGIN_REGISTRY),
+    ])
+
+
+# Substrate picks sidebar badge colors round-robin from a fixed palette.
+# Plugins do not get a say in their badge color (design note: "Dashboard
+# theming concern; substrate picks").
+_PLUGIN_BADGE_PALETTE = (
+    "indigo", "green", "purple", "amber", "blue", "pink", "gray",
+)
+
+
+def _plugin_badge_color(idx: int) -> str:
+    return _PLUGIN_BADGE_PALETTE[idx % len(_PLUGIN_BADGE_PALETTE)]
+
+
+def _plugin_enabled_map(org: str | None = None) -> dict[str, bool]:
+    """Resolve current enable state for every loaded plugin.
+
+    Per-request rather than cached: lets operators flip
+    ``dashboard.plugin#1: {enabled: ...}`` without restart, and the
+    L2.B sweep tests rely on the same path to drive plugin state via
+    fixture toggles.
+    """
+    settings = plugin_loader._read_plugin_settings(org=org)
+    return {
+        p.id: plugin_loader.is_enabled(p.id, p.plugin_dir, settings)
+        for p in PLUGIN_REGISTRY
+    }
+
 
 def _static_version() -> str:
     import time as _time
@@ -6623,6 +6711,23 @@ def _count_streams() -> int:
     return graph_ops.count_active_streams()
 
 
+def _collect_plugin_badges() -> dict[str, dict]:
+    """Walk the plugin registry, call each declared `badge_counter`, and
+    namespace the result under ``plugins.<id>.badge``. Failures are
+    logged but never propagate — a broken plugin badge does not take
+    the dispatch watcher down.
+    """
+    out: dict[str, dict] = {}
+    for p in PLUGIN_REGISTRY:
+        if p.badge_counter is None:
+            continue
+        try:
+            out[p.id] = {"badge": p.badge_counter()}
+        except Exception:
+            logger.exception("[plugin %s] badge_counter raised", p.id)
+    return out
+
+
 def _count_worktrees() -> dict[str, int]:
     """Count pending worktree stacks and dirty worktrees from the cached monitor."""
     rows = worktree_monitor.get_all()
@@ -6688,6 +6793,7 @@ async def _dispatch_watcher():
                 "worktrees_with_commits": worktree_counts.get("with_commits", 0),
                 "worktrees_with_changes": worktree_counts.get("with_changes", 0),
                 "stream_count": stream_count,
+                "plugins": _collect_plugin_badges(),
             }
             await event_bus.broadcast("dispatch", dispatch_data)
             await event_bus.broadcast("nav", nav_data)
@@ -9391,6 +9497,75 @@ async def api_graph_collab_tag_describe(request):
     return JSONResponse({"ok": True, "output": msg})
 
 
+# ── Plugin route handlers ─────────────────────────────────────
+
+
+def _make_plugin_page_handler(plugin_id: str):
+    async def handler(request):
+        org = _caller_org(request)
+        if not _plugin_enabled_map(org=org).get(plugin_id):
+            return PlainTextResponse("Not Found", status_code=404)
+        return HTMLResponse(_load_template("base.html"))
+
+    handler.__name__ = f"page_plugin_{plugin_id}"
+    return handler
+
+
+def _make_plugin_fragment_handler(plugin_id: str, template_name: str):
+    async def handler(request):
+        org = _caller_org(request)
+        if not _plugin_enabled_map(org=org).get(plugin_id):
+            return PlainTextResponse("Not Found", status_code=404)
+        return templates.TemplateResponse(request, template_name)
+
+    handler.__name__ = f"page_plugin_{plugin_id}_fragment"
+    return handler
+
+
+async def api_plugins(request):
+    """Return plugins enabled in the caller's org with sidebar metadata.
+
+    Shape: ``{plugins: [{id, label, path, badge_color, alpine_root}]}``
+    — one entry per currently-enabled plugin. The set may shrink/grow
+    as operators flip ``dashboard.plugin#1`` Settings; the substrate
+    re-evaluates state on every request.
+    """
+    org = _caller_org(request)
+    settings = plugin_loader._read_plugin_settings(org=org)
+    out = []
+    for idx, p in enumerate(PLUGIN_REGISTRY):
+        if not plugin_loader.is_enabled(p.id, p.plugin_dir, settings):
+            continue
+        out.append({
+            "id": p.id,
+            "label": p.nav_label,
+            "path": p.paths[0],
+            "badge_color": _plugin_badge_color(idx),
+            "alpine_root": p.alpine_root,
+        })
+    return JSONResponse({"plugins": out})
+
+
+def _build_plugin_routes() -> list:
+    """Generate page shell, fragment, api, and static routes per plugin."""
+    out: list = []
+    for p in PLUGIN_REGISTRY:
+        for path in p.paths:
+            out.append(Route(path, _make_plugin_page_handler(p.id)))
+        out.append(Route(
+            f"/pages/{p.id}",
+            _make_plugin_fragment_handler(p.id, f"plugins/{p.id}/{p.template}"),
+        ))
+        if p.routes:
+            out.extend(p.routes)
+        out.append(Mount(
+            f"/static/plugins/{p.id}",
+            app=StaticFiles(directory=str(p.plugin_dir)),
+            name=f"plugin-static-{p.id}",
+        ))
+    return out
+
+
 # ── App ───────────────────────────────────────────────────────
 
 routes = [
@@ -9610,7 +9785,11 @@ routes = [
     # Backwards compat redirects
     Route("/experiments/{id}", page_experiments_redirect),
 
-    # Static
+    # Plugin substrate
+    Route("/api/plugins", api_plugins),
+    *_build_plugin_routes(),
+
+    # Static (catch-all — plugin static mounts above take precedence)
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
 ]
 

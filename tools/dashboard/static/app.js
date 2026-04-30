@@ -1387,6 +1387,81 @@ async function checkPendingDesigns() {
   } catch(e) {}
 }
 
+// ── Plugin substrate ─────────────────────────────────────────
+// `Autonomy.plugins` mirrors /api/plugins. The router asks
+// `Autonomy.matchPlugin(path)` first; legacy if/else ladder runs only
+// when no plugin claims the path. See bead auto-a79f6.
+
+window.Autonomy = window.Autonomy || {};
+window.Autonomy.plugins = [];
+
+window.Autonomy.refreshPlugins = async function () {
+  try {
+    const res = await fetch('/api/plugins');
+    if (!res.ok) {
+      window.Autonomy.plugins = [];
+      return [];
+    }
+    const data = await res.json();
+    window.Autonomy.plugins = Array.isArray(data.plugins) ? data.plugins : [];
+    return window.Autonomy.plugins;
+  } catch (e) {
+    window.Autonomy.plugins = [];
+    return [];
+  }
+};
+
+window.Autonomy.matchPlugin = function (path) {
+  const list = window.Autonomy.plugins || [];
+  for (const p of list) {
+    if (path === p.path || path.startsWith(p.path + '/')) {
+      return p;
+    }
+  }
+  return null;
+};
+
+function _renderSidebarPlugins() {
+  const slot = document.getElementById('sidebar-plugins');
+  if (!slot) return;
+  slot.innerHTML = '';
+  for (const p of window.Autonomy.plugins || []) {
+    const a = document.createElement('a');
+    a.href = p.path;
+    a.className = 'nav-link';
+    a.dataset.page = p.id;
+    a.setAttribute('onclick', 'closeSidebar()');
+    a.textContent = p.label + ' ';
+    const badge = document.createElement('span');
+    badge.id = `badge-plugin-${p.id}`;
+    badge.dataset.testid = `badge-plugin-${p.id}`;
+    badge.className = `nav-badge nav-badge-${p.badge_color || 'gray'}`;
+    a.appendChild(badge);
+    slot.appendChild(a);
+  }
+}
+
+async function renderPluginFragment(plugin) {
+  pageTitle.textContent = plugin.label;
+  const fragmentUrl = `/pages/${plugin.id}`;
+  let html;
+  if (_fragmentCache.has(fragmentUrl)) {
+    html = _fragmentCache.get(fragmentUrl);
+  } else {
+    const res = await fetch(fragmentUrl);
+    if (!res.ok) {
+      content.innerHTML = '<div class="text-gray-400">Page not found</div>';
+      return;
+    }
+    html = await res.text();
+    _fragmentCache.set(fragmentUrl, html);
+  }
+  content.innerHTML = html;
+  if (window.Alpine) {
+    Alpine.initTree(content.firstElementChild);
+  }
+}
+
 // ── Router ───────────────────────────────────────────────────
 
 function navigateTo(path) {
@@ -1398,6 +1473,8 @@ function navigateTo(path) {
 
 async function route() {
   await _checkVersion();
+  await window.Autonomy.refreshPlugins();
+  _renderSidebarPlugins();
   const path = window.location.pathname;
   const isTerminalPage = path === '/terminal' || path.startsWith('/terminal/');
   const isSessionViewPage = /^\/session\/[^/]+\/.+$/.test(path);
@@ -1447,7 +1524,11 @@ async function route() {
     : path === '/streams' ? 'Search streams...'
     : 'Search graph...';
 
-  if (path === '/' || path === '/beads') {
+  // Plugin-aware routing — check the substrate before the legacy ladder.
+  const matchedPlugin = window.Autonomy.matchPlugin(path);
+  if (matchedPlugin) {
+    renderPluginFragment(matchedPlugin);
+  } else if (path === '/' || path === '/beads') {
     renderBeadsFragment();
   } else if (path.startsWith('/dispatch/trace/')) {
     renderTraceFragment();
@@ -1672,5 +1753,19 @@ function showToast(message, type) {
   });
 })();
 
-// Initial route
-route();
+// Initial plugin script injection — fetched once at boot. Each enabled
+// plugin's page.js is loaded as a <script> tag, so its
+// `Alpine.data('<alpine_root>', ...)` factory is registered before the
+// router renders any plugin fragment.
+(async () => {
+  const plugins = await window.Autonomy.refreshPlugins();
+  for (const p of plugins) {
+    if (document.querySelector(`script[data-plugin-id="${p.id}"]`)) continue;
+    const script = document.createElement('script');
+    script.src = `/static/plugins/${p.id}/page.js`;
+    script.dataset.pluginId = p.id;
+    document.body.appendChild(script);
+  }
+  _renderSidebarPlugins();
+  route();
+})();
