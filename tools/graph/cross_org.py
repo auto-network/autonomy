@@ -224,26 +224,69 @@ def rrf_merge(
     first-seen row's metadata (so own-org data beats peer snippets for
     content shape).
 
+    Round 7l source-aware behaviour: when ``key='source_id'`` (or the
+    rows expose a ``source_id`` field for any other key choice that
+    repeats), all rows belonging to a surviving source are preserved in
+    the output, in their original per-org order. The source's RRF score
+    is computed once per (org, source) pair using the source's *first
+    appearance* as the rank position — so head + excerpt rows from the
+    same source contribute exactly once to a score, then ride the
+    source's slot together. ``LIMIT`` applies at the source level
+    (distinct keys), not the row level.
+
     Own-org list is boosted by :data:`OWN_ORG_BOOST`. Top ``limit``
-    rows returned.
+    sources returned, with all their rows in tow.
     """
+    # Per-source bookkeeping: {key: {"score": float, "rows": [...], "org": str}}
+    # Key insertion order is preserved across orgs so the first org to
+    # surface a source pins its row metadata (= own-org wins on ties,
+    # matching pre-Round-7l behaviour).
     scored: dict[str, dict[str, Any]] = {}
     for org_slug, results in lists:
         boost = OWN_ORG_BOOST if org_slug == own_org else 1.0
-        for rank, row in enumerate(results, start=1):
+        # Within ONE org's list, group rows by source key in their order
+        # of first appearance. Rank-position (1-based) is computed over
+        # *distinct sources*, not raw rows — so a source's RRF score is
+        # set by its position among distinct sources, not by how many
+        # rows it emits. That keeps the source-aware contract intact.
+        seen_in_org: dict[str, list[dict]] = {}
+        order_in_org: list[str] = []
+        for row in results:
             k = row.get(key)
             if not k:
                 continue
+            if k not in seen_in_org:
+                seen_in_org[k] = []
+                order_in_org.append(k)
+            seen_in_org[k].append(row)
+        for rank, k in enumerate(order_in_org, start=1):
             contribution = boost / (RRF_K + rank)
-            if k not in scored:
-                row_copy = dict(row)
-                row_copy.setdefault("org", org_slug)
-                row_copy["rrf_score"] = contribution
-                scored[k] = row_copy
+            rows_for_source = seen_in_org[k]
+            entry = scored.get(k)
+            if entry is None:
+                # First org to surface this source pins the row payload.
+                # Each row gets a copy with org annotation; rrf_score
+                # is filled in later (after we've summed across orgs).
+                row_copies = []
+                for r in rows_for_source:
+                    rc = dict(r)
+                    rc.setdefault("org", org_slug)
+                    row_copies.append(rc)
+                scored[k] = {
+                    "score": contribution,
+                    "rows": row_copies,
+                    "org": org_slug,
+                }
             else:
-                scored[k]["rrf_score"] += contribution
-    merged = sorted(scored.values(), key=lambda r: -r["rrf_score"])
-    return merged[:limit]
+                entry["score"] += contribution
+    # Source-level sort + LIMIT, then expand back to row-level output.
+    sorted_sources = sorted(scored.values(), key=lambda e: -e["score"])
+    output: list[dict] = []
+    for entry in sorted_sources[:limit]:
+        for row in entry["rows"]:
+            row["rrf_score"] = entry["score"]
+            output.append(row)
+    return output
 
 
 def chronological_merge(
@@ -251,13 +294,22 @@ def chronological_merge(
     *,
     limit: int,
     time_field: str = "created_at",
+    key: str = "source_id",
 ) -> list[dict]:
-    """Merge per-org lists by ``time_field`` DESC. Truncate to ``limit``.
+    """Merge per-org lists by ``time_field`` DESC. Truncate to ``limit``
+    distinct sources (``key`` field). All rows of a surviving source
+    are preserved in the output.
 
     Each incoming row is annotated with ``org`` (= origin slug) before
     merging. Ties on timestamp fall back to insertion order (Python's
     sort is stable), so the DB the row came from determines the tie
     direction — fine for a recency feed.
+
+    Round 7l source-aware behaviour: ``LIMIT`` counts distinct
+    ``source_id``s rather than raw rows. A 30-hit session contributes
+    one source-slot; its head + tail rows ride that slot together. This
+    is the recency-mode counterpart of the source-level LIMIT applied
+    by ``rrf_merge`` for relevance mode.
     """
     combined: list[dict] = []
     for org_slug, rows in lists:
@@ -265,8 +317,26 @@ def chronological_merge(
             rec = dict(row)
             rec.setdefault("org", org_slug)
             combined.append(rec)
+    # Stable sort by timestamp DESC. Rows of one source share a
+    # ``source_created_at`` value so they cluster naturally.
     combined.sort(key=lambda r: r.get(time_field) or "", reverse=True)
-    return combined[:limit]
+    # Per-source bucket; first-occurrence pins the source's slot order.
+    seen: dict[str, list[dict]] = {}
+    for row in combined:
+        sid = row.get(key) or row.get("id")
+        if sid is None:
+            # Fall back to row-level inclusion when no source key is
+            # present (legacy callers); each such row gets its own slot.
+            sid = id(row)
+        if sid in seen:
+            seen[sid].append(row)
+        elif len(seen) < limit:
+            seen[sid] = [row]
+        # else: drop — we've hit the source-level limit
+    output: list[dict] = []
+    for rows in seen.values():
+        output.extend(rows)
+    return output
 
 
 # ── Cross-org scanning ───────────────────────────────────────

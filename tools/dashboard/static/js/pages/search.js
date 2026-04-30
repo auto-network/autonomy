@@ -378,6 +378,17 @@
         if (this.selectedOrder && this.selectedOrder !== DEFAULT_ORDER_KEY) {
           url += '&order=' + encodeURIComponent(this.selectedOrder);
         }
+        // Round 7l: pill click re-fetches with the session_type filter
+        // pushed to the API (not just a client-side filter over
+        // ``this.results``). Sessions / Dispatch are the only chips
+        // that map to a server-side ``session_type`` — other chips
+        // (Notes, Docs, etc.) are still narrowed client-side via
+        // ``filteredResults``, since source_type filtering is not (yet)
+        // a /api/search knob.
+        var stFilter = this._sessionTypeFilterFor(this.activeType);
+        if (stFilter) {
+          url += '&session_type=' + encodeURIComponent(stFilter.join(','));
+        }
         var headers = {};
         if (this.selectedOrg) headers['X-Graph-Org'] = this.selectedOrg;
         fetch(url, { headers: headers })
@@ -387,6 +398,15 @@
             this.loaded = true;
           })
           .catch(() => { this.loaded = true; });
+      },
+
+      // Map an active chip key to the session_type list to push to the
+      // API. Returns null when the chip doesn't map to a session_type
+      // filter (Notes, Docs, etc., or the 'all' clear-filter chip).
+      _sessionTypeFilterFor(chipKey) {
+        if (chipKey === 'session') return SESSION_TYPES_INTERACTIVE;
+        if (chipKey === 'dispatch') return SESSION_TYPES_DISPATCH;
+        return null;
       },
 
       peerPillTitle(r) {
@@ -448,7 +468,25 @@
         return total;
       },
 
-      setType(t) { this.activeType = t; },
+      setType(t) {
+        // Round 7l: chip click re-fetches when the chip maps to a
+        // server-side filter (Sessions / Dispatch / All). Without this,
+        // a global LIMIT-N query that trimmed away all rows of the
+        // clicked type would render the chip as an empty filter even
+        // though more matches exist further down the result set. For
+        // chips that don't push a server filter (Notes, Docs, etc.),
+        // we skip the network round-trip — the source-aware LIMIT
+        // returns N distinct sources of all types, so client-side
+        // filter is sufficient.
+        var prev = this.activeType;
+        this.activeType = t;
+        if (!this.query) return;
+        var prevWasServerFiltered = !!this._sessionTypeFilterFor(prev);
+        var nextIsServerFiltered = !!this._sessionTypeFilterFor(t);
+        if (prevWasServerFiltered || nextIsServerFiltered) {
+          this._refetch();
+        }
+      },
 
       // ── rendering helpers ──────────────────────────────────────────
       typeLabel(t) {
