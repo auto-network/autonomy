@@ -470,6 +470,12 @@ class TestWorktreePage:
         assert "'/discard'" in js
         assert "setInterval(() => {" in js
         assert "window.showToast" in js
+        # Deeplink: the session-viewer's workspace-changes anchor lands
+        # here with ?session=<tmux_name> and expects the review screen
+        # to open directly. Without _handleDeeplink the page is just
+        # the list view and the operator has to find their row.
+        assert "_handleDeeplink()" in js
+        assert "params.get('session')" in js
 
     def test_spa_router_knows_worktrees_route(self):
         app_js = (JS_DIR.parent / "app.js").read_text()

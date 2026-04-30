@@ -1166,9 +1166,11 @@
       <span id="live-panel-badge" class="badge badge-open" style="font-size: 0.625rem; padding: 0.0625rem 0.375rem;">Live</span>
       <span class="text-xs text-gray-500 font-mono" id="live-panel-bead"></span>
       <!-- Workspace-changes indicator. Bound to the session-viewer
-           component's hasWorkspaceChanges getter; click jumps to
-           /worktrees without toggling the panel. -->
-      <a href="/worktrees"
+           component's hasWorkspaceChanges getter; click deep-links
+           into /worktrees scoped to this session so the review
+           screen opens directly. ``stopPropagation`` keeps the
+           click from toggling the panel. -->
+      <a :href="'/worktrees?session=' + encodeURIComponent(sessionKey)"
          onclick="event.stopPropagation();"
          class="text-xs text-amber-400 hover:text-amber-200 px-1"
          x-show="hasWorkspaceChanges"

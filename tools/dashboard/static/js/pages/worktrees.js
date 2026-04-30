@@ -1143,7 +1143,7 @@
       },
 
       init() {
-        this.refresh(false);
+        this.refresh(false).then(() => this._handleDeeplink());
         this.$watch('selectedCommit', (value) => {
           if (!value) {
             this.reviewTitlePinned = false;
@@ -1179,6 +1179,29 @@
           }
           this.refresh(false);
         }, 30000);
+      },
+
+      // Deeplink entry point. The session-viewer's workspace-changes
+      // anchor lands here with ``?session=<tmux_name>``; auto-open the
+      // review screen for that session — commits-ahead first (the
+      // ready-to-merge case, opened at the oldest commit so the
+      // review walks chronologically toward HEAD), falling back to
+      // dirty-files when there are no commits. Multi-repo sessions:
+      // take the first matching row; the operator can hop to
+      // siblings via the in-page nav.
+      _handleDeeplink() {
+        const params = new URLSearchParams(window.location.search);
+        const target = params.get('session');
+        if (!target) return;
+        const matches = this.rows.filter((r) => r.session_name === target);
+        if (!matches.length) return;
+        const withCommits = matches.find((r) => (this.commitList(r) || []).length > 0);
+        if (withCommits) {
+          this.openCommitAt(withCommits, 0);
+          return;
+        }
+        const dirtyMatch = matches.find((r) => r.is_dirty);
+        if (dirtyMatch) this.selectDirtyRow(dirtyMatch);
       },
 
       destroy() {

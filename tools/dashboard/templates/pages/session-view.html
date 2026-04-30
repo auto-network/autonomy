@@ -49,8 +49,9 @@
             </template>
             <!-- Workspace-changes indicator. Same shape as the overlay
                  anchor in base.html; both bind to the same component
-                 getter so they stay in lock-step. -->
-            <a href="/worktrees"
+                 getter and deep-link into /worktrees scoped to this
+                 session so the review screen opens directly. -->
+            <a :href="'/worktrees?session=' + encodeURIComponent(sessionKey)"
                @click.stop
                class="text-xs text-amber-400 hover:text-amber-200 px-1"
                x-show="hasWorkspaceChanges"
