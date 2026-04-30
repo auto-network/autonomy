@@ -61,14 +61,24 @@ FAILURE_TIMED_OUT = "timed_out"
 FAILURE_EXEC_FAILED = "exec_failed"
 
 # Fields requested from ``gh pr list --head <branch>`` for review
-# read/refresh. ``commits`` is the per-PR commit list; ``baseRefOid`` is
-# the base commit SHA (so per-PR diffs can be scoped to that PR's range
-# rather than the whole branch). ``baseRefName`` lets the UI render the
-# integration target. ``statusCheckRollup`` carries gates; ``isDraft``
-# / ``mergeable`` / ``reviewDecision`` feed the aggregate-state rule.
+# read/refresh. ``commits`` is the per-PR commit list; ``baseRefName``
+# lets the UI render the integration target. ``statusCheckRollup``
+# carries gates; ``isDraft`` / ``mergeable`` / ``reviewDecision`` feed
+# the aggregate-state rule.
+#
+# Notably absent: ``baseRefOid``. ``gh pr list`` rejects it ("Unknown
+# JSON field: baseRefOid") even though ``gh pr view`` accepts it.
+# Without baseRefOid the first PR in a stack has an empty ``base_sha``;
+# stacked PRs N>=2 still chain correctly because
+# ``_assign_commits_to_reviews`` rewrites ``base_sha`` from the
+# previous PR's head_sha. The integrated-diff endpoint defaults to
+# the worktree's merge-base when the per-PR base_sha is empty —
+# matches today's whole-branch diff behavior. Filling baseRefOid for
+# the first PR (via a secondary ``gh pr view`` or local
+# ``git merge-base``) is a v2 refinement.
 PR_LIST_FIELDS = (
     "number,state,title,body,url,"
-    "headRefName,headRefOid,baseRefName,baseRefOid,"
+    "headRefName,headRefOid,baseRefName,"
     "isDraft,mergeable,mergeStateStatus,reviewDecision,"
     "statusCheckRollup,commits,updatedAt"
 )
