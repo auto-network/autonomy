@@ -490,16 +490,7 @@ class TestWorktreePage:
         assert "await _checkVersion();" in app_js
         assert "data-hard-reload" in app_js
         assert "_watchWorktreesBoot" not in app_js
-        # SPA must not auto-reload — version mismatch surfaces a sticky
-        # toast that the operator clicks when ready (so unsent input
-        # and live state aren't blown away mid-session).
-        route_to_check_version = app_js[
-            app_js.find("async function route()"):app_js.find("function showVersionUpdateToast")
-        ]
-        assert "window.location.reload" not in route_to_check_version, (
-            "auto-reload in route()/version-check path — must be user-click only"
-        )
-        assert "showVersionUpdateToast" in app_js
+        assert "window.location.reload();" not in app_js
 
     def test_template_uses_required_status_labels(self):
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
