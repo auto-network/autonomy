@@ -12,11 +12,13 @@ the bead fixes:
   operator never saw the "Refresh requested" label.
 
 These tests drive ``page.js`` in a Node subprocess so we exercise the
-real Alpine factory without a headless browser. We stub the page's two
-side-effecting helpers (``_readSet`` returning seeded members, and
-``_writeSetting`` capturing writes) — that lets us verify the decision
+real Alpine factory without a headless browser. Bead 4B routed every
+read/write through the generated ``Schema.alpine()`` runtime; the test
+driver now stubs ``Schema._setFetchOverride`` to seed canvas members,
+satisfy the schema-meta fetches every proxy needs, and capture every
+``POST /api/graph/setting`` write — that lets us verify the decision
 payload, the verbatim ``target_session``, and the post-tap state in a
-single eval.
+single eval without booting a real backend.
 
 The tests live with the plugin per the operator's structural rule
 (comment 1ee79942 on ``graph://f6c6c43e-24a``); the main pytest
@@ -37,6 +39,9 @@ import pytest
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 PAGE_JS = PLUGIN_DIR / "page.js"
+SCHEMAS_JS = (
+    PLUGIN_DIR.parents[1] / "static" / "js" / "schemas.js"
+)
 
 
 def _node_available() -> bool:
@@ -45,41 +50,122 @@ def _node_available() -> bool:
 
 # ── Driver ──────────────────────────────────────────────────────────────
 #
-# The Node subprocess loads page.js, instantiates the factory, monkey-
-# patches ``_readSet`` + ``_writeSetting`` against an in-memory state,
-# runs the test snippet, then prints a JSON line on stdout. Each test
-# captures stdout and asserts on the parsed dict.
+# The Node subprocess loads schemas.js + page.js, installs a fetch
+# override that
+#
+#   1. serves the schema-meta payloads each ``Schema.of`` proxy needs
+#      to construct itself (one per (set_id, revision) the page binds);
+#   2. returns seeded members for the coordinator-canvas read and an
+#      empty list for every other read; and
+#   3. captures every ``POST /api/graph/setting`` body into ``writes``
+#      so the test can assert payload shape.
+#
+# The test then calls ``await c.init()`` — which fires Schema.alpine's
+# wrapped init (proxy attachment + loadBoard) — and runs the snippet.
 
 
 _NODE_DRIVER = r"""
+const Schema = require(%(schemas_js)s);
 const { coordinatorBoard } = require(%(page_js)s);
 
-// Minimal browser globals the factory touches.
+// Minimal browser globals the factory touches. ``window.Schema`` is left
+// unset so page.js falls through to the require() path it took at module
+// load — both paths resolve to the same module because Node caches them.
 global.window = global.window || {};
 global.window.crypto = { randomUUID: () => 'fixed-uuid-for-test' };
-global.window.Autonomy = { fetch: async () => ({ ok: true, json: async () => ({}) }) };
+global.window.Autonomy = {};
 
-const c = coordinatorBoard();
 const writes = [];
 const seeded = %(seeded)s;
 
-// ``_readSet`` is the only path loadBoard takes to fetch members.
-// Return seeded members for the canvas set; an empty list for everything
-// else so the rest of loadBoard runs without errors.
-c._readSet = async (setId /*, targetRevision */) => {
-  if (setId === 'dashboard.coordinator-canvas') {
-    return seeded.canvas || [];
-  }
-  return [];
+// ── Schema-meta payloads ─────────────────────────────────────────
+//
+// Each ``Schema.of(setId, {revision})`` resolves a meta-Setting at
+// ``/api/graph/settings/autonomy.schema/<setId>#<revision>``. We hand
+// back just enough metadata for the proxy's pattern + variant
+// extensions to produce the methods page.js calls (``.append`` on
+// Decision, ``.set`` on OperatorMsg, ``.all`` on every read-only set).
+function meta(setId, revision, accessPattern, keyStrategy, variants) {
+  return {
+    set_id: setId,
+    schema_revision: revision,
+    type: 'object',
+    properties: {},
+    required: [],
+    access_pattern: accessPattern || null,
+    key_strategy: keyStrategy || null,
+    variants: variants || {},
+  };
+}
+
+const META = {
+  'dashboard.coordinator-canvas#1':
+    meta('dashboard.coordinator-canvas', 1, 'keyed_per_entity', 'natural'),
+  'dashboard.operator-message-to-coordinator#1':
+    meta('dashboard.operator-message-to-coordinator', 1, 'singleton', 'fixed:default'),
+  'dashboard.coordinator-tile#2':
+    meta('dashboard.coordinator-tile', 2, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-thread#2':
+    meta('dashboard.coordinator-thread', 2, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-decision#1':
+    meta('dashboard.coordinator-decision', 1, 'append_only_log', 'uuid_v4'),
+  'dashboard.coordinator-sprint#1':
+    meta('dashboard.coordinator-sprint', 1, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-bead#1':
+    meta('dashboard.coordinator-bead', 1, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-convergent-decision#1':
+    meta('dashboard.coordinator-convergent-decision', 1, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-open-followup#1':
+    meta('dashboard.coordinator-open-followup', 1, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-docs#1':
+    meta('dashboard.coordinator-docs', 1, 'singleton', 'fixed:default'),
 };
 
-// Capture every decision-row write so the test can assert payload shape.
-c._writeSetting = async (setId, key, payload, schemaRevision) => {
-  writes.push({ setId, key, payload, schemaRevision: schemaRevision || null });
-  return { id: 'stub' };
-};
+const META_PREFIX = '/api/graph/settings/autonomy.schema/';
+
+Schema._clearCache();
+Schema._setFetchOverride(async (path, opts) => {
+  // 1) schema-meta fetch — returns the proxy bootstrap payload.
+  if (path.indexOf(META_PREFIX) === 0) {
+    const key = decodeURIComponent(path.slice(META_PREFIX.length));
+    const payload = META[key];
+    if (!payload) {
+      return { ok: false, status: 404, json: async () => ({}) };
+    }
+    return { ok: true, status: 200, json: async () => ({ payload }) };
+  }
+  // 2) write — POST /api/graph/setting.
+  if (path === '/api/graph/setting' && opts && opts.method === 'POST') {
+    const body = JSON.parse(opts.body);
+    writes.push({
+      setId: body.set_id,
+      key: body.key,
+      payload: body.payload,
+      schemaRevision: body.schema_revision || null,
+    });
+    return { ok: true, status: 200, json: async () => ({ id: 'stub' }) };
+  }
+  // 3) list read — /api/graph/settings/<set_id>(?target_revision=N).
+  const m = path.match(/^\/api\/graph\/settings\/([^/?]+)(?:\?.*)?$/);
+  if (m) {
+    const setId = decodeURIComponent(m[1]);
+    if (setId === 'dashboard.coordinator-canvas') {
+      return {
+        ok: true, status: 200,
+        json: async () => ({ members: seeded.canvas || [] }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ members: [] }) };
+  }
+  return { ok: false, status: 404, json: async () => ({}) };
+});
+
+const c = coordinatorBoard();
 
 (async () => {
+  // Schema.alpine wraps init so awaiting it attaches proxies AND runs
+  // the original init body (which calls loadBoard + subscribes).
+  await c.init();
   %(snippet)s
 })().then((out) => {
   process.stdout.write(JSON.stringify(out));
@@ -93,6 +179,7 @@ c._writeSetting = async (setId, key, payload, schemaRevision) => {
 def _run(snippet: str, *, seeded: dict | None = None) -> dict:
     """Run a JS *snippet* against a fresh factory instance and return the JSON dict."""
     src = _NODE_DRIVER % {
+        "schemas_js": json.dumps(str(SCHEMAS_JS)),
         "page_js": json.dumps(str(PAGE_JS)),
         "seeded": json.dumps(seeded or {}),
         "snippet": snippet,
@@ -127,9 +214,9 @@ class TestCanvasRefreshButton:
         }
         out = _run(
             """
-            await c.loadBoard();
+            // Schema.alpine's init() already ran loadBoard, seeding canvas.
             c.onRefreshAll();
-            // Drain microtasks so the awaited _writeSetting resolves.
+            // Drain microtasks so the awaited Decision.append resolves.
             await new Promise((resolve) => setImmediate(resolve));
             return {
                 writes,
@@ -169,10 +256,9 @@ class TestCanvasRefreshButton:
         }
         out = _run(
             """
-            await c.loadBoard();
-            // Wedge loadBoard so it deliberately resolves AFTER the
-            // synchronous body of onRefreshAll runs — proves the post-
-            // refresh state is NOT clobbered by a late loadBoard finish.
+            // Wedge loadBoard so the call onRefreshAll triggers resolves
+            // AFTER its synchronous body — proves the post-refresh state
+            // is NOT clobbered by a late loadBoard finish.
             const realLoadBoard = c.loadBoard.bind(c);
             c.loadBoard = () => new Promise((resolve) => {
                 setTimeout(async () => {
@@ -217,7 +303,6 @@ class TestCanvasRefreshButton:
         }
         out = _run(
             """
-            await c.loadBoard();
             c.onRefreshAll();
             await new Promise((resolve) => setImmediate(resolve));
             const stateAfterFirstTap = c.refreshState;
@@ -248,7 +333,7 @@ class TestCanvasRefreshButton:
         the affordance feels alive."""
         out = _run(
             """
-            await c.loadBoard();  // canvas read returns []
+            // init()'s loadBoard saw an empty canvas list — no _coordSession.
             c.onRefreshAll();
             await new Promise((resolve) => setImmediate(resolve));
             return {

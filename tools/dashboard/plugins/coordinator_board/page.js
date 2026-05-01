@@ -4,7 +4,10 @@
 // the polled decision-log for ``setting.changed`` SSE; bead auto-1aef5
 // adds Sprints + the four Tracking-tab sets, the tile expansion +
 // detail panel, the quick-reply chosen-state migration, and the
-// peer-session-only keyshape for tile + thread.
+// peer-session-only keyshape for tile + thread. Bead 4B routes every
+// read/write through the generated ``Schema.alpine()`` runtime — the
+// ten Settings sets the page reads + the three the page writes are
+// declared as named entries, with tile/thread bound at revision 2.
 //
 //   reads + setting.changed subscribes:
 //     dashboard.coordinator-canvas
@@ -20,24 +23,16 @@
 //
 //   writes:
 //     POST /api/graph/setting   (operator-message + decision rows)
-const SET_CANVAS = 'dashboard.coordinator-canvas';
-const SET_OPERATOR_MSG = 'dashboard.operator-message-to-coordinator';
-const SET_TILE = 'dashboard.coordinator-tile';
-const SET_THREAD = 'dashboard.coordinator-thread';
-const SET_DECISION = 'dashboard.coordinator-decision';
-const SET_SPRINT = 'dashboard.coordinator-sprint';
-const SET_BEAD = 'dashboard.coordinator-bead';
-const SET_CONVERGENT_DECISION = 'dashboard.coordinator-convergent-decision';
-const SET_OPEN_FOLLOWUP = 'dashboard.coordinator-open-followup';
-const SET_DOCS = 'dashboard.coordinator-docs';
-// Default revision for sets the page writes at (canvas, operator-message,
-// decision). Tile + thread are read-only from the page's perspective —
-// peers self-publish — so the page only needs to read them at revision 2.
-const SCHEMA_REVISION = 1;
+//
+// Tile + thread are bound at revision 2 (bead auto-1aef5 keyshape) via
+// the ``{set_id, revision}`` entry form on Schema.alpine — peers
+// self-publish under their own session id and the page reads at v2.
 const TILE_SCHEMA_REVISION = 2;
 const THREAD_SCHEMA_REVISION = 2;
-const OPERATOR_MSG_KEY = 'default';
-const DOCS_KEY = 'default';
+
+const _schemaRuntime = (typeof window !== 'undefined' && window.Schema)
+  ? window.Schema
+  : (typeof require === 'function' ? require('../../static/js/schemas.js') : null);
 
 function _cssEscape(s) {
   return (window.CSS && window.CSS.escape)
@@ -46,7 +41,7 @@ function _cssEscape(s) {
 }
 
 function coordinatorBoard() {
-  return {
+  const state = {
     // ─────── UI state ───────
     tab: 'primary',
     tabs: [
@@ -121,21 +116,23 @@ function coordinatorBoard() {
     },
 
     async loadBoard() {
-      // Parallel fetches — each set is independent.
+      // Parallel fetches — each set is independent. Tile + thread reads
+      // are revision-2-aware: ``target_revision=2`` so any v1 rows
+      // resolve through the registered upconvert chain.
       const [
         canvas, op, tiles, threads, decisions,
         sprints, beads, convergent, followups, docs,
       ] = await Promise.all([
-        this._readSet(SET_CANVAS),
-        this._readSet(SET_OPERATOR_MSG),
-        this._readSet(SET_TILE, TILE_SCHEMA_REVISION),
-        this._readSet(SET_THREAD, THREAD_SCHEMA_REVISION),
-        this._readSet(SET_DECISION),
-        this._readSet(SET_SPRINT),
-        this._readSet(SET_BEAD),
-        this._readSet(SET_CONVERGENT_DECISION),
-        this._readSet(SET_OPEN_FOLLOWUP),
-        this._readSet(SET_DOCS),
+        this.Canvas.all(),
+        this.OperatorMsg.all(),
+        this.Tile.all({ target_revision: TILE_SCHEMA_REVISION }),
+        this.Thread.all({ target_revision: THREAD_SCHEMA_REVISION }),
+        this.Decision.all(),
+        this.Sprint.all(),
+        this.Bead.all(),
+        this.ConvergentDecision.all(),
+        this.OpenFollowup.all(),
+        this.Docs.all(),
       ]);
 
       const latestCanvas = this._latest(canvas);
@@ -166,75 +163,74 @@ function coordinatorBoard() {
     },
 
     _subscribeSettings() {
-      const events = window.dashboardEvents;
-      if (!events || typeof events.onSettingChanged !== 'function') return;
-      // Listed individually (not in a loop) so a single grep can prove
-      // each subscribed set_id — see auto-obo63 acceptance #2.
-      this._unsubscribers.push(events.onSettingChanged(SET_CANVAS,              () => this._refreshCanvas()));
-      this._unsubscribers.push(events.onSettingChanged(SET_OPERATOR_MSG,        () => this._refreshOperatorMessage()));
-      this._unsubscribers.push(events.onSettingChanged(SET_TILE,                () => this._refreshTiles()));
-      this._unsubscribers.push(events.onSettingChanged(SET_THREAD,              () => this._refreshThreads()));
-      this._unsubscribers.push(events.onSettingChanged(SET_DECISION,            () => this._refreshDecisions()));
-      this._unsubscribers.push(events.onSettingChanged(SET_SPRINT,              () => this._refreshSprints()));
-      this._unsubscribers.push(events.onSettingChanged(SET_BEAD,                () => this._refreshBeads()));
-      this._unsubscribers.push(events.onSettingChanged(SET_CONVERGENT_DECISION, () => this._refreshConvergentDecisions()));
-      this._unsubscribers.push(events.onSettingChanged(SET_OPEN_FOLLOWUP,       () => this._refreshOpenFollowups()));
-      this._unsubscribers.push(events.onSettingChanged(SET_DOCS,                () => this._refreshDocs()));
+      // Each subscription targets exactly the named proxy's set_id —
+      // routed through the proxy so a single grep against page.js can
+      // still prove every subscribed set (see auto-obo63 acceptance #2).
+      this._unsubscribers.push(this.Canvas.onChange(             () => this._refreshCanvas()));
+      this._unsubscribers.push(this.OperatorMsg.onChange(        () => this._refreshOperatorMessage()));
+      this._unsubscribers.push(this.Tile.onChange(               () => this._refreshTiles()));
+      this._unsubscribers.push(this.Thread.onChange(             () => this._refreshThreads()));
+      this._unsubscribers.push(this.Decision.onChange(           () => this._refreshDecisions()));
+      this._unsubscribers.push(this.Sprint.onChange(             () => this._refreshSprints()));
+      this._unsubscribers.push(this.Bead.onChange(               () => this._refreshBeads()));
+      this._unsubscribers.push(this.ConvergentDecision.onChange( () => this._refreshConvergentDecisions()));
+      this._unsubscribers.push(this.OpenFollowup.onChange(       () => this._refreshOpenFollowups()));
+      this._unsubscribers.push(this.Docs.onChange(               () => this._refreshDocs()));
     },
 
     async _refreshCanvas() {
-      const members = await this._readSet(SET_CANVAS);
+      const members = await this.Canvas.all();
       const latest = this._latest(members);
       this._coordSession = (latest && latest.key) || '';
       this.data.canvas = this._normalizeCanvas(latest);
     },
 
     async _refreshOperatorMessage() {
-      const members = await this._readSet(SET_OPERATOR_MSG);
+      const members = await this.OperatorMsg.all();
       this.data.operatorMessage = this._normalizeOperatorMessage(this._latest(members));
     },
 
     async _refreshTiles() {
-      const members = await this._readSet(SET_TILE, TILE_SCHEMA_REVISION);
+      const members = await this.Tile.all({ target_revision: TILE_SCHEMA_REVISION });
       this.data.tiles = (members || []).map(m => this._normalizeTile(m));
     },
 
     async _refreshThreads() {
-      const members = await this._readSet(SET_THREAD, THREAD_SCHEMA_REVISION);
+      const members = await this.Thread.all({ target_revision: THREAD_SCHEMA_REVISION });
       this.data.threads = (members || []).map(m => this._normalizeThread(m));
     },
 
     async _refreshDecisions() {
-      const members = await this._readSet(SET_DECISION);
+      const members = await this.Decision.all();
       this.data.decisionsByTile = this._buildDecisionsByTile(members);
     },
 
     async _refreshSprints() {
-      const members = await this._readSet(SET_SPRINT);
+      const members = await this.Sprint.all();
       this.data.sprints = (members || []).map(m => this._normalizeSprint(m));
     },
 
     async _refreshBeads() {
-      const members = await this._readSet(SET_BEAD);
+      const members = await this.Bead.all();
       this.data.beads = (members || []).map(m => this._normalizeBead(m));
     },
 
     async _refreshConvergentDecisions() {
-      const members = await this._readSet(SET_CONVERGENT_DECISION);
+      const members = await this.ConvergentDecision.all();
       this.data.convergentDecisions = (members || [])
         .map(m => this._normalizeConvergentDecision(m))
         .filter(d => d.title);
     },
 
     async _refreshOpenFollowups() {
-      const members = await this._readSet(SET_OPEN_FOLLOWUP);
+      const members = await this.OpenFollowup.all();
       this.data.openFollowups = (members || [])
         .map(m => this._normalizeOpenFollowup(m))
         .filter(t => t);
     },
 
     async _refreshDocs() {
-      const members = await this._readSet(SET_DOCS);
+      const members = await this.Docs.all();
       this.data.docs = this._normalizeDocs(this._latest(members));
     },
 
@@ -249,41 +245,6 @@ function coordinatorBoard() {
         };
       }
       return out;
-    },
-
-    async _readSet(setId, targetRevision) {
-      const base = `/api/graph/settings/${encodeURIComponent(setId)}`;
-      const url = targetRevision
-        ? `${base}?target_revision=${encodeURIComponent(targetRevision)}`
-        : base;
-      try {
-        const res = await window.Autonomy.fetch(url, { credentials: 'same-origin' });
-        if (!res.ok) return [];
-        const body = await res.json().catch(() => ({}));
-        return Array.isArray(body.members) ? body.members : [];
-      } catch (e) {
-        return [];
-      }
-    },
-
-    async _writeSetting(setId, key, payload, schemaRevision) {
-      try {
-        const res = await window.Autonomy.fetch('/api/graph/setting', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            set_id: setId,
-            schema_revision: schemaRevision || SCHEMA_REVISION,
-            key,
-            payload,
-          }),
-          credentials: 'same-origin',
-        });
-        if (!res.ok) return null;
-        return await res.json().catch(() => ({}));
-      } catch (e) {
-        return null;
-      }
     },
 
     _latest(members) {
@@ -507,10 +468,16 @@ function coordinatorBoard() {
 
       this.sending = true;
       const sentAt = new Date().toISOString();
-      const result = await this._writeSetting(
-        SET_OPERATOR_MSG, OPERATOR_MSG_KEY, { text, sentAt },
-      );
-      const ok = result !== null && (result.id || result.ok !== false);
+      let result = null;
+      let ok = false;
+      try {
+        // OperatorMsg is a singleton — proxy.set writes the fixed
+        // ``default`` key declared by the schema's @singleton decorator.
+        result = await this.OperatorMsg.set({ text, sentAt });
+        ok = result !== null && (result.id || result.ok !== false);
+      } catch (_) {
+        ok = false;
+      }
       // Optimistic update — show the message even before the next read.
       this.data.operatorMessage = { text, sentAt };
       this.sending = false;
@@ -531,11 +498,6 @@ function coordinatorBoard() {
 
     // ─────── Tile decisions ───────
     async _writeDecision(tile, kind, choice) {
-      // Each decision row is append-only — uuidv4 key so the substrate
-      // stores them all rather than collapsing to one.
-      const key = (window.crypto && window.crypto.randomUUID)
-        ? window.crypto.randomUUID()
-        : `dec-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const payload = {
         tile_id: tile.session,
         kind,
@@ -545,7 +507,15 @@ function coordinatorBoard() {
       if (choice !== undefined && choice !== null && choice !== '') {
         payload.choice = choice;
       }
-      const result = await this._writeSetting(SET_DECISION, key, payload);
+      // Decision is an append-only log keyed by uuid_v4 — proxy.append
+      // generates the key and POSTs through the substrate. Each write
+      // produces a new row rather than collapsing to one.
+      let result = null;
+      try {
+        result = await this.Decision.append(payload);
+      } catch (_) {
+        result = null;
+      }
       // Optimistic decoration so the operator gets immediate visual
       // feedback; the SET_DECISION setting.changed subscription confirms
       // via re-resolve on the next event tick.
@@ -700,15 +670,12 @@ function coordinatorBoard() {
       // the latest canvas member's key, captured on every canvas read.
       const coordSession = this._coordSession;
       if (coordSession) {
-        const key = (window.crypto && window.crypto.randomUUID)
-          ? window.crypto.randomUUID()
-          : `dec-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-        this._writeSetting(SET_DECISION, key, {
+        this.Decision.append({
           tile_id: coordSession,
           kind: 'refresh_request',
           target_session: coordSession,
           sentAt: new Date().toISOString(),
-        });
+        }).catch(() => { /* surface via decision-changed re-read */ });
       }
       // Settles to 'requested' synchronously after the write is
       // queued, regardless of loadBoard's completion timing — the
@@ -790,6 +757,24 @@ function coordinatorBoard() {
       return m ? `${h}h ${m}m ago` : `${h}h ago`;
     },
   };
+
+  if (_schemaRuntime && typeof _schemaRuntime.alpine === 'function') {
+    return _schemaRuntime.alpine(state, {
+      schemas: {
+        Canvas:             'dashboard.coordinator-canvas',
+        OperatorMsg:        'dashboard.operator-message-to-coordinator',
+        Tile:               { set_id: 'dashboard.coordinator-tile',   revision: TILE_SCHEMA_REVISION },
+        Thread:             { set_id: 'dashboard.coordinator-thread', revision: THREAD_SCHEMA_REVISION },
+        Decision:           'dashboard.coordinator-decision',
+        Sprint:             'dashboard.coordinator-sprint',
+        Bead:               'dashboard.coordinator-bead',
+        ConvergentDecision: 'dashboard.coordinator-convergent-decision',
+        OpenFollowup:       'dashboard.coordinator-open-followup',
+        Docs:               'dashboard.coordinator-docs',
+      },
+    });
+  }
+  return state;
 }
 
 if (typeof window !== 'undefined') {

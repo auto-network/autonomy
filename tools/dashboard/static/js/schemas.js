@@ -442,8 +442,30 @@
     state.init = async function() {
       var names = Object.keys(schemaMap);
       var pairs = await Promise.all(names.map(function(name) {
-        var setId = schemaMap[name];
-        return of(setId).then(function(proxy) { return [name, proxy]; });
+        var entry = schemaMap[name];
+        // Each entry is either a string (set_id, default revision) or an
+        // object ``{set_id, revision}`` for consumers that need to bind
+        // a schema at a specific non-default revision (e.g. tile/thread
+        // at v2 in coordinator-board). The object form delegates to
+        // ``Schema.of(setId, {revision})`` — same caching semantics as
+        // direct ``of()`` calls.
+        var setId, ofOpts;
+        if (typeof entry === 'string') {
+          setId = entry;
+          ofOpts = undefined;
+        } else if (entry && typeof entry === 'object'
+                   && typeof entry.set_id === 'string' && entry.set_id) {
+          setId = entry.set_id;
+          ofOpts = (typeof entry.revision === 'number')
+            ? { revision: entry.revision }
+            : undefined;
+        } else {
+          return Promise.reject(new TypeError(
+            'Schema.alpine: entry for "' + name + '" must be a set_id string '
+            + 'or {set_id, revision} object'
+          ));
+        }
+        return of(setId, ofOpts).then(function(proxy) { return [name, proxy]; });
       }));
       for (var i = 0; i < pairs.length; i++) {
         this[pairs[i][0]] = pairs[i][1];
