@@ -393,6 +393,87 @@
   // call ``_clearExtensions()`` and re-register selectively.
   _registerExtension(_variantExtension);
 
+  // ── Schema.alpine() reflection wrapper (bead 2D) ────────────
+  //
+  // Wraps an Alpine factory's state object with schema-backed proxy
+  // attachment. Plugin authors declare which schemas they need by
+  // friendly name, and Schema.alpine arranges for each name to point
+  // at a live ``Schema.of(setId)`` proxy by the time ``init()`` runs.
+  //
+  // Usage from a plugin's page.js:
+  //
+  //   function coordinatorBoard() {
+  //     return Schema.alpine({
+  //       tab: 'primary',
+  //       async tapThumb(tile, kind) {
+  //         await this.Decision[kind]({ tile_id: tile.session });
+  //       },
+  //     }, {
+  //       schemas: {
+  //         Canvas:        'dashboard.coordinator-canvas',
+  //         OperatorMsg:   'dashboard.operator-message-to-coordinator',
+  //         Decision:      'dashboard.coordinator-decision',
+  //       },
+  //     });
+  //   }
+  //
+  // After the wrapped ``init()`` runs, ``this.Canvas`` / ``this.Decision``
+  // are live proxies — the plugin's UI methods reach them like any
+  // other reactive state.
+  //
+  // 2D ships the explicit-schemas path. A future bead can read the
+  // plugin's manifest's ``entrypoints.schemas`` from
+  // ``window.Autonomy._activePluginId`` and autobind without an
+  // explicit map; the page-shell injection seam below seeds that.
+
+  function alpine(state, opts) {
+    if (!state || typeof state !== 'object') {
+      throw new TypeError('Schema.alpine requires a state object');
+    }
+    opts = opts || {};
+    var schemaMap = opts.schemas || {};
+    if (typeof schemaMap !== 'object') {
+      throw new TypeError('Schema.alpine: opts.schemas must be a name→set_id map');
+    }
+
+    var origInit = (typeof state.init === 'function') ? state.init : null;
+    var origDestroy = (typeof state.destroy === 'function') ? state.destroy : null;
+
+    state.init = async function() {
+      var names = Object.keys(schemaMap);
+      var pairs = await Promise.all(names.map(function(name) {
+        var setId = schemaMap[name];
+        return of(setId).then(function(proxy) { return [name, proxy]; });
+      }));
+      for (var i = 0; i < pairs.length; i++) {
+        this[pairs[i][0]] = pairs[i][1];
+      }
+      if (origInit) await origInit.call(this);
+    };
+
+    state.destroy = function() {
+      if (origDestroy) {
+        try { origDestroy.call(this); } catch (err) {
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[Schema.alpine] destroy hook raised:', err);
+          }
+        }
+      }
+    };
+
+    // Convenience: surface the active plugin id (when injected by
+    // the page shell) so plugin pages can read their own context
+    // without the page shell having to thread it through manually.
+    if (typeof window !== 'undefined'
+        && window.Autonomy
+        && typeof window.Autonomy._activePluginId === 'string'
+        && !state._pluginId) {
+      state._pluginId = window.Autonomy._activePluginId;
+    }
+
+    return state;
+  }
+
   // ── Test seams ──────────────────────────────────────────────
 
   function _setFetchOverride(fn) { _fetchOverride = fn; }
@@ -403,6 +484,7 @@
 
   var SchemaNS = {
     of: of,
+    alpine: alpine,
     Schema: Schema,
     _registerExtension: _registerExtension,
     _clearExtensions: _clearExtensions,

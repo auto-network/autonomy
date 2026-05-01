@@ -46,6 +46,12 @@ function renderMd(md) {
 // fragment renders, so non-plugin routes never inherit a stale value.
 window.Autonomy = window.Autonomy || {};
 window.Autonomy._activePluginOrg = null;
+// Active plugin id during a plugin's page render. Set alongside
+// ``_activePluginOrg`` in ``renderPluginFragment``; consumed by
+// ``Schema.alpine`` (bead auto-2D) so plugin pages can self-identify
+// without the shell threading the id through manually. Cleared on
+// every ``route()`` call before the next fragment renders.
+window.Autonomy._activePluginId = null;
 
 async function api(path) {
   const res = await fetch(path, _withPluginOrgHeader());
@@ -1490,6 +1496,9 @@ async function renderPluginFragment(plugin) {
   // calls from inside the page carry X-Graph-Org. The fragment fetch
   // itself goes through the wrapper too so the page shell is scoped.
   window.Autonomy._activePluginOrg = plugin.org || null;
+  // Stamp the plugin id so Schema.alpine() (and other plugin-aware
+  // helpers) can self-identify without the shell threading it through.
+  window.Autonomy._activePluginId = plugin.id || null;
   const fragmentUrl = `/pages/${plugin.id}`;
   let html;
   if (_fragmentCache.has(fragmentUrl)) {
@@ -1524,6 +1533,7 @@ async function route() {
   // inherit a stale X-Graph-Org. The plugin handler resets it below
   // when the new path matches a plugin.
   window.Autonomy._activePluginOrg = null;
+  window.Autonomy._activePluginId = null;
   await _checkVersion();
   await window.Autonomy.refreshPlugins();
   _renderSidebarPlugins();
