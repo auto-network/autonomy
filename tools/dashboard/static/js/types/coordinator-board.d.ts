@@ -13,6 +13,7 @@
 
 /**
  * dashboard.coordinator-canvas#1
+ * Access pattern: keyed_per_entity (key strategy: natural)
  */
 export interface CoordinatorCanvasV1 {
   /** The one well-framed question the coordinator wants the operator to answer right now */
@@ -27,6 +28,7 @@ export interface CoordinatorCanvasV1 {
 
 /**
  * dashboard.operator-message-to-coordinator#1
+ * Access pattern: singleton (key strategy: fixed:default)
  */
 export interface OperatorMessageToCoordinatorV1 {
   /** Operator's reply body, sent verbatim to the coordinator session */
@@ -37,6 +39,7 @@ export interface OperatorMessageToCoordinatorV1 {
 
 /**
  * dashboard.coordinator-tile#1
+ * Access pattern: keyed_per_entity (key strategy: natural)
  */
 export interface CoordinatorTileV1 {
   /** Tile label (peer's working title) */
@@ -57,6 +60,7 @@ export interface CoordinatorTileV1 {
 
 /**
  * dashboard.coordinator-thread#1
+ * Access pattern: keyed_per_entity (key strategy: natural)
  */
 export interface CoordinatorThreadV1 {
   /** Thread label (working title) */
@@ -79,16 +83,100 @@ export interface CoordinatorThreadV1 {
 
 /**
  * dashboard.coordinator-decision#1
+ * Access pattern: append_only_log (key strategy: uuid_v4)
  */
-export interface CoordinatorDecisionV1 {
+
+export interface CoordinatorDecisionV1Base {
   /** Identifier of the tile the operator interacted with (matches a coordinator-tile member's session segment) */
   tile_id: string;
   /** Decision kind; the action handler routes on this field */
   kind: 'thumb_yes' | 'thumb_no' | 'choice' | 'custom' | 'sitrep_request' | 'refresh_request';
-  /** Operator's chosen text — the resolution label for ``choice``, the free-text body for ``custom`` */
-  choice?: string;
   /** ISO-8601 timestamp of the operator tap */
   sentAt?: string;
   /** Session that should receive the decision via session_send */
   target_session: string;
 }
+
+export interface CoordinatorDecisionV1ThumbYes extends CoordinatorDecisionV1Base {
+  kind: 'thumb_yes';
+  /** Identifier of the tile the operator interacted with (matches a coordinator-tile member's session segment) */
+  tile_id: string;
+  /** Decision kind; the action handler routes on this field */
+  kind: 'thumb_yes' | 'thumb_no' | 'choice' | 'custom' | 'sitrep_request' | 'refresh_request';
+  /** ISO-8601 timestamp of the operator tap */
+  sentAt?: string;
+  /** Session that should receive the decision via session_send */
+  target_session: string;
+}
+
+export interface CoordinatorDecisionV1ThumbNo extends CoordinatorDecisionV1Base {
+  kind: 'thumb_no';
+  /** Identifier of the tile the operator interacted with (matches a coordinator-tile member's session segment) */
+  tile_id: string;
+  /** Decision kind; the action handler routes on this field */
+  kind: 'thumb_yes' | 'thumb_no' | 'choice' | 'custom' | 'sitrep_request' | 'refresh_request';
+  /** ISO-8601 timestamp of the operator tap */
+  sentAt?: string;
+  /** Session that should receive the decision via session_send */
+  target_session: string;
+}
+
+export interface CoordinatorDecisionV1SitrepRequest extends CoordinatorDecisionV1Base {
+  kind: 'sitrep_request';
+  /** Identifier of the tile the operator interacted with (matches a coordinator-tile member's session segment) */
+  tile_id: string;
+  /** Decision kind; the action handler routes on this field */
+  kind: 'thumb_yes' | 'thumb_no' | 'choice' | 'custom' | 'sitrep_request' | 'refresh_request';
+  /** ISO-8601 timestamp of the operator tap */
+  sentAt?: string;
+  /** Session that should receive the decision via session_send */
+  target_session: string;
+}
+
+export interface CoordinatorDecisionV1RefreshRequest extends CoordinatorDecisionV1Base {
+  kind: 'refresh_request';
+  /** Identifier of the tile the operator interacted with (matches a coordinator-tile member's session segment) */
+  tile_id: string;
+  /** Decision kind; the action handler routes on this field */
+  kind: 'thumb_yes' | 'thumb_no' | 'choice' | 'custom' | 'sitrep_request' | 'refresh_request';
+  /** ISO-8601 timestamp of the operator tap */
+  sentAt?: string;
+  /** Session that should receive the decision via session_send */
+  target_session: string;
+}
+
+export interface CoordinatorDecisionV1Choice extends CoordinatorDecisionV1Base {
+  kind: 'choice';
+  /** Identifier of the tile the operator interacted with (matches a coordinator-tile member's session segment) */
+  tile_id: string;
+  /** Decision kind; the action handler routes on this field */
+  kind: 'thumb_yes' | 'thumb_no' | 'choice' | 'custom' | 'sitrep_request' | 'refresh_request';
+  /** ISO-8601 timestamp of the operator tap */
+  sentAt?: string;
+  /** Session that should receive the decision via session_send */
+  target_session: string;
+  /** The pill text the operator picked, verbatim. */
+  choice: string;
+}
+
+export interface CoordinatorDecisionV1Custom extends CoordinatorDecisionV1Base {
+  kind: 'custom';
+  /** Identifier of the tile the operator interacted with (matches a coordinator-tile member's session segment) */
+  tile_id: string;
+  /** Decision kind; the action handler routes on this field */
+  kind: 'thumb_yes' | 'thumb_no' | 'choice' | 'custom' | 'sitrep_request' | 'refresh_request';
+  /** ISO-8601 timestamp of the operator tap */
+  sentAt?: string;
+  /** Session that should receive the decision via session_send */
+  target_session: string;
+  /** The operator's free-text body, verbatim. */
+  choice: string;
+}
+
+export type CoordinatorDecisionV1 =
+  | CoordinatorDecisionV1ThumbYes
+  | CoordinatorDecisionV1ThumbNo
+  | CoordinatorDecisionV1SitrepRequest
+  | CoordinatorDecisionV1RefreshRequest
+  | CoordinatorDecisionV1Choice
+  | CoordinatorDecisionV1Custom;
