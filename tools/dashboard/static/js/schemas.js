@@ -130,11 +130,17 @@
       throw new TypeError('Schema.of requires a string set_id');
     }
     opts = opts || {};
+    var revision = (typeof opts.revision === 'number') ? opts.revision : 1;
+    // Cache by ``(set_id, revision)`` composite — multiple revisions
+    // of the same set_id describe different shapes (different field
+    // sets, different defaults, different validation rules), so they
+    // MUST not alias to the same proxy. ``force: true`` refetches the
+    // same composite key.
+    var cacheKey = setId + '#' + revision;
     if (!opts.force) {
-      var cached = _proxyCache.get(setId);
+      var cached = _proxyCache.get(cacheKey);
       if (cached) return cached;
     }
-    var revision = (typeof opts.revision === 'number') ? opts.revision : 1;
     var payload = await _fetchSchemaPayload(setId, revision);
     var proxy = new Schema(payload);
     // Extension seam — 2B and 2C augment the proxy based on
@@ -149,7 +155,7 @@
         }
       }
     }
-    _proxyCache.set(setId, proxy);
+    _proxyCache.set(cacheKey, proxy);
     return proxy;
   }
 
