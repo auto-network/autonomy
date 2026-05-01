@@ -38,7 +38,7 @@ from __future__ import annotations
 import posixpath
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, register_schema
+from .registry import SchemaValidationError, SettingSchema, field, register_schema
 
 
 SET_ID = "autonomy.capability.impl"
@@ -340,84 +340,83 @@ class CapabilityImplV1(SettingSchema):
     Repo-local path fields (``package_root``, ``tool_paths``,
     ``skill_path``, ``primer_path``) are validated through
     :func:`validate_repo_local_path`.
+
+    Migrated to the typed-``field()`` declaration shape (Bead 3B) —
+    annotations now drive ``_field_metadata`` derivation via
+    ``__init_subclass__``. Imperative validation in :meth:`validate`
+    continues to enforce shape checks the typed metadata can't yet
+    describe (path safety, probe sub-shape, ``tool_target`` sub-shape,
+    contract-ref sub-shape, integer minimums, extra-field rejection).
     """
 
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "name": {
-            "type": "string",
-            "required": True,
-            "description": "Identifier for the implementation (e.g. autonomy/github)",
+    name: str = field(
+        required=True,
+        description="Identifier for the implementation (e.g. autonomy/github)",
+    )
+    version: int = field(
+        required=True,
+        description="Single monotonic integer version (>= 1)",
+    )
+    implements: list = field(
+        required=True,
+        description="Contract refs this implementation satisfies",
+        element={
+            "contract": {"type": "string", "required": True,
+                         "description": "Contract name"},
+            "version": {"type": "integer", "required": True,
+                        "description": "Pinned contract version"},
         },
-        "version": {
-            "type": "integer",
-            "required": True,
-            "description": "Single monotonic integer version (>= 1)",
-        },
-        "implements": {
-            "type": "array",
-            "required": True,
-            "description": "Contract refs this implementation satisfies",
-            "element": {
-                "contract": {"type": "string", "required": True,
-                             "description": "Contract name"},
-                "version": {"type": "integer", "required": True,
-                            "description": "Pinned contract version"},
-            },
-        },
-        "delivery_mode": {
-            "type": "string",
-            "required": True,
-            "description": "How the implementation reaches the workspace at launch",
-            "enum": list(VALID_DELIVERY_MODES),
-        },
-        "package_root": {
-            "type": "string",
-            "required": True,
-            "description": "Repo-local path that holds the implementation package",
-        },
-        "probe": {
-            "type": "object",
-            "required": True,
-            "description": "Probe descriptor (kind + entrypoint) for runtime verification",
-        },
-        "required_env": {
-            "type": "array",
-            "description": "Env var names the implementation requires at runtime",
-            "element": {"type": "string"},
-        },
-        "required_secret_files": {
-            "type": "array",
-            "description": "Secret-file paths the implementation requires at runtime",
-            "element": {"type": "string"},
-        },
-        "tool_paths": {
-            "type": "array",
-            "description": "Repo-local paths to tools provided by this implementation",
-            "element": {"type": "string"},
-        },
-        "tool_target": {
-            "type": "object",
-            "description": (
-                "Optional tool-bundle mount target: source (repo-local), "
-                "target (absolute container path), expose_commands (PATH shims)"
-            ),
-        },
-        "skill_path": {
-            "type": "string",
-            "description": "Repo-local path to the implementation's skill bundle",
-        },
-        "primer_path": {
-            "type": "string",
-            "description": "Repo-local path to the implementation's primer doc",
-        },
-        "notes": {
-            "type": "string",
-            "description": "Free-form notes",
-        },
-    }
+    )
+    delivery_mode: str = field(
+        required=True,
+        description="How the implementation reaches the workspace at launch",
+        enum=list(VALID_DELIVERY_MODES),
+    )
+    package_root: str = field(
+        required=True,
+        description="Repo-local path that holds the implementation package",
+    )
+    probe: dict = field(
+        required=True,
+        description="Probe descriptor (kind + entrypoint) for runtime verification",
+    )
+    required_env: list = field(
+        required=False,
+        description="Env var names the implementation requires at runtime",
+        element={"type": "string"},
+    )
+    required_secret_files: list = field(
+        required=False,
+        description="Secret-file paths the implementation requires at runtime",
+        element={"type": "string"},
+    )
+    tool_paths: list = field(
+        required=False,
+        description="Repo-local paths to tools provided by this implementation",
+        element={"type": "string"},
+    )
+    tool_target: dict = field(
+        required=False,
+        description=(
+            "Optional tool-bundle mount target: source (repo-local), "
+            "target (absolute container path), expose_commands (PATH shims)"
+        ),
+    )
+    skill_path: str = field(
+        required=False,
+        description="Repo-local path to the implementation's skill bundle",
+    )
+    primer_path: str = field(
+        required=False,
+        description="Repo-local path to the implementation's primer doc",
+    )
+    notes: str = field(
+        required=False,
+        description="Free-form notes",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:  # noqa: C901 — flat checks
