@@ -23,7 +23,9 @@ from __future__ import annotations
 from . import schemas as _schemas  # noqa: F401
 from .loop import (
     DEFAULT_POLL_SECONDS,
+    HEALTH,
     REGISTRY,
+    MediatorHealth,
     RegisteredAction,
     Row,
     Services,
@@ -31,6 +33,7 @@ from .loop import (
     iterate_once,
     register_action,
     register_action_decorator,
+    reset_health,
     start_action_loop,
     stop_action_loop,
 )
@@ -44,7 +47,9 @@ from .schemas import (
 
 __all__ = [
     "DEFAULT_POLL_SECONDS",
+    "HEALTH",
     "REGISTRY",
+    "MediatorHealth",
     "RegisteredAction",
     "Row",
     "Services",
@@ -52,6 +57,7 @@ __all__ = [
     "iterate_once",
     "register_action",
     "register_action_decorator",
+    "reset_health",
     "start_action_loop",
     "stop_action_loop",
     "CURSOR_SET_ID",
