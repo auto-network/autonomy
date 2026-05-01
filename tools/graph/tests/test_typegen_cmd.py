@@ -493,7 +493,10 @@ def test_resolve_schema_entry_rejects_non_schema_class():
 
 def _make_args(**overrides):
     """Build an argparse Namespace matching attach_typegen_subparser's shape."""
-    defaults = dict(plugin=None, all=False, out=None, stdout=False, check=False)
+    defaults = dict(
+        plugin=None, all=False, schemas=None, name=None,
+        out=None, stdout=False, check=False,
+    )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
 
