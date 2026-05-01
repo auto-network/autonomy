@@ -4650,6 +4650,10 @@ def main():
     from .org_cmd import attach_org_subparser
     attach_org_subparser(sub)
 
+    # capability — skilltext + primer projection from contract metadata
+    from .capability_cmd import attach_capability_subparser
+    attach_capability_subparser(sub)
+
     args = parser.parse_args()
 
     # Apply scope from environment
