@@ -393,17 +393,19 @@ def _output_path(plugin_id: str, override: str | None) -> Path:
 
 def _write_or_check(
     *,
-    plugin_id: str,
     rendered: str,
     out_path: Path,
     check: bool,
     stdout: bool,
+    regen_command: str,
 ) -> int:
     """Materialize *rendered* — write, check, or print. Returns exit code.
 
     * ``stdout=True`` prints the body and returns 0 (no I/O).
     * ``check=True`` reads the on-disk file (if any) and returns 1 when
-      it differs from *rendered*; the diagnostic goes to stderr.
+      it differs from *rendered*; the diagnostic on stderr names the
+      exact regen command for the caller's mode (``--plugin``,
+      ``--all``, or ``--schemas``).
     * Otherwise writes *rendered* to *out_path* (creating parent dirs).
     """
     if stdout:
@@ -418,17 +420,22 @@ def _write_or_check(
         if existing is None:
             sys.stderr.write(
                 f"typegen drift: {out_path} does not exist; "
-                f"run `graph set typegen --plugin {plugin_id}` to create it.\n"
+                f"run `{regen_command}` to create it.\n"
             )
         else:
             sys.stderr.write(
                 f"typegen drift: {out_path} is out of date; "
-                f"run `graph set typegen --plugin {plugin_id}` to refresh.\n"
+                f"run `{regen_command}` to refresh.\n"
             )
         return 1
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(rendered)
     return 0
+
+
+def _plugin_regen_command(plugin_id: str) -> str:
+    """Default regen command string for plugin-mode invocations."""
+    return f"graph set typegen --plugin {plugin_id}"
 
 
 def cmd_set_typegen(args) -> None:
@@ -462,11 +469,11 @@ def cmd_set_typegen(args) -> None:
         rendered = render_dts(args.name, sources, regen_command=regen)
         out_path = _output_path(args.name, args.out)
         sys.exit(_write_or_check(
-            plugin_id=args.name,
             rendered=rendered,
             out_path=out_path,
             check=args.check,
             stdout=args.stdout,
+            regen_command=regen,
         ))
 
     if args.all:
@@ -489,11 +496,11 @@ def cmd_set_typegen(args) -> None:
             rendered = render_dts(plugin.manifest.id, sources)
             out_path = _output_path(plugin.manifest.id, None)
             rc = _write_or_check(
-                plugin_id=plugin.manifest.id,
                 rendered=rendered,
                 out_path=out_path,
                 check=args.check,
                 stdout=args.stdout,
+                regen_command=_plugin_regen_command(plugin.manifest.id),
             )
             exit_code = max(exit_code, rc)
         sys.exit(exit_code)
@@ -514,11 +521,11 @@ def cmd_set_typegen(args) -> None:
     rendered = render_dts(plugin.manifest.id, sources)
     out_path = _output_path(plugin.manifest.id, args.out)
     sys.exit(_write_or_check(
-        plugin_id=plugin.manifest.id,
         rendered=rendered,
         out_path=out_path,
         check=args.check,
         stdout=args.stdout,
+        regen_command=_plugin_regen_command(plugin.manifest.id),
     ))
 
 

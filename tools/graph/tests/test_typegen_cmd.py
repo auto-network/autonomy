@@ -566,6 +566,82 @@ def test_cmd_typegen_check_fails_when_disk_diverges(tmp_path, monkeypatch, capsy
     assert "hand-edited junk" in out_path.read_text()
 
 
+def test_cmd_typegen_check_diff_diagnostic_names_plugin_regen_command(
+    tmp_path, monkeypatch, capsys,
+):
+    """Drift output for --plugin mode must point at the --plugin
+    invocation. Pin so a future refactor can't silently revert to
+    suggesting --schemas (or vice-versa).
+    """
+    out_path = tmp_path / "fake.d.ts"
+    out_path.write_text("// hand-edited junk\n")
+    monkeypatch.setattr(typegen_cmd, "_discover_plugin", lambda pid: _stub_plugin(pid))
+    monkeypatch.setattr(
+        typegen_cmd,
+        "_resolve_plugin_sources",
+        lambda plugin: [SchemaSource("x:Y", "Y", _flat_payload())],
+    )
+    args = _make_args(plugin="fake-plugin", out=str(out_path), check=True)
+    with pytest.raises(SystemExit):
+        cmd_set_typegen(args)
+    err = capsys.readouterr().err
+    assert "graph set typegen --plugin fake-plugin" in err
+    assert "--schemas" not in err  # must not leak the other mode
+
+
+def test_cmd_typegen_schemas_mode_check_diff_diagnostic_names_schemas_regen_command(
+    tmp_path, capsys,
+):
+    """Drift output in --schemas mode must reference the --schemas /
+    --name invocation. Coordinator review repro on commit 5d7df16:
+    --schemas was being told to run --plugin which can't regenerate
+    the file. Regression-pin the fix.
+    """
+    out_path = tmp_path / "missing-cap.d.ts"
+    args = _make_args(
+        schemas=["agents.capabilities.github.schemas:CheckEntryV1"],
+        name="capability-github-test",
+        out=str(out_path),
+        check=True,
+    )
+    with pytest.raises(SystemExit) as ei:
+        cmd_set_typegen(args)
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "drift" in err.lower()
+    assert "--schemas agents.capabilities.github.schemas:CheckEntryV1" in err
+    assert "--name capability-github-test" in err
+    assert "--plugin" not in err  # must not suggest the wrong mode
+
+
+def test_cmd_typegen_schemas_mode_check_passes_with_correct_diagnostic_off(
+    tmp_path, capsys,
+):
+    """Sanity: --schemas --check that matches disk content exits 0
+    with no drift output (confirms the regression test above only
+    fires on real drift).
+    """
+    out_path = tmp_path / "match.d.ts"
+    args = _make_args(
+        schemas=["agents.capabilities.github.schemas:CheckEntryV1"],
+        name="capability-github-test",
+        out=str(out_path),
+    )
+    with pytest.raises(SystemExit) as ei:
+        cmd_set_typegen(args)
+    assert ei.value.code == 0
+    args = _make_args(
+        schemas=["agents.capabilities.github.schemas:CheckEntryV1"],
+        name="capability-github-test",
+        out=str(out_path),
+        check=True,
+    )
+    with pytest.raises(SystemExit) as ei:
+        cmd_set_typegen(args)
+    assert ei.value.code == 0
+    assert "drift" not in capsys.readouterr().err.lower()
+
+
 def test_cmd_typegen_check_fails_when_disk_missing(tmp_path, monkeypatch, capsys):
     out_path = tmp_path / "missing.d.ts"
     monkeypatch.setattr(typegen_cmd, "_discover_plugin", lambda pid: _stub_plugin(pid))
