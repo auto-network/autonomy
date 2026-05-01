@@ -6810,6 +6810,23 @@ async def api_diag_eventbus_snapshot(request):
     return JSONResponse(summary)
 
 
+async def api_diag_settings_mediator(request):
+    """Heartbeat snapshot for the settings-mediator dispatch loop.
+
+    GET /api/diag/settings_mediator → JSON dump of
+    ``settings_mediator.HEALTH``. Read-only, no side effects, no
+    auth gate beyond the dashboard's own.
+
+    Useful when the loop wedges silently — `last_tick_age_s` answers
+    "is the loop alive?", `events_received_count` answers "has the
+    bus ever delivered an event?", and
+    `last_handler_fired_at[name]` localises the gap when a specific
+    action handler fails to fire.
+    """
+    from tools.dashboard.settings_mediator import HEALTH
+    return JSONResponse(HEALTH.to_dict())
+
+
 # ── Background watchers ───────────────────────────────────────
 
 _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
@@ -9977,6 +9994,7 @@ routes = [
     Route("/api/diag/sessions", api_diag_sessions),
     Route("/api/diag/client", api_diag_client, methods=["POST"]),
     Route("/api/diag/eventbus/snapshot", api_diag_eventbus_snapshot, methods=["POST"]),
+    Route("/api/diag/settings_mediator", api_diag_settings_mediator),
 
     # API
     Route("/api/beads/ready", api_beads_ready),

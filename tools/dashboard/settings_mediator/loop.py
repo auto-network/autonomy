@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -115,6 +116,89 @@ REGISTRY: list[RegisteredAction] = []
 _loop_task: asyncio.Task | None = None
 _stop_event: asyncio.Event | None = None
 _iterating_lock: asyncio.Lock | None = None
+
+
+# ── Heartbeat ────────────────────────────────────────────────────────
+
+
+@dataclass
+class MediatorHealth:
+    """Heartbeat surface mutated by the loop on every documented seam.
+
+    Read on demand by ``GET /api/diag/settings_mediator``. Per-tick
+    log lines are explicitly out of scope; this is the on-demand
+    alternative — no log noise, but enough state to answer
+    "is the loop alive?" / "did this handler fire?" / "what cursor is
+    each set on?" when the mediator looks wedged.
+
+    Mutated on the loop hot path. The dict fields are pre-allocated
+    once and reused — no per-tick dict allocation.
+    """
+    last_tick_at: float = 0.0
+    last_event_received_at: float | None = None
+    last_event_received_set_id: str | None = None
+    events_received_count: int = 0
+    last_watchdog_tick_at: float | None = None
+    last_handler_fired_at: dict[str, float] = field(default_factory=dict)
+    last_handler_succeeded_at: dict[str, float] = field(default_factory=dict)
+    last_handler_error: dict[str, str] = field(default_factory=dict)
+    handlers_fired_count: dict[str, int] = field(default_factory=dict)
+    cursor_positions: dict[str, str] = field(default_factory=dict)
+    loop_started_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Snapshot the heartbeat as a JSON-friendly dict.
+
+        Includes a derived ``last_tick_age_s`` so callers can spot a
+        stale loop without computing it themselves (per the spec's
+        "loop is stuck if older than a few seconds" use case).
+        """
+        now = time.time()
+        last_tick = self.last_tick_at or None
+        return {
+            "loop_started_at": self.loop_started_at,
+            "last_tick_at": last_tick,
+            "last_tick_age_s": (now - last_tick) if last_tick else None,
+            "last_event_received_at": self.last_event_received_at,
+            "last_event_received_set_id": self.last_event_received_set_id,
+            "events_received_count": self.events_received_count,
+            "last_watchdog_tick_at": self.last_watchdog_tick_at,
+            "last_handler_fired_at": dict(self.last_handler_fired_at),
+            "last_handler_succeeded_at": dict(
+                self.last_handler_succeeded_at
+            ),
+            "last_handler_error": dict(self.last_handler_error),
+            "handlers_fired_count": dict(self.handlers_fired_count),
+            "cursor_positions": dict(self.cursor_positions),
+            "registered_actions": [
+                {"set_id": a.set_id, "name": a.name} for a in REGISTRY
+            ],
+            "now": now,
+        }
+
+
+# Module-scope singleton. The diag endpoint imports this directly.
+HEALTH = MediatorHealth()
+
+
+def reset_health() -> None:
+    """Test helper — clear all heartbeat state in place.
+
+    Mutates the existing :data:`HEALTH` singleton rather than rebinding
+    so external imports (``from .loop import HEALTH``) keep observing
+    the live object.
+    """
+    HEALTH.last_tick_at = 0.0
+    HEALTH.last_event_received_at = None
+    HEALTH.last_event_received_set_id = None
+    HEALTH.events_received_count = 0
+    HEALTH.last_watchdog_tick_at = None
+    HEALTH.last_handler_fired_at.clear()
+    HEALTH.last_handler_succeeded_at.clear()
+    HEALTH.last_handler_error.clear()
+    HEALTH.handlers_fired_count.clear()
+    HEALTH.cursor_positions.clear()
+    HEALTH.loop_started_at = None
 
 
 # ── Registration ─────────────────────────────────────────────────────
@@ -351,6 +435,10 @@ async def iterate_once(services: Services) -> None:
     Public so tests can drive the loop deterministically without
     sleeping. Production callers go through :func:`start_action_loop`.
     """
+    # Heartbeat: stamp every iteration. The diag endpoint reads this
+    # to answer "is the loop alive?" — a stale value indicates wedge.
+    HEALTH.last_tick_at = time.time()
+
     # Group actions by set_id so we read each set once per tick. Order
     # within a set is registration order — multi-handler fan-out is
     # not concurrent; one failure does not block siblings.
@@ -403,10 +491,24 @@ async def iterate_once(services: Services) -> None:
                         _safe_write_marker(marker, status="filtered")
                         continue
 
+                # Heartbeat: stamp fired-at + bump count BEFORE invoking
+                # so a hung handler is observable from the diag endpoint
+                # (fired with no matching succeeded → handler is stuck).
+                fire_ts = time.time()
+                HEALTH.last_handler_fired_at[action.name] = fire_ts
+                HEALTH.handlers_fired_count[action.name] = (
+                    HEALTH.handlers_fired_count.get(action.name, 0) + 1
+                )
                 try:
                     await action.fn(row, services)
+                    HEALTH.last_handler_succeeded_at[action.name] = (
+                        time.time()
+                    )
                     _safe_write_marker(marker, status="ok")
                 except Exception as exc:
+                    HEALTH.last_handler_error[action.name] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
                     logger.exception(
                         "[settings_mediator] handler %s raised on "
                         "set=%s row=%s",
@@ -424,6 +526,9 @@ async def iterate_once(services: Services) -> None:
             try:
                 _write_cursor(
                     set_id, resolved.id, resolved.created_at or "",
+                )
+                HEALTH.cursor_positions[set_id] = (
+                    f"{resolved.created_at or ''}:{resolved.id}"
                 )
             except Exception:
                 logger.exception(
@@ -498,6 +603,12 @@ async def _bus_demuxer(
         if not set_id:
             continue
         if any(a.set_id == set_id for a in REGISTRY):
+            # Heartbeat: stamp event-arm reception so the diag endpoint
+            # can confirm the bus has ever delivered an event for a
+            # registered set (vs. the watchdog being the only wakeup).
+            HEALTH.last_event_received_at = time.time()
+            HEALTH.last_event_received_set_id = set_id
+            HEALTH.events_received_count += 1
             wakeup_event.set()
 
 
@@ -541,6 +652,7 @@ async def _loop_main(
             bus_queue = None
             demuxer_task = None
 
+    HEALTH.loop_started_at = time.time()
     logger.info(
         "[settings_mediator] loop started — %d action(s) registered, "
         "fallback=%.1fs%s",
@@ -574,6 +686,10 @@ async def _loop_main(
                 for t in (wakeup_task, stop_task):
                     if not t.done():
                         t.cancel()
+            if not done:
+                # Timeout fired with neither wakeup nor stop set —
+                # the next iterate_once is fallback-watchdog driven.
+                HEALTH.last_watchdog_tick_at = time.time()
             wakeup_event.clear()
     finally:
         if demuxer_task is not None:
