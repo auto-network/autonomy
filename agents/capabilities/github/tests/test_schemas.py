@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from agents.capabilities.github import probe, service
 from agents.capabilities.github.schemas import (
     CheckEntryV1,
     CODEGEN_SCHEMAS,
@@ -240,6 +241,48 @@ def test_link_helper_rejects_non_dataclass():
 
     with pytest.raises(RuntimeError, match="not a dataclass"):
         link_dataclass_to_schema(_NotADataclass, _Schema)
+
+
+# ── Runtime dataclass linkage (consumer adoption) ───────────
+
+
+def test_service_dataclasses_are_linked_to_their_schemas():
+    """``service.py`` calls ``link_dataclass_to_schema`` at module
+    import time for every runtime dataclass it owns. If anyone deletes
+    those calls (or the dataclass / schema field sets drift), the
+    import itself raises — and ``payload_schema`` would be missing
+    here. Pin the link so the regression surfaces immediately.
+    """
+    assert service.WorktreeGithubExecResult.payload_schema is WorktreeGithubExecResultV1
+    assert service.CheckEntry.payload_schema is CheckEntryV1
+    assert service.ReviewPayload.payload_schema is ReviewPayloadV1
+
+
+def test_probe_result_is_linked_to_its_schema():
+    """Same contract as the service link, scoped to ``probe.py``."""
+    assert probe.ProbeResult.payload_schema is ProbeResultV1
+
+
+def test_real_dataclass_round_trips_through_its_payload_schema():
+    """The runtime dataclass's own ``.to_dict()`` output must validate
+    against the linked schema. Catches drift between the dataclass's
+    serialization and the schema's field metadata even when
+    field-name parity is intact (e.g. value-shape skew on enums).
+    """
+    entry = service.CheckEntry(
+        id="ci/build", icon="BU", label="build", status="pass",
+    )
+    entry.payload_schema.validate(entry.to_dict())
+
+    result = probe.ProbeResult(
+        contract="source_control",
+        contract_version=1,
+        implementation="autonomy/github",
+        implementation_version=1,
+        delivery_mode="image_baked",
+        state="ready",
+    )
+    result.payload_schema.validate(result.to_dict())
 
 
 # ── Codegen drift gate ──────────────────────────────────────

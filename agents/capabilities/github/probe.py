@@ -78,6 +78,19 @@ class ProbeResult:
         }
 
 
+# Wire the runtime dataclass to its declarative typed schema. The link
+# is checked at import time — any drift between the dataclass's field
+# set and the schema's declared metadata raises immediately, so the
+# generated `capability-github.d.ts` consumed by worktrees.js can't
+# claim a probe field the dataclass doesn't actually carry (Bead 3D).
+from agents.capabilities.github.schemas import (  # noqa: E402 — defined after dataclass
+    ProbeResultV1,
+    link_dataclass_to_schema as _link_payload_schema,
+)
+
+_link_payload_schema(ProbeResult, ProbeResultV1)
+
+
 async def probe_v1(
     session_name: str,
     *,

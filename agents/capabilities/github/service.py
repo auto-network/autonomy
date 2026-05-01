@@ -225,6 +225,25 @@ class ReviewPayload:
         }
 
 
+# Wire each runtime dataclass to its declarative typed schema. The link
+# is checked at import time — any drift between the dataclass's field
+# set and the schema's declared metadata raises immediately, so the
+# generated `capability-github.d.ts` (and the JS consumers in
+# `worktrees.js` that reference it) can't claim a field the dataclass
+# doesn't actually carry. The schemas are the single codegen source
+# (Bead 3D, graph://865295b3-5cc § Capability layer impacts).
+from agents.capabilities.github.schemas import (  # noqa: E402 — defined after dataclasses
+    CheckEntryV1,
+    ReviewPayloadV1,
+    WorktreeGithubExecResultV1,
+    link_dataclass_to_schema as _link_payload_schema,
+)
+
+_link_payload_schema(WorktreeGithubExecResult, WorktreeGithubExecResultV1)
+_link_payload_schema(CheckEntry, CheckEntryV1)
+_link_payload_schema(ReviewPayload, ReviewPayloadV1)
+
+
 def _icon_from_label(label: str) -> str:
     """Derive a short glyph (1–2 chars) from a check label.
 
