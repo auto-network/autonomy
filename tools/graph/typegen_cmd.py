@@ -174,9 +174,30 @@ def _render_schema_block(name: str, payload: dict[str, Any]) -> str:
     For non-variant schemas: a single interface.
 
     For variant schemas: a ``<Name>Base`` interface for the parent's
-    fields, one ``<Name><VariantPascalCase>`` interface per variant
-    (extending the base, carrying ``kind: 'slug'``), and a
-    discriminated-union ``type <Name> = ...`` at the bottom.
+    fields, one ``<Name><PascalPath>`` interface per variant at every
+    depth of the tree (each carrying ``kind: '<own_slug>'`` and
+    extending the base), and a discriminated-union ``type <Name> = ...``
+    enumerating every variant in the tree.
+
+    Nested variants matter because the substrate's 1C tree machinery
+    (`_register_variant`) preserves the full tree shape — capability
+    layer namespaces (e.g. ``SourceControl > Review > {ReviewRead,
+    ReviewRefresh}``, ``SourceControl > Gates > GatesSnapshot``) need
+    every leaf in the union for downstream consumers (Phase 3D) to
+    narrow on the leaf discriminator. The walker below does a DFS
+    over ``variants`` (and ``variants[*]['variants']`` recursively),
+    yielding one entry per visited variant.
+
+    All variant interfaces ``extend`` the same ``<Name>Base`` rather
+    than chaining through their parent variant. Chaining would clash
+    on the ``kind`` discriminator literal (a parent's ``kind: 'review'``
+    cannot be narrowed to ``kind: 'review_read'`` via plain extension);
+    flattening to ``Base`` lets every variant declare its own
+    discriminator unambiguously while the naming convention
+    (``SourceControlReviewRead``) preserves the tree shape visually.
+    Inherited fields are already merged into each variant's
+    ``properties`` by the substrate's ``_field_metadata`` derivation,
+    so each interface still carries every applicable field.
     """
     set_id = payload.get("set_id", "")
     revision = payload.get("schema_revision", "")
@@ -197,13 +218,12 @@ def _render_schema_block(name: str, payload: dict[str, Any]) -> str:
     base_name = f"{name}Base"
     pieces = [header, _render_interface(base_name, payload)]
     union_members: list[str] = []
-    for slug, variant_payload in variants.items():
-        variant_name = f"{name}{_pascal(slug)}"
+    for variant_name, variant_payload, variant_slug in _walk_variants(name, variants):
         pieces.append(
             _render_interface(
                 variant_name,
                 variant_payload,
-                discriminator_slug=slug,
+                discriminator_slug=variant_slug,
                 extends=base_name,
             )
         )
@@ -214,6 +234,32 @@ def _render_schema_block(name: str, payload: dict[str, Any]) -> str:
         + ";"
     )
     return "\n\n".join(pieces)
+
+
+def _walk_variants(prefix: str, variants: dict[str, dict]):
+    """DFS through a variant tree, yielding one entry per visited variant.
+
+    *prefix* is the TS name of the parent class (the schema root or a
+    parent variant); each visited variant's interface name concatenates
+    the parent prefix with the variant slug rendered in PascalCase.
+    Nested variants extend that path further, so a tree
+    ``SourceControl > Review > ReviewRead`` produces
+    ``SourceControlReview`` then ``SourceControlReviewReviewRead``
+    — and to avoid stutter, we only append the variant's own
+    PascalCase slug, never re-stuttering the parent path.
+
+    Yields ``(interface_name, payload, slug)`` for each variant. The
+    ``slug`` is the variant's own discriminator (e.g. ``review_read``);
+    the substrate guarantees these are globally unique within a tree
+    because the variant slug is derived from the class name and class
+    names within a hierarchy don't collide.
+    """
+    for slug, variant_payload in variants.items():
+        interface_name = f"{prefix}{_pascal(slug)}"
+        yield interface_name, variant_payload, slug
+        nested = variant_payload.get("variants") or {}
+        if nested:
+            yield from _walk_variants(interface_name, nested)
 
 
 def _pascal(slug: str) -> str:
