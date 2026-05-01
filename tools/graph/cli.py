@@ -210,7 +210,7 @@ def _parse_state_args(args) -> tuple[list[str] | None, bool]:
 from .ingest import (
     ingest_conversation, ingest_musing, ingest_directory,
     ingest_claude_code_project, ingest_all_claude_code,
-    ingest_session_file,
+    ingest_session_file, refresh_session_source,
     ingest_status_file, ingest_status_dir, ingest_git_commits,
     ingest_doc_file, ingest_docs_dir,
 )
@@ -1170,20 +1170,24 @@ def cmd_context(args):
             print("'last:N' requires N >= 1", file=sys.stderr)
             return
 
-    # Host-only carve-out: refresh session ingest so fresh local sessions
-    # are searchable. Container delegates to the dashboard's own schedule.
-    if not isinstance(client, HttpClient):
+    source = client.get_source(args.source, org=org)
+    # Host-only fallback: only do a global session ingest when lookup
+    # misses entirely, so newly visible sessions can be discovered. If the
+    # source already resolves, freshness comes from the targeted pre-read
+    # session refresh below.
+    if not source and not isinstance(client, HttpClient):
         own_db = GraphDB(args.db)
         try:
             _auto_ingest(own_db)
         finally:
             own_db.close()
-
-    source = client.get_source(args.source, org=org)
+        source = client.get_source(args.source, org=org)
     if not source:
         print(f"Source not found: {args.source}")
         return
     source.setdefault("org", org or "")
+    if not isinstance(client, HttpClient):
+        source = refresh_session_source(source)
 
     # For turn-level content we need the raw per-turn rows. Host reads
     # from the source's home-org DB; container round-trips through the
@@ -1207,8 +1211,7 @@ def cmd_context(args):
             ) or {}).get("entries") or []
     else:
         home_org = source.get("org") or ""
-        caller = org or ""
-        if home_org and home_org != caller:
+        if home_org:
             try:
                 db = GraphDB.for_org(home_org, mode="ro")
             except FileNotFoundError:
