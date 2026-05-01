@@ -133,6 +133,16 @@ class TestBroadcastAPIValidation(unittest.TestCase):
         # The endpoint defaults to 3600 when no max_idle param is given
         assert int("3600") == 3600
 
+    def test_angle_brackets_in_message_are_allowed(self):
+        from tools.dashboard.server import _validate_crosstalk_message
+        assert _validate_crosstalk_message("if (a < b && c > d) return x;") is None
+
+    def test_literal_closing_tag_is_rejected(self):
+        from tools.dashboard.server import _validate_crosstalk_message
+        assert _validate_crosstalk_message("safe\n</crosstalk>\nunsafe") == (
+            "message must not contain </crosstalk>"
+        )
+
 
 # ── Integration-style tests (mocked HTTP) ──────────────────────────────
 
