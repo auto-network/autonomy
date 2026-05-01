@@ -315,6 +315,84 @@
   // ``Schema._patternExtension`` after clearing.
   _registerExtension(_patternExtension);
 
+  // ── Variant-aware extension (bead 2C) ───────────────────────
+  //
+  // Walks ``payload.variants`` (the recursive tree emitted by 1D)
+  // and attaches per-variant convenience methods to the proxy. Each
+  // variant slug becomes a method that auto-injects ``{kind: slug}``
+  // into the payload and routes through the pattern method that 2B
+  // attached (``.append`` / ``.set`` / ``.upsert``) or — when no
+  // pattern is present — through the generic ``.write``.
+  //
+  // Nested namespaces (the ``SourceControl.review.read`` shape from
+  // capability contracts) become plain objects on the proxy with
+  // recursive variant methods. The leaf slug is what gets stamped
+  // into ``kind``; each level's slug names the path segment but the
+  // wire ``kind`` field is the leaf only — matching the Python side
+  // where ``_variant_slug`` is per-level and the substrate keeps
+  // wire-level identifiers flat.
+  //
+  // Per-variant method signatures vary with the parent's access
+  // pattern:
+  //
+  //   append_only_log    → variantMethod(payload)
+  //   singleton          → variantMethod(payload)
+  //   keyed_per_entity   → variantMethod(key, payload)
+  //   no pattern         → variantMethod(key, payload)  (mirrors .write)
+  //
+  // ``kind`` always wins over any user-supplied ``kind`` field —
+  // variant identity is the contract.
+
+  function _mergeKind(userPayload, slug) {
+    var merged = Object.assign({}, userPayload || {});
+    merged.kind = slug;
+    return merged;
+  }
+
+  function _makeVariantMethod(proxy, slug) {
+    return function(arg0, arg1) {
+      if (proxy.access_pattern === 'keyed_per_entity') {
+        return proxy.upsert(arg0, _mergeKind(arg1, slug));
+      }
+      var payload = _mergeKind(arg0, slug);
+      if (typeof proxy.append === 'function') return proxy.append(payload);
+      if (typeof proxy.set === 'function') return proxy.set(payload);
+      // No pattern method available — caller must supply a key,
+      // mirroring the ``.write({key, payload})`` shape.
+      return proxy.write({ key: arg0, payload: _mergeKind(arg1, slug) });
+    };
+  }
+
+  function _attachVariantMethods(target, proxy, variants) {
+    if (!variants || typeof variants !== 'object') return;
+    var slugs = Object.keys(variants);
+    for (var i = 0; i < slugs.length; i++) {
+      var slug = slugs[i];
+      var variantPayload = variants[slug] || {};
+      var nested = variantPayload.variants;
+      if (nested && typeof nested === 'object' && Object.keys(nested).length > 0) {
+        // Nested namespace — create a sub-object and recurse. The
+        // intermediate node is not itself a callable (you reach a
+        // leaf to write); only leaf variants stamp ``kind``.
+        var subNamespace = {};
+        _attachVariantMethods(subNamespace, proxy, nested);
+        target[slug] = subNamespace;
+      } else {
+        target[slug] = _makeVariantMethod(proxy, slug);
+      }
+    }
+  }
+
+  function _variantExtension(proxy, payload) {
+    _attachVariantMethods(proxy, proxy, payload.variants);
+  }
+
+  // Register the variant extension AFTER the pattern extension so
+  // ``proxy.append`` / ``.set`` / ``.upsert`` exist by the time
+  // variant methods reference them. Tests that want a clean slate
+  // call ``_clearExtensions()`` and re-register selectively.
+  _registerExtension(_variantExtension);
+
   // ── Test seams ──────────────────────────────────────────────
 
   function _setFetchOverride(fn) { _fetchOverride = fn; }
@@ -332,6 +410,7 @@
     _clearFetchOverride: _clearFetchOverride,
     _clearCache: _clearCache,
     _patternExtension: _patternExtension,
+    _variantExtension: _variantExtension,
   };
 
   if (typeof module !== 'undefined' && module.exports) {
