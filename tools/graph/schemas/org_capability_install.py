@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, register_schema
+from .registry import SchemaValidationError, SettingSchema, field, register_schema
 
 
 SET_ID = "autonomy.org.capability.install"
@@ -89,49 +89,50 @@ class OrgCapabilityInstallV1(SettingSchema):
     Optional: ``env_bindings``, ``secret_file_bindings``,
     ``mount_bindings`` (each a string -> string mapping when present);
     ``notes`` (string).
+
+    Migrated to the typed-``field()`` declaration shape (auto-4n966 /
+    Bead 1A) — annotations now drive ``_field_metadata`` derivation
+    via ``__init_subclass__``. Imperative validation in
+    :meth:`validate` continues to enforce shape checks the typed
+    metadata can't yet describe (str -> str maps, integer minimums,
+    extra-field rejection).
     """
 
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "contract": {
-            "type": "string",
-            "required": True,
-            "description": "Contract identifier (unpinned name; version is the integer field)",
-        },
-        "contract_version": {
-            "type": "integer",
-            "required": True,
-            "description": "Pinned canonical contract version (>= 1)",
-        },
-        "implementation": {
-            "type": "string",
-            "required": True,
-            "description": "Implementation identifier (e.g. autonomy/github)",
-        },
-        "implementation_version": {
-            "type": "integer",
-            "required": True,
-            "description": "Pinned canonical implementation version (>= 1)",
-        },
-        "env_bindings": {
-            "type": "object",
-            "description": "Env var bindings: env name -> source identifier",
-        },
-        "secret_file_bindings": {
-            "type": "object",
-            "description": "Secret-file bindings: container path -> source identifier",
-        },
-        "mount_bindings": {
-            "type": "object",
-            "description": "Mount bindings: container path -> source identifier",
-        },
-        "notes": {
-            "type": "string",
-            "description": "Free-form notes",
-        },
-    }
+    contract: str = field(
+        required=True,
+        description="Contract identifier (unpinned name; version is the integer field)",
+    )
+    contract_version: int = field(
+        required=True,
+        description="Pinned canonical contract version (>= 1)",
+    )
+    implementation: str = field(
+        required=True,
+        description="Implementation identifier (e.g. autonomy/github)",
+    )
+    implementation_version: int = field(
+        required=True,
+        description="Pinned canonical implementation version (>= 1)",
+    )
+    env_bindings: dict = field(
+        required=False,
+        description="Env var bindings: env name -> source identifier",
+    )
+    secret_file_bindings: dict = field(
+        required=False,
+        description="Secret-file bindings: container path -> source identifier",
+    )
+    mount_bindings: dict = field(
+        required=False,
+        description="Mount bindings: container path -> source identifier",
+    )
+    notes: str = field(
+        required=False,
+        description="Free-form notes",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:  # noqa: C901 — flat checks
