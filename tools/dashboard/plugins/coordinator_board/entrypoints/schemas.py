@@ -20,7 +20,10 @@ The plugin owns ten Settings:
   thread (Tracking tab). Same rekey as tile.
 * ``dashboard.coordinator-decision`` — append-only event log of
   operator taps on a coordinator tile (thumb yes/no, choice, custom
-  reply, sitrep request, refresh request). Keyed by uuid.
+  reply, sitrep request, refresh request). Keyed by uuid. Variant
+  subclasses match the ``kind`` discriminator one-to-one
+  (``ThumbYes`` → ``thumb_yes`` etc.) — codegen consumers walk the
+  tree to expose per-kind typed methods.
 * ``dashboard.coordinator-sprint`` — coordinator-owned multi-session
   arc. Key ``<sprint-id>``.
 * ``dashboard.coordinator-bead`` — coordinator-curated bead landing /
@@ -38,6 +41,17 @@ beads, convergent-decisions, open-followups, and docs are
 coordinator-only writes (cross-session editorial); tiles + threads
 are peer-self-published with coordinator curation via the
 publication-state machine.
+
+Migrated to the Phase 1 typed-field declaration shape (bead 4A) —
+``_field_metadata`` is derived from typed annotations + ``field()``
+helpers via ``SettingSchema.__init_subclass__``. Access patterns are
+declared via decorator (``@append_only_log`` /  ``@singleton`` /
+``@keyed_per_entity``); decision variants use the variant-subclass
+pattern. Imperative ``validate()`` methods continue to enforce
+cross-field shape rules the typed metadata cannot yet describe
+(non-empty required strings, enum membership, kind-conditional
+choice requirement, structured-detail shape, list-of-strings
+content, extra-field rejection).
 """
 from __future__ import annotations
 
@@ -46,7 +60,11 @@ from typing import Any
 from tools.graph.schemas.registry import (
     SchemaValidationError,
     SettingSchema,
+    append_only_log,
+    field,
+    keyed_per_entity,
     register_schema,
+    singleton,
 )
 
 
@@ -108,41 +126,39 @@ SYNOPSIS = {
 # ── Canvas ───────────────────────────────────────────────────────────
 
 
+@keyed_per_entity
 class CoordinatorCanvasV1(SettingSchema):
     """``{ageMin, question, context, quickReplies[]}`` — coordinator's banger."""
 
     set_id = COORDINATOR_CANVAS_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "question": {
-            "type": "string",
-            "required": True,
-            "description": (
-                "The one well-framed question the coordinator wants the "
-                "operator to answer right now"
-            ),
-        },
-        "context": {
-            "type": "string",
-            "description": (
-                "Just-enough context to make the question answerable; "
-                "supports inline ``[label](href)`` markdown links"
-            ),
-        },
-        "ageMin": {
-            "type": "integer",
-            "description": "Age in minutes since the question was published",
-        },
-        "quickReplies": {
-            "type": "array",
-            "description": (
-                "Pre-canned reply suggestions; tapping a pill populates "
-                "the operator composer verbatim"
-            ),
-            "element": {"type": "string"},
-        },
-    }
+    question: str = field(
+        required=True,
+        description=(
+            "The one well-framed question the coordinator wants the "
+            "operator to answer right now"
+        ),
+    )
+    context: str = field(
+        required=False,
+        description=(
+            "Just-enough context to make the question answerable; "
+            "supports inline ``[label](href)`` markdown links"
+        ),
+    )
+    ageMin: int = field(
+        required=False,
+        description="Age in minutes since the question was published",
+    )
+    quickReplies: list = field(
+        required=False,
+        description=(
+            "Pre-canned reply suggestions; tapping a pill populates "
+            "the operator composer verbatim"
+        ),
+        element=str,
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -190,23 +206,21 @@ class CoordinatorCanvasV1(SettingSchema):
 # ── Operator message ─────────────────────────────────────────────────
 
 
+@singleton(key="default")
 class OperatorMessageToCoordinatorV1(SettingSchema):
     """``{text, sentAt}`` — operator's latest message back to coordinator."""
 
     set_id = OPERATOR_MESSAGE_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "text": {
-            "type": "string",
-            "required": True,
-            "description": "Operator's reply body, sent verbatim to the coordinator session",
-        },
-        "sentAt": {
-            "type": "string",
-            "description": "ISO-8601 send timestamp",
-        },
-    }
+    text: str = field(
+        required=True,
+        description="Operator's reply body, sent verbatim to the coordinator session",
+    )
+    sentAt: str = field(
+        required=False,
+        description="ISO-8601 send timestamp",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -267,6 +281,7 @@ def _validate_tile_common(cls, payload: Any) -> None:
         )
 
 
+@keyed_per_entity
 class CoordinatorTileV1(SettingSchema):
     """Per-(coordinator, peer) tile. Key: ``<coord>:<peer-session>``.
 
@@ -277,24 +292,18 @@ class CoordinatorTileV1(SettingSchema):
     set_id = COORDINATOR_TILE_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "label":      {"type": "string", "required": True,
-                       "description": "Tile label (peer's working title)"},
-        "role":       {"type": "string", "required": True,
-                       "description": "Peer's session role"},
-        "thing":      {"type": "string", "required": True,
-                       "description": "Editorial summary of what the peer is doing"},
-        "asks":       {"type": "string", "required": True,
-                       "enum": list(VALID_TILE_ASKS),
-                       "description": "What the tile is asking the operator for"},
-        "ageMin":     {"type": "integer",
-                       "description": "Age in minutes since the tile last updated"},
-        "updateKind": {"type": "string",
-                       "enum": list(VALID_TILE_UPDATE_KINDS),
-                       "description": "Refresh vs discovery update"},
-        "detail":     {"type": "string",
-                       "description": "Optional longer-form supporting detail (string)"},
-    }
+    label: str = field(required=True, description="Tile label (peer's working title)")
+    role: str = field(required=True, description="Peer's session role")
+    thing: str = field(required=True,
+                       description="Editorial summary of what the peer is doing")
+    asks: str = field(required=True, enum=list(VALID_TILE_ASKS),
+                      description="What the tile is asking the operator for")
+    ageMin: int = field(required=False,
+                        description="Age in minutes since the tile last updated")
+    updateKind: str = field(required=False, enum=list(VALID_TILE_UPDATE_KINDS),
+                            description="Refresh vs discovery update")
+    detail: str = field(required=False,
+                        description="Optional longer-form supporting detail (string)")
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -314,6 +323,7 @@ class CoordinatorTileV1(SettingSchema):
 # ── Tile (v2 — peer-session keyshape, structured detail) ─────────────
 
 
+@keyed_per_entity
 class CoordinatorTileV2(SettingSchema):
     """Per-peer-session tile. Key: ``<peer-session>``.
 
@@ -327,30 +337,24 @@ class CoordinatorTileV2(SettingSchema):
     set_id = COORDINATOR_TILE_SET_ID
     schema_revision = TILE_SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "label":      {"type": "string", "required": True,
-                       "description": "Tile label (peer's working title)"},
-        "role":       {"type": "string", "required": True,
-                       "description": "Peer's session role"},
-        "thing":      {"type": "string", "required": True,
-                       "description": "Editorial summary of what the peer is doing"},
-        "asks":       {"type": "string", "required": True,
-                       "enum": list(VALID_TILE_ASKS),
-                       "description": "What the tile is asking the operator for"},
-        "ageMin":     {"type": "integer",
-                       "description": "Age in minutes since the tile last updated"},
-        "updateKind": {"type": "string",
-                       "enum": list(VALID_TILE_UPDATE_KINDS),
-                       "description": "Refresh vs discovery update"},
-        "detail":     {"type": "object",
-                       "description": (
-                           "Optional structured detail; renders the "
-                           "expanded panel. ``context`` carries longer-"
-                           "form prose; ``choices`` is a list of "
-                           "resolution-choice strings the operator can "
-                           "tap."
-                       )},
-    }
+    label: str = field(required=True, description="Tile label (peer's working title)")
+    role: str = field(required=True, description="Peer's session role")
+    thing: str = field(required=True,
+                       description="Editorial summary of what the peer is doing")
+    asks: str = field(required=True, enum=list(VALID_TILE_ASKS),
+                      description="What the tile is asking the operator for")
+    ageMin: int = field(required=False,
+                        description="Age in minutes since the tile last updated")
+    updateKind: str = field(required=False, enum=list(VALID_TILE_UPDATE_KINDS),
+                            description="Refresh vs discovery update")
+    detail: dict = field(
+        required=False,
+        description=(
+            "Optional structured detail; renders the expanded panel. "
+            "``context`` carries longer-form prose; ``choices`` is a "
+            "list of resolution-choice strings the operator can tap."
+        ),
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -442,31 +446,7 @@ def _validate_thread_common(cls, payload: Any) -> None:
         )
 
 
-_THREAD_FIELDS = {
-    "label":     {"type": "string", "required": True,
-                  "description": "Thread label (working title)"},
-    "role":      {"type": "string", "required": True,
-                  "description": "Session role driving the thread"},
-    "status":    {"type": "string", "required": True,
-                  "enum": list(VALID_THREAD_STATUSES),
-                  "description": "Thread status; drives the badge"},
-    "lead":      {"type": "string", "required": True,
-                  "description": "Editorial lead (one-sentence summary)"},
-    "bullets":   {"type": "array",
-                  "description": "Supporting bullets shown beneath the lead",
-                  "element": {"type": "string"}},
-    "ageMin":    {"type": "integer",
-                  "description": "Age in minutes since the thread last updated"},
-    "totalTurns":{"type": "integer",
-                  "description": "Total turn count for the thread"},
-    "needs":     {"type": "string",
-                  "description": (
-                      "When set, the thread is asking the operator for "
-                      "something specific — surfaced as a callout"
-                  )},
-}
-
-
+@keyed_per_entity
 class CoordinatorThreadV1(SettingSchema):
     """Per-(coordinator, peer) thread. Key: ``<coord>:<peer-session>``.
 
@@ -475,7 +455,32 @@ class CoordinatorThreadV1(SettingSchema):
 
     set_id = COORDINATOR_THREAD_SET_ID
     schema_revision = SCHEMA_REVISION
-    _field_metadata = dict(_THREAD_FIELDS)
+
+    label: str = field(required=True, description="Thread label (working title)")
+    role: str = field(required=True,
+                      description="Session role driving the thread")
+    status: str = field(required=True, enum=list(VALID_THREAD_STATUSES),
+                        description="Thread status; drives the badge")
+    lead: str = field(required=True,
+                      description="Editorial lead (one-sentence summary)")
+    bullets: list = field(
+        required=False, element=str,
+        description="Supporting bullets shown beneath the lead",
+    )
+    ageMin: int = field(
+        required=False,
+        description="Age in minutes since the thread last updated",
+    )
+    totalTurns: int = field(
+        required=False, description="Total turn count for the thread",
+    )
+    needs: str = field(
+        required=False,
+        description=(
+            "When set, the thread is asking the operator for "
+            "something specific — surfaced as a callout"
+        ),
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -487,6 +492,7 @@ class CoordinatorThreadV1(SettingSchema):
             )
 
 
+@keyed_per_entity
 class CoordinatorThreadV2(SettingSchema):
     """Per-peer-session thread. Key: ``<peer-session>``.
 
@@ -497,7 +503,32 @@ class CoordinatorThreadV2(SettingSchema):
 
     set_id = COORDINATOR_THREAD_SET_ID
     schema_revision = THREAD_SCHEMA_REVISION
-    _field_metadata = dict(_THREAD_FIELDS)
+
+    label: str = field(required=True, description="Thread label (working title)")
+    role: str = field(required=True,
+                      description="Session role driving the thread")
+    status: str = field(required=True, enum=list(VALID_THREAD_STATUSES),
+                        description="Thread status; drives the badge")
+    lead: str = field(required=True,
+                      description="Editorial lead (one-sentence summary)")
+    bullets: list = field(
+        required=False, element=str,
+        description="Supporting bullets shown beneath the lead",
+    )
+    ageMin: int = field(
+        required=False,
+        description="Age in minutes since the thread last updated",
+    )
+    totalTurns: int = field(
+        required=False, description="Total turn count for the thread",
+    )
+    needs: str = field(
+        required=False,
+        description=(
+            "When set, the thread is asking the operator for "
+            "something specific — surfaced as a callout"
+        ),
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -514,47 +545,44 @@ def _upconvert_thread_v1_to_v2(payload: dict) -> dict:
     return dict(payload)
 
 
-# ── Decision (append-only event log) ─────────────────────────────────
+# ── Decision (append-only event log; variants per kind) ──────────────
 
 
+@append_only_log(key="uuid_v4")
 class CoordinatorDecisionV1(SettingSchema):
-    """Append-only operator decision row. Key: uuid, payload describes the tap."""
+    """Append-only operator decision row. Key: uuid, payload describes the tap.
+
+    Variant subclasses (``ThumbYes``, ``ThumbNo``, ``Choice``, ``Custom``,
+    ``SitrepRequest``, ``RefreshRequest``) match ``VALID_DECISION_KINDS``
+    one-to-one. Codegen consumers walk the variants tree to expose
+    per-kind typed methods on the JS proxy (``Decision.thumb_yes(...)``
+    etc.). The base ``validate()`` handles every kind via the existing
+    imperative checks; variants exist for codegen and for the union-
+    of-fields unknown-field guard below.
+    """
 
     set_id = COORDINATOR_DECISION_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "tile_id": {
-            "type": "string",
-            "required": True,
-            "description": (
-                "Identifier of the tile the operator interacted with "
-                "(matches a coordinator-tile member's session segment)"
-            ),
-        },
-        "kind": {
-            "type": "string",
-            "required": True,
-            "enum": list(VALID_DECISION_KINDS),
-            "description": "Decision kind; the action handler routes on this field",
-        },
-        "choice": {
-            "type": "string",
-            "description": (
-                "Operator's chosen text — the resolution label for "
-                "``choice``, the free-text body for ``custom``"
-            ),
-        },
-        "sentAt": {
-            "type": "string",
-            "description": "ISO-8601 timestamp of the operator tap",
-        },
-        "target_session": {
-            "type": "string",
-            "required": True,
-            "description": "Session that should receive the decision via session_send",
-        },
-    }
+    tile_id: str = field(
+        required=True,
+        description=(
+            "Identifier of the tile the operator interacted with "
+            "(matches a coordinator-tile member's session segment)"
+        ),
+    )
+    kind: str = field(
+        required=True, enum=list(VALID_DECISION_KINDS),
+        description="Decision kind; the action handler routes on this field",
+    )
+    sentAt: str = field(
+        required=False,
+        description="ISO-8601 timestamp of the operator tap",
+    )
+    target_session: str = field(
+        required=True,
+        description="Session that should receive the decision via session_send",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -591,16 +619,57 @@ class CoordinatorDecisionV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'sentAt' must be an ISO-8601 string or null"
             )
-        extra = set(payload) - set(cls._field_metadata)
+        # Allow any field declared on the base OR any registered variant.
+        # Variants extend the field set (Choice / Custom add ``choice``);
+        # this union keeps the unknown-field guard valid across them.
+        all_fields = set(cls._field_metadata)
+        for variant_cls in cls._variants.values():
+            all_fields |= set(variant_cls._field_metadata)
+        extra = set(payload) - all_fields
         if extra:
             raise SchemaValidationError(
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"
             )
 
 
+class ThumbYes(CoordinatorDecisionV1):
+    """Operator approves the tile's ask."""
+
+
+class ThumbNo(CoordinatorDecisionV1):
+    """Operator declines the tile's ask."""
+
+
+class SitrepRequest(CoordinatorDecisionV1):
+    """Operator requests a fresh sitrep on the tile's owning session."""
+
+
+class RefreshRequest(CoordinatorDecisionV1):
+    """Operator requests the tile's owner refresh its state."""
+
+
+class Choice(CoordinatorDecisionV1):
+    """Operator picked one of the canvas's pre-canned quickReply pills."""
+
+    choice: str = field(
+        required=True,
+        description="The pill text the operator picked, verbatim.",
+    )
+
+
+class Custom(CoordinatorDecisionV1):
+    """Operator typed a free-text reply targeting this tile."""
+
+    choice: str = field(
+        required=True,
+        description="The operator's free-text body, verbatim.",
+    )
+
+
 # ── Sprint (coordinator-owned editorial arc) ─────────────────────────
 
 
+@keyed_per_entity
 class CoordinatorSprintV1(SettingSchema):
     """Per-sprint-id editorial card. Key: ``<sprint-id>``.
 
@@ -611,38 +680,44 @@ class CoordinatorSprintV1(SettingSchema):
     set_id = COORDINATOR_SPRINT_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "title":       {"type": "string", "required": True,
-                        "description": "Editorial sprint headline"},
-        "status":      {"type": "string", "required": True,
-                        "enum": list(VALID_SPRINT_STATUSES),
-                        "description": "Sprint status; drives the badge"},
-        "ageMin":      {"type": "integer",
-                        "description": "Age in minutes since last update"},
-        "participants":{"type": "array",
-                        "description": "Sessions involved in this sprint",
-                        "element": {"type": "string"}},
-        "commitCount": {"type": "integer",
-                        "description": "Commit count surfaced in the meta-row"},
-        "beadCount":   {"type": "integer",
-                        "description": "Bead count surfaced in the meta-row"},
-        "arc":         {"type": "string",
-                        "description": (
-                            "Editorial 1–2 sentence arc; supports inline "
-                            "``[label](href)`` markdown links"
-                        )},
-        "shipped":     {"type": "array",
-                        "description": "Landed work lines (with optional inline links)",
-                        "element": {"type": "string"}},
-        "inFlight":    {"type": "array",
-                        "description": "Active work lines",
-                        "element": {"type": "string"}},
-        "needs":       {"type": "string",
-                        "description": (
-                            "What would keep this sprint from falling by "
-                            "the wayside; surfaced as an amber callout"
-                        )},
-    }
+    title: str = field(required=True, description="Editorial sprint headline")
+    status: str = field(required=True, enum=list(VALID_SPRINT_STATUSES),
+                        description="Sprint status; drives the badge")
+    ageMin: int = field(required=False,
+                        description="Age in minutes since last update")
+    participants: list = field(
+        required=False, element=str,
+        description="Sessions involved in this sprint",
+    )
+    commitCount: int = field(
+        required=False,
+        description="Commit count surfaced in the meta-row",
+    )
+    beadCount: int = field(
+        required=False,
+        description="Bead count surfaced in the meta-row",
+    )
+    arc: str = field(
+        required=False,
+        description=(
+            "Editorial 1–2 sentence arc; supports inline "
+            "``[label](href)`` markdown links"
+        ),
+    )
+    shipped: list = field(
+        required=False, element=str,
+        description="Landed work lines (with optional inline links)",
+    )
+    inFlight: list = field(
+        required=False, element=str, description="Active work lines",
+    )
+    needs: str = field(
+        required=False,
+        description=(
+            "What would keep this sprint from falling by the "
+            "wayside; surfaced as an amber callout"
+        ),
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -692,23 +767,25 @@ class CoordinatorSprintV1(SettingSchema):
 # ── Bead (coordinator-curated landing/closing summary) ───────────────
 
 
+@keyed_per_entity
 class CoordinatorBeadV1(SettingSchema):
     """Coordinator-curated bead summary. Key: ``<bead-id>``."""
 
     set_id = COORDINATOR_BEAD_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "commit": {"type": "string",
-                   "description": "Landing commit short-sha (or ``(host)`` for host work)"},
-        "scope":  {"type": "string", "required": True,
-                   "description": "One-line scope description"},
-        "status": {"type": "string", "required": True,
-                   "enum": list(VALID_BEAD_STATUSES),
-                   "description": "Bead status; drives the row glyph"},
-        "note":   {"type": "string",
-                   "description": "Optional editorial note"},
-    }
+    commit: str = field(
+        required=False,
+        description="Landing commit short-sha (or ``(host)`` for host work)",
+    )
+    scope: str = field(
+        required=True, description="One-line scope description",
+    )
+    status: str = field(
+        required=True, enum=list(VALID_BEAD_STATUSES),
+        description="Bead status; drives the row glyph",
+    )
+    note: str = field(required=False, description="Optional editorial note")
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -744,19 +821,20 @@ class CoordinatorBeadV1(SettingSchema):
 # ── Convergent decision (coordinator-curated cross-session call) ─────
 
 
+@keyed_per_entity
 class CoordinatorConvergentDecisionV1(SettingSchema):
     """Coordinator-curated convergent design decision. Key: ``<title-slug>``."""
 
     set_id = COORDINATOR_CONVERGENT_DECISION_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "title":   {"type": "string", "required": True,
-                    "description": "Headline of the convergent decision"},
-        "raisedBy":{"type": "array", "required": True,
-                    "description": "Sessions that surfaced the same problem",
-                    "element": {"type": "string"}},
-    }
+    title: str = field(
+        required=True, description="Headline of the convergent decision",
+    )
+    raisedBy: list = field(
+        required=True, element=str,
+        description="Sessions that surfaced the same problem",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -786,19 +864,20 @@ class CoordinatorConvergentDecisionV1(SettingSchema):
 # ── Open follow-up (coordinator-curated, not yet beaded) ─────────────
 
 
+@keyed_per_entity
 class CoordinatorOpenFollowupV1(SettingSchema):
     """Coordinator-curated open follow-up. Key: uuid."""
 
     set_id = COORDINATOR_OPEN_FOLLOWUP_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "text": {"type": "string", "required": True,
-                 "description": (
-                     "Follow-up body; supports inline ``[label](href)`` "
-                     "markdown links"
-                 )},
-    }
+    text: str = field(
+        required=True,
+        description=(
+            "Follow-up body; supports inline ``[label](href)`` "
+            "markdown links"
+        ),
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -822,18 +901,17 @@ class CoordinatorOpenFollowupV1(SettingSchema):
 # ── Docs (singleton coordMap + walkthrough pointers) ─────────────────
 
 
+@singleton(key="default")
 class CoordinatorDocsV1(SettingSchema):
     """Singleton coord-map + walkthrough doc pointers. Key: ``default``."""
 
     set_id = COORDINATOR_DOCS_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "coordMap":   {"type": "string",
-                       "description": "Coord-map note source id"},
-        "walkthrough":{"type": "string",
-                       "description": "Walkthrough note source id"},
-    }
+    coordMap: str = field(required=False, description="Coord-map note source id")
+    walkthrough: str = field(
+        required=False, description="Walkthrough note source id",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
