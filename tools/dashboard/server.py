@@ -5619,10 +5619,15 @@ async def api_worktrees(request):
 async def api_worktrees_refresh(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_sessions.get_worktrees())
-    # Operator-triggered refresh bypasses the source_control TTL cache
-    # and any active rate-limit back-off — they want fresh PR data on
-    # demand. The 30s background loop continues to respect both.
-    rows = await worktree_monitor.refresh(force_capabilities=True)
+    # Top-level Refresh on the Worktrees page is local-git only — re-run
+    # ``scan_all_worktrees`` and serve cached source_control snapshots.
+    # Fanning out gh fetches for every live row was the rate-limit
+    # anti-pattern we just removed from the background poll; it doesn't
+    # belong on the operator path either. The per-PR refresh affordance
+    # inside the review overlay (planned with the review-binding bead)
+    # is the only operator-explicit fetch path — scoped to one PR with
+    # ETag-conditional REST so most clicks are free.
+    rows = await worktree_monitor.refresh()
     return JSONResponse([
         _worktree_state_json(row)
         for row in rows
