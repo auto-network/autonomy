@@ -2491,11 +2491,9 @@ async def api_crosstalk_send(request):
     target = body.get("target", "")
     message = body.get("message", "")
 
-    # Validate message: plain text only, no angle brackets, max 4000 chars
-    if not message or len(message) > 4000:
-        return JSONResponse({"error": "message must be 1-4000 characters"}, status_code=400)
-    if "<" in message or ">" in message:
-        return JSONResponse({"error": "message must not contain < or > characters"}, status_code=400)
+    error = _validate_crosstalk_message(message)
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
 
     # Validate target exists
     if not target or not _tmux_session_exists(target):
@@ -2555,6 +2553,15 @@ async def api_crosstalk_send(request):
 _MAX_BROADCAST_IDLE_SECS = 21600  # 6 hours
 
 
+def _validate_crosstalk_message(message: str) -> str | None:
+    """Return a validation error for an outbound CrossTalk body, if any."""
+    if not message or len(message) > 4000:
+        return "message must be 1-4000 characters"
+    if "</crosstalk>" in message:
+        return "message must not contain </crosstalk>"
+    return None
+
+
 async def api_crosstalk_broadcast(request):
     """POST /api/crosstalk/broadcast — send message to all recently-active peers.
 
@@ -2586,10 +2593,9 @@ async def api_crosstalk_broadcast(request):
         return JSONResponse({"error": "invalid JSON body"}, status_code=400)
 
     message = body.get("message", "")
-    if not message or len(message) > 4000:
-        return JSONResponse({"error": "message must be 1-4000 characters"}, status_code=400)
-    if "<" in message or ">" in message:
-        return JSONResponse({"error": "message must not contain < or > characters"}, status_code=400)
+    error = _validate_crosstalk_message(message)
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
 
     # Get live sessions, filter by idle time
     conn = dashboard_db.get_conn()

@@ -631,6 +631,57 @@ class TestCrossTalkEnvelope:
         # entry_count must not leak as a fallback.
         assert "999" not in envelope
 
+    def test_send_allows_ordinary_angle_brackets_in_body(
+        self, setup_env, server_app, monkeypatch,
+    ):
+        """Angle brackets in code snippets are allowed; only literal envelope escapes are blocked."""
+        from starlette.testclient import TestClient
+
+        tmp_path, db_path, orgs_dir = setup_env
+        jsonl = str(tmp_path / "code.jsonl")
+        Path(jsonl).touch()
+        org_db = orgs_dir / "autonomy.db"
+        _insert_org_source(
+            org_db,
+            source_id="code-src",
+            file_path=jsonl,
+        )
+        _insert_row(
+            db_path, "auto-sender",
+            jsonl_path=jsonl,
+            graph_source_id="code-src",
+        )
+        _insert_row(
+            db_path, "auto-target",
+            jsonl_path=str(tmp_path / "tgt.jsonl"),
+            graph_source_id="",
+        )
+
+        from tools.dashboard import server as server_mod
+        importlib.reload(server_mod)
+        token = self._patch_auth(monkeypatch, server_mod, "auto-sender")
+
+        captured: dict = {}
+
+        async def fake_tmux_send(target, payload):
+            captured["target"] = target
+            captured["payload"] = payload
+
+        monkeypatch.setattr(server_mod, "tmux_send", fake_tmux_send)
+        monkeypatch.setattr(server_mod, "_tmux_session_exists", lambda name: True)
+
+        message = "if (left < right && total > 0) return items[i];"
+        with TestClient(server_mod.app) as client:
+            r = client.post(
+                "/api/crosstalk/send",
+                json={"target": "auto-target", "message": message},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert r.status_code == 200, r.text
+
+        assert captured["target"] == "auto-target"
+        assert message in captured["payload"]
+
 
 if __name__ == "__main__":
     import sys
