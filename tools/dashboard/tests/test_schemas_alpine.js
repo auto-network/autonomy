@@ -216,6 +216,49 @@ describe('Schema.alpine — init() composition', () => {
 });
 
 
+// ── Per-entry revision binding ───────────────────────────────
+
+describe('Schema.alpine — explicit revision per entry', () => {
+  it('binds a schema at a non-default revision when entry is {set_id, revision}', async () => {
+    function payloadV(rev) {
+      return {
+        set_id: 'multi.rev', schema_revision: rev,
+        type: 'object', properties: { a: { type: 'string' } },
+        required: ['a'], access_pattern: null, key_strategy: null,
+        variants: {},
+      };
+    }
+    const stub = makeFetchStub({
+      '/api/graph/settings/autonomy.schema/multi.rev%231': metaResponse(payloadV(1)),
+      '/api/graph/settings/autonomy.schema/multi.rev%232': metaResponse(payloadV(2)),
+    });
+    Schema._setFetchOverride(stub);
+
+    const state = Schema.alpine({}, {
+      schemas: {
+        Plain: 'multi.rev',
+        Bumped: { set_id: 'multi.rev', revision: 2 },
+      },
+    });
+    await state.init();
+
+    assert.equal(state.Plain.revision, 1);
+    assert.equal(state.Bumped.revision, 2);
+    assert.notStrictEqual(state.Plain, state.Bumped);
+  });
+
+  it('throws when entry is neither a string nor a {set_id, revision} object', async () => {
+    const stub = makeFetchStub({});
+    Schema._setFetchOverride(stub);
+
+    const state = Schema.alpine({}, {
+      schemas: { Bad: { revision: 2 } },  // missing set_id
+    });
+    await assert.rejects(state.init(), /must be a set_id string/);
+  });
+});
+
+
 // ── destroy() composition ────────────────────────────────────
 
 describe('Schema.alpine — destroy() composition', () => {
