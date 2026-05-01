@@ -164,6 +164,57 @@ class TestWorktreeAPI:
         assert resp.status_code == 200
         assert len(resp.json()) == 1
         assert fake.refresh_count == 1
+        # Top-level refresh is local-git only — must NOT pass force_capabilities=True.
+        # The per-row endpoint below is the operator's force-GET path.
+        assert fake.last_force is False
+
+    def test_per_row_refresh_endpoint_force_fetches_one_row(
+        self, test_client, monkeypatch,
+    ):
+        """``POST /api/worktrees/{session}/{repo}/refresh`` is the
+        operator-explicit force-GET path: scoped to one row, bypasses
+        TTL + poll budget, but stays per-row so a click on Refresh
+        inside the overlay doesn't fan out gh calls for every live
+        row."""
+        from tools.dashboard import server
+
+        rows = [_row(session="auto-x", live=True)]
+        captured = {"calls": []}
+
+        async def fake_refresh_one(session, repo):
+            captured["calls"].append((session, repo))
+            return list(rows)
+
+        monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: list(rows))
+        monkeypatch.setattr(
+            server.worktree_monitor, "refresh_one", fake_refresh_one,
+        )
+
+        resp = test_client.post("/api/worktrees/auto-x/autonomy/refresh")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["session_name"] == "auto-x"
+        assert body["repo_name"] == "autonomy"
+        # refresh_one was called with the right (session, repo).
+        assert captured["calls"] == [("auto-x", "autonomy")]
+
+    def test_per_row_refresh_returns_404_when_row_missing(
+        self, test_client, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        async def fake_refresh_one(session, repo):
+            return []  # no matching row in the scan
+
+        monkeypatch.setattr(
+            server.worktree_monitor, "refresh_one", fake_refresh_one,
+        )
+
+        resp = test_client.post("/api/worktrees/missing/autonomy/refresh")
+
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "worktree not found"
 
     def test_sync_base_endpoint_refreshes_and_returns_updated_state(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row(clone_stale=False)])
@@ -1700,6 +1751,104 @@ class TestWorktreeMonitorBackgroundFetchPolicy:
         # Force seed = 1, plus at most 2 more background polls until
         # we hit the cap of 3 in the rolling window.
         assert call_count["n"] <= 3
+
+
+class TestWorktreeMonitorRefreshOne:
+    """``refresh_one`` is the operator-explicit force-GET path: scoped
+    to one (session, repo). Bypasses TTL + poll budget for the target
+    row, leaves all other rows alone, still respects rate-limit
+    backoff so the operator can't accidentally deepen the hole.
+    """
+
+    def _make_monitor(self, monkeypatch, *, rows, snapshot=None):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        snapshot = snapshot or {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "review": None,
+            "watch": {"mode": "silent"},
+        }
+        captured = {"calls": []}
+
+        async def fake_fetch(row, all_rows, *, watch_mode="silent"):
+            captured["calls"].append((row.session_name, row.repo_name))
+            return {**snapshot, "watch": {"mode": watch_mode}}
+
+        monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
+        return wm_module.WorktreeMonitor(), captured
+
+    def test_refresh_one_fetches_only_target_row(self, monkeypatch):
+        rows = [
+            _row(session="auto-target", live=True),
+            _row(session="auto-other", live=True),
+        ]
+        monitor, captured = self._make_monitor(monkeypatch, rows=rows)
+
+        asyncio.run(monitor.refresh_one("auto-target", "autonomy"))
+
+        # Exactly one fetch — the target row. ``auto-other`` was
+        # untouched (the whole point of the per-row endpoint).
+        assert captured["calls"] == [("auto-target", "autonomy")]
+
+    def test_refresh_one_bypasses_ttl(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as wm_module
+        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_WATCH_TTL_SECONDS", 60.0)
+
+        rows = [_row(session="auto-x", live=True)]
+        monitor, captured = self._make_monitor(monkeypatch, rows=rows)
+
+        # Seed via background-allowed force, then do a per-row force —
+        # second call must fetch even though we're well within the TTL.
+        asyncio.run(monitor.refresh(force_capabilities=True))
+        asyncio.run(monitor.refresh_one("auto-x", "autonomy"))
+
+        assert len(captured["calls"]) == 2
+
+    def test_refresh_one_respects_rate_limit_backoff(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as wm_module
+        monkeypatch.setattr(wm_module, "RATE_LIMIT_BACKOFF_SECONDS", 60.0)
+
+        rate_limited_snap = {
+            "state": "degraded",
+            "implementation": "autonomy/github",
+            "reason": "rate_limited",
+            "review": None,
+            "watch": {"mode": "silent"},
+        }
+        rows = [_row(session="auto-x", live=True)]
+        monitor, captured = self._make_monitor(
+            monkeypatch, rows=rows, snapshot=rate_limited_snap,
+        )
+
+        # First call hits rate-limit -> arms backoff.
+        asyncio.run(monitor.refresh_one("auto-x", "autonomy"))
+        assert monitor._capability_backoff_until > 0.0
+        assert len(captured["calls"]) == 1
+
+        # Second call within the backoff window must NOT fetch — the
+        # cached snapshot reflects the backoff.
+        asyncio.run(monitor.refresh_one("auto-x", "autonomy"))
+        assert len(captured["calls"]) == 1
+        snap = monitor.get_source_control("auto-x", "autonomy")
+        assert snap["reason"] == "rate_limited"
+        assert "backoff_seconds_remaining" in (snap.get("details") or {})
+
+    def test_refresh_one_clears_backoff_on_clean_response(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as wm_module
+        monkeypatch.setattr(wm_module, "RATE_LIMIT_BACKOFF_SECONDS", 60.0)
+
+        # Pre-arm the backoff to simulate "rate-limit recovered."
+        rows = [_row(session="auto-x", live=True)]
+        monitor, captured = self._make_monitor(monkeypatch, rows=rows)
+        monitor._capability_backoff_until = time.monotonic() - 1.0  # already passed
+
+        asyncio.run(monitor.refresh_one("auto-x", "autonomy"))
+
+        # Clean response → backoff cleared.
+        assert monitor._capability_backoff_until == 0.0
 
 
 class TestWorktreeMonitorRateLimitBackoff:

@@ -5623,15 +5623,49 @@ async def api_worktrees_refresh(request):
     # ``scan_all_worktrees`` and serve cached source_control snapshots.
     # Fanning out gh fetches for every live row was the rate-limit
     # anti-pattern we just removed from the background poll; it doesn't
-    # belong on the operator path either. The per-PR refresh affordance
-    # inside the review overlay (planned with the review-binding bead)
-    # is the only operator-explicit fetch path — scoped to one PR with
-    # ETag-conditional REST so most clicks are free.
+    # belong on the operator path either. Per-row force-fetch is on
+    # ``POST /api/worktrees/{session}/{repo}/refresh`` (see below).
     rows = await worktree_monitor.refresh()
     return JSONResponse([
         _worktree_state_json(row)
         for row in rows
     ])
+
+
+async def api_worktree_refresh(request):
+    """Force-refresh a single worktree row's source_control snapshot.
+
+    The operator-explicit force-GET path. Scoped to one
+    ``(session, repo)`` row so a click on the review overlay's
+    Refresh button doesn't fan out gh calls for every live row.
+    Bypasses the per-row TTL + poll budget; rate-limit backoff is
+    still respected.
+
+    Returns the updated row JSON. 404 when the row isn't live or
+    isn't found in the scan.
+    """
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        rows = dao_sessions.get_worktrees()
+        row = next(
+            (
+                r for r in rows
+                if r.get("session_name") == session_name
+                and r.get("repo_name") == repo_name
+            ),
+            None,
+        )
+        if row is None:
+            return JSONResponse({"error": "worktree not found"}, status_code=404)
+        return JSONResponse(row)
+
+    rows = await worktree_monitor.refresh_one(session_name, repo_name)
+    row = _find_worktree_row(rows, session_name, repo_name)
+    if row is None:
+        return JSONResponse({"error": "worktree not found"}, status_code=404)
+    return JSONResponse(_worktree_state_json(row))
 
 async def api_worktree_commit(request):
     session_name = request.path_params["session"]
@@ -10086,6 +10120,7 @@ routes = [
     Route("/api/worktrees/{session}/{repo}/changes", api_worktree_changes, methods=["GET"]),
     Route("/api/worktrees/{session}/{repo}/pr-diff", api_worktree_integrated_diff, methods=["GET"]),
     Route("/api/worktrees/{session}/{repo}/commits/{sha}/merge", api_worktree_commit_merge, methods=["POST"]),
+    Route("/api/worktrees/{session}/{repo}/refresh", api_worktree_refresh, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/sync-base", api_worktree_sync_base, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/request-rebase", api_worktree_request_rebase, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/watch", api_worktree_watch_set, methods=["PUT"]),
