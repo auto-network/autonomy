@@ -210,6 +210,111 @@
     return Promise.reject(new Error('Schema runtime: no fetch available'));
   }
 
+  // ── Pattern-aware extension (bead 2B) ───────────────────────
+  //
+  // Reads ``proxy.access_pattern`` and ``proxy.key_strategy`` (set by
+  // the @decorators in auto-ruuyc) and attaches the matching
+  // convenience method:
+  //
+  //   append_only_log    → proxy.append(payload)        (UUID key)
+  //   singleton          → proxy.set(payload)           (fixed key)
+  //   keyed_per_entity   → proxy.upsert(key, payload)   (caller key)
+  //
+  // Each method routes through the generic ``proxy.write``. Undecorated
+  // schemas get no convenience methods — codegen consumers fall back
+  // to ``proxy.write({key, payload})`` which is the substrate's
+  // documented escape hatch.
+  //
+  // Registered at module load below so every ``Schema.of`` call gets
+  // pattern methods automatically. Tests that need an isolated proxy
+  // can call ``_clearExtensions()`` and then re-register
+  // ``_patternExtension`` if they want this layer back.
+
+  function _generateAppendKey(strategy) {
+    if (strategy === 'uuid_v4' || strategy === null || strategy === undefined) {
+      return _uuidV4();
+    }
+    // Future strategies (snowflake_id, ulid, ...) plug in here. For
+    // now anything else is unrecognized; warn loudly and fall back
+    // to UUID so the write still succeeds.
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('[Schema] unknown append_only_log key_strategy '
+                   + JSON.stringify(strategy) + '; using uuid_v4');
+    }
+    return _uuidV4();
+  }
+
+  function _resolveSingletonKey(strategy) {
+    if (typeof strategy === 'string' && strategy.indexOf('fixed:') === 0) {
+      return strategy.slice('fixed:'.length);
+    }
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('[Schema] unrecognized singleton key_strategy '
+                   + JSON.stringify(strategy) + '; using "default"');
+    }
+    return 'default';
+  }
+
+  function _uuidV4() {
+    if (typeof globalThis !== 'undefined'
+        && globalThis.crypto
+        && typeof globalThis.crypto.randomUUID === 'function') {
+      return globalThis.crypto.randomUUID();
+    }
+    // RFC4122-shaped fallback for environments without crypto.randomUUID.
+    // Random source is Math.random — sufficient for substrate keys but
+    // not cryptographically strong; modern node/browsers will use the
+    // primary path above.
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      var r = Math.random() * 16 | 0;
+      var v = (c === 'x') ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+
+  function _patternExtension(proxy /*, payload */) {
+    var pattern = proxy.access_pattern;
+    if (!pattern) return;
+    if (pattern === 'append_only_log') {
+      proxy.append = function(payload) {
+        return proxy.write({
+          key: _generateAppendKey(proxy.key_strategy),
+          payload: payload,
+        });
+      };
+      return;
+    }
+    if (pattern === 'singleton') {
+      var key = _resolveSingletonKey(proxy.key_strategy);
+      proxy.set = function(payload) {
+        return proxy.write({ key: key, payload: payload });
+      };
+      return;
+    }
+    if (pattern === 'keyed_per_entity') {
+      proxy.upsert = function(key, payload) {
+        if (typeof key !== 'string' || !key) {
+          throw new TypeError('Schema.upsert requires a string key');
+        }
+        return proxy.write({ key: key, payload: payload });
+      };
+      return;
+    }
+    // Unknown access_pattern — log but don't crash. Future patterns
+    // can extend this switch; the generic .write surface still works.
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('[Schema] unknown access_pattern '
+                   + JSON.stringify(pattern) + ' on '
+                   + proxy.set_id + '; no convenience method attached');
+    }
+  }
+
+  // Wire the pattern extension as a default. Tests that need a fully
+  // generic proxy can ``_clearExtensions()`` before invoking
+  // ``Schema.of``; tests that need it back can re-register
+  // ``Schema._patternExtension`` after clearing.
+  _registerExtension(_patternExtension);
+
   // ── Test seams ──────────────────────────────────────────────
 
   function _setFetchOverride(fn) { _fetchOverride = fn; }
@@ -226,6 +331,7 @@
     _setFetchOverride: _setFetchOverride,
     _clearFetchOverride: _clearFetchOverride,
     _clearCache: _clearCache,
+    _patternExtension: _patternExtension,
   };
 
   if (typeof module !== 'undefined' && module.exports) {
