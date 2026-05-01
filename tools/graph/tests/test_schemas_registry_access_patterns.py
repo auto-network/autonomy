@@ -71,6 +71,38 @@ def test_append_only_log_explicit_key_strategy():
     assert V1._key_strategy == "snowflake_id"
 
 
+def test_append_only_log_callable_key_normalizes_to_name():
+    """Design-note example writes ``@append_only_log(key=uuid_v4)`` with
+    a callable reference; the decorator must normalize to the callable's
+    ``__name__`` so ``_key_strategy`` always holds a string for
+    serialization (regression coverage for auto-cvon6).
+    """
+    def uuid_v4():
+        return "abc"
+
+    @append_only_log(key=uuid_v4)
+    class V1(SettingSchema):
+        set_id = "x.y"
+        schema_revision = 1
+
+    assert V1._key_strategy == "uuid_v4"
+    assert isinstance(V1._key_strategy, str)
+
+
+def test_append_only_log_callable_without_name_falls_back_to_repr():
+    """Lambdas and unnamed callables fall back to repr — defensive,
+    keeps the contract that ``_key_strategy`` is always a string.
+    """
+    @append_only_log(key=lambda: "x")
+    class V1(SettingSchema):
+        set_id = "x.y"
+        schema_revision = 1
+
+    # lambdas have ``__name__ == '<lambda>'``, so we get that string.
+    assert isinstance(V1._key_strategy, str)
+    assert V1._key_strategy == "<lambda>"
+
+
 # ── @singleton ───────────────────────────────────────────────
 
 

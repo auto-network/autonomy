@@ -23,6 +23,12 @@ from .registry import (
     SCHEMA_META_REVISION,
     SYNOPSIS_META_SET_ID,
     SYNOPSIS_META_REVISION,
+    # Authoring API: schemas declare their fields and access pattern
+    # using these helpers / decorators.
+    field,
+    append_only_log,
+    singleton,
+    keyed_per_entity,
 )
 
 # Concrete schema registrations. Importing for side effects — each module
@@ -55,4 +61,8 @@ __all__ = [
     "SCHEMA_META_REVISION",
     "SYNOPSIS_META_SET_ID",
     "SYNOPSIS_META_REVISION",
+    "field",
+    "append_only_log",
+    "singleton",
+    "keyed_per_entity",
 ]
