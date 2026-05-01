@@ -25,12 +25,117 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import uuid4
 
 
 class SchemaValidationError(ValueError):
     """Raised when a payload does not conform to its declared schema."""
+
+
+# ── Typed field declarations (additive over _field_metadata) ──
+#
+# Subclasses can declare their schema fields as typed annotations with a
+# :func:`field` value on the right-hand side, and ``__init_subclass__``
+# derives ``_field_metadata`` from those declarations. The legacy
+# ``_field_metadata`` dict still works unchanged; when both are present,
+# the typed declarations take precedence per-key.
+#
+#     class WorkspaceV1(SettingSchema):
+#         set_id = "autonomy.workspace"
+#         schema_revision = 1
+#
+#         name:    str = field(required=True,
+#                              description="Workspace identifier (matches key)")
+#         image:   str = field(required=True,
+#                              description="Container image to launch")
+#         harness: str = field(default="claude",
+#                              enum=["claude", "codex"],
+#                              description="Agent CLI to launch")
+
+
+_MISSING = object()
+
+
+@dataclass(frozen=True)
+class _FieldSpec:
+    """Field metadata produced by :func:`field`. Plucked by
+    :meth:`SettingSchema.__init_subclass__`.
+    """
+    required: bool | None = None
+    default: Any = _MISSING
+    default_factory: Callable[[], Any] | None = None
+    description: str | None = None
+    enum: list | None = None
+    element: Any = None
+
+
+def field(
+    *,
+    required: bool | None = None,
+    default: Any = _MISSING,
+    default_factory: Callable[[], Any] | None = None,
+    description: str | None = None,
+    enum: list | None = None,
+    element: Any = None,
+) -> Any:
+    """Declare metadata for a SettingSchema field.
+
+    Use as the right-hand side of a typed annotation:
+
+        name: str = field(required=True, description="...")
+
+    Parameters:
+        required: explicit required flag. Defaults to True when neither
+            ``default`` nor ``default_factory`` is given.
+        default: literal default value (replaces the class attribute).
+        default_factory: callable producing the default — invoked once
+            at class-creation time and stored as the class attribute.
+        description: human-readable description; surfaces in
+            ``graph set schema`` and (eventually) generated IDE tooltips.
+        enum: list of valid values for enum-shaped fields.
+        element: per-element shape for list-typed fields. Bare Python
+            types become JSON-schema type names; a dict of field→type
+            describes a list-of-dict element shape.
+    """
+    return _FieldSpec(
+        required=required,
+        default=default,
+        default_factory=default_factory,
+        description=description,
+        enum=enum,
+        element=element,
+    )
+
+
+def _normalize_element(element: Any) -> Any:
+    if isinstance(element, type):
+        return _python_type_to_json_type(element)
+    if isinstance(element, dict):
+        return {
+            k: _python_type_to_json_type(v) if isinstance(v, type) else v
+            for k, v in element.items()
+        }
+    return element
+
+
+def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
+    meta: dict[str, Any] = {"type": _python_type_to_json_type(ann)}
+    if spec.description is not None:
+        meta["description"] = spec.description
+    if spec.required is True:
+        meta["required"] = True
+    elif spec.required is None and spec.default is _MISSING \
+            and spec.default_factory is None:
+        meta["required"] = True
+    if spec.default is not _MISSING:
+        meta["default"] = spec.default
+    if spec.enum is not None:
+        meta["enum"] = list(spec.enum)
+    if spec.element is not None:
+        meta["element"] = _normalize_element(spec.element)
+    return meta
 
 
 # ── JSON-schema field shape helpers ──────────────────────────
@@ -75,12 +180,65 @@ class SettingSchema:
     set_id: str = ""
     schema_revision: int = 0
 
-    # Hand-rolled metadata: {field_name: {description, type, required,
-    # enum, default, element, ...}}. Kept alongside ``_required`` /
-    # ``_optional_types`` rather than derived from them so that
-    # descriptions, enum choices, and defaults stay close to the validator
-    # logic that enforces them.
+    # Field metadata: ``{field_name: {description, type, required,
+    # enum, default, element, ...}}``. Source of truth for
+    # introspection (``graph set schema/example/find``) and the lazy
+    # flush into ``autonomy.schema#1``.
+    #
+    # Two declaration shapes coexist:
+    #
+    # 1. Direct dict assignment:
+    #        _field_metadata: dict[str, dict] = {"name": {...}}
+    # 2. Typed annotations + :func:`field`:
+    #        name: str = field(required=True, description="...")
+    #    ``__init_subclass__`` derives the dict at class creation time.
+    #
+    # Both forms can coexist on the same subclass; typed annotations
+    # take precedence per-key.
     _field_metadata: dict[str, dict] = {}
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        anns = cls.__dict__.get("__annotations__")
+        if not anns:
+            return
+        # Annotations may be strings under ``from __future__ import
+        # annotations``. Resolve them in the defining module's namespace
+        # so the JSON-schema type mapping can dispatch on real types.
+        try:
+            from typing import get_type_hints
+            resolved = get_type_hints(cls)
+        except Exception:
+            resolved = {}
+        derived: dict[str, dict] = {}
+        for name, raw_ann in anns.items():
+            ann = resolved.get(name, raw_ann)
+            # Skip class metadata and any private attribute.
+            if name in ("set_id", "schema_revision"):
+                continue
+            if name.startswith("_"):
+                continue
+            spec = cls.__dict__.get(name)
+            if not isinstance(spec, _FieldSpec):
+                continue
+            derived[name] = _build_metadata_from_spec(ann, spec)
+            # Replace the class attribute with the actual default (or
+            # remove it for required fields with no default) so that
+            # the _FieldSpec doesn't leak into runtime access.
+            if spec.default is not _MISSING:
+                setattr(cls, name, spec.default)
+            elif spec.default_factory is not None:
+                setattr(cls, name, spec.default_factory())
+            else:
+                try:
+                    delattr(cls, name)
+                except AttributeError:
+                    pass
+        if derived:
+            # Existing dict-form _field_metadata first, derived overrides.
+            base = dict(cls.__dict__.get("_field_metadata", {}) or {})
+            base.update(derived)
+            cls._field_metadata = base
 
     @classmethod
     def validate(cls, payload: dict) -> None:
