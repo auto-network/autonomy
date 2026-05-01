@@ -283,9 +283,9 @@ def test_variant_slug_uses_shared_helper_consistently():
     assert HTTPSProxyHandler._variant_slug == snake_case("HTTPSProxyHandler")
 
 
-def test_export_json_schema_payload_does_not_leak_variant_metadata():
-    """1C stores variant metadata on the class only; surfacing it in
-    the meta-Setting payload is bead 1D's job. Pinned regression.
+def test_variant_tree_surfaces_in_export_json_schema_payload():
+    """Bead 1D surfaces the variant tree in the meta-Setting payload
+    that codegen consumers walk to produce per-variant typed methods.
     """
     class Decision(SettingSchema):
         set_id = "x.y"
@@ -295,7 +295,8 @@ def test_export_json_schema_payload_does_not_leak_variant_metadata():
         pass
 
     js = Decision.export_json_schema()
-    assert "variants" not in js
+    assert "variants" in js
+    assert "thumb_yes" in js["variants"]
     # Pinned existing keys still there.
     assert js["set_id"] == "x.y"
     assert js["schema_revision"] == 1
