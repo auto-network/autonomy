@@ -162,7 +162,11 @@ def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
 # expansion to surface this metadata is bead 1D; 1B only stores it.
 
 
-def append_only_log(cls: type | None = None, *, key: str = "uuid_v4") -> Any:
+def append_only_log(
+    cls: type | None = None,
+    *,
+    key: str | Callable[..., Any] = "uuid_v4",
+) -> Any:
     """Schema decorator: declare append-only event log semantics.
 
     Rows are never overridden; each write generates a fresh key via the
@@ -170,12 +174,23 @@ def append_only_log(cls: type | None = None, *, key: str = "uuid_v4") -> Any:
     expose ``.append(payload)`` instead of generic ``.write({key,
     payload})``.
 
+    The design signpost shows ``@append_only_log(key=uuid_v4)`` (a
+    callable reference) as the canonical authoring shape. We normalize
+    callables to their ``__name__`` at decoration time so
+    ``_key_strategy`` always holds a string for downstream serialization
+    and pattern-matching.
+
     Usable as ``@append_only_log`` (bare) or
     ``@append_only_log(key="...")``.
     """
+    if callable(key):
+        key_name = getattr(key, "__name__", repr(key))
+    else:
+        key_name = str(key)
+
     def _wrap(target: type) -> type:
         target._access_pattern = "append_only_log"
-        target._key_strategy = key
+        target._key_strategy = key_name
         return target
 
     if cls is None:
