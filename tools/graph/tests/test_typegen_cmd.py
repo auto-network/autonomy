@@ -269,6 +269,174 @@ def test_render_dts_for_variant_schema_emits_base_plus_per_variant_interfaces_pl
     assert "Access pattern: append_only_log (key strategy: uuid_v4)" in out
 
 
+# ── Nested variant tree (recursion) ──────────────────────────
+
+
+def _nested_variant_payload() -> dict:
+    """Mirror an exported nested-variant schema.
+
+    Models the canonical capability-layer pattern from
+    graph://865295b3-5cc and the substrate's
+    ``test_capability_layer_nested_namespace_shape``:
+
+    * ``SourceControl`` (root)
+      * ``branch_status`` (leaf, no further variants)
+      * ``commit_stack`` (leaf, no further variants)
+      * ``review`` (namespace)
+        * ``review_read`` (leaf, with own ``branch`` field)
+        * ``review_refresh`` (leaf, no extra fields)
+      * ``gates`` (namespace)
+        * ``gates_snapshot`` (leaf)
+        * ``gates_watch_set`` (leaf)
+    """
+    base_props = {
+        "tile_id": {"type": "string", "description": "Workspace tile reference"},
+    }
+    base_required = ["tile_id"]
+    leaf = {
+        "type": "object",
+        "properties": dict(base_props),
+        "required": list(base_required),
+        "variants": {},
+    }
+    review_read = {
+        "type": "object",
+        "properties": {
+            **base_props,
+            "branch": {"type": "string", "description": "Refspec to look up."},
+        },
+        "required": ["tile_id", "branch"],
+        "variants": {},
+    }
+    review = {
+        "type": "object",
+        "properties": dict(base_props),
+        "required": list(base_required),
+        "variants": {
+            "review_read": review_read,
+            "review_refresh": dict(leaf),
+        },
+    }
+    gates = {
+        "type": "object",
+        "properties": dict(base_props),
+        "required": list(base_required),
+        "variants": {
+            "gates_snapshot": dict(leaf),
+            "gates_watch_set": dict(leaf),
+        },
+    }
+    return {
+        "type": "object",
+        "properties": dict(base_props),
+        "required": list(base_required),
+        "variants": {
+            "branch_status": dict(leaf),
+            "commit_stack": dict(leaf),
+            "review": review,
+            "gates": gates,
+        },
+        "set_id": "autonomy.capability.contract.source_control",
+        "schema_revision": 1,
+        "access_pattern": None,
+        "key_strategy": None,
+    }
+
+
+def test_render_dts_recurses_into_nested_variants():
+    """The capability-layer SourceControl/Review/Gates pattern: every
+    variant at every depth must produce its own interface, AND every
+    variant must appear in the top-level discriminated union — not
+    only the direct children of the root.
+    """
+    src = SchemaSource(
+        ref="example.module:SourceControl",
+        cls_name="SourceControl",
+        payload=_nested_variant_payload(),
+    )
+    out = render_dts("source-control-plugin", [src])
+
+    # Base + every direct child interface.
+    assert "export interface SourceControlBase {" in out
+    assert "export interface SourceControlBranchStatus extends SourceControlBase {" in out
+    assert "export interface SourceControlCommitStack extends SourceControlBase {" in out
+    assert "export interface SourceControlReview extends SourceControlBase {" in out
+    assert "export interface SourceControlGates extends SourceControlBase {" in out
+
+    # Every nested variant must also appear, NOT chained through the
+    # parent variant — chaining would clash on the `kind` literal type.
+    assert "export interface SourceControlReviewReviewRead extends SourceControlBase {" in out
+    assert "export interface SourceControlReviewReviewRefresh extends SourceControlBase {" in out
+    assert "export interface SourceControlGatesGatesSnapshot extends SourceControlBase {" in out
+    assert "export interface SourceControlGatesGatesWatchSet extends SourceControlBase {" in out
+
+    # Every variant carries its own discriminator slug — including the
+    # leaves nested two levels deep.
+    assert "  kind: 'branch_status';" in out
+    assert "  kind: 'review';" in out
+    assert "  kind: 'review_read';" in out
+    assert "  kind: 'gates_watch_set';" in out
+
+    # Nested-variant fields propagate (the substrate already merges
+    # inherited fields into each variant's `properties`).
+    assert "  branch: string;" in out
+
+    # Discriminated union enumerates every variant in the tree.
+    union_idx = out.index("export type SourceControl =")
+    union_block = out[union_idx:]
+    for member in [
+        "SourceControlBranchStatus",
+        "SourceControlCommitStack",
+        "SourceControlReview",
+        "SourceControlReviewReviewRead",
+        "SourceControlReviewReviewRefresh",
+        "SourceControlGates",
+        "SourceControlGatesGatesSnapshot",
+        "SourceControlGatesGatesWatchSet",
+    ]:
+        assert f"| {member}" in union_block, (
+            f"discriminated union missing {member}; got:\n{union_block}"
+        )
+
+
+def test_render_dts_recurses_through_three_levels():
+    """Pin the recursion depth: a third-level nested variant must
+    still appear in the union and its own interface. The substrate
+    doesn't cap nesting, so codegen mustn't either.
+    """
+    grandchild = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "variants": {},
+    }
+    child = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "variants": {"grandchild_leaf": grandchild},
+    }
+    payload = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "variants": {"child_branch": child},
+        "set_id": "x.y",
+        "schema_revision": 1,
+        "access_pattern": None,
+        "key_strategy": None,
+    }
+    src = SchemaSource(ref="x:Root", cls_name="Root", payload=payload)
+    out = render_dts("plugin", [src])
+
+    assert "export interface RootChildBranch extends RootBase {" in out
+    assert "export interface RootChildBranchGrandchildLeaf extends RootBase {" in out
+    assert "  kind: 'child_branch';" in out
+    assert "  kind: 'grandchild_leaf';" in out
+    assert "| RootChildBranch" in out
+    assert "| RootChildBranchGrandchildLeaf" in out
+
+
 def test_render_dts_omits_access_pattern_line_for_undecorated_schema():
     src = SchemaSource(
         ref="x:Y",
