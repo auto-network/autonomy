@@ -5641,8 +5641,19 @@ async def api_worktree_refresh(request):
     Bypasses the per-row TTL + poll budget; rate-limit backoff is
     still respected.
 
-    Returns the updated row JSON. 404 when the row isn't live or
-    isn't found in the scan.
+    Behavior on edge cases:
+
+    * **Row not found in the scan** → 404. The worktree directory
+      doesn't exist on disk anymore.
+    * **Row found but session is dead** → 200 with the row JSON.
+      ``refresh_one`` skips the capability fetch (no live container
+      to ``docker exec`` into), but the local-git rescan still ran
+      and the cached source_control snapshot (if any) is preserved.
+      Caller can detect dead via ``session_live=False`` in the
+      returned row. Capability re-resolution for dead sessions is
+      a separate architectural piece — see graph://d9764756-c49.
+    * **Row found and live** → 200 with the row JSON. Fresh capability
+      fetch happens (subject to rate-limit backoff).
     """
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]

@@ -216,6 +216,34 @@ class TestWorktreeAPI:
         assert resp.status_code == 404
         assert resp.json()["error"] == "worktree not found"
 
+    def test_per_row_refresh_returns_200_for_dead_session(
+        self, test_client, monkeypatch,
+    ):
+        """A dead-session row is still a real worktree — return 200 with
+        the row JSON (session_live=False). The capability fetch was
+        skipped (no container to docker exec into) but the local-git
+        rescan and cached source_control are still served. Per
+        graph://d9764756-c49: dead-session re-resolution belongs to a
+        future ``host_proxy`` capability path, not to per-row refresh.
+        """
+        from tools.dashboard import server
+
+        dead_row = _row(session="auto-dead", live=False)
+
+        async def fake_refresh_one(session, repo):
+            return [dead_row]
+
+        monkeypatch.setattr(
+            server.worktree_monitor, "refresh_one", fake_refresh_one,
+        )
+
+        resp = test_client.post("/api/worktrees/auto-dead/autonomy/refresh")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["session_name"] == "auto-dead"
+        assert body["session_live"] is False
+
     def test_sync_base_endpoint_refreshes_and_returns_updated_state(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row(clone_stale=False)])
         called = {}
@@ -735,6 +763,29 @@ class TestWorktreePage:
         # PR-mode commit subject comes from the PR title; body from PR body.
         assert "subject: pr.title" in js
         assert "body: pr.body" in js
+
+    def test_per_row_refresh_button_wired(self):
+        """The review overlay's Refresh button posts to the per-row
+        force-GET endpoint — restoring the operator's force-fetch
+        affordance after the top-level refresh became local-git only.
+        """
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        # Button rendered + disabled-while-loading wired.
+        assert 'data-testid="review-overlay-refresh-button"' in template
+        assert 'rowRefreshing' in template
+        assert "@click=\"refreshSelectedRow()\"" in template
+
+        # JS handler exists and POSTs to the per-row endpoint.
+        assert "refreshSelectedRow()" in js
+        assert "rowRefreshing" in js
+        assert "'/refresh'" in js
+        assert "method: 'POST'" in js
+        # Updates this.rows in place so the cards page also sees fresh
+        # state without waiting for the next /api/worktrees poll.
+        assert "this.rows.splice(idx, 1, updated)" in js
+        assert "this.syncOverlayRows()" in js
 
     def test_pr_nag_controls_wired(self):
         """The card-level Silent / Nag All Changes / Nag When Done
