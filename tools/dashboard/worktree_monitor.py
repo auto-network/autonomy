@@ -305,11 +305,11 @@ class WorktreeMonitor:
         """Force a scan and replace the cache.
 
         ``force_capabilities=True`` bypasses the per-row TTL and any
-        active rate-limit back-off — operator-triggered refresh
-        (``POST /api/worktrees/refresh``) wants fresh data on demand.
-        The background polling loop calls with the default
-        ``False`` so it respects the TTL and backs off when gh is
-        rate-limited.
+        active rate-limit back-off for EVERY live row — fan-out
+        capability fetch. Today's only callers are tests; the
+        operator-facing top-level refresh now passes the default
+        (local-git only) and uses :meth:`refresh_one` for scoped
+        operator-explicit fetches.
         """
         if self._lock is None:
             self._lock = asyncio.Lock()
@@ -320,6 +320,102 @@ class WorktreeMonitor:
                 rows, force_capabilities=force_capabilities,
             )
             return list(rows)
+
+    async def refresh_one(
+        self, session_name: str, repo_name: str,
+    ) -> list[WorktreeState]:
+        """Force-refresh a single row's source_control snapshot.
+
+        The operator-explicit force-GET path: scoped to one
+        ``(session, repo)``. Re-runs the local-git scan (for
+        consistency with the top-level refresh) and then fetches
+        fresh capability data for ONLY the target row, bypassing TTL
+        + per-row poll budget. The rate-limit backoff is still
+        respected — refusing to re-fetch while the limit is hot
+        would be the wrong move only if the operator could parse it
+        themselves; the backoff already protects against deepening
+        the hole.
+
+        When the row isn't found / isn't live, the local-git scan
+        still runs and the cache is updated, but no capability
+        fetch happens. Returns the full row list so the caller can
+        serve the updated snapshot.
+        """
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            rows = await asyncio.to_thread(scan_all_worktrees)
+            self._cache = rows
+            target = next(
+                (
+                    r for r in rows
+                    if r.session_name == session_name
+                    and r.repo_name == repo_name
+                    and r.session_live
+                ),
+                None,
+            )
+            if target is not None:
+                await self._refresh_one_source_control(target, rows)
+            return list(rows)
+
+    async def _refresh_one_source_control(
+        self, row: WorktreeState, all_rows: list[WorktreeState],
+    ) -> None:
+        """Single-row source_control fetch for the operator-explicit path.
+
+        Bypasses TTL + poll budget but still respects rate-limit
+        backoff. Updates the cache + fetched_at + poll_history in
+        place; arms or clears the backoff based on the response.
+        """
+        key = (row.session_name, row.repo_name)
+        now = time.monotonic()
+        if now < self._capability_backoff_until:
+            # Backoff is hot — refuse to deepen the hole. Surface
+            # the back-off explicitly to the caller via the cache.
+            self._source_control_cache[key] = _degraded_snapshot(
+                state="degraded",
+                reason=FAILURE_RATE_LIMITED,
+                watch_mode=self.get_nag_mode(*key),
+                details={
+                    "backoff_seconds_remaining": max(
+                        0, int(self._capability_backoff_until - now),
+                    ),
+                },
+            )
+            return
+
+        try:
+            snapshot = await _fetch_source_control(
+                row, all_rows,
+                watch_mode=self.get_nag_mode(*key),
+            )
+        except Exception as exc:
+            logger.warning(
+                "worktree_monitor: refresh_one failed for %s/%s: %s",
+                row.session_name, row.repo_name, exc,
+            )
+            self._source_control_cache[key] = _degraded_snapshot(
+                state="degraded",
+                reason="probe_failed",
+                watch_mode=self.get_nag_mode(*key),
+            )
+            return
+
+        self._record_poll(key, now)
+        self._source_control_cache[key] = snapshot
+        self._source_control_fetched_at[key] = now
+
+        if snapshot.get("reason") == FAILURE_RATE_LIMITED:
+            self._capability_backoff_until = now + RATE_LIMIT_BACKOFF_SECONDS
+            logger.warning(
+                "worktree_monitor: refresh_one hit rate-limit on %s/%s; "
+                "backing off capability fetches for %ds",
+                row.session_name, row.repo_name, int(RATE_LIMIT_BACKOFF_SECONDS),
+            )
+        elif self._capability_backoff_until > 0:
+            # Clean response — clear any stale back-off.
+            self._capability_backoff_until = 0.0
 
     def _watch_ttl_elapsed(self, key: tuple[str, str], now: float) -> bool:
         """True when the watch-active row's TTL window has lapsed."""
