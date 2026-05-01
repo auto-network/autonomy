@@ -231,6 +231,48 @@ describe('Schema.of — caching', () => {
 
     assert.equal(stub.calls.length, 2);
   });
+
+  it('caches per (set_id, revision) — different revisions return distinct proxies', async () => {
+    // Regression for auto-hrkkf: pre-fix, ``_proxyCache.get(setId)`` aliased
+    // every revision of a set_id to the first one fetched.
+    function payloadV(rev) {
+      return {
+        set_id: 'multi.rev',
+        schema_revision: rev,
+        type: 'object',
+        properties: rev === 1
+          ? { a: { type: 'string' } }
+          : { a: { type: 'string' }, b: { type: 'integer' } },
+        required: ['a'],
+        access_pattern: null,
+        key_strategy: null,
+        variants: {},
+      };
+    }
+    const stub = makeFetchStub({
+      '/api/graph/settings/autonomy.schema/multi.rev%231': metaResponse(payloadV(1)),
+      '/api/graph/settings/autonomy.schema/multi.rev%232': metaResponse(payloadV(2)),
+    });
+    Schema._setFetchOverride(stub);
+
+    const v1 = await Schema.of('multi.rev', { revision: 1 });
+    const v2 = await Schema.of('multi.rev', { revision: 2 });
+
+    // Distinct proxies for distinct revisions.
+    assert.notStrictEqual(v1, v2);
+    assert.equal(v1.revision, 1);
+    assert.equal(v2.revision, 2);
+    // v1's fields are the v1 shape; v2's are the v2 shape.
+    assert.deepEqual(Object.keys(v1.fields), ['a']);
+    assert.deepEqual(Object.keys(v2.fields).sort(), ['a', 'b']);
+    // Both calls fetched.
+    assert.equal(stub.calls.length, 2);
+
+    // Repeated calls within a revision still cache.
+    const v1Again = await Schema.of('multi.rev', { revision: 1 });
+    assert.strictEqual(v1Again, v1);
+    assert.equal(stub.calls.length, 2);  // no new fetch
+  });
 });
 
 
