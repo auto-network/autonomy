@@ -142,6 +142,91 @@ def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
     return meta
 
 
+# ── Access-pattern decorators ─────────────────────────────────
+#
+# A schema's access semantics are a property of the schema, not of every
+# page that uses it. Decorators store the pattern + key strategy on the
+# class so codegen consumers (CLI introspection, JS proxy, generated
+# typed methods) can dispatch on them.
+#
+# Three patterns cover the substrate's current consumers:
+#
+#   @append_only_log          uuid keys, never overridden, .append(payload)
+#   @singleton(key="default") fixed key, latest-write-wins, .set(payload)
+#   @keyed_per_entity         caller-supplied natural key, .upsert(key, payload)
+#
+# A schema without a decorator is a generic keyed Setting — the
+# substrate's escape hatch (.write({key, payload})). The decorators set
+# class-level ``_access_pattern`` (str) and ``_key_strategy`` (str)
+# attributes; consumers read those. ``export_json_schema``'s payload
+# expansion to surface this metadata is bead 1D; 1B only stores it.
+
+
+def append_only_log(cls: type | None = None, *, key: str = "uuid_v4") -> Any:
+    """Schema decorator: declare append-only event log semantics.
+
+    Rows are never overridden; each write generates a fresh key via the
+    named key strategy (default ``uuid_v4``). Codegen-aware consumers
+    expose ``.append(payload)`` instead of generic ``.write({key,
+    payload})``.
+
+    Usable as ``@append_only_log`` (bare) or
+    ``@append_only_log(key="...")``.
+    """
+    def _wrap(target: type) -> type:
+        target._access_pattern = "append_only_log"
+        target._key_strategy = key
+        return target
+
+    if cls is None:
+        return _wrap
+    return _wrap(cls)
+
+
+def singleton(cls: type | None = None, *, key: str = "default") -> Any:
+    """Schema decorator: declare latest-write-wins semantics on a fixed key.
+
+    Codegen-aware consumers expose ``.set(payload)`` instead of generic
+    ``.write({key, payload})``. The key defaults to ``"default"`` so the
+    common case is parameter-free.
+
+    Usable as ``@singleton`` (bare) or ``@singleton(key="...")``.
+    """
+    def _wrap(target: type) -> type:
+        target._access_pattern = "singleton"
+        target._key_strategy = f"fixed:{key}"
+        return target
+
+    if cls is None:
+        return _wrap
+    return _wrap(cls)
+
+
+def keyed_per_entity(
+    cls: type | None = None,
+    *,
+    key_strategy: str = "natural",
+) -> Any:
+    """Schema decorator: declare per-entity rows with caller-supplied keys.
+
+    Codegen-aware consumers expose ``.upsert(key, payload)`` instead of
+    generic ``.write({key, payload})``. ``key_strategy`` names the
+    caller-side convention (``natural`` = caller picks; future
+    strategies can name structured-key derivations).
+
+    Usable as ``@keyed_per_entity`` (bare) or
+    ``@keyed_per_entity(key_strategy="...")``.
+    """
+    def _wrap(target: type) -> type:
+        target._access_pattern = "keyed_per_entity"
+        target._key_strategy = key_strategy
+        return target
+
+    if cls is None:
+        return _wrap
+    return _wrap(cls)
+
+
 def _merged_inherited_field_metadata(cls: type) -> dict[str, dict]:
     """Return inherited ``_field_metadata`` merged across the MRO.
 
@@ -217,6 +302,13 @@ class SettingSchema:
     # Both forms can coexist on the same subclass; typed annotations
     # take precedence per-key.
     _field_metadata: dict[str, dict] = {}
+
+    # Access pattern + key strategy, set by the decorators below
+    # (``@append_only_log`` / ``@singleton`` / ``@keyed_per_entity``).
+    # Undecorated schemas leave these as ``None`` — the substrate's
+    # generic ``.write({key, payload})`` is the escape hatch.
+    _access_pattern: str | None = None
+    _key_strategy: str | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
