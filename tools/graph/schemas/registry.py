@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -32,6 +33,37 @@ from uuid import uuid4
 
 
 logger = logging.getLogger(__name__)
+
+
+# ── Discriminator slug helper ────────────────────────────────
+#
+# Single shared CamelCase → snake_case helper used to derive variant
+# discriminator slugs from subclass class names. ``__init_subclass__``
+# uses this when registering a variant subclass under its parent's
+# ``_variants`` registry; codegen consumers (1D + downstream) read the
+# same slug from the meta-Setting payload. Both call sites point at
+# this one helper so the conversion stays consistent.
+
+_SLUG_TWO_UPPER = re.compile(r"(.)([A-Z][a-z]+)")
+_SLUG_LOWER_UPPER = re.compile(r"([a-z0-9])([A-Z])")
+
+
+def snake_case(name: str) -> str:
+    """Convert a CamelCase class name to a snake_case discriminator slug.
+
+    Examples::
+
+        ThumbYes        → thumb_yes
+        RefreshRequest  → refresh_request
+        Choice          → choice
+        MyURL           → my_url
+        URLToFoo        → url_to_foo
+
+    Idempotent on already-snake-case input. Module-level so codegen and
+    variant enumeration share the exact same conversion.
+    """
+    s1 = _SLUG_TWO_UPPER.sub(r"\1_\2", name)
+    return _SLUG_LOWER_UPPER.sub(r"\1_\2", s1).lower()
 
 
 class SchemaValidationError(ValueError):
@@ -242,6 +274,39 @@ def keyed_per_entity(
     return _wrap(cls)
 
 
+def _register_variant(cls: type) -> None:
+    """Register *cls* under its parent's ``_variants`` map if applicable.
+
+    A class whose immediate parent is ``SettingSchema`` is a fresh
+    schema base, not a variant. A class whose immediate parent is some
+    OTHER ``SettingSchema`` descendant is a variant of that parent: we
+    derive the discriminator slug via :func:`snake_case` and store
+    both the registry entry on the parent and ``_variant_slug`` on the
+    class.
+
+    Multi-level hierarchies preserve the tree shape — each level
+    registers only its direct children. Nested-namespace consumers
+    walk the tree to assemble dotted paths; the registry is not
+    flattened.
+
+    Looks up ``SettingSchema`` in module globals at call time to side-
+    step the forward-reference issue (this function is defined before
+    ``SettingSchema``, but it runs only via ``__init_subclass__`` —
+    after the base class is fully constructed).
+    """
+    base = globals().get("SettingSchema")
+    if base is None:  # SettingSchema not yet defined (shouldn't happen)
+        return
+    parent = cls.__mro__[1]
+    if parent is base or not isinstance(parent, type):
+        return
+    if not issubclass(parent, base):
+        return
+    slug = snake_case(cls.__name__)
+    parent._variants[slug] = cls
+    cls._variant_slug = slug
+
+
 def _merged_inherited_field_metadata(cls: type) -> dict[str, dict]:
     """Return inherited ``_field_metadata`` merged across the MRO.
 
@@ -325,8 +390,23 @@ class SettingSchema:
     _access_pattern: str | None = None
     _key_strategy: str | None = None
 
+    # Variant discriminated-union machinery. ``_variants`` maps
+    # discriminator slug → variant subclass for every direct subclass of
+    # this class (one level only; multi-level hierarchies preserve their
+    # tree shape rather than flattening). ``_variant_slug`` is set on a
+    # subclass when ``__init_subclass__`` registers it as a variant of
+    # its immediate parent — schemas that subclass ``SettingSchema``
+    # directly are not variants and leave it ``None``. Codegen consumers
+    # (1D and beyond) read these to produce per-variant typed methods.
+    _variants: dict[str, type] = {}
+    _variant_slug: str | None = None
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        # Each subclass owns its own variant registry — initialize a
+        # fresh dict on the class so we don't accidentally share the
+        # base class's mutable default across subclasses.
+        cls._variants = {}
         inherited = _merged_inherited_field_metadata(cls)
         explicit = dict(cls.__dict__.get("_field_metadata", {}) or {})
         anns = cls.__dict__.get("__annotations__")
@@ -335,6 +415,7 @@ class SettingSchema:
                 merged = dict(inherited)
                 merged.update(explicit)
                 cls._field_metadata = merged
+            _register_variant(cls)
             return
         # Annotations may be strings under ``from __future__ import
         # annotations``. Resolve them in the defining module's namespace
@@ -381,6 +462,7 @@ class SettingSchema:
             merged.update(explicit)
             merged.update(derived)
             cls._field_metadata = merged
+        _register_variant(cls)
 
     @classmethod
     def validate(cls, payload: dict) -> None:
