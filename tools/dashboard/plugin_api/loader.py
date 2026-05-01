@@ -243,14 +243,26 @@ def _resolve_attr(spec: str) -> Any:
 
 def _resolve_entrypoints(
     discovered: DiscoveredPlugin,
+    *,
+    effective_org: str | None = None,
 ) -> LoadedPlugin | None:
     """Resolve ``module:attr`` strings to live objects.
+
+    *effective_org* is the install scope the substrate will use for this
+    plugin — ``manifest.org`` by default, overridden by the toggle row's
+    ``payload.org`` when present. It's bound onto the
+    :data:`tools.dashboard.settings_mediator.loop._loading_plugin_org`
+    contextvar across the action import so every ``register_action(...)``
+    inside the imported module stamps the right org onto its
+    ``RegisteredAction``. ``None`` (default) keeps the legacy scopeless
+    behaviour for callers (``load_all``) that don't yet know the override.
 
     Returns ``None`` when any entrypoint fails to import — the substrate
     treats this as "downgrade to disabled" + log.
     """
     manifest = discovered.manifest
     ep = manifest.entrypoints
+    resolved_org = effective_org if effective_org is not None else manifest.org
 
     routes: list = []
     badge_counter: Callable[[], Any] | None = None
@@ -274,8 +286,21 @@ def _resolve_entrypoints(
             # Bare module paths — importing fires register_action(...) at
             # module top-level. We don't keep handles to the imported
             # modules; the side effect lives in settings_mediator.REGISTRY.
-            for spec in ep.actions:
-                importlib.import_module(spec)
+            #
+            # Bind ``_loading_plugin_org`` for the duration of the import
+            # so each register_action call inside the plugin module
+            # stamps the right org onto its RegisteredAction. The
+            # contextvar is reset on the way out (including on exception)
+            # so unrelated registrations elsewhere stay scopeless.
+            from tools.dashboard.settings_mediator.loop import (
+                _loading_plugin_org,
+            )
+            token = _loading_plugin_org.set(resolved_org)
+            try:
+                for spec in ep.actions:
+                    importlib.import_module(spec)
+            finally:
+                _loading_plugin_org.reset(token)
             actions = list(ep.actions)
     except (ImportError, AttributeError, TypeError) as exc:
         logger.warning(
@@ -295,7 +320,7 @@ def _resolve_entrypoints(
         style=manifest.assets.style,
         plugin_dir=discovered.plugin_dir,
         manifest=manifest,
-        effective_org=manifest.org,
+        effective_org=resolved_org,
         routes=routes,
         badge_counter=badge_counter,
         schemas=schemas,
@@ -334,13 +359,19 @@ def load_enabled(
             d.manifest.id, d.plugin_dir, settings, manifest=d.manifest,
         ):
             continue
-        result = _resolve_entrypoints(d)
-        if result is None:
-            continue
+        # Resolve effective_org BEFORE entrypoint import so any toggle
+        # row override propagates into the action contextvar — otherwise
+        # the actions would register under manifest.org and the mediator
+        # would read from the wrong DB.
         payload = settings.get(d.manifest.id) or {}
         override = payload.get("org")
         if isinstance(override, str) and override:
-            result.effective_org = override
+            effective_org = override
+        else:
+            effective_org = manifest_org
+        result = _resolve_entrypoints(d, effective_org=effective_org)
+        if result is None:
+            continue
         loaded.append(result)
     return loaded
 

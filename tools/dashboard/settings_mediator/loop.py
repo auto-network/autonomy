@@ -23,6 +23,7 @@ cursor never advances past unread rows).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -100,11 +101,21 @@ class Services:
 
 @dataclass
 class RegisteredAction:
-    """One entry in the action registry."""
+    """One entry in the action registry.
+
+    ``org`` is the install scope this handler reads from / writes its
+    cursor + markers in. The plugin loader sets it via the
+    :data:`_loading_plugin_org` contextvar at import time so handlers
+    declared inside an ``entrypoints.actions`` module see their owning
+    plugin's ``manifest.effective_org``. Direct ``register_action``
+    callers outside the loader (legacy + tests) leave it ``None`` and
+    fall through to the scopeless DB.
+    """
     set_id: str
     fn: Callable[[Row, Services], Awaitable[None]]
     name: str
     predicate: Callable[[Row], bool] | None = None
+    org: str | None = None
 
 
 # ── Module-level state ───────────────────────────────────────────────
@@ -112,6 +123,14 @@ class RegisteredAction:
 # Sticky across the process: register_action calls populate REGISTRY at
 # import time of plugin code; start_action_loop owns the asyncio.Task.
 REGISTRY: list[RegisteredAction] = []
+
+# Active during a plugin's ``entrypoints.actions`` import: the loader
+# binds this to ``manifest.effective_org`` so every register_action call
+# inside the imported module stamps the right org onto its
+# RegisteredAction. Default ``None`` keeps non-plugin callers scopeless.
+_loading_plugin_org: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "settings_mediator._loading_plugin_org", default=None,
+)
 
 _loop_task: asyncio.Task | None = None
 _stop_event: asyncio.Event | None = None
@@ -225,6 +244,7 @@ def register_action(
             fn=fn,
             name=resolved_name,
             predicate=predicate,
+            org=_loading_plugin_org.get(),
         )
     )
 
@@ -264,14 +284,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _read_cursor(set_id: str) -> tuple[str, str] | None:
+def _read_cursor(
+    set_id: str, *, org: str | None = None,
+) -> tuple[str, str] | None:
     """Return ``(lastSeenAt, lastRowId)`` or ``None`` if no cursor stored.
 
     Reads the latest base member of ``dashboard.action-registry-cursor#1``
-    keyed by *set_id*. ``read_set`` already returns one row per key
-    (latest by precedence/created_at), so we just look up the key.
+    keyed by *set_id* in *org*'s DB. ``read_set`` already returns one row
+    per key (latest by precedence/created_at), so we just look up the key.
+
+    ``peers=[]`` keeps the read local: cursors are per-org process state,
+    never cross-org content, and a peer's cursor must not steer this org's
+    loop. Without this, a sibling org's canonical-state cursor row would
+    leak in via :func:`tools.graph.cross_org.resolve_peers`.
     """
-    members = settings_ops.read_set(CURSOR_SET_ID)
+    members = settings_ops.read_set(CURSOR_SET_ID, org=org, peers=[])
     for m in members.members:
         if m.key == set_id:
             payload = m.payload if isinstance(m.payload, dict) else {}
@@ -283,8 +310,11 @@ def _read_cursor(set_id: str) -> tuple[str, str] | None:
     return None
 
 
-def _write_cursor(set_id: str, last_row_id: str, last_seen_at: str) -> None:
-    """Upsert the cursor for *set_id* directly via SQL.
+def _write_cursor(
+    set_id: str, last_row_id: str, last_seen_at: str,
+    *, org: str | None = None,
+) -> None:
+    """Upsert the cursor for *set_id* directly via SQL in *org*'s DB.
 
     We bypass ``add_setting`` to avoid bloat: cursor advancement happens
     once per processed row and we only ever care about the latest value.
@@ -294,7 +324,7 @@ def _write_cursor(set_id: str, last_row_id: str, last_seen_at: str) -> None:
     payload = {"lastRowId": last_row_id, "lastSeenAt": last_seen_at}
     serialized = json.dumps(payload, sort_keys=True)
     now = _now_iso()
-    db = settings_ops._open(None)
+    db = settings_ops._open(org)
     try:
         row = db.conn.execute(
             "SELECT id FROM settings WHERE set_id = ? AND key = ? "
@@ -323,13 +353,13 @@ def _marker_key(set_id: str, row_id: str, action_name: str) -> str:
     return f"{set_id}:{row_id}:{action_name}"
 
 
-def _marker_exists(marker_key: str) -> bool:
+def _marker_exists(marker_key: str, *, org: str | None = None) -> bool:
     """Return True if a state marker for *marker_key* already exists.
 
     A direct SQL probe keeps the per-row hot path cheap — we don't need
     the resolved-set machinery, just an indexed lookup.
     """
-    db = settings_ops._open(None)
+    db = settings_ops._open(org)
     try:
         row = db.conn.execute(
             "SELECT 1 FROM settings WHERE set_id = ? AND key = ? "
@@ -347,8 +377,9 @@ def _write_marker(
     *,
     status: str,
     error: str | None = None,
+    org: str | None = None,
 ) -> None:
-    """Insert (or replace) the marker for *marker_key*.
+    """Insert (or replace) the marker for *marker_key* in *org*'s DB.
 
     Idempotency relies on a single base row per ``(set_id, key)`` pair,
     so we upsert just like the cursor. ``status='filtered'`` is used
@@ -363,7 +394,7 @@ def _write_marker(
         payload["error"] = error
     serialized = json.dumps(payload, sort_keys=True)
     now = _now_iso()
-    db = settings_ops._open(None)
+    db = settings_ops._open(org)
     try:
         existing = db.conn.execute(
             "SELECT id FROM settings WHERE set_id = ? AND key = ? "
@@ -406,6 +437,8 @@ def _resolved_to_row(m: ResolvedSetting) -> Row:
 def _members_since(
     set_id: str,
     cursor: tuple[str, str] | None,
+    *,
+    org: str | None = None,
 ) -> list[ResolvedSetting]:
     """Return resolved members of *set_id* strictly after *cursor*.
 
@@ -413,8 +446,13 @@ def _members_since(
     resolution algorithm), which is exactly what action handlers expect:
     the substrate fires once per logical Setting member. Sort order is
     ``(created_at, id)`` so re-polls produce a stable sequence.
+
+    ``peers=[]`` scopes the read to *org* alone — cross-org event
+    routing is explicitly out of scope (a handler registered for org X
+    must not fire on rows that exist only in org Y, even if both orgs
+    share the same ``set_id``).
     """
-    members = settings_ops.read_set(set_id)
+    members = settings_ops.read_set(set_id, org=org, peers=[])
     rows = sorted(
         members.members,
         key=lambda m: (m.created_at or "", m.id),
@@ -430,7 +468,7 @@ def _members_since(
 
 
 async def iterate_once(services: Services) -> None:
-    """Walk each registered set once, dispatching new rows.
+    """Walk each registered ``(set_id, org)`` once, dispatching new rows.
 
     Public so tests can drive the loop deterministically without
     sleeping. Production callers go through :func:`start_action_loop`.
@@ -439,22 +477,26 @@ async def iterate_once(services: Services) -> None:
     # to answer "is the loop alive?" — a stale value indicates wedge.
     HEALTH.last_tick_at = time.time()
 
-    # Group actions by set_id so we read each set once per tick. Order
-    # within a set is registration order — multi-handler fan-out is
-    # not concurrent; one failure does not block siblings.
-    by_set: dict[str, list[RegisteredAction]] = {}
+    # Group actions by (set_id, org) so each org-scoped read happens
+    # exactly once per tick. The plugin loader stamps ``org`` from
+    # ``manifest.effective_org`` at registration; legacy callers that
+    # bypass the loader register at ``org=None`` and read scopeless.
+    # Multi-handler fan-out within a (set_id, org) bucket runs in
+    # registration order; one failure does not block siblings.
+    by_set: dict[tuple[str, str | None], list[RegisteredAction]] = {}
     for action in REGISTRY:
-        by_set.setdefault(action.set_id, []).append(action)
+        by_set.setdefault((action.set_id, action.org), []).append(action)
 
-    for set_id, actions in by_set.items():
+    for (set_id, org), actions in by_set.items():
+        cursor_key = f"{set_id}@{org or '-'}"
         try:
-            cursor = _read_cursor(set_id)
-            new_rows = _members_since(set_id, cursor)
+            cursor = _read_cursor(set_id, org=org)
+            new_rows = _members_since(set_id, cursor, org=org)
         except Exception:
             logger.exception(
-                "[settings_mediator] read failure for set_id=%s; "
+                "[settings_mediator] read failure for set_id=%s org=%s; "
                 "will retry on next tick",
-                set_id,
+                set_id, org,
             )
             continue
 
@@ -463,13 +505,13 @@ async def iterate_once(services: Services) -> None:
             for action in actions:
                 marker = _marker_key(set_id, resolved.id, action.name)
                 try:
-                    if _marker_exists(marker):
+                    if _marker_exists(marker, org=org):
                         continue
                 except Exception:
                     logger.exception(
-                        "[settings_mediator] marker-read failed for %s; "
-                        "skipping this handler this tick",
-                        marker,
+                        "[settings_mediator] marker-read failed for %s "
+                        "(org=%s); skipping this handler this tick",
+                        marker, org,
                     )
                     continue
 
@@ -479,16 +521,19 @@ async def iterate_once(services: Services) -> None:
                     except Exception as exc:
                         logger.exception(
                             "[settings_mediator] predicate raised for "
-                            "set=%s action=%s row=%s",
-                            set_id, action.name, resolved.id,
+                            "set=%s org=%s action=%s row=%s",
+                            set_id, org, action.name, resolved.id,
                         )
                         _safe_write_marker(
                             marker, status="failed",
                             error=f"predicate: {type(exc).__name__}: {exc}",
+                            org=org,
                         )
                         continue
                     if not accepted:
-                        _safe_write_marker(marker, status="filtered")
+                        _safe_write_marker(
+                            marker, status="filtered", org=org,
+                        )
                         continue
 
                 # Heartbeat: stamp fired-at + bump count BEFORE invoking
@@ -504,19 +549,20 @@ async def iterate_once(services: Services) -> None:
                     HEALTH.last_handler_succeeded_at[action.name] = (
                         time.time()
                     )
-                    _safe_write_marker(marker, status="ok")
+                    _safe_write_marker(marker, status="ok", org=org)
                 except Exception as exc:
                     HEALTH.last_handler_error[action.name] = (
                         f"{type(exc).__name__}: {exc}"
                     )
                     logger.exception(
                         "[settings_mediator] handler %s raised on "
-                        "set=%s row=%s",
-                        action.name, set_id, resolved.id,
+                        "set=%s org=%s row=%s",
+                        action.name, set_id, org, resolved.id,
                     )
                     _safe_write_marker(
                         marker, status="failed",
                         error=f"{type(exc).__name__}: {exc}",
+                        org=org,
                     )
 
             # Cursor advances only after every registered handler has
@@ -526,18 +572,19 @@ async def iterate_once(services: Services) -> None:
             try:
                 _write_cursor(
                     set_id, resolved.id, resolved.created_at or "",
+                    org=org,
                 )
-                HEALTH.cursor_positions[set_id] = (
+                HEALTH.cursor_positions[cursor_key] = (
                     f"{resolved.created_at or ''}:{resolved.id}"
                 )
             except Exception:
                 logger.exception(
                     "[settings_mediator] cursor write failed for "
-                    "set=%s row=%s; will retry next tick",
-                    set_id, resolved.id,
+                    "set=%s org=%s row=%s; will retry next tick",
+                    set_id, org, resolved.id,
                 )
-                # Don't try further rows in this set — the next tick
-                # will re-evaluate from the still-old cursor and
+                # Don't try further rows in this (set, org) — the next
+                # tick will re-evaluate from the still-old cursor and
                 # marker checks will skip already-processed (row,
                 # handler) pairs.
                 break
@@ -548,10 +595,11 @@ def _safe_write_marker(
     *,
     status: str,
     error: str | None = None,
+    org: str | None = None,
 ) -> None:
     """Best-effort marker write — surface logger noise but never raise."""
     try:
-        _write_marker(marker, status=status, error=error)
+        _write_marker(marker, status=status, error=error, org=org)
     except Exception:
         logger.exception(
             "[settings_mediator] marker write failed for %s "

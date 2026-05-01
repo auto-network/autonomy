@@ -682,7 +682,7 @@ async def test_heartbeat_handler_error_recorded_loop_continues(
 async def test_heartbeat_cursor_positions_track_set_id(
     graph_db_env, fixture_schema, services,
 ):
-    """Successful cursor write updates ``HEALTH.cursor_positions[set_id]``."""
+    """Successful cursor write updates ``HEALTH.cursor_positions[set_id@org]``."""
 
     async def handler(row, svc):
         pass
@@ -692,9 +692,12 @@ async def test_heartbeat_cursor_positions_track_set_id(
     sid = _add_row({"x": 1}, key="k")
     await iterate_once(services)
 
-    assert TEST_SET_ID in HEALTH.cursor_positions
+    # Scopeless callers (org=None) surface as ``set_id@-`` per the
+    # per-org cursor key shape introduced in bead auto-exjic.
+    cursor_key = f"{TEST_SET_ID}@-"
+    assert cursor_key in HEALTH.cursor_positions
     # The stored value encodes the row id we just processed.
-    assert sid in HEALTH.cursor_positions[TEST_SET_ID]
+    assert sid in HEALTH.cursor_positions[cursor_key]
 
 
 def test_health_to_dict_includes_age_and_registry():
@@ -838,3 +841,334 @@ def test_reset_health_clears_all_fields():
     assert HEALTH.last_handler_error == {}
     assert HEALTH.cursor_positions == {}
     assert HEALTH.loop_started_at is None
+
+
+# ── Org-aware read/write (bead auto-exjic) ───────────────────────────
+
+
+@pytest.fixture
+def orgs_root(tmp_path, monkeypatch):
+    """Per-test ``data/orgs/`` directory + cleared ``GRAPH_DB`` pin.
+
+    Mirrors the fixture in ``tools/graph/tests/test_write_routing.py``:
+    the org-aware mediator tests need real per-org DB routing through
+    ``settings_ops._open(org)``, which means ``GRAPH_DB`` must be unset
+    (otherwise it pins every read/write to a single file regardless of
+    the ``org=`` argument). ``DEFAULT_DB`` is redirected so the legacy
+    fallback never touches the real ``data/graph.db``.
+    """
+    from tools.graph import db as graph_db_mod
+    root = tmp_path / "orgs"
+    legacy = tmp_path / "legacy.db"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", legacy)
+    return root
+
+
+def test_register_action_carries_loading_plugin_org():
+    """When ``_loading_plugin_org`` is set, RegisteredAction.org reflects it.
+
+    Step 13.1: emulates the loader's contextvar wrap around
+    ``importlib.import_module(actions_mod)``.
+    """
+    from tools.dashboard.settings_mediator.loop import _loading_plugin_org
+
+    async def h(row, svc):
+        pass
+
+    # Inside the contextvar window — RegisteredAction should be stamped.
+    token = _loading_plugin_org.set("autonomy")
+    try:
+        register_action(TEST_SET_ID, h, name="org-stamp")
+    finally:
+        _loading_plugin_org.reset(token)
+
+    # Outside the window — back to None (legacy scopeless).
+    register_action(TEST_SET_ID, h, name="org-none")
+
+    by_name = {a.name: a for a in REGISTRY}
+    assert by_name["org-stamp"].org == "autonomy"
+    assert by_name["org-none"].org is None
+
+
+def test_same_set_id_in_two_orgs_registers_distinct_entries():
+    """Step 13.2 — registering the same set_id under two orgs produces
+    two REGISTRY entries; ``iterate_once`` will read each org separately.
+    """
+    from tools.dashboard.settings_mediator.loop import _loading_plugin_org
+
+    async def h(row, svc):
+        pass
+
+    for org in ("autonomy", "anchore"):
+        token = _loading_plugin_org.set(org)
+        try:
+            register_action(TEST_SET_ID, h, name=f"dual-{org}")
+        finally:
+            _loading_plugin_org.reset(token)
+
+    matches = [a for a in REGISTRY if a.set_id == TEST_SET_ID]
+    orgs = sorted(a.org for a in matches)
+    assert orgs == ["anchore", "autonomy"]
+
+
+@pytest.mark.asyncio
+async def test_iterate_once_reads_from_handlers_org_db(
+    orgs_root, fixture_schema, services,
+):
+    """Step 13.3 — handler registered with org=autonomy fires for rows
+    in autonomy.db and ignores rows in personal.db with the same set_id.
+    """
+    from tools.graph.db import GraphDB
+    from tools.dashboard.settings_mediator.loop import _loading_plugin_org
+
+    GraphDB.create_org_db("autonomy").close()
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    fired_ids: list[str] = []
+
+    async def handler(row, svc):
+        fired_ids.append(row.id)
+
+    token = _loading_plugin_org.set("autonomy")
+    try:
+        register_action(TEST_SET_ID, handler, name="autonomy-only")
+    finally:
+        _loading_plugin_org.reset(token)
+
+    # Seed a row in autonomy.db (the handler's org).
+    autonomy_id = ops.add_setting(
+        TEST_SET_ID, TEST_SET_REVISION, "in-autonomy",
+        {"src": "autonomy"}, org="autonomy",
+    )
+    # Seed a row in personal.db with the same set_id — handler is
+    # registered to autonomy and must NOT see this row.
+    ops.add_setting(
+        TEST_SET_ID, TEST_SET_REVISION, "in-personal",
+        {"src": "personal"}, org="personal",
+    )
+
+    await iterate_once(services)
+    assert fired_ids == [autonomy_id]
+
+
+@pytest.mark.asyncio
+async def test_cursor_and_markers_are_per_org(
+    orgs_root, fixture_schema, services,
+):
+    """Step 13.4 — processing a row in autonomy.db must not advance the
+    cursor or write the marker in personal.db.
+    """
+    from tools.graph.db import GraphDB
+    from tools.dashboard.settings_mediator.loop import _loading_plugin_org
+    from tools.dashboard.settings_mediator import loop as loop_mod
+
+    GraphDB.create_org_db("autonomy").close()
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    async def handler(row, svc):
+        pass
+
+    token = _loading_plugin_org.set("autonomy")
+    try:
+        register_action(TEST_SET_ID, handler, name="per-org-cursor")
+    finally:
+        _loading_plugin_org.reset(token)
+
+    autonomy_id = ops.add_setting(
+        TEST_SET_ID, TEST_SET_REVISION, "k",
+        {"x": 1}, org="autonomy",
+    )
+
+    await iterate_once(services)
+
+    # Cursor + marker landed in autonomy.db.
+    assert loop_mod._read_cursor(TEST_SET_ID, org="autonomy") is not None
+    marker = loop_mod._marker_key(TEST_SET_ID, autonomy_id, "per-org-cursor")
+    assert loop_mod._marker_exists(marker, org="autonomy")
+
+    # And NOT in personal.db.
+    assert loop_mod._read_cursor(TEST_SET_ID, org="personal") is None
+    assert not loop_mod._marker_exists(marker, org="personal")
+
+
+@pytest.mark.asyncio
+async def test_cursor_positions_uses_set_id_at_org_key_shape(
+    orgs_root, fixture_schema, services,
+):
+    """Step 13.5 — the diag heartbeat keys cursor entries as
+    ``f"{set_id}@{org or '-'}"``.
+    """
+    from tools.graph.db import GraphDB
+    from tools.dashboard.settings_mediator.loop import _loading_plugin_org
+
+    GraphDB.create_org_db("autonomy").close()
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    async def h(row, svc):
+        pass
+
+    token = _loading_plugin_org.set("autonomy")
+    try:
+        register_action(TEST_SET_ID, h, name="diag-key-shape")
+    finally:
+        _loading_plugin_org.reset(token)
+
+    ops.add_setting(
+        TEST_SET_ID, TEST_SET_REVISION, "k",
+        {"x": 1}, org="autonomy",
+    )
+    await iterate_once(services)
+
+    expected = f"{TEST_SET_ID}@autonomy"
+    assert expected in HEALTH.cursor_positions
+    # Sanity: the bare set_id (without @org) is not used.
+    assert TEST_SET_ID not in HEALTH.cursor_positions
+
+
+def _write_test_plugin(plugins_dir, dir_name, plugin_id, *, org="autonomy",
+                        actions_spec=None):
+    """Create a minimal plugin directory tree for loader tests."""
+    import textwrap
+    pdir = plugins_dir / dir_name
+    pdir.mkdir(parents=True)
+    actions_block = ""
+    if actions_spec is not None:
+        actions_block = (
+            "entrypoints:\n"
+            "  actions:\n"
+            f"    - {actions_spec}\n"
+        )
+    (pdir / "plugin.yaml").write_text(textwrap.dedent(f"""
+        id: {plugin_id}
+        api_version: 1
+        org: {org}
+        paths:
+          - /{plugin_id}
+        assets:
+          template: page.html
+          script: page.js
+        nav:
+          label: {plugin_id.capitalize()}
+        frontend:
+          alpine_root: {plugin_id}Page
+    """).lstrip() + actions_block)
+    (pdir / "page.html").write_text("<div></div>")
+    (pdir / "page.js").write_text("// noop")
+    return pdir
+
+
+def test_plugin_loader_stamps_effective_org_on_actions(tmp_path, monkeypatch):
+    """Step 13.6 — a plugin with ``manifest.org = "autonomy"`` registers
+    actions whose ``RegisteredAction.org`` reflects that.
+
+    The fake ``import_module`` calls ``register_action`` directly so the
+    registration runs inside the loader's contextvar window — exactly
+    where a real plugin module's top-level code would run.
+    """
+    from tools.dashboard.plugin_api import loader
+
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    actions_spec = "tools.dashboard.tests._orgaware_actions_fixture"
+    _write_test_plugin(
+        plugins_dir, "orgaware", "orgaware",
+        org="autonomy", actions_spec=actions_spec,
+    )
+
+    async def _h_a(row, svc):
+        pass
+
+    async def _h_b(row, svc):
+        pass
+
+    def fake_import(spec):
+        if spec == actions_spec:
+            register_action(
+                "dashboard.test.orgaware-a", _h_a, name="orgaware.action_a",
+            )
+            register_action(
+                "dashboard.test.orgaware-b", _h_b, name="orgaware.action_b",
+            )
+        return None
+
+    monkeypatch.setattr(loader.importlib, "import_module", fake_import)
+    monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: {})
+
+    loaded = loader.load_enabled(plugins_dir=plugins_dir)
+    assert {p.id for p in loaded} == {"orgaware"}
+    by_name = {a.name: a for a in REGISTRY}
+    assert by_name["orgaware.action_a"].org == "autonomy"
+    assert by_name["orgaware.action_b"].org == "autonomy"
+
+
+def test_plugin_loader_propagates_payload_org_override(tmp_path, monkeypatch):
+    """The toggle row's ``payload.org`` override propagates into the
+    contextvar before the action import — handlers register under the
+    overridden org, not ``manifest.org``.
+
+    Guards the ``load_enabled`` refactor: prior to bead auto-exjic, the
+    override was applied to ``LoadedPlugin.effective_org`` AFTER
+    ``_resolve_entrypoints`` had already imported the actions module
+    under ``manifest.org``.
+    """
+    from tools.dashboard.plugin_api import loader
+
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    actions_spec = "tools.dashboard.tests._switched_actions_fixture"
+    _write_test_plugin(
+        plugins_dir, "switched", "switched",
+        org="autonomy", actions_spec=actions_spec,
+    )
+
+    async def _h(row, svc):
+        pass
+
+    def fake_import(spec):
+        if spec == actions_spec:
+            register_action(
+                "dashboard.test.switched", _h, name="switched.handler",
+            )
+        return None
+
+    monkeypatch.setattr(loader.importlib, "import_module", fake_import)
+
+    def fake_settings(org=None):
+        if org == "autonomy":
+            return {"switched": {"enabled": True, "org": "anchore"}}
+        return {}
+
+    monkeypatch.setattr(loader, "_read_plugin_settings", fake_settings)
+
+    loaded = loader.load_enabled(plugins_dir=plugins_dir)
+    assert {p.id for p in loaded} == {"switched"}
+    assert loaded[0].effective_org == "anchore"
+    by_name = {a.name: a for a in REGISTRY}
+    assert by_name["switched.handler"].org == "anchore"
+
+
+@pytest.mark.asyncio
+async def test_backward_compat_register_action_outside_loader(
+    graph_db_env, fixture_schema, services,
+):
+    """Step 13.7 — direct ``register_action(...)`` outside the loader
+    context still produces ``RegisteredAction(org=None)`` and the
+    mediator processes it scopeless — the legacy path keeps working.
+    """
+    seen: list[str] = []
+
+    async def handler(row, svc):
+        seen.append(row.id)
+
+    register_action(TEST_SET_ID, handler, name="legacy-scopeless")
+    by_name = {a.name: a for a in REGISTRY}
+    assert by_name["legacy-scopeless"].org is None
+
+    sid = _add_row({"x": 1}, key="legacy")
+    await iterate_once(services)
+    assert seen == [sid]
+    # cursor key still uses the @- suffix for org=None.
+    assert f"{TEST_SET_ID}@-" in HEALTH.cursor_positions
