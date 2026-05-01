@@ -349,6 +349,11 @@ window.ensureSessionMessages = function() {
       if (s.activity_state !== undefined) store.activityState = s.activity_state;
       if (s.org) store.org = s.org;
       store.resolved = !!s.resolved;
+      // auto-ngis4: SSE registry must plumb harness + model the same way
+      // the HTTP seed path does, otherwise newly-registered sessions paint
+      // an "unknown" badge until a full page reload.
+      if (s.harness) store.harness = s.harness;
+      if (s.model !== undefined) store.model = s.model;
     }
     // Mark removed sessions as dead
     var allSessions = Alpine.store('sessions');
