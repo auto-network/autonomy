@@ -24,10 +24,14 @@ match is a no-op.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import uuid4
+
+
+logger = logging.getLogger(__name__)
 
 
 class SchemaValidationError(ValueError):
@@ -138,6 +142,23 @@ def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
     return meta
 
 
+def _merged_inherited_field_metadata(cls: type) -> dict[str, dict]:
+    """Return inherited ``_field_metadata`` merged across the MRO.
+
+    Subclasses should see every field their parents declared, regardless of
+    whether the parent used the legacy dict form or typed ``field()``
+    declarations. Walk the MRO from oldest ancestor to nearest parent so the
+    most-specific inherited class wins before the current subclass applies its
+    own overrides.
+    """
+    merged: dict[str, dict] = {}
+    for base_cls in reversed(cls.__mro__[1:]):
+        meta = getattr(base_cls, "_field_metadata", None)
+        if meta:
+            merged.update(dict(meta))
+    return merged
+
+
 # ── JSON-schema field shape helpers ──────────────────────────
 
 
@@ -199,8 +220,14 @@ class SettingSchema:
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        inherited = _merged_inherited_field_metadata(cls)
+        explicit = dict(cls.__dict__.get("_field_metadata", {}) or {})
         anns = cls.__dict__.get("__annotations__")
         if not anns:
+            if inherited and explicit:
+                merged = dict(inherited)
+                merged.update(explicit)
+                cls._field_metadata = merged
             return
         # Annotations may be strings under ``from __future__ import
         # annotations``. Resolve them in the defining module's namespace
@@ -208,7 +235,12 @@ class SettingSchema:
         try:
             from typing import get_type_hints
             resolved = get_type_hints(cls)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "get_type_hints(%s) failed; typed annotations fall back to "
+                "raw strings (may resolve to type='string'): %s",
+                cls.__qualname__, exc,
+            )
             resolved = {}
         derived: dict[str, dict] = {}
         for name, raw_ann in anns.items():
@@ -234,11 +266,14 @@ class SettingSchema:
                     delattr(cls, name)
                 except AttributeError:
                     pass
-        if derived:
-            # Existing dict-form _field_metadata first, derived overrides.
-            base = dict(cls.__dict__.get("_field_metadata", {}) or {})
-            base.update(derived)
-            cls._field_metadata = base
+        if inherited or explicit or derived:
+            # Inherited metadata first, then the subclass's explicit
+            # dict-form entries, then typed-derived fields as the highest
+            # precedence source.
+            merged = dict(inherited)
+            merged.update(explicit)
+            merged.update(derived)
+            cls._field_metadata = merged
 
     @classmethod
     def validate(cls, payload: dict) -> None:
