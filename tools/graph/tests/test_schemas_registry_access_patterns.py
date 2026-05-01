@@ -262,11 +262,9 @@ def test_decorators_return_the_class():
     assert isinstance(C, type) and issubclass(C, SettingSchema)
 
 
-def test_decorator_does_not_affect_export_json_schema_payload():
-    """1B stores access pattern as class attributes only; surfacing it
-    in export_json_schema's payload is bead 1D's job. This test pins
-    that 1B doesn't leak the new metadata into the existing payload
-    shape (regression coverage for unchanged downstream consumers).
+def test_decorator_metadata_surfaces_in_export_json_schema_payload():
+    """Bead 1D surfaces ``_access_pattern`` and ``_key_strategy`` in the
+    meta-Setting payload that codegen consumers read.
     """
     @append_only_log
     class V1(SettingSchema):
@@ -275,8 +273,8 @@ def test_decorator_does_not_affect_export_json_schema_payload():
         name: str = field(required=True, description="N")
 
     js = V1.export_json_schema()
-    assert "access_pattern" not in js
-    assert "key_strategy" not in js
+    assert js["access_pattern"] == "append_only_log"
+    assert js["key_strategy"] == "uuid_v4"
     # Existing keys stay where they were.
     assert js["set_id"] == "x.y"
     assert js["schema_revision"] == 1

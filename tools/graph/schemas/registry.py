@@ -477,17 +477,44 @@ class SettingSchema:
 
     @classmethod
     def export_json_schema(cls) -> dict:
-        """Synthesize a json-schema-compatible dict from ``_field_metadata``.
+        """Synthesize the meta-Setting payload for this schema.
 
-        The output shape is intentionally close to draft-07: ``type:
-        object``, ``properties`` keyed by field name, ``required``
-        listing field names whose metadata flags ``required: True``.
+        The output is intentionally close to draft-07 JSON Schema with
+        substrate-specific extensions: ``type: object``, ``properties``
+        keyed by field name, ``required`` listing required field names,
+        plus ``access_pattern`` / ``key_strategy`` (decorator-driven)
+        and ``variants`` (recursive map of subclass discriminator slug
+        to that variant's payload).
+
         Per-field property dicts copy through ``description``, ``type``,
         ``enum``, ``default``, and ``element`` (array element shape).
 
+        Variants recursively carry their own ``properties``,
+        ``required``, and nested ``variants`` — variant payloads merge
+        the inherited ``_field_metadata`` from their MRO (the inheritance
+        fix from auto-vumin) so consumers see every variant's full
+        shape without re-walking the class hierarchy themselves.
+
         Schemas without a populated ``_field_metadata`` produce an empty
-        properties dict — useful for the test-only stub schemas that
-        exist only to satisfy the registry contract.
+        properties dict; schemas without variants produce ``variants:
+        {}``; undecorated schemas produce ``access_pattern: None`` and
+        ``key_strategy: None``.
+        """
+        payload = cls._export_payload()
+        payload["set_id"] = cls.set_id
+        payload["schema_revision"] = cls.schema_revision
+        payload["access_pattern"] = cls._access_pattern
+        payload["key_strategy"] = cls._key_strategy
+        return payload
+
+    @classmethod
+    def _export_payload(cls) -> dict:
+        """Recursive piece of :meth:`export_json_schema`.
+
+        Returns the per-class payload sans root-only fields (``set_id``,
+        ``schema_revision``, ``access_pattern``, ``key_strategy``).
+        Variants nest under ``variants[slug]`` via the same helper, so
+        each variant's payload inherits the same recursion shape.
         """
         properties: dict[str, dict] = {}
         required: list[str] = []
@@ -500,11 +527,13 @@ class SettingSchema:
             if meta.get("required"):
                 required.append(name)
         return {
-            "set_id": cls.set_id,
-            "schema_revision": cls.schema_revision,
             "type": "object",
             "properties": properties,
             "required": required,
+            "variants": {
+                slug: variant._export_payload()
+                for slug, variant in cls._variants.items()
+            },
         }
 
 
