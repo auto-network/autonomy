@@ -299,6 +299,12 @@
       rows: [],
       loading: true,
       refreshing: false,
+      // Per-row force-refresh state for the review overlay's Refresh
+      // button. Distinct from the page-level ``refreshing`` flag so a
+      // background page refresh doesn't mark the overlay's button as
+      // working — they're independent paths now (top-level is
+      // local-git only; per-row is the operator's force-GET).
+      rowRefreshing: false,
       detailLoading: false,
       dirtyDetailLoading: false,
       error: '',
@@ -1148,6 +1154,44 @@
         } finally {
           this.loading = false;
           this.refreshing = false;
+        }
+      },
+
+      // Per-row force-refresh button on the review overlay.
+      // Posts to /api/worktrees/{session}/{repo}/refresh — the
+      // operator-explicit force-GET path that bypasses the per-row
+      // TTL + poll budget for ONE row only. Replaces the row in
+      // this.rows with the server's response and re-syncs the
+      // overlay so the new source_control snapshot renders
+      // immediately.
+      async refreshSelectedRow() {
+        if (!this.selectedCommit || !this.selectedCommit.row) return;
+        if (this.rowRefreshing) return;
+        const row = this.selectedCommit.row;
+        this.rowRefreshing = true;
+        try {
+          const resp = await fetch(
+            '/api/worktrees/' + encodeURIComponent(row.session_name) + '/'
+              + encodeURIComponent(row.repo_name) + '/refresh',
+            { method: 'POST' },
+          );
+          const updatedRaw = await _jsonOrError(resp);
+          const [updated] = _normalizeRows([updatedRaw]);
+          // Splice the updated row back into this.rows in place so
+          // the cards page reflects the same fresh state.
+          const targetKey = this.rowKey(row);
+          const idx = this.rows.findIndex(r => this.rowKey(r) === targetKey);
+          if (idx >= 0) {
+            this.rows.splice(idx, 1, updated);
+          } else {
+            this.rows.push(updated);
+          }
+          this.syncOverlayRows();
+          this.lastUpdated = new Date().toLocaleTimeString();
+        } catch (err) {
+          _toast('Per-row refresh failed: ' + (err.message || String(err)), 'error');
+        } finally {
+          this.rowRefreshing = false;
         }
       },
 

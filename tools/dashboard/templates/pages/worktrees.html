@@ -592,9 +592,17 @@
                         </div>
                       </template>
                     </div>
-                    <button type="button"
-                            class="absolute right-0 top-0 h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
-                            @click="selectedCommit = null">×</button>
+                    <div class="absolute right-0 top-0 flex items-center gap-2">
+                      <button type="button"
+                              class="h-10 rounded-2xl border border-white/10 bg-white/[0.03] px-3 text-xs font-semibold text-slate-300 transition hover:border-white/20 hover:text-white disabled:cursor-wait disabled:opacity-50"
+                              :disabled="rowRefreshing"
+                              @click="refreshSelectedRow()"
+                              data-testid="review-overlay-refresh-button"
+                              x-text="rowRefreshing ? 'Refreshing...' : 'Refresh'">Refresh</button>
+                      <button type="button"
+                              class="h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
+                              @click="selectedCommit = null">×</button>
+                    </div>
                   </div>
                   <div class="mt-1 flex max-w-4xl flex-col items-start gap-1.5"
                        data-branch-row>
