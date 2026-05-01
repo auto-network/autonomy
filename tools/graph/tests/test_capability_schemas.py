@@ -162,6 +162,31 @@ def _workspace_enable_issue_tracker() -> dict:
 # ── Contract schema ──────────────────────────────────────────
 
 
+def test_contract_v1_is_a_flat_base_not_a_variant():
+    """``capability_contract#1`` is the meta-shape every contract Setting
+    must fit. Contract families (``issue_tracker``, ``source_control``,
+    ...) live as payload ``name`` values rather than pre-enumerated
+    variant subschemas — so the class is a direct ``SettingSchema``
+    base with no variants and no variant slug.
+
+    If a future bead introduces variant subclasses for, say, codegen
+    consumers, that decision should land deliberately (and update this
+    test). Pin the current shape so accidental drift is caught.
+    """
+    assert capability_contract.CapabilityContractV1._variant_slug is None
+    assert capability_contract.CapabilityContractV1._variants == {}
+
+
+def test_contract_v1_field_metadata_keys_match_legacy_dict_form():
+    """The typed-field migration (Bead 3C) must produce the same set of
+    ``_field_metadata`` keys as the pre-migration declaration so existing
+    consumers (``export_json_schema``, codegen) keep seeing the same
+    surface.
+    """
+    expected = {"name", "version", "summary", "ops", "notes", "ui_hints"}
+    assert set(capability_contract.CapabilityContractV1._field_metadata) == expected
+
+
 def test_contract_issue_tracker_v1_validates():
     validate_payload(
         capability_contract.SET_ID,

@@ -39,7 +39,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, register_schema
+from .registry import SchemaValidationError, SettingSchema, field, register_schema
 
 
 SET_ID = "autonomy.capability.contract"
@@ -125,54 +125,65 @@ class CapabilityContractV1(SettingSchema):
     ``summary``, ``ops`` (non-empty list of operation descriptors).
 
     Optional: ``notes``, ``ui_hints``.
+
+    Migrated to the typed-``field()`` declaration shape (Bead 3C) —
+    annotations now drive ``_field_metadata`` derivation via
+    ``__init_subclass__``. Imperative validation in :meth:`validate`
+    continues to enforce shape checks the typed metadata can't yet
+    describe (snake_case names, op sub-shape, integer minimums,
+    duplicate-op rejection, extra-field rejection).
+
+    No variant subclasses are appropriate at this level: variants share
+    ``set_id`` + ``schema_revision``, but ``capability_contract#1`` is
+    the meta-shape every contract Setting must fit, and contract
+    families (``issue_tracker``, ``source_control``, ...) are encoded
+    as payload ``name`` values rather than pre-enumerated subschemas.
+    The substrate's nested-namespace tree is exercised for hypothetical
+    op trees in
+    :func:`tools.graph.tests.test_schemas_registry_variants.test_capability_layer_nested_namespace_shape`
+    and is unaffected by this migration.
     """
 
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
 
-    _field_metadata: dict[str, dict] = {
-        "name": {
-            "type": "string",
-            "required": True,
-            "description": "Lowercase snake_case identifier for the contract family",
+    name: str = field(
+        required=True,
+        description="Lowercase snake_case identifier for the contract family",
+    )
+    version: int = field(
+        required=True,
+        description=(
+            "Single monotonic integer version. ``name@N`` denotes the "
+            "pinned canonical revision."
+        ),
+    )
+    summary: str = field(
+        required=True,
+        description="Operator-facing one-line description of the contract",
+    )
+    ops: list = field(
+        required=True,
+        description="Named operations this contract groups",
+        element={
+            "name": {"type": "string", "required": True,
+                     "description": "Op name (lowercase snake_case)"},
+            "summary": {"type": "string", "required": True,
+                        "description": "One-line op description"},
+            "input_schema": {"type": "object", "required": True,
+                             "description": "JSON-schema for op input"},
+            "output_schema": {"type": "object", "required": True,
+                              "description": "JSON-schema for op output"},
         },
-        "version": {
-            "type": "integer",
-            "required": True,
-            "description": (
-                "Single monotonic integer version. ``name@N`` denotes the "
-                "pinned canonical revision."
-            ),
-        },
-        "summary": {
-            "type": "string",
-            "required": True,
-            "description": "Operator-facing one-line description of the contract",
-        },
-        "ops": {
-            "type": "array",
-            "required": True,
-            "description": "Named operations this contract groups",
-            "element": {
-                "name": {"type": "string", "required": True,
-                         "description": "Op name (lowercase snake_case)"},
-                "summary": {"type": "string", "required": True,
-                            "description": "One-line op description"},
-                "input_schema": {"type": "object", "required": True,
-                                 "description": "JSON-schema for op input"},
-                "output_schema": {"type": "object", "required": True,
-                                  "description": "JSON-schema for op output"},
-            },
-        },
-        "notes": {
-            "type": "string",
-            "description": "Free-form notes (design rationale, caveats, links)",
-        },
-        "ui_hints": {
-            "type": "object",
-            "description": "Free-form object of UI hints for dashboard renderers",
-        },
-    }
+    )
+    notes: str = field(
+        required=False,
+        description="Free-form notes (design rationale, caveats, links)",
+    )
+    ui_hints: dict = field(
+        required=False,
+        description="Free-form object of UI hints for dashboard renderers",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:  # noqa: C901 — flat checks
