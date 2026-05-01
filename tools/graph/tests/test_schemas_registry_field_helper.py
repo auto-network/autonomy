@@ -8,6 +8,8 @@ verify both shapes and their precedence rules.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from tools.graph.schemas.registry import (
@@ -203,6 +205,93 @@ def test_typed_fields_take_precedence_over_dict_form():
     assert V1._field_metadata["extra"] == {
         "type": "string",
         "description": "Only in dict",
+    }
+
+
+def test_typed_fields_inherit_across_multiple_levels():
+    class Base(SettingSchema):
+        set_id = "x.y"
+        schema_revision = 1
+        tile_id: str = field(description="Base field")
+
+    class Child(Base):
+        extra: str = field(description="Child field")
+
+    class Grandchild(Child):
+        final: bool = field(description="Grandchild field")
+
+    assert set(Base._field_metadata) == {"tile_id"}
+    assert set(Child._field_metadata) == {"tile_id", "extra"}
+    assert set(Grandchild._field_metadata) == {"tile_id", "extra", "final"}
+
+
+def test_child_dict_form_composes_with_inherited_typed_fields():
+    class Base(SettingSchema):
+        set_id = "x.y"
+        schema_revision = 1
+        tile_id: str = field(description="Base field")
+
+    class Child(Base):
+        _field_metadata = {
+            "status": {
+                "type": "string",
+                "description": "Child dict-form field",
+            },
+        }
+
+    assert Child._field_metadata["tile_id"] == {
+        "type": "string",
+        "description": "Base field",
+        "required": True,
+    }
+    assert Child._field_metadata["status"] == {
+        "type": "string",
+        "description": "Child dict-form field",
+    }
+
+
+def test_child_typed_field_override_wins_over_parent_typed_field():
+    class Base(SettingSchema):
+        set_id = "x.y"
+        schema_revision = 1
+        name: str = field(required=True, description="Base description")
+
+    class Child(Base):
+        name: str = field(default="child", description="Child description")
+
+    assert Base._field_metadata["name"] == {
+        "type": "string",
+        "required": True,
+        "description": "Base description",
+    }
+    assert Child._field_metadata["name"] == {
+        "type": "string",
+        "description": "Child description",
+        "default": "child",
+    }
+    assert Child.name == "child"
+
+
+def test_get_type_hints_failure_logs_warning_and_falls_back_to_string(caplog):
+    with caplog.at_level(logging.WARNING):
+        class V1(SettingSchema):
+            set_id = "x.y"
+            schema_revision = 1
+            ok: int = field(description="Should be integer when hints resolve")
+            ref: MissingType = field(description="Missing forward ref")
+
+    assert "get_type_hints(" in caplog.text
+    assert "V1" in caplog.text
+    assert "typed annotations fall back to raw strings" in caplog.text
+    assert V1._field_metadata["ok"] == {
+        "type": "string",
+        "description": "Should be integer when hints resolve",
+        "required": True,
+    }
+    assert V1._field_metadata["ref"] == {
+        "type": "string",
+        "description": "Missing forward ref",
+        "required": True,
     }
 
 
