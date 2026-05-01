@@ -1013,3 +1013,7 @@ def attach_set_subparser(sub) -> None:
     p_mig.add_argument("--dry-run", action="store_true", dest="dry_run")
     _add_org_arg(p_mig)
     p_mig.set_defaults(func=cmd_set_migrate)
+
+    # typegen — schema-derived TypeScript codegen
+    from .typegen_cmd import attach_typegen_subparser
+    attach_typegen_subparser(set_sub)
