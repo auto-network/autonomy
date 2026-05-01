@@ -26,6 +26,7 @@ import pytest
 from tools.graph import cli as graph_cli
 from tools.graph import cross_org, ops
 from tools.graph import db as graph_db_mod
+from tools.graph.ingest import ingest_claude_code_session
 from tools.graph import primer as graph_primer
 from tools.graph.db import GraphDB
 from tools.graph.models import Attachment, Source, Thought
@@ -186,6 +187,36 @@ def _make_args(**kwargs) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
+def _user_entry(text: str, ts: str) -> dict:
+    return {
+        "type": "user",
+        "uuid": f"u-{abs(hash((text, ts))) & 0xffff:x}",
+        "message": {"role": "user", "content": text},
+        "timestamp": ts,
+    }
+
+
+def _assistant_entry(text: str, ts: str) -> dict:
+    return {
+        "type": "assistant",
+        "uuid": f"a-{abs(hash((text, ts))) & 0xffff:x}",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": text}],
+            "model": "claude-test",
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+        },
+        "timestamp": ts,
+    }
+
+
+def _write_jsonl(path: Path, entries: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+
+
 # ── cmd_read: single-ID resolve cross-org ────────────────────────
 
 
@@ -289,6 +320,40 @@ def test_cmd_context_cross_org_raw_not_found(orgs_root, capsys, monkeypatch):
 
     out = capsys.readouterr().out
     assert "Source not found" in out
+
+
+def test_cmd_context_last_refreshes_only_addressed_session(orgs_root, tmp_path, capsys, monkeypatch):
+    """`graph context <src> last:N` refreshes the addressed session, not a global sweep."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    monkeypatch.setattr(
+        graph_cli,
+        "_auto_ingest",
+        lambda _db: (_ for _ in ()).throw(AssertionError("global auto-ingest should not run")),
+    )
+    _seed_org("autonomy").close()
+
+    session_path = tmp_path / "sessions" / "fresh-tail-session.jsonl"
+    _write_jsonl(session_path, [
+        _user_entry("Initial question", "2026-04-21T10:00:00Z"),
+        _assistant_entry("Initial answer", "2026-04-21T10:00:05Z"),
+    ])
+
+    db = GraphDB.open_org_db("autonomy", mode="rw")
+    try:
+        result = ingest_claude_code_session(db, session_path)
+    finally:
+        db.close()
+    source_id = result["source_id"]
+
+    with open(session_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(_user_entry("Need the latest tail", "2026-04-21T10:01:00Z")) + "\n")
+        f.write(json.dumps(_assistant_entry("Latest reply after refresh", "2026-04-21T10:01:05Z")) + "\n")
+
+    args = _make_args(source=source_id, turn="last:2", window=0)
+    graph_cli.cmd_context(args)
+
+    out = capsys.readouterr().out
+    assert "Latest reply after refresh" in out
 
 
 # ── cmd_attachment / cmd_attachments ────────────────────────────

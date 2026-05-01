@@ -7908,6 +7908,26 @@ async def api_graph_link(request):
 _ingest_lock = asyncio.Lock()
 
 
+async def _refresh_graph_session_source(source: dict) -> dict:
+    """Best-effort refresh for one already-known session source."""
+    if source.get("type") != "session":
+        return source
+
+    async with _ingest_lock:
+        def _run_refresh() -> dict:
+            from tools.graph.ingest import refresh_session_source
+            return refresh_session_source(source)
+
+        try:
+            return await asyncio.to_thread(_run_refresh)
+        except Exception:
+            logger.exception(
+                "[graph] session refresh failed for %s",
+                source.get("id", "?")[:12],
+            )
+            return source
+
+
 async def api_graph_sessions(request):
     """Ingest sessions via direct ingest call (no subprocess)."""
     if _ingest_lock.locked():
@@ -9434,6 +9454,7 @@ async def api_graph_resolve(request):
     org = _caller_org(request)
     source = graph_ops.get_source(id, org=org)
     if source:
+        source = await _refresh_graph_session_source(source)
         result = await asyncio.to_thread(
             graph_ops.read_source_full, source["id"], org=org, max_chars=50000,
             around_turn=around_turn, window=window, tail_n=tail_n,

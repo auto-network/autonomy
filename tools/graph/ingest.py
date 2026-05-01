@@ -1371,6 +1371,31 @@ def ingest_session_file(
     return ingest_claude_code_session(db, path, force=force, project=project)
 
 
+def refresh_session_source(source: dict) -> dict:
+    """Best-effort refresh for one existing session source."""
+    if source.get("type") != "session":
+        return source
+
+    source_id = str(source.get("id") or "").strip()
+    home_org = str(source.get("org") or "").strip()
+    file_path = str(source.get("file_path") or "").strip()
+    if not source_id or not home_org or not file_path:
+        return source
+
+    jsonl_path = Path(file_path)
+    if not jsonl_path.exists():
+        return source
+
+    db = GraphDB.open_org_db(home_org, mode="rw")
+    try:
+        ingest_session_file(db, jsonl_path, force=False)
+        refreshed = db.get_source(source_id) or source
+        refreshed.setdefault("org", home_org)
+        return refreshed
+    finally:
+        db.close()
+
+
 def _ingest_session_routed(jsonl_file: Path, force: bool) -> dict:
     """Open the right per-org DB for *jsonl_file* and ingest.
 
