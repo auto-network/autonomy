@@ -118,6 +118,31 @@ async function approveBead(id, event) {
 
 // ── Pages ────────────────────────────────────────────────────
 
+// Replace a host element's contents and rebind Alpine, ensuring the
+// outgoing tree's components run their destroy() callbacks.
+//
+// Why this matters: setting `host.innerHTML = ...` removes the prior
+// DOM, but Alpine's MutationObserver can race the replacement and skip
+// firing destroy() on the components that were attached to the old
+// subtree. Anything those components registered against window/document
+// (event listeners, intervals, SSE subscriptions) leaks across the
+// navigation. After enough page transitions, a single dispatched event
+// fires N stacked listeners — which manifests as N parallel API calls
+// from one user action.
+//
+// destroyTree explicitly walks the subtree first and runs every
+// component's destroy(), so subsequent initTree starts from a clean
+// slate.
+function _replaceFragment(host, html) {
+  if (window.Alpine && host.firstElementChild) {
+    Alpine.destroyTree(host.firstElementChild);
+  }
+  host.innerHTML = html;
+  if (window.Alpine && host.firstElementChild) {
+    Alpine.initTree(host.firstElementChild);
+  }
+}
+
 // ── Beads Page (Jinja2 fragment + Alpine) ────────────────────
 
 async function renderBeadsFragment() {
@@ -130,10 +155,7 @@ async function renderBeadsFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/beads', html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 
@@ -149,11 +171,7 @@ async function renderBeadDetailFragment(id) {
     html = await res.text();
     _fragmentCache.set('/pages/bead', html);
   }
-  content.innerHTML = html;
-
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 // ── Dispatch Page (Jinja2 fragment + Alpine) ──────────────────
@@ -181,11 +199,7 @@ async function renderDispatchFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/dispatch', html);
   }
-  content.innerHTML = html;
-
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 
@@ -201,10 +215,7 @@ async function renderTimelineFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/timeline', html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 // ── Trace Page (Jinja2 fragment + Alpine) ──────────────────────
@@ -219,10 +230,7 @@ async function renderTraceFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/trace', html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 
@@ -238,11 +246,7 @@ async function renderSessionsFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/sessions', html);
   }
-  content.innerHTML = html;
-
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 async function renderWorktreesFragment() {
@@ -256,11 +260,7 @@ async function renderWorktreesFragment() {
     _fragmentCache.set('/pages/worktrees', html);
   }
   if (window.location.pathname !== '/worktrees') return;
-  content.innerHTML = html;
-  const root = content.firstElementChild;
-  if (window.Alpine && root) {
-    Alpine.initTree(root);
-  }
+  _replaceFragment(content, html);
 }
 
 async function renderSessionViewFragment() {
@@ -273,10 +273,7 @@ async function renderSessionViewFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/session-view', html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 async function renderSourceFragment() {
@@ -291,10 +288,7 @@ async function renderSourceFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/source', html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 // ── Search Results Page (Jinja2 fragment + Alpine) ───────────
@@ -309,10 +303,7 @@ async function renderSearchFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/search', html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 // ── Streams Landing Page (Jinja2 fragment + Alpine) ──────────
@@ -327,10 +318,7 @@ async function renderStreamsFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/streams', html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 // ── Collab Hub Page (Jinja2 fragment + Alpine) ──────────────
@@ -345,10 +333,7 @@ async function renderCollabFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/collab', html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 // ── Stream Page (Jinja2 fragment + Alpine) ───────────────────
@@ -365,10 +350,7 @@ async function renderStreamFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/stream', html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 // ── Experiment Page (Jinja2 fragment + Alpine) ───────────────
@@ -389,10 +371,7 @@ async function renderDesignFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/design', html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 // ── Chat With Panel ─────────────────────────────────────────
@@ -554,10 +533,7 @@ async function renderTerminalFragment() {
     _fragmentCache.set('/pages/terminal', html);
   }
   const termPage = document.getElementById('terminal-page');
-  termPage.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(termPage.firstElementChild);
-  }
+  _replaceFragment(termPage, html);
   _terminalFragmentInit = true;
 }
 
@@ -970,13 +946,13 @@ async function renderExperiment(revisionId) {
   }
 
   pageTitle.textContent = 'Design';
-  content.innerHTML = '<div class="text-gray-400">Loading design...</div>';
+  _replaceFragment(content, '<div class="text-gray-400">Loading design...</div>');
   destroyChatWith();
   _chatWithCollapsed = false;
 
   const exp = await api(`/api/design/${revisionId}/full`);
   if (exp.error) {
-    content.innerHTML = `<div class="text-red-400">Design not found</div>`;
+    _replaceFragment(content, `<div class="text-red-400">Design not found</div>`);
     return;
   }
 
@@ -1095,7 +1071,7 @@ async function renderExperiment(revisionId) {
     </div>`;
 
   html += `</div>`;
-  content.innerHTML = html;
+  _replaceFragment(content, html);
 
   // Auto-reconnect Chat With panel if session already exists (fire-and-forget).
   // For experiments in a series, also auto-show the panel so the user sees the
@@ -1506,16 +1482,13 @@ async function renderPluginFragment(plugin) {
   } else {
     const res = await fetch(fragmentUrl, _withPluginOrgHeader());
     if (!res.ok) {
-      content.innerHTML = '<div class="text-gray-400">Page not found</div>';
+      _replaceFragment(content, '<div class="text-gray-400">Page not found</div>');
       return;
     }
     html = await res.text();
     _fragmentCache.set(fragmentUrl, html);
   }
-  content.innerHTML = html;
-  if (window.Alpine) {
-    Alpine.initTree(content.firstElementChild);
-  }
+  _replaceFragment(content, html);
 }
 
 // ── Router ───────────────────────────────────────────────────
@@ -1622,7 +1595,7 @@ async function route() {
   } else if (path === '/search') {
     renderSearchFragment();
   } else {
-    content.innerHTML = '<div class="text-gray-400">Page not found</div>';
+    _replaceFragment(content, '<div class="text-gray-400">Page not found</div>');
   }
   // Notify persistent (un-cleared) header components that the SPA route
   // changed. Used by the agent-actions dropdown — its Alpine root lives
