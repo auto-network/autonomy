@@ -206,18 +206,18 @@
                   <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
                         :class="statusClass(item.row)"
                         x-text="statusLabel(item.row)"></span>
-                  <template x-if="rowPr(item.row)">
-                    <a :href="rowPr(item.row).url"
+                  <template x-for="pr in rowPrs(item.row)" :key="'pr-badge-' + (pr.review_id || pr.number)">
+                    <a :href="pr.url"
                        target="_blank"
                        rel="noreferrer"
                        class="rounded-full border px-2 py-0.5 text-[10px] font-semibold transition"
-                       :class="prBadgeClass(rowPr(item.row))"
+                       :class="prBadgeClass(pr)"
                        @click.stop
                        data-testid="pr-badge">
                       <span class="inline-flex items-center gap-1.5">
                         <span class="h-1.5 w-1.5 rounded-full"
-                              :class="prDotClass(rowPr(item.row))"></span>
-                        <span x-text="'PR #' + rowPr(item.row).number"></span>
+                              :class="prDotClass(pr)"></span>
+                        <span x-text="'PR #' + (pr.number != null ? pr.number : pr.review_id)"></span>
                       </span>
                     </a>
                   </template>
@@ -265,7 +265,7 @@
                 </button>
               </div>
 
-              <template x-if="rowPr(item.row)">
+              <template x-if="rowPrs(item.row).length">
                 <div class="mt-4 min-w-0" data-testid="pr-navigator">
                   <div class="mb-2 flex justify-end">
                     <div class="grid grid-cols-3 gap-1 rounded-2xl border border-white/10 bg-slate-950/75 p-1 text-[11px] font-semibold shadow-[0_10px_24px_rgba(0,0,0,0.22)]"
@@ -288,29 +288,32 @@
                     </div>
                   </div>
                   <div class="divide-y divide-white/10 border-y border-white/10">
-                    <button type="button"
-                            class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"
-                            @click="openReviewPr(item.row)"
-                            data-testid="pr-navigator-pr-row">
-                      <span class="rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-300">PR</span>
-                      <span class="min-w-0 truncate text-sm text-slate-200"
-                            x-text="rowPr(item.row).title"></span>
-                      <span class="flex shrink-0 items-center gap-1.5">
-                        <template x-for="check in rowPrChecks(item.row)" :key="'card-pr-' + check.id">
-                          <span class="inline-flex h-7 w-7 cursor-help items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
-                                :class="checkIconClass(check.status)"
-                                tabindex="0"
-                                @mouseenter="showCheckTooltip($event, check)"
-                                @mousemove="showCheckTooltip($event, check)"
-                                @mouseleave="hideCheckTooltip()"
-                                @focus="showCheckTooltip($event, check)"
-                                @blur="hideCheckTooltip()"
-                                @click.stop.prevent="toggleCheckTooltip($event, check)">
-                            <span x-text="check.icon"></span>
-                          </span>
-                        </template>
-                      </span>
-                    </button>
+                    <template x-for="pr in rowPrs(item.row)" :key="'pr-nav-' + (pr.review_id || pr.number)">
+                      <button type="button"
+                              class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"
+                              @click="openReviewPr(item.row, pr)"
+                              data-testid="pr-navigator-pr-row">
+                        <span class="rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-300"
+                              x-text="'PR #' + (pr.number != null ? pr.number : pr.review_id)"></span>
+                        <span class="min-w-0 truncate text-sm text-slate-200"
+                              x-text="pr.title || ('PR #' + (pr.number != null ? pr.number : pr.review_id))"></span>
+                        <span class="flex shrink-0 items-center gap-1.5">
+                          <template x-for="check in rowPrChecks(item.row, pr)" :key="'card-pr-' + (pr.review_id || pr.number) + '-' + check.id">
+                            <span class="inline-flex h-7 w-7 cursor-help items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
+                                  :class="checkIconClass(check.status)"
+                                  tabindex="0"
+                                  @mouseenter="showCheckTooltip($event, check)"
+                                  @mousemove="showCheckTooltip($event, check)"
+                                  @mouseleave="hideCheckTooltip()"
+                                  @focus="showCheckTooltip($event, check)"
+                                  @blur="hideCheckTooltip()"
+                                  @click.stop.prevent="toggleCheckTooltip($event, check)">
+                              <span x-text="check.icon"></span>
+                            </span>
+                          </template>
+                        </span>
+                      </button>
+                    </template>
                     <template x-for="(commit, idx) in commitList(item.row)" :key="'card-' + rowKey(item.row) + '/' + commit.sha">
                       <button type="button"
                               class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"

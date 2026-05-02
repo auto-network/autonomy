@@ -32,6 +32,34 @@ gh pr list --limit 10
 gh pr view <NUMBER> --json number,title,body,state,mergeStateStatus,statusCheckRollup
 ```
 
+## After creating a PR — declare the binding
+
+The Worktrees dashboard previously auto-detected your PR by scanning
+``gh pr list --head <branch>`` every 30s. That ran into rate limits,
+ghost-commits on squash-merge, and stacked-PR ambiguity. The new
+flow is **operator/agent declaration**: tell the dashboard which review
+covers which commit range, and it fetches state by id instead.
+
+After you create the PR, run:
+
+```bash
+agents/capabilities/github/bin/declare-review-binding.sh <PR_NUMBER>
+```
+
+…or for stacked PRs (the second one onward), chain off the previous
+PR's head SHA:
+
+```bash
+agents/capabilities/github/bin/declare-review-binding.sh \
+  --previous-review-id <PREVIOUS_PR_NUMBER> \
+  <THIS_PR_NUMBER>
+```
+
+The helper writes a ``autonomy.worktree.review_binding#1`` Setting
+keyed ``<SESSION>:<REPO>:<BRANCH>:<PR>``. The dashboard reads the
+binding, fetches PR state by id over REST, and stops scanning the
+branch — no more rate-limit risk.
+
 ## Deterministic surface (for reference)
 
 The Dashboard does not call `gh` argv directly. It calls typed operations

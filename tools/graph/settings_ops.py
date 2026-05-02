@@ -634,6 +634,60 @@ def deprecate_setting(
         _call_emit_hook(operation="deprecate", snapshot=snapshot, org=org)
 
 
+def remove_settings_by_key_prefix(
+    set_id: str,
+    *,
+    prefix: str,
+    org: str | None = None,
+) -> int:
+    """Hard-delete every base/override Setting under ``set_id`` whose key
+    matches ``<prefix>:%`` (composite-key child rows).
+
+    Bypasses the per-row ``raw``-only constraint that :func:`remove_setting`
+    enforces because this is a system-level cleanup path: callers wipe
+    binding rows when the worktree they describe is destroyed, regardless
+    of publication state. The companion review_state cache is *not*
+    deleted by callers using this — bindings die per-worktree, caches
+    persist per-org.
+
+    Returns the number of rows deleted. Cross-org targets raise
+    :class:`ops.CrossOrgWriteError` indirectly: peer DBs are read-only
+    from this caller's perspective, so the SQL ``DELETE`` simply finds
+    nothing in the local DB and returns 0 — there is no silent writethrough.
+    """
+    db = _open(org)
+    deleted_keys: list[tuple[str, int, str, str, bool]] = []
+    try:
+        like = _prefix_like_pattern(prefix)
+        rows = db.conn.execute(
+            "SELECT id, set_id, schema_revision, key, publication_state, "
+            "deprecated FROM settings "
+            "WHERE set_id = ? AND key LIKE ? ESCAPE '\\'",
+            (set_id, like),
+        ).fetchall()
+        for row in rows:
+            deleted_keys.append((
+                row["set_id"], int(row["schema_revision"]), row["key"],
+                row["publication_state"], bool(row["deprecated"]),
+            ))
+        cur = db.conn.execute(
+            "DELETE FROM settings "
+            "WHERE set_id = ? AND key LIKE ? ESCAPE '\\'",
+            (set_id, like),
+        )
+        n = cur.rowcount or 0
+        db.conn.commit()
+    finally:
+        db.close()
+    for sid, srev, key, state, dep in deleted_keys:
+        _call_emit_hook(
+            operation="delete",
+            snapshot=_make_snapshot(sid, srev, key, state, dep),
+            org=org,
+        )
+    return n
+
+
 def remove_setting(
     setting_id: str,
     *,

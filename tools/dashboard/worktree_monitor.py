@@ -20,12 +20,28 @@ from collections import deque
 
 from agents.capabilities.github import probe as github_probe
 from agents.capabilities.github.service import (
+    FAILURE_NOT_MODIFIED,
     FAILURE_RATE_LIMITED,
     WorktreeGithubExecResult,
+    derive_repo_slug,
     normalize_review_payload,
+    parse_check_runs_response,
+    parse_pull_response,
+    source_control_check_runs_read_for_sha_v1,
+    source_control_review_read_by_id_v1,
     source_control_review_read_v1,
 )
 from agents.workspace_manager import WorktreeState, scan_all_worktrees
+from tools.graph import settings_ops
+from tools.graph.schemas.source_control_review_state import (
+    SCHEMA_REVISION as REVIEW_STATE_REVISION,
+    SET_ID as REVIEW_STATE_SET_ID,
+    SourceControlReviewStateV1,
+)
+from tools.graph.schemas.worktree_review_binding import (
+    SET_ID as REVIEW_BINDING_SET_ID,
+    parse_binding_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +113,11 @@ def _degraded_snapshot(
         "state": state,
         "implementation": "autonomy/github",
         "reason": reason,
+        # Always plural — UI renders zero, one, or many reviews per row.
+        # Keeping ``reviews`` (list) and ``review`` (first-or-None
+        # back-compat alias) avoids a flag day for every consumer that
+        # still reads the singular field; the alias drops in a follow-up.
+        "reviews": [],
         "review": None,
         "watch": {"mode": watch_mode},
     }
@@ -105,6 +126,192 @@ def _degraded_snapshot(
         # the failure mode doesn't carry extra context.
         snapshot["details"] = details
     return snapshot
+
+
+def _ready_snapshot(
+    reviews: list[dict],
+    *,
+    watch_mode: str,
+    stale: bool = False,
+) -> dict:
+    """Compose a ``state=ready`` snapshot with a (possibly empty) list of reviews.
+
+    ``stale=True`` flags the whole snapshot when the resolver couldn't
+    confirm freshness against the live container (e.g. the bindings
+    were never refreshed and the cache is empty). The UI surfaces this
+    as a "stale, refresh required" indicator.
+    """
+    snapshot: dict = {
+        "state": "ready",
+        "implementation": "autonomy/github",
+        "reason": None,
+        "reviews": list(reviews),
+        # Back-compat alias — the first review (or None) under the
+        # singular ``review`` field so legacy callers keep rendering
+        # one PR while the UI migration to ``reviews`` plural rolls out.
+        "review": reviews[0] if reviews else None,
+        "watch": {"mode": watch_mode},
+    }
+    if stale:
+        snapshot["stale"] = True
+    return snapshot
+
+
+# ── Binding-driven composition ───────────────────────────────────────
+
+
+def _read_bindings(row: WorktreeState) -> list:
+    """Read bindings for a row by ``<session>:<repo>:<branch>`` prefix.
+
+    Returns the raw ``ResolvedSetting`` list — caller owns key parsing
+    and payload composition. Always returns an empty list (never None)
+    so the call site can branch on truthiness.
+    """
+    if not row.branch:
+        return []
+    prefix = f"{row.session_name}:{row.repo_name}:{row.branch}"
+    members = settings_ops.read_set(
+        REVIEW_BINDING_SET_ID,
+        prefix=prefix,
+        org="autonomy",
+    )
+    # Deterministic per-review ordering matters for stacked rows because
+    # the UI falls back to the first review when no explicit review_id is
+    # supplied (e.g. legacy single-PR overlay entry points).
+    return sorted(members.members, key=lambda member: member.key)
+
+
+def _read_review_state_cache(repo_slug: str | None) -> dict[str, dict]:
+    """Read the per-repo cache map ``{key: payload}`` for ``repo_slug``.
+
+    ``repo_slug`` is the ``<owner>/<repo>`` form derived from the
+    worktree's managed clone. Empty / None returns an empty dict so
+    callers don't have to special-case the boundary.
+    """
+    if not repo_slug:
+        return {}
+    members = settings_ops.read_set(
+        REVIEW_STATE_SET_ID,
+        prefix=repo_slug,
+        org="autonomy",
+    )
+    return {m.key: m.payload for m in members.members}
+
+
+def _compose_review_payload(
+    *,
+    repo_slug: str,
+    review_id: str,
+    binding_payload: dict,
+    cache: dict | None,
+) -> dict:
+    """Synthesize the per-review block the UI renders.
+
+    Mirrors :class:`agents.capabilities.github.service.ReviewPayload`
+    so the JS consumer doesn't need a second adapter. When the cache is
+    missing for this binding, returns a stub flagged ``stale=True`` so
+    the UI shows "refresh required" rather than crashing.
+
+    ``commit_shas`` is intentionally empty — the cache is provider
+    state, not local git state. Per-PR diff scoping uses
+    ``binding.base_sha..cache.head_sha`` directly.
+    """
+    base_sha = binding_payload.get("base_sha", "") or ""
+    if cache is None:
+        # Operator declared the binding but no fetch has populated the
+        # cache yet. Stub with the binding's base_sha + a stale flag so
+        # the UI knows to nudge the operator toward Refresh.
+        return {
+            "number": int(review_id) if review_id.isdigit() else None,
+            "review_id": review_id,
+            "url": "",
+            "title": "",
+            "body": "",
+            "head_sha": "",
+            "base_sha": base_sha,
+            "base_branch": "",
+            "state": "open",
+            "is_draft": False,
+            "aggregate_state": "yellow",
+            "running": False,
+            "checks": [],
+            "commit_shas": [],
+            "stale": True,
+        }
+
+    checks = list(cache.get("checks") or [])
+    # The cache deliberately omits per-check ``icon``; render-time
+    # derivation lives in JS (``_iconFromLabel``). We surface the same
+    # vocabulary the legacy normalizer does, so the existing tooltip
+    # disc styling keeps working.
+    running = any(
+        (c.get("status") in ("running", "pending"))
+        for c in checks
+    )
+    has_failure = any((c.get("status") == "fail") for c in checks)
+    aggregate_state = "yellow" if has_failure else "green"
+
+    return {
+        "number": int(review_id) if review_id.isdigit() else None,
+        "review_id": review_id,
+        "url": cache.get("url") or "",
+        "title": cache.get("title") or "",
+        "body": cache.get("body") or "",
+        "head_sha": cache.get("head_sha") or "",
+        # Per-PR scoping — the binding's base_sha overrides the cache's
+        # base_sha so stacked PRs diff correctly even when the
+        # provider's reported ``base.sha`` reflects the integration
+        # branch instead of the previous PR's head.
+        "base_sha": base_sha or (cache.get("base_sha") or ""),
+        "base_branch": cache.get("base_branch") or "",
+        "state": cache.get("state") or "open",
+        "is_draft": bool(cache.get("is_draft")),
+        "aggregate_state": aggregate_state,
+        "running": running,
+        "checks": checks,
+        "commit_shas": [],
+    }
+
+
+def _compose_bound_snapshot(
+    row: WorktreeState,
+    *,
+    bindings: list,
+    watch_mode: str,
+) -> dict:
+    """Compose a ``ready`` snapshot from bindings + cache. Zero gh calls.
+
+    The list order matches the bindings' key order
+    (sorted by ``read_set``), which gives deterministic output when
+    the operator declared a stack in order.
+    """
+    repo_slug = derive_repo_slug(row.managed_clone) or ""
+    cache_map = _read_review_state_cache(repo_slug)
+    reviews: list[dict] = []
+    any_stale = False
+    for binding in bindings:
+        try:
+            _, _, _, review_id = parse_binding_key(binding.key)
+        except ValueError:
+            # Drop malformed binding keys — log so an operator can spot
+            # the drift, but don't poison the snapshot.
+            logger.warning(
+                "worktree_monitor: malformed binding key %r — skipping",
+                binding.key,
+            )
+            continue
+        cache_key = f"{repo_slug}:{review_id}" if repo_slug else None
+        cache = cache_map.get(cache_key) if cache_key else None
+        payload = _compose_review_payload(
+            repo_slug=repo_slug,
+            review_id=review_id,
+            binding_payload=binding.payload or {},
+            cache=cache,
+        )
+        if payload.get("stale"):
+            any_stale = True
+        reviews.append(payload)
+    return _ready_snapshot(reviews, watch_mode=watch_mode, stale=any_stale)
 
 
 def _details_from_op_result(op_result: WorktreeGithubExecResult) -> dict:
@@ -142,7 +349,25 @@ async def _fetch_source_control(
     *,
     watch_mode: str = NAG_DEFAULT,
 ) -> dict:
-    """Probe + read the row's source_control snapshot for one live row."""
+    """Probe + read the row's source_control snapshot for one live row.
+
+    Binding-driven first: if the operator/agent declared one or more
+    review bindings for this row, the snapshot is composed from the
+    cached review_state + bindings with **zero** gh calls. Falls back
+    to the legacy ``gh pr list --head <branch>`` auto-detect path when
+    no bindings exist — preserves the no-config experience for
+    operators who haven't adopted the binding flow yet.
+    """
+    bindings = _read_bindings(row)
+    if bindings:
+        # Cache-only path — never touches gh on a background tick.
+        # The probe is intentionally skipped: cache reads don't depend
+        # on the live container being up. ``refresh_one`` does the
+        # network work and arms the cache.
+        return _compose_bound_snapshot(
+            row, bindings=bindings, watch_mode=watch_mode,
+        )
+
     probe_result = await github_probe.probe_v1(
         row.session_name,
         timeout=int(_GITHUB_PROBE_TIMEOUT),
@@ -175,13 +400,130 @@ async def _fetch_source_control(
         )
 
     review = normalize_review_payload(op_result.stdout)
-    return {
-        "state": "ready",
-        "implementation": "autonomy/github",
-        "reason": None,
-        "review": review.to_dict() if review is not None else None,
-        "watch": {"mode": watch_mode},
-    }
+    review_dict = review.to_dict() if review is not None else None
+    reviews = [review_dict] if review_dict is not None else []
+    return _ready_snapshot(reviews, watch_mode=watch_mode)
+
+
+# ── Operator-explicit force-fetch over bindings ──────────────────────
+
+
+async def _refresh_bindings_via_rest(
+    row: WorktreeState,
+    all_rows: list[WorktreeState],
+    bindings: list,
+    *,
+    watch_mode: str,
+) -> tuple[dict, bool]:
+    """Walk bindings, fetch each via REST, write the cache, and recompose.
+
+    Returns ``(snapshot, rate_limited_seen)``. The caller arms the
+    rate-limit backoff on True and recomposes from cache regardless.
+    """
+    repo_slug = derive_repo_slug(row.managed_clone) or ""
+    cache_map = _read_review_state_cache(repo_slug)
+    rate_limited = False
+
+    for binding in bindings:
+        try:
+            _, _, _, review_id = parse_binding_key(binding.key)
+        except ValueError:
+            logger.warning(
+                "worktree_monitor: malformed binding key %r — skipping",
+                binding.key,
+            )
+            continue
+        cache_key = f"{repo_slug}:{review_id}"
+        cached = cache_map.get(cache_key)
+        cached_etag = (cached or {}).get("etag")
+
+        rest = await source_control_review_read_by_id_v1(
+            row.session_name,
+            row.repo_name,
+            review_id=review_id,
+            rows=all_rows,
+            repo_slug=repo_slug or None,
+            etag=cached_etag,
+            timeout=int(_GITHUB_REVIEW_TIMEOUT),
+        )
+        if rest.failure == FAILURE_NOT_MODIFIED:
+            # Cache still fresh — touch ``updated_at`` by re-writing the
+            # same payload. Skip when there's no cache to refresh.
+            if cached is not None:
+                try:
+                    settings_ops.add_setting(
+                        REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
+                        cache_key, cached, org="autonomy",
+                    )
+                except Exception:
+                    logger.warning(
+                        "worktree_monitor: cache touch failed for %s",
+                        cache_key, exc_info=True,
+                    )
+            continue
+        if rest.failure == FAILURE_RATE_LIMITED:
+            rate_limited = True
+            # Leave the cached row alone — caller will surface degraded
+            # state in the snapshot if everything was rate-limited.
+            continue
+        if not rest.ok:
+            # Other failures: keep cache, log, move on.
+            logger.warning(
+                "worktree_monitor: REST review fetch failed for %s/%s "
+                "review=%s failure=%s",
+                row.session_name, row.repo_name, review_id, rest.failure,
+            )
+            continue
+
+        parsed = parse_pull_response(rest.stdout, etag=cached_etag)
+        head_sha = parsed.get("head_sha") or ""
+        checks: list[dict] = []
+        if head_sha:
+            checks_rest = await source_control_check_runs_read_for_sha_v1(
+                row.session_name,
+                row.repo_name,
+                head_sha=head_sha,
+                rows=all_rows,
+                repo_slug=repo_slug or None,
+                timeout=int(_GITHUB_REVIEW_TIMEOUT),
+            )
+            if checks_rest.ok:
+                checks = parse_check_runs_response(checks_rest.stdout)
+            else:
+                # Carry old checks forward when the check-runs sub-fetch
+                # fails — partial freshness beats no checks at all.
+                checks = list((cached or {}).get("checks") or [])
+
+        payload: dict = {
+            "title": parsed["title"],
+            "body": parsed["body"],
+            "state": parsed["state"],
+            "head_sha": parsed["head_sha"],
+            "base_sha": parsed["base_sha"],
+            "base_branch": parsed["base_branch"],
+            "is_draft": parsed["is_draft"],
+            "provider": "github",
+            "checks": checks,
+        }
+        if parsed.get("etag"):
+            payload["etag"] = parsed["etag"]
+        if parsed.get("url"):
+            payload["url"] = parsed["url"]
+        try:
+            settings_ops.add_setting(
+                REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
+                cache_key, payload, org="autonomy",
+            )
+        except Exception:
+            logger.warning(
+                "worktree_monitor: cache write failed for %s",
+                cache_key, exc_info=True,
+            )
+
+    snapshot = _compose_bound_snapshot(
+        row, bindings=bindings, watch_mode=watch_mode,
+    )
+    return snapshot, rate_limited
 
 
 class WorktreeMonitor:
@@ -367,6 +709,11 @@ class WorktreeMonitor:
         Bypasses TTL + poll budget but still respects rate-limit
         backoff. Updates the cache + fetched_at + poll_history in
         place; arms or clears the backoff based on the response.
+
+        When the row has one or more declared bindings, REST-by-id
+        ops drive the refresh (separate quota from GraphQL, ETag 304s
+        are free). When no bindings exist, falls back to the legacy
+        ``gh pr list`` auto-detect path so unbound rows still refresh.
         """
         key = (row.session_name, row.repo_name)
         now = time.monotonic()
@@ -385,11 +732,19 @@ class WorktreeMonitor:
             )
             return
 
+        bindings = _read_bindings(row)
+        rate_limited = False
         try:
-            snapshot = await _fetch_source_control(
-                row, all_rows,
-                watch_mode=self.get_nag_mode(*key),
-            )
+            if bindings:
+                snapshot, rate_limited = await _refresh_bindings_via_rest(
+                    row, all_rows, bindings,
+                    watch_mode=self.get_nag_mode(*key),
+                )
+            else:
+                snapshot = await _fetch_source_control(
+                    row, all_rows,
+                    watch_mode=self.get_nag_mode(*key),
+                )
         except Exception as exc:
             logger.warning(
                 "worktree_monitor: refresh_one failed for %s/%s: %s",
@@ -406,7 +761,7 @@ class WorktreeMonitor:
         self._source_control_cache[key] = snapshot
         self._source_control_fetched_at[key] = now
 
-        if snapshot.get("reason") == FAILURE_RATE_LIMITED:
+        if rate_limited or snapshot.get("reason") == FAILURE_RATE_LIMITED:
             self._capability_backoff_until = now + RATE_LIMIT_BACKOFF_SECONDS
             logger.warning(
                 "worktree_monitor: refresh_one hit rate-limit on %s/%s; "
@@ -450,7 +805,7 @@ class WorktreeMonitor:
 
         Returns ``True`` only when every gate clears:
           - row is watch-active (operator opted in),
-          - cached snapshot exists and shows ``review.running == True``
+          - cached snapshot has at least one running review
             (something is actually transitioning — no point polling
             otherwise),
           - the watch TTL has elapsed since the last fetch,
@@ -462,10 +817,14 @@ class WorktreeMonitor:
             return False
         if cached is None:
             return False  # never had a snapshot; an operator refresh has to seed it
-        review = cached.get("review")
-        if not review:
-            return False
-        if not review.get("running"):
+        # Plural ``reviews`` is the canonical shape post-binding migration;
+        # legacy ``review`` (singular) is read as fallback for older cache
+        # entries seeded before the migration.
+        reviews = cached.get("reviews")
+        if not reviews:
+            single = cached.get("review")
+            reviews = [single] if single else []
+        if not any((r and r.get("running")) for r in reviews):
             return False
         if not self._watch_ttl_elapsed(key, now):
             return False
