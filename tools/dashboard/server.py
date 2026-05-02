@@ -125,6 +125,14 @@ from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 # starts inside the lifespan hook.
 from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
 
+# Surface Presence + ParticipantActivity substrate (bead auto-i3tki) —
+# imported eagerly for the same reason: its three SettingSchema classes
+# (dashboard.surface.presence, dashboard.surface.ping,
+# dashboard.participant.activity) must be in the registry before
+# ``flush_schema_meta`` runs on the first writable GraphDB connection.
+# See pitfall ``graph://3fe60c25-fab``.
+from tools.graph import surface as _surface  # noqa: E402, F401
+
 # Load every valid plugin (regardless of Setting state) so route
 # registration covers plugins that operators may flip on at runtime.
 # Per-request handlers gate via ``_plugin_enabled_map``; plugins
