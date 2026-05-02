@@ -134,12 +134,15 @@ async function approveBead(id, event) {
 // component's destroy(), so subsequent initTree starts from a clean
 // slate.
 function _replaceFragment(host, html) {
-  if (window.Alpine && host.firstElementChild) {
-    Alpine.destroyTree(host.firstElementChild);
+  if (window.Alpine) {
+    Array.from(host.children).forEach(child => Alpine.destroyTree(child));
   }
   host.innerHTML = html;
-  if (window.Alpine && host.firstElementChild) {
-    Alpine.initTree(host.firstElementChild);
+  if (window.Alpine) {
+    // Some fragments begin with sibling <style> tags before their x-data
+    // root. Initialize every top-level child so Alpine doesn't skip the
+    // reactive root when it's not the first element.
+    Array.from(host.children).forEach(child => Alpine.initTree(child));
   }
 }
 
