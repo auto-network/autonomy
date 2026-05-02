@@ -1186,6 +1186,14 @@
 
     <!-- Persistent terminal page (preserved across navigation) -->
     <div id="terminal-page" class="flex-1 overflow-auto p-6" style="display:none;"></div>
+
+    <!-- Persistent worktree review overlay. Keeps the current page mounted
+         underneath so session-viewer diff review can close back in place. -->
+    <div id="worktree-review-layer"
+         x-data="worktreesPage({ mode: 'overlay' })"
+         x-cloak>
+      {% include "partials/worktree-review-overlays.html" %}
+    </div>
   </div>
 
   <!-- Live Session Panel (bottom-docked overlay) -->
@@ -1198,16 +1206,18 @@
       <span id="live-panel-badge" class="badge badge-open" style="font-size: 0.625rem; padding: 0.0625rem 0.375rem;">Live</span>
       <span class="text-xs text-gray-500 font-mono" id="live-panel-bead"></span>
       <!-- Workspace-changes indicator. Bound to the session-viewer
-           component's hasWorkspaceChanges getter; click deep-links
-           into /worktrees scoped to this session so the review
-           screen opens directly. ``stopPropagation`` keeps the
-           click from toggling the panel. -->
-      <a :href="'/worktrees?session=' + encodeURIComponent(sessionKey)"
-         onclick="event.stopPropagation();"
-         class="text-xs text-amber-400 hover:text-amber-200 px-1"
-         x-show="hasWorkspaceChanges"
-         :title="workspaceStatusTooltip"
-         style="display:none;">⌥</a>
+           component's hasWorkspaceChanges getter; click opens the
+           persistent worktree review overlay for this session.
+           ``stopPropagation`` keeps the click from toggling the
+           live panel underneath. -->
+      <button type="button"
+              onclick="event.stopPropagation();"
+              @click.stop.prevent="openWorkspaceReview()"
+              class="text-xs text-amber-400 hover:text-amber-200 px-1"
+              x-show="hasWorkspaceChanges"
+              :title="workspaceStatusTooltip"
+              data-testid="session-worktree-review-button"
+              style="display:none;">⌥</button>
       <span class="text-xs text-gray-500 ml-auto" id="live-panel-status"></span>
       <button onclick="event.stopPropagation(); hideLivePanel();" class="text-gray-500 hover:text-gray-300 text-sm px-1">✕</button>
     </div>

@@ -1,0 +1,447 @@
+<template x-if="selectedCommit">
+  <div class="worktree-review-overlay fixed inset-0 z-50 overflow-y-auto bg-gray-950"
+       x-ref="commitDetailScroller"
+       @scroll.passive="syncReviewHeaderState()"
+       data-testid="worktree-commit-detail">
+    <section class="worktree-review-shell min-h-screen bg-gray-950">
+      <div class="mx-auto max-w-6xl px-4 pb-8 pt-4 sm:px-6 lg:px-8">
+        <div class="-mx-4 mb-4 px-4 pt-1 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+          <div class="mx-auto max-w-6xl">
+            <div class="relative mb-2 pr-12">
+              <div class="flex min-w-0 flex-wrap items-center gap-2">
+                <template x-if="selectedCommit.row.session_live && selectedCommit.row.session_project">
+                  <a :href="'/session/' + encodeURIComponent(selectedCommit.row.session_project) + '/' + encodeURIComponent(selectedCommit.row.session_name)"
+                     class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
+                     :title="'Open session viewer: ' + selectedCommit.row.session_name"
+                     x-text="selectedCommit.row.session_name"></a>
+                </template>
+                <template x-if="!(selectedCommit.row.session_live && selectedCommit.row.session_project)">
+                  <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
+                        x-text="selectedCommit.row.session_name"></span>
+                </template>
+                <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
+                  <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
+                  <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
+                        x-text="repoName(selectedCommit.row)"></span>
+                </span>
+                <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+                      :class="statusClass(selectedCommit.row)"
+                      x-text="statusLabel(selectedCommit.row)"></span>
+                <template x-if="!isPrReview() && selectedCommit.total > 1">
+                  <div class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/80 px-2 py-0.5 text-[10px] font-semibold text-slate-300">
+                    <button type="button"
+                            class="rounded-full border border-white/10 px-1.5 py-0.5 text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                            :disabled="!hasEarlierCommit()"
+                            @click="viewEarlierCommit()"
+                            aria-label="View earlier commit">←</button>
+                    <span class="font-mono text-slate-200"
+                          x-text="'commit ' + (selectedCommit.commitIndex + 1) + ' of ' + selectedCommit.total"></span>
+                    <button type="button"
+                            class="rounded-full border border-white/10 px-1.5 py-0.5 text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                            :disabled="!hasLaterCommit()"
+                            @click="viewLaterCommit()"
+                            aria-label="View later commit">→</button>
+                  </div>
+                </template>
+                <template x-if="isPrReview()">
+                  <span class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold"
+                        :class="prBadgeClass(selectedCommit.pr)">
+                    <span class="h-1.5 w-1.5 rounded-full"
+                          :class="prDotClass(selectedCommit.pr)"></span>
+                    <span x-text="'PR #' + selectedCommit.pr.number"></span>
+                  </span>
+                </template>
+              </div>
+              <button type="button"
+                      class="absolute right-0 top-0 h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
+                      @click="selectedCommit = null">×</button>
+            </div>
+
+            <div class="mb-5 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+              <div class="min-w-0 flex-1">
+                <div class="mb-3 flex min-w-0 flex-wrap items-start gap-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                  <div class="grid min-w-0 gap-1" data-branch-stack>
+                    <span class="inline-flex min-w-0 items-center gap-2"
+                          data-branch-part="src">
+                      <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
+                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                              x-text="repoName(selectedCommit.row)"></span>
+                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                              x-text="sourceBranch(selectedCommit.row)"></span>
+                      </span>
+                    </span>
+                    <span class="text-sm text-slate-600"
+                          data-branch-part="arrow"
+                          aria-hidden="true">→</span>
+                    <span class="inline-flex min-w-0 items-center gap-2"
+                          data-branch-part="dst">
+                      <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
+                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                              x-text="repoName(selectedCommit.row)"></span>
+                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                              x-text="targetBranch(selectedCommit.row)"></span>
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <template x-if="isPrReview()">
+                <div class="w-full max-w-sm shrink-0 rounded-3xl border border-white/10 bg-slate-950/75 p-4 shadow-2xl shadow-black/20">
+                  <div class="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">PR Review</div>
+                      <div class="mt-1 text-lg font-semibold text-white"
+                           x-text="'PR #' + selectedCommit.pr.number"></div>
+                    </div>
+                    <a :href="selectedCommit.pr.url"
+                       target="_blank"
+                       rel="noreferrer"
+                       class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition"
+                       :class="prBadgeClass(selectedCommit.pr)">
+                      <span class="h-1.5 w-1.5 rounded-full"
+                            :class="prDotClass(selectedCommit.pr)"></span>
+                      <span>Open PR</span>
+                    </a>
+                  </div>
+                  <div class="space-y-2 text-sm text-slate-300">
+                    <p class="font-medium text-white"
+                       x-text="selectedCommit.pr.title || 'No PR title'"></p>
+                    <template x-if="(selectedCommit.pr.body || '').trim()">
+                      <div class="text-sm leading-6 text-slate-400"
+                           x-markdown="selectedCommit.pr.body"></div>
+                    </template>
+                  </div>
+                  <template x-if="rowPrChecks(selectedCommit.row, selectedCommit.pr).length">
+                    <div class="mt-4 space-y-2">
+                      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Checks</div>
+                      <div class="space-y-1.5">
+                        <template x-for="check in rowPrChecks(selectedCommit.row, selectedCommit.pr)"
+                                  :key="'review-' + (check.id || check.label)">
+                          <div class="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-xs text-slate-300">
+                            <div class="flex min-w-0 items-center gap-2">
+                              <span class="inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/10 bg-white/[0.03] text-[11px] font-semibold text-slate-100"
+                                    x-text="check.icon || '·'"></span>
+                              <div class="min-w-0">
+                                <div class="truncate font-medium text-white"
+                                     x-text="check.label || 'Check'"></div>
+                                <div class="truncate text-[11px] text-slate-500"
+                                     x-text="check.detail || describeCheckStatus(check.status)"></div>
+                              </div>
+                            </div>
+                            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
+                                  :class="check.status === 'pass'
+                                    ? 'bg-emerald-300/10 text-emerald-100'
+                                    : (check.status === 'running'
+                                      ? 'bg-sky-300/10 text-sky-100'
+                                      : (check.status === 'pending'
+                                        ? 'bg-slate-300/10 text-slate-200'
+                                        : 'bg-amber-300/10 text-amber-100'))"
+                                  x-text="describeCheckStatus(check.status)"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <div x-ref="commitTitleSentinel" class="h-px"></div>
+        <div x-ref="commitTitleBar"
+             class="sticky top-0 z-10 -mx-4 border-y border-white/10 bg-gray-950/95 px-4 backdrop-blur transition-all duration-200 ease-out sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8"
+             :class="reviewTitlePinned ? 'py-2' : 'py-3'">
+          <div class="mx-auto max-w-6xl">
+            <h3 class="max-w-4xl font-semibold text-white transition-all duration-200 ease-out"
+                :class="reviewTitlePinned ? 'text-base leading-5 sm:text-3xl sm:leading-9' : 'text-2xl leading-8 sm:text-3xl sm:leading-9'"
+                x-text="selectedCommit.commit.subject"></h3>
+          </div>
+        </div>
+
+        <div>
+          <template x-if="(selectedCommit.commit.body || '').trim()">
+            <div class="mb-6 max-w-4xl text-sm leading-6 text-slate-300"
+                 x-markdown="selectedCommit.commit.body"></div>
+          </template>
+
+          <div class="mb-6">
+            <div x-ref="commitFilesHeader"
+                 class="sticky z-[8] -mx-2 mb-2 flex items-center justify-between gap-3 border-y border-white/10 bg-gray-950/95 px-2 py-2 backdrop-blur"
+                 :style="'top:' + commitStickyTop + 'px'">
+              <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500"
+                   x-text="isPrReview() ? 'Files in this PR' : 'Files in this commit'"></div>
+              <div class="flex items-center gap-3">
+                <div class="flex shrink-0 items-center gap-2 font-mono text-[10px] text-slate-500">
+                  <span x-text="selectedCommit.commit.stats.files + ' files'"></span>
+                  <span class="text-emerald-300" x-text="'+' + selectedCommit.commit.stats.additions"></span>
+                  <span class="text-rose-300" x-text="'-' + selectedCommit.commit.stats.deletions"></span>
+                </div>
+                <button type="button"
+                        class="rounded-xl border border-white/10 px-3 py-1 text-xs font-semibold text-slate-300"
+                        @click="showDiff = !showDiff"
+                        x-text="showDiff ? 'Hide Diffs' : 'Show Diffs'"></button>
+              </div>
+            </div>
+            <div class="divide-y divide-white/10 border-y border-white/10">
+              <template x-for="file in selectedCommit.commit.files" :key="selectedCommit.commit.sha + file.status + file.path">
+                <div :class="showDiff ? 'py-3' : 'py-1.5'">
+                  <div class="grid grid-cols-[0.85rem_minmax(0,1fr)_auto] items-center gap-1.5"
+                       :class="showDiff ? 'sticky z-[7] -mx-2 border-b border-white/10 bg-gray-950/95 px-2 py-1.5 backdrop-blur' : ''"
+                       :style="showDiff ? 'top:' + commitFileRowStickyTop + 'px' : ''">
+                    <span class="text-center font-mono text-[10px] font-bold text-indigo-200" x-text="file.status"></span>
+                    <span class="min-w-0 overflow-hidden whitespace-nowrap font-mono text-[11px] leading-4 text-slate-300"
+                          :title="file.path"
+                          x-text="fitPath(file.path, $el)"></span>
+                    <span class="inline-flex shrink-0 items-center gap-1 font-mono text-[11px]">
+                      <span class="text-emerald-300" x-text="'+' + file.additions"></span>
+                      <span class="text-rose-300" x-text="'-' + file.deletions"></span>
+                    </span>
+                  </div>
+                  <template x-if="showDiff && patchLinesForFile(selectedCommit, file).length">
+                    <div class="worktree-diff-scroller mt-2">
+                      <div class="min-w-full w-max">
+                        <template x-for="(line, idx) in patchLinesForFile(selectedCommit, file)" :key="file.path + '-' + idx">
+                          <div class="grid min-w-full w-max grid-cols-[2rem_2rem_0.75rem_max-content] items-start gap-0 font-mono text-[11px] leading-5"
+                               :class="line.kind === 'add' ? 'bg-emerald-300/[0.08]' : (line.kind === 'del' ? 'bg-rose-300/[0.08]' : 'bg-transparent')">
+                            <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.oldNo"></span>
+                            <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.newNo"></span>
+                            <span class="border-r border-white/10 text-center"
+                                  :class="line.kind === 'add' ? 'text-emerald-300' : (line.kind === 'del' ? 'text-rose-300' : 'text-slate-600')"
+                                  x-text="diffMarker(line.kind)"></span>
+                            <span class="worktree-diff-code hljs whitespace-pre px-2 pr-3"
+                                  :class="line.kind === 'add' ? 'text-emerald-100' : (line.kind === 'del' ? 'text-rose-100' : 'text-slate-300')"
+                                  x-html="line.html || '&nbsp;'"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+            <template x-if="detailLoading">
+              <div class="mt-3 text-xs text-slate-500">Loading commit diff...</div>
+            </template>
+          </div>
+        </div>
+
+        <div class="relative mt-6">
+          <template x-if="!isPrReview() && supportsDashboardMerge(selectedCommit.row)">
+            <div class="mx-auto flex max-w-6xl flex-col gap-2 md:flex-row md:items-center">
+              <template x-if="mergeBurstActive">
+                <div class="pointer-events-none absolute inset-x-0 -top-16 z-10 flex justify-center overflow-visible">
+                  <div class="relative h-24 w-72 max-w-full">
+                    <div class="merge-confetti-glow absolute left-1/2 top-8 h-16 w-16 rounded-full bg-emerald-300/20 blur-2xl"></div>
+                    <template x-for="piece in confettiPieces" :key="mergeBurstSeed + '-' + piece.id">
+                      <span class="merge-confetti-piece absolute left-1/2 top-10 h-3 w-1.5 rounded-full shadow-[0_0_12px_rgba(255,255,255,0.18)]"
+                            :style="'--dx:' + piece.dx + 'px; --dy:' + piece.dy + 'px; --rot:' + piece.rot + 'deg; background:' + piece.color + '; animation-delay:' + piece.delay + 'ms'"></span>
+                    </template>
+                  </div>
+                </div>
+              </template>
+              <template x-if="cloneStale(selectedCommit.row)">
+                <button type="button"
+                        class="h-11 rounded-2xl bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-50 md:flex-1"
+                        :disabled="isSyncingBase(selectedCommit.row)"
+                        @click="syncBase(selectedCommit.row)"
+                        data-testid="worktree-sync-base-button">
+                  <span x-show="!isSyncingBase(selectedCommit.row)">Sync Worktree to Latest</span>
+                  <span x-show="isSyncingBase(selectedCommit.row)">Syncing...</span>
+                </button>
+              </template>
+              <template x-if="!cloneStale(selectedCommit.row) && canCherryPick(selectedCommit)">
+                <button type="button"
+                        class="h-11 rounded-2xl bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-50 md:flex-1"
+                        :disabled="cherryPicking"
+                        @click="cherryPickCommit(selectedCommit.row)"
+                        data-testid="worktree-cherry-pick-button">
+                  <span x-show="!cherryPicking" x-text="'Cherry Pick to ' + targetBranch(selectedCommit.row)"></span>
+                  <span x-show="cherryPicking">Cherry-picking...</span>
+                </button>
+              </template>
+              <template x-if="!cloneStale(selectedCommit.row) && !canCherryPick(selectedCommit)">
+                <div class="md:flex-1">
+                  <button type="button"
+                          class="h-11 w-full rounded-2xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed"
+                          :class="mergeState === 'success'
+                            ? 'bg-emerald-500 text-white hover:bg-emerald-500'
+                            : (canMergeCommit(selectedCommit)
+                              ? 'bg-indigo-600 text-white hover:bg-indigo-500'
+                              : 'bg-gray-800 text-gray-500')"
+                          :disabled="!canMergeCommit(selectedCommit) || mergeState === 'working' || mergeState === 'success'"
+                          :title="mergeDisabledReason(selectedCommit)"
+                          @click="startMergeCommit()"
+                          data-testid="worktree-commit-merge-button">
+                    <span class="inline-flex items-center justify-center gap-2">
+                      <template x-if="mergeState === 'working'">
+                        <span class="inline-flex items-center gap-2">
+                          <span class="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white"></span>
+                          <span x-text="mergeCommitLabel(selectedCommit)"></span>
+                        </span>
+                      </template>
+                      <template x-if="mergeState === 'success'">
+                        <span class="inline-flex items-center gap-2">
+                          <span class="text-base leading-none">✓</span>
+                          <span>Merged</span>
+                        </span>
+                      </template>
+                      <template x-if="mergeState !== 'working' && mergeState !== 'success'">
+                        <span x-text="mergeCommitLabel(selectedCommit)"></span>
+                      </template>
+                    </span>
+                  </button>
+                  <template x-if="mergeDisabledReason(selectedCommit)">
+                    <p class="mt-2 text-sm leading-5 text-amber-200 md:text-xs md:leading-4"
+                       data-testid="worktree-merge-disabled-reason"
+                       x-text="mergeDisabledReason(selectedCommit)"></p>
+                  </template>
+                </div>
+              </template>
+              <template x-if="canRequestRebase(selectedCommit)">
+                <button type="button"
+                        class="h-11 rounded-2xl border border-indigo-500/30 px-4 text-sm font-semibold text-indigo-200 transition hover:bg-indigo-500/10 disabled:cursor-wait disabled:opacity-50"
+                        :disabled="rebaseRequesting"
+                        @click="requestRebase(selectedCommit.row)"
+                        data-testid="worktree-request-rebase-button">
+                  <span x-show="!rebaseRequesting">Request Rebase</span>
+                  <span x-show="rebaseRequesting">Requesting...</span>
+                </button>
+              </template>
+              <button type="button"
+                      class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300"
+                      @click="selectedCommit = null">Close</button>
+            </div>
+          </template>
+
+          <template x-if="isPrReview() || !supportsDashboardMerge(selectedCommit.row)">
+            <div class="mx-auto flex max-w-6xl justify-end">
+              <button type="button"
+                      class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300"
+                      @click="selectedCommit = null">Close</button>
+            </div>
+          </template>
+        </div>
+      </div>
+    </section>
+  </div>
+</template>
+
+<template x-if="selectedDirtyRow">
+  <div class="worktree-review-overlay fixed inset-0 z-50 overflow-y-auto bg-gray-950"
+       x-ref="dirtyDetailScroller"
+       @scroll.passive="syncReviewHeaderState()"
+       data-testid="worktree-dirty-detail">
+    <section class="worktree-review-shell min-h-screen bg-gray-950">
+      <div class="mx-auto max-w-6xl px-4 pb-8 pt-4 sm:px-6 lg:px-8">
+        <div class="-mx-4 mb-4 px-4 pt-1 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+          <div class="mx-auto max-w-6xl">
+            <div class="relative mb-2 pr-12">
+              <div class="flex min-w-0 flex-wrap items-center gap-2">
+                <template x-if="selectedDirtyRow.session_live && selectedDirtyRow.session_project">
+                  <a :href="'/session/' + encodeURIComponent(selectedDirtyRow.session_project) + '/' + encodeURIComponent(selectedDirtyRow.session_name)"
+                     class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
+                     :title="'Open session viewer: ' + selectedDirtyRow.session_name"
+                     x-text="selectedDirtyRow.session_name"></a>
+                </template>
+                <template x-if="!(selectedDirtyRow.session_live && selectedDirtyRow.session_project)">
+                  <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
+                        x-text="selectedDirtyRow.session_name"></span>
+                </template>
+                <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
+                  <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
+                  <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
+                        x-text="repoName(selectedDirtyRow)"></span>
+                </span>
+                <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+                      :class="statusClass(selectedDirtyRow)"
+                      x-text="statusLabel(selectedDirtyRow)"></span>
+              </div>
+              <button type="button"
+                      class="absolute right-0 top-0 h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
+                      @click="selectedDirtyRow = null">×</button>
+            </div>
+          </div>
+        </div>
+
+        <div x-ref="dirtyTitleSentinel" class="h-px"></div>
+        <div x-ref="dirtyTitleBar"
+             class="sticky top-0 z-10 -mx-4 border-y border-white/10 bg-gray-950/95 px-4 backdrop-blur transition-all duration-200 ease-out sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8"
+             :class="reviewTitlePinned ? 'py-2' : 'py-3'">
+          <div class="mx-auto max-w-6xl">
+            <h3 class="max-w-4xl font-semibold text-white transition-all duration-200 ease-out"
+                :class="reviewTitlePinned ? 'text-base leading-5 sm:text-3xl sm:leading-9' : 'text-2xl leading-8 sm:text-3xl sm:leading-9'">Working tree changes</h3>
+          </div>
+        </div>
+
+        <div>
+          <div class="mb-6">
+            <div x-ref="dirtyFilesHeader"
+                 class="sticky z-[8] -mx-2 mb-2 flex items-center justify-between gap-3 border-y border-white/10 bg-gray-950/95 px-2 py-2 backdrop-blur"
+                 :style="'top:' + commitStickyTop + 'px'">
+              <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Files in working tree</div>
+              <div class="flex items-center gap-3">
+                <div class="flex shrink-0 items-center gap-2 font-mono text-[10px] text-slate-500">
+                  <span x-text="selectedDirtyRow.files.length + ' files'"></span>
+                </div>
+                <button type="button"
+                        class="rounded-xl border border-white/10 px-3 py-1 text-xs font-semibold text-slate-300"
+                        @click="showDiff = !showDiff"
+                        x-text="showDiff ? 'Hide Diffs' : 'Show Diffs'"></button>
+              </div>
+            </div>
+            <div class="divide-y divide-white/10 border-y border-white/10">
+              <template x-for="file in selectedDirtyRow.files" :key="rowKey(selectedDirtyRow) + file.status + file.path">
+                <div :class="showDiff ? 'py-3' : 'py-1.5'">
+                  <div class="grid grid-cols-[0.85rem_minmax(0,1fr)] items-center gap-1.5"
+                       :class="showDiff ? 'sticky z-[7] -mx-2 border-b border-white/10 bg-gray-950/95 px-2 py-1.5 backdrop-blur' : ''"
+                       :style="showDiff ? 'top:' + commitFileRowStickyTop + 'px' : ''">
+                    <span class="text-center font-mono text-[10px] font-bold text-amber-200"
+                          :title="statusTitle(file.status)"
+                          x-text="displayStatus(file.status)"></span>
+                    <span class="min-w-0 overflow-hidden whitespace-nowrap font-mono text-[11px] leading-4 text-slate-300"
+                          :title="file.path"
+                          x-text="fitPath(file.path, $el)"></span>
+                  </div>
+                  <template x-if="showDiff && patchLinesForFile(selectedDirtyRow, file).length">
+                    <div class="worktree-diff-scroller mt-2">
+                      <div class="min-w-full w-max">
+                        <template x-for="(line, idx) in patchLinesForFile(selectedDirtyRow, file)" :key="file.path + '-' + idx">
+                          <div class="grid min-w-full w-max grid-cols-[2rem_2rem_0.75rem_max-content] items-start gap-0 font-mono text-[11px] leading-5"
+                               :class="line.kind === 'add' ? 'bg-emerald-300/[0.08]' : (line.kind === 'del' ? 'bg-rose-300/[0.08]' : 'bg-transparent')">
+                            <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.oldNo"></span>
+                            <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.newNo"></span>
+                            <span class="border-r border-white/10 text-center"
+                                  :class="line.kind === 'add' ? 'text-emerald-300' : (line.kind === 'del' ? 'text-rose-300' : 'text-slate-600')"
+                                  x-text="diffMarker(line.kind)"></span>
+                            <span class="worktree-diff-code hljs whitespace-pre px-2 pr-3"
+                                  :class="line.kind === 'add' ? 'text-emerald-100' : (line.kind === 'del' ? 'text-rose-100' : 'text-slate-300')"
+                                  x-html="line.html || '&nbsp;'"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+            <template x-if="dirtyDetailLoading">
+              <div class="mt-3 text-xs text-slate-500">Loading dirty diff...</div>
+            </template>
+          </div>
+        </div>
+
+        <div class="mt-6">
+          <div class="mx-auto flex max-w-6xl justify-end">
+            <button type="button"
+                    class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300"
+                    @click="selectedDirtyRow = null">Close</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</template>

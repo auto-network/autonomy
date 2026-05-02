@@ -307,7 +307,8 @@
   }
 
   document.addEventListener('alpine:init', () => {
-    Alpine.data('worktreesPage', () => ({
+    Alpine.data('worktreesPage', (opts) => ({
+      _mode: (opts && opts.mode) || 'page',
       rows: [],
       loading: true,
       refreshing: false,
@@ -1226,6 +1227,24 @@
         return !!(this.selectedCommit || this.selectedDirtyRow || this.confirmDiscardRow || this.rebaseRequiredDialog);
       },
 
+      async openSessionOverlay(sessionName) {
+        if (!sessionName) return false;
+        await this.refresh(false);
+        const matches = this.rows.filter((row) => row.session_name === sessionName);
+        if (!matches.length) return false;
+        const withCommits = matches.find((row) => (this.commitList(row) || []).length > 0);
+        if (withCommits) {
+          await this.openCommitAt(withCommits, 0);
+          return true;
+        }
+        const dirtyMatch = matches.find((row) => row.is_dirty);
+        if (dirtyMatch) {
+          await this.selectDirtyRow(dirtyMatch);
+          return true;
+        }
+        return false;
+      },
+
       syncScrollLock() {
         const locked = this.hasOverlayOpen();
         document.documentElement.style.overflow = locked ? 'hidden' : '';
@@ -1602,7 +1621,12 @@
       },
 
       init() {
-        this.refresh(false).then(() => this._handleDeeplink());
+        if (this._mode === 'overlay') {
+          window._worktreeReviewOverlay = this;
+          this.loading = false;
+        } else {
+          this.refresh(false).then(() => this._handleDeeplink());
+        }
         this.$watch('selectedCommit', (value) => {
           if (!value) {
             this.reviewTitlePinned = false;
@@ -1632,12 +1656,14 @@
           this.queueReviewHeaderState();
         };
         window.addEventListener('resize', this._resizeHandler);
-        this._timer = setInterval(() => {
-          if (this.selectedCommit || this.selectedDirtyRow || this.confirmDiscardRow || this.mergeState !== 'idle') {
-            return;
-          }
-          this.refresh(false);
-        }, 30000);
+        if (this._mode !== 'overlay') {
+          this._timer = setInterval(() => {
+            if (this.selectedCommit || this.selectedDirtyRow || this.confirmDiscardRow || this.mergeState !== 'idle') {
+              return;
+            }
+            this.refresh(false);
+          }, 30000);
+        }
       },
 
       // Deeplink entry point. The session-viewer's workspace-changes
@@ -1664,6 +1690,9 @@
       },
 
       destroy() {
+        if (window._worktreeReviewOverlay === this) {
+          window._worktreeReviewOverlay = null;
+        }
         this.disconnectCommitStickyObserver();
         this.disconnectReviewTitleObserver();
         document.documentElement.style.overflow = '';
@@ -1679,4 +1708,11 @@
       },
     }));
   });
+
+  window.openWorktreeReviewOverlay = async function (sessionName) {
+    if (!window._worktreeReviewOverlay || typeof window._worktreeReviewOverlay.openSessionOverlay !== 'function') {
+      return false;
+    }
+    return await window._worktreeReviewOverlay.openSessionOverlay(sessionName);
+  };
 })();

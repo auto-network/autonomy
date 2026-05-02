@@ -142,6 +142,21 @@
         return 'Workspace: ' + bits.join(', ') + ' — open Worktrees review';
       },
 
+      async openWorkspaceReview() {
+        if (!this.sessionKey) return;
+        try {
+          if (window.openWorktreeReviewOverlay) {
+            var opened = await window.openWorktreeReviewOverlay(this.sessionKey);
+            if (opened) return;
+          }
+        } catch (_ignored) {
+          // Fall through to the route-based deep link.
+        }
+        if (typeof navigateTo === 'function') {
+          navigateTo('/worktrees?session=' + encodeURIComponent(this.sessionKey));
+        }
+      },
+
       // ── View-only state ─────────────────────────────────────────
       displayEntries: [],
       autoScroll: true,
