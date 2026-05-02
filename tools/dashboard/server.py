@@ -4140,6 +4140,160 @@ async def api_session_dispatch_nag(request):
     return JSONResponse({"ok": True})
 
 
+# ── Turn Correction API (auto-edec1.2) ──────────────────────────
+#
+# Sparse persisted overlay rows for the session-viewer turn-correction
+# feature. The original transcript JSONL stays immutable; corrections live
+# in dashboard.db keyed by (session_uuid, target_message_id) and are looked
+# up by either tmux_name or session_uuid in the URL path.
+
+def _resolve_session_uuid(session_id: str) -> str | None:
+    """Resolve a session_id (tmux_name or session_uuid) to its session_uuid.
+
+    Returns None if no session matches. Used by the turn-correction endpoints
+    so callers can address sessions by either identifier.
+    """
+    if not session_id:
+        return None
+    row = dashboard_db.get_session(session_id)
+    if row and row.get("session_uuid"):
+        return row["session_uuid"]
+    # Maybe the caller passed the session_uuid directly. Match against the
+    # canonical column AND session_uuids history (legacy rolled-over JSONLs
+    # carry their old uuid in the array).
+    from tools.dashboard.dao.dashboard_db import get_conn as _get_conn
+    conn = _get_conn()
+    direct = conn.execute(
+        "SELECT session_uuid FROM tmux_sessions WHERE session_uuid=?"
+        " ORDER BY created_at DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    if direct and direct["session_uuid"]:
+        return direct["session_uuid"]
+    fallback = conn.execute(
+        "SELECT session_uuid FROM tmux_sessions WHERE session_uuids LIKE ?"
+        " ORDER BY created_at DESC LIMIT 1",
+        (f"%{session_id}%",),
+    ).fetchone()
+    if fallback and fallback["session_uuid"]:
+        return fallback["session_uuid"]
+    return None
+
+
+def _serialize_turn_correction(row: dict) -> dict:
+    """Project a turn-correction row to its public JSON shape."""
+    return {
+        "session_uuid": row.get("session_uuid"),
+        "target_message_id": row.get("target_message_id"),
+        "status": row.get("status"),
+        "original_sha256": row.get("original_sha256"),
+        "corrected_text": row.get("corrected_text"),
+        "mode": row.get("mode"),
+        "reason": row.get("reason"),
+        "confidence": row.get("confidence"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+async def api_session_turn_corrections_list(request):
+    """GET /api/session/{session_id}/turn-corrections
+
+    Returns every persisted correction for the session (pending and terminal).
+    Used to rehydrate overlay state on page load and replay.
+    """
+    session_id = request.path_params["session_id"]
+    session_uuid = _resolve_session_uuid(session_id)
+    if not session_uuid:
+        return JSONResponse(
+            {"error": "session not found", "session_id": session_id},
+            status_code=404,
+        )
+    rows = dashboard_db.list_turn_corrections(session_uuid)
+    return JSONResponse({
+        "session_id": session_id,
+        "session_uuid": session_uuid,
+        "corrections": [_serialize_turn_correction(r) for r in rows],
+    })
+
+
+async def _resolve_correction_transition(request, target_status: str):
+    """Shared validation + DB transition for accept/dismiss POSTs.
+
+    Returns a Starlette JSONResponse. Both endpoints require the caller to
+    submit ``original_sha256`` so we can refuse stale targets even when the
+    same target_message_id is reused after a corrupted/aborted edit cycle.
+    """
+    session_id = request.path_params["session_id"]
+    message_id = request.path_params["message_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    expected_sha = (body.get("original_sha256") or "").strip()
+    if not expected_sha:
+        return JSONResponse(
+            {"error": "original_sha256 is required"}, status_code=400,
+        )
+
+    session_uuid = _resolve_session_uuid(session_id)
+    if not session_uuid:
+        return JSONResponse(
+            {"error": "session not found", "session_id": session_id},
+            status_code=404,
+        )
+
+    outcome, row = dashboard_db.set_turn_correction_status(
+        session_uuid, message_id, target_status, expected_sha256=expected_sha,
+    )
+    if outcome == "not_found":
+        return JSONResponse(
+            {"error": "correction not found",
+             "session_uuid": session_uuid,
+             "target_message_id": message_id},
+            status_code=404,
+        )
+    if outcome == "sha_mismatch":
+        return JSONResponse(
+            {"error": "stale target — original_sha256 does not match",
+             "stored_sha256": row["original_sha256"] if row else None,
+             "submitted_sha256": expected_sha,
+             "correction": _serialize_turn_correction(row) if row else None},
+            status_code=409,
+        )
+    if outcome == "already_terminal":
+        return JSONResponse(
+            {"error": "correction already terminal",
+             "status": row["status"] if row else None,
+             "correction": _serialize_turn_correction(row) if row else None},
+            status_code=409,
+        )
+    return JSONResponse({
+        "ok": True,
+        "correction": _serialize_turn_correction(row) if row else None,
+    })
+
+
+async def api_session_turn_correction_accept(request):
+    """POST /api/session/{session_id}/turn-corrections/{message_id}/accept
+
+    Body: {"original_sha256": "..."}
+    Transitions a pending correction to ``accepted``. Returns 409 on stale
+    or already-terminal rows.
+    """
+    return await _resolve_correction_transition(request, "accepted")
+
+
+async def api_session_turn_correction_dismiss(request):
+    """POST /api/session/{session_id}/turn-corrections/{message_id}/dismiss
+
+    Body: {"original_sha256": "..."}
+    Transitions a pending correction to ``dismissed``. Returns 409 on stale
+    or already-terminal rows.
+    """
+    return await _resolve_correction_transition(request, "dismissed")
+
+
 async def _resolve_primer(primer: str) -> str | None:
     """Resolve a graph:// URL to its text content.  Returns None on failure."""
     graph_id = primer.removeprefix("graph://") if primer.startswith("graph://") else primer
@@ -10435,6 +10589,21 @@ routes = [
     Route("/api/session/{tmux_name}/nag", api_session_nag, methods=["PUT"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag_delete, methods=["DELETE"]),
     Route("/api/session/{tmux_name}/dispatch-nag", api_session_dispatch_nag, methods=["PUT"]),
+    Route(
+        "/api/session/{session_id}/turn-corrections",
+        api_session_turn_corrections_list,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/session/{session_id}/turn-corrections/{message_id}/accept",
+        api_session_turn_correction_accept,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/session/{session_id}/turn-corrections/{message_id}/dismiss",
+        api_session_turn_correction_dismiss,
+        methods=["POST"],
+    ),
     Route("/api/session/send", api_session_send, methods=["POST"]),
     Route("/api/session/{project}/{session_id}/tail", api_session_tail),
     Route("/api/session/{project}/{session_id}/send", api_session_send, methods=["POST"]),
