@@ -908,3 +908,129 @@ class TestEdgeCases:
         result = _parse_jsonl_entry(_line(fixture))
         assert result["type"] == "tool_result"
         assert result["content"] == "from message content"
+
+
+# ── TestMessageIdentity ──────────────────────────────────────────────
+
+class TestMessageIdentity:
+    """Pass-through of raw JSONL `uuid` as `message_id` and `parentUuid` as
+    `parent_uuid` so the correction overlay can target tiles by stable identity
+    rather than position.
+    """
+
+    def test_user_string_emits_message_id(self):
+        """User string content → message_id is preserved from raw uuid."""
+        fixture = {
+            "parentUuid": "parent-aaa", "isSidechain": False, "type": "user",
+            "uuid": "msg-uuid-001",
+            "message": {"role": "user", "content": "Help me with a thing"},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        assert result["type"] == "user"
+        assert result["message_id"] == "msg-uuid-001"
+        assert result["parent_uuid"] == "parent-aaa"
+
+    def test_user_list_text_emits_message_id(self):
+        """User list-of-content with text block → message_id preserved."""
+        fixture = {
+            "parentUuid": "parent-bbb", "isSidechain": False, "type": "user",
+            "uuid": "msg-uuid-002",
+            "message": {"role": "user", "content": [
+                {"type": "text", "text": "Fix the dashboard bug"},
+            ]},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        assert result["type"] == "user"
+        assert result["content"] == "Fix the dashboard bug"
+        assert result["message_id"] == "msg-uuid-002"
+        assert result["parent_uuid"] == "parent-bbb"
+
+    def test_assistant_text_emits_message_id(self):
+        """Assistant text block → message_id and parent_uuid preserved."""
+        fixture = {
+            "parentUuid": "parent-ccc", "isSidechain": False, "type": "assistant",
+            "uuid": "msg-uuid-003",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "On it."},
+            ]},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        assert isinstance(result, list)
+        assert result[0]["type"] == "assistant_text"
+        assert result[0]["message_id"] == "msg-uuid-003"
+        assert result[0]["parent_uuid"] == "parent-ccc"
+
+    def test_user_first_message_null_parent_uuid_omitted(self):
+        """First message in a session has parentUuid=null → parent_uuid omitted."""
+        fixture = {
+            "parentUuid": None, "isSidechain": False, "type": "user",
+            "uuid": "msg-uuid-004",
+            "message": {"role": "user", "content": "First message"},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        assert result["type"] == "user"
+        assert result["message_id"] == "msg-uuid-004"
+        assert "parent_uuid" not in result
+
+    def test_user_without_uuid_omits_message_id(self):
+        """Raw entry with no uuid (legacy/synthetic) → message_id omitted, no crash."""
+        fixture = {
+            "isSidechain": False, "type": "user",
+            "message": {"role": "user", "content": "synthetic"},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        assert result["type"] == "user"
+        assert "message_id" not in result
+        assert "parent_uuid" not in result
+
+    def test_system_classified_user_does_not_carry_message_id(self):
+        """<system-reminder> in user content → system entry, not user — no message_id."""
+        fixture = {
+            "parentUuid": "parent-sys", "isSidechain": False, "type": "user",
+            "uuid": "msg-uuid-005",
+            "message": {"role": "user", "content": (
+                "<system-reminder>\nDeferred tools available\n</system-reminder>"
+            )},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        assert result["type"] == "system"
+        assert "message_id" not in result
+        assert "parent_uuid" not in result
+
+    def test_assistant_tool_use_does_not_carry_message_id(self):
+        """tool_use blocks are not user-facing text tiles → no message_id passthrough."""
+        fixture = {
+            "parentUuid": "parent-tu", "isSidechain": False, "type": "assistant",
+            "uuid": "msg-uuid-006",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_x", "name": "Read",
+                 "input": {"file_path": "/tmp/x"}},
+            ]},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        assert isinstance(result, list)
+        assert result[0]["type"] == "tool_use"
+        assert "message_id" not in result[0]
+        assert "parent_uuid" not in result[0]
+
+    def test_user_tool_result_block_does_not_carry_message_id(self):
+        """tool_result blocks inside user messages are tool tiles, not user tiles."""
+        fixture = {
+            "parentUuid": "parent-tr", "isSidechain": False, "type": "user",
+            "uuid": "msg-uuid-007",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_y", "content": "ok"},
+            ]},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        assert result["type"] == "tool_result"
+        assert "message_id" not in result
+        assert "parent_uuid" not in result
