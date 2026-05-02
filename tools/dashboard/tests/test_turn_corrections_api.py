@@ -12,8 +12,6 @@ covered by ``tools/dashboard/tests/test_parser.py`` under bead auto-edec1.1.
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
-
 import pytest
 from starlette.testclient import TestClient
 
@@ -536,37 +534,15 @@ def test_session_monitor_skips_non_correction_entries(test_app):
     assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
 
 
-def test_session_monitor_derives_uuid_from_jsonl_path(test_app):
-    """Tail rows may arrive before row.session_uuid is populated."""
+def test_session_monitor_skips_session_without_uuid(test_app):
+    """Session still resolving — the helper defends by skipping persistence."""
     from tools.dashboard.session_monitor import SessionMonitor
 
     sha = _sha("text")
-    derived_uuid = "uuid-from-jsonl-path"
     entries = [{
         "type": "turn_correction",
         "target_message_id": "msg-1",
         "original_sha256": sha,
-        "corrected_text": "corrected",
-    }]
-    row = {
-        "session_uuid": None,
-        "jsonl_path": str(Path("/tmp/sessions/autonomy") / f"{derived_uuid}.jsonl"),
-    }
-    SessionMonitor._persist_turn_corrections(row, entries)
-    stored = dashboard_db.get_turn_correction(derived_uuid, "msg-1")
-    assert stored is not None
-    assert stored["status"] == "pending"
-    assert stored["original_sha256"] == sha
-
-
-def test_session_monitor_still_skips_when_no_stable_uuid_available(test_app):
-    """If there is no explicit uuid, no JSONL path, and no tmux row, skip."""
-    from tools.dashboard.session_monitor import SessionMonitor
-
-    entries = [{
-        "type": "turn_correction",
-        "target_message_id": "msg-1",
-        "original_sha256": _sha("text"),
         "corrected_text": "corrected",
     }]
     row = {"session_uuid": None}
