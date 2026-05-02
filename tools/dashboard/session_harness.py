@@ -364,7 +364,7 @@ def _classify_crosstalk(text: str) -> dict | None:
     if not m:
         return None
     body = m.group("body")
-    if "<" in body or ">" in body:
+    if "</crosstalk>" in body:
         return None
     return {
         "from": m.group("from_"),

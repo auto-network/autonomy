@@ -2809,16 +2809,17 @@ def _classify_crosstalk(text: str) -> dict | None:
     """Detect CrossTalk peer messages in user entries.
 
     Returns a dict with sender info and message body, or None if the text
-    is not a valid crosstalk envelope.  Body must be plain text (no angle
-    brackets) to avoid injection.
+    is not a valid crosstalk envelope. Body may contain ordinary angle
+    brackets; only a literal closing envelope tag inside the body is
+    rejected.
     """
     stripped = text.strip()
     m = _CROSSTALK_RE.fullmatch(stripped)
     if not m:
         return None
     body = m.group("body")
-    if '<' in body or '>' in body:
-        return None  # not valid crosstalk — body must be plain text
+    if "</crosstalk>" in body:
+        return None
     return {
         "from": m.group("from_"),
         "label": m.group("label"),

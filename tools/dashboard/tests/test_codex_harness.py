@@ -757,6 +757,34 @@ def test_parse_codex_inbound_crosstalk_user_message():
     }
 
 
+def test_parse_codex_inbound_crosstalk_allows_angle_bracket_code():
+    entry = parse_codex_log_line(_line({
+        "timestamp": TS,
+        "type": "event_msg",
+        "payload": {
+            "type": "user_message",
+            "message": (
+                '<crosstalk from="host-0422-201533" label="Dashboard UI" '
+                'source="5706c4cc-6570-4acd-a457-a8907bdb54f5" turn="1774" '
+                'timestamp="2026-04-23T21:41:16Z">\n'
+                'if (left < right && total > 0) return items[i];\n'
+                '</crosstalk>'
+            ),
+        },
+    }))
+
+    assert entry == {
+        "type": "crosstalk",
+        "role": "crosstalk",
+        "content": "if (left < right && total > 0) return items[i];",
+        "sender": "host-0422-201533",
+        "sender_label": "Dashboard UI",
+        "source_id": "5706c4cc-6570-4acd-a457-a8907bdb54f5",
+        "turn": "1774",
+        "timestamp": TS,
+    }
+
+
 def test_parse_codex_compacted_history_as_compact_summary():
     entry = parse_codex_log_line(_line({
         "timestamp": TS,
