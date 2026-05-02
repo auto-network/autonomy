@@ -474,12 +474,15 @@ def _seed_identity_setting(
         return None
     sid = uuid7()
     now = _now_iso()
+    expires_at = schemas.cache_expires_at(
+        ORG_IDENTITY_SET_ID, ORG_IDENTITY_REVISION, now,
+    )
     db.conn.execute(
         "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
-        "publication_state, created_at, updated_at) "
-        "VALUES(?,?,?,?,?,?,?,?)",
+        "publication_state, created_at, updated_at, expires_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
         (sid, ORG_IDENTITY_SET_ID, ORG_IDENTITY_REVISION, slug,
-         json.dumps(payload), state, now, now),
+         json.dumps(payload), state, now, now, expires_at),
     )
     db.conn.commit()
     return sid
@@ -582,7 +585,7 @@ def _rewrite_slug_in_db(db: GraphDB, old: str, new: str) -> None:
       * ``payload`` is a JSON object whose top-level ``org`` equals ``old``
     """
     rows = db.conn.execute(
-        "SELECT id, key, payload FROM settings"
+        "SELECT id, key, payload, set_id, schema_revision FROM settings"
     ).fetchall()
     now = _now_iso()
     for r in rows:
@@ -601,10 +604,13 @@ def _rewrite_slug_in_db(db: GraphDB, old: str, new: str) -> None:
             payload["org"] = new
             new_payload_str = json.dumps(payload)
         if new_key != r["key"] or new_payload_str != r["payload"]:
+            expires_at = schemas.cache_expires_at(
+                r["set_id"], int(r["schema_revision"]), now,
+            )
             db.conn.execute(
                 "UPDATE settings SET key = ?, payload = ?, "
-                "updated_at = ? WHERE id = ?",
-                (new_key, new_payload_str, now, r["id"]),
+                "updated_at = ?, expires_at = ? WHERE id = ?",
+                (new_key, new_payload_str, now, expires_at, r["id"]),
             )
 
 
