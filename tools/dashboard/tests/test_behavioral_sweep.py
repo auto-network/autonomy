@@ -242,18 +242,20 @@ SWEEP_BEADS = [
     {
         "id": "auto-sweep-b1", "title": "Sweep alpha task",
         "priority": 1, "status": "open", "issue_type": "task",
-        "labels": ["readiness:approved"], "created_by": "librarian",
+        "labels": ["readiness:approved"], "created_by": "terminal:auto-sweep-alpha",
         "description": "First test bead for behavioral sweep",
     },
     {
         "id": "auto-sweep-b2", "title": "Sweep beta bug",
         "priority": 2, "status": "in_progress", "issue_type": "bug",
+        "parent_id": "auto-sweep-b1",
         "labels": ["readiness:specified", "dashboard"], "created_by": "user",
         "description": "Second test bead with dependencies",
     },
     {
         "id": "auto-sweep-b3", "title": "Sweep gamma feature",
         "priority": 0, "status": "open", "issue_type": "feature",
+        "parent_id": "auto-sweep-b1",
         "labels": [], "created_by": "librarian",
     },
     {
@@ -2165,6 +2167,19 @@ BEAD_DETAIL_CHECKS = """
     // Issue type visible
     r.has_issue_type = bodyText.indexOf('task') !== -1;
 
+    // Author metadata is visible and links to the live session when applicable.
+    var authorEl = document.querySelector('[data-testid="bead-author"]');
+    r.has_author = authorEl ? authorEl.innerText.indexOf('terminal:auto-sweep-alpha') !== -1 : false;
+    var authorLink = authorEl ? authorEl.querySelector('a[href="/session/autonomy/auto-sweep-alpha"]') : null;
+    r.has_author_session_link = !!authorLink;
+
+    // Children section reflects the real hierarchy, not primer related-beads.
+    var childSection = document.querySelector('[data-testid="bead-children"]');
+    var childText = childSection ? childSection.innerText : '';
+    r.has_children_section = !!childSection;
+    r.has_child_b2 = childText.indexOf('auto-sweep-b2') !== -1 && childText.indexOf('Sweep beta bug') !== -1;
+    r.has_child_b3 = childText.indexOf('auto-sweep-b3') !== -1 && childText.indexOf('Sweep gamma feature') !== -1;
+
     // State is ready (not loading or error)
     var loadingText = document.querySelector('[x-show*="loading"]');
     var errorText = document.querySelector('[x-show*="error"]');
@@ -2979,6 +2994,19 @@ class TestBeadDetailPageBehavior:
         """User sees the bead labels."""
         c = self._checks
         assert c.get("has_label"), "Label 'readiness:approved' not visible"
+
+    def test_author_metadata(self):
+        """User sees the author metadata and can click through to the live session when active."""
+        c = self._checks
+        assert c.get("has_author"), "Author metadata 'terminal:auto-sweep-alpha' not visible"
+        assert c.get("has_author_session_link"), "Active-session author was not linked to /session/autonomy/auto-sweep-alpha"
+
+    def test_children_hierarchy(self):
+        """User sees direct child beads from the actual hierarchy."""
+        c = self._checks
+        assert c.get("has_children_section"), "Children section not visible on bead detail page"
+        assert c.get("has_child_b2"), "Child bead auto-sweep-b2 not visible in the Children section"
+        assert c.get("has_child_b3"), "Child bead auto-sweep-b3 not visible in the Children section"
 
     def test_no_template_artifacts(self):
         """No raw Jinja template syntax visible."""

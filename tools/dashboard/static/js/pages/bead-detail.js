@@ -42,6 +42,7 @@
       runDir: null,
       dispatchRun: null,
       experienceReport: null,
+      authorSession: null,
       depBlockers: [],
       depDependents: [],
 
@@ -63,6 +64,68 @@
         if (created_by.startsWith('terminal:')) return created_by;
         if (created_by.startsWith('dispatch:')) return created_by;
         return created_by;
+      },
+
+      authorValue() {
+        if (!this.bead) return '';
+        return this.bead.created_by || this.bead.owner || '';
+      },
+
+      authorHeading() {
+        if (!this.bead) return 'Author';
+        return this.bead.created_by ? 'Author' : 'Owner';
+      },
+
+      authorDisplay() {
+        const author = this.authorValue();
+        if (!author) return '';
+        const icon = this.creatorIcon(author);
+        return icon ? `${icon} ${author}` : author;
+      },
+
+      authorSessionId() {
+        const author = this.authorValue();
+        if (!author || !author.startsWith('terminal:')) return '';
+        return author.slice('terminal:'.length);
+      },
+
+      authorHref() {
+        if (!this.authorSession || !this.authorSession.is_live || !this.authorSession.project) {
+          return '';
+        }
+        return `/session/${this.authorSession.project}/${this.authorSession.session_id}`;
+      },
+
+      async hydratePrimer() {
+        try {
+          const primerRes = await fetch(`/api/primer/${this.id}`);
+          const primerData = await primerRes.json();
+          if (primerData && !primerData.error) {
+            this.primer = primerData;
+          }
+        } catch (_) {
+          // Primer unavailable — primer-backed sections stay hidden.
+        }
+      },
+
+      async hydrateAuthorSession() {
+        const sessionId = this.authorSessionId();
+        if (!sessionId) return;
+        try {
+          const res = await fetch('/api/dao/active_sessions');
+          const rows = await res.json();
+          if (!Array.isArray(rows)) return;
+          const match = rows.find((row) =>
+            row &&
+            row.is_live &&
+            (row.session_id === sessionId || row.tmux_session === sessionId)
+          );
+          if (match && match.project) {
+            this.authorSession = match;
+          }
+        } catch (_) {
+          // Author link enhancement is best-effort only.
+        }
       },
 
       async approve() {
@@ -90,11 +153,9 @@
         }
 
         try {
-          // Fetch bead + primer concurrently
-          const [beadRes, primerRes] = await Promise.all([
-            fetch(`/api/dao/bead/${this.id}`),
-            fetch(`/api/primer/${this.id}`),
-          ]);
+          // Primer is optional. Start it immediately, but do not block first paint on it.
+          void this.hydratePrimer();
+          const beadRes = await fetch(`/api/dao/bead/${this.id}`);
 
           if (beadRes.status === 404) {
             this.state = 'notFound';
@@ -123,17 +184,8 @@
             l.startsWith('dispatch:collecting')
           );
 
-          // Primer may fail (graph not available, bead not indexed) — that's OK
-          try {
-            const primerData = await primerRes.json();
-            if (primerData && !primerData.error) {
-              this.primer = primerData;
-            }
-          } catch (_) {
-            // Primer unavailable — sections will not render (all x-if guarded by primer &&)
-          }
-
           this.state = 'ready';
+          void this.hydrateAuthorSession();
 
           // Fetch dependency data (blockers + dependents)
           try {

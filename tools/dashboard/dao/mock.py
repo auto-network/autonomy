@@ -57,6 +57,7 @@ BEAD_DEFAULTS: dict[str, Any] = {
     "status": "open",
     "priority": 2,
     "issue_type": "task",
+    "parent_id": None,
     "description": "",
     "design": None,
     "acceptance_criteria": None,
@@ -242,7 +243,15 @@ def get_open_beads(limit: int = 200) -> list[dict]:
 
 
 def get_bead(bead_id: str) -> dict | None:
-    return next((b for b in _beads() if b["id"] == bead_id), None)
+    beads = _beads()
+    bead = next((b for b in beads if b["id"] == bead_id), None)
+    if bead is None:
+        return None
+    out = dict(bead)
+    children = [dict(b) for b in beads if b.get("parent_id") == bead_id]
+    children.sort(key=lambda b: (b.get("priority", 2), b.get("id", "")))
+    out["children"] = children
+    return out
 
 
 def get_bead_counts() -> dict[str, int]:

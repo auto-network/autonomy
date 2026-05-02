@@ -254,6 +254,26 @@ def get_bead(bead_id: str) -> dict | None:
         )
         bead["comments"] = [_coerce(r) for r in _rows(cur)]
 
+        # Direct children via parent-child dependencies.
+        cur.execute(
+            """
+            SELECT
+                ci.id, ci.title, ci.status, ci.priority, ci.issue_type,
+                ci.description, ci.created_at, ci.updated_at,
+                ci.assignee, ci.estimated_minutes, ci.close_reason,
+                GROUP_CONCAT(l.label ORDER BY l.label SEPARATOR ',') AS labels
+            FROM dependencies d
+            JOIN issues ci ON ci.id = d.issue_id
+            LEFT JOIN labels l ON l.issue_id = ci.id
+            WHERE d.depends_on_id = %s
+              AND d.type = %s
+            GROUP BY ci.id
+            ORDER BY ci.priority ASC, ci.updated_at DESC
+            """,
+            (bead_id, "parent-child"),
+        )
+        bead["children"] = [_coerce(r) for r in _rows(cur)]
+
     return bead
 
 
