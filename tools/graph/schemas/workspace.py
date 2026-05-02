@@ -51,7 +51,7 @@ SYNOPSIS = {
 # ── Valid repo mount shape ──────────────────────────────────
 
 _REPO_REQUIRED = ("url", "mount")
-_REPO_OPTIONAL = {"writable": bool}
+_REPO_OPTIONAL = {"writable": bool, "base_source": str}
 _VALID_HARNESSES = {"claude", "codex"}
 
 
@@ -73,6 +73,17 @@ def _validate_repo(repo: Any, idx: int) -> None:
         if key in repo and not isinstance(repo[key], want):
             raise SchemaValidationError(
                 f"repos[{idx}].{key} must be {want.__name__}"
+            )
+    if "base_source" in repo:
+        bs = repo["base_source"]
+        if not bs:
+            raise SchemaValidationError(
+                f"repos[{idx}].base_source must be a non-empty string"
+            )
+        if not bs.startswith("/"):
+            raise SchemaValidationError(
+                f"repos[{idx}].base_source must be an absolute path, "
+                f"got {bs!r}"
             )
     allowed = set(_REPO_REQUIRED) | set(_REPO_OPTIONAL)
     extra = set(repo) - allowed
@@ -159,6 +170,14 @@ class WorkspaceV1(SettingSchema):
                           "description": "Container path to mount the worktree at"},
                 "writable": {"type": "boolean", "default": False,
                              "description": "Whether the worktree mount is writable"},
+                "base_source": {
+                    "type": "string",
+                    "description": (
+                        "Absolute host checkout path used as the base for "
+                        "fresh session worktrees instead of `origin`. "
+                        "Omit to derive fresh worktrees from `origin`."
+                    ),
+                },
             },
         },
         "env": {

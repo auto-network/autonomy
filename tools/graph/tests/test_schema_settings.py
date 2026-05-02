@@ -103,3 +103,52 @@ def test_settings_round_trip(fresh_db):
     assert row["schema_revision"] == 1
     assert row["key"] == "foo"
     assert row["payload"] == '{"x": 1}'
+
+
+# ── Workspace repo base_source field validation (auto-4sfe9) ────────
+
+
+def _ws_payload(**repo_overrides):
+    """Build an autonomy.workspace#1 payload with a single repo entry."""
+    repo = {
+        "url": "git@github.com:autonomy/autonomy.git",
+        "mount": "/workspace/repo",
+    }
+    repo.update(repo_overrides)
+    return {
+        "name": "autonomy",
+        "image": "autonomy-agent:latest",
+        "repos": [repo],
+    }
+
+
+def test_workspace_repo_accepts_omitted_base_source():
+    from tools.graph.schemas.registry import SchemaValidationError  # noqa: F401
+    from tools.graph.schemas.workspace import WorkspaceV1
+    WorkspaceV1.validate(_ws_payload())
+
+
+def test_workspace_repo_accepts_absolute_base_source():
+    from tools.graph.schemas.workspace import WorkspaceV1
+    WorkspaceV1.validate(_ws_payload(base_source="/home/user/autonomy"))
+
+
+def test_workspace_repo_rejects_relative_base_source():
+    from tools.graph.schemas.registry import SchemaValidationError
+    from tools.graph.schemas.workspace import WorkspaceV1
+    with pytest.raises(SchemaValidationError, match="base_source"):
+        WorkspaceV1.validate(_ws_payload(base_source="relative/path"))
+
+
+def test_workspace_repo_rejects_empty_base_source():
+    from tools.graph.schemas.registry import SchemaValidationError
+    from tools.graph.schemas.workspace import WorkspaceV1
+    with pytest.raises(SchemaValidationError, match="base_source"):
+        WorkspaceV1.validate(_ws_payload(base_source=""))
+
+
+def test_workspace_repo_rejects_non_string_base_source():
+    from tools.graph.schemas.registry import SchemaValidationError
+    from tools.graph.schemas.workspace import WorkspaceV1
+    with pytest.raises(SchemaValidationError, match="base_source"):
+        WorkspaceV1.validate(_ws_payload(base_source=123))

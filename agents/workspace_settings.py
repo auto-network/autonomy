@@ -176,10 +176,17 @@ class WorkspaceMountInvalidError(Exception):
 
 @dataclass(frozen=True)
 class RepoMount:
-    """Git repo mount spec from the workspace Setting payload."""
+    """Git repo mount spec from the workspace Setting payload.
+
+    ``base_source`` is an optional absolute host checkout path. When set,
+    fresh session worktrees derive from that checkout's integration branch
+    instead of the managed clone's ``origin``. ``None`` means default
+    ``origin`` behaviour.
+    """
     url: str
     mount: str
     writable: bool = False
+    base_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -324,10 +331,27 @@ def _parse_repo(raw: Any, workspace_id: str, idx: int) -> RepoMount:
             raise WorkspaceSettingsError(
                 f"workspace {workspace_id!r}: repos[{idx}] missing {key!r}"
             )
+    base_source_raw = raw.get("base_source")
+    base_source: str | None
+    if base_source_raw is None:
+        base_source = None
+    else:
+        if not isinstance(base_source_raw, str) or not base_source_raw:
+            raise WorkspaceSettingsError(
+                f"workspace {workspace_id!r}: repos[{idx}].base_source must "
+                f"be a non-empty string"
+            )
+        if not base_source_raw.startswith("/"):
+            raise WorkspaceSettingsError(
+                f"workspace {workspace_id!r}: repos[{idx}].base_source must "
+                f"be an absolute path, got {base_source_raw!r}"
+            )
+        base_source = base_source_raw
     return RepoMount(
         url=str(raw["url"]),
         mount=str(raw["mount"]),
         writable=bool(raw.get("writable", False)),
+        base_source=base_source,
     )
 
 
