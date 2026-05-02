@@ -4657,6 +4657,34 @@ def main():
     from .capability_cmd import attach_capability_subparser
     attach_capability_subparser(sub)
 
+    # maintenance — substrate housekeeping verbs (cache GC, etc.)
+    p_maint = sub.add_parser(
+        "maintenance",
+        help="Substrate maintenance verbs (cache GC, etc.)",
+    )
+    maint_sub = p_maint.add_subparsers(
+        dest="maintenance_subcmd", required=True,
+    )
+
+    p_cache_gc = maint_sub.add_parser(
+        "cache-gc",
+        help="Sweep expired @cache(ttl=...) rows from per-org DBs",
+    )
+    p_cache_gc.add_argument(
+        "--dry-run", action="store_true",
+        help="Log per-row + summary but do not DELETE.",
+    )
+    p_cache_gc.add_argument(
+        "--limit", type=int, default=1000,
+        help="Max rows to sweep per DB per pass (default: 1000).",
+    )
+    p_cache_gc.add_argument(
+        "--org", default=None,
+        help="Restrict to one org slug. Default: every per-org DB.",
+    )
+    from .maintenance.cache_gc import cmd_cache_gc
+    p_cache_gc.set_defaults(func=cmd_cache_gc)
+
     args = parser.parse_args()
 
     # Apply scope from environment

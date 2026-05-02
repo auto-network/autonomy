@@ -28,6 +28,7 @@ import logging
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -274,6 +275,44 @@ def keyed_per_entity(
     return _wrap(cls)
 
 
+def cache(
+    cls: type | None = None,
+    *,
+    ttl: timedelta,
+    key_strategy: str = "natural",
+) -> Any:
+    """Schema decorator: declare cache semantics with TTL-driven GC.
+
+    A cache schema's rows carry an absolute ``expires_at`` set at
+    write time (``updated_at + ttl``). The cache_gc cron sweeps rows
+    whose expires_at has elapsed and whose publication_state is
+    below ``published``.
+
+    ``ttl`` is required — there is no default-eternal cache.
+    ``timedelta`` is enforced (not int seconds) so the unit is
+    explicit at the call site. ``key_strategy`` mirrors
+    :func:`keyed_per_entity` since cache rows are caller-keyed
+    upserts.
+
+    Usable only with parens: ``@cache(ttl=timedelta(...))``.
+    """
+    if not isinstance(ttl, timedelta):
+        raise TypeError("@cache requires ttl=timedelta(...)")
+    seconds = int(ttl.total_seconds())
+    if seconds <= 0:
+        raise ValueError("@cache requires a positive ttl")
+
+    def _wrap(target: type) -> type:
+        target._access_pattern = "cache"
+        target._key_strategy = key_strategy
+        target._cache_ttl_seconds = seconds
+        return target
+
+    if cls is None:
+        return _wrap
+    return _wrap(cls)
+
+
 def _register_variant(cls: type) -> None:
     """Register *cls* under its parent's ``_variants`` map if applicable.
 
@@ -384,11 +423,17 @@ class SettingSchema:
     _field_metadata: dict[str, dict] = {}
 
     # Access pattern + key strategy, set by the decorators below
-    # (``@append_only_log`` / ``@singleton`` / ``@keyed_per_entity``).
-    # Undecorated schemas leave these as ``None`` — the substrate's
-    # generic ``.write({key, payload})`` is the escape hatch.
+    # (``@append_only_log`` / ``@singleton`` / ``@keyed_per_entity`` /
+    # ``@cache``). Undecorated schemas leave these as ``None`` — the
+    # substrate's generic ``.write({key, payload})`` is the escape hatch.
     _access_pattern: str | None = None
     _key_strategy: str | None = None
+
+    # ``@cache(ttl=...)``-only: TTL in whole seconds, stamped onto the
+    # ``expires_at`` column on every write to a row of this schema.
+    # ``None`` for non-cache schemas (they never expire and have no
+    # ``expires_at`` column value).
+    _cache_ttl_seconds: int | None = None
 
     # Variant discriminated-union machinery. ``_variants`` maps
     # discriminator slug → variant subclass for every direct subclass of
@@ -505,6 +550,8 @@ class SettingSchema:
         payload["schema_revision"] = cls.schema_revision
         payload["access_pattern"] = cls._access_pattern
         payload["key_strategy"] = cls._key_strategy
+        if cls._cache_ttl_seconds is not None:
+            payload["cache_ttl_seconds"] = int(cls._cache_ttl_seconds)
         return payload
 
     @classmethod
@@ -697,8 +744,37 @@ def _module_synopsis(model_cls: type[SettingSchema]) -> dict | None:
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cache_expires_at(set_id: str, revision: int, now_iso: str) -> str | None:
+    """Return ISO-8601 ``expires_at`` for cache schemas; ``None`` otherwise.
+
+    Cache schemas are those decorated with :func:`cache` — the decorator
+    stamps ``_cache_ttl_seconds`` on the class. For every other schema
+    (and unregistered ``(set_id, revision)`` pairs) this returns
+    ``None``, which writers stamp into the column as ``NULL`` so the
+    GC sweep skips the row.
+
+    The output format matches existing ``created_at`` / ``updated_at``
+    timestamps: zero-padded ISO-8601 UTC with second resolution and a
+    trailing ``Z``. ``now_iso`` is the same string the caller is about
+    to write into ``updated_at`` — passing the canonical ``_now_iso()``
+    output keeps the substrate's idea of "now" consistent across
+    columns within a single write.
+    """
+    schema = get_schema(set_id, revision)
+    if schema is None:
+        return None
+    ttl_seconds = getattr(schema, "_cache_ttl_seconds", None)
+    if not ttl_seconds:
+        return None
+    now_dt = datetime.strptime(now_iso, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc,
+    )
+    return (now_dt + timedelta(seconds=int(ttl_seconds))).strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+    )
 
 
 def _upsert_meta_setting(

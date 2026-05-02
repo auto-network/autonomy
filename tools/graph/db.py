@@ -424,6 +424,22 @@ class GraphDB:
             "CREATE INDEX IF NOT EXISTS idx_settings_schema "
             "ON settings(set_id, schema_revision)"
         )
+        # Cache GC (auto-5ch66): cache-tagged schemas stamp an absolute
+        # ``expires_at`` on every write. Non-cache rows leave it NULL
+        # forever — the partial index keeps the index file tight on a
+        # DB where 99% of rows are non-cache.
+        cols = {
+            r[1]
+            for r in self.conn.execute("PRAGMA table_info(settings)").fetchall()
+        }
+        if "expires_at" not in cols:
+            self.conn.execute(
+                "ALTER TABLE settings ADD COLUMN expires_at TEXT"
+            )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_settings_expires_at "
+            "ON settings(expires_at) WHERE expires_at IS NOT NULL"
+        )
         self.conn.commit()
 
     def _migrate_orgs(self):
