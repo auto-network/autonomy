@@ -3354,6 +3354,93 @@ class TestSessionViewerTodoTiles:
             "Later TaskUpdate tile should display the renamed subject"
 
 
+SESSION_VIEWER_WORKTREE_OVERLAY_CHECKS = """
+    var sleep = function(ms) { return new Promise(function(resolve) { setTimeout(resolve, ms); }); };
+    var waitFor = async function(predicate, timeoutMs) {
+        var deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (predicate()) return true;
+            await sleep(50);
+        }
+        return false;
+    };
+    var findButtonByText = function(root, text) {
+        var buttons = Array.from((root || document).querySelectorAll('button'));
+        return buttons.find(function(btn) { return btn.textContent.trim() === text; }) || null;
+    };
+
+    r.original_path = window.location.pathname + window.location.search;
+    await waitFor(function() {
+        var btn = document.querySelector('[data-testid="session-worktree-review-button"]');
+        return !!(btn && btn.offsetParent !== null);
+    }, 3000);
+
+    var reviewBtn = document.querySelector('[data-testid="session-worktree-review-button"]');
+    r.button_visible = !!(reviewBtn && reviewBtn.offsetParent !== null);
+    if (reviewBtn) reviewBtn.click();
+
+    await waitFor(function() {
+        return !!document.querySelector('[data-testid="worktree-commit-detail"]');
+    }, 3000);
+
+    var commitDetail = document.querySelector('[data-testid="worktree-commit-detail"]');
+    r.commit_detail_open = !!commitDetail;
+    r.path_after_open = window.location.pathname + window.location.search;
+
+    var closeBtn = commitDetail ? findButtonByText(commitDetail, 'Close') : null;
+    if (closeBtn) closeBtn.click();
+    await waitFor(function() {
+        return !document.querySelector('[data-testid="worktree-commit-detail"]');
+    }, 2000);
+    await waitFor(function() {
+        var header = document.querySelector('[data-testid="session-header"]');
+        return !!(header && header.offsetParent !== null);
+    }, 1000);
+
+    var header = document.querySelector('[data-testid="session-header"]');
+    r.path_after_close = window.location.pathname + window.location.search;
+    r.session_header_visible_after_close = !!(header && header.offsetParent !== null);
+"""
+
+
+class TestSessionViewerWorktreeOverlay:
+    """Session-viewer worktree review opens as an overlay without route churn."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        _navigate_and_check("/session/autonomy/auto-sweep-alpha", "", wait_ms=3000)
+        result = _run_async_eval(
+            f"""(async () => {{
+                var r = {{}};
+                {SESSION_VIEWER_WORKTREE_OVERLAY_CHECKS}
+                return JSON.stringify(r);
+            }})()"""
+        )
+        request.cls._checks = result
+
+    def test_workspace_button_visible(self):
+        assert self._checks.get("button_visible"), "Session worktree review button was not visible"
+
+    def test_commit_overlay_opens(self):
+        assert self._checks.get("commit_detail_open"), "Worktree commit review overlay did not open from session viewer"
+
+    def test_route_stays_on_session(self):
+        c = self._checks
+        assert c.get("path_after_open") == c.get("original_path"), (
+            "Opening the worktree review from session viewer should not navigate away; "
+            f"got {c.get('path_after_open')!r} from {c.get('original_path')!r}"
+        )
+        assert c.get("path_after_close") == c.get("original_path"), (
+            "Closing the worktree review should return in place to the same session route; "
+            f"got {c.get('path_after_close')!r} from {c.get('original_path')!r}"
+        )
+
+    def test_session_header_restored_after_close(self):
+        assert self._checks.get("session_header_visible_after_close"), (
+            "Session header was not visible after closing worktree review overlay"
+        )
+
+
 class TestHostSessionTailContract:
     """L2.A contract test: /api/session/{project}/{id}/tail must return
     `type` and `is_live` consistent with the session registry.
