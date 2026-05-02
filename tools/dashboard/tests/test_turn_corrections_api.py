@@ -12,6 +12,7 @@ covered by ``tools/dashboard/tests/test_parser.py`` under bead auto-edec1.1.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
@@ -189,6 +190,42 @@ def test_dao_already_terminal_returns_existing_status(test_app):
     )
     assert outcome == "already_terminal"
     assert row["status"] == "accepted"
+
+
+def test_dao_raced_terminal_update_returns_already_terminal(test_app, monkeypatch):
+    """A losing concurrent transition must not report false success."""
+    sha = _sha("text")
+    dashboard_db.upsert_turn_correction(
+        SESSION_UUID, "msg-1",
+        original_sha256=sha, corrected_text="corrected",
+    )
+    base_conn = dashboard_db.get_conn()
+    original_execute = base_conn.execute
+
+    class RacingConn:
+        def execute(self, sql, params=()):
+            if sql.startswith("UPDATE turn_corrections SET status=?, updated_at=?"):
+                # Simulate another caller accepting the row after our initial
+                # SELECT but before this UPDATE executes.
+                original_execute(
+                    "UPDATE turn_corrections SET status='accepted' "
+                    "WHERE session_uuid=? AND target_message_id=?",
+                    (SESSION_UUID, "msg-1"),
+                )
+                base_conn.commit()
+            return original_execute(sql, params)
+
+        def commit(self):
+            return base_conn.commit()
+
+    monkeypatch.setattr(dashboard_db, "get_conn", lambda: RacingConn())
+    outcome, row = dashboard_db.set_turn_correction_status(
+        SESSION_UUID, "msg-1", "dismissed", expected_sha256=sha,
+    )
+    assert outcome == "already_terminal"
+    assert row["status"] == "accepted"
+    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
+    assert stored["status"] == "accepted"
 
 
 def test_dao_set_status_not_found(test_app):
@@ -499,20 +536,41 @@ def test_session_monitor_skips_non_correction_entries(test_app):
     assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
 
 
-def test_session_monitor_skips_session_without_uuid(test_app):
-    """Session still resolving — defer persistence to the next pass."""
+def test_session_monitor_derives_uuid_from_jsonl_path(test_app):
+    """Tail rows may arrive before row.session_uuid is populated."""
     from tools.dashboard.session_monitor import SessionMonitor
 
     sha = _sha("text")
+    derived_uuid = "uuid-from-jsonl-path"
     entries = [{
         "type": "turn_correction",
         "target_message_id": "msg-1",
         "original_sha256": sha,
         "corrected_text": "corrected",
     }]
+    row = {
+        "session_uuid": None,
+        "jsonl_path": str(Path("/tmp/sessions/autonomy") / f"{derived_uuid}.jsonl"),
+    }
+    SessionMonitor._persist_turn_corrections(row, entries)
+    stored = dashboard_db.get_turn_correction(derived_uuid, "msg-1")
+    assert stored is not None
+    assert stored["status"] == "pending"
+    assert stored["original_sha256"] == sha
+
+
+def test_session_monitor_still_skips_when_no_stable_uuid_available(test_app):
+    """If there is no explicit uuid, no JSONL path, and no tmux row, skip."""
+    from tools.dashboard.session_monitor import SessionMonitor
+
+    entries = [{
+        "type": "turn_correction",
+        "target_message_id": "msg-1",
+        "original_sha256": _sha("text"),
+        "corrected_text": "corrected",
+    }]
     row = {"session_uuid": None}
     SessionMonitor._persist_turn_corrections(row, entries)
-    # No persistence happened — nothing under any uuid for this msg
     assert dashboard_db.get_turn_correction("", "msg-1") is None
 
 
