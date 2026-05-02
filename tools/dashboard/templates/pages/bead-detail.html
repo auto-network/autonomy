@@ -45,10 +45,18 @@
             </template>
           </div>
         </template>
-        <!-- Creator -->
-        <template x-if="bead.created_by">
-          <div class="text-sm text-gray-400 mb-2">
-            Creator: <span x-text="creatorIcon(bead.created_by) + ' ' + creatorLabel(bead.created_by)"></span>
+        <!-- Author / Owner -->
+        <template x-if="authorValue()">
+          <div class="text-sm text-gray-400 mb-2" data-testid="bead-author">
+            <span class="text-gray-500" x-text="authorHeading() + ':'"></span>
+            <template x-if="authorHref()">
+              <a :href="authorHref()"
+                 class="text-indigo-400 hover:underline"
+                 x-text="authorDisplay()"></a>
+            </template>
+            <template x-if="!authorHref()">
+              <span x-text="authorDisplay()"></span>
+            </template>
           </div>
         </template>
       </section>
@@ -245,9 +253,33 @@
       </template>
 
       <!-- Children -->
-      <template x-if="primer && primer.related_beads && primer.related_beads.length > 0">
-        <section aria-label="Children" class="mb-6">
+      <template x-if="bead.children && bead.children.length > 0">
+        <section aria-label="Children" class="mb-6" data-testid="bead-children">
           <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Children</h2>
+          <div class="space-y-1">
+            <template x-for="child in bead.children" :key="child.id">
+              <a :href="'/bead/' + child.id"
+                 :data-bead-id="child.id"
+                 class="block p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline">
+                <div class="flex items-center gap-2">
+                  <span class="badge" :class="'badge-' + (child.status || 'open')" x-text="child.status || 'open'"></span>
+                  <span class="ft-badge" :class="'badge-p' + child.priority" x-text="'P' + child.priority"></span>
+                  <span class="font-mono text-xs text-gray-500" x-text="child.id"></span>
+                  <span class="text-sm text-gray-200 flex-1" x-text="child.title"></span>
+                </div>
+                <template x-if="child.description">
+                  <div class="text-xs text-gray-500 mt-1 truncate" x-text="child.description.slice(0, 120)"></div>
+                </template>
+              </a>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <!-- Related Beads -->
+      <template x-if="primer && primer.related_beads && primer.related_beads.length > 0">
+        <section aria-label="Related Beads" class="mb-6">
+          <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Related Beads</h2>
           <div class="space-y-1">
             <template x-for="rb in primer.related_beads" :key="rb.bead_id || rb.id">
               <a :href="'/bead/' + (rb.bead_id || rb.id)"
