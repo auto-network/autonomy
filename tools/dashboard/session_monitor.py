@@ -1765,23 +1765,15 @@ class SessionMonitor:
         the suggestion as a sparse row so refresh/reconnect can rehydrate
         the overlay without rewriting JSONL.
 
-        We prefer the explicit ``session_uuid`` on the row, but when that is
-        still unset we can usually derive a stable UUID from the current JSONL
-        filename (the tailer only calls this helper after resolving a file).
-        Already-terminal rows are preserved by ``upsert_turn_correction``
-        itself.
+        Sessions without a ``session_uuid`` silently skip. In the current
+        session-monitor flow the tailer only reads a concrete JSONL after the
+        session has been linked, so this is a defensive guard rather than an
+        expected live path. Already-terminal rows are preserved by
+        ``upsert_turn_correction`` itself.
         """
         if not entries:
             return
         session_uuid = row.get("session_uuid")
-        if not session_uuid:
-            jsonl_path_str = row.get("curr_jsonl_file") or row.get("jsonl_path")
-            if jsonl_path_str:
-                session_uuid = Path(str(jsonl_path_str)).stem
-        if not session_uuid and row.get("tmux_name"):
-            current = get_session(row["tmux_name"])
-            if current and current.get("session_uuid"):
-                session_uuid = current["session_uuid"]
         if not session_uuid:
             return
         for entry in entries:
