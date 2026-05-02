@@ -143,6 +143,16 @@ class TestBroadcastAPIValidation(unittest.TestCase):
             "message must not contain </crosstalk>"
         )
 
+    def test_8000_chars_allowed(self):
+        from tools.dashboard.server import _validate_crosstalk_message
+        assert _validate_crosstalk_message("x" * 8000) is None
+
+    def test_8001_chars_rejected(self):
+        from tools.dashboard.server import _validate_crosstalk_message
+        assert _validate_crosstalk_message("x" * 8001) == (
+            "message must be 1-8000 characters"
+        )
+
 
 # ── Integration-style tests (mocked HTTP) ──────────────────────────────
 
