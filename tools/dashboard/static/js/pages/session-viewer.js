@@ -549,6 +549,19 @@
         var self = this;
         var sid = this.sessionKey;
 
+        // Use ``Alpine.watch`` (global) rather than ``this.$watch``
+        // (magic property): the global form returns a teardown function,
+        // the magic property returns ``undefined``. The previous code
+        // pushed ``this.$watch(...)``'s return into ``_storeCleanups``,
+        // so on _reset() the cleanup loop's ``typeof === 'function'``
+        // guard rejected every entry and no watcher was ever
+        // unsubscribed. After N opens of the overlay, every new SSE
+        // entry got ``appendOne()``'d N times — that was the
+        // duplicate-message bug.
+        function track(teardown) {
+          if (typeof teardown === 'function') self._storeCleanups.push(teardown);
+        }
+
         // Tick interval: bump _tick every second so running-tool elapsed times refresh
         if (!this._tickInterval) {
           this._tickInterval = setInterval(function() {
@@ -558,7 +571,7 @@
 
         // Single watcher: incremental append + auto-scroll when entries change
         var lastLen = this.entries.length;
-        this._storeCleanups.push(this.$watch(
+        track(Alpine.watch(
           function() {
             var s = Alpine.store('sessions')[sid];
             return s ? s.entries.length : 0;
@@ -590,7 +603,7 @@
 
         // Watch isLive for overlay header updates
         if (this._mode === 'overlay') {
-          this._storeCleanups.push(this.$watch(
+          track(Alpine.watch(
             function() {
               var s = Alpine.store('sessions')[sid];
               return s ? s.isLive : true;
@@ -603,7 +616,7 @@
         // A blanket x-effect on the root reacts to any dep change, which
         // caused a race with toggleTerminal's $nextTick mount on dead
         // sessions (open -> effect-dispose -> nextTick-remount -> stuck).
-        this._storeCleanups.push(this.$watch(
+        track(Alpine.watch(
           function() {
             var s = Alpine.store('sessions')[sid];
             return s ? s.isLive : true;
@@ -1094,7 +1107,8 @@
       // ── Overlay: reset ──────────────────────────────────────────
 
       _reset() {
-        // Clean up watchers and polling
+        // Tear down every watcher registered by _setupWatchers. Each
+        // entry is the teardown function returned by Alpine.watch().
         for (var i = 0; i < this._storeCleanups.length; i++) {
           if (typeof this._storeCleanups[i] === 'function') this._storeCleanups[i]();
         }
