@@ -835,6 +835,40 @@
       letter-spacing: -0.05em;
     }
 
+    /* Safe-area rules for the persistent shell-mounted worktree review
+       overlay only. The Worktrees page carries its own overlay styles;
+       scoping these to #worktree-review-layer avoids double padding when
+       review opens from /worktrees itself. */
+    #worktree-review-layer .worktree-review-overlay {
+      overflow-x: hidden;
+      overscroll-behavior-x: none;
+      padding-top: 0.75rem;
+    }
+    #worktree-review-layer .worktree-review-shell {
+      max-width: 100%;
+    }
+    #worktree-review-layer .worktree-diff-scroller {
+      max-width: 100%;
+      overflow-x: auto;
+      overflow-y: hidden;
+      overscroll-behavior-x: contain;
+      -webkit-overflow-scrolling: touch;
+    }
+    #worktree-review-layer .worktree-diff-code.hljs {
+      display: block;
+      min-width: 100%;
+      background: transparent;
+      color: inherit;
+    }
+    @supports (padding-top: env(safe-area-inset-top)) {
+      #worktree-review-layer .worktree-review-overlay {
+        padding-top: calc(0.75rem + env(safe-area-inset-top));
+        padding-right: env(safe-area-inset-right);
+        padding-bottom: env(safe-area-inset-bottom);
+        padding-left: env(safe-area-inset-left);
+      }
+    }
+
     /* Terminal region — fills the grid's 1fr row when active */
     .sv-terminal {
       min-height: 0;
