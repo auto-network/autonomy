@@ -1,0 +1,197 @@
+/* Surface Presence — substrate library CSS (substrate.B).
+ *
+ * Companion to ``static/js/surface-presence.js``. Plugins that opt
+ * into surface presence via ``Presence.alpine()`` get these classes
+ * for free and should not duplicate the rules locally.
+ *
+ * Bead: substrate.B (auto-7t98r). Signpost: graph://dff97eec-c59.
+ *
+ * The ``.req-button`` block is lifted verbatim from
+ * ``tools/dashboard/plugins/coordinator_board/page.html:240-263``
+ * with the ``.coord-board`` parent dropped so any plugin can use
+ * the affordance. The 3-state contract (idle → pending →
+ * requested) is unchanged from the coordinator's original.
+ */
+
+
+/* ── req-button — generic 3-state request affordance ─────────
+ *
+ * A control that initiates an async request and tracks
+ * pending-until-resolved state on a single element.
+ *
+ *   data-state="idle"       — affordance is shown (e.g. ↻)
+ *   data-state="pending"    — request firing (spinner animation)
+ *   data-state="requested"  — request acknowledged, awaiting result
+ *                             (persists until the result lands or
+ *                              the user taps to dismiss)
+ *
+ * The owning component is responsible for resetting state to
+ * 'idle' when fresh data actually arrives. The button itself only
+ * handles idle → pending → requested and the explicit
+ * dismiss-on-click. */
+.req-button {
+  height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 500;
+  border: none; cursor: pointer; flex-shrink: 0;
+  border-radius: 9999px;
+  transition: background-color 0.2s, color 0.2s, width 0.25s, padding 0.25s;
+}
+.req-button[data-state="idle"],
+.req-button[data-state="pending"] {
+  width: 28px; padding: 0;
+  background: rgb(139 92 246 / 0.18);
+  color: rgb(221 214 254);
+}
+.req-button[data-state="idle"]:hover {
+  background: rgb(139 92 246 / 0.28);
+}
+.req-button[data-state="pending"] { animation: req-button-spin 0.9s linear infinite; }
+.req-button[data-state="requested"] {
+  padding: 0 12px;
+  background: rgb(16 185 129 / 0.15);
+  color: rgb(110 231 183);
+}
+.req-button[data-state="requested"]:hover {
+  background: rgb(16 185 129 / 0.22);
+}
+@keyframes req-button-spin { to { transform: rotate(360deg); } }
+
+/* Tile-scoped variant — smaller pill that fits in a tile header
+ * row alongside title text. Used by the per-tile summon button. */
+.req-button.tile-req {
+  width: 22px; height: 22px;
+  font-size: 11px;
+}
+.req-button.tile-req[data-state="requested"] {
+  width: auto; height: 22px; padding: 0 8px;
+  font-size: 10px;
+}
+
+
+/* ── nx-avatar-stack — overflow-aware participant avatars ────
+ *
+ * Renders the first few participants as overlapping circles with
+ * a "+N more" trailing badge when the count exceeds the visible
+ * cap. Plugins set ``--nx-stack-cap`` on the container to control
+ * how many avatars show; CSS does not enforce the cap (template
+ * iteration does) but the spacing assumes ~3 visible avatars by
+ * default. */
+.nx-avatar-stack {
+  display: inline-flex; align-items: center;
+  flex-direction: row;
+  isolation: isolate;
+}
+.nx-avatar-stack > .nx-avatar {
+  width: 24px; height: 24px;
+  border-radius: 9999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 600;
+  color: rgb(15 23 42);
+  border: 2px solid rgb(15 23 42);
+  margin-left: -8px;
+  position: relative;
+  transition: transform 0.15s;
+}
+.nx-avatar-stack > .nx-avatar:first-child { margin-left: 0; }
+.nx-avatar-stack > .nx-avatar:hover { transform: translateY(-1px); z-index: 1; }
+.nx-avatar-stack > .nx-avatar-overflow {
+  width: 24px; height: 24px;
+  border-radius: 9999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 600;
+  color: rgb(226 232 240);
+  background: rgb(51 65 85);
+  border: 2px solid rgb(15 23 42);
+  margin-left: -8px;
+}
+
+
+/* ── nx-tile-marker — per-tile presence dot ──────────────────
+ *
+ * A small color dot drawn on a tile when a participant's
+ * ``position_kind="tile"`` and ``position_value`` matches the tile.
+ * Plugins set the dot's color from ``Presence.participantColor()``
+ * via inline style or a custom property. */
+.nx-tile-marker {
+  width: 8px; height: 8px;
+  border-radius: 9999px;
+  display: inline-block;
+  background: var(--nx-marker-color, rgb(139 92 246));
+  box-shadow: 0 0 0 2px rgb(15 23 42);
+}
+.nx-tile-marker.nx-tile-marker-stacked {
+  /* When multiple participants focus the same tile their markers
+   * collapse into a stacked group with a count badge. The badge
+   * itself is a .nx-tile-marker-count sibling. */
+  margin-right: -4px;
+}
+.nx-tile-marker-count {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 14px; padding: 0 5px;
+  border-radius: 9999px;
+  font-size: 9px; font-weight: 600;
+  color: rgb(226 232 240);
+  background: rgb(51 65 85);
+}
+
+
+/* ── nx-working-badge — pulsing "working" indicator + tooltip ─
+ *
+ * Shown next to a participant who has self-claimed
+ * ``state="working"`` in their presence row. The pulse reads as
+ * "active right now" without being noisy; the tooltip surfaces
+ * the participant's ``intent`` text on hover. */
+.nx-working-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 9999px;
+  background: rgb(34 197 94 / 0.15);
+  color: rgb(134 239 172);
+  border: 1px solid rgb(34 197 94 / 0.30);
+  position: relative;
+  cursor: default;
+}
+.nx-working-badge::before {
+  content: "";
+  width: 6px; height: 6px;
+  border-radius: 9999px;
+  background: rgb(74 222 128);
+  box-shadow: 0 0 0 0 rgb(74 222 128 / 0.65);
+  animation: nx-working-pulse 1.6s ease-out infinite;
+}
+.nx-working-badge[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0; top: calc(100% + 6px);
+  white-space: nowrap;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgb(15 23 42);
+  color: rgb(226 232 240);
+  font-size: 11px; font-weight: 500;
+  border: 1px solid rgb(51 65 85);
+  z-index: 10;
+}
+@keyframes nx-working-pulse {
+  0%   { box-shadow: 0 0 0 0   rgb(74 222 128 / 0.65); }
+  70%  { box-shadow: 0 0 0 8px rgb(74 222 128 / 0);    }
+  100% { box-shadow: 0 0 0 0   rgb(74 222 128 / 0);    }
+}
+
+
+/* ── nx-follow-active — highlight a participant being followed ─
+ *
+ * When a viewer toggles "follow" on a participant their avatar +
+ * panel row light up so it's obvious which participant is being
+ * mirrored. Follow-mode is per-viewer state; the substrate never
+ * writes it (see pitfall graph://73af2694-562). */
+.nx-follow-active {
+  outline: 2px solid rgb(139 92 246);
+  outline-offset: 2px;
+  background: rgb(139 92 246 / 0.12);
+}
+.nx-follow-active.nx-avatar {
+  border-color: rgb(139 92 246);
+}
