@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Iterable
 
 from agents.workspace_settings import (
+    RepoMount,
     WorkspaceV1,
     WorkspaceMountInvalidError,
     WorkspaceMountMissingError,
@@ -241,6 +242,82 @@ def _update_readonly_clone(clone: Path) -> None:
     _run_git(["checkout", "--detach", _repo_integration_base_ref(clone)], cwd=clone)
 
 
+def _repo_identity(url: str) -> tuple[str, str] | str:
+    """Return a comparable canonical identity for a git repo location.
+
+    URL-shaped values resolve to the ``(host, path)`` pair from
+    :func:`parse_repo_url`; file-system paths fall back to a resolved
+    absolute string so on-disk repos compare cleanly across symlinks and
+    relative forms. Used to verify a host checkout's ``origin`` matches a
+    workspace repo URL when ``base_source`` is set.
+    """
+    try:
+        return parse_repo_url(url)
+    except WorkspaceError:
+        return str(Path(url).resolve())
+
+
+def _sync_managed_clone_from_base_source(repo: RepoMount, clone: Path) -> None:
+    """Sync ``clone``'s integration branch from ``repo.base_source``.
+
+    Validates that the host path exists, is a git checkout, and its
+    ``origin`` URL identity matches ``repo.url``. Resolves the checkout's
+    default integration branch and advances the managed clone's local
+    branch ref to that tip via :func:`_sync_managed_clone_branch_ref`.
+
+    Raises :class:`WorkspaceError` (loudly, with no fallback to ``origin``)
+    when the path is missing, not a git checkout, has no matching
+    ``origin``, or has no resolvable default branch.
+    """
+    base_source = repo.base_source
+    if base_source is None:
+        return
+    if not base_source.startswith("/"):
+        raise WorkspaceError(
+            f"workspace: repo {repo.url!r} base_source must be an absolute "
+            f"path, got {base_source!r}"
+        )
+    host_path = Path(base_source)
+    if not host_path.exists():
+        raise WorkspaceError(
+            f"workspace: base_source path does not exist for repo "
+            f"{repo.url!r}: {base_source}"
+        )
+    rc, _, err = _git_output(
+        ["rev-parse", "--git-dir"], host_path, timeout=15,
+    )
+    if rc != 0:
+        raise WorkspaceError(
+            f"workspace: base_source is not a git checkout for repo "
+            f"{repo.url!r}: {base_source} ({err.strip()})"
+        )
+    rc, origin_url, err = _git_output(
+        ["config", "--get", "remote.origin.url"], host_path, timeout=15,
+    )
+    if rc != 0 or not origin_url.strip():
+        raise WorkspaceError(
+            f"workspace: base_source has no origin remote for repo "
+            f"{repo.url!r}: {base_source}"
+        )
+    origin = origin_url.strip()
+    if _repo_identity(origin) != _repo_identity(repo.url):
+        raise WorkspaceError(
+            f"workspace: base_source {base_source} origin {origin!r} does "
+            f"not match repo URL {repo.url!r}"
+        )
+    branch = _repo_default_branch(host_path)
+    if branch is None:
+        raise WorkspaceError(
+            f"workspace: could not resolve default branch for base_source "
+            f"of repo {repo.url!r}: {base_source}"
+        )
+    logger.info(
+        "workspace: syncing managed clone %s from base_source %s (branch %s)",
+        clone, base_source, branch,
+    )
+    _sync_managed_clone_branch_ref(clone, host_path, branch)
+
+
 def prepare_session_mounts(
     workspace: WorkspaceV1,
     session_name: str,
@@ -257,6 +334,7 @@ def prepare_session_mounts(
     mounts: dict[str, str] = {}
     for repo in workspace.repos:
         clone = ensure_managed_clone(repo.url, repos_dir=repos_dir)
+        _sync_managed_clone_from_base_source(repo, clone)
         if repo.writable:
             worktree = worktrees_dir / session_name / _worktree_basename(repo.url)
             create_worktree(

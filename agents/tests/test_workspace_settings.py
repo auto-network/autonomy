@@ -7,8 +7,10 @@ import pytest
 from agents.workspace_settings import (
     CAPABILITIES_MOUNT_DIR,
     MaterializedCapability,
+    RepoMount,
     WorkspaceSettingsError,
     _impl_mount_target,
+    _parse_repo,
     _workspace_from_setting,
     resolve_capabilities,
 )
@@ -51,6 +53,75 @@ def test_workspace_from_setting_reads_codex_harness():
         mounts={},
     )
     assert workspace.harness == "codex"
+
+
+# ── RepoMount parsing (auto-4sfe9) ───────────────────────────────
+
+
+def test_parse_repo_defaults_base_source_to_none():
+    repo = _parse_repo(
+        {"url": "git@github.com:foo/bar.git", "mount": "/workspace/bar"},
+        workspace_id="ws", idx=0,
+    )
+    assert isinstance(repo, RepoMount)
+    assert repo.base_source is None
+
+
+def test_parse_repo_accepts_absolute_base_source():
+    repo = _parse_repo(
+        {
+            "url": "git@github.com:foo/bar.git",
+            "mount": "/workspace/bar",
+            "base_source": "/home/user/bar",
+        },
+        workspace_id="ws", idx=0,
+    )
+    assert repo.base_source == "/home/user/bar"
+
+
+def test_parse_repo_rejects_relative_base_source():
+    with pytest.raises(WorkspaceSettingsError, match="base_source"):
+        _parse_repo(
+            {
+                "url": "git@github.com:foo/bar.git",
+                "mount": "/workspace/bar",
+                "base_source": "relative/path",
+            },
+            workspace_id="ws", idx=0,
+        )
+
+
+def test_parse_repo_rejects_empty_base_source():
+    with pytest.raises(WorkspaceSettingsError, match="base_source"):
+        _parse_repo(
+            {
+                "url": "git@github.com:foo/bar.git",
+                "mount": "/workspace/bar",
+                "base_source": "",
+            },
+            workspace_id="ws", idx=0,
+        )
+
+
+def test_workspace_from_setting_propagates_repo_base_source():
+    workspace = _workspace_from_setting(
+        {
+            "name": "Autonomy",
+            "image": "autonomy-agent:latest",
+            "repos": [
+                {
+                    "url": "git@github.com:foo/bar.git",
+                    "mount": "/workspace/bar",
+                    "base_source": "/home/user/bar",
+                },
+            ],
+        },
+        workspace_id="autonomy",
+        graph_project="autonomy",
+        artifacts=(),
+        mounts={},
+    )
+    assert workspace.repos[0].base_source == "/home/user/bar"
 
 
 def test_workspace_from_setting_rejects_invalid_harness():
