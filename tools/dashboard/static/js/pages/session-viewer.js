@@ -41,6 +41,7 @@
       project: '',
       sessionId: '',
       projectLabel: '',
+      _workspacePromise: null,
 
       // ── Store-backed getters ────────────────────────────────────
       // These read from Alpine.store('sessions')[sessionKey] directly.
@@ -120,6 +121,11 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return (s && s.org) || null;
       },
+      get workspaceName() {
+        if (this.projectLabel) return this.projectLabel;
+        if (this.project) return _formatProject(this.project);
+        return '';
+      },
 
       // Workspace-changes indicator: derived from the cached
       // ``_workspaceStatus`` (populated by ``_refreshWorkspaceStatus``).
@@ -186,6 +192,8 @@
       // Auto-resets to 'topics' whenever hasTodos transitions true → false
       // (handled by the $watch in init(), so there's no stuck-tab state).
       selectedDrawerTab: 'topics',
+      copiedField: '',
+      _copyFeedbackTimer: null,
 
       // Terminal toggle (full-screen xterm.js swaps the chat body)
       showTerminal: false,
@@ -259,6 +267,8 @@
             this.sessionKey = sessionId;
             this.sessionId = sessionId;
             this.project = project;
+            this.projectLabel = _formatProject(project);
+            this._ensureWorkspaceName(project);
             if (this._mode === 'page') window._diagFocusedViewerId = sessionId;
 
             var store = window.getSessionStore(sessionId);
@@ -313,6 +323,8 @@
         this.sessionKey = sessionId;
         this.sessionId = sessionId;
         this.project = project;
+        this.projectLabel = _formatProject(project);
+        this._ensureWorkspaceName(project);
         // Track the session id the page is currently rendering so /api/diag
         // collectors can flag is_focused_viewer correctly. Page mode owns
         // this; panel/overlay sessions read but do not claim focus.
@@ -530,6 +542,10 @@
           clearInterval(this._tickInterval);
           this._tickInterval = null;
         }
+        if (this._copyFeedbackTimer) {
+          clearTimeout(this._copyFeedbackTimer);
+          this._copyFeedbackTimer = null;
+        }
         if (this._resumeHeartbeatInterval) {
           clearInterval(this._resumeHeartbeatInterval);
           this._resumeHeartbeatInterval = null;
@@ -630,6 +646,87 @@
         ));
 
         this._setupResumeRecovery();
+      },
+
+      async _ensureWorkspaceName(workspaceId) {
+        if (!workspaceId) return '';
+        var fallback = _formatProject(workspaceId);
+        if (this.project === workspaceId && this.projectLabel && this.projectLabel !== fallback) {
+          return this.projectLabel;
+        }
+        if (this._workspacePromise && this._workspacePromise.id === workspaceId) {
+          return this._workspacePromise.promise;
+        }
+        var self = this;
+        var promise = (async function() {
+          try {
+            if (!window.Schema || typeof window.Schema.of !== 'function') {
+              return fallback;
+            }
+            var Workspace = await window.Schema.of('autonomy.workspace');
+            var row = await Workspace.read(workspaceId);
+            var payload = row && row.payload;
+            var resolved = (payload && typeof payload.name === 'string' && payload.name.trim())
+              ? payload.name.trim()
+              : fallback;
+            if (self.project === workspaceId) self.projectLabel = resolved;
+            return resolved;
+          } catch (_) {
+            return fallback;
+          } finally {
+            if (self._workspacePromise && self._workspacePromise.id === workspaceId) {
+              self._workspacePromise = null;
+            }
+          }
+        })();
+        this._workspacePromise = { id: workspaceId, promise: promise };
+        return promise;
+      },
+
+      async _copyText(text) {
+        if (!text) return false;
+        try {
+          if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            return true;
+          }
+        } catch (_) {}
+        try {
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          ta.setSelectionRange(0, ta.value.length);
+          var ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          return !!ok;
+        } catch (_) {
+          return false;
+        }
+      },
+
+      _markCopied(field) {
+        this.copiedField = field;
+        if (this._copyFeedbackTimer) clearTimeout(this._copyFeedbackTimer);
+        var self = this;
+        this._copyFeedbackTimer = setTimeout(function () {
+          if (self.copiedField === field) self.copiedField = '';
+        }, 1200);
+      },
+
+      async copyTmuxSession() {
+        var tmux = this._tmuxSession;
+        if (!tmux) return;
+        var copied = await this._copyText(tmux);
+        if (!copied) {
+          if (window.showToast) window.showToast('Clipboard copy failed', 'error');
+          return;
+        }
+        this._markCopied('tmux');
+        if (window.showToast) window.showToast('Copied teamwork session', 'warning');
       },
 
       _setupResumeRecovery() {
@@ -995,6 +1092,8 @@
               this.linkState = 'confirmed';
               if (data.project && data.project !== this.project) {
                 this.project = data.project;
+                this.projectLabel = _formatProject(data.project);
+                this._ensureWorkspaceName(data.project);
               }
               return;
             }

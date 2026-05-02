@@ -60,6 +60,14 @@
                     aria-label="Open worktree review"
                     style="display:none;"><span class="sv-term-glyph">⌥</span></button>
             <template x-if="_tmuxSession && isLive">
+              <button class="sv-term-toggle sv-term-escape"
+                      @click.stop="interrupt()"
+                      aria-label="Send Escape"
+                      title="Send Escape">
+                <span class="sv-term-escape-label">ESC</span>
+              </button>
+            </template>
+            <template x-if="_tmuxSession && isLive">
               <button class="sv-term-toggle"
                       :class="{ 'active': showTerminal }"
                       @click.stop="toggleTerminal()"
@@ -171,15 +179,20 @@
                      x-text="window.SessionStats.idleStr({lastActivity: lastActivity}) || '—'"></div>
               </div>
               <template x-if="_tmuxSession">
-                <div class="sv-exp-stat-cell sv-exp-stat-wide">
+                <div class="sv-exp-stat-cell sv-exp-stat-copy">
                   <div class="sv-exp-stat-key">TMUX</div>
-                  <div class="sv-exp-stat-val" x-text="_tmuxSession"></div>
+                  <button class="sv-exp-stat-val sv-exp-stat-copyable"
+                          :class="{ 'is-copied': copiedField === 'tmux' }"
+                          @click.stop="copyTmuxSession()"
+                          :title="'Copy teamwork session: ' + _tmuxSession"
+                          x-text="_tmuxSession"></button>
                 </div>
               </template>
               <template x-if="org">
                 <div class="sv-exp-stat-cell">
-                  <div class="sv-exp-stat-key">ORG</div>
-                  <div class="sv-exp-stat-val" style="display:flex; align-items:center; gap:6px;">
+                  <div class="sv-exp-stat-key">WORKSPACE</div>
+                  <div class="sv-exp-stat-val sv-exp-stat-with-icon"
+                       :title="org.resolved ? ((workspaceName || '?') + ' · ' + org.name) : (workspaceName || '?')">
                     <span class="sc-org"
                           :style="org.favicon ? '' : `background:${org.color}`"
                           :title="org.resolved ? org.name : ('legacy: ' + (project || 'unknown'))">
@@ -193,7 +206,7 @@
                       </template>
                       <img class="sc-org-img" :src="org.favicon" x-show="org.favicon" :alt="org.name">
                     </span>
-                    <span x-text="org.resolved ? org.name : '?'"></span>
+                    <span x-text="workspaceName || '?'"></span>
                   </div>
                 </div>
               </template>
