@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
-from tools.graph import settings_ops
+from tools.graph import schemas, settings_ops
 from tools.graph.settings_ops import ResolvedSetting
 
 from .schemas import (
@@ -324,6 +324,9 @@ def _write_cursor(
     payload = {"lastRowId": last_row_id, "lastSeenAt": last_seen_at}
     serialized = json.dumps(payload, sort_keys=True)
     now = _now_iso()
+    expires_at = schemas.cache_expires_at(
+        CURSOR_SET_ID, int(CURSOR_REVISION), now,
+    )
     db = settings_ops._open(org)
     try:
         row = db.conn.execute(
@@ -333,16 +336,18 @@ def _write_cursor(
         ).fetchone()
         if row is not None:
             db.conn.execute(
-                "UPDATE settings SET payload = ?, updated_at = ? WHERE id = ?",
-                (serialized, now, row["id"]),
+                "UPDATE settings SET payload = ?, updated_at = ?, "
+                "expires_at = ? WHERE id = ?",
+                (serialized, now, expires_at, row["id"]),
             )
         else:
             db.conn.execute(
                 "INSERT INTO settings(id, set_id, schema_revision, key, "
-                "payload, publication_state, created_at, updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?)",
+                "payload, publication_state, created_at, updated_at, "
+                "expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
                 (str(uuid4()), CURSOR_SET_ID, int(CURSOR_REVISION),
-                 set_id, serialized, "canonical", now, now),
+                 set_id, serialized, "canonical", now, now, expires_at),
             )
         db.conn.commit()
     finally:
@@ -394,6 +399,9 @@ def _write_marker(
         payload["error"] = error
     serialized = json.dumps(payload, sort_keys=True)
     now = _now_iso()
+    expires_at = schemas.cache_expires_at(
+        STATE_SET_ID, int(STATE_REVISION), now,
+    )
     db = settings_ops._open(org)
     try:
         existing = db.conn.execute(
@@ -403,16 +411,18 @@ def _write_marker(
         ).fetchone()
         if existing is not None:
             db.conn.execute(
-                "UPDATE settings SET payload = ?, updated_at = ? WHERE id = ?",
-                (serialized, now, existing["id"]),
+                "UPDATE settings SET payload = ?, updated_at = ?, "
+                "expires_at = ? WHERE id = ?",
+                (serialized, now, expires_at, existing["id"]),
             )
         else:
             db.conn.execute(
                 "INSERT INTO settings(id, set_id, schema_revision, key, "
-                "payload, publication_state, created_at, updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?)",
+                "payload, publication_state, created_at, updated_at, "
+                "expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
                 (str(uuid4()), STATE_SET_ID, int(STATE_REVISION),
-                 marker_key, serialized, "canonical", now, now),
+                 marker_key, serialized, "canonical", now, now, expires_at),
             )
         db.conn.commit()
     finally:

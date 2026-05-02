@@ -382,6 +382,7 @@ CREATE TABLE IF NOT EXISTS settings (
     deprecated        INTEGER NOT NULL DEFAULT 0 CHECK (deprecated IN (0,1)),
     successor_id      TEXT,
     created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    expires_at        TEXT                          -- @cache(ttl=...) absolute TTL stamp; NULL = never expires
 );
 -- Indices created via _migrate_settings so legacy DBs survive executescript.
