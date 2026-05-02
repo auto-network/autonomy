@@ -388,14 +388,15 @@ def add_setting(
     schemas.validate_payload(set_id, schema_revision, payload)
     sid = str(uuid4())
     now = _now_iso()
+    expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
     db = _open(org)
     try:
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
-            "publication_state, created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?)",
+            "publication_state, created_at, updated_at, expires_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
             (sid, set_id, int(schema_revision), key, json.dumps(payload),
-             state, now, now),
+             state, now, now, expires_at),
         )
         db.conn.commit()
     finally:
@@ -438,13 +439,17 @@ def override_setting(
         )
         sid = str(uuid4())
         now = _now_iso()
+        expires_at = schemas.cache_expires_at(
+            target["set_id"], int(target["schema_revision"]), now,
+        )
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
-            "publication_state, supersedes, created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
+            "publication_state, supersedes, created_at, updated_at, "
+            "expires_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (sid, target["set_id"], int(target["schema_revision"]),
              target["key"], json.dumps(payload_overrides),
-             state, target_id, now, now),
+             state, target_id, now, now, expires_at),
         )
         db.conn.commit()
     finally:
@@ -480,12 +485,16 @@ def exclude_setting(
     try:
         sid = str(uuid4())
         now = _now_iso()
+        expires_at = schemas.cache_expires_at(
+            target["set_id"], int(target["schema_revision"]), now,
+        )
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
-            "publication_state, excludes, created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
+            "publication_state, excludes, created_at, updated_at, "
+            "expires_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (sid, target["set_id"], int(target["schema_revision"]),
-             target["key"], "{}", state, target_id, now, now),
+             target["key"], "{}", state, target_id, now, now, expires_at),
         )
         db.conn.commit()
     finally:
@@ -543,14 +552,25 @@ def promote_setting(
     db = _open(org)
     snapshot = None
     try:
-        cur = db.conn.execute(
-            "UPDATE settings SET publication_state = ?, updated_at = ? "
-            "WHERE id = ?",
-            (to_state, now, setting_id),
-        )
-        if cur.rowcount == 0:
+        # Look up set_id/schema_revision before the UPDATE so we can
+        # recompute expires_at for cache rows. TTL is a sliding window
+        # from updated_at, so any UPDATE that bumps updated_at must
+        # restamp expires_at (HTTP-cache max-age semantics).
+        pre = db.conn.execute(
+            "SELECT set_id, schema_revision FROM settings WHERE id = ?",
+            (setting_id,),
+        ).fetchone()
+        if pre is None:
             _reject_peer_setting_target(setting_id, org)
             raise LookupError(f"setting not found: {setting_id!r}")
+        expires_at = schemas.cache_expires_at(
+            pre["set_id"], int(pre["schema_revision"]), now,
+        )
+        db.conn.execute(
+            "UPDATE settings SET publication_state = ?, updated_at = ?, "
+            "expires_at = ? WHERE id = ?",
+            (to_state, now, expires_at, setting_id),
+        )
         post = db.conn.execute(
             "SELECT set_id, schema_revision, key, publication_state, "
             "deprecated FROM settings WHERE id = ?",
@@ -582,14 +602,21 @@ def deprecate_setting(
     db = _open(org)
     snapshot = None
     try:
-        cur = db.conn.execute(
-            "UPDATE settings SET deprecated = 1, successor_id = ?, "
-            "updated_at = ? WHERE id = ?",
-            (successor_id, now, setting_id),
-        )
-        if cur.rowcount == 0:
+        pre = db.conn.execute(
+            "SELECT set_id, schema_revision FROM settings WHERE id = ?",
+            (setting_id,),
+        ).fetchone()
+        if pre is None:
             _reject_peer_setting_target(setting_id, org)
             raise LookupError(f"setting not found: {setting_id!r}")
+        expires_at = schemas.cache_expires_at(
+            pre["set_id"], int(pre["schema_revision"]), now,
+        )
+        db.conn.execute(
+            "UPDATE settings SET deprecated = 1, successor_id = ?, "
+            "updated_at = ?, expires_at = ? WHERE id = ?",
+            (successor_id, now, expires_at, setting_id),
+        )
         post = db.conn.execute(
             "SELECT set_id, schema_revision, key, publication_state, "
             "deprecated FROM settings WHERE id = ?",
@@ -1278,6 +1305,10 @@ def migrate_setting_revisions(
         set_id=set_id, to_revision=int(to_revision), dry_run=dry_run,
     )
     now = _now_iso()
+    # Migrate rewrites every row to ``to_revision`` — its TTL is the only
+    # one we need to know. Compute once and reuse for every cache-row
+    # rewrite in this loop.
+    expires_at = schemas.cache_expires_at(set_id, int(to_revision), now)
     db = _open(org)
     affected_snapshots: list[dict] = []
     try:
@@ -1307,8 +1338,9 @@ def migrate_setting_revisions(
             if not dry_run:
                 db.conn.execute(
                     "UPDATE settings SET payload = ?, schema_revision = ?, "
-                    "updated_at = ? WHERE id = ?",
-                    (json.dumps(converted), int(to_revision), now, row["id"]),
+                    "updated_at = ?, expires_at = ? WHERE id = ?",
+                    (json.dumps(converted), int(to_revision), now,
+                     expires_at, row["id"]),
                 )
                 # Schema revision is now to_revision; key / state /
                 # deprecated unchanged by migrate.

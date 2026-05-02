@@ -19,6 +19,7 @@ from .registry import (
     validate_payload,
     list_registered_set_ids,
     flush_schema_meta,
+    cache_expires_at,
     SCHEMA_META_SET_ID,
     SCHEMA_META_REVISION,
     SYNOPSIS_META_SET_ID,
@@ -29,6 +30,7 @@ from .registry import (
     append_only_log,
     singleton,
     keyed_per_entity,
+    cache,
 )
 
 # Concrete schema registrations. Importing for side effects — each module
@@ -57,6 +59,7 @@ __all__ = [
     "validate_payload",
     "list_registered_set_ids",
     "flush_schema_meta",
+    "cache_expires_at",
     "SCHEMA_META_SET_ID",
     "SCHEMA_META_REVISION",
     "SYNOPSIS_META_SET_ID",
@@ -65,4 +68,5 @@ __all__ = [
     "append_only_log",
     "singleton",
     "keyed_per_entity",
+    "cache",
 ]
