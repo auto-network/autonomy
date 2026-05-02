@@ -31,12 +31,35 @@ def test_title_not_contenteditable(test_client):
 
 
 def test_expanded_block_references_required_getters(test_client):
-    """Expanded block must reference topics, entryCount, contextTokens, lastActivity."""
+    """Expanded block must reference the data it renders in the drawer."""
     resp = test_client.get("/pages/session-view")
     assert resp.status_code == 200
     html = resp.text
-    for field in ('topics', 'entryCount', 'contextTokens', 'lastActivity'):
+    for field in ('topics', 'entryCount', 'contextTokens', 'lastActivity', 'workspaceName'):
         assert field in html, f"Expanded block missing reference to {field}"
+
+
+def test_expanded_block_uses_workspace_tile_and_copyable_tmux(test_client):
+    """Drawer stats must expose the workspace label and tap-to-copy tmux value."""
+    resp = test_client.get("/pages/session-view")
+    assert resp.status_code == 200
+    html = resp.text
+    assert '>WORKSPACE<' in html, "Workspace tile label missing from expanded header"
+    assert 'copyTmuxSession()' in html, "TMUX value is not wired to copy on tap"
+
+
+def test_session_viewer_js_reads_workspace_setting_and_copy_helper(test_client):
+    """The page controller must resolve workspace names via Settings and support clipboard copy."""
+    resp = test_client.get("/static/js/pages/session-viewer.js")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "window.Schema.of('autonomy.workspace')" in body, (
+        "session-viewer.js is not using the JS schema runtime for workspace lookup"
+    )
+    assert 'Workspace.read(workspaceId)' in body, (
+        "session-viewer.js is not reading workspace Settings by key"
+    )
+    assert 'copyTmuxSession' in body, "session-viewer.js missing TMUX copy helper"
 
 
 def test_session_stats_lib_served(test_client):

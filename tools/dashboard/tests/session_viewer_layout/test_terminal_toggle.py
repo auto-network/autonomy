@@ -20,12 +20,14 @@ Uses the test_client fixture from tests/conftest.py.
 
 
 def test_toggle_button_rendered_when_tmux_present(test_client):
-    """Header row1 contains the terminal toggle when _tmuxSession is set."""
+    """Header row1 contains the ESC action and terminal toggle when tmux is set."""
     resp = test_client.get("/pages/session-view")
     assert resp.status_code == 200
     html = resp.text
     assert 'class="sv-term-toggle"' in html or "class='sv-term-toggle'" in html, \
         "sv-term-toggle button missing from template"
+    assert 'sv-term-escape' in html, "Header ESC button missing from template"
+    assert 'interrupt()' in html, "Header ESC button is not wired to interrupt()"
     # Must reference showTerminal state and toggleTerminal method
     assert 'toggleTerminal' in html
     assert 'showTerminal' in html
