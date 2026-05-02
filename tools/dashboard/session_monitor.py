@@ -54,6 +54,7 @@ from tools.dashboard.dao.dashboard_db import (
     update_tail_state,
     update_nag_last_sent,
     update_todos,
+    upsert_turn_correction,
     count_live,
 )
 
@@ -1293,9 +1294,16 @@ class SessionMonitor:
             self._event_bus.update_cache("session:registry", self.get_registry())
 
         self._enrich_agent_entries(row, ts, new_entries)
+        self._persist_turn_corrections(row, new_entries)
+        # Warm-up rehydrates correction overlay state from history even when
+        # the task-tracker enricher is not wired. Run it unconditionally so
+        # the overlay survives restarts on minimal harness configurations.
+        try:
+            await self._warm_task_tracker_if_needed(tmux_name, row, ts)
+        except Exception:
+            logger.exception("session_monitor: warm-up failed for %s", tmux_name)
         if self._entry_enricher:
             try:
-                await self._warm_task_tracker_if_needed(tmux_name, row, ts)
                 self._entry_enricher(tmux_name, new_entries)
                 await self._persist_todos_if_changed(tmux_name, ts)
             except Exception:
@@ -1663,13 +1671,14 @@ class SessionMonitor:
         """Replay prior JSONL entries through the enricher once per session.
 
         Guarantees post-restart Task* tiles resolve against a complete
-        taskId→subject map. No broadcast; state only.
+        taskId→subject map. Also re-persists any ``turn_correction`` events
+        that were already in the history, so the dashboard rehydrates
+        overlay state even when the JSONL is older than dashboard.db.
+        No broadcast; state only.
         """
         if ts.task_tracker_warmed:
             return
         ts.task_tracker_warmed = True  # set first — retry loops would double-warm
-        if self._entry_enricher is None:
-            return
         jsonl_path_str = row.get("jsonl_path")
         if not jsonl_path_str:
             return
@@ -1698,6 +1707,12 @@ class SessionMonitor:
                 prior.extend(parsed)
             else:
                 prior.append(parsed)
+        # Persist any turn_correction events from history regardless of whether
+        # the task-tracker enricher is wired — the correction overlay must
+        # rehydrate even on a minimal harness.
+        self._persist_turn_corrections(row, prior)
+        if self._entry_enricher is None:
+            return
         if prior:
             try:
                 self._entry_enricher(tmux_name, prior)
@@ -1740,6 +1755,51 @@ class SessionMonitor:
         ts.last_todos_json = encoded
         if self._event_bus:
             await self._broadcast_registry()
+
+    @staticmethod
+    def _persist_turn_corrections(row: dict, entries: list) -> None:
+        """Upsert any ``turn_correction`` parser events into dashboard.db.
+
+        The parser (auto-edec1.1) upconverts valid ``graph turn-correction
+        suggest`` output into a typed ``turn_correction`` entry. We persist
+        the suggestion as a sparse row so refresh/reconnect can rehydrate
+        the overlay without rewriting JSONL.
+
+        Sessions without a ``session_uuid`` (still resolving) silently skip:
+        the entry is harmless to the live stream and the next tail pass will
+        re-see it once a uuid is available. Already-terminal rows are
+        preserved by ``upsert_turn_correction`` itself.
+        """
+        if not entries:
+            return
+        session_uuid = row.get("session_uuid")
+        if not session_uuid:
+            return
+        for entry in entries:
+            if entry.get("type") != "turn_correction":
+                continue
+            target = entry.get("target_message_id")
+            sha = entry.get("original_sha256")
+            corrected = entry.get("corrected_text")
+            if not target or not sha or corrected is None:
+                # Malformed event — skip rather than poison persistence.
+                continue
+            try:
+                upsert_turn_correction(
+                    session_uuid,
+                    target,
+                    original_sha256=sha,
+                    corrected_text=corrected,
+                    mode=entry.get("mode"),
+                    reason=entry.get("reason"),
+                    confidence=entry.get("confidence"),
+                )
+            except Exception:
+                logger.exception(
+                    "session_monitor: turn_correction persist failed"
+                    " session=%s target=%s",
+                    session_uuid, target,
+                )
 
     @staticmethod
     def _enrich_agent_entries(row: dict, ts: _TailState, entries: list) -> None:

@@ -42,6 +42,20 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     topics          TEXT DEFAULT '[]',
     role            TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS turn_corrections (
+    session_uuid       TEXT NOT NULL,
+    target_message_id  TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'pending',
+    original_sha256    TEXT NOT NULL,
+    corrected_text     TEXT NOT NULL,
+    mode               TEXT,
+    reason             TEXT,
+    confidence         REAL,
+    created_at         REAL NOT NULL,
+    updated_at         REAL NOT NULL,
+    PRIMARY KEY (session_uuid, target_message_id)
+);
 """
 
 
@@ -953,3 +967,162 @@ def upsert_session(
         ),
     )
     conn.commit()
+
+
+# ── Turn Corrections ─────────────────────────────────────────────
+#
+# Sparse persisted overlay rows for the session-viewer turn-correction
+# feature (auto-edec1.2). One row per accepted/dismissed/pending suggestion,
+# keyed by (session_uuid, target_message_id) so the JSONL transcript stays
+# immutable. Identity validation uses original_sha256 to reject stale or
+# mismatched targets even if the same target_message_id is reused.
+
+_VALID_CORRECTION_STATUSES = ("pending", "accepted", "dismissed")
+
+
+def upsert_turn_correction(
+    session_uuid: str,
+    target_message_id: str,
+    *,
+    original_sha256: str,
+    corrected_text: str,
+    mode: str | None = None,
+    reason: str | None = None,
+    confidence: float | None = None,
+) -> dict:
+    """Insert or refresh a pending turn-correction row.
+
+    Pending rows are upsertable: a new suggestion for the same
+    (session_uuid, target_message_id) replaces the prior pending one. Once a
+    row reaches a terminal status (accepted/dismissed) it is preserved and
+    NOT overwritten by a fresh pending suggestion — callers must dismiss the
+    terminal row first if they want to re-suggest. Returns the row as stored.
+    """
+    if not session_uuid or not target_message_id:
+        raise ValueError("session_uuid and target_message_id are required")
+    if not original_sha256 or not isinstance(original_sha256, str):
+        raise ValueError("original_sha256 is required")
+    if corrected_text is None:
+        raise ValueError("corrected_text is required")
+
+    conn = get_conn()
+    now = time.time()
+    existing = conn.execute(
+        "SELECT * FROM turn_corrections WHERE session_uuid=? AND target_message_id=?",
+        (session_uuid, target_message_id),
+    ).fetchone()
+    if existing is not None and existing["status"] in ("accepted", "dismissed"):
+        # Terminal — leave alone.
+        return dict(existing)
+
+    conn.execute(
+        "INSERT INTO turn_corrections"
+        " (session_uuid, target_message_id, status, original_sha256, corrected_text,"
+        "  mode, reason, confidence, created_at, updated_at)"
+        " VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(session_uuid, target_message_id) DO UPDATE SET"
+        "  original_sha256=excluded.original_sha256,"
+        "  corrected_text=excluded.corrected_text,"
+        "  mode=excluded.mode,"
+        "  reason=excluded.reason,"
+        "  confidence=excluded.confidence,"
+        "  updated_at=excluded.updated_at"
+        " WHERE turn_corrections.status='pending'",
+        (session_uuid, target_message_id, original_sha256, corrected_text,
+         mode, reason, confidence, now, now),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM turn_corrections WHERE session_uuid=? AND target_message_id=?",
+        (session_uuid, target_message_id),
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def get_turn_correction(session_uuid: str, target_message_id: str) -> dict | None:
+    """Return a single correction row, or None."""
+    if not session_uuid or not target_message_id:
+        return None
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM turn_corrections WHERE session_uuid=? AND target_message_id=?",
+        (session_uuid, target_message_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_turn_corrections(session_uuid: str) -> list[dict]:
+    """Return all corrections for a session, oldest first."""
+    if not session_uuid:
+        return []
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM turn_corrections WHERE session_uuid=? ORDER BY created_at ASC",
+        (session_uuid,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_turn_correction_status(
+    session_uuid: str,
+    target_message_id: str,
+    status: str,
+    *,
+    expected_sha256: str,
+) -> tuple[str, dict | None]:
+    """Transition a pending correction to a terminal state.
+
+    Returns ``(outcome, row)``:
+
+    * ``("ok", row)`` — transition applied; ``row`` is the updated record.
+    * ``("not_found", None)`` — no row matches the (session, message) pair.
+    * ``("sha_mismatch", row)`` — the supplied ``expected_sha256`` does not
+      match the stored ``original_sha256``. Row left unchanged.
+    * ``("already_terminal", row)`` — row is already accepted/dismissed.
+      Row left unchanged.
+
+    Both terminal outcomes return the existing row so callers can render an
+    accurate "stale or mismatched" message without a second lookup.
+    """
+    if status not in ("accepted", "dismissed"):
+        raise ValueError(f"invalid terminal status: {status}")
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM turn_corrections WHERE session_uuid=? AND target_message_id=?",
+        (session_uuid, target_message_id),
+    ).fetchone()
+    if row is None:
+        return ("not_found", None)
+    existing = dict(row)
+    if existing["original_sha256"] != expected_sha256:
+        return ("sha_mismatch", existing)
+    if existing["status"] != "pending":
+        return ("already_terminal", existing)
+    now = time.time()
+    conn.execute(
+        "UPDATE turn_corrections SET status=?, updated_at=?"
+        " WHERE session_uuid=? AND target_message_id=? AND status='pending'",
+        (status, now, session_uuid, target_message_id),
+    )
+    conn.commit()
+    refreshed = conn.execute(
+        "SELECT * FROM turn_corrections WHERE session_uuid=? AND target_message_id=?",
+        (session_uuid, target_message_id),
+    ).fetchone()
+    return ("ok", dict(refreshed) if refreshed else None)
+
+
+def delete_turn_corrections_for_session(session_uuid: str) -> int:
+    """Drop every correction row for a session. Returns rows deleted.
+
+    Used by tests and dashboard-mock fixture rotation. Production code paths
+    do not delete correction rows — terminal rows are intentionally durable.
+    """
+    if not session_uuid:
+        return 0
+    conn = get_conn()
+    cursor = conn.execute(
+        "DELETE FROM turn_corrections WHERE session_uuid=?", (session_uuid,)
+    )
+    conn.commit()
+    return cursor.rowcount or 0
