@@ -17,6 +17,7 @@ import asyncio
 import logging
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 
 from agents.capabilities.github import probe as github_probe
 from agents.capabilities.github.service import (
@@ -100,6 +101,86 @@ NAG_DEFAULT = NAG_SILENT
 # forgotten nag mode auto-reverts to silent.
 NAG_DEFAULT_DURATION_SECONDS = 3600.0   # 1 hour by default
 NAG_MAX_DURATION_SECONDS = 14400.0      # 4-hour absolute ceiling
+# Hard ceiling for ``nag_when_terminal`` — the smart-cadence polling
+# loop disarms automatically once this many seconds have elapsed since
+# the row was armed (per Jeremy 2026-04-30, never unlimited polling).
+NAG_DONE_TIMEOUT_SECONDS = 7200.0       # 2 hours
+
+
+def next_poll_delay(elapsed_seconds: float) -> float | None:
+    """Smart-cadence delay (seconds) between background polls for a nag-armed row.
+
+    Tight at the start to catch fast-failing checks, then relaxed once
+    the row has been armed for more than 5 minutes. Returns ``None``
+    when the 2-hour cap has been reached — the caller treats that as
+    "disarm, do not poll any more."
+
+    The schedule ramps:
+
+    * ``elapsed < 30`` → 30s (the first poll fires at ``t=30s``)
+    * ``30 ≤ elapsed < 300`` → 60s (one poll per minute through 5 min)
+    * ``elapsed ≥ 300`` → 300s (every 5 min until timeout)
+
+    Across the full 2-hour window, the schedule produces roughly 28
+    polls per row — far cheaper than the legacy 60/hour budget while
+    still tight enough to catch CI transitions in seconds rather than
+    minutes.
+    """
+    if elapsed_seconds >= NAG_DONE_TIMEOUT_SECONDS:
+        return None
+    if elapsed_seconds < 30:
+        return 30.0
+    if elapsed_seconds < 300:
+        return 60.0
+    return 300.0
+
+
+def _is_review_terminal(review: dict | None) -> bool:
+    """A review's checks are *terminal* once at least one check exists
+    and none of them are still ``running`` or ``pending``."""
+    if not review:
+        return False
+    checks = review.get("checks") or []
+    if not checks:
+        return False
+    for entry in checks:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") in ("running", "pending"):
+            return False
+    return True
+
+
+def _format_terminal_message(review: dict) -> str:
+    """Compose the GREEN/RED CrossTalk body for a terminalized PR.
+
+    Mirrors the wording from auto-bugm6 (the bead spec). The bead-spec
+    message uses ``review.number`` as the PR identifier; falls back to
+    ``review_id`` if number is unavailable.
+    """
+    checks = [c for c in (review.get("checks") or []) if isinstance(c, dict)]
+    total = len(checks)
+    failed = [c for c in checks if c.get("status") == "fail"]
+    fail_count = len(failed)
+    number = review.get("number")
+    if number:
+        pr_label = f"PR #{number}"
+    else:
+        pr_label = f"review {review.get('review_id') or '?'}"
+    plural = "check" if total == 1 else "checks"
+    if fail_count == 0:
+        return (
+            f"You got merged review status: {pr_label} — GREEN\n"
+            f"All {total} {plural} passed."
+        )
+    names = [
+        (c.get("label") or c.get("id") or "?").strip() or "?"
+        for c in failed
+    ]
+    return (
+        f"You got merged review status: {pr_label} — RED\n"
+        f"{fail_count} of {total} {plural} failed: {', '.join(names)}"
+    )
 
 
 def _degraded_snapshot(
@@ -545,6 +626,21 @@ class WorktreeMonitor:
         self._capability_backoff_until: float = 0.0
         # Per-row (mode, expiry_monotonic) — silent has no entry.
         self._nag_modes: dict[tuple[str, str], tuple[str, float]] = {}
+        # Per-row monotonic instant the row was armed for ``nag_done``.
+        # The smart-cadence polling clock starts here. Cleared when the
+        # row is moved off ``nag_done`` (silent or another mode).
+        self._armed_at: dict[tuple[str, str], float] = {}
+        # Per-row, per-review fired-state for terminal CrossTalks. The
+        # value is the head_sha at the time of firing, so a subsequent
+        # push that produces a new head_sha re-fires once it terminalizes.
+        self._terminal_fired: dict[tuple[str, str], dict[str, str]] = {}
+        # Optional async hook for terminal CrossTalk delivery. Server
+        # startup wires the dashboard's ``_send_dashboard_ui_crosstalk``
+        # path here; tests substitute a fake to assert wiring without
+        # touching tmux. ``(target_session, message) -> Awaitable[None]``.
+        self._terminal_notifier: (
+            Callable[[str, str], Awaitable[None]] | None
+        ) = None
         self._task: asyncio.Task | None = None
         self._lock: asyncio.Lock | None = None
         self._started = False
@@ -618,6 +714,8 @@ class WorktreeMonitor:
             # Silent doesn't need a timer — clear the entry so
             # get_nag_mode + the watch block both reflect plain silent.
             self._nag_modes.pop(key, None)
+            self._armed_at.pop(key, None)
+            self._terminal_fired.pop(key, None)
             cached = self._source_control_cache.get(key)
             if cached is not None:
                 cached["watch"] = {"mode": NAG_SILENT}
@@ -632,8 +730,20 @@ class WorktreeMonitor:
         # Clamp to the absolute ceiling — even an explicit longer
         # request gets capped here so the safety guarantee holds.
         duration_seconds = min(float(duration_seconds), NAG_MAX_DURATION_SECONDS)
-        expiry = time.monotonic() + duration_seconds
+        now = time.monotonic()
+        expiry = now + duration_seconds
         self._nag_modes[key] = (mode, expiry)
+        if mode == NAG_WHEN_DONE:
+            # Reset the smart-cadence clock and clear any stale
+            # fired-state so a re-arm re-notifies when checks
+            # terminalize again at the current head_sha.
+            self._armed_at[key] = now
+            self._terminal_fired[key] = {}
+        else:
+            # Other modes (currently nag_all) don't use the smart-cadence
+            # clock; drop any leftover entry from a previous nag_done
+            # cycle.
+            self._armed_at.pop(key, None)
 
         cached = self._source_control_cache.get(key)
         if cached is not None:
@@ -642,6 +752,18 @@ class WorktreeMonitor:
                 "expires_in_seconds": int(duration_seconds),
             }
         return mode
+
+    def set_terminal_notifier(
+        self,
+        notifier: Callable[[str, str], Awaitable[None]] | None,
+    ) -> None:
+        """Register the async hook used to deliver terminal CrossTalks.
+
+        Server startup calls this with ``_send_dashboard_ui_crosstalk``;
+        tests pass a stub. ``None`` clears the hook (no notifications
+        will fire). Idempotent — calling twice replaces the hook.
+        """
+        self._terminal_notifier = notifier
 
     async def refresh(self, *, force_capabilities: bool = False) -> list[WorktreeState]:
         """Force a scan and replace the cache.
@@ -760,6 +882,7 @@ class WorktreeMonitor:
         self._record_poll(key, now)
         self._source_control_cache[key] = snapshot
         self._source_control_fetched_at[key] = now
+        await self._fire_terminal_transitions(key, snapshot)
 
         if rate_limited or snapshot.get("reason") == FAILURE_RATE_LIMITED:
             self._capability_backoff_until = now + RATE_LIMIT_BACKOFF_SECONDS
@@ -771,6 +894,58 @@ class WorktreeMonitor:
         elif self._capability_backoff_until > 0:
             # Clean response — clear any stale back-off.
             self._capability_backoff_until = 0.0
+
+    async def _fire_terminal_transitions(
+        self, key: tuple[str, str], snapshot: dict,
+    ) -> None:
+        """Fire one CrossTalk per PR that just transitioned to terminal.
+
+        Only runs for rows armed under :data:`NAG_WHEN_DONE`. The fired
+        ledger is keyed by ``head_sha``, so a subsequent push that
+        produces a new head_sha re-fires once it terminalizes again.
+        Best-effort: notifier failures are logged but never propagated
+        — the cache write that triggered this call already succeeded.
+        """
+        if self.get_nag_mode(*key) != NAG_WHEN_DONE:
+            return
+        notifier = self._terminal_notifier
+        if notifier is None:
+            return
+        if not isinstance(snapshot, dict):
+            return
+        if snapshot.get("state") != "ready":
+            return
+        reviews = snapshot.get("reviews")
+        if not reviews:
+            single = snapshot.get("review")
+            reviews = [single] if single else []
+        fired = self._terminal_fired.setdefault(key, {})
+        session_name, _repo = key
+        for review in reviews:
+            if not isinstance(review, dict):
+                continue
+            if not _is_review_terminal(review):
+                continue
+            review_id = (
+                review.get("review_id")
+                or (str(review.get("number")) if review.get("number") else "")
+            )
+            if not review_id:
+                continue
+            head_sha = review.get("head_sha") or ""
+            if fired.get(review_id) == head_sha:
+                continue
+            message = _format_terminal_message(review)
+            try:
+                await notifier(session_name, message)
+            except Exception:
+                logger.warning(
+                    "worktree_monitor: terminal CrossTalk notifier failed "
+                    "for %s/%s review=%s",
+                    session_name, _repo, review_id, exc_info=True,
+                )
+                continue
+            fired[review_id] = head_sha
 
     def _watch_ttl_elapsed(self, key: tuple[str, str], now: float) -> bool:
         """True when the watch-active row's TTL window has lapsed."""
@@ -803,20 +978,49 @@ class WorktreeMonitor:
     ) -> bool:
         """Decide whether to fetch this row in a background tick.
 
-        Returns ``True`` only when every gate clears:
-          - row is watch-active (operator opted in),
-          - cached snapshot has at least one running review
-            (something is actually transitioning — no point polling
-            otherwise),
-          - the watch TTL has elapsed since the last fetch,
-          - the per-row sliding-hour poll budget has not been spent.
+        Two armed-row regimes:
 
-        Force-refresh callers do not consult this — they always fetch.
+        * :data:`NAG_WHEN_DONE` (auto-bugm6) — smart cadence keyed off
+          ``armed_at``. Polls at ``next_poll_delay`` intervals (30s,
+          60s, 300s tiers) until the 2-hour cap, regardless of whether
+          the cached review is still running. Once the cap elapses
+          ``next_poll_delay`` returns ``None`` and the row stops
+          polling. The smart cadence's own ceiling replaces the
+          flat-budget gate for these rows.
+        * :data:`NAG_ALL_CHANGES` — legacy gate: cached running review
+          + watch TTL + sliding-hour poll budget.
+
+        Silent rows never poll. Operator-forced refresh callers do not
+        consult this — they always fetch.
         """
-        if self.get_nag_mode(*key) == NAG_SILENT:
+        mode = self.get_nag_mode(*key)
+        if mode == NAG_SILENT:
             return False
         if cached is None:
             return False  # never had a snapshot; an operator refresh has to seed it
+
+        if mode == NAG_WHEN_DONE:
+            armed_at = self._armed_at.get(key)
+            if armed_at is None:
+                # Mode says nag_done but the smart-cadence clock was
+                # never armed — defensive fallback so we don't
+                # accidentally hammer gh on background ticks.
+                return False
+            elapsed = now - armed_at
+            if elapsed >= NAG_DONE_TIMEOUT_SECONDS:
+                return False  # 2h cap reached — disarm via cadence
+            # Spec: first poll fires at t=arm+30s; subsequent polls
+            # follow ``next_poll_delay`` for the current regime.
+            if elapsed < 30:
+                return False
+            last_fetch = self._source_control_fetched_at.get(key)
+            if last_fetch is None or last_fetch < armed_at:
+                return True  # first poll since arm
+            delay = next_poll_delay(elapsed)
+            if delay is None:
+                return False
+            return (now - last_fetch) >= delay
+
         # Plural ``reviews`` is the canonical shape post-binding migration;
         # legacy ``review`` (singular) is read as fallback for older cache
         # entries seeded before the migration.
@@ -900,16 +1104,28 @@ class WorktreeMonitor:
                 carried[key] = cached
 
         # Fan out only the rows that actually need a fresh fetch.
+        # Rows armed under ``nag_done`` go through the REST path so
+        # cache-only binding rows actually get refreshed on their
+        # smart-cadence schedule; everything else uses the legacy
+        # cache-only ``_fetch_source_control`` path.
+        async def _fetch_for_row(row: WorktreeState):
+            row_key = (row.session_name, row.repo_name)
+            row_mode = self.get_nag_mode(*row_key)
+            if row_mode == NAG_WHEN_DONE:
+                bindings = _read_bindings(row)
+                if bindings:
+                    snapshot, _rl = await _refresh_bindings_via_rest(
+                        row, rows, bindings, watch_mode=row_mode,
+                    )
+                    return snapshot
+            return await _fetch_source_control(
+                row, rows, watch_mode=row_mode,
+            )
+
         results: list = []
         if rows_to_fetch:
             results = await asyncio.gather(
-                *(
-                    _fetch_source_control(
-                        row, rows,
-                        watch_mode=self.get_nag_mode(row.session_name, row.repo_name),
-                    )
-                    for row in rows_to_fetch
-                ),
+                *(_fetch_for_row(row) for row in rows_to_fetch),
                 return_exceptions=True,
             )
 
@@ -918,6 +1134,7 @@ class WorktreeMonitor:
             k: v for k, v in self._source_control_fetched_at.items() if k in carried
         }
         rate_limit_seen = False
+        terminal_fire_targets: list[tuple[tuple[str, str], dict]] = []
         for row, snapshot in zip(rows_to_fetch, results):
             key = (row.session_name, row.repo_name)
             # Stamp the poll history regardless of outcome so a stuck
@@ -942,6 +1159,12 @@ class WorktreeMonitor:
             # 30s tick) skip gh entirely.
             if snapshot.get("reason") == FAILURE_RATE_LIMITED:
                 rate_limit_seen = True
+            else:
+                # Defer the actual notifier dispatch until after the
+                # cache has been swapped — the helper reads
+                # ``self.get_nag_mode`` and ``self._terminal_fired``,
+                # which both stay consistent across the swap.
+                terminal_fire_targets.append((key, snapshot))
 
         if rate_limit_seen:
             self._capability_backoff_until = now + RATE_LIMIT_BACKOFF_SECONDS
@@ -958,6 +1181,9 @@ class WorktreeMonitor:
 
         self._source_control_cache = new_cache
         self._source_control_fetched_at = new_fetched_at
+
+        for fire_key, fire_snapshot in terminal_fire_targets:
+            await self._fire_terminal_transitions(fire_key, fire_snapshot)
 
     async def start(self) -> None:
         """Start the background polling loop."""

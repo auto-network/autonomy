@@ -5719,6 +5719,28 @@ async def _send_dashboard_ui_crosstalk(target_session: str, message: str) -> Non
     )
 
 
+async def _terminal_crosstalk_notifier(target_session: str, message: str) -> None:
+    """Deliver a per-PR terminal CrossTalk for ``nag_when_terminal`` rows.
+
+    Wraps :func:`_send_dashboard_ui_crosstalk` so a dead session or
+    transient tmux failure logs but does not propagate — the cache
+    write that triggered this call already succeeded, and the worktree
+    monitor would otherwise drop the firing-state record on a raised
+    exception (see :meth:`WorktreeMonitor._fire_terminal_transitions`).
+    """
+    try:
+        await _send_dashboard_ui_crosstalk(target_session, message)
+    except WorkspaceError:
+        # Session went dead between cache write and notify — nothing
+        # to do, the worktree monitor still records this fire so we
+        # don't re-attempt for the same head_sha.
+        pass
+    except Exception:
+        logger.exception(
+            "terminal CrossTalk delivery failed for target=%s", target_session,
+        )
+
+
 def _session_meta_for_tmux(tmux_name: str) -> dict:
     """Look up a session's title + project + harness in one pass.
 
@@ -5852,6 +5874,27 @@ async def api_worktree_refresh(request):
         if row is None:
             return JSONResponse({"error": "worktree not found"}, status_code=404)
         return JSONResponse(row)
+
+    nag_when_terminal_raw = request.query_params.get("nag_when_terminal", "")
+    nag_when_terminal = (
+        str(nag_when_terminal_raw).strip().lower() in ("1", "true", "yes", "on")
+    )
+    if nag_when_terminal:
+        # Arm before refresh so the cache write that follows triggers
+        # a terminal CrossTalk if checks are already green/red. The 2h
+        # cap matches the smart-cadence ceiling baked into
+        # ``next_poll_delay``.
+        from tools.dashboard.worktree_monitor import (
+            NAG_WHEN_DONE,
+            NAG_DONE_TIMEOUT_SECONDS,
+        )
+        try:
+            worktree_monitor.set_nag_mode(
+                session_name, repo_name, NAG_WHEN_DONE,
+                duration_seconds=NAG_DONE_TIMEOUT_SECONDS,
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
     rows = await worktree_monitor.refresh_one(session_name, repo_name)
     row = _find_worktree_row(rows, session_name, repo_name)
@@ -10785,6 +10828,10 @@ async def _on_startup():
             restore_fn(EVENT_BUS_STATE_PATH)
         except Exception:
             logger.exception("event_bus.restore() raised unexpectedly; continuing")
+    # Wire the terminal CrossTalk notifier before the monitor starts so
+    # any initial-refresh cache write in ``start()`` can fire transitions
+    # for already-armed rows.
+    worktree_monitor.set_terminal_notifier(_terminal_crosstalk_notifier)
     if os.environ.get("DASHBOARD_MOCK"):
         await worktree_monitor.start()
         # Mock mode: skip real database init and session monitor.

@@ -2724,3 +2724,625 @@ class TestRefreshOneOverBindings:
         # Cache content unchanged; the snapshot still reads "Cached".
         snapshot = monitor.get_source_control("auto-x", "autonomy")
         assert snapshot["reviews"][0]["title"] == "Cached"
+
+
+# ── Smart-cadence + nag-when-terminal (auto-bugm6) ─────────────────────
+
+
+class TestNextPollDelay:
+    """``next_poll_delay`` schedule for nag-armed rows."""
+
+    def test_first_poll_at_30s(self):
+        from tools.dashboard.worktree_monitor import next_poll_delay
+        # Anywhere in [0, 30) the function returns 30 — the first poll
+        # fires when ``elapsed >= 30``.
+        assert next_poll_delay(0) == 30.0
+        assert next_poll_delay(15) == 30.0
+        assert next_poll_delay(29.9) == 30.0
+
+    def test_60s_tier_through_5min(self):
+        from tools.dashboard.worktree_monitor import next_poll_delay
+        for elapsed in (30, 60, 90, 150, 240, 299.9):
+            assert next_poll_delay(elapsed) == 60.0
+
+    def test_5min_tier_after_5min(self):
+        from tools.dashboard.worktree_monitor import next_poll_delay
+        for elapsed in (300, 600, 1800, 3600, 7199.9):
+            assert next_poll_delay(elapsed) == 300.0
+
+    def test_returns_none_at_or_past_2h(self):
+        from tools.dashboard.worktree_monitor import next_poll_delay
+        # 2-hour cap. Past it the row must disarm rather than poll forever.
+        assert next_poll_delay(7200) is None
+        assert next_poll_delay(7201) is None
+        assert next_poll_delay(100_000) is None
+
+
+class TestArmingNagWhenDone:
+    """``set_nag_mode("nag_done", ...)`` arms the smart-cadence clock and
+    clears any prior fired-state for the row."""
+
+    def test_arming_sets_armed_at(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        monitor = wm.WorktreeMonitor()
+        before = time.monotonic()
+        monitor.set_nag_mode(
+            "auto-x", "autonomy", "nag_done",
+            duration_seconds=wm.NAG_DONE_TIMEOUT_SECONDS,
+        )
+        after = time.monotonic()
+        armed = monitor._armed_at[("auto-x", "autonomy")]
+        assert before <= armed <= after
+
+    def test_arming_clears_previous_fired_state(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        monitor = wm.WorktreeMonitor()
+        # Pretend a previous arm fired a notification for PR #42.
+        monitor._terminal_fired[("auto-x", "autonomy")] = {"42": "old-sha"}
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_done")
+        # Re-arming gives the row a fresh ledger so a re-terminalized
+        # PR (even at the same head_sha) re-fires once.
+        assert monitor._terminal_fired[("auto-x", "autonomy")] == {}
+
+    def test_silent_clears_armed_at_and_fired(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_done")
+        monitor._terminal_fired[("auto-x", "autonomy")]["42"] = "sha"
+        monitor.set_nag_mode("auto-x", "autonomy", "silent")
+        assert ("auto-x", "autonomy") not in monitor._armed_at
+        assert ("auto-x", "autonomy") not in monitor._terminal_fired
+
+    def test_nag_all_does_not_set_armed_at(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_all")
+        # nag_all uses the legacy budget gate, not the smart cadence.
+        assert ("auto-x", "autonomy") not in monitor._armed_at
+
+
+class TestSmartCadenceShouldPoll:
+    """``_should_poll_in_background`` for nag_done rows respects the
+    smart-cadence schedule keyed off ``armed_at``."""
+
+    def _seeded_monitor(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        monitor = wm.WorktreeMonitor()
+        # Seed a non-degraded snapshot so the cached-is-None gate clears.
+        monitor._source_control_cache[("auto-x", "autonomy")] = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "reviews": [{"running": False, "checks": []}],
+            "review": None,
+            "watch": {"mode": "nag_done"},
+        }
+        return monitor
+
+    def _arm_at(self, monitor, *, armed_at_offset, now):
+        """Set up the monitor so it looks armed at ``now+armed_at_offset``.
+
+        The mode-expiry must outlive the synthetic ``now`` we'll pass to
+        ``_should_poll_in_background``, which itself reads
+        ``time.monotonic()`` for the expiry comparison. We pin the
+        expiry well into the future relative to the real clock so the
+        live expiry never trips the test.
+        """
+        monitor._armed_at[("auto-x", "autonomy")] = armed_at_offset
+        # Use the real monotonic now + a generous slack for expiry,
+        # since get_nag_mode reads the live clock.
+        monitor._nag_modes[("auto-x", "autonomy")] = (
+            "nag_done", time.monotonic() + 100_000,
+        )
+
+    def test_does_not_poll_within_first_30s(self):
+        monitor = self._seeded_monitor()
+        armed = 1000.0
+        self._arm_at(monitor, armed_at_offset=armed, now=armed)
+        # 10s after arm — too early.
+        assert not monitor._should_poll_in_background(
+            ("auto-x", "autonomy"),
+            monitor._source_control_cache[("auto-x", "autonomy")],
+            armed + 10,
+        )
+
+    def test_polls_at_or_after_30s_when_no_prior_fetch(self):
+        monitor = self._seeded_monitor()
+        armed = 1000.0
+        self._arm_at(monitor, armed_at_offset=armed, now=armed)
+        # No prior fetch -> first eligible poll at t=arm+30s.
+        assert monitor._should_poll_in_background(
+            ("auto-x", "autonomy"),
+            monitor._source_control_cache[("auto-x", "autonomy")],
+            armed + 30,
+        )
+
+    def test_does_not_repoll_until_60s_after_last_poll_in_minute_tier(self):
+        monitor = self._seeded_monitor()
+        armed = 1000.0
+        self._arm_at(monitor, armed_at_offset=armed, now=armed)
+        # Pretend we just polled at t=arm+60s.
+        monitor._source_control_fetched_at[("auto-x", "autonomy")] = armed + 60
+        # Still in 60s tier — must wait 60s after last fetch before
+        # the next poll (regime says delay = 60).
+        assert not monitor._should_poll_in_background(
+            ("auto-x", "autonomy"),
+            monitor._source_control_cache[("auto-x", "autonomy")],
+            armed + 100,
+        )
+        assert monitor._should_poll_in_background(
+            ("auto-x", "autonomy"),
+            monitor._source_control_cache[("auto-x", "autonomy")],
+            armed + 120,
+        )
+
+    def test_5min_tier_uses_300s_gap(self):
+        monitor = self._seeded_monitor()
+        armed = 1000.0
+        self._arm_at(monitor, armed_at_offset=armed, now=armed)
+        # Past 5min — gap is now 300s.
+        monitor._source_control_fetched_at[("auto-x", "autonomy")] = armed + 600
+        assert not monitor._should_poll_in_background(
+            ("auto-x", "autonomy"),
+            monitor._source_control_cache[("auto-x", "autonomy")],
+            armed + 800,
+        )
+        assert monitor._should_poll_in_background(
+            ("auto-x", "autonomy"),
+            monitor._source_control_cache[("auto-x", "autonomy")],
+            armed + 900,
+        )
+
+    def test_2h_cap_disarms_via_cadence(self):
+        monitor = self._seeded_monitor()
+        armed = 1000.0
+        self._arm_at(monitor, armed_at_offset=armed, now=armed)
+        monitor._source_control_fetched_at[("auto-x", "autonomy")] = armed + 7000
+        assert not monitor._should_poll_in_background(
+            ("auto-x", "autonomy"),
+            monitor._source_control_cache[("auto-x", "autonomy")],
+            armed + 7300,
+        )
+
+    def test_silent_row_does_not_poll_even_if_armed_at_is_set(self):
+        # Defensive: a residual ``_armed_at`` entry must not bypass the
+        # silent gate.
+        monitor = self._seeded_monitor()
+        now = 1000.0
+        monitor._armed_at[("auto-x", "autonomy")] = now  # leftover
+        # No entry in _nag_modes -> get_nag_mode returns 'silent'.
+        assert not monitor._should_poll_in_background(
+            ("auto-x", "autonomy"),
+            monitor._source_control_cache[("auto-x", "autonomy")],
+            now + 60,
+        )
+
+
+class TestFireTerminalTransitions:
+    """``_fire_terminal_transitions`` per-PR CrossTalk delivery."""
+
+    def _arm(self, monitor, key=("auto-x", "autonomy")):
+        from tools.dashboard import worktree_monitor as wm
+        monitor.set_nag_mode(*key, "nag_done")
+
+    def _terminal_review(self, *, number=42, head="abc", green=True):
+        if green:
+            checks = [
+                {"id": "build", "label": "build", "status": "pass"},
+                {"id": "test",  "label": "test",  "status": "pass"},
+            ]
+        else:
+            checks = [
+                {"id": "build", "label": "build", "status": "fail"},
+                {"id": "lint",  "label": "lint",  "status": "fail"},
+                {"id": "test",  "label": "test",  "status": "pass"},
+                {"id": "deploy","label": "deploy","status": "pass"},
+            ]
+        return {
+            "number": number,
+            "review_id": str(number),
+            "head_sha": head,
+            "checks": checks,
+        }
+
+    def _ready(self, reviews):
+        return {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "reviews": reviews,
+            "review": reviews[0] if reviews else None,
+            "watch": {"mode": "nag_done"},
+        }
+
+    def test_green_pr_fires_green_message(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        sent = []
+        async def fake(target, msg):
+            sent.append((target, msg))
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(fake)
+        self._arm(monitor)
+
+        snapshot = self._ready([self._terminal_review(number=42, green=True)])
+        asyncio.run(
+            monitor._fire_terminal_transitions(("auto-x", "autonomy"), snapshot),
+        )
+        assert len(sent) == 1
+        target, msg = sent[0]
+        assert target == "auto-x"
+        assert "PR #42 — GREEN" in msg
+        assert "All 2 checks passed" in msg
+
+    def test_red_pr_lists_failing_check_names(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        sent = []
+        async def fake(target, msg):
+            sent.append((target, msg))
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(fake)
+        self._arm(monitor)
+
+        snapshot = self._ready([self._terminal_review(number=303, green=False)])
+        asyncio.run(
+            monitor._fire_terminal_transitions(("auto-x", "autonomy"), snapshot),
+        )
+        assert len(sent) == 1
+        msg = sent[0][1]
+        assert "PR #303 — RED" in msg
+        assert "2 of 4 checks failed" in msg
+        assert "build" in msg and "lint" in msg
+
+    def test_does_not_fire_when_running_check_remains(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        sent = []
+        async def fake(target, msg):
+            sent.append((target, msg))
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(fake)
+        self._arm(monitor)
+
+        review = self._terminal_review()
+        review["checks"].append(
+            {"id": "deploy", "label": "deploy", "status": "running"},
+        )
+        asyncio.run(
+            monitor._fire_terminal_transitions(
+                ("auto-x", "autonomy"), self._ready([review]),
+            ),
+        )
+        assert sent == []
+
+    def test_fires_only_when_mode_is_nag_done(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        sent = []
+        async def fake(target, msg):
+            sent.append((target, msg))
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(fake)
+
+        # nag_all should NOT trigger a terminal fire.
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_all")
+        asyncio.run(
+            monitor._fire_terminal_transitions(
+                ("auto-x", "autonomy"),
+                self._ready([self._terminal_review()]),
+            ),
+        )
+        assert sent == []
+
+        # Same row in nag_done — fires.
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_done")
+        asyncio.run(
+            monitor._fire_terminal_transitions(
+                ("auto-x", "autonomy"),
+                self._ready([self._terminal_review()]),
+            ),
+        )
+        assert len(sent) == 1
+
+    def test_does_not_refire_for_same_head_sha(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        sent = []
+        async def fake(target, msg):
+            sent.append((target, msg))
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(fake)
+        self._arm(monitor)
+
+        snapshot = self._ready([self._terminal_review(number=42, head="abc")])
+        asyncio.run(
+            monitor._fire_terminal_transitions(("auto-x", "autonomy"), snapshot),
+        )
+        # Second pass at the same head_sha — already fired.
+        asyncio.run(
+            monitor._fire_terminal_transitions(("auto-x", "autonomy"), snapshot),
+        )
+        assert len(sent) == 1
+
+    def test_refires_after_new_head_sha(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        sent = []
+        async def fake(target, msg):
+            sent.append((target, msg))
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(fake)
+        self._arm(monitor)
+
+        first = self._ready([self._terminal_review(number=42, head="abc")])
+        asyncio.run(
+            monitor._fire_terminal_transitions(("auto-x", "autonomy"), first),
+        )
+        # Push lands -> new head_sha. Should fire again.
+        second = self._ready([self._terminal_review(number=42, head="def")])
+        asyncio.run(
+            monitor._fire_terminal_transitions(("auto-x", "autonomy"), second),
+        )
+        assert len(sent) == 2
+
+    def test_stacked_prs_each_fire_separate_message(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        sent = []
+        async def fake(target, msg):
+            sent.append(msg)
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(fake)
+        self._arm(monitor)
+
+        stacked = self._ready([
+            self._terminal_review(number=100, head="aaa", green=True),
+            self._terminal_review(number=101, head="bbb", green=False),
+        ])
+        asyncio.run(
+            monitor._fire_terminal_transitions(("auto-x", "autonomy"), stacked),
+        )
+        assert len(sent) == 2
+        joined = "\n".join(sent)
+        assert "PR #100 — GREEN" in joined
+        assert "PR #101 — RED" in joined
+
+    def test_no_notifier_does_nothing(self):
+        # Defensive: the monitor must not crash when no notifier is wired.
+        from tools.dashboard import worktree_monitor as wm
+
+        monitor = wm.WorktreeMonitor()
+        self._arm(monitor)
+        # Should not raise.
+        asyncio.run(
+            monitor._fire_terminal_transitions(
+                ("auto-x", "autonomy"),
+                self._ready([self._terminal_review()]),
+            ),
+        )
+
+    def test_notifier_failure_does_not_record_fire(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        async def boom(target, msg):
+            raise RuntimeError("tmux dead")
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(boom)
+        self._arm(monitor)
+
+        snapshot = self._ready([self._terminal_review(number=42, head="abc")])
+        # Must not raise — best-effort delivery.
+        asyncio.run(
+            monitor._fire_terminal_transitions(("auto-x", "autonomy"), snapshot),
+        )
+        # Failure means we did NOT record the fire — the next call (with
+        # a working notifier) re-attempts at the same head_sha.
+        fired = monitor._terminal_fired.get(("auto-x", "autonomy"), {})
+        assert fired.get("42") != "abc"
+
+
+class TestFormatTerminalMessage:
+    """``_format_terminal_message`` wording matches the bead spec."""
+
+    def test_singular_check_grammar(self):
+        from tools.dashboard.worktree_monitor import _format_terminal_message
+        msg = _format_terminal_message({
+            "number": 7, "review_id": "7", "head_sha": "x",
+            "checks": [{"id": "build", "label": "build", "status": "pass"}],
+        })
+        assert "All 1 check passed" in msg
+
+    def test_red_uses_label_when_present_else_id(self):
+        from tools.dashboard.worktree_monitor import _format_terminal_message
+        msg = _format_terminal_message({
+            "number": 7, "review_id": "7", "head_sha": "x",
+            "checks": [
+                {"id": "fallback-id", "label": "", "status": "fail"},
+                {"id": "ci", "label": "CI / build", "status": "pass"},
+            ],
+        })
+        # Empty label falls back to id.
+        assert "fallback-id" in msg
+
+
+class TestNagWhenTerminalEndpoint:
+    """``POST /api/worktrees/{session}/{repo}/refresh?nag_when_terminal=1``
+    arms ``nag_done`` with the 2-hour cap before doing the refresh."""
+
+    def test_query_param_arms_nag_done_with_2h_cap(self, test_client, monkeypatch):
+        from tools.dashboard import server
+
+        captured = {}
+
+        def fake_set(session, repo, mode, *, duration_seconds=None):
+            captured["args"] = (session, repo, mode)
+            captured["duration_seconds"] = duration_seconds
+            return mode
+
+        async def fake_refresh_one(session, repo):
+            return [_row(session=session, repo=repo, live=True)]
+
+        monkeypatch.setattr(server.worktree_monitor, "set_nag_mode", fake_set)
+        monkeypatch.setattr(server.worktree_monitor, "refresh_one", fake_refresh_one)
+
+        resp = test_client.post(
+            "/api/worktrees/auto-x/autonomy/refresh?nag_when_terminal=1",
+        )
+        assert resp.status_code == 200
+        assert captured["args"] == ("auto-x", "autonomy", "nag_done")
+        # Spec: 2-hour cap (NAG_DONE_TIMEOUT_SECONDS).
+        assert captured["duration_seconds"] == 7200.0
+
+    def test_default_refresh_does_not_arm(self, test_client, monkeypatch):
+        from tools.dashboard import server
+
+        called = {"set": False}
+
+        def fake_set(*_args, **_kwargs):
+            called["set"] = True
+            return "silent"
+
+        async def fake_refresh_one(session, repo):
+            return [_row(session=session, repo=repo, live=True)]
+
+        monkeypatch.setattr(server.worktree_monitor, "set_nag_mode", fake_set)
+        monkeypatch.setattr(server.worktree_monitor, "refresh_one", fake_refresh_one)
+
+        resp = test_client.post("/api/worktrees/auto-x/autonomy/refresh")
+        assert resp.status_code == 200
+        assert called["set"] is False
+
+    def test_truthy_aliases_recognized(self, test_client, monkeypatch):
+        from tools.dashboard import server
+
+        captured = []
+
+        def fake_set(session, repo, mode, *, duration_seconds=None):
+            captured.append(mode)
+            return mode
+
+        async def fake_refresh_one(session, repo):
+            return [_row(session=session, repo=repo, live=True)]
+
+        monkeypatch.setattr(server.worktree_monitor, "set_nag_mode", fake_set)
+        monkeypatch.setattr(server.worktree_monitor, "refresh_one", fake_refresh_one)
+
+        for raw in ("1", "true", "TRUE", "yes", "on"):
+            resp = test_client.post(
+                f"/api/worktrees/auto-x/autonomy/refresh?nag_when_terminal={raw}",
+            )
+            assert resp.status_code == 200
+        assert captured == ["nag_done"] * 5
+
+
+class TestRefreshOneFiresOnArm:
+    """The refresh-with-arm flow: when the row is armed before the
+    cache write inside ``refresh_one``, the post-write transition
+    helper fires immediately for already-terminal PRs."""
+
+    def test_armed_row_with_terminal_pr_fires_immediately(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        from agents.capabilities.github import service as wg
+        from tools.dashboard import worktree_monitor as wm
+        from tools.graph import settings_ops
+
+        # Bind a single PR.
+        settings_ops.add_setting(
+            "autonomy.worktree.review_binding", 1,
+            "auto-x:autonomy:session/auto-x:303",
+            {"base_sha": "fa9bcd"},
+            org="autonomy",
+        )
+
+        async def fake_review(*args, **kwargs):
+            return wg.WorktreeGithubExecResult(
+                operation=wg.OP_REVIEW_READ_BY_ID,
+                session_name="auto-x", repo_name="autonomy",
+                ok=True,
+                stdout=(
+                    'HTTP/2.0 200 OK\r\nETag: "etag-X"\r\n\r\n'
+                    '{"title":"Done","body":"","state":"open",'
+                    '"draft":false,"html_url":"https://example/pull/303",'
+                    '"head":{"sha":"headXYZ"},'
+                    '"base":{"sha":"baseSHA","ref":"main"}}'
+                ),
+            )
+
+        async def fake_checks(*args, **kwargs):
+            return wg.WorktreeGithubExecResult(
+                operation=wg.OP_CHECK_RUNS_READ_FOR_SHA,
+                session_name="auto-x", repo_name="autonomy",
+                ok=True,
+                stdout=(
+                    '{"check_runs":['
+                    '{"id":1,"name":"build","status":"completed","conclusion":"success"},'
+                    '{"id":2,"name":"test","status":"completed","conclusion":"success"}'
+                    ']}'
+                ),
+            )
+
+        monkeypatch.setattr(wm, "source_control_review_read_by_id_v1", fake_review)
+        monkeypatch.setattr(wm, "source_control_check_runs_read_for_sha_v1", fake_checks)
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+
+        sent = []
+        async def notifier(target, message):
+            sent.append((target, message))
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(notifier)
+        # Arm BEFORE the cache write — mirrors the API endpoint flow.
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_done")
+
+        row = _row(session="auto-x", repo="autonomy", live=True)
+        asyncio.run(monitor._refresh_one_source_control(row, [row]))
+
+        assert len(sent) == 1
+        assert sent[0][0] == "auto-x"
+        assert "PR #303 — GREEN" in sent[0][1]
+
+
+class TestDeclarePrAmendedHelper:
+    """The helper script under ``agents/capabilities/github/bin/`` exists
+    and is documented in the SKILL.md, per the bead's acceptance line."""
+
+    def test_helper_script_exists_and_is_executable(self):
+        helper = (
+            Path(__file__).resolve().parents[3]
+            / "agents" / "capabilities" / "github"
+            / "bin" / "declare-pr-amended.sh"
+        )
+        assert helper.exists(), f"missing: {helper}"
+        # Must be executable so dispatcher containers can invoke directly.
+        import os
+        assert os.access(helper, os.X_OK), f"not executable: {helper}"
+        text = helper.read_text()
+        # Sanity: hits the refresh endpoint with the arming query param.
+        assert "nag_when_terminal=1" in text
+        assert "/api/worktrees/" in text
+
+    def test_skill_md_documents_the_helper(self):
+        skill = (
+            Path(__file__).resolve().parents[3]
+            / "agents" / "capabilities" / "github" / "SKILL.md"
+        )
+        text = skill.read_text()
+        assert "declare-pr-amended.sh" in text
+        # Wording cue from the bead's acceptance: "I just amended a commit"
+        # workflow. Match loosely so future copy-edits don't break.
+        assert "amended" in text.lower()
