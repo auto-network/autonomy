@@ -457,10 +457,19 @@ class WorktreeState:
 
 @dataclass(frozen=True)
 class WorktreeDirtyDetail:
-    """Uncommitted file detail for a worktree review screen."""
+    """Uncommitted file detail for a worktree review screen.
+
+    ``stale`` flags the case where the requested base/head SHAs no
+    longer exist locally (force-push to a rewritten branch, an
+    operator-bound review whose head SHA was orphaned by a rebase,
+    etc.). The dashboard renders a "stale, refresh required"
+    indicator instead of crashing.
+    """
 
     files: list[GitFileChange] = field(default_factory=list)
     patch: str | None = None
+    stale: bool = False
+    reason: str | None = None
 
 
 def _git_output(args: list[str], cwd: Path, *, timeout: int = 15) -> tuple[int, str, str]:
@@ -1355,6 +1364,12 @@ def cleanup_session_worktrees(
         _delete_branch(clone, branch)
         _worktree_prune(clone)
 
+    # Wipe operator-declared review bindings for this session — they're
+    # scoped to the worktree and would dangle otherwise. The
+    # ``review_state`` cache is per-org and survives this on purpose so
+    # the next worktree against the same review re-uses it.
+    _delete_review_bindings_for_session(session_name)
+
     return result
 
 
@@ -1431,7 +1446,68 @@ def cleanup_session_worktree(
             except OSError as e:
                 result.errors.append((str(session_dir), f"rmdir: {e}"))
 
+    # Wipe operator-declared review bindings scoped to this exact
+    # (session, repo) pair. The cache stays put.
+    _delete_review_bindings_for_session_repo(session_name, repo_name)
+
     return result
+
+
+def _delete_review_bindings_for_session(session_name: str) -> int:
+    """Hard-delete every review-binding row scoped to ``session_name``."""
+    try:
+        from tools.graph import settings_ops
+        from tools.graph.schemas.worktree_review_binding import (
+            SET_ID as REVIEW_BINDING_SET_ID,
+        )
+    except Exception:
+        logger.warning(
+            "workspace cleanup: settings_ops unavailable; skipping "
+            "review binding cleanup for %s",
+            session_name,
+        )
+        return 0
+    try:
+        return settings_ops.remove_settings_by_key_prefix(
+            REVIEW_BINDING_SET_ID,
+            prefix=session_name,
+            org="autonomy",
+        )
+    except Exception:
+        logger.warning(
+            "workspace cleanup: review binding cleanup failed for %s",
+            session_name,
+            exc_info=True,
+        )
+        return 0
+
+
+def _delete_review_bindings_for_session_repo(
+    session_name: str,
+    repo_name: str,
+) -> int:
+    """Hard-delete every review-binding row scoped to ``(session, repo)``."""
+    try:
+        from tools.graph import settings_ops
+        from tools.graph.schemas.worktree_review_binding import (
+            SET_ID as REVIEW_BINDING_SET_ID,
+        )
+    except Exception:
+        return 0
+    try:
+        return settings_ops.remove_settings_by_key_prefix(
+            REVIEW_BINDING_SET_ID,
+            prefix=f"{session_name}:{repo_name}",
+            org="autonomy",
+        )
+    except Exception:
+        logger.warning(
+            "workspace cleanup: review binding cleanup failed for %s/%s",
+            session_name,
+            repo_name,
+            exc_info=True,
+        )
+        return 0
 
 
 def prune_orphan_worktrees(
@@ -1866,21 +1942,38 @@ def get_session_worktree_integrated_diff(
     session_name: str,
     repo_name: str,
     *,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
     worktrees_dir: Path = WORKTREES_DIR,
 ) -> WorktreeDirtyDetail:
-    """Return the integrated PR diff (``merge-base..HEAD``) for one worktree.
+    """Return the integrated PR diff for one worktree.
 
-    The shape mirrors :class:`WorktreeDirtyDetail` (file list + patch)
-    so the existing ``_worktree_dirty_detail_json`` serializer can
-    render it; semantically this is the integrated commit-stack diff
-    a PR reviewer sees, not uncommitted changes. Used by the
-    auto-r098a PR-mode review overlay.
+    Default is ``merge-base..HEAD``: the operator-classic "everything
+    on this branch" diff. When ``base_sha`` and ``head_sha`` are both
+    supplied, the diff is scoped to ``base_sha..head_sha`` so stacked
+    reviews render only their own commits.
+
+    When the explicit base/head SHAs aren't present locally, the
+    return value carries ``stale=True`` with a human-readable
+    ``reason`` instead of raising — the UI surfaces a refresh-needed
+    indicator instead of silently diffing the wrong range.
     """
     worktree = _session_worktree_path(
         session_name,
         repo_name,
         worktrees_dir=worktrees_dir,
     )
+    if base_sha and head_sha:
+        if not _worktree_has_object(worktree, base_sha) or not _worktree_has_object(
+            worktree, head_sha
+        ):
+            return WorktreeDirtyDetail(
+                files=[],
+                patch=None,
+                stale=True,
+                reason="cached SHA not present locally; refresh required",
+            )
+        return _diff_for_explicit_shas(worktree, base_sha, head_sha)
     base_ref = _worktree_dashboard_base_ref(worktree, repo_name)
     if base_ref is None:
         raise WorkspaceError(
@@ -1901,6 +1994,78 @@ def get_session_worktree_integrated_diff(
         files=files,
         patch=_worktree_integrated_patch(worktree, base_ref),
     )
+
+
+def _worktree_has_object(worktree: Path, sha: str) -> bool:
+    """Return True iff ``sha`` resolves to a commit object in the repo."""
+    if not sha:
+        return False
+    rc, _, _ = _git_output(
+        ["cat-file", "-e", f"{sha}^{{commit}}"],
+        worktree,
+        timeout=10,
+    )
+    return rc == 0
+
+
+def _diff_for_explicit_shas(
+    worktree: Path,
+    base_sha: str,
+    head_sha: str,
+) -> WorktreeDirtyDetail:
+    """Compute unified diff + file metadata for ``base_sha..head_sha``."""
+    rc, patch, _ = _git_output(
+        ["diff", "--patch", "--find-renames", f"{base_sha}..{head_sha}"],
+        worktree,
+        timeout=60,
+    )
+    if rc != 0:
+        return WorktreeDirtyDetail(files=[], patch=None, stale=True, reason="git diff failed")
+    rc, name_status_out, _ = _git_output(
+        ["diff", "--name-status", "--find-renames", f"{base_sha}..{head_sha}"],
+        worktree,
+        timeout=30,
+    )
+    rc2, numstat_out, _ = _git_output(
+        ["diff", "--numstat", "--find-renames", f"{base_sha}..{head_sha}"],
+        worktree,
+        timeout=30,
+    )
+    if rc != 0 or rc2 != 0:
+        return WorktreeDirtyDetail(
+            files=[],
+            patch=patch.strip() or None,
+            stale=True,
+            reason="git metadata read failed",
+        )
+    numstats: dict[str, tuple[int, int]] = {}
+    for line in numstat_out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        path = parts[-1].strip()
+        if not path:
+            continue
+        numstats[path] = (_parse_numstat(parts[0]), _parse_numstat(parts[1]))
+    files: list[GitFileChange] = []
+    for line in name_status_out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0].strip()
+        path = parts[-1].strip()
+        if not path:
+            continue
+        adds, dels = numstats.get(path, (0, 0))
+        files.append(
+            GitFileChange(
+                status=status[:1] or "M",
+                path=path,
+                additions=adds,
+                deletions=dels,
+            )
+        )
+    return WorktreeDirtyDetail(files=files, patch=patch.strip() or None)
 
 def merge_session_worktree_commit(
     session_name: str,

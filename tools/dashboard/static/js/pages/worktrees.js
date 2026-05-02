@@ -453,46 +453,98 @@
       },
 
       // ── source_control / autonomy/github capability bridge ────────
-      // Backend exposes review state under row.source_control.review
-      // (see auto-4ze9o). The settled design template uses a flatter
-      // ``row.pr`` shape with ``state`` ∈ green|yellow. rowPr() adapts
-      // between them so the design's HTML/Alpine bindings can be used
-      // verbatim.
+      // Backend exposes review state under row.source_control.reviews
+      // (plural — one entry per binding for stacked PRs; legacy
+      // singular ``review`` is read as a fallback). rowPrs() adapts
+      // each entry into the flatter ``pr`` shape the settled design
+      // template binds against. rowPr() returns the first one for
+      // back-compat with single-PR call sites.
 
       /**
-       * Adapt a worktree row's ``source_control.review`` (a
-       * {@link ReviewPayloadV1} from the capability) to the flatter
-       * ``pr`` shape the settled design template binds against.
-       * @param {{source_control?: {review?: ReviewPayloadV1}} | null} row
-       * @returns {{
-       *   number: ReviewPayloadV1['number'],
-       *   url: ReviewPayloadV1['url'],
-       *   title: ReviewPayloadV1['title'],
-       *   body: ReviewPayloadV1['body'],
-       *   state: ReviewPayloadV1['aggregate_state'],
-       *   running: ReviewPayloadV1['running'],
-       *   watch_active: boolean,
-       *   pr_checks: CheckEntryV1[]
-       * } | null}
+       * @param {ReviewPayloadV1} review
+       * @param {string} mode
+       * @returns {object}
        */
-      rowPr(row) {
-        const review = row && row.source_control && row.source_control.review;
-        if (!review) return null;
-        const mode = this.rowNagMode(row);
+      _adaptReview(review, mode) {
+        const checks = (review.checks || []).map(c => ({
+          ...c,
+          // Cache stores no ``icon`` — derive it from the label so the
+          // disc renders without a server-side dependency.
+          icon: c.icon || this._iconFromLabel(c.label),
+        }));
+        const aggregate = review.aggregate_state
+          || (checks.some(c => c.status === 'fail') ? 'yellow' : 'green');
         return {
           number: review.number,
+          review_id: review.review_id || (review.number != null ? String(review.number) : ''),
           url: review.url,
           title: review.title,
           body: review.body,
-          state: review.aggregate_state,
-          running: review.running,
-          // animate-pulse fires only when the user opted in to nags AND
-          // something is in flight (settled design's running-overlay
-          // semantics — running alone is a state, watch_active is the
-          // user's intent to be notified).
+          state: aggregate,
+          head_sha: review.head_sha,
+          base_sha: review.base_sha,
+          running: !!review.running,
+          stale: !!review.stale,
           watch_active: mode !== 'silent',
-          pr_checks: review.checks || [],
+          pr_checks: checks,
         };
+      },
+
+      /**
+       * Derive a 1–2 char glyph from a check label. Mirrors the Python
+       * ``_icon_from_label`` so cache rows (which never carry ``icon``)
+       * still render the right disc text. Path-prefixed labels keep
+       * only the trailing segment; alphas of the first one or two
+       * tokens form the glyph.
+       * @param {string} label
+       * @returns {string}
+       */
+      _iconFromLabel(label) {
+        let text = (label || '').trim();
+        if (!text) return '?';
+        for (const sep of ['/', ':']) {
+          const idx = text.lastIndexOf(sep);
+          if (idx >= 0) text = text.slice(idx + 1);
+        }
+        text = text.trim();
+        if (!text) return '?';
+        const parts = text.replace(/_/g, ' ').replace(/-/g, ' ')
+          .split(/\s+/).filter(Boolean);
+        if (!parts.length) return '?';
+        const firstAlpha = (s) => {
+          for (const ch of s) if (/[A-Za-z]/.test(ch)) return ch;
+          return '';
+        };
+        const first = firstAlpha(parts[0]);
+        const second = parts.length >= 2 ? firstAlpha(parts[1]) : '';
+        const glyph = (first + second).toUpperCase();
+        return glyph.slice(0, 2) || '?';
+      },
+
+      /**
+       * @param {{source_control?: {reviews?: ReviewPayloadV1[], review?: ReviewPayloadV1}} | null} row
+       * @returns {object[]}
+       */
+      rowPrs(row) {
+        if (!row || !row.source_control) return [];
+        const sc = row.source_control;
+        let reviews = Array.isArray(sc.reviews) ? sc.reviews.slice() : [];
+        if (!reviews.length && sc.review) reviews = [sc.review];
+        if (!reviews.length) return [];
+        const mode = this.rowNagMode(row);
+        return reviews
+          .filter(r => r != null)
+          .map(r => this._adaptReview(r, mode));
+      },
+
+      /**
+       * Adapt a worktree row's first review for back-compat call sites.
+       * @param {{source_control?: {reviews?: ReviewPayloadV1[], review?: ReviewPayloadV1}} | null} row
+       * @returns {object | null}
+       */
+      rowPr(row) {
+        const prs = this.rowPrs(row);
+        return prs.length ? prs[0] : null;
       },
 
       prIsFlashing(pr) {
@@ -514,13 +566,17 @@
       // Per-PR check list for the on-card navigator. Each entry is a
       // {@link CheckEntryV1} from the capability's
       // normalize_review_payload (settled design 3435e03f, lines 215-226).
+      // Now takes an explicit ``pr`` so stacked PRs render one row per PR
+      // with its own checks; back-compat overload (one arg) returns the
+      // first PR's checks for legacy call sites.
       /**
-       * @param {{source_control?: {review?: ReviewPayloadV1}} | null} row
+       * @param {object | null} row
+       * @param {object | null} [pr]
        * @returns {CheckEntryV1[]}
        */
-      rowPrChecks(row) {
-        const pr = this.rowPr(row);
-        return (pr && pr.pr_checks) || [];
+      rowPrChecks(row, pr) {
+        const target = pr || this.rowPr(row);
+        return (target && target.pr_checks) || [];
       },
 
       // ── Rich check-tooltip popover ───────────────────────────────────
@@ -698,8 +754,14 @@
       // ``selectedCommit`` with ``prMode: true`` so the existing
       // overlay renders the PR title/body + integrated patch with
       // tiny conditional tweaks (no separate template block).
-      async openReviewPr(row) {
-        const pr = this.rowPr(row);
+      //
+      // When ``pr`` is supplied (per-PR navigator click for stacked
+      // PRs), the fetch carries ``?review_id=X`` so the server scopes
+      // the diff to that single PR's commit range via the binding's
+      // ``base_sha``. Default callers (single-PR badge click) get the
+      // first PR.
+      async openReviewPr(row, pr) {
+        if (!pr) pr = this.rowPr(row);
         if (!pr) {
           this.openReviewCommit(row, 0);
           return;
@@ -744,10 +806,11 @@
         this.queueReviewHeaderState();
 
         try {
-          const resp = await fetch(
-            '/api/worktrees/' + encodeURIComponent(row.session_name) + '/'
-              + encodeURIComponent(row.repo_name) + '/pr-diff',
-          );
+          const reviewParam = pr.review_id || (pr.number != null ? String(pr.number) : '');
+          const url = '/api/worktrees/' + encodeURIComponent(row.session_name) + '/'
+            + encodeURIComponent(row.repo_name) + '/pr-diff'
+            + (reviewParam ? ('?review_id=' + encodeURIComponent(reviewParam)) : '');
+          const resp = await fetch(url);
           const detail = await _jsonOrError(resp);
           // Bail if user navigated away while the fetch was in flight.
           if (!this.selectedCommit || this.selectedCommit.commit.sha !== requestKey) return;
@@ -780,8 +843,9 @@
       },
 
       openReviewDefault(row) {
-        if (this.rowPr(row)) {
-          this.openReviewPr(row);
+        const prs = this.rowPrs(row);
+        if (prs.length) {
+          this.openReviewPr(row, prs[0]);
         } else {
           this.openReviewCommit(row, 0);
         }

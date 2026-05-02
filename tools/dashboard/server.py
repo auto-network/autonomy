@@ -5622,10 +5622,15 @@ def _worktree_commit_json(commit: WorktreeCommit, *, include_patch: bool = False
 
 
 def _worktree_dirty_detail_json(detail: WorktreeDirtyDetail) -> dict:
-    return {
+    payload: dict = {
         "files": [_worktree_file_json(file) for file in detail.files],
         "patch": detail.patch or "",
     }
+    if getattr(detail, "stale", False):
+        payload["stale"] = True
+        if getattr(detail, "reason", None):
+            payload["reason"] = detail.reason
+    return payload
 
 
 async def _signal_session_merge_celebration(
@@ -5899,13 +5904,23 @@ async def api_worktree_changes(request):
 
 
 async def api_worktree_integrated_diff(request):
-    """Integrated PR diff for one worktree (``merge-base..HEAD``).
+    """Integrated PR diff for one worktree.
 
     Powers the auto-r098a PR-mode review overlay: when the operator
     clicks the PR row in the on-card navigator, the overlay fetches
     this endpoint instead of an individual commit. Same JSON shape as
     ``/changes`` (file list + patch) since :class:`WorktreeDirtyDetail`
     is reused.
+
+    When operator-declared review bindings (auto-nrqbs) exist for the
+    row, scopes the diff to ``binding.base_sha..cache.head_sha`` so
+    stacked PRs render only their own commits. ``?review_id=X``
+    disambiguates when the row carries multiple bindings; without it
+    the first binding wins. Falls back to ``merge-base..HEAD`` when no
+    binding exists. When the requested SHAs aren't present locally
+    (force-push, orphaned commits), the response carries
+    ``stale: true`` so the UI shows "refresh required" instead of
+    crashing.
     """
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
@@ -5920,16 +5935,55 @@ async def api_worktree_integrated_diff(request):
             )
         return JSONResponse(detail)
 
+    base_sha, head_sha = _resolve_binding_diff_shas(
+        session_name, repo_name,
+        review_id=request.query_params.get("review_id"),
+    )
+
     try:
         detail = await asyncio.to_thread(
             get_session_worktree_integrated_diff,
             session_name,
             repo_name,
+            base_sha=base_sha,
+            head_sha=head_sha,
         )
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
 
     return JSONResponse(_worktree_dirty_detail_json(detail))
+
+
+def _resolve_binding_diff_shas(
+    session_name: str, repo_name: str, *, review_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Pick the (base_sha, head_sha) pair to scope ``/pr-diff`` to.
+
+    Returns ``(None, None)`` when no binding exists or the cache hasn't
+    been refreshed yet — caller falls back to the worktree's
+    merge-base..HEAD diff. When the row has multiple bindings (stacked
+    PRs), ``review_id`` disambiguates; without it the first binding
+    wins so the existing single-PR overlay click keeps working.
+    """
+    snapshot = worktree_monitor.get_source_control(session_name, repo_name)
+    if not snapshot:
+        return None, None
+    reviews = snapshot.get("reviews") or []
+    if not reviews:
+        single = snapshot.get("review")
+        reviews = [single] if single else []
+    if not reviews:
+        return None, None
+    if review_id:
+        for r in reviews:
+            if r and (str(r.get("review_id") or "") == str(review_id)
+                      or str(r.get("number") or "") == str(review_id)):
+                return r.get("base_sha") or None, r.get("head_sha") or None
+        # Operator asked for a specific review_id we don't carry —
+        # fall back to whole-branch rather than diffing the wrong PR.
+        return None, None
+    chosen = reviews[0] or {}
+    return chosen.get("base_sha") or None, chosen.get("head_sha") or None
 
 async def api_worktree_commit_merge(request):
     session_name = request.path_params["session"]

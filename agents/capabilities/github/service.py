@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 OP_REVIEW_READ = "source_control_review_read_v1"
 OP_REVIEW_REFRESH = "source_control_review_refresh_v1"
 OP_GATES_WATCH_SET = "source_control_gates_watch_set_v1"
+# REST-by-id ops added by the operator-declared review binding work
+# (auto-nrqbs). Distinct names from the GraphQL legacy ops above so
+# audit/log surfaces can tell them apart.
+OP_REVIEW_READ_BY_ID = "source_control_review_read_by_id_v1"
+OP_CHECK_RUNS_READ_FOR_SHA = "source_control_check_runs_read_for_sha_v1"
 
 # PR watch modes accepted by ``source_control_gates_watch_set_v1``. They mirror the
 # GitHub subscription tri-state — subscribed / ignored / default (cleared).
@@ -60,6 +65,10 @@ FAILURE_AUTH_MISSING = "auth_missing"
 FAILURE_TIMED_OUT = "timed_out"
 FAILURE_RATE_LIMITED = "rate_limited"
 FAILURE_EXEC_FAILED = "exec_failed"
+# REST conditional-fetch outcome: server returned 304 Not Modified in
+# response to ``If-None-Match: <etag>``. The cached row is still fresh;
+# the resolver should keep it and only touch ``updated_at``.
+FAILURE_NOT_MODIFIED = "not_modified"
 
 # Fields requested from ``gh pr list --head <branch>`` for review
 # read/refresh. ``commits`` is the per-PR commit list; ``baseRefName``
@@ -994,10 +1003,292 @@ async def source_control_gates_watch_set_v1(
     )
 
 
+# ── REST-by-id operations (operator-declared review binding) ─────────
+#
+# The bound-review path (auto-nrqbs) replaces branch-scan auto-detection
+# with operator declaration plus REST fetch. Two new ops:
+#
+#   * source_control_review_read_by_id_v1 — GET /repos/<slug>/pulls/<id>
+#   * source_control_check_runs_read_for_sha_v1 — GET .../commits/<sha>/check-runs
+#
+# Both run as ``docker exec <container> gh api ...`` against the live
+# session container. ``gh api`` ships ``-i`` to surface response headers
+# (so callers can pluck ``ETag``); ``--header 'If-None-Match: <etag>'``
+# on ``read_by_id`` enables conditional refresh.
+
+
+def _api_args_review_read_by_id(repo_slug: str, review_id: str,
+                                etag: str | None) -> list[str]:
+    args = ["api", "-i", f"/repos/{repo_slug}/pulls/{review_id}"]
+    if etag:
+        args.extend(["--header", f"If-None-Match: {etag}"])
+    return args
+
+
+def _api_args_check_runs_for_sha(repo_slug: str, head_sha: str) -> list[str]:
+    return ["api", f"/repos/{repo_slug}/commits/{head_sha}/check-runs"]
+
+
+def _split_headers_and_body(stdout: str) -> tuple[dict[str, str], str]:
+    """Split ``gh api -i`` output into (headers, body).
+
+    The first blank line separates the status/header block from the JSON
+    body. Headers are case-insensitive — keys are lowercased so callers
+    can do ``headers.get("etag")`` without worrying about provider
+    casing.
+    """
+    text = stdout or ""
+    # Tolerate Windows-style CRLF in case gh ever emits it; split keeps
+    # this future-proof.
+    parts = text.split("\r\n\r\n", 1)
+    if len(parts) == 1:
+        parts = text.split("\n\n", 1)
+    if len(parts) == 1:
+        return {}, text
+    header_block, body = parts
+    headers: dict[str, str] = {}
+    for line in header_block.splitlines():
+        if ":" not in line:
+            continue
+        name, _, value = line.partition(":")
+        headers[name.strip().lower()] = value.strip()
+    return headers, body
+
+
+def parse_pull_response(stdout: str, etag: str | None = None) -> dict:
+    """Parse ``gh api -i /repos/.../pulls/<id>`` output to flat cache fields.
+
+    Returns the dict ready to write into
+    ``autonomy.source_control.review_state``: title, body, state,
+    head_sha, base_sha, base_branch, is_draft, url, etag. Missing fields
+    fall back to safe empties. ``etag`` is read from the response
+    headers when present and falls back to the caller-supplied
+    ``etag`` argument (e.g. on 304 the body is empty so the caller
+    passes the cached one through).
+    """
+    import json
+
+    headers, body = _split_headers_and_body(stdout)
+    response_etag = headers.get("etag") or etag or ""
+
+    data: dict = {}
+    if body and body.strip():
+        try:
+            parsed = json.loads(body)
+        except (TypeError, ValueError):
+            parsed = {}
+        if isinstance(parsed, dict):
+            data = parsed
+
+    raw_state = str(data.get("state") or "").lower()
+    merged_at = data.get("merged_at")
+    if raw_state == "closed" and merged_at:
+        # GitHub keeps state=closed for merged PRs; the merged flag is
+        # what reviewers actually want to see.
+        state = "merged"
+    elif raw_state in ("open", "closed"):
+        state = raw_state
+    else:
+        state = "open"
+
+    head = data.get("head") or {}
+    base = data.get("base") or {}
+    return {
+        "title": (data.get("title") or "").strip(),
+        "body": data.get("body") or "",
+        "state": state,
+        "head_sha": (head.get("sha") if isinstance(head, dict) else "") or "",
+        "base_sha": (base.get("sha") if isinstance(base, dict) else "") or "",
+        "base_branch": (base.get("ref") if isinstance(base, dict) else "") or "",
+        "is_draft": bool(data.get("draft")),
+        "url": data.get("html_url") or "",
+        "etag": response_etag,
+    }
+
+
+def parse_check_runs_response(stdout: str) -> list[dict]:
+    """Parse ``gh api /repos/.../commits/<sha>/check-runs`` to CheckEntry dicts.
+
+    Returns a list of ``{id, label, status, detail}`` dicts (no
+    ``icon`` — the UI computes it from ``label``). Status maps to the
+    same four-value vocabulary as :func:`_normalize_check`:
+    ``pass`` / ``fail`` / ``running`` / ``pending``. Skipped runs drop
+    out (consistent with the existing GraphQL normalizer).
+    """
+    import json
+
+    text = (stdout or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    runs = data.get("check_runs") or []
+    if not isinstance(runs, list):
+        return []
+
+    out: list[dict] = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        label = (run.get("name") or "").strip() or "(unnamed check)"
+        run_id = run.get("id") or run.get("name") or label
+        status_raw = str(run.get("status") or "").lower()
+        conclusion = str(run.get("conclusion") or "").lower()
+        if status_raw == "completed":
+            if conclusion == "skipped":
+                continue
+            status = "pass" if conclusion == "success" else "fail"
+        elif status_raw in ("in_progress", "pending"):
+            status = "running"
+        elif status_raw == "queued":
+            status = "pending"
+        else:
+            # Unknown vendor state — surface as pending so it stays
+            # non-terminal and the UI shows a placeholder disc.
+            status = "pending"
+        entry = {
+            "id": str(run_id),
+            "label": label,
+            "status": status,
+        }
+        detail = run.get("output") or {}
+        if isinstance(detail, dict):
+            text_detail = detail.get("title") or detail.get("summary")
+            if text_detail:
+                entry["detail"] = str(text_detail).strip()[:500] or None
+        out.append(entry)
+    return out
+
+
+def classify_rest_failure(stdout: str, stderr: str, exit_code: int,
+                          timed_out: bool) -> str | None:
+    """REST-aware extension of :func:`classify_failure`.
+
+    ``gh api`` returns exit code 0 even on 304 Not Modified, with the
+    HTTP status visible in the response headers (when ``-i`` is set).
+    Detect that here so the resolver can treat 304 as "cache still
+    fresh" rather than a generic success.
+
+    Falls back to the legacy classifier for everything else.
+    """
+    if timed_out:
+        return FAILURE_TIMED_OUT
+    if exit_code == 0:
+        # ``gh api -i`` puts the HTTP status line first when it ran;
+        # short-circuit on 304 so the resolver can keep the cached row.
+        first_line = (stdout or "").splitlines()[0:1]
+        if first_line and "304" in first_line[0]:
+            return FAILURE_NOT_MODIFIED
+        return None
+    return classify_failure(stdout, stderr, exit_code, timed_out)
+
+
+async def source_control_review_read_by_id_v1(
+    session_name: str,
+    repo_name: str,
+    *,
+    review_id: str,
+    rows: list[WorktreeState],
+    repo_slug: str | None = None,
+    etag: str | None = None,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> WorktreeGithubExecResult:
+    """Read PR state by id over REST. ETag-aware for conditional refresh.
+
+    Maps internally to::
+
+        docker exec <container> gh api -i /repos/<slug>/pulls/<review_id>
+            [--header 'If-None-Match: <etag>']
+
+    When the server returns 304 the result's ``failure`` is
+    :data:`FAILURE_NOT_MODIFIED` (with ``ok=False``). Resolvers should
+    treat that as "cache still fresh" — the row's ``updated_at`` may
+    advance but the payload stays.
+
+    ``repo_slug`` may be supplied to override the slug derived from the
+    row's managed clone (useful for forks/multi-remote setups). When
+    omitted we fall back to :func:`derive_repo_slug` like the other ops.
+    """
+
+    explicit_slug = repo_slug
+
+    def _args(*, row, repo_slug, mode):  # noqa: ARG001 — fixed-shape factory
+        slug = explicit_slug or repo_slug
+        return _api_args_review_read_by_id(slug, str(review_id), etag)
+
+    result = await _execute_op(
+        operation=OP_REVIEW_READ_BY_ID,
+        session_name=session_name,
+        repo_name=repo_name,
+        rows=rows,
+        gh_args_for=_args,
+        timeout=timeout,
+        # ``gh api`` doesn't need a branch (it talks to a PR id directly),
+        # but the row resolution / container resolution still needs the
+        # row. Branch presence isn't required for this op.
+        require_branch=False,
+    )
+
+    # Re-classify the response using the REST-aware classifier so 304s
+    # are flagged as ``not_modified`` rather than generic success.
+    if result.ok:
+        rest_failure = classify_rest_failure(
+            result.stdout, result.stderr, result.exit_code, result.timed_out,
+        )
+        if rest_failure == FAILURE_NOT_MODIFIED:
+            from dataclasses import replace
+            result = replace(
+                result,
+                ok=False,
+                failure=FAILURE_NOT_MODIFIED,
+                error_message="cache still fresh (HTTP 304 Not Modified)",
+            )
+    return result
+
+
+async def source_control_check_runs_read_for_sha_v1(
+    session_name: str,
+    repo_name: str,
+    *,
+    head_sha: str,
+    rows: list[WorktreeState],
+    repo_slug: str | None = None,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> WorktreeGithubExecResult:
+    """Read merge-gate check runs for a commit SHA over REST.
+
+    Maps internally to::
+
+        docker exec <container> gh api /repos/<slug>/commits/<sha>/check-runs
+    """
+
+    explicit_slug = repo_slug
+
+    def _args(*, row, repo_slug, mode):  # noqa: ARG001
+        slug = explicit_slug or repo_slug
+        return _api_args_check_runs_for_sha(slug, str(head_sha))
+
+    return await _execute_op(
+        operation=OP_CHECK_RUNS_READ_FOR_SHA,
+        session_name=session_name,
+        repo_name=repo_name,
+        rows=rows,
+        gh_args_for=_args,
+        timeout=timeout,
+        require_branch=False,
+    )
+
+
 __all__ = [
     "OP_REVIEW_READ",
     "OP_REVIEW_REFRESH",
     "OP_GATES_WATCH_SET",
+    "OP_REVIEW_READ_BY_ID",
+    "OP_CHECK_RUNS_READ_FOR_SHA",
     "PR_WATCH_SUBSCRIBED",
     "PR_WATCH_IGNORED",
     "PR_WATCH_DEFAULT",
@@ -1012,6 +1303,7 @@ __all__ = [
     "FAILURE_TIMED_OUT",
     "FAILURE_RATE_LIMITED",
     "FAILURE_EXEC_FAILED",
+    "FAILURE_NOT_MODIFIED",
     "PR_VIEW_FIELDS",
     "PR_LIST_FIELDS",
     "DEFAULT_TIMEOUT_SECONDS",
@@ -1022,10 +1314,15 @@ __all__ = [
     "resolve_live_container",
     "derive_repo_slug",
     "classify_failure",
+    "classify_rest_failure",
     "run_cli",
     "normalize_review_payload",
     "normalize_review_stack",
+    "parse_pull_response",
+    "parse_check_runs_response",
     "source_control_review_read_v1",
     "source_control_review_refresh_v1",
     "source_control_gates_watch_set_v1",
+    "source_control_review_read_by_id_v1",
+    "source_control_check_runs_read_for_sha_v1",
 ]

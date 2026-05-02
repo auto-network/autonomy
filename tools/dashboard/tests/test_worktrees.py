@@ -369,7 +369,7 @@ class TestWorktreeAPI:
         ``/changes``. Powers the auto-r098a PR-mode review overlay."""
         server, _fake = _install_fake_monitor(monkeypatch, [_row(live=True)])
 
-        def fake_detail(session_name, repo_name):
+        def fake_detail(session_name, repo_name, *, base_sha=None, head_sha=None):
             assert (session_name, repo_name) == ("auto-test", "autonomy")
             return server.WorktreeDirtyDetail(
                 files=[
@@ -673,24 +673,30 @@ class TestWorktreePage:
 
     def test_pr_badge_template_and_helpers_wired(self):
         """The PR badge fragment from the settled design (3435e03f) is in
-        the template and the Alpine helpers ``rowPr`` / ``prBadgeClass`` /
-        ``prDotClass`` / ``prIsFlashing`` are wired in worktrees.js."""
+        the template and the Alpine helpers ``rowPrs`` / ``prBadgeClass`` /
+        ``prDotClass`` / ``prIsFlashing`` are wired in worktrees.js.
+
+        Post-binding migration (auto-nrqbs): badges loop over
+        ``rowPrs(item.row)`` to support stacked PRs; the singular
+        ``rowPr`` survives as a back-compat alias for first-or-null.
+        """
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
 
-        # Badge fragment renders only when rowPr returns a PR object.
+        # Badge fragment renders one badge per PR (zero, one, or many).
         assert 'data-testid="pr-badge"' in template
-        assert 'x-if="rowPr(item.row)"' in template
-        assert ':class="prBadgeClass(rowPr(item.row))"' in template
-        assert ':class="prDotClass(rowPr(item.row))"' in template
-        assert "'PR #' + rowPr(item.row).number" in template
+        assert 'x-for="pr in rowPrs(item.row)"' in template
+        assert ':class="prBadgeClass(pr)"' in template
+        assert ':class="prDotClass(pr)"' in template
 
-        # Helpers map source_control.review -> design's flatter pr shape.
+        # Helpers expose both plural ``rowPrs`` and singular ``rowPr``.
+        assert "rowPrs(row) {" in js
         assert "rowPr(row) {" in js
-        assert "row.source_control && row.source_control.review" in js
-        assert "state: review.aggregate_state" in js  # green | yellow
-        assert "running: review.running" in js
-        assert "pr_checks: review.checks" in js
+        assert "row.source_control" in js
+        # Adapter: cache → flat pr shape, with derived state/checks.
+        assert "_adaptReview(review, mode) {" in js
+        assert "running: !!review.running" in js
+        assert "pr_checks: checks" in js
         # Visual classes come straight from the design — green is passing,
         # yellow is the not-passing color, animate-pulse is the running
         # overlay (only on green when watch is active).
@@ -755,8 +761,10 @@ class TestWorktreePage:
         assert "'PR #' + selectedCommit.pr.number" in template
 
         # JS: openReviewPr now actually fetches /pr-diff and slots the
-        # integrated diff into selectedCommit with prMode: true.
-        assert "openReviewPr(row)" in js
+        # integrated diff into selectedCommit with prMode: true. Stack
+        # support (auto-nrqbs) added an explicit ``pr`` arg so per-PR
+        # navigator clicks can scope ``?review_id=`` to the right row.
+        assert "openReviewPr(row, pr)" in js
         assert "'/pr-diff'" in js
         assert "prMode: true" in js
         assert "isPrReview()" in js
@@ -827,25 +835,29 @@ class TestWorktreePage:
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
 
-        # Navigator gate: only renders when rowPr is non-null.
+        # Navigator gate: renders when at least one PR is bound to the row.
         assert 'data-testid="pr-navigator"' in template
         assert 'data-testid="pr-navigator-pr-row"' in template
         assert 'data-testid="pr-navigator-commit-row"' in template
-        # PR row binds to openReviewPr; per-commit rows bind to openReviewCommit.
-        assert '@click="openReviewPr(item.row)"' in template
+        # PR rows loop over rowPrs (one entry per binding for stacked PRs);
+        # per-commit rows bind to openReviewCommit unchanged.
+        assert 'x-if="rowPrs(item.row).length"' in template
+        assert 'x-for="pr in rowPrs(item.row)"' in template
+        assert '@click="openReviewPr(item.row, pr)"' in template
         assert '@click="openReviewCommit(item.row, idx)"' in template
         # Both rows render the icon disc strip with checkIconClass coloring.
         assert ':class="checkIconClass(check.status)"' in template
         assert 'x-text="check.icon"' in template
-        # PR row uses rowPrChecks; commit rows use reviewCommitChecks.
-        assert 'check in rowPrChecks(item.row)' in template
+        # PR row uses rowPrChecks(item.row, pr) (per-PR checks); commit
+        # rows use reviewCommitChecks.
+        assert 'check in rowPrChecks(item.row, pr)' in template
         assert 'check in reviewCommitChecks(commit)' in template
 
         # Helpers exist with the expected shapes.
-        assert "rowPrChecks(row) {" in js
+        assert "rowPrChecks(row, pr)" in js
         assert "reviewCommitChecks(_commit)" in js  # Returns [] until per-commit data lands.
         assert "checkIconClass(status) {" in js
-        assert "openReviewPr(row) {" in js
+        assert "openReviewPr(row, pr) {" in js
         assert "openReviewCommit(row, idx) {" in js
         assert "openReviewDefault(row) {" in js
         # Disc colors lifted from the design — emerald pass, amber running,
@@ -2289,3 +2301,426 @@ class TestWorktreeWatchEndpoint:
 
         assert resp.status_code == 200
         assert captured["args"] == ("auto-x", "autonomy", "silent")
+
+
+# ── Operator-declared review bindings (auto-nrqbs) ─────────────────────
+
+
+@pytest.fixture
+def isolated_settings_db(monkeypatch, tmp_path):
+    """Pin Settings to a per-test SQLite file so binding/cache writes
+    don't bleed across tests or touch the operator's real DB."""
+    db_path = tmp_path / "settings.db"
+    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    yield db_path
+
+
+class TestWorktreeReviewBindings:
+    """Resolver wiring: bindings drive composition; absence falls back to legacy."""
+
+    def test_no_bindings_falls_back_to_legacy_auto_detect(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        """When no binding exists, the resolver still runs the legacy
+        ``gh pr list`` auto-detect path. Behavior unchanged for unbound rows.
+        """
+        from agents.capabilities.github import probe as github_probe
+        from agents.capabilities.github import service as wg
+        from tools.dashboard import worktree_monitor as wm
+
+        async def fake_probe(_session, *, timeout=3):
+            return github_probe.ProbeResult(state=github_probe.STATE_READY, reason=None)
+
+        async def fake_review_read(*args, **kwargs):
+            return wg.WorktreeGithubExecResult(
+                operation=wg.OP_REVIEW_READ,
+                session_name=kwargs.get("session_name") or "auto-x",
+                repo_name="autonomy",
+                ok=True,
+                stdout='[{"number": 7, "title": "Legacy auto-detected", '
+                       '"body": "", "state": "OPEN", "headRefName": "session/auto-x", '
+                       '"baseRefName": "main", "isDraft": false, '
+                       '"statusCheckRollup": [], "commits": []}]',
+            )
+
+        monkeypatch.setattr(github_probe, "probe_v1", fake_probe)
+        monkeypatch.setattr(wm, "source_control_review_read_v1", fake_review_read)
+
+        row = _row(session="auto-x", repo="autonomy", live=True)
+        snapshot = asyncio.run(wm._fetch_source_control(row, [row]))
+        assert snapshot["state"] == "ready"
+        # Legacy single-PR review wraps as a 1-item plural list.
+        assert len(snapshot["reviews"]) == 1
+        assert snapshot["reviews"][0]["number"] == 7
+        # Back-compat alias also present.
+        assert snapshot["review"]["number"] == 7
+
+    def test_binding_present_composes_from_cache_with_zero_gh_calls(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        """When the operator declared a binding and the cache is hot,
+        the snapshot is composed from the Setting rows alone — no
+        docker exec / gh fan-out."""
+        from tools.graph import settings_ops
+        from tools.dashboard import worktree_monitor as wm
+        from agents.capabilities.github import service as wg
+
+        # Seed binding + cache.
+        settings_ops.add_setting(
+            "autonomy.worktree.review_binding", 1,
+            "auto-x:autonomy:session/auto-x:42",
+            {"base_sha": "fa12cd34"},
+            org="autonomy",
+        )
+        settings_ops.add_setting(
+            "autonomy.source_control.review_state", 1,
+            "owner/repo:42",
+            {
+                "title": "Cached PR", "body": "from cache",
+                "state": "open", "head_sha": "head456", "base_sha": "real-base",
+                "base_branch": "main", "is_draft": False, "provider": "github",
+                "url": "https://example/pull/42",
+                "checks": [
+                    {"id": "build", "label": "build", "status": "pass"},
+                    {"id": "test",  "label": "test",  "status": "running"},
+                ],
+            },
+            org="autonomy",
+        )
+
+        # If anything reaches gh, the test fails loudly.
+        async def boom(*args, **kwargs):
+            raise AssertionError("legacy auto-detect should not run when binding exists")
+
+        monkeypatch.setattr(wm, "source_control_review_read_v1", boom)
+        # ``worktree_monitor`` imported derive_repo_slug at module load,
+        # so patch the already-bound name on the consumer module rather
+        # than the source — patching wg.derive_repo_slug would no-op.
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+
+        row = _row(session="auto-x", repo="autonomy", live=True)
+        snapshot = asyncio.run(wm._fetch_source_control(row, [row]))
+        assert snapshot["state"] == "ready"
+        assert len(snapshot["reviews"]) == 1
+        review = snapshot["reviews"][0]
+        assert review["number"] == 42
+        assert review["title"] == "Cached PR"
+        # Binding base_sha overrides cache.base_sha for per-PR scoping.
+        assert review["base_sha"] == "fa12cd34"
+        # Running disc bubbles up from the cached check entries.
+        assert review["running"] is True
+
+    def test_stacked_pr_bindings_compose_into_ordered_list(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        """Two bindings on one branch produce a 2-item ``reviews`` list."""
+        from tools.graph import settings_ops
+        from tools.dashboard import worktree_monitor as wm
+        from agents.capabilities.github import service as wg
+
+        for review_id, base_sha in [("100", "ba100abc"), ("101", "ba101abc")]:
+            settings_ops.add_setting(
+                "autonomy.worktree.review_binding", 1,
+                f"auto-x:autonomy:session/auto-x:{review_id}",
+                {"base_sha": base_sha},
+                org="autonomy",
+            )
+            settings_ops.add_setting(
+                "autonomy.source_control.review_state", 1,
+                f"owner/repo:{review_id}",
+                {
+                    "title": f"Stack #{review_id}", "body": "",
+                    "state": "open", "head_sha": f"head{review_id}",
+                    "base_sha": "ignored-by-resolver", "base_branch": "main",
+                    "is_draft": False, "provider": "github",
+                },
+                org="autonomy",
+            )
+
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+        row = _row(session="auto-x", repo="autonomy", live=True)
+        snapshot = asyncio.run(wm._fetch_source_control(row, [row]))
+        ids = sorted(r["review_id"] for r in snapshot["reviews"])
+        assert ids == ["100", "101"]
+
+    def test_binding_without_cache_marks_review_stale(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        """An operator declared the binding but no fetch has populated
+        the cache yet — surface a stub flagged ``stale: True`` so the
+        UI nudges toward Refresh."""
+        from tools.graph import settings_ops
+        from tools.dashboard import worktree_monitor as wm
+
+        settings_ops.add_setting(
+            "autonomy.worktree.review_binding", 1,
+            "auto-x:autonomy:session/auto-x:9",
+            {"base_sha": "abc123"},
+            org="autonomy",
+        )
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+
+        row = _row(session="auto-x", repo="autonomy", live=True)
+        snapshot = asyncio.run(wm._fetch_source_control(row, [row]))
+        assert snapshot["state"] == "ready"
+        assert snapshot.get("stale") is True
+        assert snapshot["reviews"][0]["stale"] is True
+
+    def test_cleanup_deletes_bindings_keeps_review_state_cache(
+        self, isolated_settings_db,
+    ):
+        """``cleanup_session_worktrees`` wipes bindings for the session;
+        the per-org review_state cache survives so the next worktree
+        targeting the same review re-uses it."""
+        from tools.graph import settings_ops
+        from agents import workspace_manager
+
+        # Seed: one binding for the session, one cache row for the same
+        # review id (different setting key prefix).
+        settings_ops.add_setting(
+            "autonomy.worktree.review_binding", 1,
+            "auto-doomed:autonomy:session/auto-doomed:42",
+            {"base_sha": "abc"},
+            org="autonomy",
+        )
+        settings_ops.add_setting(
+            "autonomy.source_control.review_state", 1,
+            "owner/repo:42",
+            {
+                "title": "T", "body": "", "state": "open",
+                "head_sha": "h", "base_sha": "b", "base_branch": "main",
+                "is_draft": False, "provider": "github",
+            },
+            org="autonomy",
+        )
+
+        # Helper directly — exercising the same path cleanup_session_worktrees
+        # invokes after the worktree directory is removed.
+        deleted = workspace_manager._delete_review_bindings_for_session("auto-doomed")
+        assert deleted == 1
+
+        binding_rows = settings_ops.read_set(
+            "autonomy.worktree.review_binding",
+            prefix="auto-doomed",
+            org="autonomy",
+        )
+        assert list(binding_rows.members) == []
+
+        cache_rows = settings_ops.read_set(
+            "autonomy.source_control.review_state",
+            prefix="owner/repo",
+            org="autonomy",
+        ).to_dict()
+        assert "owner/repo:42" in cache_rows
+
+    def test_pr_diff_endpoint_uses_binding_base_sha_when_present(
+        self, test_client, isolated_settings_db, monkeypatch,
+    ):
+        """``GET /api/worktrees/.../pr-diff`` scopes the diff to
+        ``binding.base_sha..cache.head_sha`` when a binding exists."""
+        from tools.dashboard import server
+        from tools.graph import settings_ops
+
+        # Prime the worktree monitor's snapshot cache directly so the
+        # diff resolver reads our review object — no probe required.
+        snapshot = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "reviews": [
+                {
+                    "number": 11, "review_id": "11", "url": "",
+                    "title": "Bound PR", "body": "",
+                    "head_sha": "headSHA", "base_sha": "baseSHA",
+                    "state": "open", "is_draft": False,
+                    "aggregate_state": "green", "running": False, "checks": [],
+                },
+            ],
+            "review": None,
+            "watch": {"mode": "silent"},
+        }
+        server.worktree_monitor._source_control_cache[("auto-x", "autonomy")] = snapshot
+
+        captured: dict = {}
+
+        def fake_detail(session_name, repo_name, *, base_sha=None, head_sha=None):
+            captured["base"] = base_sha
+            captured["head"] = head_sha
+            return server.WorktreeDirtyDetail(files=[], patch="")
+
+        monkeypatch.setattr(server, "get_session_worktree_integrated_diff", fake_detail)
+        # The /api/worktrees stub bypass — we don't need monitor.refresh.
+        monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: [])
+
+        resp = test_client.get("/api/worktrees/auto-x/autonomy/pr-diff")
+        assert resp.status_code == 200
+        assert captured["base"] == "baseSHA"
+        assert captured["head"] == "headSHA"
+        # cleanup
+        server.worktree_monitor._source_control_cache.pop(("auto-x", "autonomy"), None)
+
+    def test_pr_diff_endpoint_returns_stale_for_orphaned_shas(
+        self, test_client, isolated_settings_db, monkeypatch, tmp_path,
+    ):
+        """When the cached head_sha doesn't exist locally (force-push
+        orphaned it), the response carries ``stale: true`` instead
+        of crashing."""
+        from tools.dashboard import server
+        from agents import workspace_manager
+
+        # Real worktree path that exists but has no commits — git
+        # cat-file on a fake sha returns rc=1, exercising the stale path.
+        worktree_dir = tmp_path / "worktrees" / "auto-y" / "autonomy"
+        worktree_dir.mkdir(parents=True)
+        # Init a real (empty) git repo so cat-file actually runs.
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(worktree_dir)], check=True)
+
+        snapshot = {
+            "state": "ready",
+            "reviews": [{
+                "number": 12, "review_id": "12",
+                "head_sha": "deadbeefdeadbeef", "base_sha": "facefacefaceface",
+            }],
+            "review": None,
+            "watch": {"mode": "silent"},
+        }
+        server.worktree_monitor._source_control_cache[("auto-y", "autonomy")] = snapshot
+        monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: [])
+
+        # Patch the integrated_diff entry-point's directory resolution to
+        # land in our scratch worktree.
+        def fake_detail(session, repo, *, base_sha=None, head_sha=None):
+            return workspace_manager.get_session_worktree_integrated_diff(
+                session, repo,
+                base_sha=base_sha, head_sha=head_sha,
+                worktrees_dir=tmp_path / "worktrees",
+            )
+
+        monkeypatch.setattr(server, "get_session_worktree_integrated_diff", fake_detail)
+
+        resp = test_client.get("/api/worktrees/auto-y/autonomy/pr-diff")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["stale"] is True
+        assert "reason" in body
+        server.worktree_monitor._source_control_cache.pop(("auto-y", "autonomy"), None)
+
+
+class TestRefreshOneOverBindings:
+    """``refresh_one`` walks bindings + REST when present."""
+
+    def _seed_binding(self):
+        from tools.graph import settings_ops
+        settings_ops.add_setting(
+            "autonomy.worktree.review_binding", 1,
+            "auto-x:autonomy:session/auto-x:99",
+            {"base_sha": "fa9bcd"},
+            org="autonomy",
+        )
+
+    def test_refresh_one_binding_path_writes_cache_and_recomposes(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        from agents.capabilities.github import service as wg
+        from tools.dashboard import worktree_monitor as wm
+        from tools.graph import settings_ops
+
+        self._seed_binding()
+
+        # Stub the REST review fetch + check-runs fetch.
+        async def fake_review(*args, **kwargs):
+            return wg.WorktreeGithubExecResult(
+                operation=wg.OP_REVIEW_READ_BY_ID,
+                session_name="auto-x", repo_name="autonomy",
+                ok=True,
+                stdout=(
+                    'HTTP/2.0 200 OK\r\nETag: "etag-A"\r\n\r\n'
+                    '{"title":"Bound","body":"B","state":"open",'
+                    '"draft":false,"html_url":"https://example/pull/99",'
+                    '"head":{"sha":"headSHA"},'
+                    '"base":{"sha":"baseSHA","ref":"main"}}'
+                ),
+            )
+
+        async def fake_checks(*args, **kwargs):
+            return wg.WorktreeGithubExecResult(
+                operation=wg.OP_CHECK_RUNS_READ_FOR_SHA,
+                session_name="auto-x", repo_name="autonomy",
+                ok=True,
+                stdout='{"check_runs":[{"id":1,"name":"build","status":"completed","conclusion":"success"}]}',
+            )
+
+        monkeypatch.setattr(wm, "source_control_review_read_by_id_v1", fake_review)
+        monkeypatch.setattr(wm, "source_control_check_runs_read_for_sha_v1", fake_checks)
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+
+        # Use a fresh monitor so global state doesn't leak across tests.
+        monitor = wm.WorktreeMonitor()
+        row = _row(session="auto-x", repo="autonomy", live=True)
+        # Drive _refresh_one_source_control synchronously via asyncio.run.
+        asyncio.run(monitor._refresh_one_source_control(row, [row]))
+
+        # Cache row landed.
+        cached = settings_ops.read_set(
+            "autonomy.source_control.review_state",
+            prefix="owner/repo", org="autonomy",
+        ).to_dict()
+        assert "owner/repo:99" in cached
+        payload = cached["owner/repo:99"].payload
+        assert payload["title"] == "Bound"
+        assert payload["head_sha"] == "headSHA"
+        assert payload["etag"] == '"etag-A"'
+        assert payload["checks"][0]["status"] == "pass"
+
+        # Snapshot recomposes from the freshly written cache.
+        snapshot = monitor.get_source_control("auto-x", "autonomy")
+        assert snapshot is not None
+        assert snapshot["reviews"][0]["title"] == "Bound"
+
+    def test_refresh_one_binding_path_treats_304_as_cache_fresh(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        from agents.capabilities.github import service as wg
+        from tools.dashboard import worktree_monitor as wm
+        from tools.graph import settings_ops
+
+        self._seed_binding()
+        # Pre-seed cache with an etag.
+        settings_ops.add_setting(
+            "autonomy.source_control.review_state", 1,
+            "owner/repo:99",
+            {
+                "title": "Cached", "body": "B", "state": "open",
+                "head_sha": "headSHA", "base_sha": "baseSHA",
+                "base_branch": "main", "is_draft": False, "provider": "github",
+                "etag": '"etag-A"',
+                "checks": [{"id": "build", "label": "build", "status": "pass"}],
+            },
+            org="autonomy",
+        )
+
+        async def fake_review(*args, **kwargs):
+            return wg.WorktreeGithubExecResult(
+                operation=wg.OP_REVIEW_READ_BY_ID,
+                session_name="auto-x", repo_name="autonomy",
+                ok=False,
+                failure=wg.FAILURE_NOT_MODIFIED,
+                stdout="HTTP/2.0 304 Not Modified\r\n\r\n",
+            )
+
+        # check-runs op should NOT be called on 304 — assert if it is.
+        async def boom_checks(*args, **kwargs):
+            raise AssertionError("check-runs should not be re-fetched on 304")
+
+        monkeypatch.setattr(wm, "source_control_review_read_by_id_v1", fake_review)
+        monkeypatch.setattr(wm, "source_control_check_runs_read_for_sha_v1", boom_checks)
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+
+        monitor = wm.WorktreeMonitor()
+        row = _row(session="auto-x", repo="autonomy", live=True)
+        asyncio.run(monitor._refresh_one_source_control(row, [row]))
+
+        # Cache content unchanged; the snapshot still reads "Cached".
+        snapshot = monitor.get_source_control("auto-x", "autonomy")
+        assert snapshot["reviews"][0]["title"] == "Cached"
