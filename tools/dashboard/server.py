@@ -2565,12 +2565,13 @@ async def api_crosstalk_send(request):
 
 
 _MAX_BROADCAST_IDLE_SECS = 21600  # 6 hours
+_MAX_CROSSTALK_MESSAGE_CHARS = 8000
 
 
 def _validate_crosstalk_message(message: str) -> str | None:
     """Return a validation error for an outbound CrossTalk body, if any."""
-    if not message or len(message) > 4000:
-        return "message must be 1-4000 characters"
+    if not message or len(message) > _MAX_CROSSTALK_MESSAGE_CHARS:
+        return f"message must be 1-{_MAX_CROSSTALK_MESSAGE_CHARS} characters"
     if "</crosstalk>" in message:
         return "message must not contain </crosstalk>"
     return None
