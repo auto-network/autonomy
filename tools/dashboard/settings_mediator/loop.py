@@ -86,6 +86,21 @@ class Row:
         return self.payload.get(k, default)
 
 
+class _UnboundCrosstalk:
+    """Default placeholder for :attr:`Services.crosstalk` — raises on use.
+
+    Production wires a real :class:`tools.dashboard.surface_actions.CrosstalkService`
+    in ``server._build_settings_mediator_services``. Test fixtures that
+    don't exercise CrosstalkService leave this in place; calling it from
+    such a test surfaces the missing wiring instead of silently no-oping.
+    """
+    async def send(self, *args, **kwargs):  # pragma: no cover — defensive
+        raise RuntimeError(
+            "Services.crosstalk is unbound; wire a CrosstalkService "
+            "instance before invoking handlers that send CrossTalk."
+        )
+
+
 @dataclass
 class Services:
     """Cross-plugin primitives an action handler may call.
@@ -97,6 +112,7 @@ class Services:
     session_send: Callable[[str, str], Awaitable[None]]
     find_session_by_role: Callable[[str], Awaitable[str | None]]
     log: logging.Logger = field(default_factory=lambda: logger)
+    crosstalk: Any = field(default_factory=_UnboundCrosstalk)
 
 
 @dataclass
