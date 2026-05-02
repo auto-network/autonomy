@@ -112,6 +112,7 @@ def test_insert_agentic_session_persists_metadata(graph_db_env):
     assert meta["set_revision"] == 1
     assert meta["member_key"] == "note.update-summary"
     assert meta["model"] == "claude-haiku-4-5-20251001"
+    assert meta["target_kind"] == "source"
     assert meta["target_source_id"] == "abc12345-aaaa-bbbb-cccc-ddddeeee0001"
     assert meta["target_org"] == "anchore"
     assert meta["dispatched_by_session"] == "session-uuid-7777"
@@ -125,6 +126,28 @@ def test_insert_agentic_session_persists_metadata(graph_db_env):
         db.close()
     assert persisted is not None
     assert persisted["type"] == "agentic"
+
+
+def test_insert_agentic_session_persists_bead_identity(graph_db_env):
+    GraphDB(str(graph_db_env)).close()
+
+    row = ops.insert_agentic_session(
+        org="autonomy",
+        set_id="dashboard.agent-actions",
+        set_revision=1,
+        member_key="bead.dry-run-implement",
+        model="claude-haiku-4-5-20251001",
+        target_source_id="auto-bead-777",
+        target_kind="bead",
+        target_org="autonomy",
+        dispatched_by_session="dashboard",
+        title="Dry-Run Implement",
+    )
+
+    meta = row["metadata"]
+    assert meta["target_kind"] == "bead"
+    assert meta["target_source_id"] == "auto-bead-777"
+    assert meta["target_org"] == "autonomy"
 
 
 # ── search exclusion at every FTS entry point ─────────────────

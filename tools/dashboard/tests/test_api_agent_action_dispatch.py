@@ -1,10 +1,10 @@
 """API tests for ``POST /api/agent-actions/dispatch`` (auto-pqgrl).
 
-The endpoint dispatches an agentic action against a graph asset. Routing
-is strictly own-org-of-asset: actions defined in ``anchore.db`` only
-render on anchore notes; the agent runs in the workspace registered to
-the asset's owning org. Universal Send-To is special-cased — it does not
-spawn an agent, only delivers a CrossTalk primer.
+The endpoint dispatches an agentic action against a graph asset or bead.
+Routing is strictly own-org-of-asset: actions defined in ``anchore.db``
+only render on anchore notes; bead actions currently live in autonomy.
+Universal Send-To is special-cased — it does not spawn an agent, only
+delivers a CrossTalk primer.
 
 Tests cover:
 
@@ -18,6 +18,9 @@ Tests cover:
 * 5-second idempotency window deduplicates double clicks.
 * The agent is launched in the *target asset's* workspace, not the
   operator's.
+* An explicit ``workspace`` override materializes the full workspace
+  launch bundle instead of the lightweight default path.
+* Bead-targeted actions persist bead identity and route/trace correctly.
 """
 
 from __future__ import annotations
@@ -88,6 +91,18 @@ def per_org_universe(tmp_path, monkeypatch):
     # Register a workspace for each org so the dispatch endpoint can
     # locate one when target_org is autonomy or anchore.
     _seed_workspace(orgs_dir / "autonomy.db", workspace_id="autonomy-rig")
+    _seed_workspace(
+        orgs_dir / "autonomy.db",
+        workspace_id="operator",
+        payload_overrides={
+            "working_dir": "/workspace/repo/tools/dashboard",
+            "env": {"FEATURE_FLAG": "1"},
+            "startup": "scripts/bootstrap.sh",
+            "dind": True,
+            "network_host": False,
+            "tags": ["operator", "agent-actions"],
+        },
+    )
     _seed_workspace(orgs_dir / "anchore.db", workspace_id="anchore-rig")
 
     return orgs_dir
@@ -114,12 +129,47 @@ def _seed_actions(org_db: Path) -> None:
                 "icon": "✏",
                 "model": "claude-haiku-4-5-20251001",
                 "prompt_template": (
-                    "Update the title for {asset_id}.\n"
-                    "Page: {asset_url}\n"
+                    "Update the title for {asset[id]}.\n"
+                    "Page: {asset[url]}\n"
                     "Sender: {dispatched_by_session}\n"
                 ),
                 "estimated_seconds": 10,
                 "writes": ["source.title"],
+            },
+        ),
+        (
+            "note.full-workspace",
+            {
+                "asset_type": "note",
+                "label": "Deep Workspace Review",
+                "icon": "🛠",
+                "model": "claude-haiku-4-5-20251001",
+                "workspace": "operator",
+                "prompt_template": (
+                    "Review {asset[id]} in a writable workspace.\n"
+                    "Page: {asset[url]}\n"
+                    "Sender: {dispatched_by_session}\n"
+                ),
+                "estimated_seconds": 25,
+                "writes": ["source.title"],
+            },
+        ),
+        (
+            "bead.dry-run-implement",
+            {
+                "asset_type": "bead",
+                "label": "Dry-Run Implement",
+                "icon": "⚙",
+                "model": "claude-haiku-4-5-20251001",
+                "prompt_template": (
+                    "Bead: {asset[id]}\n"
+                    "Title: {bead[title]}\n"
+                    "Status: {bead[status]}\n"
+                    "Priority: {bead[priority]}\n"
+                    "Primer:\n{asset[primer]}\n"
+                ),
+                "estimated_seconds": 20,
+                "writes": ["bead.comment", "bead.labels"],
             },
         ),
     ]
@@ -143,9 +193,16 @@ def _seed_actions(org_db: Path) -> None:
         db.close()
 
 
-def _seed_workspace(org_db: Path, *, workspace_id: str) -> None:
+def _seed_workspace(
+    org_db: Path,
+    *,
+    workspace_id: str,
+    payload_overrides: dict[str, Any] | None = None,
+) -> None:
     """Insert an ``autonomy.workspace#1`` row keyed on *workspace_id*."""
     payload = {"name": workspace_id, "image": "autonomy-agent"}
+    if payload_overrides:
+        payload.update(payload_overrides)
     db = GraphDB(org_db)
     try:
         sid = "ws-" + workspace_id
@@ -175,6 +232,35 @@ def _insert_note_source(*, org: str, source_id: str, title: str) -> None:
         db.insert_source(src)
     finally:
         db.close()
+
+
+def _patch_bead_runtime(monkeypatch, bead: dict[str, Any]) -> None:
+    """Patch bead lookup + primer generation for bead-targeted tests."""
+    from tools.dashboard import server as server_mod
+    from tools.graph import primer as primer_mod
+
+    monkeypatch.setattr(
+        server_mod.dao_beads,
+        "get_bead",
+        lambda bead_id: dict(bead) if bead_id == bead["id"] else None,
+    )
+    monkeypatch.setattr(
+        primer_mod,
+        "collect_primer_data",
+        lambda bead_id, **kwargs: {
+            "bead_id": bead_id,
+            "bead": {"title": bead["title"]},
+            "provenance": [],
+            "related_notes": [],
+            "pitfalls": [],
+            "related_beads": [],
+        },
+    )
+    monkeypatch.setattr(
+        primer_mod,
+        "format_for_agent",
+        lambda data: f"Primer for {data['bead_id']}",
+    )
 
 
 @pytest.fixture
@@ -354,6 +440,94 @@ def test_dispatch_uses_target_asset_workspace(
     image = args[6] if len(args) >= 7 else call["kwargs"].get("image")
     assert image == "autonomy-agent"  # both rigs share the image; routing
     # is asserted by target_workspace=anchore-rig + target_org=anchore.
+
+
+def test_dispatch_explicit_workspace_materializes_workspace_settings(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    asset_id = "56565656-5656-5656-5656-565656565656"
+    _insert_note_source(
+        org="autonomy", source_id=asset_id, title="Workspace-heavy note",
+    )
+
+    from tools.dashboard import server as server_mod
+
+    prepare_calls: list[tuple[str, str, bool]] = []
+
+    def fake_prepare_session_mounts(workspace, session_name, refresh_existing_worktree):
+        prepare_calls.append(
+            (workspace.id, session_name, bool(refresh_existing_worktree)),
+        )
+        return {"/tmp/operator-worktree": "/workspace/repo"}
+
+    monkeypatch.setattr(
+        server_mod,
+        "prepare_session_mounts",
+        fake_prepare_session_mounts,
+    )
+
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.full-workspace",
+        "asset_id": asset_id,
+    })
+    assert r.status_code == 201, r.json()
+    body = r.json()
+    assert body["target_workspace"] == "operator"
+    assert body["target_org"] == "autonomy"
+    assert prepare_calls == [("operator", body["slug"], True)]
+
+    call = patch_launch_session[-1]["kwargs"]
+    assert call["mounts"] == {"/tmp/operator-worktree": "/workspace/repo"}
+    assert call["working_dir"] == "/workspace/repo/tools/dashboard"
+    assert call["extra_env"] == {"FEATURE_FLAG": "1"}
+    assert call["startup_script"] == (
+        Path("/workspace/repo") / "scripts/bootstrap.sh"
+    )
+    assert call["privileged"] is True
+    assert call["network_host"] is False
+    assert call["metadata"]["graph_project"] == "autonomy"
+    assert call["metadata"]["graph_org"] == "autonomy"
+    assert call["metadata"]["graph_tags"] == ["operator", "agent-actions"]
+    assert call["model"] == "claude-haiku-4-5-20251001"
+    assert call["global_claude_md"].name == ".claude_md"
+
+
+def test_dispatch_bead_action_creates_agentic_source(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    bead = {
+        "id": "auto-bead-101",
+        "title": "Audit the bead action path",
+        "status": "open",
+        "priority": 1,
+        "description": "Dry-run implement the requested behavior.",
+        "design": "Reuse dashboard.agent-actions with bead-aware context.",
+        "acceptance_criteria": "Produce a structured bead audit.",
+        "notes": "No merge. No commit required.",
+    }
+    _patch_bead_runtime(monkeypatch, bead)
+
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "bead.dry-run-implement",
+        "asset_id": bead["id"],
+    })
+    assert r.status_code == 201, r.json()
+    body = r.json()
+    assert body["target_org"] == "autonomy"
+    assert body["target_workspace"] == "autonomy-rig"
+
+    row = graph_ops.get_source(body["agentic_source_id"])
+    assert row is not None
+    md = row["metadata"]
+    if isinstance(md, str):
+        md = json.loads(md)
+    assert md["target_kind"] == "bead"
+    assert md["target_source_id"] == bead["id"]
+
+    prompt = patch_launch_session[-1]["kwargs"]["prompt"]
+    assert f"Bead: {bead['id']}" in prompt
+    assert f"Title: {bead['title']}" in prompt
+    assert "Primer for auto-bead-101" in prompt
 
 
 def test_dispatch_send_to_uses_crosstalk(
@@ -579,6 +753,51 @@ def test_api_dispatch_runs_surfaces_agentic_identity(
     assert row.get("dispatched_by_session") == "dashboard"
 
 
+def test_api_dispatch_runs_surfaces_agentic_bead_identity(
+    client,
+    per_org_universe,
+    isolated_dispatch_db,
+    patch_launch_session,
+    monkeypatch,
+):
+    bead = {
+        "id": "auto-bead-runs",
+        "title": "Dispatch row should point back to bead",
+        "status": "open",
+        "priority": 2,
+        "description": "Verify bead-targeted agentic identity.",
+        "design": "",
+        "acceptance_criteria": "",
+        "notes": "",
+    }
+    _patch_bead_runtime(monkeypatch, bead)
+
+    r = client.post(
+        "/api/agent-actions/dispatch",
+        json={"member_key": "bead.dry-run-implement", "asset_id": bead["id"]},
+    )
+    assert r.status_code == 201, r.json()
+    agentic_source_id = r.json()["agentic_source_id"]
+
+    runs_resp = client.get("/api/dispatch/runs")
+    assert runs_resp.status_code == 200
+    runs = runs_resp.json()
+    matches = [
+        run for run in runs
+        if run.get("kind") == "agentic"
+        and run.get("agentic_source_id") == agentic_source_id
+    ]
+    assert len(matches) == 1
+    row = matches[0]
+    assert (row.get("bead_id") or "") == ""
+    assert row.get("target_kind") == "bead"
+    assert row.get("target_source_id") == bead["id"]
+    assert row.get("target_org") == "autonomy"
+    assert row.get("member_key") == "bead.dry-run-implement"
+    assert row.get("action_label") == "Dry-Run Implement"
+    assert row.get("title") == bead["title"]
+
+
 def test_dispatch_canonicalises_prefix_asset_id(client, per_org_universe):
     """Browser sends a 12-char prefix (the URL-derived form);
     downstream uses must see the canonical UUID — the agent's
@@ -654,6 +873,56 @@ def test_dispatch_trace_agentic_shape(
     assert body.get("member_key") == "note.update-summary"
     assert body.get("target_title") == asset_title
     # Browser-initiated → "dashboard" sentinel + no project link.
+    assert body.get("dispatched_by_session") == "dashboard"
+
+
+def test_dispatch_trace_agentic_bead_shape(
+    test_app,
+    per_org_universe,
+    isolated_dispatch_db,
+    patch_launch_session,
+    reset_idempotency_cache,
+    monkeypatch,
+):
+    importlib.reload(__import__("tools.dashboard.dao.dispatch", fromlist=["x"]))
+
+    bead = {
+        "id": "auto-bead-trace",
+        "title": "Trace should surface bead target",
+        "status": "open",
+        "priority": 2,
+        "description": "Ensure bead-targeted trace metadata is populated.",
+        "design": "",
+        "acceptance_criteria": "",
+        "notes": "",
+    }
+    _patch_bead_runtime(monkeypatch, bead)
+
+    with TestClient(test_app) as client:
+        r = client.post(
+            "/api/agent-actions/dispatch",
+            json={
+                "member_key": "bead.dry-run-implement",
+                "asset_id": bead["id"],
+            },
+        )
+        assert r.status_code == 201, r.json()
+        run_id = r.json()["slug"]
+
+        trace = client.get(f"/api/dispatch/trace/{run_id}")
+        assert trace.status_code == 200, trace.text
+        body = trace.json()
+
+    assert body["kind"] == "agentic"
+    assert (body.get("bead_id") or "") == ""
+    assert body.get("bead") is None
+    assert body.get("agentic_source_id") == r.json()["agentic_source_id"]
+    assert body.get("action_label") == "Dry-Run Implement"
+    assert body.get("target_kind") == "bead"
+    assert body.get("target_source_id") == bead["id"]
+    assert body.get("target_org") == "autonomy"
+    assert body.get("member_key") == "bead.dry-run-implement"
+    assert body.get("target_title") == bead["title"]
     assert body.get("dispatched_by_session") == "dashboard"
 
 
