@@ -439,32 +439,161 @@ def test_heartbeat_writes_row_after_interval(graph_db_env):
     assert rows["n"] >= 3
 
 
-# ── Static helper stubs ──────────────────────────────────────
+# ── Static helpers — read live ParticipantActivity rows ──────
 
 
-def test_is_idle_stub_returns_false():
-    """Acceptance #2: stub never raises; default = "not idle"."""
-    assert Presence.is_idle("any-id") is False
+def _write_activity(
+    participant_id: str,
+    *,
+    last_user_input_at: str = "",
+    last_session_turn_at: str = "",
+    last_meaningful_at: str = "",
+    inputs_last_hour: int = 0,
+    turns_last_hour: int = 0,
+    label: str = "Tester",
+    kind: str = "agent",
+) -> None:
+    """Helper: write a ParticipantActivity row at *participant_id*."""
+    settings_ops.add_setting(
+        PARTICIPANT_ACTIVITY_SET_ID,
+        SCHEMA_REVISION,
+        participant_id,
+        {
+            "participant_id": participant_id,
+            "participant_kind": kind,
+            "participant_label": label,
+            "last_user_input_at": last_user_input_at,
+            "last_session_turn_at": last_session_turn_at,
+            "last_meaningful_at": last_meaningful_at,
+            "inputs_last_hour": inputs_last_hour,
+            "turns_last_hour": turns_last_hour,
+        },
+        org="personal",
+    )
+
+
+def _iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_is_idle_no_row_returns_true(graph_db_env):
+    """Acceptance #2: 'never seen' participants default to idle."""
+    assert Presence.is_idle("never-written") is True
+
+
+def test_is_idle_recent_input_returns_false(graph_db_env):
+    """A user input within the threshold = not idle."""
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    _write_activity(
+        "active-pid",
+        last_user_input_at=_iso(now - timedelta(seconds=30)),
+        last_meaningful_at=_iso(now - timedelta(seconds=30)),
+        inputs_last_hour=1,
+        turns_last_hour=1,
+    )
     assert Presence.is_idle(
-        "any-id", threshold=timedelta(seconds=1),
+        "active-pid", threshold=timedelta(minutes=5),
     ) is False
 
 
-def test_last_user_input_stub_returns_none():
-    """Acceptance #3: stub never raises; returns None."""
-    assert Presence.last_user_input("any-id") is None
-
-
-def test_active_within_stub_returns_true():
-    """Acceptance #4: stub never raises; default = "assume active"."""
-    assert Presence.active_within("any-id", timedelta(hours=1)) is True
-    assert Presence.active_within(
-        "any-id", timedelta(seconds=0),
+def test_is_idle_stale_input_returns_true(graph_db_env):
+    """Last input older than threshold = idle."""
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    _write_activity(
+        "stale-pid",
+        last_user_input_at=_iso(now - timedelta(hours=2)),
+        last_meaningful_at=_iso(now - timedelta(hours=2)),
+        inputs_last_hour=0,
+        turns_last_hour=0,
+    )
+    assert Presence.is_idle(
+        "stale-pid", threshold=timedelta(minutes=30),
     ) is True
 
 
-def test_inputs_last_hour_stub_returns_zero():
-    assert Presence.inputs_last_hour("any-id") == 0
+def test_is_idle_empty_last_user_input_returns_true(graph_db_env):
+    """A row with an empty ``last_user_input_at`` reads as idle —
+    we've never seen the operator type into this session."""
+    _write_activity("never-typed", last_user_input_at="")
+    assert Presence.is_idle("never-typed") is True
+
+
+def test_last_user_input_no_row_returns_none(graph_db_env):
+    """No activity row → no last input."""
+    assert Presence.last_user_input("never-written") is None
+
+
+def test_last_user_input_returns_parsed_datetime(graph_db_env):
+    """The ISO timestamp comes back as a tz-aware datetime."""
+    from datetime import timezone
+    when = datetime.now(timezone.utc).replace(microsecond=0)
+    _write_activity("hit", last_user_input_at=_iso(when))
+    got = Presence.last_user_input("hit")
+    assert got is not None
+    assert got.tzinfo is not None
+    # Compare seconds (ISO precision strips microseconds).
+    assert int(got.timestamp()) == int(when.timestamp())
+
+
+def test_active_within_no_row_returns_false(graph_db_env):
+    """Acceptance #4: an unknown participant is not 'active'."""
+    assert Presence.active_within("unknown", timedelta(hours=1)) is False
+
+
+def test_active_within_recent_meaningful_returns_true(graph_db_env):
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    _write_activity(
+        "recent",
+        last_meaningful_at=_iso(now - timedelta(seconds=10)),
+    )
+    assert Presence.active_within("recent", timedelta(minutes=1)) is True
+
+
+def test_active_within_stale_returns_false(graph_db_env):
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    _write_activity(
+        "stale",
+        last_meaningful_at=_iso(now - timedelta(hours=3)),
+    )
+    assert Presence.active_within("stale", timedelta(minutes=30)) is False
+
+
+def test_inputs_last_hour_no_row_returns_zero(graph_db_env):
+    assert Presence.inputs_last_hour("unknown") == 0
+
+
+def test_inputs_last_hour_returns_counter(graph_db_env):
+    _write_activity("counter", inputs_last_hour=7)
+    assert Presence.inputs_last_hour("counter") == 7
+
+
+def test_inputs_last_hour_handles_non_int_payload_safely(graph_db_env):
+    """Defensive: a malformed counter (e.g. legacy migration) reads as 0."""
+    # Insert a row with the expected schema, then patch the inner field
+    # by writing a follow-up row with the canonical type. The schema
+    # validator rejects non-ints on write, so this path is reached only
+    # by legacy / hand-edited rows; force one by going through the DB.
+    _write_activity("legacy", inputs_last_hour=4)
+    db = settings_ops._open(None)
+    try:
+        db.conn.execute(
+            "UPDATE settings SET payload = ? WHERE set_id = ? AND key = ?",
+            (
+                '{"participant_id": "legacy", "participant_kind": "agent",'
+                '"participant_label": "L", "last_user_input_at": "",'
+                '"last_session_turn_at": "", "last_meaningful_at": "",'
+                '"inputs_last_hour": "many", "turns_last_hour": 0}',
+                PARTICIPANT_ACTIVITY_SET_ID, "legacy",
+            ),
+        )
+        db.conn.commit()
+    finally:
+        db.close()
+    assert Presence.inputs_last_hour("legacy") == 0
 
 
 # ── Color helper ─────────────────────────────────────────────
