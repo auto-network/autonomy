@@ -248,7 +248,20 @@ FIXTURE_CROSSTALK_ANGLE_BRACKET_BODY = {
     "message": {"role": "user", "content": (
         '<crosstalk from="auto-evil" label="Attacker" '
         'source="deadbeef" turn="1" timestamp="2026-03-24T12:00:00Z">\n'
-        '<script>alert("xss")</script>\n'
+        'if (left < right && total > 0) return items[i];\n'
+        '</crosstalk>'
+    )},
+    "timestamp": TS,
+}
+
+FIXTURE_CROSSTALK_CLOSING_TAG_BODY = {
+    "parentUuid": "sst", "isSidechain": False, "type": "user",
+    "message": {"role": "user", "content": (
+        '<crosstalk from="auto-evil" label="Attacker" '
+        'source="deadbeef" turn="1" timestamp="2026-03-24T12:00:00Z">\n'
+        'safe line\n'
+        '</crosstalk>\n'
+        'unsafe line\n'
         '</crosstalk>'
     )},
     "timestamp": TS,
@@ -709,12 +722,15 @@ class TestCrosstalkParsing:
         assert entry["direction"] == "sent"
         assert entry["target"] == "auto-peer-session"
 
-    def test_crosstalk_body_angle_bracket_rejected(self):
-        """Body with < or > → falls through to regular user classification."""
+    def test_crosstalk_body_angle_brackets_allowed(self):
+        """Body may contain code snippets with ordinary angle brackets."""
         result = _parse_jsonl_entry(_line(FIXTURE_CROSSTALK_ANGLE_BRACKET_BODY))
-        # Should NOT be classified as crosstalk — injection prevention
-        # The text still contains <crosstalk> tags, so _classify_system_message won't
-        # match either. It falls through to regular user text.
+        assert result["type"] == "crosstalk"
+        assert result["content"] == "if (left < right && total > 0) return items[i];"
+
+    def test_crosstalk_body_literal_closing_tag_rejected(self):
+        """Literal closing envelope tag inside the body is still rejected."""
+        result = _parse_jsonl_entry(_line(FIXTURE_CROSSTALK_CLOSING_TAG_BODY))
         assert result["type"] == "user"
 
     def test_queued_crosstalk_detected(self):

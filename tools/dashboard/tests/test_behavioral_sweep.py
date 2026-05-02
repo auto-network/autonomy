@@ -7672,6 +7672,24 @@ class TestSessionHarnessBadge:
         assert new_parsed.get("harness") == "codex"
         assert new_parsed.get("model") == "gpt-5-codex"
 
+    def test_crosstalk_body_with_code_parses_in_both_classifiers(self):
+        from tools.dashboard.session_harness import _classify_crosstalk as harness_parse
+        from tools.dashboard.server import _classify_crosstalk as server_parse
+
+        payload = (
+            '<crosstalk from="auto-peer" label="Peer" '
+            'source="aabb" turn="10" timestamp="2026-04-30T13:00:00Z">\n'
+            'if (left < right && total > 0) return items[i];\n'
+            '</crosstalk>'
+        )
+
+        harness_parsed = harness_parse(payload)
+        server_parsed = server_parse(payload)
+        assert harness_parsed is not None
+        assert server_parsed is not None
+        assert harness_parsed.get("message") == "if (left < right && total > 0) return items[i];"
+        assert server_parsed.get("message") == "if (left < right && total > 0) return items[i];"
+
     # ── Detection fallback (auto-ngis4 spec) ───────────────────────
 
     def test_detection_fallback_claude_jsonl_shape(self):
