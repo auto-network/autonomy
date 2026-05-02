@@ -133,6 +133,13 @@ from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E40
 # See pitfall ``graph://3fe60c25-fab``.
 from tools.graph import surface as _surface  # noqa: E402, F401
 
+# Surface ping CrossTalk delivery (bead auto-9gxo8, substrate.C) —
+# imported eagerly so the ``surface.ping.deliver`` mediator action is
+# registered before ``start_action_loop`` ticks. The handler routes
+# pings by explicit ``to_participant_id`` (per pitfall
+# ``graph://1ba4d2e0-c5f``).
+from tools.dashboard import surface_actions as _surface_actions  # noqa: E402, F401
+
 # Load every valid plugin (regardless of Setting state) so route
 # registration covers plugins that operators may flip on at runtime.
 # Per-request handlers gate via ``_plugin_enabled_map``; plugins
@@ -10809,10 +10816,13 @@ async def _settings_mediator_find_session_by_role(role: str) -> str | None:
 def _build_settings_mediator_services():
     """Construct the substrate's :class:`Services` for the running process."""
     from tools.dashboard.settings_mediator import Services
+    from tools.dashboard.surface_actions import CrosstalkService
+    from tools.dashboard.tmux_send import tmux_send
     return Services(
         session_send=_settings_mediator_session_send,
         find_session_by_role=_settings_mediator_find_session_by_role,
         log=logging.getLogger("settings_mediator"),
+        crosstalk=CrosstalkService(send_fn=tmux_send),
     )
 
 async def _on_startup():
