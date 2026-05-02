@@ -1099,12 +1099,21 @@ def set_turn_correction_status(
     if existing["status"] != "pending":
         return ("already_terminal", existing)
     now = time.time()
-    conn.execute(
+    cursor = conn.execute(
         "UPDATE turn_corrections SET status=?, updated_at=?"
         " WHERE session_uuid=? AND target_message_id=? AND status='pending'",
         (status, now, session_uuid, target_message_id),
     )
     conn.commit()
+    if (cursor.rowcount or 0) == 0:
+        # Another caller won the race after our initial SELECT but before our
+        # UPDATE. Re-read and report the now-terminal row instead of claiming
+        # success for a transition that never applied.
+        raced = conn.execute(
+            "SELECT * FROM turn_corrections WHERE session_uuid=? AND target_message_id=?",
+            (session_uuid, target_message_id),
+        ).fetchone()
+        return ("already_terminal", dict(raced) if raced else existing)
     refreshed = conn.execute(
         "SELECT * FROM turn_corrections WHERE session_uuid=? AND target_message_id=?",
         (session_uuid, target_message_id),
