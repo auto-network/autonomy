@@ -898,7 +898,7 @@ SWEEP_GRAPH_SOURCES = {
         "project": "autonomy",
         "created_at": "2026-03-30T12:00:00Z",
         "metadata": "{}",
-        "content": "# Plain Note\n\n| Col A | Col B |\n|-------|-------|\n| 1 | 2 |\n\nSome paragraph text.",
+        "content": "# Plain Note\n\n| Col A | Col B |\n|-------|-------|\n| 1 | 2 |\n\nSome paragraph text.\n\nDepends on auto-edec1.1 for parser wiring.",
     },
     SWEEP_RICH_NOTE_ID: {
         "id": SWEEP_RICH_NOTE_ID,
@@ -3621,6 +3621,11 @@ PLAIN_NOTE_CHECKS = """
     var body = document.body.textContent || '';
     r.sees_table_data = body.indexOf('Col A') >= 0 && body.indexOf('Col B') >= 0;
     r.sees_paragraph = body.indexOf('Some paragraph text') >= 0;
+    var dottedBeadLink = Array.from(document.querySelectorAll('.markdown-body a')).find(function(a) {
+        return a.textContent.trim() === 'auto-edec1.1';
+    });
+    r.dotted_bead_link_text = dottedBeadLink ? dottedBeadLink.textContent.trim() : '';
+    r.dotted_bead_link_href = dottedBeadLink ? dottedBeadLink.getAttribute('href') : '';
     r.title_not_in_body = body.indexOf('Plain Note') >= 0;  // title shown in header area
     r.title_in_header = !!(document.querySelector('[data-testid="source-title"]') ||
         document.querySelector('h1, h2, .text-xl, .text-2xl'));
@@ -3650,6 +3655,17 @@ class TestPlainNoteBehavior:
     def test_title_visible(self):
         """Note title is visible on the page."""
         assert self._checks.get("title_not_in_body"), "Note title not visible anywhere"
+
+    def test_dotted_bead_link_preserves_child_suffix(self):
+        """Raw dotted bead IDs link to the full child bead instead of truncating at the parent."""
+        assert self._checks.get("dotted_bead_link_text") == "auto-edec1.1", (
+            "Expected dotted bead text to stay intact; "
+            f"got {self._checks.get('dotted_bead_link_text')!r}"
+        )
+        assert self._checks.get("dotted_bead_link_href") == "/bead/auto-edec1.1", (
+            "Expected dotted bead href to include the child suffix; "
+            f"got {self._checks.get('dotted_bead_link_href')!r}"
+        )
 
 
 # ── Source page: rich-content note (direct view) ────────────────────

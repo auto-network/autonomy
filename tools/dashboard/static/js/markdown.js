@@ -300,8 +300,8 @@ document.addEventListener('alpine:init', () => {
         { group: 2, href: id => '/graph/' + id,  display: (full, id) => full },  // graph://xxxxx
         { group: 3, href: id => '/graph/' + id,  display: (full, id) => id },    // 9e1a2361-405
       ];
-      //                       group 1: bead              group 2: graph:// URI               group 3: source ID
-      const COMBINED_RE = /\b(auto-[a-z0-9]{2,8})\b|graph:\/\/([0-9a-f]{8}[-0-9a-f]*)|\b([0-9a-f]{8}-[0-9a-f]{3})\b/g;
+      //                       group 1: bead                        group 2: graph:// URI               group 3: source ID
+      const COMBINED_RE = /\b(auto-[a-z0-9]{2,8}(?:\.[0-9]+)*)(?!-)\b|graph:\/\/([0-9a-f]{8}[-0-9a-f]*)|\b([0-9a-f]{8}-[0-9a-f]{3})\b/g;
       const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
       const textNodes = [];
       while (walker.nextNode()) textNodes.push(walker.currentNode);
