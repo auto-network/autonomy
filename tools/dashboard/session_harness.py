@@ -593,6 +593,11 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
     entry_type = raw.get("type")
     timestamp = raw.get("timestamp", "")
     is_sidechain = raw.get("isSidechain", False)
+    identity: dict = {}
+    if (msg_uuid := raw.get("uuid")) is not None:
+        identity["message_id"] = msg_uuid
+    if (parent := raw.get("parentUuid")) is not None:
+        identity["parent_uuid"] = parent
 
     if raw.get("isCompactSummary") or raw.get("isVisibleInTranscriptOnly"):
         message = raw.get("message", {})
@@ -703,6 +708,7 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                     "role": "user",
                     "content": text,
                     "timestamp": timestamp,
+                    **identity,
                 })
         entries.extend(tool_results)
         if not entries:
@@ -721,6 +727,7 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                         "role": "assistant",
                         "content": text,
                         "timestamp": timestamp,
+                        **identity,
                     })
             elif btype == "tool_use":
                 tool_input = block.get("input", {})
