@@ -14,13 +14,14 @@ This module is the **API-surface wedge** (substrate.A): consumers can
 import against it immediately. The implementation behind the surface
 evolves through subsequent beads (B/C/D) without breaking importers.
 
-Stubbed bits today:
+Live behind the API today:
 
-* :meth:`Presence.is_idle` / :meth:`Presence.last_user_input` /
-  :meth:`Presence.active_within` / :meth:`Presence.inputs_last_hour` —
-  return safe defaults until ``session_monitor.py`` activity-write
-  integration ships (substrate.D). Consumer code is correct now and
-  improves automatically when substrate.D lands.
+* :meth:`Presence.is_idle`, :meth:`Presence.last_user_input`,
+  :meth:`Presence.active_within`, :meth:`Presence.inputs_last_hour` —
+  read the ``dashboard.participant.activity#1`` row written by
+  ``tools/dashboard/session_monitor.py`` on every parsed turn
+  (substrate.D). Returns sensible defaults (treated as idle / no
+  recent activity / 0) when no row exists yet for *participant_id*.
 
 Substrate gap (v1 limitation): no atomic upsert. Heartbeat / state
 writes use :func:`tools.graph.settings_ops.add_setting`, so concurrent
@@ -597,7 +598,37 @@ class Presence:
             org=self.org,
         )
 
-    # ── Static helpers (substrate.D will make these real) ────────
+    # ── Static helpers — backed by ParticipantActivity rows ─────
+
+    @staticmethod
+    def _read_activity(
+        participant_id: str, *, org: str = "personal",
+    ) -> dict | None:
+        """Resolve *participant_id*'s ParticipantActivity payload.
+
+        Returns the payload dict, or ``None`` when no row exists or the
+        settings stack is unreachable. Lazy-imports ``settings_ops`` so a
+        bare import of :mod:`tools.graph.surface` does not pull in the
+        whole graph stack.
+        """
+        from tools.graph import settings_ops
+
+        try:
+            members = settings_ops.read_set(
+                PARTICIPANT_ACTIVITY_SET_ID, org=org, peers=[],
+            )
+        except Exception:
+            logger.exception(
+                "Presence: read_set failed for participant_id=%s",
+                participant_id,
+            )
+            return None
+        for m in members.members:
+            if m.key == participant_id:
+                payload = m.payload
+                if isinstance(payload, dict):
+                    return payload
+        return None
 
     @staticmethod
     def is_idle(
@@ -607,39 +638,76 @@ class Presence:
     ) -> bool:
         """Has *participant_id* been idle longer than *threshold*?
 
-        STUB until substrate.D ships. Returns ``False`` (never idle) so
-        consumers that gate work on ``not is_idle(...)`` keep running
-        as they do today, then automatically pause when real activity
-        data arrives.
+        Reads the ParticipantActivity row written by
+        ``session_monitor.py``. Treats "no row" or "no
+        ``last_user_input_at``" as **idle** (True) — a participant we've
+        never seen the operator address can't be the operator's current
+        focus. ``threshold`` is the staleness window for
+        ``last_user_input_at``.
         """
-        return False
+        last = Presence.last_user_input(participant_id)
+        if last is None:
+            return True
+        return (datetime.now(timezone.utc) - last) > threshold
 
     @staticmethod
     def last_user_input(participant_id: str) -> Optional[datetime]:
         """Timestamp of *participant_id*'s most recent user input.
 
-        STUB until substrate.D ships. Returns ``None``.
+        Returns a timezone-aware UTC :class:`~datetime.datetime`, or
+        ``None`` when no row exists or ``last_user_input_at`` has never
+        been set / cannot be parsed.
         """
-        return None
+        activity = Presence._read_activity(participant_id)
+        if not activity:
+            return None
+        raw = activity.get("last_user_input_at", "")
+        if not raw:
+            return None
+        try:
+            iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+            return datetime.fromisoformat(iso)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def active_within(
         participant_id: str, duration: timedelta,
     ) -> bool:
-        """Has *participant_id* been active within the last *duration*?
+        """Has *participant_id* had any meaningful activity in the last *duration*?
 
-        STUB until substrate.D ships. Returns ``True`` (assume active)
-        so consumers default to the same behavior they have today.
+        Reads ``last_meaningful_at`` (the maximum of
+        ``last_user_input_at`` and ``last_session_turn_at``) so even a
+        purely-agent batch keeps the participant "active." Returns
+        ``False`` when no row exists or the timestamp is unparseable.
         """
-        return True
+        activity = Presence._read_activity(participant_id)
+        if not activity:
+            return False
+        raw = activity.get("last_meaningful_at", "") \
+            or activity.get("last_session_turn_at", "") \
+            or activity.get("last_user_input_at", "")
+        if not raw:
+            return False
+        try:
+            iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+            last = datetime.fromisoformat(iso)
+        except (TypeError, ValueError):
+            return False
+        return (datetime.now(timezone.utc) - last) <= duration
 
     @staticmethod
     def inputs_last_hour(participant_id: str) -> int:
         """How many user inputs has *participant_id* sent in the last hour?
 
-        STUB until substrate.D ships. Returns ``0``.
+        Returns the ``inputs_last_hour`` counter on the activity row, or
+        ``0`` when no row exists.
         """
-        return 0
+        activity = Presence._read_activity(participant_id)
+        if not activity:
+            return 0
+        v = activity.get("inputs_last_hour", 0)
+        return v if isinstance(v, int) else 0
 
     @staticmethod
     def participant_color(participant_id: str) -> str:
