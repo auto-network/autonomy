@@ -295,3 +295,44 @@ class TestGlobalInputOffSearchPage:
         assert url_info.get("q") == "navtest", (
             f"q param should carry the typed value, got {url_info!r}"
         )
+
+    def test_enter_off_search_initializes_search_page_alpine(self, harness):
+        """Navigating into /search from another page must still initialize
+        the search fragment's Alpine root."""
+        _open("/sessions")
+        time.sleep(1.0)
+        ab_eval("""
+            var gs = document.getElementById('global-search');
+            gs.value = 'navinit';
+            gs.dispatchEvent(new Event('input', { bubbles: true }));
+            gs.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Enter', bubbles: true, cancelable: true
+            }));
+            return true;
+        """)
+        time.sleep(1.0)
+        result = ab_eval("""
+            var u = new URL(window.location.href);
+            var root = document.querySelector('[x-data^="searchPage"]');
+            var data = root && root._x_dataStack ? root._x_dataStack[0] : null;
+            return {
+                path: u.pathname,
+                q: u.searchParams.get('q'),
+                initialized: !!data,
+                query: data ? data.query : null,
+                loaded: data ? data.loaded : null
+            };
+        """)
+        assert result, "eval returned nothing after cross-page search nav"
+        assert result.get("path") == "/search", (
+            f"expected /search after Enter nav, got {result!r}"
+        )
+        assert result.get("q") == "navinit", (
+            f"q param should carry the typed value, got {result!r}"
+        )
+        assert result.get("initialized") is True, (
+            f"search Alpine root failed to initialize after SPA nav, got {result!r}"
+        )
+        assert result.get("query") == "navinit", (
+            f"search Alpine state should hydrate from URL after SPA nav, got {result!r}"
+        )
