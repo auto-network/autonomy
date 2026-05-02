@@ -13,27 +13,33 @@
 // rendered with icon + label + model/timing meta.
 
 (function () {
-  var ASSET_ROUTE_RE = /^\/(?:graph|source)\/([0-9a-f-]{6,})/i;
+  var NOTE_ROUTE_RE = /^\/(?:graph|source)\/([0-9a-f-]{6,})/i;
+  var BEAD_ROUTE_RE = /^\/bead\/([^/?#]+)/i;
   var SET_ID = 'dashboard.agent-actions';
   var ASSET_TYPE_BY_PAGE = {
     'graph': 'note',
     'source': 'note',
+    'bead': 'bead',
   };
   // Asset-type defaults that aren't note-shaped. Other route prefixes
   // (e.g. /sessions, /dispatch) intentionally yield no asset_type so the
   // button stays hidden until those types ship members.
   var TYPELESS_ROUTES = [
     /^\/sessions/, /^\/dispatch/, /^\/timeline/, /^\/worktrees/,
-    /^\/beads/, /^\/bead\//, /^\/orgs/, /^\/search/, /^\/$/,
+    /^\/beads/, /^\/orgs/, /^\/search/, /^\/$/,
   ];
 
   function deriveAsset() {
     var path = window.location.pathname || '/';
-    var m = path.match(ASSET_ROUTE_RE);
+    var m = path.match(NOTE_ROUTE_RE);
     if (m) {
       var prefix = path.split('/')[1] || '';
       var aType = ASSET_TYPE_BY_PAGE[prefix] || '';
       return { id: m[1], type: aType };
+    }
+    m = path.match(BEAD_ROUTE_RE);
+    if (m) {
+      return { id: decodeURIComponent(m[1]), type: 'bead' };
     }
     return { id: '', type: '' };
   }
@@ -56,6 +62,12 @@
     } catch (e) {
       return '';
     }
+  }
+
+  async function fetchAssetOrg(asset) {
+    if (!asset || !asset.id) return '';
+    if (asset.type === 'bead') return 'autonomy';
+    return fetchSourceOrg(asset.id);
   }
 
   // Map an active-session row (from /api/dao/active_sessions) to the shape
@@ -195,7 +207,7 @@
           this.members = [];
           return;
         }
-        var org = await fetchSourceOrg(asset.id);
+        var org = await fetchAssetOrg(asset);
         this.org = org;
         if (!org) {
           this.visible = false;

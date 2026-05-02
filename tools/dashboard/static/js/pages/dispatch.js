@@ -154,16 +154,22 @@
   // Dispatch rows render in three flavors:
   //   - kind='bead'      → /bead/<bead_id>
   //   - kind='librarian' → /bead/<bead_id> (legacy — librarian runs key off bead_id)
-  //   - kind='agentic'   → /graph/<target_source_id> (the asset the action
-  //                        operates on; agentic_source_id points at the
-  //                        agent's own session row, which is reachable
-  //                        via the Live Trace button instead).
+  //   - kind='agentic'   → switch on target_kind and route
+  //                        target_source_id to either /bead/<id> or
+  //                        /graph/<id>. agentic_source_id points at the
+  //                        agent's own session row, which is reachable via
+  //                        the Live Trace button instead).
   // Returns null when no usable route exists; the row click is suppressed in
   // that case so we don't navigate to a broken URL.
   function routeForRun(b) {
     if (!b) return null;
     var kind = b.kind || 'bead';
     if (kind === 'agentic') {
+      if (b.target_kind === 'bead') {
+        return b.target_source_id
+          ? '/bead/' + encodeURIComponent(b.target_source_id)
+          : null;
+      }
       var assetId = b.target_source_id || b.agentic_source_id;
       return assetId ? '/graph/' + encodeURIComponent(assetId) : null;
     }

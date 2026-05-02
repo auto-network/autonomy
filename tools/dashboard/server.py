@@ -682,11 +682,12 @@ def _resolve_agentic_identity(agentic_source_id: str | None) -> dict:
     """Resolve agentic identity fields from the agentic source row.
 
     The agentic source's own title is the action's display label
-    (e.g. "Update Title & Summary"); the asset the action operates on
-    is referenced by ``metadata.target_source_id`` and has its own
-    title. Returns a dict with: ``action_label``, ``member_key``,
-    ``target_source_id``, ``target_org``, ``dispatched_by_session``,
-    ``title`` (target asset's title, or action_label as fallback).
+    (e.g. "Update Title & Summary"); the target asset metadata stores a
+    single ``target_source_id`` plus ``target_kind`` to interpret it.
+    Returns a dict with: ``action_label``, ``member_key``,
+    ``target_kind``, ``target_source_id``, ``target_org``,
+    ``dispatched_by_session``, ``title`` (target asset's title, or
+    action_label as fallback).
 
     Single source of truth used by ``_enrich_dispatch_runs``,
     ``_enrich_timeline_agentic``, and the live-active list builder so
@@ -696,6 +697,7 @@ def _resolve_agentic_identity(agentic_source_id: str | None) -> dict:
     out: dict = {
         "action_label": None,
         "member_key": None,
+        "target_kind": None,
         "target_source_id": None,
         "target_org": None,
         "dispatched_by_session": None,
@@ -717,10 +719,18 @@ def _resolve_agentic_identity(agentic_source_id: str | None) -> dict:
         except (json.JSONDecodeError, TypeError):
             meta = {}
     out["member_key"] = meta.get("member_key") or None
+    out["target_kind"] = meta.get("target_kind") or None
     out["target_source_id"] = meta.get("target_source_id") or None
     out["target_org"] = meta.get("target_org") or None
     out["dispatched_by_session"] = meta.get("dispatched_by_session") or None
-    if out["target_source_id"]:
+    if out["target_kind"] == "bead" and out["target_source_id"]:
+        try:
+            bead = dao_beads.get_bead(out["target_source_id"])
+        except Exception:  # noqa: BLE001
+            bead = None
+        if bead and bead.get("title"):
+            out["title"] = str(bead["title"])
+    elif out["target_source_id"]:
         try:
             tsrc = graph_ops.get_source(out["target_source_id"])
         except Exception:  # noqa: BLE001
@@ -746,6 +756,7 @@ def _enrich_dispatch_runs(runs: list[dict]) -> None:
         ident = _resolve_agentic_identity(run["agentic_source_id"])
         run["action_label"] = ident["action_label"]
         run["member_key"] = ident["member_key"]
+        run["target_kind"] = ident["target_kind"]
         run["target_source_id"] = ident["target_source_id"]
         run["target_org"] = ident["target_org"]
         run["dispatched_by_session"] = ident["dispatched_by_session"]
@@ -1201,6 +1212,7 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         # (which fetches the agentic source row + target asset title).
         # Bead/librarian rows leave these as None.
         "agentic_source_id": agentic_source_id,
+        "target_kind": None,
         "target_source_id": None,
         "target_org": None,
         "member_key": None,
@@ -1224,6 +1236,7 @@ def _enrich_timeline_agentic(entries: list[dict]) -> None:
         ident = _resolve_agentic_identity(entry["agentic_source_id"])
         entry["action_label"] = ident["action_label"]
         entry["member_key"] = ident["member_key"]
+        entry["target_kind"] = ident["target_kind"]
         entry["target_source_id"] = ident["target_source_id"]
         entry["target_org"] = ident["target_org"]
         entry["dispatched_by_session"] = ident["dispatched_by_session"]
@@ -1784,6 +1797,7 @@ async def api_dispatch_trace(request):
             "agentic_source_id": agentic_source_id,
             "action_label": identity["action_label"],
             "member_key": identity["member_key"],
+            "target_kind": identity["target_kind"],
             "target_source_id": identity["target_source_id"],
             "target_org": identity["target_org"],
             "target_title": identity["title"],
@@ -6984,6 +6998,7 @@ async def _collect_dispatch_data() -> dict:
         if agentic_ident is not None:
             active_row["action_label"] = agentic_ident["action_label"]
             active_row["member_key"] = agentic_ident["member_key"]
+            active_row["target_kind"] = agentic_ident["target_kind"]
             active_row["target_source_id"] = agentic_ident["target_source_id"]
             active_row["target_org"] = agentic_ident["target_org"]
             active_row["dispatched_by_session"] = agentic_ident["dispatched_by_session"]
@@ -8753,7 +8768,7 @@ def _get_tag_taxonomy(org: str) -> list[str]:
 
 def _build_send_to_primer(
     *,
-    source: dict,
+    asset: dict,
     custom_message: str = "",
 ) -> str:
     """Compose the markdown primer that Send-To delivers to the chosen
@@ -8761,10 +8776,10 @@ def _build_send_to_primer(
     title, and the action key — enough to resolve the asset against the
     correct org's graph DB without consulting the dashboard.
     """
-    asset_id = str(source.get("id") or "")
-    asset_type = str(source.get("type") or "")
-    asset_org = str(source.get("org") or source.get("project") or "")
-    asset_title = str(source.get("title") or "")[:80]
+    asset_id = str(asset.get("id") or "")
+    asset_type = str(asset.get("type") or "")
+    asset_org = str(asset.get("org") or "")
+    asset_title = str(asset.get("title") or "")[:80]
     if not asset_org:
         logger.warning(
             "Send-To primer: asset_org unresolvable for asset_id=%s — "
@@ -8873,34 +8888,172 @@ def _resolve_workspace_for_org(target_org: str):
     return None
 
 
+def _source_metadata_dict(source: dict) -> dict:
+    """Return ``source.metadata`` as a dict."""
+    src_meta_raw = source.get("metadata") or {}
+    if isinstance(src_meta_raw, str):
+        try:
+            return json.loads(src_meta_raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    if isinstance(src_meta_raw, dict):
+        return src_meta_raw
+    return {}
+
+
+def _normalize_action_object(value):
+    """Recursively coerce action-context objects into format-friendly data."""
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return {
+            str(k): _normalize_action_object(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_action_object(v) for v in value]
+    return value
+
+
+def _build_agent_action_template_context(
+    *,
+    asset: dict,
+    source: dict | None = None,
+    bead: dict | None = None,
+    tags: list[str],
+) -> dict:
+    """Expose generic nested objects to prompt templates."""
+    return {
+        "asset": _normalize_action_object(asset),
+        "source": _normalize_action_object(source or {}),
+        "bead": _normalize_action_object(bead or {}),
+        "tags": {
+            "values": list(tags),
+            "list": ", ".join(tags),
+        },
+    }
+
+
+def _agent_action_asset_url(*, asset_kind: str, asset_id: str, request) -> str:
+    """Return the canonical dashboard URL for the dispatched asset."""
+    base = f"{request.url.scheme}://{request.url.netloc}"
+    if asset_kind == "bead":
+        return f"{base}/bead/{asset_id}"
+    return f"{base}/graph/{asset_id}"
+
+
+def _adapt_source_action_asset(
+    *,
+    source: dict,
+) -> tuple[dict, dict, dict]:
+    """Return normalized prompt objects for a source-backed action."""
+    asset_id = str(source.get("id") or "")
+    src_meta = _source_metadata_dict(source)
+    source_obj = dict(source)
+    source_obj["metadata"] = src_meta
+    asset = {
+        "id": asset_id,
+        "title": source.get("title") or "",
+        "short_description": (
+            source.get("short_description")
+            or src_meta.get("short_description")
+            or ""
+        ),
+        "type": source.get("type") or "",
+        "primer": "",
+        "metadata": src_meta,
+    }
+    return asset, source_obj, {}
+
+
+def _adapt_bead_action_asset(
+    *,
+    bead_id: str,
+    bead: dict,
+) -> tuple[dict, dict, dict]:
+    """Return normalized prompt objects for a bead-backed action."""
+    from tools.graph.primer import collect_primer_data, format_for_agent
+
+    primer_data = collect_primer_data(bead_id)
+    bead_obj = dict(bead)
+    bead_obj.setdefault("id", bead_id)
+    asset = {
+        "id": bead_id,
+        "title": bead.get("title") or bead_id,
+        "short_description": bead.get("description") or "",
+        "type": "bead",
+        "primer": format_for_agent(primer_data),
+        "metadata": {},
+    }
+    return asset, {}, bead_obj
+
+
+def _build_agent_action_context(
+    *,
+    asset_kind: str,
+    asset_id: str,
+    request,
+    target_org: str,
+    source: dict | None = None,
+    bead: dict | None = None,
+) -> dict:
+    """Build the generic prompt object bag for any supported asset kind."""
+    tags = _get_tag_taxonomy(target_org)
+    asset_url = _agent_action_asset_url(
+        asset_kind=asset_kind,
+        asset_id=asset_id,
+        request=request,
+    )
+    if asset_kind == "bead":
+        asset, source_obj, bead_obj = _adapt_bead_action_asset(
+            bead_id=asset_id,
+            bead=bead or {},
+        )
+    else:
+        asset, source_obj, bead_obj = _adapt_source_action_asset(
+            source=source or {},
+        )
+    asset["url"] = asset_url
+    asset["org"] = target_org
+    return _build_agent_action_template_context(
+        asset=asset,
+        source=source_obj,
+        bead=bead_obj,
+        tags=tags,
+    )
+
+
 # Authoritative list of placeholders that prompt-template authors may
 # reference. Extending this list also requires extending the context
 # build site in ``_render_agent_action_prompt`` so the field actually
 # resolves at runtime — the static check below catches the mismatch
 # before the agent ever sees the prompt.
-_AGENT_ACTION_PLACEHOLDERS = (
-    "asset_id",
-    "asset_title",
-    "asset_short_description",
-    "asset_url",
-    "asset_type",
-    "asset_org",
-    "tag_list",
+_AGENT_ACTION_PLACEHOLDER_ROOTS = (
+    "asset",
+    "source",
+    "bead",
+    "tags",
     "dispatched_by_session",
     "member_key",
 )
 
 
+def _template_field_root(field_name: str) -> str:
+    """Return the root symbol for a ``str.format`` placeholder."""
+    root = field_name.split("[", 1)[0]
+    return root.split(".", 1)[0]
+
+
 def _render_agent_action_prompt(
-    template: str, *, asset_id: str, page_context: dict,
+    template: str, *, page_context: dict,
     dispatched_by_session: str, member_key: str,
     run_id: str | None = None,
 ) -> str:
     """Render ``template`` against ``page_context`` via ``str.format``.
 
     Strict mode (auto-gh2iv): the template is statically inspected
-    BEFORE rendering. Any placeholder not in
-    :data:`_AGENT_ACTION_PLACEHOLDERS` raises ``ValueError`` so the
+    BEFORE rendering. Any placeholder whose root symbol is not in
+    :data:`_AGENT_ACTION_PLACEHOLDER_ROOTS` raises ``ValueError`` so the
     dispatch endpoint can surface a 500 with a clear message instead of
     silently shipping ``{undefined_field}`` literal text to the agent.
 
@@ -8919,11 +9072,15 @@ def _render_agent_action_prompt(
         f for _, f, _, _ in _string.Formatter().parse(template)
         if f and not f[0].isdigit()
     }
-    unknown = referenced - set(_AGENT_ACTION_PLACEHOLDERS)
+    unknown = {
+        field for field in referenced
+        if _template_field_root(field) not in _AGENT_ACTION_PLACEHOLDER_ROOTS
+    }
     if unknown:
         msg = (
             f"prompt template references undefined placeholder(s) "
-            f"{sorted(unknown)}; add to _AGENT_ACTION_PLACEHOLDERS or fix the template"
+            f"{sorted(unknown)}; add the root placeholder to "
+            f"_AGENT_ACTION_PLACEHOLDER_ROOTS or fix the template"
         )
         logger.error("agent-actions render failure: %s", msg)
         if run_id:
@@ -8941,19 +9098,9 @@ def _render_agent_action_prompt(
                 )
         raise ValueError(msg)
 
-    fmt_ctx = {
-        "asset_id": asset_id,
-        "asset_title": str(page_context.get("asset_title") or ""),
-        "asset_short_description": str(
-            page_context.get("asset_short_description") or ""
-        ),
-        "asset_url": str(page_context.get("asset_url") or ""),
-        "asset_type": str(page_context.get("asset_type") or ""),
-        "asset_org": str(page_context.get("asset_org") or ""),
-        "tag_list": str(page_context.get("tag_list") or ""),
-        "dispatched_by_session": dispatched_by_session,
-        "member_key": member_key,
-    }
+    fmt_ctx = dict(page_context)
+    fmt_ctx["dispatched_by_session"] = dispatched_by_session
+    fmt_ctx["member_key"] = member_key
     try:
         return template.format(**fmt_ctx)
     except KeyError as e:  # defense-in-depth — static check above should have caught this
@@ -9017,12 +9164,20 @@ async def api_agent_action_dispatch(request):
     if os.environ.get("DASHBOARD_MOCK"):
         from tools.dashboard.dao import mock as dao_mock
         src = dao_mock.get_source(asset_id)
-        if src is None:
+        bead = None if src is not None else dao_mock.get_bead(asset_id)
+        if src is None and bead is None:
             return JSONResponse(
                 {"error": f"asset not found: {asset_id}"}, status_code=404,
             )
-        from tools.dashboard.org_identity import session_org_slug
-        target_org = session_org_slug(src)
+        if src is not None:
+            from tools.dashboard.org_identity import session_org_slug
+            target_org = session_org_slug(src)
+            asset_type = str(src.get("type") or "")
+            asset_title = str(src.get("title") or "")
+        else:
+            target_org = "autonomy"
+            asset_type = "bead"
+            asset_title = str((bead or {}).get("title") or asset_id)
         members = dao_mock.get_settings_members(set_id, org=target_org)
         payload = next(
             (m.get("payload") or {} for m in members if m.get("key") == member_key),
@@ -9047,9 +9202,13 @@ async def api_agent_action_dispatch(request):
             # Surface the primer body in the mock-mode response so the
             # behavioural-sweep fetch spy can assert primer shape without
             # having to wire a real CrossTalk delivery in the browser harness.
-            src.setdefault("org", target_org)
             primer_body = _build_send_to_primer(
-                source=src,
+                asset={
+                    "id": asset_id,
+                    "type": asset_type,
+                    "org": target_org,
+                    "title": asset_title,
+                },
                 custom_message=custom_message,
             )
             return JSONResponse({
@@ -9064,24 +9223,34 @@ async def api_agent_action_dispatch(request):
 
     # ── Step 1: resolve the target asset and its owning org ──────
     source = graph_ops.get_source(asset_id)
+    bead = None
+    target_kind = "source"
+    target_source_id = ""
     if source is None:
+        bead = await asyncio.to_thread(dao_beads.get_bead, asset_id)
+    if source is None and bead is None:
         return JSONResponse(
             {"error": f"asset not found: {asset_id}"}, status_code=404,
         )
-    target_org = source.get("org") or ""
-    if not target_org:
-        return JSONResponse(
-            {"error": "asset has no owning org"}, status_code=409,
-        )
-
-    # Canonicalise the asset id from the resolved source. The browser
-    # may send a 12-char prefix derived from the URL; templates and the
-    # idempotency key downstream want the full UUID so the agent can
-    # ``graph read`` cleanly and a re-dispatch within the window is
-    # correctly de-duped regardless of how each call addressed the
-    # source. The ``asset_id`` variable shadows the body input from
-    # here on out.
-    asset_id = str(source["id"])
+    if source is not None:
+        target_org = source.get("org") or ""
+        if not target_org:
+            return JSONResponse(
+                {"error": "asset has no owning org"}, status_code=409,
+            )
+        # Canonicalise the asset id from the resolved source. The browser
+        # may send a 12-char prefix derived from the URL; templates and the
+        # idempotency key downstream want the full UUID so the agent can
+        # ``graph read`` cleanly and a re-dispatch within the window is
+        # correctly de-duped regardless of how each call addressed the
+        # source. The ``asset_id`` variable shadows the body input from
+        # here on out.
+        asset_id = str(source["id"])
+        target_source_id = asset_id
+    else:
+        target_org = "autonomy"
+        target_kind = "bead"
+        target_source_id = asset_id
 
     # ── Step 2: look up the action member in target_org's DB ─────
     payload = _resolve_agent_action_member(
@@ -9118,7 +9287,20 @@ async def api_agent_action_dispatch(request):
                 status_code=400,
             )
         primer = _build_send_to_primer(
-            source=source,
+            asset={
+                "id": asset_id,
+                "type": (
+                    str(source.get("type") or "")
+                    if source is not None else
+                    "bead"
+                ),
+                "org": target_org,
+                "title": (
+                    str(source.get("title") or "")
+                    if source is not None else
+                    str((bead or {}).get("title") or asset_id)
+                ),
+            },
             custom_message=custom_message,
         )
         ok, err = await _send_to_via_crosstalk(
@@ -9141,7 +9323,26 @@ async def api_agent_action_dispatch(request):
         return JSONResponse(response)
 
     # ── Step 4b: non-universal action — workspace lookup ─────────
-    workspace = _resolve_workspace_for_org(target_org)
+    explicit_workspace = str(payload.get("workspace") or "").strip()
+    if explicit_workspace:
+        try:
+            workspace = workspace_settings.get_workspace(explicit_workspace)
+        except KeyError:
+            return JSONResponse(
+                {"error": "unknown workspace", "workspace": explicit_workspace},
+                status_code=409,
+            )
+        except workspace_settings.WorkspaceSettingsError as exc:
+            return JSONResponse(
+                {
+                    "error": "workspace config error",
+                    "workspace": explicit_workspace,
+                    "detail": str(exc),
+                },
+                status_code=500,
+            )
+    else:
+        workspace = _resolve_workspace_for_org(target_org)
     if workspace is None:
         return JSONResponse(
             {"error": "no workspace for org", "org": target_org},
@@ -9164,42 +9365,21 @@ async def api_agent_action_dispatch(request):
             status_code=409,
         )
 
-    # Build the prompt-render context entirely from the resolved source
-    # row + the tag taxonomy. The browser used to send a ``page_context``
-    # dict scraped from the DOM, but every field in it was either data
-    # the server already owned (title, short_description, type, org) or
-    # a UI fallback that leaked into the agent's prompt as if it were
-    # truth (e.g. ``"Source: <prefix>"`` from source.js's title-element
-    # fallback). The database row is the only authoritative source.
-    src_meta_raw = source.get("metadata") or {}
-    if isinstance(src_meta_raw, str):
-        try:
-            src_meta = json.loads(src_meta_raw)
-        except (json.JSONDecodeError, TypeError):
-            src_meta = {}
-    else:
-        src_meta = src_meta_raw
-    asset_url = (
-        f"{request.url.scheme}://{request.url.netloc}/graph/{asset_id}"
+    # Build the prompt-render context entirely from the resolved asset.
+    # The browser sends only ``asset_id`` + ``member_key``; all asset
+    # fields come from server-owned data.
+    rendered_context = _build_agent_action_context(
+        asset_kind=target_kind,
+        asset_id=asset_id,
+        request=request,
+        target_org=target_org,
+        source=source,
+        bead=bead,
     )
-    rendered_context = {
-        "asset_id": asset_id,
-        "asset_title": source.get("title") or "",
-        "asset_short_description": (
-            source.get("short_description")
-            or src_meta.get("short_description")
-            or ""
-        ),
-        "asset_url": asset_url,
-        "asset_type": source.get("type") or "",
-        "asset_org": target_org,
-        "tag_list": ", ".join(_get_tag_taxonomy(target_org)),
-    }
 
     try:
         rendered_prompt = _render_agent_action_prompt(
             template,
-            asset_id=asset_id,
             page_context=rendered_context,
             dispatched_by_session=dispatched_by_session or "",
             member_key=member_key,
@@ -9223,7 +9403,8 @@ async def api_agent_action_dispatch(request):
             set_revision=int(payload.get("set_revision") or 1),
             member_key=member_key,
             model=model,
-            target_source_id=asset_id,
+            target_source_id=target_source_id,
+            target_kind=target_kind,
             target_org=target_org,
             dispatched_by_session=dispatched_by_session or "",
             title=title,
@@ -9255,31 +9436,96 @@ async def api_agent_action_dispatch(request):
     except Exception:
         launch_session = None  # type: ignore[assignment]
 
+    launch_kwargs: dict = {
+        "session_type": "agentic",
+        "name": container_name,
+        "prompt": rendered_prompt,
+        "mounts": None,
+        "metadata": {
+            "graph_project": target_org,
+            "graph_org": target_org,
+            "agentic_source_id": src["id"],
+            "set_id": set_id,
+            "member_key": member_key,
+            "dispatched_by_session": dispatched_by_session or "",
+        },
+        "detach": True,
+        "image": workspace.image,
+        "working_dir": "/workspace/repo",
+        "harness": workspace.harness,
+        "extra_env": None,
+        "output_dir": output_dir,
+        "model": model,
+    }
+    if explicit_workspace:
+        missing_artifacts = workspace_settings.validate_artifacts(workspace)
+        if missing_artifacts:
+            first = missing_artifacts[0]
+            message = workspace_settings.format_missing_artifact_error(first, workspace)
+            return JSONResponse(
+                {
+                    "error": message,
+                    "workspace": workspace.id,
+                    "missing_artifacts": [
+                        {
+                            "name": m.artifact.name,
+                            "description": m.artifact.description,
+                            "help": m.artifact.help,
+                            "expected_path": str(m.path),
+                        }
+                        for m in missing_artifacts
+                    ],
+                },
+                status_code=400,
+            )
+        try:
+            project_mounts = prepare_session_mounts(
+                workspace,
+                container_name,
+                refresh_existing_worktree=True,
+            )
+        except WorkspaceError as exc:
+            logger.error(
+                "agent-actions: workspace prep failed workspace=%s err=%s",
+                workspace.id, exc,
+            )
+            return JSONResponse(
+                {
+                    "error": f"Workspace prep failed: {exc}",
+                    "workspace": workspace.id,
+                },
+                status_code=500,
+            )
+        project_mounts.update(workspace_settings.artifact_mounts(workspace))
+        extra_env: dict[str, str] = dict(workspace.env) if workspace.env else {}
+        for env_name in workspace.env_from_host:
+            env_value = os.environ.get(env_name)
+            if env_value is not None:
+                extra_env[env_name] = env_value
+        output_dir_path.mkdir(parents=True, exist_ok=True)
+        primer_path = output_dir_path / ".claude_md"
+        primer_path.write_text(render_workspace_primer(workspace))
+        launch_metadata = dict(launch_kwargs["metadata"])
+        launch_metadata["graph_project"] = workspace.graph_project
+        launch_metadata["graph_org"] = workspace.graph_project
+        if workspace.default_tags:
+            launch_metadata["graph_tags"] = list(workspace.default_tags)
+        launch_kwargs.update({
+            "mounts": project_mounts or None,
+            "metadata": launch_metadata,
+            "working_dir": workspace.working_dir or "/workspace/repo",
+            "extra_env": extra_env or None,
+            "global_claude_md": primer_path,
+            "startup_script": (_REPO_ROOT / workspace.startup) if workspace.startup else None,
+            "privileged": workspace.dind,
+            "network_host": workspace.network_host,
+            "capabilities": workspace.capabilities,
+        })
+
     container_id: str | None = None
     if launch_session is not None and not os.environ.get("AGENT_ACTIONS_NO_LAUNCH"):
         try:
-            container_id = await asyncio.to_thread(
-                launch_session,
-                "agentic",  # session_type
-                container_name,
-                rendered_prompt,
-                None,  # mounts
-                {
-                    "graph_project": target_org,
-                    "graph_org": target_org,
-                    "agentic_source_id": src["id"],
-                    "set_id": set_id,
-                    "member_key": member_key,
-                    "dispatched_by_session": dispatched_by_session or "",
-                },
-                True,  # detach
-                workspace.image,
-                "/workspace/repo",
-                workspace.harness,
-                None,  # extra_env
-                output_dir,  # explicit output_dir so dispatch_runs.output_dir matches
-                model,
-            )
+            container_id = await asyncio.to_thread(launch_session, **launch_kwargs)
         except Exception:
             logger.exception("agent-actions: launch_session crashed")
             container_id = None

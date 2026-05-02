@@ -46,6 +46,7 @@ from agents.dispatch_db import (
     set_dispatcher_paused, is_paused as db_is_paused, get_pause_reason,
 )
 from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
+from agents.workspace_manager import cleanup_session_worktrees
 from agents.workspace_settings import WorkspaceV1, load_workspaces
 from agents.session_launcher import launch_session
 
@@ -2326,6 +2327,13 @@ def poll_and_collect_agentic() -> None:
             remove_container(container_name)
         except Exception:
             pass
+        try:
+            cleanup_session_worktrees(run_id, force=True)
+        except Exception as e:
+            print(
+                f"  agentic completion: workspace cleanup failed for {run_id}: {e}",
+                file=sys.stderr,
+            )
 
         print(
             f"  Agentic completed: {run_id} (exit={exit_code}, "

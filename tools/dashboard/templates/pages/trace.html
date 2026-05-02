@@ -45,7 +45,15 @@
       <div class="mb-6">
         <a href="/dispatch" class="text-indigo-400 text-sm hover:underline mb-2 block">&#8592; Back to Dispatch</a>
         <h1 class="text-2xl font-bold mb-2" x-text="trace.action_label || 'Agentic Action'"></h1>
-        <template x-if="trace.target_title">
+        <template x-if="trace.target_title && trace.target_kind === 'bead' && trace.target_source_id">
+          <div class="text-sm text-gray-400 mb-3">
+            on
+            <a :href="'/bead/' + trace.target_source_id"
+               class="text-indigo-400 hover:underline"
+               x-text="trace.target_title"></a>
+          </div>
+        </template>
+        <template x-if="trace.target_title && trace.target_kind !== 'bead' && trace.target_source_id">
           <div class="text-sm text-gray-400 mb-3">
             on
             <a :href="'/graph/' + (trace.target_source_id || '')"
@@ -85,7 +93,15 @@
       <section class="mb-6" aria-label="Provenance">
         <h2 class="text-lg font-semibold mb-2 text-blue-400">Provenance</h2>
         <div class="bg-gray-800 rounded-lg p-4 space-y-2 text-sm">
-          <template x-if="trace.target_source_id">
+          <template x-if="trace.target_kind === 'bead' && trace.target_source_id">
+            <div>
+              <span class="text-gray-500">Asset:</span>
+              <a :href="'/bead/' + trace.target_source_id"
+                 class="ml-2 text-indigo-400 hover:underline"
+                 x-text="trace.target_title || trace.target_source_id"></a>
+            </div>
+          </template>
+          <template x-if="trace.target_kind !== 'bead' && trace.target_source_id">
             <div>
               <span class="text-gray-500">Asset:</span>
               <a :href="'/graph/' + trace.target_source_id"

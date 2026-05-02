@@ -18,7 +18,7 @@ AGENT_ACTIONS_SET_ID = "dashboard.agent-actions"
 AGENT_ACTIONS_REVISION = 1
 
 VALID_ASSET_TYPES = (
-    "note", "session", "agent-run", "conversation",
+    "note", "bead", "session", "agent-run", "conversation",
     "docs", "musing", "status", "*",
 )
 
@@ -37,7 +37,7 @@ SYNOPSIS = {
 
 _ALLOWED_FIELDS = {
     "asset_type", "label", "icon", "model", "prompt_template",
-    "estimated_seconds", "writes", "universal",
+    "estimated_seconds", "writes", "universal", "workspace",
 }
 
 
@@ -95,6 +95,14 @@ class AgentActionV1(SettingSchema):
             ),
             "default": False,
         },
+        "workspace": {
+            "type": "string",
+            "description": (
+                "Optional explicit workspace id to materialize for this action. "
+                "When omitted, the runtime uses the lightweight default "
+                "workspace behavior."
+            ),
+        },
     }
 
     @classmethod
@@ -127,7 +135,7 @@ class AgentActionV1(SettingSchema):
                         f"{cls.__name__}: non-universal members require {key!r}"
                     )
 
-        for key in ("icon", "model", "prompt_template"):
+        for key in ("icon", "model", "prompt_template", "workspace"):
             if key in payload and payload[key] is not None:
                 if not isinstance(payload[key], str):
                     raise SchemaValidationError(
