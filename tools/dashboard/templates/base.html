@@ -1212,12 +1212,13 @@
            live panel underneath. -->
       <button type="button"
               onclick="event.stopPropagation();"
-              @click.stop.prevent="openWorkspaceReview()"
-              class="text-xs text-amber-400 hover:text-amber-200 px-1"
+              @click.stop="openWorkspaceReview()"
+              class="sv-term-toggle"
               x-show="hasWorkspaceChanges"
               :title="workspaceStatusTooltip"
               data-testid="session-worktree-review-button"
-              style="display:none;">⌥</button>
+              aria-label="Open worktree review"
+              style="display:none;"><span class="sv-term-glyph">⌥</span></button>
       <span class="text-xs text-gray-500 ml-auto" id="live-panel-status"></span>
       <button onclick="event.stopPropagation(); hideLivePanel();" class="text-gray-500 hover:text-gray-300 text-sm px-1">✕</button>
     </div>

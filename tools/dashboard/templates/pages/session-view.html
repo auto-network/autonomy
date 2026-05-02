@@ -52,12 +52,13 @@
                  getter and open the persistent worktree review overlay,
                  falling back to /worktrees?session=... only if needed. -->
             <button type="button"
-                    @click.stop.prevent="openWorkspaceReview()"
-                    class="text-xs text-amber-400 hover:text-amber-200 px-1"
+                    class="sv-term-toggle"
+                    @click.stop="openWorkspaceReview()"
                     x-show="hasWorkspaceChanges"
                     :title="workspaceStatusTooltip"
                     data-testid="session-worktree-review-button"
-                    style="display:none;">⌥</button>
+                    aria-label="Open worktree review"
+                    style="display:none;"><span class="sv-term-glyph">⌥</span></button>
             <template x-if="_tmuxSession && isLive">
               <button class="sv-term-toggle"
                       :class="{ 'active': showTerminal }"
