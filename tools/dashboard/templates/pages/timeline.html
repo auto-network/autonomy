@@ -598,13 +598,13 @@
         </div>
         <div class="px-4 py-3 text-sm text-gray-200">
           <template x-if="attentionZoom === 'compact'">
-            <div class="text-gray-300" data-testid="attention-body-compact" x-text="e.compact || ''"></div>
+            <div class="text-gray-300" data-testid="attention-body-compact" x-text="attentionBody(e, 'compact')"></div>
           </template>
           <template x-if="attentionZoom === 'normal'">
-            <div class="leading-relaxed text-gray-200" data-testid="attention-body-normal" x-markdown="e.normal || ''"></div>
+            <div class="leading-relaxed text-gray-200" data-testid="attention-body-normal" x-markdown="attentionBody(e, 'normal')"></div>
           </template>
           <template x-if="attentionZoom === 'expanded'">
-            <div class="leading-relaxed text-gray-200" data-testid="attention-body-expanded" x-markdown="e.expanded || ''"></div>
+            <div class="leading-relaxed text-gray-200" data-testid="attention-body-expanded" x-markdown="attentionBody(e, 'expanded')"></div>
           </template>
         </div>
       </div>

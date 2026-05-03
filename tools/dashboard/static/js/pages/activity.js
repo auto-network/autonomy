@@ -410,6 +410,17 @@
         return '↩ ' + short;
       },
 
+      // auto-pv1j1: when the requested zoom level's content is empty/null/
+      // missing, fall back to the next-shallower level that has content.
+      // Empty string, null, and undefined all collapse to "not present" via
+      // JS's falsy-`||` short circuit, which is what we want here.
+      attentionBody(entry, zoom) {
+        if (!entry) return '';
+        if (zoom === 'compact') return entry.compact || '';
+        if (zoom === 'normal') return entry.normal || entry.compact || '';
+        return entry.expanded || entry.normal || entry.compact || '';
+      },
+
       fmtDuration(secs) {
         return _fmtDuration(secs);
       },

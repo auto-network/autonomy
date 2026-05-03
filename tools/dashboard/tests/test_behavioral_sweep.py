@@ -393,6 +393,20 @@ SWEEP_JOURNAL_ENTRIES = [
         "created_at": "2026-03-27T19:40:00Z",
         "org": "autonomy",
     },
+    {
+        # auto-pv1j1: entry with no expanded text, used to verify the
+        # Attention tab's renderer falls back to the next-shallower
+        # non-empty zoom when the requested level is empty/missing.
+        "id": "journal-sweep-003-empty-exp",
+        "compact": "Fallback case — compact only baseline",
+        "normal": "Renderer **fallback**: when expanded is empty, render normal content here.",
+        "expanded": "",
+        "timestamp_start": "2026-05-03T10:00:00Z",
+        "timestamp_end": "2026-05-03T10:05:00Z",
+        "entry_type": "attention",
+        "created_at": "2026-05-03T10:05:00Z",
+        "org": "autonomy",
+    },
 ]
 
 SWEEP_THREADS = [
@@ -2958,6 +2972,44 @@ ACTIVITY_ATTENTION_CHECKS = """(async () => {
         await tick();
         r.zoom_normal_active = data ? (data.attentionZoom === 'normal') : false;
 
+        // Fallback rendering — auto-pv1j1: when the requested zoom level's
+        // content is empty, the renderer should fall back to the
+        // next-shallower non-empty content. Fixture seeds a third entry
+        // (journal-sweep-003-empty-exp) with empty `expanded`; at expanded
+        // zoom that entry should render its `normal` content. Entries with
+        // a non-empty `expanded` continue to render their expanded text.
+        if (data && data.attentionEntries.length > 0) {
+            if (expandedBtn) expandedBtn.click();
+            await tick();
+
+            var fullCard = document.querySelector('[data-testid="activity-attention-entry-journal-sweep-001"]');
+            var fullExpanded = fullCard ? fullCard.querySelector('[data-testid="attention-body-expanded"]') : null;
+            r.fallback_full_expanded_text = fullExpanded ? fullExpanded.textContent.trim() : '';
+            r.fallback_full_has_expanded_marker =
+                r.fallback_full_expanded_text.indexOf('Whats missing from mock dao') !== -1;
+
+            var emptyCard = document.querySelector('[data-testid="activity-attention-entry-journal-sweep-003-empty-exp"]');
+            var emptyExpanded = emptyCard ? emptyCard.querySelector('[data-testid="attention-body-expanded"]') : null;
+            r.fallback_empty_at_expanded_text = emptyExpanded ? emptyExpanded.textContent.trim() : '';
+            r.fallback_empty_at_expanded_renders_normal =
+                r.fallback_empty_at_expanded_text.indexOf('when expanded is empty') !== -1;
+            r.fallback_empty_at_expanded_not_blank = r.fallback_empty_at_expanded_text.length > 0;
+            // Markdown is still applied (the fallback should use the same
+            // renderer the expanded zoom would use), so **fallback** should
+            // come through as <strong>.
+            r.fallback_empty_renders_strong = !!(emptyExpanded && emptyExpanded.querySelector('strong'));
+
+            // Switch to normal and confirm the empty-expanded entry's
+            // normal-zoom body matches what we got at expanded zoom.
+            if (normalBtn) normalBtn.click();
+            await tick();
+            var emptyNormal = emptyCard ? emptyCard.querySelector('[data-testid="attention-body-normal"]') : null;
+            r.fallback_empty_at_normal_text = emptyNormal ? emptyNormal.textContent.trim() : '';
+            r.fallback_text_match =
+                r.fallback_empty_at_expanded_text.length > 0 &&
+                r.fallback_empty_at_expanded_text === r.fallback_empty_at_normal_text;
+        }
+
         // XSS regression — inject raw <script> via fixture and confirm DOMPurify strips it
         if (data && data.attentionEntries.length > 0) {
             var origEntries = JSON.parse(JSON.stringify(data.attentionEntries));
@@ -3120,6 +3172,45 @@ class TestActivityAttentionTabBehavior:
             "Raw <script> survived in rendered Attention body"
         assert c.get("xss_no_global"), \
             "Injected <script> from fixture executed (XSS regression)"
+
+    def test_expanded_zoom_falls_back_when_expanded_empty(self):
+        """auto-pv1j1: at expanded zoom, an entry with empty `expanded` renders its `normal` content (not a blank panel)."""
+        c = self._timeline
+        assert c.get("fallback_empty_at_expanded_not_blank"), (
+            "Empty-expanded entry rendered a blank panel at expanded zoom; "
+            "renderer should fall back to the next-shallower non-empty content."
+        )
+        assert c.get("fallback_empty_at_expanded_renders_normal"), (
+            "Empty-expanded entry should render its `normal` content at "
+            f"expanded zoom; got {c.get('fallback_empty_at_expanded_text')!r}"
+        )
+
+    def test_fallback_text_matches_normal_zoom_text(self):
+        """auto-pv1j1: the empty-expanded entry's expanded-zoom body matches its normal-zoom body."""
+        c = self._timeline
+        assert c.get("fallback_text_match"), (
+            "Empty-expanded entry's expanded-zoom body should equal its "
+            "normal-zoom body (both should render the `normal` content). "
+            f"expanded={c.get('fallback_empty_at_expanded_text')!r} "
+            f"normal={c.get('fallback_empty_at_normal_text')!r}"
+        )
+
+    def test_fallback_uses_markdown_renderer(self):
+        """auto-pv1j1: fallback content at expanded zoom is rendered via x-markdown (the renderer expanded zoom uses), so **bold** still becomes <strong>."""
+        c = self._timeline
+        assert c.get("fallback_empty_renders_strong"), (
+            "Fallback content at expanded zoom should render markdown "
+            "(the **fallback** in fixture text should become <strong>)."
+        )
+
+    def test_full_entry_still_renders_expanded_content(self):
+        """auto-pv1j1: an entry with a non-empty `expanded` still renders that content (no regression)."""
+        c = self._timeline
+        assert c.get("fallback_full_has_expanded_marker"), (
+            "Full entry at expanded zoom should render its `expanded` text "
+            "(marker phrase 'Whats missing from mock dao' from fixture); got "
+            f"{c.get('fallback_full_expanded_text')!r}"
+        )
 
 
 class TestCollabPageBehavior:
