@@ -2764,22 +2764,192 @@ def cmd_journal(args):
         cmd_journal_list(args)
 
 
-def cmd_journal_write(args):
-    """Write a structured journal entry from JSON stdin."""
-    raw = sys.stdin.read().strip() if args.content == "-" else args.content
-    if not raw:
-        print("Error: no JSON content provided", file=sys.stderr)
-        sys.exit(1)
+def _parse_journal_timestamp(value: str, *, now=None) -> str:
+    """Parse a journal timestamp.
+
+    Accepts ISO8601 (returned unchanged after a sanity round-trip),
+    ``now``, or a duration string ``2h``/``30m``/``1d``/``1w``
+    interpreted as "this much in the past".
+    """
+    from datetime import datetime, timezone, timedelta
+
+    if not value:
+        raise ValueError("timestamp value is empty")
+    s = value.strip()
+    now_dt = now or datetime.now(timezone.utc)
+    if s.lower() == "now":
+        return now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Duration form (e.g. "2h", "30m", "1d", "1w") \u2192 now - duration.
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"Error: invalid JSON: {e}", file=sys.stderr)
-        sys.exit(1)
-    for field in ("compact", "normal", "timestamp_start", "timestamp_end"):
-        if field not in data:
-            print(f"Error: missing required field: {field}", file=sys.stderr)
+        secs = _shared_parse_duration(s)
+    except ValueError:
+        secs = None
+    if secs is not None:
+        return (now_dt - timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # ISO8601 \u2014 round-trip through datetime to validate.
+    iso = s.replace("Z", "+00:00") if s.endswith("Z") else s
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError as e:
+        raise ValueError(
+            f"invalid timestamp: {value!r} (use ISO8601, 'now', or a duration like '2h')"
+        ) from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_journal_link(spec: str) -> dict:
+    """Parse ``--link <target>:<relation>[:<turn>]`` into an edge dict."""
+    if not spec or ":" not in spec:
+        raise ValueError(
+            f"invalid --link {spec!r}: expected <target>:<relation>[:<turn>]"
+        )
+    parts = spec.split(":", 2)
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        raise ValueError(
+            f"invalid --link {spec!r}: expected <target>:<relation>[:<turn>]"
+        )
+    edge = {"target": parts[0], "relation": parts[1]}
+    if len(parts) == 3 and parts[2]:
+        try:
+            edge["turn"] = int(parts[2])
+        except ValueError as e:
+            raise ValueError(
+                f"invalid --link {spec!r}: turn must be an integer"
+            ) from e
+    return edge
+
+
+def _read_text_input(path_value: str | None, stdin_flag: bool, label: str) -> str:
+    """Read text content from ``--<label>`` (file path) or ``--<label>-stdin``.
+
+    Returns the empty string if neither is provided.
+    """
+    if path_value and stdin_flag:
+        raise ValueError(f"--{label} and --{label}-stdin are mutually exclusive")
+    if stdin_flag:
+        return sys.stdin.read()
+    if path_value:
+        try:
+            return Path(path_value).read_text(encoding="utf-8")
+        except OSError as e:
+            raise ValueError(f"--{label}: cannot read {path_value!r}: {e}") from e
+    return ""
+
+
+def cmd_journal_write(args):
+    """Write a structured journal entry.
+
+    Two input forms:
+
+    - **Flag form (preferred)**: positional ``<compact>`` plus
+      ``--normal``/``--normal-stdin`` (and optionally ``--expanded``,
+      ``--start``/``--end``/``--since``, ``--type``, ``--link``).
+    - **JSON-stdin form (programmatic escape hatch)**: ``-c -`` reads a
+      JSON payload from stdin matching the legacy contract.
+    """
+    # JSON-stdin form: `-c -` or `-c '<json>'` \u2014 back-compat path.
+    if getattr(args, "content", None) is not None:
+        raw = sys.stdin.read().strip() if args.content == "-" else args.content
+        if not raw:
+            print("Error: no JSON content provided", file=sys.stderr)
             sys.exit(1)
-    data.setdefault("project", _get_scope() or "autonomy")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"Error: invalid JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+        for field in ("compact", "normal", "timestamp_start", "timestamp_end"):
+            if field not in data:
+                print(f"Error: missing required field: {field}", file=sys.stderr)
+                sys.exit(1)
+        data.setdefault("project", _get_scope() or "autonomy")
+        result = get_client().write_journal_entry(
+            data, org=os.environ.get("GRAPH_ORG"),
+        ) or {}
+        sid = result.get("source_id") or ""
+        edge_count = result.get("edge_count") or 0
+        print(f"  \u2713 Journal entry saved (src:{sid[:12]}) \u2014 {edge_count} edges")
+        return
+
+    # Flag form.
+    compact = getattr(args, "compact", None)
+    if not compact:
+        print("Error: missing <compact> headline", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        normal = _read_text_input(
+            getattr(args, "normal", None),
+            getattr(args, "normal_stdin", False),
+            "normal",
+        )
+        expanded = _read_text_input(
+            getattr(args, "expanded", None),
+            getattr(args, "expanded_stdin", False),
+            "expanded",
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not normal.strip():
+        print(
+            "Error: missing normal-zoom content; pass --normal <path> or --normal-stdin",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    from datetime import datetime, timezone, timedelta
+    now_dt = datetime.now(timezone.utc)
+
+    start_value = getattr(args, "start", None)
+    end_value = getattr(args, "end", None)
+    since_value = getattr(args, "since", None)
+
+    try:
+        if since_value and start_value:
+            raise ValueError("--since and --start are mutually exclusive")
+        if since_value:
+            secs = _shared_parse_duration(since_value)
+            ts_start = (now_dt - timedelta(seconds=secs)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            ts_end = _parse_journal_timestamp(end_value or "now", now=now_dt)
+        elif start_value:
+            ts_start = _parse_journal_timestamp(start_value, now=now_dt)
+            ts_end = _parse_journal_timestamp(end_value or "now", now=now_dt)
+        else:
+            # Default: --since 1h.
+            secs = _shared_parse_duration("1h")
+            ts_start = (now_dt - timedelta(seconds=secs)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            ts_end = _parse_journal_timestamp(end_value or "now", now=now_dt)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    edges = []
+    for spec in getattr(args, "link", None) or []:
+        try:
+            edges.append(_parse_journal_link(spec))
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    data = {
+        "compact": compact,
+        "normal": normal,
+        "expanded": expanded,
+        "timestamp_start": ts_start,
+        "timestamp_end": ts_end,
+        "entry_type": getattr(args, "entry_type", None) or "attention",
+        "edges": edges,
+        "project": _get_scope() or "autonomy",
+    }
+
     result = get_client().write_journal_entry(
         data, org=os.environ.get("GRAPH_ORG"),
     ) or {}
@@ -4419,8 +4589,62 @@ def main():
     p_journal.set_defaults(func=cmd_journal)
     journal_sub = p_journal.add_subparsers(dest="journal_cmd")
 
-    p_jwrite = journal_sub.add_parser("write", help="Write a journal entry from JSON stdin")
-    p_jwrite.add_argument("-c", "--content", default="-", help="JSON content (- for stdin)")
+    p_jwrite = journal_sub.add_parser(
+        "write",
+        help="Write a journal entry — flag form (preferred) or JSON stdin (-c -)",
+        description=(
+            "Write a structured journal entry.\n\n"
+            "Flag form (preferred — zero-friction for sessions):\n"
+            "  graph journal write \"headline\" --since 2h \\\n"
+            "      --normal /tmp/n.md [--expanded /tmp/e.md]\n"
+            "  graph journal write \"headline\" --normal-stdin --since 30m < n.md\n"
+            "  graph journal write \"headline\" --start 2026-05-03T04:00:00Z \\\n"
+            "      --end now --type attention --link auto-xxx:fixed_by\n\n"
+            "Required: <compact> + at least one of (--normal, --normal-stdin).\n"
+            "Defaults to --since 1h when neither --start nor --since is given.\n\n"
+            "Programmatic escape hatch (back-compat):\n"
+            "  graph journal write -c -   # JSON payload from stdin\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_jwrite.add_argument(
+        "compact", nargs="?",
+        help="One-line headline for the entry (positional)",
+    )
+    p_jwrite.add_argument("--normal", help="Path to file with normal-zoom text")
+    p_jwrite.add_argument(
+        "--normal-stdin", dest="normal_stdin", action="store_true",
+        help="Read normal-zoom text from stdin",
+    )
+    p_jwrite.add_argument("--expanded", help="Path to file with expanded-zoom text")
+    p_jwrite.add_argument(
+        "--expanded-stdin", dest="expanded_stdin", action="store_true",
+        help="Read expanded-zoom text from stdin",
+    )
+    p_jwrite.add_argument(
+        "--start",
+        help="Start timestamp (ISO8601, 'now', or duration like '2h')",
+    )
+    p_jwrite.add_argument(
+        "--end", default=None,
+        help="End timestamp (ISO8601, 'now', or duration). Default: now",
+    )
+    p_jwrite.add_argument(
+        "--since",
+        help="Shortcut: start = now - duration; end = now (e.g. 2h, 30m)",
+    )
+    p_jwrite.add_argument(
+        "--type", dest="entry_type", default=None,
+        help="Entry type (default: attention)",
+    )
+    p_jwrite.add_argument(
+        "--link", action="append", default=[],
+        help="Add edge: <bead-or-src>:<relation>[:<turn>] (repeatable)",
+    )
+    p_jwrite.add_argument(
+        "-c", "--content", default=None,
+        help="Programmatic escape hatch: JSON content (- for stdin)",
+    )
     p_jwrite.set_defaults(func=cmd_journal)
 
     p_jlist = journal_sub.add_parser("list", help="List recent journal entries")
