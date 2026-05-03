@@ -17,6 +17,8 @@ let _displayCapturePending = false;
 let _harnessUsageMode = 'fallback';
 let _harnessUsageSchema = null;
 let _harnessUsageUnsub = null;
+let _harnessUsagePage = 0;
+let _harnessUsageExpanded = false;
 
 // ── Markdown Rendering ───────────────────────────────────────
 
@@ -103,19 +105,6 @@ function formatRateWindowLabel(windowMinutes) {
   return `${minutes}m`;
 }
 
-function formatResetShort(epochSeconds) {
-  const ts = Number(epochSeconds);
-  if (!Number.isFinite(ts) || ts <= 0) return '--';
-  const date = new Date(ts * 1000);
-  if (Number.isNaN(date.getTime())) return '--';
-  const now = new Date();
-  const diffMs = date.getTime() - now.getTime();
-  if (diffMs > 0 && diffMs < 24 * 60 * 60 * 1000) {
-    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  }
-  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-}
-
 function formatResetLong(epochSeconds) {
   const ts = Number(epochSeconds);
   if (!Number.isFinite(ts) || ts <= 0) return '--';
@@ -144,21 +133,203 @@ function formatUpdatedAt(timestamp) {
 function harnessWindowTone(windowData) {
   const used = Number(windowData && windowData.used_percent);
   if (!Number.isFinite(used)) return '';
-  if (used >= 90) return 'harness-window-hot';
-  if (used >= 75) return 'harness-window-warn';
-  if (used <= 50) return 'harness-window-cool';
+  if (used >= 90) return 'is-hot';
+  if (used >= 75) return 'is-warn';
+  if (used <= 50) return 'is-cool';
   return '';
 }
 
-function renderHarnessWindow(windowData, fallbackLabel) {
-  if (!windowData) {
-    return `<div class="harness-window"><span class="harness-window-label">${_esc(fallbackLabel)}</span><span class="harness-window-value">--</span><span class="harness-window-reset">↺ --</span></div>`;
+function formatHarnessUsageCountdown(epochSeconds) {
+  const ts = Number(epochSeconds);
+  if (!Number.isFinite(ts) || ts <= 0) return '--';
+  const diffMs = (ts * 1000) - Date.now();
+  if (diffMs <= 0) return '0m';
+  const totalMinutes = Math.max(1, Math.ceil(diffMs / 60000));
+  if (totalMinutes >= 1440) {
+    const days = Math.floor(totalMinutes / 1440);
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    return hours > 0 ? `${days}d${hours}h` : `${days}d`;
   }
-  return `<div class="harness-window ${harnessWindowTone(windowData)}">
-    <span class="harness-window-label">${_esc(formatRateWindowLabel(windowData.window_minutes))}</span>
-    <span class="harness-window-value">${_esc(formatRatePercent(windowData.used_percent))}</span>
-    <span class="harness-window-reset">↺ ${_esc(formatResetShort(windowData.resets_at))}</span>
+  if (totalMinutes >= 60) {
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return minutes > 0 ? `${hours}h${minutes}m` : `${hours}h`;
+  }
+  return `${totalMinutes}m`;
+}
+
+function renderHarnessStripWindow(windowData, fallbackLabel) {
+  const label = windowData && windowData.window_minutes
+    ? formatRateWindowLabel(windowData.window_minutes)
+    : fallbackLabel;
+  const used = Number(windowData && windowData.used_percent);
+  const pct = Number.isFinite(used) ? Math.max(0, Math.min(100, used)) : 0;
+  const duration = formatHarnessUsageCountdown(windowData && windowData.resets_at);
+  const rowClass = ['harness-strip-row'];
+  if (!windowData) rowClass.push('is-unavailable');
+  const tone = harnessWindowTone(windowData);
+  if (tone) rowClass.push(tone);
+  return `<div class="${rowClass.join(' ')}">
+    <span class="harness-strip-window">${_esc(label)}</span>
+    <span class="harness-strip-rail"><span class="harness-strip-fill" style="width:${pct}%"></span></span>
+    <span class="harness-strip-reset">${_esc(duration)}</span>
   </div>`;
+}
+
+function renderHarnessUsageDetails(item) {
+  if (!item) return '';
+  const windows = item.windows || {};
+  const rows = [
+    ['identity', item.identityLabel || item.metaLabel || item.harness || '--'],
+    ['updated', formatUpdatedAt(item.updatedAt)],
+    ['source', item.source || '--'],
+    ['short reset', formatResetLong(windows.short && windows.short.resets_at)],
+    ['long reset', formatResetLong(windows.long && windows.long.resets_at)],
+    ['plan', item.planType || '--'],
+    ['limit', item.limitId || item.limitName || '--'],
+  ];
+  if (item.tier) rows.push(['tier', item.tier]);
+  if (item.accountId) rows.push(['account', item.accountId]);
+  if (item.rateLimitReachedType) rows.push(['reached', item.rateLimitReachedType]);
+  if (item.note) rows.push(['note', item.note]);
+  return rows.map(([label, value]) => `
+    <div class="harness-sheet-row">
+      <span class="harness-sheet-label">${_esc(label)}</span>
+      <span class="harness-sheet-value">${_esc(value)}</span>
+    </div>`).join('');
+}
+
+function renderHarnessUsageDots(count, activeIndex) {
+  if (count < 2) return '';
+  return `<div class="harness-strip-dots" aria-hidden="true">${Array.from({ length: count }, (_, index) => `
+    <span class="harness-strip-dot${index === activeIndex ? ' is-active' : ''}" data-index="${index}"></span>
+  `).join('')}</div>`;
+}
+
+function clampHarnessUsagePage(index, count) {
+  if (!count) return 0;
+  return Math.max(0, Math.min(count - 1, index));
+}
+
+function syncHarnessUsageScroll(behavior = 'auto') {
+  if (!harnessUsage) return;
+  const scroller = harnessUsage.querySelector('.harness-strip-scroller');
+  if (!scroller) return;
+  const width = scroller.clientWidth || 0;
+  if (!width) return;
+  scroller.scrollTo({ left: width * _harnessUsagePage, behavior });
+}
+
+function updateHarnessUsageState(items) {
+  if (!harnessUsage) return;
+  const active = items[_harnessUsagePage] || null;
+  harnessUsage.classList.toggle('is-expanded', _harnessUsageExpanded);
+  harnessUsage.querySelectorAll('.harness-strip-page').forEach((page) => {
+    const pageIndex = Number(page.dataset.index || 0);
+    page.classList.toggle('is-active', pageIndex === _harnessUsagePage);
+  });
+  harnessUsage.querySelectorAll('.harness-strip-hit').forEach((button) => {
+    const pageIndex = Number(button.dataset.index || 0);
+    button.setAttribute(
+      'aria-expanded',
+      String(_harnessUsageExpanded && pageIndex === _harnessUsagePage),
+    );
+  });
+  harnessUsage.querySelectorAll('.harness-strip-dot').forEach((dot) => {
+    const dotIndex = Number(dot.dataset.index || 0);
+    dot.classList.toggle('is-active', dotIndex === _harnessUsagePage);
+  });
+  const details = harnessUsage.querySelector('.harness-strip-details');
+  if (details) {
+    details.classList.toggle('is-open', _harnessUsageExpanded);
+    details.setAttribute('aria-hidden', _harnessUsageExpanded ? 'false' : 'true');
+    details.innerHTML = _harnessUsageExpanded ? renderHarnessUsageDetails(active) : '';
+  }
+}
+
+function attachHarnessUsageInteractions(items) {
+  if (!harnessUsage) return;
+  const scroller = harnessUsage.querySelector('.harness-strip-scroller');
+  if (!scroller) return;
+
+  let pointerId = null;
+  let startX = 0;
+  let startY = 0;
+  let dragDistance = 0;
+  let scrollTimer = 0;
+
+  const onScrollSettled = () => {
+    const width = scroller.clientWidth || 1;
+    const nextPage = clampHarnessUsagePage(
+      Math.round(scroller.scrollLeft / width),
+      items.length,
+    );
+    if (nextPage !== _harnessUsagePage) {
+      _harnessUsagePage = nextPage;
+      updateHarnessUsageState(items);
+    }
+  };
+
+  scroller.addEventListener('pointerdown', (event) => {
+    pointerId = event.pointerId;
+    startX = event.clientX;
+    startY = event.clientY;
+    dragDistance = 0;
+  });
+
+  scroller.addEventListener('pointermove', (event) => {
+    if (pointerId !== event.pointerId) return;
+    dragDistance = Math.max(
+      dragDistance,
+      Math.abs(event.clientX - startX),
+      Math.abs(event.clientY - startY),
+    );
+  });
+
+  const clearPointer = (event) => {
+    if (pointerId !== event.pointerId) return;
+    pointerId = null;
+    window.setTimeout(() => { dragDistance = 0; }, 0);
+  };
+
+  scroller.addEventListener('pointerup', clearPointer);
+  scroller.addEventListener('pointercancel', clearPointer);
+
+  scroller.addEventListener('scroll', () => {
+    window.clearTimeout(scrollTimer);
+    scrollTimer = window.setTimeout(onScrollSettled, 60);
+  });
+
+  harnessUsage.querySelectorAll('.harness-strip-hit').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      if (dragDistance > 8) {
+        event.preventDefault();
+        return;
+      }
+      const pageIndex = clampHarnessUsagePage(
+        Number(button.dataset.index || 0),
+        items.length,
+      );
+      if (pageIndex !== _harnessUsagePage) {
+        _harnessUsagePage = pageIndex;
+        _harnessUsageExpanded = false;
+        updateHarnessUsageState(items);
+        syncHarnessUsageScroll('smooth');
+        return;
+      }
+      _harnessUsageExpanded = !_harnessUsageExpanded;
+      updateHarnessUsageState(items);
+    });
+  });
+
+  const details = harnessUsage.querySelector('.harness-strip-details');
+  if (details) {
+    details.addEventListener('click', () => {
+      if (!_harnessUsageExpanded) return;
+      _harnessUsageExpanded = false;
+      updateHarnessUsageState(items);
+    });
+  }
 }
 
 function normalizeLegacyHarnessUsageItem(item) {
@@ -215,97 +386,45 @@ function renderHarnessUsage(data) {
   const items = normalizeHarnessUsageItems(data);
   if (!items.length) {
     harnessUsage.classList.remove('has-tiles');
+    harnessUsage.classList.remove('is-expanded');
+    _harnessUsagePage = 0;
+    _harnessUsageExpanded = false;
     harnessUsage.innerHTML = '';
     return;
   }
+  _harnessUsagePage = clampHarnessUsagePage(_harnessUsagePage, items.length);
   harnessUsage.classList.add('has-tiles');
-  harnessUsage.innerHTML = `<div class="harness-usage-title">Live Limits</div>` + items.map(item => {
-    const harness = item.harness || 'unknown';
-    const available = item.status === 'ok';
-    const windows = item.windows || {};
-    const badgeClass = harness === 'codex'
-      ? 'sc-harness-codex'
-      : harness === 'claude'
-        ? 'sc-harness-claude'
-        : 'sc-harness-unknown';
-    const metaLabel = item.metaLabel || '';
-    const detailRows = available ? `
-      <div class="harness-tile-detail-row">
-        <span class="harness-tile-detail-label">Updated</span>
-        <span class="harness-tile-detail-value">${_esc(formatUpdatedAt(item.updatedAt))}</span>
-      </div>
-      <div class="harness-tile-detail-row">
-        <span class="harness-tile-detail-label">Source</span>
-        <span class="harness-tile-detail-value">${_esc(item.source || '--')}</span>
-      </div>
-      <div class="harness-tile-detail-row">
-        <span class="harness-tile-detail-label">Short Reset</span>
-        <span class="harness-tile-detail-value">${_esc(formatResetLong(windows.short && windows.short.resets_at))}</span>
-      </div>
-      <div class="harness-tile-detail-row">
-        <span class="harness-tile-detail-label">Long Reset</span>
-        <span class="harness-tile-detail-value">${_esc(formatResetLong(windows.long && windows.long.resets_at))}</span>
-      </div>
-      <div class="harness-tile-detail-row">
-        <span class="harness-tile-detail-label">Plan</span>
-        <span class="harness-tile-detail-value">${_esc(item.planType || '--')}</span>
-      </div>
-      ${item.tier
-        ? `<div class="harness-tile-detail-row">
-            <span class="harness-tile-detail-label">Tier</span>
-            <span class="harness-tile-detail-value">${_esc(item.tier)}</span>
-          </div>`
-        : ''}
-      ${item.accountId
-        ? `<div class="harness-tile-detail-row">
-            <span class="harness-tile-detail-label">Account</span>
-            <span class="harness-tile-detail-value">${_esc(item.accountId)}</span>
-          </div>`
-        : ''}
-      <div class="harness-tile-detail-row">
-        <span class="harness-tile-detail-label">Limit</span>
-        <span class="harness-tile-detail-value">${_esc(item.limitId || item.limitName || '--')}</span>
-      </div>
-      ${item.rateLimitReachedType
-        ? `<div class="harness-tile-detail-row">
-            <span class="harness-tile-detail-label">Reached</span>
-            <span class="harness-tile-detail-value">${_esc(item.rateLimitReachedType)}</span>
-          </div>`
-        : ''}
-      ${item.note
-        ? `<div class="harness-tile-detail-row">
-            <span class="harness-tile-detail-label">Note</span>
-            <span class="harness-tile-detail-value">${_esc(item.note)}</span>
-          </div>`
-        : ''}`
-      : `<div class="harness-tile-empty">No telemetry</div>
-         <div class="harness-tile-empty-note">${_esc(item.note || 'No rate-limit telemetry captured yet')}</div>`;
-
-    return `<details class="harness-tile" data-harness="${_esc(harness)}">
-      <summary>
-        <div class="harness-tile-top">
-          <span class="sc-harness ${badgeClass}">${_esc(harness)}</span>
-          <div class="harness-tile-meta">
-            <span class="harness-tile-count">${_esc(metaLabel)}</span>
-            <span class="harness-chevron">▾</span>
-          </div>
-        </div>
-        ${available
-          ? `<div class="harness-tile-bottom">
-              ${renderHarnessWindow(windows.short, 'short')}
-              ${renderHarnessWindow(windows.long, 'long')}
-            </div>`
-          : `<div class="harness-tile-bottom">
-              <div class="harness-window">
-                <span class="harness-window-label">Status</span>
-                <span class="harness-window-value" style="font-size:0.82rem;">No data</span>
-                <span class="harness-window-reset">tap for details</span>
+  harnessUsage.innerHTML = `
+    <div class="harness-strip${_harnessUsageExpanded ? ' is-expanded' : ''}">
+      <div class="harness-strip-scroller">
+        ${items.map((item, index) => {
+          const windows = item.windows || {};
+          return `<div class="harness-strip-page${index === _harnessUsagePage ? ' is-active' : ''}" data-index="${index}">
+            <button
+              type="button"
+              class="harness-strip-hit"
+              data-index="${index}"
+              aria-expanded="${_harnessUsageExpanded && index === _harnessUsagePage ? 'true' : 'false'}"
+            >
+              <div class="harness-strip-head">
+                <span class="harness-strip-label">${_esc(item.harness || 'unknown')}</span>
+                ${renderHarnessUsageDots(items.length, _harnessUsagePage)}
               </div>
-            </div>`}
-      </summary>
-      <div class="harness-tile-details">${detailRows}</div>
-    </details>`;
-  }).join('');
+              <div class="harness-strip-bars">
+                ${renderHarnessStripWindow(windows.short, '5h')}
+                ${renderHarnessStripWindow(windows.long, '7d')}
+              </div>
+            </button>
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="harness-strip-details${_harnessUsageExpanded ? ' is-open' : ''}" aria-hidden="${_harnessUsageExpanded ? 'false' : 'true'}">
+        ${_harnessUsageExpanded ? renderHarnessUsageDetails(items[_harnessUsagePage]) : ''}
+      </div>
+    </div>`;
+  attachHarnessUsageInteractions(items);
+  updateHarnessUsageState(items);
+  syncHarnessUsageScroll();
 }
 
 function freshHarnessUsageSettings(members) {

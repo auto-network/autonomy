@@ -7623,11 +7623,9 @@ def _should_run_harness_usage_poller() -> bool:
 
 
 def operator_is_idle(*, threshold_minutes: int = 15) -> bool:
-    # TODO: swap to Presence.is_idle(operator_id, threshold=timedelta(...))
-    # once the participant-activity substrate lands. Until then the real
-    # overnight gate is the persisted last_user_message_at check below.
-    _ = threshold_minutes
-    return False
+    from tools.graph.surface import Presence
+
+    return Presence.is_idle(threshold=timedelta(minutes=threshold_minutes))
 
 
 def _now_iso() -> str:

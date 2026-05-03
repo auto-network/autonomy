@@ -314,6 +314,7 @@ def test_publish_harness_usage_snapshot_skips_when_no_new_user_messages(monkeypa
         "upsert_by_key",
         lambda set_id, schema_revision, key, payload, org=None, state="raw": writes.append(key) or "sid",
     )
+    monkeypatch.setattr(server, "operator_is_idle", lambda threshold_minutes=15: False)
     server._harness_usage_last_refresh_context.clear()
 
     server._publish_harness_usage_snapshot()
@@ -322,8 +323,20 @@ def test_publish_harness_usage_snapshot_skips_when_no_new_user_messages(monkeypa
     assert writes == ["claude:test"]
 
 
-def test_operator_is_idle_defaults_false():
-    assert server.operator_is_idle() is False
+def test_operator_is_idle_delegates_to_presence(monkeypatch):
+    calls = []
+
+    class _FakePresence:
+        @staticmethod
+        def is_idle(*, threshold):
+            calls.append(threshold)
+            return True
+
+    monkeypatch.setattr("tools.graph.surface.Presence", _FakePresence)
+
+    assert server.operator_is_idle(threshold_minutes=15) is True
+    assert len(calls) == 1
+    assert int(calls[0].total_seconds()) == 900
 
 
 def test_publish_harness_usage_snapshot_skips_when_operator_is_idle(monkeypatch):
