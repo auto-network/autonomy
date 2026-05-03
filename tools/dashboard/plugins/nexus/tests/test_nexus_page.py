@@ -33,6 +33,9 @@ PAGE_JS = PLUGIN_DIR / "page.js"
 SCHEMAS_JS = (
     PLUGIN_DIR.parents[1] / "static" / "js" / "schemas.js"
 )
+PRESENCE_JS = (
+    PLUGIN_DIR.parents[1] / "static" / "js" / "surface-presence.js"
+)
 
 
 def _node_available() -> bool:
@@ -41,11 +44,21 @@ def _node_available() -> bool:
 
 _NODE_DRIVER = r"""
 const Schema = require(%(schemas_js)s);
-const { nexus } = require(%(page_js)s);
+// Surface presence library sniffs ``globalThis.Schema`` to attach its
+// proxies — set it BEFORE we require page.js so the lazy resolver finds
+// the same Schema instance the driver hands fetch overrides to.
+globalThis.Schema = Schema;
+const Presence = require(%(presence_js)s);
 
 global.window = global.window || {};
 global.window.crypto = { randomUUID: () => 'fixed-uuid-for-test' };
-global.window.Autonomy = {};
+global.window.Autonomy = %(autonomy)s;
+// Stash Presence on window too so the page.js sniff hits the browser
+// path it would in production.
+global.window.Schema = Schema;
+global.window.Presence = Presence;
+
+const { nexus } = require(%(page_js)s);
 
 const writes = [];
 const seeded = %(seeded)s;
@@ -68,6 +81,10 @@ const META = {
     meta('dashboard.nexus.scene', 1, 'singleton', 'fixed:active'),
   'dashboard.nexus.tile#1':
     meta('dashboard.nexus.tile', 1, 'keyed_per_entity', 'natural'),
+  'dashboard.surface.presence#1':
+    meta('dashboard.surface.presence', 1, 'keyed_per_entity', 'natural'),
+  'dashboard.surface.ping#1':
+    meta('dashboard.surface.ping', 1, 'append_only_log', 'uuid_v4'),
 };
 
 const META_PREFIX = '/api/graph/settings/autonomy.schema/';
@@ -78,6 +95,12 @@ const liveScene = (seeded.scene && seeded.scene.length)
   : [];
 const liveTiles = (seeded.tiles && seeded.tiles.length)
   ? seeded.tiles.map(m => Object.assign({}, m))
+  : [];
+const livePresence = (seeded.presence && seeded.presence.length)
+  ? seeded.presence.map(m => Object.assign({}, m))
+  : [];
+const livePings = (seeded.pings && seeded.pings.length)
+  ? seeded.pings.map(m => Object.assign({}, m))
   : [];
 
 Schema._clearCache();
@@ -118,8 +141,23 @@ Schema._setFetchOverride(async (path, opts) => {
       };
       if (idx >= 0) liveTiles[idx] = row;
       else liveTiles.push(row);
+    } else if (body.set_id === 'dashboard.surface.presence') {
+      const idx = livePresence.findIndex(m => m.key === body.key);
+      const row = {
+        key: body.key,
+        payload: body.payload,
+        updated_at: '2026-05-03T00:00:00Z',
+      };
+      if (idx >= 0) livePresence[idx] = row;
+      else livePresence.push(row);
+    } else if (body.set_id === 'dashboard.surface.ping') {
+      livePings.push({
+        key: body.key,
+        payload: body.payload,
+        updated_at: '2026-05-03T00:00:00Z',
+      });
     }
-    return { ok: true, status: 200, json: async () => ({ id: 'stub' }) };
+    return { ok: true, status: 200, json: async () => ({ id: 'stub', key: body.key }) };
   }
   // 3) singleton read — /api/graph/settings/<set_id>/<key>
   // 4) list read    — /api/graph/settings/<set_id>(?target_revision=N)
@@ -137,6 +175,11 @@ Schema._setFetchOverride(async (path, opts) => {
       if (!row) return { ok: false, status: 404, json: async () => ({}) };
       return { ok: true, status: 200, json: async () => row };
     }
+    if (setId === 'dashboard.surface.presence') {
+      const row = livePresence.find(m => m.key === key);
+      if (!row) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => row };
+    }
     return { ok: false, status: 404, json: async () => ({}) };
   }
   const list = path.match(/^\/api\/graph\/settings\/([^/?]+)(?:\?.*)?$/);
@@ -147,6 +190,12 @@ Schema._setFetchOverride(async (path, opts) => {
     }
     if (setId === 'dashboard.nexus.tile') {
       return { ok: true, status: 200, json: async () => ({ members: liveTiles.slice() }) };
+    }
+    if (setId === 'dashboard.surface.presence') {
+      return { ok: true, status: 200, json: async () => ({ members: livePresence.slice() }) };
+    }
+    if (setId === 'dashboard.surface.ping') {
+      return { ok: true, status: 200, json: async () => ({ members: livePings.slice() }) };
     }
     return { ok: true, status: 200, json: async () => ({ members: [] }) };
   }
@@ -160,18 +209,30 @@ const c = nexus();
   %(snippet)s
 })().then((out) => {
   process.stdout.write(JSON.stringify(out));
+  // Stop the presence heartbeat (setInterval keeps the node loop
+  // alive otherwise) and exit explicitly so the subprocess returns.
+  try { c.destroy && c.destroy(); } catch (_) { /* ignore */ }
+  process.exit(0);
 }).catch((e) => {
   process.stderr.write(String(e && e.stack || e));
+  try { c.destroy && c.destroy(); } catch (_) { /* ignore */ }
   process.exit(1);
 });
 """
 
 
-def _run(snippet: str, *, seeded: dict | None = None) -> dict:
+def _run(
+    snippet: str,
+    *,
+    seeded: dict | None = None,
+    autonomy: dict | None = None,
+) -> dict:
     src = _NODE_DRIVER % {
         "schemas_js": json.dumps(str(SCHEMAS_JS)),
+        "presence_js": json.dumps(str(PRESENCE_JS)),
         "page_js": json.dumps(str(PAGE_JS)),
         "seeded": json.dumps(seeded or {}),
+        "autonomy": json.dumps(autonomy or {}),
         "snippet": snippet,
     }
     proc = subprocess.run(
@@ -329,3 +390,204 @@ class TestNexusBindings:
         assert out["tileId"] == "dashboard.nexus.tile"
         assert out["hasSceneSet"]
         assert out["hasTileUpsert"]
+
+
+# ── Presence integration (bead auto-klu7q) ─────────────────────────
+
+
+_PRESENT_SEED = {
+    "scene": [{
+        "key": "active",
+        "payload": {"title": "Settings", "subtitle": ""},
+        "updated_at": "2026-05-02T00:00:00Z",
+    }],
+    "tiles": [{
+        "key": "welcome",
+        "payload": {"kind": "markdown", "order": 100, "body": "hi"},
+        "updated_at": "2026-05-02T00:00:00Z",
+    }],
+}
+
+
+def _agent_row(participant_id, surface_id="settings-nexus", **overrides):
+    payload = {
+        "surface_id": surface_id,
+        "participant_kind": "agent",
+        "participant_id": participant_id,
+        "participant_label": participant_id.title(),
+        "accepts_pings": True,
+        "state": "present",
+        "position_kind": "none",
+        "position_value": "",
+        "intent": "",
+        "heartbeat_at": "2026-05-02T22:00:00Z",
+        "last_ping_id": "",
+    }
+    payload.update(overrides)
+    return {
+        "key": surface_id + ":" + participant_id,
+        "payload": payload,
+        "updated_at": "2026-05-02T22:00:00Z",
+    }
+
+
+@pytest.mark.skipif(not _node_available(), reason="node not installed")
+class TestNexusPresence:
+    """Acceptance criteria #1-#5 for bead auto-klu7q."""
+
+    def test_participants_hydrate_from_surface_presence_rows(self):
+        # Acceptance #2: agent on the same surface appears in participants
+        # filtered by surface_id. ``init()`` loads participants before
+        # writing the operator's own row; in production the next
+        # setting.changed SSE refreshes the list — the test re-runs the
+        # load helper to prove the same eventual shape lands.
+        out = _run(
+            """
+            await c._presenceLoadParticipants();
+            return {
+                participants: c.participants.map(p => ({
+                    id: p.participant_id,
+                    kind: p.participant_kind,
+                    label: p.participant_label,
+                    color: c.participantColor(p.participant_id),
+                })),
+                amHere: c.amHere,
+            };
+            """,
+            seeded={
+                **_PRESENT_SEED,
+                "presence": [
+                    _agent_row("alice"),
+                    # Different surface — must be filtered out.
+                    _agent_row("bob", surface_id="other-surface"),
+                ],
+            },
+            autonomy={"operatorId": "jeremy", "operatorLabel": "Jeremy"},
+        )
+        ids = sorted(p["id"] for p in out["participants"])
+        assert "alice" in ids
+        assert "jeremy" in ids
+        assert "bob" not in ids
+        # Acceptance #2: deterministic HSL for each participant.
+        for p in out["participants"]:
+            assert p["color"].startswith("hsl(")
+            assert p["color"].endswith("70% 60%)")
+        # ``amHere`` flips true once the operator's row is written.
+        assert out["amHere"] is True
+
+    def test_summon_writes_ping_and_settles_on_acknowledgement(self):
+        # Acceptance #3 + #4: pinging an agent writes a SurfacePing row;
+        # the agent's next presence write (with matching last_ping_id)
+        # settles the button back to idle.
+        out = _run(
+            """
+            const target = c.participants.find(p => p.participant_id === 'alice');
+            // Tap the summon button.
+            await c.summon(target);
+            const afterPing = {
+                pingState: Object.assign({}, c.pingState),
+                pings: writes.filter(w => w.setId === 'dashboard.surface.ping')
+                            .map(w => ({key: w.key, payload: w.payload})),
+            };
+
+            // Find the ping we just wrote, then fake the agent
+            // acknowledging by writing a presence row with the matching
+            // last_ping_id and re-running the load step.
+            const pingKey = afterPing.pings[afterPing.pings.length - 1].key;
+            // Mutate the seeded presence row directly + invoke the
+            // change handler so the page state reloads and settles.
+            const row = livePresence.find(m => m.key === 'settings-nexus:alice');
+            row.payload = Object.assign({}, row.payload, {last_ping_id: pingKey});
+            await c._presenceLoadParticipants();
+            c._settlePingsFromParticipants();
+
+            return {
+                afterPing,
+                pingStateAfterAck: Object.assign({}, c.pingState),
+                pingKey,
+            };
+            """,
+            seeded={
+                **_PRESENT_SEED,
+                "presence": [_agent_row("alice")],
+            },
+            autonomy={"operatorId": "jeremy", "operatorLabel": "Jeremy"},
+        )
+        # Ping was written with the correct targeting + surface fields.
+        assert len(out["afterPing"]["pings"]) == 1
+        ping_payload = out["afterPing"]["pings"][0]["payload"]
+        assert ping_payload["surface_id"] == "settings-nexus"
+        assert ping_payload["from_participant_id"] == "jeremy"
+        assert ping_payload["to_participant_id"] == "alice"
+        # Button moved to 'requested' after the write resolved.
+        assert out["afterPing"]["pingState"]["alice"] == "requested"
+        # Acknowledgement settles the button back to idle.
+        assert out["pingStateAfterAck"]["alice"] == "idle"
+
+    def test_summon_skips_non_pingable_agents(self):
+        # Acceptance #2 corollary: an agent with accepts_pings=False is
+        # findable in the panel but the summon path is a no-op.
+        out = _run(
+            """
+            const target = c.participants.find(p => p.participant_id === 'opted-out');
+            await c.summon(target);
+            return {
+                pingState: Object.assign({}, c.pingState),
+                pings: writes.filter(w => w.setId === 'dashboard.surface.ping'),
+            };
+            """,
+            seeded={
+                **_PRESENT_SEED,
+                "presence": [_agent_row("opted-out", accepts_pings=False)],
+            },
+            autonomy={"operatorId": "jeremy"},
+        )
+        assert out["pings"] == []
+        # No state change for an opted-out target.
+        assert "opted-out" not in out["pingState"]
+
+    def test_tile_markers_filter_by_position(self):
+        # Per-tile markers render only for participants whose
+        # ``position_kind="tile"`` matches the tile id.
+        out = _run(
+            """
+            return {
+                onTileWelcome: c.tileMarkers('welcome').map(p => p.participant_id),
+                onTileMissing: c.tileMarkers('does-not-exist').map(p => p.participant_id),
+            };
+            """,
+            seeded={
+                **_PRESENT_SEED,
+                "presence": [
+                    _agent_row("alice", position_kind="tile", position_value="welcome"),
+                    _agent_row("bob",   position_kind="tile", position_value="other"),
+                    _agent_row("carol", position_kind="none"),
+                ],
+            },
+        )
+        assert out["onTileWelcome"] == ["alice"]
+        assert out["onTileMissing"] == []
+
+    def test_v1_state_still_present_after_presence_wrap(self):
+        # Acceptance #5: no regression — scene/timeline/rail data still
+        # populated end-to-end through the wrapped factory.
+        out = _run(
+            """
+            return {
+                sceneTitle: c.scene.title,
+                timelineIds: c.timeline.map(t => t.id),
+                phaseCount: c.phases.length,
+                hasParticipantsArray: Array.isArray(c.participants),
+                hasPingAgentMethod: typeof c.pingAgent === 'function',
+            };
+            """,
+            seeded={
+                **_PRESENT_SEED,
+                "presence": [],
+            },
+        )
+        assert out["sceneTitle"] == "Settings"
+        assert out["timelineIds"] == ["welcome"]
+        assert out["phaseCount"] == 6
+        assert out["hasParticipantsArray"] is True
+        assert out["hasPingAgentMethod"] is True

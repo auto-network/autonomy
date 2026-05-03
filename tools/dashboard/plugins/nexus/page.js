@@ -16,12 +16,27 @@
 // session has written anything. The bootstrap is guarded by a probe
 // of both sets — present rows always win over the seed.
 //
-// Bead: auto-ct3ey. Design: graph://9b0bdb8e-a9c4. Worked example
-// of the plugin pattern: graph://97ace518-788.
+// v1.5 (bead auto-klu7q) wraps the factory output with
+// ``Presence.alpine()`` so this surface joins the SurfacePresence
+// substrate (substrate.B). Operator + agents render in the banner's
+// presence panel and per-tile markers track each participant's claimed
+// focus. The summon button per agent writes a ``SurfacePing`` row that
+// substrate.C delivers to that exact session over CrossTalk.
+//
+// Bead: auto-ct3ey (v1) + auto-klu7q (v1.5). Design: graph://9b0bdb8e-a9c4.
+// Worked example of the plugin pattern: graph://97ace518-788.
+// Surface Presence signpost: graph://dff97eec-c59.
 
 const _schemaRuntime = (typeof window !== 'undefined' && window.Schema)
   ? window.Schema
   : (typeof require === 'function' ? require('../../static/js/schemas.js') : null);
+
+// Surface presence library — same dual-export sniff. ``window.Presence``
+// is set by ``static/js/surface-presence.js`` in the browser; node
+// tests ``require('../../static/js/surface-presence.js')`` directly.
+const _presenceRuntime = (typeof window !== 'undefined' && window.Presence)
+  ? window.Presence
+  : (typeof require === 'function' ? require('../../static/js/surface-presence.js') : null);
 
 // The static rail content for v1. Per the bead spec the phase tracker,
 // merge queue, dispatch counters, sessions list, phase board, backlog,
@@ -141,6 +156,11 @@ const _BOOTSTRAP_TILES = [
   },
 ];
 
+// Surface id this plugin claims for SurfacePresence / SurfacePing rows.
+// Stable across both /nexus and /settings-nexus paths so any session
+// landing on either route joins the same multiplayer surface.
+const _SURFACE_ID = 'settings-nexus';
+
 function nexus() {
   const state = {
     // ─────── Scene + tile state ───────
@@ -155,6 +175,17 @@ function nexus() {
     },
     timeline: [],
     lastUpdated: "",
+
+    // ─────── Per-participant summon button state ───────
+    // Map participant_id → 'idle' | 'pending' | 'requested'. The
+    // req-button contract from coordinator-board: the owning component
+    // resets to 'idle' when fresh data arrives. Here that means: when
+    // the target participant writes a presence row whose ``last_ping_id``
+    // matches the ping we just sent, settle back to idle.
+    pingState: {},
+    // Map participant_id → ping_id we last sent them. Used to decide
+    // whether an incoming presence change settles their button.
+    _pingsSent: {},
 
     // ─────── Hardcoded rail data (v1) ───────
     phases: _RAIL_DEFAULTS.phases.map(p => ({...p})),
@@ -352,17 +383,131 @@ function nexus() {
       s = s.replace(/`([^`]+)`/g, '<code class="bg-gray-800 px-1 py-0.5 rounded text-[12px] text-indigo-300">$1</code>');
       return s;
     },
+
+    // ─────── Surface presence helpers (substrate.B view layer) ───────
+
+    participantColor(participantId) {
+      // Deterministic HSL hash, mirrored across Python + JS so the
+      // operator and the dashboard agree on a participant's hue. The
+      // helper lives view-side per pitfall graph://73af2694-562 — agents
+      // never claim a color in their own row.
+      if (_presenceRuntime && typeof _presenceRuntime.participantColor === 'function') {
+        return _presenceRuntime.participantColor(participantId);
+      }
+      return 'hsl(0 70% 60%)';
+    },
+
+    participantInitial(p) {
+      const label = (p && (p.participant_label || p.participant_id)) || '?';
+      return String(label).trim().charAt(0).toUpperCase() || '?';
+    },
+
+    tileMarkers(tileId) {
+      // Participants whose claimed focus is this tile. Drives the small
+      // colored dots rendered on each tile header.
+      if (!Array.isArray(this.participants)) return [];
+      return this.participants.filter(p => p
+        && p.position_kind === 'tile'
+        && p.position_value === tileId);
+    },
+
+    scrollToTile(tileId) {
+      // Default onPing handler. Scrolls the tile into view so the
+      // operator can answer the ping without hunting through the
+      // timeline. Guards against missing IDs and a non-DOM env (tests).
+      if (!tileId || typeof document === 'undefined') return;
+      const el = document.querySelector('[data-testid="nx-tile-' + tileId + '"]');
+      if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({behavior: 'smooth', block: 'center'});
+      }
+    },
+
+    async summon(participant) {
+      // Operator taps the per-participant ping button. Writes a
+      // SurfacePing row directed at the explicit participant_id —
+      // never a role lookup (see graph://1ba4d2e0-c5f). The button
+      // moves idle → pending → requested and settles back to idle
+      // when the agent's next presence row reflects ``last_ping_id``.
+      if (!participant || !participant.participant_id) return;
+      if (!participant.accepts_pings) return;
+      const targetId = participant.participant_id;
+      this.pingState = {...this.pingState, [targetId]: 'pending'};
+      try {
+        const focusId = (this.scene && this.scene.focus_tile_id) || '';
+        const result = await this.pingAgent(
+          targetId,
+          {kind: focusId ? 'tile' : 'none', value: focusId},
+          '',
+        );
+        // The append helper on the proxy returns the written row; we
+        // capture the key so the settle handler can match it against
+        // the agent's ``last_ping_id``.
+        const pingId = (result && (result.key || (result.payload && result.payload.id))) || '';
+        if (pingId) this._pingsSent = {...this._pingsSent, [targetId]: pingId};
+        this.pingState = {...this.pingState, [targetId]: 'requested'};
+      } catch (err) {
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('[nexus] summon failed for', targetId, err);
+        }
+        this.pingState = {...this.pingState, [targetId]: 'idle'};
+      }
+    },
+
+    _settlePingsFromParticipants() {
+      // After every presence refresh, walk participants and clear any
+      // 'requested' button whose target has acknowledged the matching
+      // ping. We compare against ``_pingsSent`` rather than the most
+      // recent ping seen on the wire so an unrelated ping from another
+      // operator can't settle our button.
+      if (!Array.isArray(this.participants)) return;
+      let dirty = false;
+      const next = {...this.pingState};
+      for (const p of this.participants) {
+        if (!p || !p.participant_id) continue;
+        const sentId = this._pingsSent[p.participant_id];
+        if (!sentId) continue;
+        if (p.last_ping_id && p.last_ping_id === sentId
+            && next[p.participant_id] === 'requested') {
+          next[p.participant_id] = 'idle';
+          dirty = true;
+        }
+      }
+      if (dirty) this.pingState = next;
+    },
   };
 
+  // Compose Presence.alpine then Schema.alpine. Init order is
+  // outer-first per the wrapper contract: Schema.alpine attaches Scene
+  // and Tile, then calls the Presence-wrapped init (presence proxies +
+  // participants load + heartbeat), then calls the original nexus init
+  // (refreshScene + refreshTiles + bootstrap-if-empty). This means by
+  // the time the bootstrap probe runs, ``this.participants`` is already
+  // hydrated for any later UI work that needs it.
+  let composed = state;
+  if (_presenceRuntime && typeof _presenceRuntime.alpine === 'function') {
+    composed = _presenceRuntime.alpine({
+      surfaceId: _SURFACE_ID,
+      // Regular function (NOT arrow) so Presence's ``onPing.call(this, ...)``
+      // delivers the nexus state as ``this``. Arrow functions ignore
+      // ``.call(this)`` per ECMA semantics.
+      onPing: function(ping) {
+        this.scrollToTile(ping && ping.position_value);
+      },
+      onParticipantChange: function() {
+        this._settlePingsFromParticipants();
+      },
+    }, state);
+  }
+
   if (_schemaRuntime && typeof _schemaRuntime.alpine === 'function') {
-    return _schemaRuntime.alpine(state, {
+    return _schemaRuntime.alpine(composed, {
       schemas: {
         Scene: 'dashboard.nexus.scene',
         Tile:  'dashboard.nexus.tile',
       },
     });
   }
-  return state;
+  return composed;
 }
 
 if (typeof window !== 'undefined') {

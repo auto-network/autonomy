@@ -298,3 +298,53 @@ class TestNexusPageFragment:
         assert "Scene: 'dashboard.nexus.scene'" in js
         assert "Tile:  'dashboard.nexus.tile'" in js \
             or "Tile: 'dashboard.nexus.tile'" in js
+
+
+# ── Presence integration (bead auto-klu7q) ──────────────────────────
+
+
+class TestNexusPresenceIntegration:
+    """v1.5 wires substrate.B's ``Presence.alpine()`` into the page."""
+
+    def test_page_js_wraps_state_with_presence_alpine(self):
+        js = (PLUGIN_DIR / "page.js").read_text()
+        # The composition: Schema.alpine(Presence.alpine(opts, state), ...).
+        assert "_presenceRuntime.alpine" in js
+        # Surface id matches the page route + acceptance criteria.
+        assert "settings-nexus" in js
+        # The onPing wiring delegates to scrollToTile per the bead spec.
+        assert "scrollToTile" in js
+
+    def test_page_js_ships_presence_helpers(self):
+        js = (PLUGIN_DIR / "page.js").read_text()
+        # View-side helpers consumers of the presence panel rely on.
+        assert "participantColor" in js
+        assert "tileMarkers" in js
+        assert "summon" in js
+        # The req-button 3-state map (idle/pending/requested) is the
+        # contract the panel binds against.
+        assert "pingState" in js
+        assert "'requested'" in js
+        assert "'pending'" in js
+
+    def test_page_html_renders_presence_panel(self):
+        html = (PLUGIN_DIR / "page.html").read_text()
+        # Acceptance #1: panel mounts in the banner.
+        assert 'data-testid="nx-presence-panel"' in html
+        assert 'data-testid="nx-presence-stack"' in html
+        # Acceptance #2: avatars + summon button per participant. Two
+        # template loops over ``participants`` write the avatars and
+        # the summon buttons; iterations are name-keyed by participant id.
+        assert "nx-presence-avatar-" in html
+        assert "nx-summon-" in html
+        # Acceptance #2: avatar background reads from participantColor.
+        assert "participantColor(p.participant_id)" in html
+
+    def test_page_html_renders_per_tile_markers(self):
+        html = (PLUGIN_DIR / "page.html").read_text()
+        # Per-tile marker dots — one container per tile (markdown +
+        # code variants both wired). The markers use the substrate's
+        # ``.nx-tile-marker`` class so any plugin gets the same look.
+        assert "nx-tile-marker" in html
+        assert "tileMarkers(t.id)" in html
+        assert "nx-tile-markers-" in html
