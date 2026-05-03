@@ -1485,6 +1485,16 @@ class SessionMonitor:
             session_dir=session_dir,
         )
 
+        # Stamp trusted session identity onto entry types whose serve URLs
+        # depend on it. ``viewer_attachment`` payloads come from agent
+        # tool_result content, so any ``session`` they claim is untrusted —
+        # the monitor knows authoritatively which tmux session this batch
+        # came from and is the only correct source. (See
+        # ``_upconvert_viewer_attachment`` docstring for the threat model.)
+        for entry in new_entries:
+            if entry.get("type") == "viewer_attachment":
+                entry["session"] = tmux_name
+
         activity_state = _apply_activity_entries(ts, new_entries)
         update_activity_state(tmux_name, activity_state)
 

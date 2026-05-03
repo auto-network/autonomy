@@ -389,6 +389,21 @@
         </div>
       </template>
 
+      <!-- Viewer-attachment lightbox: shown when openLightbox() sets the src -->
+      <template x-if="lightboxSrc">
+        <div class="sc-va-lightbox"
+             data-testid="viewer-attachment-lightbox"
+             @click.self="closeLightbox()"
+             @keydown.escape.window="closeLightbox()"
+             tabindex="-1"
+             x-init="$el.focus()">
+          <button class="sc-va-lightbox-close"
+                  @click="closeLightbox()"
+                  aria-label="Close">&times;</button>
+          <img :src="lightboxSrc" :alt="lightboxAlt" class="sc-va-lightbox-img">
+        </div>
+      </template>
+
     </div>
   </template>
 

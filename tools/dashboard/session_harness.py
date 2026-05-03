@@ -543,6 +543,62 @@ def _build_turn_correction_entry(
     return entry
 
 
+def _upconvert_viewer_attachment(
+    content: str, timestamp: str, tool_id: str = ""
+) -> dict | None:
+    """Upconvert ``graph share`` JSON output into a typed ``viewer_attachment``
+    parser entry.
+
+    The CLI prints a single JSON object whose ``type`` is ``viewer_attachment``;
+    we recognize that discriminator and emit a typed entry the viewer renders
+    as a thumbnail tile (tap to fullscreen). The file itself lives under
+    ``/workspace/output/.attachments/...`` (host's ``data/agent-runs/<run>/``)
+    and is served via ``/api/session/<tmux>/output/<rel_path>``.
+
+    Security: ``session`` is **deliberately not** copied from the payload —
+    ``tool_result`` content is whatever the agent printed, so a compromised
+    or malicious agent could otherwise emit ``"session": "<other-tmux>"`` and
+    induce the viewer to fetch another session's files (confused-deputy
+    cross-session read). The trusted session is stamped later by the
+    SessionMonitor, which knows authoritatively which JSONL stream this
+    entry came from. Same reason for skipping any other identity-shaped
+    fields the payload might claim.
+    """
+    if not isinstance(content, str):
+        return None
+    stripped = content.strip()
+    if not stripped or stripped[0] != "{":
+        return None
+    if "viewer_attachment" not in stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "viewer_attachment":
+        return None
+    rel_path = payload.get("rel_path")
+    if not isinstance(rel_path, str) or not rel_path:
+        return None
+    entry: dict[str, Any] = {
+        "type": "viewer_attachment",
+        "role": "tool",
+        "timestamp": timestamp,
+        "rel_path": rel_path,
+    }
+    if tool_id:
+        entry["tool_id"] = tool_id
+    # ``session`` intentionally omitted — see docstring. Stamped by monitor.
+    for key in ("filename", "mime", "alt", "caption", "sha8"):
+        v = payload.get(key)
+        if isinstance(v, str) and v:
+            entry[key] = v
+    size = payload.get("size")
+    if isinstance(size, int) and size >= 0:
+        entry["size"] = size
+    return entry
+
+
 def _upconvert_turn_correction_command(
     command: str,
     timestamp: str,
@@ -880,6 +936,11 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                     )
                     if tc:
                         tool_results.append(tc)
+                    va = _upconvert_viewer_attachment(
+                        result_content, timestamp, tool_id=tool_use_id,
+                    )
+                    if va:
+                        tool_results.append(va)
                     sem = _upconvert_graph_result(result_content, timestamp, tool_id=tool_use_id)
                     if sem:
                         _enrich_semantic_tile(sem)
@@ -1007,16 +1068,17 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
             "timestamp": timestamp,
         }
         tc = _upconvert_turn_correction(result_content, timestamp, tool_id=tool_id)
+        va = _upconvert_viewer_attachment(result_content, timestamp, tool_id=tool_id)
         sem = _upconvert_graph_result(result_content, timestamp, tool_id=tool_id)
-        if tc and sem:
-            _enrich_semantic_tile(sem)
-            return [base_result, tc, sem]
+        out = [base_result]
         if tc:
-            return [base_result, tc]
+            out.append(tc)
+        if va:
+            out.append(va)
         if sem:
             _enrich_semantic_tile(sem)
-            return [base_result, sem]
-        return base_result
+            out.append(sem)
+        return out if len(out) > 1 else base_result
 
     return None
 
@@ -1837,16 +1899,17 @@ def _parse_codex_exec_end(payload: dict, timestamp: str) -> dict | list[dict] | 
     tc = _upconvert_turn_correction(output, timestamp, tool_id=tool_id)
     if tc is None:
         tc = _upconvert_turn_correction_command(command, timestamp, tool_id=tool_id)
+    va = _upconvert_viewer_attachment(output, timestamp, tool_id=tool_id)
     sem = _upconvert_graph_result(output, timestamp, tool_id=tool_id)
-    if tc and sem:
-        _enrich_semantic_tile(sem)
-        return [result, tc, sem]
+    out = [result]
     if tc:
-        return [result, tc]
+        out.append(tc)
+    if va:
+        out.append(va)
     if sem:
         _enrich_semantic_tile(sem)
-        return [result, sem]
-    return result
+        out.append(sem)
+    return out if len(out) > 1 else result
 
 
 def parse_codex_log_line(line: str) -> dict | list[dict] | None:
