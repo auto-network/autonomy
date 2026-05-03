@@ -172,6 +172,12 @@
       _expandView: {},
       _groupExpanded: {},
       _groupExpandView: {},
+      // ── Turn-correction overlay (auto-edec1.4) ─────────────────
+      // Sparse map keyed by user entry message_id. Each value is the
+      // serialized turn-correction row from /api/session/.../turn-corrections
+      // ({status, original_sha256, corrected_text, ...}). Renderer
+      // helpers in SessionRenderer read this to overlay user tiles.
+      _corrections: {},
 
       // Backfill progress (page mode only)
       loadProgress: 0,
@@ -403,6 +409,10 @@
 
         // Ensure SSE subscription (idempotent)
         window.ensureSessionMessages();
+
+        // Hydrate sparse turn-correction overlay state.
+        // Sparse: empty payload → empty map → no overlay rendered.
+        this._hydrateCorrections();
 
         // Set up reactive watchers
         this._setupWatchers();
@@ -1113,6 +1123,81 @@
         this.linkCandidates = [];
       },
 
+      // ── Turn-correction overlay hydration / mutation ───────────
+
+      // Pull persisted correction rows for this session and seed
+      // ``_corrections``. Sparse: empty response → empty map. Failures
+      // are swallowed so a transient persistence outage doesn't block
+      // the rest of the viewer from rendering.
+      async _hydrateCorrections() {
+        if (!this.sessionKey) return;
+        try {
+          var res = await fetch('/api/session/' + encodeURIComponent(this.sessionKey) + '/turn-corrections');
+          if (!res.ok) return;
+          var data = await res.json();
+          var map = {};
+          var rows = (data && data.corrections) || [];
+          for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            if (row && row.target_message_id) map[row.target_message_id] = row;
+          }
+          this._corrections = map;
+        } catch (e) {
+          // best-effort
+        }
+      },
+
+      async acceptCorrection(entry) {
+        return this._transitionCorrection(entry, 'accept', 'accepted');
+      },
+
+      async dismissCorrection(entry) {
+        return this._transitionCorrection(entry, 'dismiss', 'dismissed');
+      },
+
+      async _transitionCorrection(entry, action, terminalStatus) {
+        if (!entry || !entry.message_id) return;
+        var c = this._corrections[entry.message_id];
+        if (!c) return;
+        // Optimistic UI: flip the local state immediately so the tile
+        // reacts without a round-trip; the network call confirms.
+        var prev = c.status;
+        var next = Object.assign({}, c, { status: terminalStatus });
+        this._corrections = Object.assign({}, this._corrections, {
+          [entry.message_id]: next,
+        });
+        try {
+          var url = '/api/session/' + encodeURIComponent(this.sessionKey)
+            + '/turn-corrections/' + encodeURIComponent(entry.message_id)
+            + '/' + action;
+          var res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ original_sha256: c.original_sha256 || '' }),
+          });
+          if (!res.ok) {
+            // Roll back on failure so the operator can retry.
+            var rollback = Object.assign({}, c, { status: prev });
+            this._corrections = Object.assign({}, this._corrections, {
+              [entry.message_id]: rollback,
+            });
+            return;
+          }
+          var body = await res.json();
+          var serverRow = body && body.correction;
+          if (serverRow) {
+            this._corrections = Object.assign({}, this._corrections, {
+              [entry.message_id]: serverRow,
+            });
+          }
+        } catch (e) {
+          var rollback = Object.assign({}, c, { status: prev });
+          this._corrections = Object.assign({}, this._corrections, {
+            [entry.message_id]: rollback,
+          });
+        }
+      },
+
       // ── Backfill fetch ──────────────────────────────────────────
 
       async _fetchBacklog(store) {
@@ -1229,6 +1314,7 @@
         this._expandView = {};
         this._groupExpanded = {};
         this._groupExpandView = {};
+        this._corrections = {};
         this.autoScroll = true;
         this._runDir = '';
         this._tailUrl = '';

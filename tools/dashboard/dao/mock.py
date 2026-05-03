@@ -434,6 +434,70 @@ def get_session_entries(session_id: str) -> list[dict] | None:
     return entries_map.get(session_id)
 
 
+# ── Turn-correction overlay (auto-edec1.4) ────────────────────────
+# Sparse fixture-backed shadow of the ``turn_corrections`` table. Keyed
+# by tmux_name → list of correction rows. Tests seed pending/accepted/
+# dismissed states; accept/dismiss POSTs mutate the in-memory cache so
+# the same fixture file does not need to be re-written between calls.
+
+_TURN_CORRECTIONS_OVERRIDES: dict[str, dict[str, dict]] = {}
+
+
+def _correction_rows(session_id: str) -> list[dict]:
+    data = _load()
+    bucket = data.get("turn_corrections", {})
+    base_rows = list(bucket.get(session_id, []))
+    overrides = _TURN_CORRECTIONS_OVERRIDES.get(session_id, {})
+    out = []
+    seen_message_ids = set()
+    for row in base_rows:
+        mid = row.get("target_message_id")
+        merged = dict(row)
+        if mid in overrides:
+            merged.update(overrides[mid])
+        seen_message_ids.add(mid)
+        out.append(merged)
+    for mid, row in overrides.items():
+        if mid not in seen_message_ids:
+            out.append(dict(row))
+    return out
+
+
+def get_turn_corrections(session_id: str) -> list[dict]:
+    """Return mock turn-correction rows for the session_id (tmux_name)."""
+    return _correction_rows(session_id)
+
+
+def set_turn_correction_status(
+    session_id: str,
+    message_id: str,
+    target_status: str,
+    *,
+    expected_sha256: str,
+) -> tuple[str, dict | None]:
+    """Mirror dashboard_db.set_turn_correction_status for the mock DAO.
+
+    Returns ('ok' | 'not_found' | 'sha_mismatch', row_dict_or_None).
+    Mutates ``_TURN_CORRECTIONS_OVERRIDES`` so subsequent reads reflect
+    the new status (tests don't have to round-trip through the fixture
+    file).
+    """
+    rows = _correction_rows(session_id)
+    match = next(
+        (r for r in rows if r.get("target_message_id") == message_id),
+        None,
+    )
+    if match is None:
+        return "not_found", None
+    if match.get("original_sha256") != expected_sha256:
+        return "sha_mismatch", match
+    new_row = dict(match)
+    new_row["status"] = target_status
+    bucket = _TURN_CORRECTIONS_OVERRIDES.setdefault(session_id, {})
+    bucket[message_id] = new_row
+    return "ok", new_row
+
+
 def get_recent_sessions(
     limit: int | None = None,
     sort: str = "lastActivity",
