@@ -14,9 +14,9 @@ Spec: graph://0d3f750f-f9c (Setting Primitive). Companion bead trail:
 ``graph turn-correction suggest`` CLI), and ``auto-edec1.2`` (sparse
 overlay state on the dashboard side).
 
-Defaults are conservative on purpose: if no workspace-specific Setting is
-written, the primer still surfaces the feature so an operator who has
-not yet authored a Setting still benefits.
+Defaults are intentionally action-biased: if no workspace-specific
+Setting is written, the primer should still push agents to use turn
+corrections aggressively whenever they add even slight value.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ VALID_AGGRESSIVENESS = ("off", "conservative", "balanced", "aggressive")
 # read the same baseline.
 DEFAULT_PAYLOAD: dict[str, Any] = {
     "enabled": True,
-    "aggressiveness": "balanced",
+    "aggressiveness": "aggressive",
     "persist_accepts_to_graph": False,
 }
 
@@ -94,10 +94,10 @@ class TurnCorrectionSettingsV1(SettingSchema):
                 "``graph turn-correction suggest``. ``off`` shows the "
                 "command for reference but tells the agent not to "
                 "volunteer corrections; ``conservative`` reserves it "
-                "for clearly garbled messages; ``balanced`` (default) "
-                "applies whenever a perception gap is plausible; "
-                "``aggressive`` instructs the agent to err on the side "
-                "of suggesting a correction."
+                "for clearly garbled messages; ``balanced`` applies "
+                "whenever a perception gap is plausible; "
+                "``aggressive`` (default) instructs the agent to err "
+                "on the side of suggesting a correction."
             ),
             "enum": list(VALID_AGGRESSIVENESS),
             "default": DEFAULT_PAYLOAD["aggressiveness"],
