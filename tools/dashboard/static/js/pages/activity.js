@@ -343,6 +343,45 @@
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
+  // ── Notifications tab (auto-6gv89) ─────────────────────────────────
+  //
+  // Schema set ids — mirror tools/dashboard/notifications_settings.py.
+  const _ASK_SET_ID = 'dashboard.activity.ask';
+  const _ASK_VOTE_SET_ID = 'dashboard.activity.ask_vote';
+  const _ASK_REFRESH_SET_ID = 'dashboard.activity.ask_refresh';
+  const _OPERATOR_DISMISSED_SET_ID = 'dashboard.activity.operator_dismissed';
+
+  function _participantColor(participantId) {
+    const Presence = (typeof window !== 'undefined') ? window.Presence : null;
+    if (Presence && typeof Presence.participantColor === 'function') {
+      return Presence.participantColor(participantId);
+    }
+    // Defensive fallback if surface-presence.js failed to load.
+    let h = 0;
+    let coef = 1;
+    const s = String(participantId == null ? '' : participantId);
+    for (let i = 0; i < s.length; i++) {
+      h = (h + Math.imul(s.charCodeAt(i), coef)) | 0;
+      coef = Math.imul(coef, 31);
+    }
+    const unsigned = h >>> 0;
+    return 'hsl(' + (unsigned % 360) + ' 70% 60%)';
+  }
+
+  function _nowIso() {
+    return new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+  }
+
+  function _resolveOperatorId() {
+    if (typeof window !== 'undefined'
+        && window.Autonomy
+        && typeof window.Autonomy.operatorId === 'string'
+        && window.Autonomy.operatorId) {
+      return window.Autonomy.operatorId;
+    }
+    return 'operator';
+  }
+
   document.addEventListener('alpine:init', () => {
     Alpine.data('activityPage', () => ({
       range: '24h',
@@ -360,6 +399,26 @@
       tab: 'feed',
       attentionZoom: 'normal',
       attentionEntries: [],
+      // ── Notifications tab state (auto-6gv89) ───────────────────
+      // ``asks``: members of dashboard.activity.ask, raw shape
+      //   { id, key, payload: {session_id, to_participant_id,
+      //                        text, created_at, revision_seq} }
+      // ``dismissedAskIds``: array of ask_ids the operator has muted
+      //   (singleton row from dashboard.activity.operator_dismissed).
+      // ``refreshTargets``: { ask_id: target_revision } from
+      //   dashboard.activity.ask_refresh.
+      // ``localRefreshPending``: { ask_id: true } during in-flight
+      //   write — drives the 'pending' (spinner) visual state.
+      asks: [],
+      dismissedAskIds: [],
+      refreshTargets: {},
+      localRefreshPending: {},
+      voterId: _resolveOperatorId(),
+      _AskSchema: null,
+      _VoteSchema: null,
+      _RefreshSchema: null,
+      _DismissedSchema: null,
+      _notifUnsubs: [],
       routeForRun: window.routeForRun || null,
       _intervalId: null,
       _dispatchHandler: null,
@@ -616,6 +675,267 @@
         } catch (_) {}
       },
 
+      // ── Notifications tab (auto-6gv89) ────────────────────────
+      //
+      // Each derived ask card contains:
+      //   id              — ask_id (Setting key, == session_id)
+      //   payload         — raw schema payload (text, revision_seq, …)
+      //   _color          — deterministic HSL via Presence.participantColor
+      //   _toLabel        — header recipient label ("ambient" or id)
+      //   _refreshState   — 'idle' | 'pending' | 'requested', derived
+      //                     from refreshTargets + localRefreshPending +
+      //                     payload.revision_seq.
+      //
+      // The "requested" predicate matches the substrate contract from
+      // tools/dashboard/notifications_settings.py: a refresh row exists
+      // AND current_revision_seq <= target_revision. Re-clicks /
+      // reloads / heartbeats keep the same target so the state sticks
+      // until the source bumps revision_seq or removes the ask.
+
+      participantColor(id) {
+        return _participantColor(id);
+      },
+
+      askCards() {
+        const cards = [];
+        for (const m of (this.asks || [])) {
+          if (!m) continue;
+          const payload = m.payload || {};
+          const askId = m.key || payload.session_id || m.id || '';
+          if (!askId) continue;
+          const sessionId = payload.session_id || askId;
+          const toId = payload.to_participant_id || '';
+          const targetRev = this.refreshTargets[askId];
+          const curRev = (typeof payload.revision_seq === 'number') ? payload.revision_seq : 0;
+          let refreshState = 'idle';
+          if (this.localRefreshPending[askId]) {
+            refreshState = 'pending';
+          } else if (targetRev != null && curRev <= targetRev) {
+            refreshState = 'requested';
+          }
+          cards.push({
+            id: askId,
+            sessionId: sessionId,
+            payload: payload,
+            text: payload.text || '',
+            createdAt: payload.created_at || '',
+            revisionSeq: curRev,
+            toId: toId,
+            _toLabel: toId ? ('→' + toId) : 'ambient',
+            _color: _participantColor(sessionId),
+            _refreshState: refreshState,
+          });
+        }
+        cards.sort((a, b) => {
+          // Newest first by created_at; fall back to ask id for stability.
+          if (a.createdAt && b.createdAt && a.createdAt !== b.createdAt) {
+            return a.createdAt < b.createdAt ? 1 : -1;
+          }
+          return a.id < b.id ? 1 : -1;
+        });
+        return cards;
+      },
+
+      visibleAskCards() {
+        const dismissed = new Set(this.dismissedAskIds || []);
+        return this.askCards().filter(c => !dismissed.has(c.id));
+      },
+
+      notificationCount() {
+        return this.visibleAskCards().length;
+      },
+
+      async _initAsks() {
+        const Schema = (typeof window !== 'undefined') ? window.Schema : null;
+        if (!Schema || typeof Schema.of !== 'function') return;
+        try {
+          const [askProxy, voteProxy, refreshProxy, dismissedProxy] = await Promise.all([
+            Schema.of(_ASK_SET_ID),
+            Schema.of(_ASK_VOTE_SET_ID),
+            Schema.of(_ASK_REFRESH_SET_ID),
+            Schema.of(_OPERATOR_DISMISSED_SET_ID),
+          ]);
+          this._AskSchema = askProxy;
+          this._VoteSchema = voteProxy;
+          this._RefreshSchema = refreshProxy;
+          this._DismissedSchema = dismissedProxy;
+        } catch (err) {
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[activity] notifications schema bind failed:', err);
+          }
+          return;
+        }
+        await this.refreshAsks();
+        const self = this;
+        const subscribe = (proxy, handler) => {
+          if (proxy && typeof proxy.onChange === 'function') {
+            const unsub = proxy.onChange(() => handler.call(self));
+            if (typeof unsub === 'function') self._notifUnsubs.push(unsub);
+          }
+        };
+        subscribe(this._AskSchema, this._reloadAsks);
+        subscribe(this._RefreshSchema, this._reloadRefreshTargets);
+        subscribe(this._DismissedSchema, this._reloadDismissed);
+      },
+
+      async refreshAsks() {
+        await Promise.all([
+          this._reloadAsks(),
+          this._reloadRefreshTargets(),
+          this._reloadDismissed(),
+        ]);
+      },
+
+      async _reloadAsks() {
+        if (!this._AskSchema) return;
+        try {
+          const members = await this._AskSchema.all();
+          this.asks = Array.isArray(members) ? members : [];
+        } catch (_) {
+          // Leave existing data untouched on transient failure.
+        }
+      },
+
+      async _reloadRefreshTargets() {
+        if (!this._RefreshSchema) return;
+        try {
+          const members = await this._RefreshSchema.all();
+          const next = {};
+          for (const m of (members || [])) {
+            const payload = m && m.payload ? m.payload : {};
+            const askId = payload.ask_id || (m && m.key);
+            if (!askId) continue;
+            const t = payload.target_revision;
+            if (typeof t === 'number') next[askId] = t;
+          }
+          this.refreshTargets = next;
+          // Settle any local pending markers whose target is now visible.
+          // Substrate-confirmed `requested` overrides the ephemeral
+          // `pending` state on re-render (req-button settle on
+          // setting.changed callback, per the bead).
+          for (const askId of Object.keys(this.localRefreshPending)) {
+            if (next[askId] != null) delete this.localRefreshPending[askId];
+          }
+        } catch (_) {}
+      },
+
+      async _reloadDismissed() {
+        if (!this._DismissedSchema) return;
+        try {
+          const members = await this._DismissedSchema.all();
+          // Singleton — newest member wins. Defensive: walk all in case.
+          let ids = [];
+          for (const m of (members || [])) {
+            const payload = m && m.payload ? m.payload : {};
+            if (Array.isArray(payload.dismissed_ask_ids)) {
+              ids = payload.dismissed_ask_ids.slice();
+            }
+          }
+          this.dismissedAskIds = ids;
+        } catch (_) {}
+      },
+
+      async _writeDismissed(ids) {
+        const next = ids.slice();
+        this.dismissedAskIds = next;
+        if (!this._DismissedSchema) return;
+        try {
+          if (typeof this._DismissedSchema.set === 'function') {
+            await this._DismissedSchema.set({ dismissed_ask_ids: next });
+          } else {
+            await this._DismissedSchema.write({
+              key: 'dismissed',
+              payload: { dismissed_ask_ids: next },
+            });
+          }
+        } catch (err) {
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[activity] dismissed write failed:', err);
+          }
+        }
+      },
+
+      _dismissLocal(askId) {
+        if (!askId) return;
+        if (this.dismissedAskIds.includes(askId)) return;
+        return this._writeDismissed(this.dismissedAskIds.concat([askId]));
+      },
+
+      async voteAsk(askId, direction) {
+        if (!askId || (direction !== 'up' && direction !== 'down')) return;
+        // Local dismiss is the operator-visible terminal effect; do it
+        // first so the card disappears even if the vote write 500s.
+        this._dismissLocal(askId);
+        if (!this._VoteSchema) return;
+        const voter = this.voterId || _resolveOperatorId();
+        const payload = {
+          ask_id: askId,
+          voter_id: voter,
+          direction: direction,
+          voted_at: _nowIso(),
+        };
+        const key = askId + ':' + voter;
+        try {
+          if (typeof this._VoteSchema.upsert === 'function') {
+            await this._VoteSchema.upsert(key, payload);
+          } else {
+            await this._VoteSchema.write({ key: key, payload: payload });
+          }
+        } catch (err) {
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[activity] vote write failed:', err);
+          }
+        }
+      },
+
+      dismissAsk(askId) {
+        return this._dismissLocal(askId);
+      },
+
+      async refreshAsk(askId) {
+        if (!askId) return;
+        const card = this.askCards().find(c => c.id === askId);
+        if (!card) return;
+        // Re-clicks while requested are no-ops — the contract from
+        // notifications_settings.py says the requested state must NOT
+        // clear via operator re-clicks.
+        if (card._refreshState === 'requested') return;
+        if (card._refreshState === 'pending') return;
+        const targetRevision = card.revisionSeq || 0;
+        this.localRefreshPending = { ...this.localRefreshPending, [askId]: true };
+        if (!this._RefreshSchema) {
+          // No substrate available — flip straight to "requested" so
+          // the visual state machine still progresses (tests inject
+          // refreshTargets directly to validate the same path).
+          this.refreshTargets = { ...this.refreshTargets, [askId]: targetRevision };
+          delete this.localRefreshPending[askId];
+          return;
+        }
+        const voter = this.voterId || _resolveOperatorId();
+        const payload = {
+          ask_id: askId,
+          requested_at: _nowIso(),
+          requested_by: voter,
+          target_revision: targetRevision,
+        };
+        try {
+          if (typeof this._RefreshSchema.upsert === 'function') {
+            await this._RefreshSchema.upsert(askId, payload);
+          } else {
+            await this._RefreshSchema.write({ key: askId, payload: payload });
+          }
+          // Optimistically pin the target so the button settles to
+          // "requested" before setting.changed re-fires.
+          this.refreshTargets = { ...this.refreshTargets, [askId]: targetRevision };
+        } catch (err) {
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[activity] refresh write failed:', err);
+          }
+        } finally {
+          delete this.localRefreshPending[askId];
+        }
+      },
+
       init() {
         if (window._sseCache && window._sseCache.dispatch) {
           this.applyDispatch(window._sseCache.dispatch);
@@ -644,6 +964,7 @@
         this._hashHandler = () => this._handleJournalHash();
         window.addEventListener('hashchange', this._hashHandler);
         this._intervalId = setInterval(() => this.refreshTimeline(), 15000);
+        this._initAsks();
       },
 
       destroy() {
@@ -667,6 +988,10 @@
           unregisterHandler('dispatcher_state', this._dispatcherStateHandler);
           this._dispatcherStateHandler = null;
         }
+        for (const u of (this._notifUnsubs || [])) {
+          try { u(); } catch (_) {}
+        }
+        this._notifUnsubs = [];
       },
     }));
   });

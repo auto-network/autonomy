@@ -3320,6 +3320,403 @@ class TestActivityAttentionTabBehavior:
         )
 
 
+ACTIVITY_NOTIFICATIONS_CHECKS = """(async () => {
+    try {
+        var r = {};
+        var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
+        var waitFor = async function(predicate, timeoutMs) {
+            var deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+                if (predicate()) return true;
+                await sleep(50);
+            }
+            return false;
+        };
+        var tick = async function() {
+            await Alpine.nextTick();
+            await sleep(120);
+        };
+
+        r.page_path = window.location.pathname;
+        r.has_page = await waitFor(function() {
+            return !!document.querySelector('[data-testid="activity-page"]');
+        }, 3000);
+
+        var root = document.querySelector('[data-testid="activity-page"]');
+        var data = root ? Alpine.$data(root) : null;
+        if (!data) return JSON.stringify({error: 'no Alpine data'});
+
+        // ── Capture vote/refresh/dismissed write attempts ──────────
+        // Replace the four schema proxies with stubs so we can verify
+        // each action writes to the expected set + payload without a
+        // real /api/graph/setting round-trip.
+        var writes = { vote: [], refresh: [], dismissed: [] };
+        data._VoteSchema = {
+            upsert: function(key, payload) {
+                writes.vote.push({key: key, payload: payload});
+                return Promise.resolve(null);
+            },
+            onChange: function() { return function() {}; },
+            all: function() { return Promise.resolve([]); },
+        };
+        data._RefreshSchema = {
+            upsert: function(key, payload) {
+                writes.refresh.push({key: key, payload: payload});
+                return Promise.resolve(null);
+            },
+            onChange: function() { return function() {}; },
+            all: function() { return Promise.resolve([]); },
+        };
+        data._DismissedSchema = {
+            set: function(payload) {
+                writes.dismissed.push(payload);
+                return Promise.resolve(null);
+            },
+            onChange: function() { return function() {}; },
+            all: function() { return Promise.resolve([]); },
+        };
+        data._AskSchema = {
+            onChange: function() { return function() {}; },
+            all: function() { return Promise.resolve([]); },
+        };
+        data.voterId = 'operator-test';
+
+        // Seed three asks via direct state mutation. Sort verifies
+        // newest-first; ask 'b' has the latest created_at so it should
+        // be the first card rendered.
+        data.asks = [
+            {
+                id: 'set-a', key: 'a',
+                payload: {
+                    session_id: 'auto-sessA',
+                    to_participant_id: 'operator-jeremy',
+                    text: 'Old **ask** with [auto-cqhx](/bead/auto-cqhx) ref',
+                    created_at: '2026-05-03T09:00:00Z',
+                    revision_seq: 1,
+                },
+            },
+            {
+                id: 'set-b', key: 'b',
+                payload: {
+                    session_id: 'auto-sessB',
+                    to_participant_id: '',
+                    text: 'Newer ambient ask body',
+                    created_at: '2026-05-03T10:30:00Z',
+                    revision_seq: 2,
+                },
+            },
+            {
+                id: 'set-c', key: 'c',
+                payload: {
+                    session_id: 'auto-sessC',
+                    to_participant_id: '',
+                    text: 'Middle ask',
+                    created_at: '2026-05-03T10:00:00Z',
+                    revision_seq: 1,
+                },
+            },
+        ];
+        data.dismissedAskIds = [];
+        data.refreshTargets = {};
+        data.localRefreshPending = {};
+        await tick();
+
+        // Click into the Notifications tab.
+        var notifBtn = document.querySelector('[data-testid="activity-tab-notifications"]');
+        r.has_notifications_tab = !!notifBtn;
+        if (notifBtn) notifBtn.click();
+        await tick();
+
+        var panel = document.querySelector('[data-testid="activity-notifications"]');
+        r.notifications_panel_visible = !!panel && panel.offsetParent !== null;
+
+        // Tab badge — operator-visible inbox count = 3 (no dismiss yet).
+        var badge = document.querySelector('[data-testid="activity-tab-notifications-badge"]');
+        r.badge_present = !!badge;
+        r.badge_text = badge ? badge.textContent.trim() : '';
+
+        // All three cards rendered.
+        var cards = document.querySelectorAll('[data-testid^="activity-ask-card-"]');
+        r.card_count = cards.length;
+
+        // Sort verification — newest-first means 'b' card precedes 'a'.
+        r.first_card_id = cards.length > 0 ? cards[0].getAttribute('data-testid') : '';
+        r.second_card_id = cards.length > 1 ? cards[1].getAttribute('data-testid') : '';
+
+        // Recipient label: 'a' is targeted, 'b' is ambient.
+        var aRecipient = document.querySelector('[data-testid="activity-ask-recipient-a"]');
+        var bRecipient = document.querySelector('[data-testid="activity-ask-recipient-b"]');
+        r.a_recipient = aRecipient ? aRecipient.textContent.trim() : '';
+        r.b_recipient = bRecipient ? bRecipient.textContent.trim() : '';
+
+        // Markdown rendering — **ask** becomes <strong>; bead-ref auto-link.
+        var aBody = document.querySelector('[data-testid="activity-ask-body-a"]');
+        r.body_uses_markdown = !!aBody && aBody.classList.contains('markdown-body');
+        r.body_has_strong = !!aBody && !!aBody.querySelector('strong');
+        var beadLink = aBody ? aBody.querySelector('a[href^="/bead/auto-"]') : null;
+        r.body_bead_link = !!beadLink;
+
+        // Avatar — colored dot via participantColor (deterministic HSL).
+        var aAvatar = document.querySelector('[data-testid="activity-ask-avatar-a"]');
+        var bAvatar = document.querySelector('[data-testid="activity-ask-avatar-b"]');
+        r.avatar_present = !!aAvatar;
+        // Read computed background; browsers normalize hsl→rgb in style props.
+        var aComputed = aAvatar ? window.getComputedStyle(aAvatar).backgroundColor : '';
+        var bComputed = bAvatar ? window.getComputedStyle(bAvatar).backgroundColor : '';
+        r.avatar_color_a = aComputed;
+        r.avatar_color_b = bComputed;
+        r.avatar_color_nonempty = !!aComputed && aComputed !== 'rgba(0, 0, 0, 0)';
+        r.avatar_colors_distinct = !!aComputed && !!bComputed && aComputed !== bComputed;
+        // Sanity: participantColor is deterministic, so avatar 'a' and a
+        // freshly-computed Presence.participantColor('auto-sessA') agree.
+        var deterministicA = (window.Presence && typeof window.Presence.participantColor === 'function')
+            ? window.Presence.participantColor('auto-sessA') : '';
+        // Mount a hidden probe so the browser normalises the same way.
+        var probe = document.createElement('span');
+        probe.style.background = deterministicA;
+        document.body.appendChild(probe);
+        var probeComputed = window.getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        r.avatar_color_matches_participantColor = aComputed === probeComputed;
+
+        // ── 👍 vote action ─────────────────────────────────────
+        var upBtn = document.querySelector('[data-testid="activity-ask-up-c"]');
+        if (upBtn) upBtn.click();
+        await tick();
+        r.vote_write_count = writes.vote.length;
+        r.vote_last = writes.vote[writes.vote.length - 1] || null;
+        r.dismissed_after_up = (data.dismissedAskIds || []).indexOf('c') !== -1;
+        r.c_card_gone_after_up = !document.querySelector('[data-testid="activity-ask-card-c"]');
+        r.badge_after_up = (function() {
+            var b = document.querySelector('[data-testid="activity-tab-notifications-badge"]');
+            return b ? b.textContent.trim() : '';
+        })();
+
+        // ── 👎 vote action on a different ask ─────────────────
+        var downBtn = document.querySelector('[data-testid="activity-ask-down-a"]');
+        if (downBtn) downBtn.click();
+        await tick();
+        r.down_vote_count = writes.vote.length;
+        r.down_last_dir = writes.vote.length >= 2 ? writes.vote[writes.vote.length - 1].payload.direction : '';
+        r.dismissed_after_down = (data.dismissedAskIds || []).indexOf('a') !== -1;
+
+        // ── ✕ dismiss action: local-only, no vote write ───────
+        var voteCountBefore = writes.vote.length;
+        var dismissBtn = document.querySelector('[data-testid="activity-ask-dismiss-b"]');
+        if (dismissBtn) dismissBtn.click();
+        await tick();
+        r.dismiss_vote_unchanged = writes.vote.length === voteCountBefore;
+        r.dismissed_after_x = (data.dismissedAskIds || []).indexOf('b') !== -1;
+
+        // Empty state — all three asks dismissed.
+        var empty = document.querySelector('[data-testid="activity-notifications-empty"]');
+        r.empty_state_visible = !!empty && empty.offsetParent !== null;
+        r.empty_state_text = empty ? empty.textContent.trim() : '';
+        r.badge_hidden_when_zero = !document.querySelector(
+            '[data-testid="activity-tab-notifications-badge"]'
+        );
+
+        // Re-seed for refresh action tests — undismiss everything.
+        data.dismissedAskIds = [];
+        await tick();
+
+        // ── ↻ refresh action: idle → pending → requested ──────
+        var refreshBtn = document.querySelector('[data-testid="activity-ask-refresh-a"]');
+        r.refresh_idle_state = refreshBtn ? refreshBtn.getAttribute('data-state') : '';
+        r.refresh_idle_text = refreshBtn ? refreshBtn.textContent.trim() : '';
+        if (refreshBtn) refreshBtn.click();
+        await tick();
+        r.refresh_write_count = writes.refresh.length;
+        r.refresh_last_target = writes.refresh.length > 0
+            ? writes.refresh[writes.refresh.length - 1].payload.target_revision : null;
+        r.refresh_last_key = writes.refresh.length > 0
+            ? writes.refresh[writes.refresh.length - 1].key : '';
+        var refreshAfter = document.querySelector('[data-testid="activity-ask-refresh-a"]');
+        r.refresh_state_after_click = refreshAfter ? refreshAfter.getAttribute('data-state') : '';
+        r.refresh_text_after_click = refreshAfter ? refreshAfter.textContent.trim() : '';
+        // `requested` only persists locally because we wrote refreshTargets[a]=1.
+        r.refresh_target_pinned = data.refreshTargets && data.refreshTargets['a'] === 1;
+
+        // Re-click while requested — must NOT clear, no extra writes.
+        var writeCountBeforeReclick = writes.refresh.length;
+        if (refreshAfter) refreshAfter.click();
+        await tick();
+        r.reclick_write_count = writes.refresh.length;
+        r.reclick_no_extra_write = writes.refresh.length === writeCountBeforeReclick;
+        var refreshStill = document.querySelector('[data-testid="activity-ask-refresh-a"]');
+        r.refresh_state_after_reclick = refreshStill ? refreshStill.getAttribute('data-state') : '';
+
+        // Source bumps revision_seq → requested clears.
+        var newAsks = (data.asks || []).map(function(m) {
+            if (m.key === 'a') {
+                return {
+                    id: m.id, key: m.key,
+                    payload: Object.assign({}, m.payload, {revision_seq: 2}),
+                };
+            }
+            return m;
+        });
+        data.asks = newAsks;
+        await tick();
+        var refreshSettled = document.querySelector('[data-testid="activity-ask-refresh-a"]');
+        r.refresh_state_after_revision_bump = refreshSettled ? refreshSettled.getAttribute('data-state') : '';
+
+        return JSON.stringify(r);
+    } catch (e) {
+        return JSON.stringify({error: e.message, stack: e.stack});
+    }
+})()"""
+
+
+class TestActivityNotificationsTabBehavior:
+    """Activity surface — Notifications tab over SessionAsk substrate (auto-6gv89)."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        request.cls._timeline = _navigate_and_eval_async(
+            "/timeline", ACTIVITY_NOTIFICATIONS_CHECKS, wait_ms=1200,
+        )
+        request.cls._activity = _navigate_and_eval_async(
+            "/activity", ACTIVITY_NOTIFICATIONS_CHECKS, wait_ms=1200,
+        )
+
+    def test_notifications_tab_present_on_both_routes(self):
+        for c in (self._timeline, self._activity):
+            assert c.get("has_page"), f"Activity page missing on {c.get('page_path')}: {c}"
+            assert c.get("has_notifications_tab"), \
+                f"Notifications tab missing on {c.get('page_path')}"
+
+    def test_clicking_notifications_tab_renders_panel(self):
+        c = self._timeline
+        assert c.get("notifications_panel_visible"), \
+            "Notifications panel did not render after tab click"
+
+    def test_tab_badge_reflects_operator_inbox_count(self):
+        """Badge shows count of operator-visible (non-dismissed) asks."""
+        c = self._timeline
+        assert c.get("badge_present"), "Tab badge missing when 3 outstanding asks"
+        assert c.get("badge_text") == "3", \
+            f"Expected badge=3, got {c.get('badge_text')!r}"
+        # After one up-vote (which dismisses locally), count drops to 2.
+        assert c.get("badge_after_up") == "2", \
+            f"Expected badge=2 after up-vote dismissal, got {c.get('badge_after_up')!r}"
+
+    def test_three_cards_rendered_newest_first(self):
+        c = self._timeline
+        assert c.get("card_count") == 3, \
+            f"Expected 3 ask cards, got {c.get('card_count')}"
+        # Sort: newest-first by created_at (b=10:30, c=10:00, a=09:00).
+        assert c.get("first_card_id") == "activity-ask-card-b", \
+            f"Expected newest ('b') first, got {c.get('first_card_id')!r}"
+        assert c.get("second_card_id") == "activity-ask-card-c", \
+            f"Expected second-newest ('c'), got {c.get('second_card_id')!r}"
+
+    def test_recipient_label_targeted_or_ambient(self):
+        c = self._timeline
+        assert c.get("a_recipient") == "→operator-jeremy", \
+            f"Expected targeted recipient, got {c.get('a_recipient')!r}"
+        assert c.get("b_recipient") == "ambient", \
+            f"Expected ambient label, got {c.get('b_recipient')!r}"
+
+    def test_body_renders_markdown(self):
+        c = self._timeline
+        assert c.get("body_uses_markdown"), \
+            "Ask body missing .markdown-body class"
+        assert c.get("body_has_strong"), \
+            "Ask body did not render <strong> for **markdown**"
+
+    def test_body_auto_links_bead_refs(self):
+        c = self._timeline
+        assert c.get("body_bead_link"), \
+            "Ask body did not auto-link auto-cqhx bead reference"
+
+    def test_source_session_avatar_renders(self):
+        c = self._timeline
+        assert c.get("avatar_present"), "Session-color avatar missing"
+        assert c.get("avatar_color_nonempty"), \
+            f"Avatar background color empty/transparent: {c.get('avatar_color_a')!r}"
+        assert c.get("avatar_colors_distinct"), \
+            "Two different session ids should produce different avatar colors"
+        assert c.get("avatar_color_matches_participantColor"), (
+            "Avatar color should equal Presence.participantColor(session_id) — "
+            f"got {c.get('avatar_color_a')!r}"
+        )
+
+    def test_up_vote_writes_substrate_and_dismisses_locally(self):
+        c = self._timeline
+        assert c.get("vote_write_count") == 1, \
+            f"Expected 1 vote write, got {c.get('vote_write_count')}"
+        last = c.get("vote_last") or {}
+        payload = last.get("payload") or {}
+        assert payload.get("direction") == "up", \
+            f"Expected up vote, got {payload.get('direction')!r}"
+        assert payload.get("ask_id") == "c", \
+            f"Vote ask_id mismatch: {payload.get('ask_id')!r}"
+        assert payload.get("voter_id") == "operator-test", \
+            f"Vote voter_id mismatch: {payload.get('voter_id')!r}"
+        # Composite key = ask_id:voter_id.
+        assert last.get("key") == "c:operator-test", \
+            f"Vote key mismatch: {last.get('key')!r}"
+        assert c.get("dismissed_after_up"), \
+            "Up-vote should also add ask_id to operator's dismissed list"
+        assert c.get("c_card_gone_after_up"), \
+            "Card 'c' should leave operator's inbox after up-vote"
+
+    def test_down_vote_writes_substrate_and_dismisses_locally(self):
+        c = self._timeline
+        assert c.get("down_vote_count") == 2, \
+            f"Expected 2 vote writes total, got {c.get('down_vote_count')}"
+        assert c.get("down_last_dir") == "down", \
+            f"Expected down vote, got {c.get('down_last_dir')!r}"
+        assert c.get("dismissed_after_down"), \
+            "Down-vote should also add ask_id to operator's dismissed list"
+
+    def test_dismiss_is_local_only_no_vote_write(self):
+        c = self._timeline
+        assert c.get("dismiss_vote_unchanged"), \
+            "Dismiss button must not write to AskVoteV1"
+        assert c.get("dismissed_after_x"), \
+            "Dismiss button must add ask_id to operator's dismissed list"
+
+    def test_empty_state_renders_when_inbox_zero(self):
+        c = self._timeline
+        assert c.get("empty_state_visible"), \
+            "Empty state should appear once all asks are dismissed"
+        assert c.get("empty_state_text") == "No outstanding asks", \
+            f"Unexpected empty text: {c.get('empty_state_text')!r}"
+        assert c.get("badge_hidden_when_zero"), \
+            "Tab badge should be hidden when inbox count is zero"
+
+    def test_refresh_button_state_machine(self):
+        c = self._timeline
+        # Initial: idle button labeled with the refresh affordance.
+        assert c.get("refresh_idle_state") == "idle", \
+            f"Refresh button should start idle, got {c.get('refresh_idle_state')!r}"
+        # After click: write fires AND state pins to 'requested'.
+        assert c.get("refresh_write_count") == 1, \
+            f"Expected 1 refresh write, got {c.get('refresh_write_count')}"
+        assert c.get("refresh_last_target") == 1, \
+            f"target_revision should pin to current revision_seq=1, got {c.get('refresh_last_target')!r}"
+        assert c.get("refresh_last_key") == "a", \
+            f"Refresh key should be ask_id, got {c.get('refresh_last_key')!r}"
+        assert c.get("refresh_state_after_click") == "requested", \
+            f"After click, state should be 'requested', got {c.get('refresh_state_after_click')!r}"
+        assert c.get("refresh_target_pinned"), \
+            "refreshTargets should pin target_revision after click"
+
+    def test_refresh_reclick_does_not_clear_requested(self):
+        c = self._timeline
+        assert c.get("reclick_no_extra_write"), \
+            "Re-clicking refresh while requested must not write again"
+        assert c.get("refresh_state_after_reclick") == "requested", \
+            f"Re-click should keep 'requested' state, got {c.get('refresh_state_after_reclick')!r}"
+
+    def test_refresh_clears_when_revision_bumps(self):
+        c = self._timeline
+        assert c.get("refresh_state_after_revision_bump") == "idle", \
+            f"After source bumps revision_seq past target, refresh should return to 'idle', got {c.get('refresh_state_after_revision_bump')!r}"
+
+
 class TestCollabPageBehavior:
     """Collab page behavioral sweep — tabs, notes, thought input."""
 
