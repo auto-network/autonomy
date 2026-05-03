@@ -746,8 +746,10 @@
       },
 
       async _initAsks() {
-        const Schema = (typeof window !== 'undefined') ? window.Schema : null;
-        if (!Schema || typeof Schema.of !== 'function') return;
+        // base.html loads schemas.js before any page-init runs, so the
+        // typeof guard against window.Schema.of was dead. If the
+        // substrate is missing the entire app is broken — let it throw.
+        const Schema = window.Schema;
         try {
           const [askProxy, voteProxy, refreshProxy, dismissedProxy] = await Promise.all([
             Schema.of(_ASK_SET_ID),
@@ -766,12 +768,16 @@
           return;
         }
         await this.refreshAsks();
+        // Schema.onChange's contract is "always returns a callable" (the
+        // no-op fallback covers the events.js-not-loaded case), so the
+        // typeof guards we used to wrap this with were dead. We push
+        // every unsub into _notifUnsubs because activity.js still goes
+        // through Schema.of() directly rather than Schema.alpine, which
+        // would otherwise auto-dispose for us.
         const self = this;
         const subscribe = (proxy, handler) => {
-          if (proxy && typeof proxy.onChange === 'function') {
-            const unsub = proxy.onChange(() => handler.call(self));
-            if (typeof unsub === 'function') self._notifUnsubs.push(unsub);
-          }
+          if (!proxy) return;
+          self._notifUnsubs.push(proxy.onChange(() => handler.call(self)));
         };
         subscribe(this._AskSchema, this._reloadAsks);
         subscribe(this._RefreshSchema, this._reloadRefreshTargets);
@@ -839,15 +845,11 @@
         const next = ids.slice();
         this.dismissedAskIds = next;
         if (!this._DismissedSchema) return;
+        // OperatorDismissedAsksV1 is @singleton, so the proxy's .set is
+        // attached deterministically by the pattern extension. No
+        // fallback to .write({key, payload}) — that branch was dead.
         try {
-          if (typeof this._DismissedSchema.set === 'function') {
-            await this._DismissedSchema.set({ dismissed_ask_ids: next });
-          } else {
-            await this._DismissedSchema.write({
-              key: 'dismissed',
-              payload: { dismissed_ask_ids: next },
-            });
-          }
+          await this._DismissedSchema.set({ dismissed_ask_ids: next });
         } catch (err) {
           if (typeof console !== 'undefined' && console.warn) {
             console.warn('[activity] dismissed write failed:', err);
@@ -875,12 +877,10 @@
           voted_at: _nowIso(),
         };
         const key = askId + ':' + voter;
+        // SessionAskVoteV1 is @keyed_per_entity → .upsert is guaranteed
+        // by the pattern extension. The dead .write fallback is gone.
         try {
-          if (typeof this._VoteSchema.upsert === 'function') {
-            await this._VoteSchema.upsert(key, payload);
-          } else {
-            await this._VoteSchema.write({ key: key, payload: payload });
-          }
+          await this._VoteSchema.upsert(key, payload);
         } catch (err) {
           if (typeof console !== 'undefined' && console.warn) {
             console.warn('[activity] vote write failed:', err);
@@ -919,11 +919,8 @@
           target_revision: targetRevision,
         };
         try {
-          if (typeof this._RefreshSchema.upsert === 'function') {
-            await this._RefreshSchema.upsert(askId, payload);
-          } else {
-            await this._RefreshSchema.write({ key: askId, payload: payload });
-          }
+          // AskRefreshRequestV1 is @keyed_per_entity → .upsert guaranteed.
+          await this._RefreshSchema.upsert(askId, payload);
           // Optimistically pin the target so the button settles to
           // "requested" before setting.changed re-fires.
           this.refreshTargets = { ...this.refreshTargets, [askId]: targetRevision };

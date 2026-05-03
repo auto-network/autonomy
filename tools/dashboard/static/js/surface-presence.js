@@ -80,18 +80,6 @@
     return new Date().toISOString().replace(/\.\d+Z$/, 'Z');
   }
 
-  function _uuidV4() {
-    if (typeof globalThis !== 'undefined' && globalThis.crypto
-        && typeof globalThis.crypto.randomUUID === 'function') {
-      return globalThis.crypto.randomUUID();
-    }
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      var r = Math.random() * 16 | 0;
-      var v = (c === 'x') ? r : (r & 0x3) | 0x8;
-      return v.toString(16);
-    });
-  }
-
   function _payloadOf(member) {
     if (!member) return null;
     return member.payload || member;
@@ -302,20 +290,25 @@
     };
 
     state._presenceSubscribe = function() {
+      // Schema.onChange always returns a callable (no-op if events.js
+      // missing); the typeof guards we used to wrap each call with
+      // were dead. We still push into _presenceUnsubs because this
+      // module pre-dates Schema.alpine's auto-dispose seam — a future
+      // migration to Schema.alpine drops the array entirely.
       var self = this;
-      if (this._presencePresenceProxy
-          && typeof this._presencePresenceProxy.onChange === 'function') {
-        var unsubP = this._presencePresenceProxy.onChange(function(evt) {
-          self._presenceHandlePresenceChange(evt);
-        });
-        if (typeof unsubP === 'function') this._presenceUnsubs.push(unsubP);
+      if (this._presencePresenceProxy) {
+        this._presenceUnsubs.push(
+          this._presencePresenceProxy.onChange(function(evt) {
+            self._presenceHandlePresenceChange(evt);
+          }),
+        );
       }
-      if (this._presencePingProxy
-          && typeof this._presencePingProxy.onChange === 'function') {
-        var unsubX = this._presencePingProxy.onChange(function(evt) {
-          self._presenceHandlePingEvent(evt);
-        });
-        if (typeof unsubX === 'function') this._presenceUnsubs.push(unsubX);
+      if (this._presencePingProxy) {
+        this._presenceUnsubs.push(
+          this._presencePingProxy.onChange(function(evt) {
+            self._presenceHandlePingEvent(evt);
+          }),
+        );
       }
     };
 
@@ -383,13 +376,11 @@
       this._presenceClaimedState = claimedState || this._presenceClaimedState;
       var payload = this._presenceBuildPayload();
       var key = surfaceId + ':' + this._presenceParticipantId;
-      // SurfacePresence is @keyed_per_entity — proxy.upsert exists.
-      // Fall back to .write({key,payload}) defensively in case the
-      // pattern extension is detached (e.g. test isolation).
-      if (typeof this._presencePresenceProxy.upsert === 'function') {
-        return this._presencePresenceProxy.upsert(key, payload);
-      }
-      return this._presencePresenceProxy.write({ key: key, payload: payload });
+      // SurfacePresence is @keyed_per_entity — the pattern extension
+      // attaches .upsert deterministically. Tests that detach
+      // extensions for isolation re-register them with
+      // _registerExtension, so the runtime branch was dead.
+      return this._presencePresenceProxy.upsert(key, payload);
     };
 
     state._presenceStartHeartbeat = function() {
@@ -445,12 +436,9 @@
         message: message || '',
         sent_at: _nowIso(),
       };
-      // SurfacePing is @append_only_log — proxy.append generates the
-      // UUID key for us. Fall back to .write defensively.
-      if (typeof this._presencePingProxy.append === 'function') {
-        return this._presencePingProxy.append(payload);
-      }
-      return this._presencePingProxy.write({ key: _uuidV4(), payload: payload });
+      // SurfacePing is @append_only_log — the pattern extension
+      // attaches .append, which generates the UUID key for us.
+      return this._presencePingProxy.append(payload);
     };
 
     state.acknowledgePing = async function(pingId) {
