@@ -76,8 +76,7 @@ from agents.workspace_manager import (
 logger = logging.getLogger(__name__)
 
 _TURN_CORRECTION_HISTORY_WINDOW_SECONDS = 5 * 60
-_TURN_CORRECTION_PRIOR_CANDIDATES = 3
-_TURN_CORRECTION_FORWARD_CANDIDATES = 1
+_TURN_CORRECTION_RECENT_USER_MSG_LIMIT = 5
 _TURN_CORRECTION_TOKEN_RE = re.compile(r"(\s+|\S+)")
 
 # inotify — optional, falls back to polling if unavailable
@@ -661,8 +660,10 @@ class _TailState:
     last_enqueue_dedup_ts: float = 0.0
     last_full_rescan_ts: float = 0.0  # wall-clock ts of last reconciliation hit
     full_rescan_count: int = 0  # times reconciliation promoted this session
-    # Recent user turns retained for one-shot turn-correction resolution.
-    recent_user_turns: deque = field(default_factory=lambda: deque(maxlen=24))
+    # Live-only lookback deque for one-shot turn-correction resolution.
+    recent_user_turns: deque = field(
+        default_factory=lambda: deque(maxlen=_TURN_CORRECTION_RECENT_USER_MSG_LIMIT)
+    )
 
 
 def _entry_identity(entry: dict) -> str:
@@ -1927,7 +1928,7 @@ class SessionMonitor:
         # Persist any turn_correction events from history regardless of whether
         # the task-tracker enricher is wired — the correction overlay must
         # rehydrate even on a minimal harness.
-        self._persist_turn_corrections(row, ts, prior)
+        self._persist_turn_corrections(row, ts, prior, remember_users=False)
         if self._entry_enricher is None:
             return
         if prior:
@@ -1974,16 +1975,24 @@ class SessionMonitor:
             await self._broadcast_registry()
 
     @staticmethod
-    def _persist_turn_corrections(row: dict, ts: _TailState, entries: list) -> None:
+    def _persist_turn_corrections(
+        row: dict,
+        ts: _TailState,
+        entries: list,
+        *,
+        remember_users: bool = True,
+    ) -> None:
         """Upsert any ``turn_correction`` parser events into dashboard.db.
 
         The parser (auto-edec1.1) upconverts valid ``graph turn-correction
         suggest`` output into a typed ``turn_correction`` entry. The
         agent-facing command only emits the corrected replacement text, so
-        we score a narrow set of nearby user turns here, choose the cleanest
-        inline diff match, compute the raw-text sha256 server-side, and
-        persist the sparse row so refresh/reconnect can rehydrate the overlay
-        without rewriting JSONL.
+        we score the last few live user turns seen by this monitor process,
+        choose the cleanest inline diff match, compute the raw-text sha256
+        server-side, and persist the sparse row so refresh/reconnect can
+        rehydrate the overlay without rewriting JSONL. Historical replay may
+        re-persist already-targeted rows, but it must not repopulate the
+        live lookback deque.
 
         Sessions without a ``session_uuid`` silently skip. In the current
         session-monitor flow the tailer only reads a concrete JSONL after the
@@ -1993,42 +2002,7 @@ class SessionMonitor:
         """
         if not entries:
             return
-        current_users: list[dict[str, Any]] = []
-        for idx, entry in enumerate(entries):
-            if entry.get("type") != "user":
-                continue
-            message_id = entry.get("message_id")
-            content = entry.get("content")
-            if not isinstance(message_id, str) or not message_id:
-                continue
-            if not isinstance(content, str) or not content:
-                continue
-            current_users.append({
-                "index": idx,
-                "message_id": message_id,
-                "content": content,
-                "timestamp": entry.get("timestamp", "") or "",
-            })
         session_uuid = row.get("session_uuid")
-        prior_users = list(ts.recent_user_turns)
-
-        def _remember_current_users() -> None:
-            for user in current_users:
-                if (
-                    ts.recent_user_turns
-                    and ts.recent_user_turns[-1].get("message_id") == user["message_id"]
-                ):
-                    continue
-                ts.recent_user_turns.append({
-                    "message_id": user["message_id"],
-                    "content": user["content"],
-                    "timestamp": user["timestamp"],
-                })
-
-        if not session_uuid:
-            _remember_current_users()
-            return
-
         claimed_targets: set[str] = set()
         existing_rows: dict[str, dict | None] = {}
 
@@ -2051,51 +2025,47 @@ class SessionMonitor:
                 return True
             return abs(correction_epoch - candidate_epoch) <= _TURN_CORRECTION_HISTORY_WINDOW_SECONDS
 
-        def _resolve_candidate(turn_correction_index: int, corrected_text: str, correction_ts: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        def _remember_user_entry(entry: dict[str, Any]) -> None:
+            if entry.get("type") != "user":
+                return
+            message_id = entry.get("message_id")
+            content = entry.get("content")
+            if not isinstance(message_id, str) or not message_id:
+                return
+            if not isinstance(content, str) or not content:
+                return
+            if (
+                ts.recent_user_turns
+                and ts.recent_user_turns[-1].get("message_id") == message_id
+            ):
+                return
+            ts.recent_user_turns.append({
+                "message_id": message_id,
+                "content": content,
+                "timestamp": entry.get("timestamp", "") or "",
+            })
+
+        def _resolve_candidate(corrected_text: str, correction_ts: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
             correction_epoch = _parse_iso_timestamp(correction_ts)
-            prior_pool: list[dict[str, Any]] = []
-            for user in prior_users:
+            recent_users = list(ts.recent_user_turns)
+            evaluated: list[dict[str, Any]] = []
+            winner: dict[str, Any] | None = None
+
+            for order, user in enumerate(reversed(recent_users)):
                 if not _candidate_available(user):
                     continue
                 candidate_epoch = _parse_iso_timestamp(str(user.get("timestamp") or ""))
                 if not _candidate_is_recent(correction_epoch, candidate_epoch):
                     continue
                 candidate = dict(user)
-                candidate["source"] = "recent_cache"
+                candidate["source"] = "recent_user_deque"
                 candidate["candidate_epoch"] = candidate_epoch
-                prior_pool.append(candidate)
-            for user in current_users:
-                if user["index"] >= turn_correction_index or not _candidate_available(user):
-                    continue
-                candidate_epoch = _parse_iso_timestamp(str(user.get("timestamp") or ""))
-                if not _candidate_is_recent(correction_epoch, candidate_epoch):
-                    continue
-                candidate = dict(user)
-                candidate["source"] = "same_pass_prior"
-                candidate["candidate_epoch"] = candidate_epoch
-                prior_pool.append(candidate)
-            candidates = prior_pool[-_TURN_CORRECTION_PRIOR_CANDIDATES:]
-            forward_added = 0
-            for user in current_users:
-                if user["index"] <= turn_correction_index or not _candidate_available(user):
-                    continue
-                candidate_epoch = _parse_iso_timestamp(str(user.get("timestamp") or ""))
-                if not _candidate_is_recent(correction_epoch, candidate_epoch):
-                    continue
-                candidate = dict(user)
-                candidate["source"] = "same_pass_forward"
-                candidate["candidate_epoch"] = candidate_epoch
-                candidates.append(candidate)
-                forward_added += 1
-                if forward_added >= _TURN_CORRECTION_FORWARD_CANDIDATES:
-                    break
-
-            evaluated: list[dict[str, Any]] = []
-            winner: dict[str, Any] | None = None
-            for order, candidate in enumerate(candidates):
                 metrics = _turn_correction_metrics(str(candidate.get("content") or ""), corrected_text)
                 age_seconds = None
-                if correction_epoch is not None and candidate.get("candidate_epoch") is not None:
+                if (
+                    correction_epoch is not None
+                    and candidate.get("candidate_epoch") is not None
+                ):
                     age_seconds = round(correction_epoch - float(candidate["candidate_epoch"]), 3)
                 rec = {
                     **candidate,
@@ -2109,13 +2079,14 @@ class SessionMonitor:
                 if winner is None:
                     winner = rec
                     continue
-                winner_key = winner["metrics"]["score_key"] + (-winner["order"],)
-                candidate_key = metrics["score_key"] + (-order,)
+                winner_key = winner["metrics"]["score_key"] + (winner["order"],)
+                candidate_key = metrics["score_key"] + (order,)
                 if candidate_key < winner_key:
                     winner = rec
 
             debug_payload = {
                 "correction_ts": correction_ts,
+                "recent_user_count": len(recent_users),
                 "candidate_count": len(evaluated),
                 "candidates": [
                     {
@@ -2141,8 +2112,14 @@ class SessionMonitor:
             }
             return winner, debug_payload
 
-        for idx, entry in enumerate(entries):
+        for entry in entries:
+            if entry.get("type") == "user":
+                if remember_users:
+                    _remember_user_entry(entry)
+                continue
             if entry.get("type") != "turn_correction":
+                continue
+            if not session_uuid:
                 continue
             corrected = entry.get("corrected_text")
             if not isinstance(corrected, str):
@@ -2151,15 +2128,13 @@ class SessionMonitor:
             sha = entry.get("original_sha256")
             if not isinstance(target, str) or not target or not isinstance(sha, str) or not sha:
                 candidate, debug_payload = _resolve_candidate(
-                    idx,
                     corrected,
                     str(entry.get("timestamp", "") or ""),
                 )
                 logger.debug(
-                    "session_monitor: turn_correction resolve session=%s same_pass_users=%d cached_prior_users=%d corrected_preview=%r debug=%s",
+                    "session_monitor: turn_correction resolve session=%s recent_user_count=%d corrected_preview=%r debug=%s",
                     session_uuid,
-                    len(current_users),
-                    len(prior_users),
+                    len(ts.recent_user_turns),
                     corrected[:160],
                     debug_payload,
                 )
@@ -2189,7 +2164,6 @@ class SessionMonitor:
                     " session=%s target=%s",
                     session_uuid, target,
                 )
-        _remember_current_users()
 
     @staticmethod
     def _enrich_agent_entries(row: dict, ts: _TailState, entries: list) -> None:
