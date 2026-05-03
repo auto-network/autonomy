@@ -426,6 +426,43 @@
   // ``window.Autonomy._activePluginId`` and autobind without an
   // explicit map; the page-shell injection seam below seeds that.
 
+  // ── Per-component proxy tracking ────────────────────────────
+  //
+  // ``Schema.alpine`` attaches schema proxies onto consumer state by
+  // ``Schema.of(...)``; consumers then subscribe via
+  // ``this.SchemaName.onChange(handler)`` from inside their init.
+  // Proxies themselves are cached per (set_id, revision) for the
+  // page's lifetime, so multiple components sharing a set share the
+  // same proxy — which means we can't dispose listeners by destroying
+  // the proxy. Instead, we wrap each attached proxy in a delegating
+  // shim that records the unsub functions returned by ``.onChange``
+  // and releases them when the wrapper's destroy fires. Consumers
+  // never see the shim — it inherits the underlying proxy via
+  // prototype, so every other method (.read, .all, .upsert, .write,
+  // pattern methods, variant methods) reaches the cached proxy
+  // unmodified.
+
+  function _wrapProxyForTracking(proxy) {
+    var unsubs = [];
+    var shim = Object.create(proxy);
+    shim.onChange = function(callback) {
+      var unsub = proxy.onChange(callback);
+      unsubs.push(unsub);
+      return unsub;
+    };
+    shim._disposeListeners = function() {
+      for (var i = 0; i < unsubs.length; i++) {
+        try { unsubs[i](); } catch (err) {
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[Schema.alpine] listener teardown raised:', err);
+          }
+        }
+      }
+      unsubs.length = 0;
+    };
+    return shim;
+  }
+
   function alpine(state, opts) {
     if (!state || typeof state !== 'object') {
       throw new TypeError('Schema.alpine requires a state object');
@@ -438,6 +475,10 @@
 
     var origInit = (typeof state.init === 'function') ? state.init : null;
     var origDestroy = (typeof state.destroy === 'function') ? state.destroy : null;
+    // Tracking shims attached to ``this`` during init. Captured in
+    // closure rather than on state so they don't leak into the
+    // consumer's reactive surface or show up in Alpine.$data dumps.
+    var trackedShims = [];
 
     state.init = async function() {
       var names = Object.keys(schemaMap);
@@ -468,12 +509,28 @@
         return of(setId, ofOpts).then(function(proxy) { return [name, proxy]; });
       }));
       for (var i = 0; i < pairs.length; i++) {
-        this[pairs[i][0]] = pairs[i][1];
+        var shim = _wrapProxyForTracking(pairs[i][1]);
+        trackedShims.push(shim);
+        this[pairs[i][0]] = shim;
       }
       if (origInit) await origInit.call(this);
     };
 
     state.destroy = function() {
+      // Release any onChange listeners the consumer registered through
+      // the tracking shims. Every shim's _disposeListeners walks its
+      // captured unsubs and calls them; the underlying cached proxy
+      // is untouched so other live components keep working. Run this
+      // BEFORE the consumer's own destroy so handlers stop firing
+      // while the consumer's teardown executes.
+      for (var i = 0; i < trackedShims.length; i++) {
+        try { trackedShims[i]._disposeListeners(); } catch (err) {
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[Schema.alpine] dispose hook raised:', err);
+          }
+        }
+      }
+      trackedShims.length = 0;
       if (origDestroy) {
         try { origDestroy.call(this); } catch (err) {
           if (typeof console !== 'undefined' && console.warn) {
