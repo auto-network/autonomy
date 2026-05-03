@@ -402,6 +402,14 @@
         return start || end || '';
       },
 
+      formatAttentionSessionChip(entry) {
+        const sid = entry && entry.source_session_id;
+        if (!sid) return '';
+        const s = String(sid);
+        const short = s.length > 16 ? s.slice(0, 14) + '…' : s;
+        return '↩ ' + short;
+      },
+
       fmtDuration(secs) {
         return _fmtDuration(secs);
       },
