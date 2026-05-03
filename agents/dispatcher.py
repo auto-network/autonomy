@@ -150,6 +150,28 @@ class RunningLibrarian:
 
 
 @dataclass
+class RunningAgentic:
+    """Tracks live-stats state for a running agentic dispatch container.
+
+    Agentic launches happen in the dashboard process and only ever exist
+    in dispatch_runs as a DB row — there is no in-memory ``RunningAgent``
+    for the dispatcher to hang per-tick state on. ``poll_and_collect_agentic``
+    creates one of these the first time it sees a RUNNING agentic row, mirrors
+    the live-stats collection that ``RunningAgent`` and ``RunningLibrarian``
+    get in the main loop, and drops the entry on completion. Same field
+    contract as the other two so ``_collect_live_stats_for`` can treat them
+    interchangeably.
+    """
+    run_id: str            # also the tmux/container name (Round 5 contract)
+    container_name: str
+    container_id: str      # resolved lazily from container_name via docker inspect
+    output_dir: str
+    jsonl_offset: int = 0
+    prev_cpu_usec: int = 0
+    prev_cpu_poll_time: float = 0.0
+
+
+@dataclass
 class DispatcherConfig:
     max_concurrent: int = 1
     max_concurrent_librarians: int = 1
@@ -1428,6 +1450,27 @@ def _read_cgroup_mem_mb(container_id: str) -> int | None:
         return None
 
 
+def _resolve_container_id(name: str) -> str | None:
+    """Map a container name to its long Docker ID for cgroup path building.
+
+    Cgroup files live under ``/sys/fs/cgroup/system.slice/docker-<id>.scope/``,
+    keyed on the long hex ID — passing a name produces an ``OSError`` on the
+    cgroup read. Cheap one-shot ``docker inspect``; callers cache the result
+    on their holder so this only runs once per agent's lifetime.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.Id}}", name],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        cid = result.stdout.strip()
+        return cid or None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
 def _read_cgroup_cpu_usec(container_id: str) -> int | None:
     """Read cumulative CPU usage in microseconds from cgroup cpu.stat.
 
@@ -1589,47 +1632,54 @@ def _read_stats_via_monitor(
     return snippet, context_tokens, entry_count, turn_delta, last_activity
 
 
-def _collect_live_stats(agent: RunningAgent) -> None:
-    """Collect live stats for a running agent and persist to dispatch_runs.
+def _collect_live_stats_for(
+    holder,
+    *,
+    register_session,
+    fallback_run_id: str,
+    error_label: str,
+) -> None:
+    """Shared live-stats collection for any holder shaped like RunningAgent.
 
-    Card stats (snippet, context_tokens, entry_count, last_activity) are read
-    through the session monitor — the single source of truth for JSONL tail
-    state (graph://554a08c6-887). Cgroup memory and CPU are still read
-    directly. Also registers the dispatch session with the monitor once the
-    JSONL appears so overlays and tail endpoints share its reader.
+    Holder contract: attributes ``container_id``, ``output_dir``,
+    ``jsonl_offset``, ``prev_cpu_usec``, ``prev_cpu_poll_time``. The monitor
+    helper sets ``_prev_entry_count`` on it.
+
+    The three callers (bead agent, librarian, agentic) differ only in how
+    they register the JSONL with the monitor and what label to log on
+    failure, so those are passed in. Card stats (snippet, context_tokens,
+    entry_count, last_activity) come from the monitor's DB view —
+    graph://554a08c6-887 explains why dashboard.db is the single source of
+    truth for JSONL tail state. Cgroup memory and CPU are still read direct
+    from the host's cgroup files; the resolver upstream is responsible for
+    ensuring ``container_id`` is the long hex ID, not a name.
     """
     try:
-        run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+        run_id = Path(holder.output_dir).name if holder.output_dir else fallback_run_id
 
-        jsonl_file = _find_jsonl_file(agent.output_dir)
+        jsonl_file = _find_jsonl_file(holder.output_dir)
         if jsonl_file:
-            _register_dispatch_session(agent, jsonl_file)
+            register_session(jsonl_file)
 
-        # --- JSONL stats via monitor (dashboard.db is the shared reader) ---
         snippet, context_tokens, entry_count, turn_delta, last_activity = (
-            _read_stats_via_monitor(run_id, agent)
+            _read_stats_via_monitor(run_id, holder)
         )
         tool_delta = 0  # tool-use counting lives in monitor.get_session_stats
 
-        # --- Cgroup: memory ---
-        mem_mb = _read_cgroup_mem_mb(agent.container_id)
+        mem_mb = _read_cgroup_mem_mb(holder.container_id)
 
-        # --- Cgroup: CPU (diff from previous reading) ---
-        cpu_usec = _read_cgroup_cpu_usec(agent.container_id)
+        cpu_usec = _read_cgroup_cpu_usec(holder.container_id)
         cpu_pct: float | None = None
         now = time.time()
-
-        if cpu_usec is not None and agent.prev_cpu_usec > 0:
-            elapsed_usec = (now - agent.prev_cpu_poll_time) * 1_000_000
+        if cpu_usec is not None and holder.prev_cpu_usec > 0:
+            elapsed_usec = (now - holder.prev_cpu_poll_time) * 1_000_000
             if elapsed_usec > 0:
-                cpu_pct = (cpu_usec - agent.prev_cpu_usec) / elapsed_usec * 100.0
+                cpu_pct = (cpu_usec - holder.prev_cpu_usec) / elapsed_usec * 100.0
                 cpu_pct = max(0.0, cpu_pct)
-
         if cpu_usec is not None:
-            agent.prev_cpu_usec = cpu_usec
-            agent.prev_cpu_poll_time = now
+            holder.prev_cpu_usec = cpu_usec
+            holder.prev_cpu_poll_time = now
 
-        # --- Persist to DB ---
         update_live_stats(
             run_id=run_id,
             last_snippet=snippet,
@@ -1640,12 +1690,23 @@ def _collect_live_stats(agent: RunningAgent) -> None:
             cpu_usec=cpu_usec,
             mem_mb=mem_mb,
             last_activity=last_activity,
-            jsonl_offset=agent.jsonl_offset,
+            jsonl_offset=holder.jsonl_offset,
+        )
+    except Exception as e:
+        print(
+            f"  WARNING: live stats collection failed for {error_label}: {e}",
+            file=sys.stderr,
         )
 
-    except Exception as e:
-        print(f"  WARNING: live stats collection failed for {agent.bead_id}: {e}",
-              file=sys.stderr)
+
+def _collect_live_stats(agent: RunningAgent) -> None:
+    """Bead-agent adapter — see ``_collect_live_stats_for``."""
+    _collect_live_stats_for(
+        agent,
+        register_session=lambda jl: _register_dispatch_session(agent, jl),
+        fallback_run_id=agent.bead_id,
+        error_label=agent.bead_id,
+    )
 
 
 # ── Session ingestion ───────────────────────────────────────────
@@ -2150,48 +2211,34 @@ def poll_and_collect_librarians(running_librarians: list[RunningLibrarian]) -> N
 
 
 def _collect_live_stats_for_librarian(lib: RunningLibrarian) -> None:
-    """Collect live stats for a running librarian container (same as bead agents)."""
-    try:
-        run_id = Path(lib.output_dir).name if lib.output_dir else lib.job_id
+    """Librarian adapter — see ``_collect_live_stats_for``."""
+    _collect_live_stats_for(
+        lib,
+        register_session=lambda jl: _register_librarian_session(lib, jl),
+        fallback_run_id=lib.job_id,
+        error_label=f"librarian {lib.job_id[:8]}",
+    )
 
-        jsonl_file = _find_jsonl_file(lib.output_dir)
-        if jsonl_file:
-            _register_librarian_session(lib, jsonl_file)
 
-        snippet, context_tokens, entry_count, turn_delta, last_activity = (
-            _read_stats_via_monitor(run_id, lib)
-        )
-        tool_delta = 0
+# Agentic live-stats holders, keyed by run_id. Populated lazily inside
+# poll_and_collect_agentic when a RUNNING agentic row is first observed,
+# popped on completion. Each entry plays the role RunningAgent /
+# RunningLibrarian play for the other dispatch kinds — they hold the
+# prev_cpu_usec / prev_cpu_poll_time / jsonl_offset state that
+# _collect_live_stats_for needs to compute deltas across ticks.
+_agentic_holders: dict[str, RunningAgentic] = {}
 
-        mem_mb = _read_cgroup_mem_mb(lib.container_id)
 
-        cpu_usec = _read_cgroup_cpu_usec(lib.container_id)
-        cpu_pct: float | None = None
-        now = time.time()
-        if cpu_usec is not None and lib.prev_cpu_usec > 0:
-            elapsed_usec = (now - lib.prev_cpu_poll_time) * 1_000_000
-            if elapsed_usec > 0:
-                cpu_pct = (cpu_usec - lib.prev_cpu_usec) / elapsed_usec * 100.0
-                cpu_pct = max(0.0, cpu_pct)
-        if cpu_usec is not None:
-            lib.prev_cpu_usec = cpu_usec
-            lib.prev_cpu_poll_time = now
-
-        update_live_stats(
-            run_id=run_id,
-            last_snippet=snippet,
-            context_tokens=context_tokens,
-            tool_delta=tool_delta,
-            turn_delta=turn_delta,
-            cpu_pct=cpu_pct,
-            cpu_usec=cpu_usec,
-            mem_mb=mem_mb,
-            last_activity=last_activity,
-            jsonl_offset=lib.jsonl_offset,
-        )
-    except Exception as e:
-        print(f"  WARNING: live stats failed for librarian {lib.job_id[:8]}: {e}",
-              file=sys.stderr)
+def _collect_live_stats_for_agentic(holder: RunningAgentic) -> None:
+    """Agentic adapter — see ``_collect_live_stats_for``."""
+    _collect_live_stats_for(
+        holder,
+        register_session=lambda jl: _register_agentic_session(
+            holder.run_id, holder.output_dir, jl,
+        ),
+        fallback_run_id=holder.run_id,
+        error_label=f"agentic {holder.run_id[:12]}",
+    )
 
 
 # ── Agentic completion watcher ────────────────────────────────────
@@ -2291,23 +2338,51 @@ def poll_and_collect_agentic() -> None:
         if not container_name:
             continue
 
-        # Register the agentic session with the monitor as soon as its
-        # JSONL appears. Without this the monitor never inotifies the
-        # file, no ``session:messages`` events fire, and the live-trace
-        # overlay can't event-based-refresh — the operator has to close
-        # and re-open the panel to see new turns. Registration is
-        # idempotent on the monitor side.
+        # Compute jsonl_file the same way the metrics path does — used both
+        # by the completion-finalize block below and by the live-stats
+        # collector via _find_jsonl_file (which globs identically).
         sessions_dir = Path(output_dir) / "sessions" if output_dir else None
         jsonl_files = (
             sorted(sessions_dir.rglob("*.jsonl")) if sessions_dir and sessions_dir.exists() else []
         )
         jsonl_file = jsonl_files[0] if jsonl_files else None
-        if jsonl_file is not None:
+
+        # Get-or-create the live-stats holder for this run. Same shape as
+        # RunningAgent so _collect_live_stats_for treats them identically;
+        # cgroup paths need the long Docker ID, so we resolve the name
+        # lazily and cache the result on the holder for subsequent ticks.
+        holder = _agentic_holders.get(run_id)
+        if holder is None:
+            container_id = _resolve_container_id(container_name) or ""
+            holder = RunningAgentic(
+                run_id=run_id,
+                container_name=container_name,
+                container_id=container_id,
+                output_dir=output_dir,
+            )
+            _agentic_holders[run_id] = holder
+
+        # Run the same live-stats path bead/librarian agents get. This also
+        # registers the session with the monitor (idempotently) once the
+        # JSONL appears, so we can drop the standalone register-only branch
+        # that used to live here — _collect_live_stats_for handles it.
+        if holder.container_id:
+            _collect_live_stats_for_agentic(holder)
+        elif jsonl_file is not None:
+            # Fall back to bare registration when we couldn't resolve the
+            # container ID (e.g. container already gone). Stats are lost
+            # but the monitor still gets its inotify watch, so the
+            # live-trace overlay keeps working.
             _register_agentic_session(run_id, output_dir, jsonl_file)
 
         finished, exit_code = poll_container(container_name)
         if not finished:
             continue
+
+        # Container has exited — drop the live-stats cache entry so we
+        # don't leak memory across the dispatcher's lifetime.
+        _agentic_holders.pop(run_id, None)
+
         last_snippet, turn_count, tool_count, last_ts = _agentic_jsonl_metrics(
             jsonl_file
         ) if jsonl_file else ("", 0, 0, None)
