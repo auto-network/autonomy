@@ -446,6 +446,12 @@ function freshHarnessUsageSettings(members) {
     const order = { claude: 0, codex: 1 };
     const byHarness = (order[a.harness] ?? 99) - (order[b.harness] ?? 99);
     if (byHarness) return byHarness;
+    const statusOrder = { ok: 0, unknown: 1, unavailable: 2 };
+    const byStatus = (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99);
+    if (byStatus) return byStatus;
+    const tsA = Date.parse(a.updated_at || a.updatedAt || '');
+    const tsB = Date.parse(b.updated_at || b.updatedAt || '');
+    if (Number.isFinite(tsA) && Number.isFinite(tsB) && tsA !== tsB) return tsB - tsA;
     return String(a.identity_label || '').localeCompare(String(b.identity_label || ''));
   });
   return items;
