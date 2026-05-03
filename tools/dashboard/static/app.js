@@ -457,6 +457,7 @@ function freshHarnessUsageSettings(members) {
   (Array.isArray(members) ? members : []).forEach(member => {
     const payload = member && member.payload;
     if (!payload || typeof payload !== 'object') return;
+    if (payload.status && payload.status !== 'ok') return;
     const updatedAt = member.updated_at || payload.updated_at;
     const ts = updatedAt ? Date.parse(updatedAt) : NaN;
     if (!Number.isFinite(ts)) return;
