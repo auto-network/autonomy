@@ -573,6 +573,15 @@
       >
         <div class="px-4 py-2 border-b border-gray-700 text-xs font-mono text-gray-400 flex items-center gap-2">
           <span class="text-gray-300" x-text="formatAttentionTimeRange(e)"></span>
+          <template x-if="e.source_session_id">
+            <a
+              :href="'/session/' + e.source_session_id"
+              class="ml-auto px-2 py-0.5 rounded border border-gray-600 bg-gray-800/80 text-gray-300 hover:text-white hover:border-gray-500"
+              :title="'Open source session: ' + e.source_session_id"
+              :data-testid="'activity-attention-session-chip-' + (e.id || idx)"
+              x-text="formatAttentionSessionChip(e)"
+            ></a>
+          </template>
         </div>
         <div class="px-4 py-3 text-sm text-gray-200">
           <template x-if="attentionZoom === 'compact'">
