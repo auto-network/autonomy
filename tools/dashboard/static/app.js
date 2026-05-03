@@ -1650,10 +1650,14 @@ globalSearch.addEventListener('keydown', (e) => {
 document.addEventListener('click', (e) => {
   if (e.defaultPrevented) return;        // another handler already handled this click
   const link = e.target.closest('a[href]');
-  if (link && link.hasAttribute('data-hard-reload')) {
-    return;
-  }
-  if (link && link.origin === window.location.origin && !link.pathname.startsWith('/api/') && !link.hasAttribute('download')) {
+  if (!link) return;
+  // Hash-only links (in-page anchors): let the browser handle native scroll +
+  // hash update. Routing through navigateTo would strip the hash and then
+  // short-circuit on the matching pathname.
+  const rawHref = link.getAttribute('href') || '';
+  if (rawHref.startsWith('#')) return;
+  if (link.hasAttribute('data-hard-reload')) return;
+  if (link.origin === window.location.origin && !link.pathname.startsWith('/api/') && !link.hasAttribute('download')) {
     e.preventDefault();
     navigateTo(link.pathname + link.search);
   }
