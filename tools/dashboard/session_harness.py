@@ -12,6 +12,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import shlex
 import sqlite3
 from typing import Protocol, Any
 
@@ -501,6 +502,15 @@ def _upconvert_turn_correction(content: str, timestamp: str, tool_id: str = "") 
         payload = json.loads(stripped)
     except (json.JSONDecodeError, ValueError):
         return None
+    return _build_turn_correction_entry(payload, timestamp, tool_id=tool_id)
+
+
+def _build_turn_correction_entry(
+    payload: dict,
+    timestamp: str,
+    *,
+    tool_id: str = "",
+) -> dict | None:
     if not isinstance(payload, dict) or payload.get("type") != "turn_correction":
         return None
     corrected = payload.get("corrected_text")
@@ -530,6 +540,121 @@ def _upconvert_turn_correction(content: str, timestamp: str, tool_id: str = "") 
     if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
         entry["confidence"] = float(confidence)
     return entry
+
+
+def _upconvert_turn_correction_command(
+    command: str,
+    timestamp: str,
+    *,
+    tool_id: str = "",
+) -> dict | None:
+    """Fallback for blank exec_command completions.
+
+    Some live Codex ``exec_command_end`` envelopes arrive with empty captured
+    output even though the immediate tool return contained the JSON payload.
+    For the canonical one-shot command, the corrected replacement string and
+    optional metadata are already present in the command text, so we can
+    synthesize the same typed event without depending on stdout capture.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", tokens[0]):
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+    for op in ("|", "&&", ";"):
+        if op in tokens:
+            tokens = tokens[:tokens.index(op)]
+            break
+    if not tokens:
+        return None
+    prefix_len = 0
+    if tokens[0] == "graph":
+        prefix_len = 1
+    elif (
+        len(tokens) >= 3
+        and tokens[0].startswith("python")
+        and tokens[1] == "-m"
+        and tokens[2] == "tools.graph"
+    ):
+        prefix_len = 3
+    else:
+        return None
+    if tokens[prefix_len:prefix_len + 2] != ["turn-correction", "suggest"]:
+        return None
+    args = tokens[prefix_len + 2:]
+    corrected_text: str | None = None
+    mode: str | None = None
+    reason: str | None = None
+    confidence: float | None = None
+    uses_stdin = False
+    saw_json = False
+    idx = 0
+    while idx < len(args):
+        token = args[idx]
+        if token == "--json":
+            saw_json = True
+            idx += 1
+            continue
+        if token == "--stdin":
+            uses_stdin = True
+            idx += 1
+            continue
+        if token == "--mode" and idx + 1 < len(args):
+            mode = args[idx + 1]
+            idx += 2
+            continue
+        if token.startswith("--mode="):
+            mode = token.split("=", 1)[1]
+            idx += 1
+            continue
+        if token == "--reason" and idx + 1 < len(args):
+            reason = args[idx + 1]
+            idx += 2
+            continue
+        if token.startswith("--reason="):
+            reason = token.split("=", 1)[1]
+            idx += 1
+            continue
+        if token == "--confidence" and idx + 1 < len(args):
+            try:
+                confidence = float(args[idx + 1])
+            except (TypeError, ValueError):
+                return None
+            idx += 2
+            continue
+        if token.startswith("--confidence="):
+            try:
+                confidence = float(token.split("=", 1)[1])
+            except (TypeError, ValueError):
+                return None
+            idx += 1
+            continue
+        if token.startswith("--"):
+            return None
+        if corrected_text is not None:
+            return None
+        corrected_text = token
+        idx += 1
+    if not saw_json or uses_stdin or corrected_text is None:
+        return None
+    payload: dict[str, Any] = {
+        "type": "turn_correction",
+        "corrected_text": corrected_text,
+    }
+    if mode:
+        payload["mode"] = mode
+    if reason:
+        payload["reason"] = reason
+    if confidence is not None:
+        payload["confidence"] = confidence
+    return _build_turn_correction_entry(payload, timestamp, tool_id=tool_id)
 
 
 def _upconvert_graph_result(content: str, timestamp: str, tool_id: str = "") -> dict | None:
@@ -1670,6 +1795,8 @@ def _parse_codex_exec_end(payload: dict, timestamp: str) -> dict | list[dict] | 
         "process_id": payload.get("process_id") or "",
     }
     tc = _upconvert_turn_correction(output, timestamp, tool_id=tool_id)
+    if tc is None:
+        tc = _upconvert_turn_correction_command(command, timestamp, tool_id=tool_id)
     sem = _upconvert_graph_result(output, timestamp, tool_id=tool_id)
     if tc and sem:
         _enrich_semantic_tile(sem)
