@@ -18,7 +18,6 @@ let _harnessUsageMode = 'fallback';
 let _harnessUsageSchema = null;
 let _harnessUsageUnsub = null;
 let _harnessUsagePage = 0;
-let _harnessUsageExpanded = false;
 
 // ── Markdown Rendering ───────────────────────────────────────
 
@@ -200,29 +199,6 @@ function renderHarnessStripWindow(windowData, fallbackLabel) {
   </div>`;
 }
 
-function renderHarnessUsageDetails(item) {
-  if (!item) return '';
-  const windows = item.windows || {};
-  const rows = [
-    ['identity', item.identityLabel || item.metaLabel || item.harness || '--'],
-    ['updated', formatUpdatedAt(item.updatedAt)],
-    ['source', item.source || '--'],
-    ['short reset', formatResetLong(windows.short && windows.short.resets_at)],
-    ['long reset', formatResetLong(windows.long && windows.long.resets_at)],
-    ['plan', item.planType || '--'],
-    ['limit', item.limitId || item.limitName || '--'],
-  ];
-  if (item.tier) rows.push(['tier', item.tier]);
-  if (item.accountId) rows.push(['account', item.accountId]);
-  if (item.rateLimitReachedType) rows.push(['reached', item.rateLimitReachedType]);
-  if (item.note) rows.push(['note', item.note]);
-  return rows.map(([label, value]) => `
-    <div class="harness-sheet-row">
-      <span class="harness-sheet-label">${_esc(label)}</span>
-      <span class="harness-sheet-value">${_esc(value)}</span>
-    </div>`).join('');
-}
-
 function renderHarnessUsageDots(count, activeIndex) {
   if (count < 2) return '';
   return `<div class="harness-strip-dots" aria-hidden="true">${Array.from({ length: count }, (_, index) => `
@@ -246,29 +222,17 @@ function syncHarnessUsageScroll(behavior = 'auto') {
 
 function updateHarnessUsageState(items) {
   if (!harnessUsage) return;
-  const active = items[_harnessUsagePage] || null;
-  harnessUsage.classList.toggle('is-expanded', _harnessUsageExpanded);
   harnessUsage.querySelectorAll('.harness-strip-page').forEach((page) => {
     const pageIndex = Number(page.dataset.index || 0);
     page.classList.toggle('is-active', pageIndex === _harnessUsagePage);
   });
   harnessUsage.querySelectorAll('.harness-strip-hit').forEach((button) => {
-    const pageIndex = Number(button.dataset.index || 0);
-    button.setAttribute(
-      'aria-expanded',
-      String(_harnessUsageExpanded && pageIndex === _harnessUsagePage),
-    );
+    button.setAttribute('aria-expanded', 'false');
   });
   harnessUsage.querySelectorAll('.harness-strip-dot').forEach((dot) => {
     const dotIndex = Number(dot.dataset.index || 0);
     dot.classList.toggle('is-active', dotIndex === _harnessUsagePage);
   });
-  const details = harnessUsage.querySelector('.harness-strip-details');
-  if (details) {
-    details.classList.toggle('is-open', _harnessUsageExpanded);
-    details.setAttribute('aria-hidden', _harnessUsageExpanded ? 'false' : 'true');
-    details.innerHTML = _harnessUsageExpanded ? renderHarnessUsageDetails(active) : '';
-  }
 }
 
 function attachHarnessUsageInteractions(items) {
@@ -336,24 +300,11 @@ function attachHarnessUsageInteractions(items) {
       );
       if (pageIndex !== _harnessUsagePage) {
         _harnessUsagePage = pageIndex;
-        _harnessUsageExpanded = false;
         updateHarnessUsageState(items);
         syncHarnessUsageScroll('smooth');
-        return;
       }
-      _harnessUsageExpanded = !_harnessUsageExpanded;
-      updateHarnessUsageState(items);
     });
   });
-
-  const details = harnessUsage.querySelector('.harness-strip-details');
-  if (details) {
-    details.addEventListener('click', () => {
-      if (!_harnessUsageExpanded) return;
-      _harnessUsageExpanded = false;
-      updateHarnessUsageState(items);
-    });
-  }
 }
 
 function normalizeLegacyHarnessUsageItem(item) {
@@ -410,16 +361,14 @@ function renderHarnessUsage(data) {
   const items = normalizeHarnessUsageItems(data);
   if (!items.length) {
     harnessUsage.classList.remove('has-tiles');
-    harnessUsage.classList.remove('is-expanded');
     _harnessUsagePage = 0;
-    _harnessUsageExpanded = false;
     harnessUsage.innerHTML = '';
     return;
   }
   _harnessUsagePage = clampHarnessUsagePage(_harnessUsagePage, items.length);
   harnessUsage.classList.add('has-tiles');
   harnessUsage.innerHTML = `
-    <div class="harness-strip${_harnessUsageExpanded ? ' is-expanded' : ''}">
+    <div class="harness-strip">
       <div class="harness-strip-scroller">
         ${items.map((item, index) => {
           const windows = item.windows || {};
@@ -428,7 +377,7 @@ function renderHarnessUsage(data) {
               type="button"
               class="harness-strip-hit"
               data-index="${index}"
-              aria-expanded="${_harnessUsageExpanded && index === _harnessUsagePage ? 'true' : 'false'}"
+              aria-expanded="false"
             >
               <div class="harness-strip-head">
                 <span class="harness-strip-label">${_esc(item.harness || 'unknown')}</span>
@@ -441,9 +390,6 @@ function renderHarnessUsage(data) {
             </button>
           </div>`;
         }).join('')}
-      </div>
-      <div class="harness-strip-details${_harnessUsageExpanded ? ' is-open' : ''}" aria-hidden="${_harnessUsageExpanded ? 'false' : 'true'}">
-        ${_harnessUsageExpanded ? renderHarnessUsageDetails(items[_harnessUsagePage]) : ''}
       </div>
     </div>`;
   attachHarnessUsageInteractions(items);

@@ -430,54 +430,8 @@
     .harness-strip-row.is-unavailable .harness-strip-reset {
       color: #64748b;
     }
-    .harness-strip-details {
-      max-height: 0;
-      overflow: hidden;
-      opacity: 0;
-      transform: translateY(-0.18rem);
-      transition: max-height 0.22s ease, opacity 0.18s ease, transform 0.18s ease, padding-top 0.18s ease;
-      border-top: 1px solid rgba(30, 41, 59, 0.72);
-      margin-top: 0.44rem;
-      padding-top: 0;
-      display: grid;
-      gap: 0.16rem;
-    }
-    .harness-strip-details.is-open {
-      max-height: 18rem;
-      opacity: 1;
-      transform: translateY(0);
-      padding-top: 0.44rem;
-    }
-    .harness-sheet-row {
-      display: grid;
-      grid-template-columns: auto 1fr;
-      align-items: baseline;
-      gap: 0.4rem 0.7rem;
-      padding: 0.07rem 0;
-    }
-    .harness-sheet-label {
-      color: #64748b;
-      font-size: 0.54rem;
-      letter-spacing: 0.07em;
-      text-transform: uppercase;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-    .harness-sheet-value {
-      color: #334155;
-      font-size: 0.66rem;
-      line-height: 1.35;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-variant-numeric: tabular-nums;
-      text-align: right;
-      word-break: break-word;
-    }
     @media (max-width: 640px) {
       #harness-usage { margin-bottom: 0.66rem; }
-      .harness-sheet-row {
-        grid-template-columns: 1fr;
-        gap: 0.12rem;
-      }
-      .harness-sheet-value { text-align: left; }
     }
     /* Timeline card — reflow-v6 */
     .tl-card { background: #1f2937; border-radius: 8px; margin-bottom: 8px; padding: 12px 16px; cursor: pointer; }
