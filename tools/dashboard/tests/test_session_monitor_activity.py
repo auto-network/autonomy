@@ -77,11 +77,9 @@ def test_writes_from_two_sessions_share_singleton(graph_db_env):
     """Acceptance #4: any session's input updates the same row.
 
     Conceptually both sessions hand the timestamp to the same writer;
-    no per-session keying. Asserts that both writes land on the
-    singleton key 'operator' (no per-session row sprawl). Inspects raw
-    rows directly because ``read_set``'s tie-break is nondeterministic
-    when same-second writes collide (v1 substrate gap per
-    ``graph://dff97eec-c59`` #2).
+    no per-session keying. Post-upsert migration (auto-nqlzg) the
+    singleton stays a single row — the second write updates the first
+    in place rather than appending. Latest write wins.
     """
     import json as _json
 
@@ -101,15 +99,12 @@ def test_writes_from_two_sessions_share_singleton(graph_db_env):
     finally:
         db.close()
 
-    # Both writes share the singleton key — never per-session.
-    assert len(rows) == 2
-    keys = {r["key"] for r in rows}
-    assert keys == {"operator"}
-
-    payloads = [_json.loads(r["payload"]) for r in rows]
-    timestamps = {p["last_input_at"] for p in payloads}
-    assert _iso(sess_a_ts) in timestamps
-    assert _iso(sess_b_ts) in timestamps
+    # One singleton row — never per-session, never appended.
+    assert len(rows) == 1
+    assert rows[0]["key"] == "operator"
+    payload = _json.loads(rows[0]["payload"])
+    # Latest write wins: session B's later timestamp survives.
+    assert payload["last_input_at"] == _iso(sess_b_ts)
 
 
 def test_record_swallows_settings_failure(graph_db_env, monkeypatch):
@@ -117,7 +112,7 @@ def test_record_swallows_settings_failure(graph_db_env, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("simulated DB failure")
 
-    monkeypatch.setattr(settings_ops, "add_setting", boom)
+    monkeypatch.setattr(settings_ops, "upsert_by_key", boom)
     # Should not raise.
     _record_operator_input(_iso(datetime.now(timezone.utc)))
     # No row landed.
