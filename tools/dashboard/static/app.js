@@ -1825,6 +1825,30 @@ async function checkPendingDesigns() {
 window.Autonomy = window.Autonomy || {};
 window.Autonomy.plugins = [];
 
+function _pluginScriptSrc(plugin) {
+  const rev = plugin && plugin.asset_rev ? `?v=${encodeURIComponent(plugin.asset_rev)}` : '';
+  return `/static/plugins/${plugin.id}/page.js${rev}`;
+}
+
+function _dropPluginFragmentCache(pluginId) {
+  const prefix = `/pages/${pluginId}`;
+  for (const key of _fragmentCache.keys()) {
+    if (key === prefix || key.startsWith(prefix + '?')) {
+      _fragmentCache.delete(key);
+    }
+  }
+}
+
+function _stampPluginAssetUrls(html, plugin) {
+  if (!plugin || !plugin.asset_rev) return html;
+  const base = `/static/plugins/${plugin.id}/`;
+  const rev = `?v=${encodeURIComponent(plugin.asset_rev)}`;
+  return html.replace(
+    new RegExp(`${base.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}([^"'?#]+)(?!\\?v=)`, 'g'),
+    `${base}$1${rev}`,
+  );
+}
+
 window.Autonomy.refreshPlugins = async function () {
   try {
     const res = await fetch('/api/plugins');
@@ -1842,10 +1866,18 @@ window.Autonomy.refreshPlugins = async function () {
     // fragment whose alpine_root isn't defined yet.
     const pending = [];
     for (const p of window.Autonomy.plugins) {
-      if (document.querySelector(`script[data-plugin-id="${p.id}"]`)) continue;
+      const existing = document.querySelector(`script[data-plugin-id="${p.id}"]`);
+      if (existing && existing.dataset.assetRev === (p.asset_rev || '')) {
+        continue;
+      }
+      if (existing) {
+        existing.remove();
+        _dropPluginFragmentCache(p.id);
+      }
       const script = document.createElement('script');
-      script.src = `/static/plugins/${p.id}/page.js`;
+      script.src = _pluginScriptSrc(p);
       script.dataset.pluginId = p.id;
+      script.dataset.assetRev = p.asset_rev || '';
       pending.push(new Promise(resolve => {
         script.onload = resolve;
         script.onerror = resolve;
@@ -1901,7 +1933,9 @@ async function renderPluginFragment(plugin) {
   // Stamp the plugin id so Schema.alpine() (and other plugin-aware
   // helpers) can self-identify without the shell threading it through.
   window.Autonomy._activePluginId = plugin.id || null;
-  const fragmentUrl = `/pages/${plugin.id}`;
+  const fragmentUrl = plugin.asset_rev
+    ? `/pages/${plugin.id}?v=${encodeURIComponent(plugin.asset_rev)}`
+    : `/pages/${plugin.id}`;
   let html;
   if (_fragmentCache.has(fragmentUrl)) {
     html = _fragmentCache.get(fragmentUrl);
@@ -1912,6 +1946,7 @@ async function renderPluginFragment(plugin) {
       return;
     }
     html = await res.text();
+    html = _stampPluginAssetUrls(html, plugin);
     _fragmentCache.set(fragmentUrl, html);
   }
   _replaceFragment(content, html);
@@ -2235,10 +2270,13 @@ function showToast(message, type) {
 (async () => {
   const plugins = await window.Autonomy.refreshPlugins();
   for (const p of plugins) {
-    if (document.querySelector(`script[data-plugin-id="${p.id}"]`)) continue;
+    const existing = document.querySelector(`script[data-plugin-id="${p.id}"]`);
+    if (existing && existing.dataset.assetRev === (p.asset_rev || '')) continue;
+    if (existing) existing.remove();
     const script = document.createElement('script');
-    script.src = `/static/plugins/${p.id}/page.js`;
+    script.src = _pluginScriptSrc(p);
     script.dataset.pluginId = p.id;
+    script.dataset.assetRev = p.asset_rev || '';
     document.body.appendChild(script);
   }
   _renderSidebarPlugins();

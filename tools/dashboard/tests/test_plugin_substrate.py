@@ -261,6 +261,29 @@ def test_setting_disable_excludes_plugin(tmp_path, monkeypatch):
     assert {p.id for p in loaded} == {"bar"}
 
 
+def test_plugin_asset_rev_changes_when_page_assets_change(tmp_path, monkeypatch):
+    """The `/api/plugins` contract needs a cheap stable token so the SPA can
+    reload page assets after live deploys instead of reusing stale JS.
+    """
+    from tools.dashboard.server import _plugin_asset_rev
+
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    pdir = _write_plugin(plugins_dir, "foo", _min_manifest_yaml("foo"))
+
+    monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: {})
+    [plugin] = loader.load_enabled(plugins_dir=plugins_dir)
+    before = _plugin_asset_rev(plugin)
+
+    page_js = pdir / "page.js"
+    page_js.write_text(page_js.read_text() + "\n// rev bump\n")
+
+    after = _plugin_asset_rev(plugin)
+    assert before
+    assert after
+    assert before != after
+
+
 def test_pure_frontend_plugin_loads(tmp_path, monkeypatch):
     """A plugin with no `entrypoints` block loads cleanly; substrate
     registers page+fragment routes only, no API routes appended.

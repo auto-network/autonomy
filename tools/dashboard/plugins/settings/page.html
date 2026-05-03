@@ -22,26 +22,26 @@
     <div class="flex flex-wrap items-center gap-2">
       <button
         class="text-[11px] font-mono px-3 py-1.5 rounded-full border transition-colors"
-        :class="activeTab === 'browse'
+        :class="(typeof activeTab === 'undefined' || activeTab === 'browse')
           ? 'border-indigo-500/70 bg-indigo-900/40 text-indigo-200'
           : 'border-gray-700 text-gray-400 hover:bg-gray-800'"
-        @click="switchTab('browse')"
+        @click="typeof switchTab === 'function' ? switchTab('browse') : null"
         data-testid="settings-tab-browse">
         Browse
       </button>
       <button
         class="text-[11px] font-mono px-3 py-1.5 rounded-full border transition-colors"
-        :class="activeTab === 'diagnostics'
+        :class="(typeof activeTab !== 'undefined' && activeTab === 'diagnostics')
           ? 'border-cyan-500/70 bg-cyan-950/40 text-cyan-200'
           : 'border-gray-700 text-gray-400 hover:bg-gray-800'"
-        @click="switchTab('diagnostics')"
+        @click="typeof switchTab === 'function' ? switchTab('diagnostics') : null"
         data-testid="settings-tab-diagnostics">
         Diagnostics
       </button>
     </div>
   </div>
 
-  <div x-show="activeTab === 'browse'" data-testid="settings-browse-view">
+  <div x-show="typeof activeTab === 'undefined' || activeTab === 'browse'" data-testid="settings-browse-view">
     <div class="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-4">
 
       <aside class="md:border-r md:border-gray-700 md:pr-4">
@@ -189,7 +189,7 @@
     </div>
   </div>
 
-  <div x-show="activeTab === 'diagnostics'" data-testid="settings-diagnostics-view">
+  <div x-show="typeof activeTab !== 'undefined' && activeTab === 'diagnostics'" data-testid="settings-diagnostics-view">
     <div class="space-y-4">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="inline-flex rounded-full border border-gray-700 bg-gray-900/70 p-1">

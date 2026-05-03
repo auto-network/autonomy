@@ -11384,6 +11384,7 @@ async def api_plugins(request):
             "badge_color": _plugin_badge_color(idx),
             "alpine_root": p.alpine_root,
             "org": effective_org,
+            "asset_rev": _plugin_asset_rev(p),
         })
     return JSONResponse({"plugins": out})
 
@@ -11406,6 +11407,32 @@ def _build_plugin_routes() -> list:
             name=f"plugin-static-{p.id}",
         ))
     return out
+
+
+def _plugin_asset_rev(plugin) -> str:
+    """Cheap revision token for plugin page assets.
+
+    Used by the SPA shell to invalidate cached fragments and reload a
+    plugin's page.js after live deploys. The token changes whenever the
+    plugin manifest or any declared page asset changes on disk.
+    """
+    parts: list[str] = []
+    candidates = [
+        plugin.plugin_dir / "plugin.yaml",
+        plugin.plugin_dir / plugin.template,
+        plugin.plugin_dir / plugin.script,
+    ]
+    if plugin.style:
+        candidates.append(plugin.plugin_dir / plugin.style)
+    for path in candidates:
+        try:
+            st = path.stat()
+            parts.append(
+                f"{path.name}:{st.st_size}:{st.st_mtime_ns}"
+            )
+        except OSError:
+            parts.append(f"{path.name}:missing")
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
 # ── App ───────────────────────────────────────────────────────
