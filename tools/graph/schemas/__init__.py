@@ -48,6 +48,7 @@ from . import org_capability_install  # noqa: F401 — autonomy.org.capability.i
 from . import workspace_capability_enable  # noqa: F401 — autonomy.workspace.capability.enable#1
 from . import worktree_review_binding  # noqa: F401 — autonomy.worktree.review_binding#1
 from . import source_control_review_state  # noqa: F401 — autonomy.source_control.review_state#1
+from . import turn_correction  # noqa: F401 — autonomy.workspace.turn_correction#1
 
 __all__ = [
     "SchemaValidationError",
