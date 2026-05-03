@@ -178,6 +178,8 @@
       // ({status, original_sha256, corrected_text, ...}). Renderer
       // helpers in SessionRenderer read this to overlay user tiles.
       _corrections: {},
+      _correctionRefreshTimer: null,
+      _correctionHydrateToken: 0,
 
       // Backfill progress (page mode only)
       loadProgress: 0,
@@ -627,7 +629,7 @@
               self._scrollToBottom();
             }
             if (sawTurnCorrection) {
-              self._hydrateCorrections();
+              self._refreshCorrectionsForNewEvent();
             }
             // Update overlay header if in overlay mode
             if (self._mode === 'overlay') self._updateHeader();
@@ -1136,12 +1138,33 @@
       // ``_corrections``. Sparse: empty response → empty map. Failures
       // are swallowed so a transient persistence outage doesn't block
       // the rest of the viewer from rendering.
-      async _hydrateCorrections() {
+      _refreshCorrectionsForNewEvent() {
+        var self = this;
+        this._hydrateCorrections({ fresh: true });
+        if (this._correctionRefreshTimer) {
+          clearTimeout(this._correctionRefreshTimer);
+        }
+        this._correctionRefreshTimer = setTimeout(function() {
+          self._correctionRefreshTimer = null;
+          self._hydrateCorrections({ fresh: true });
+        }, 350);
+      },
+
+      async _hydrateCorrections(opts) {
         if (!this.sessionKey) return;
+        var token = ++this._correctionHydrateToken;
         try {
-          var res = await fetch('/api/session/' + encodeURIComponent(this.sessionKey) + '/turn-corrections');
+          var url = '/api/session/' + encodeURIComponent(this.sessionKey) + '/turn-corrections';
+          if (opts && opts.fresh) {
+            url += '?_=' + Date.now();
+          }
+          var res = await fetch(url, {
+            cache: 'no-store',
+            headers: { 'Cache-Control': 'no-cache' },
+          });
           if (!res.ok) return;
           var data = await res.json();
+          if (token !== this._correctionHydrateToken) return;
           var map = {};
           var rows = (data && data.corrections) || [];
           for (var i = 0; i < rows.length; i++) {
@@ -1322,6 +1345,11 @@
         this._groupExpanded = {};
         this._groupExpandView = {};
         this._corrections = {};
+        if (this._correctionRefreshTimer) {
+          clearTimeout(this._correctionRefreshTimer);
+          this._correctionRefreshTimer = null;
+        }
+        this._correctionHydrateToken = 0;
         this.autoScroll = true;
         this._runDir = '';
         this._tailUrl = '';

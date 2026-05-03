@@ -87,10 +87,17 @@ function makeHarness(fetchHandlers) {
     },
   };
 
-  const fetchFn = (url) => {
-    fetchCalls.push(url);
+  const fetchFn = (url, options) => {
+    fetchCalls.push({ url, options: options || null });
     if (fetchHandlers && fetchHandlers[url]) {
       return Promise.resolve(fetchHandlers[url]());
+    }
+    if (fetchHandlers) {
+      for (const key of Object.keys(fetchHandlers)) {
+        if (url.startsWith(key)) {
+          return Promise.resolve(fetchHandlers[key](url, options));
+        }
+      }
     }
     if (url === '/api/dao/active_sessions') {
       return Promise.resolve({ json: () => Promise.resolve([]) });
@@ -379,10 +386,54 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
     await flush();
 
     // No tail fetch should have been issued, and entries are untouched.
-    const tailFetches = h.fetchCalls.filter((u) => u.includes('/tail?after='));
+    const tailFetches = h.fetchCalls.filter((c) => c.url.includes('/tail?after='));
     assert.equal(tailFetches.length, 0, 'cached path must not refetch');
     assert.equal(store.entries.length, beforeLen);
     assert.equal(store.entries[0].content, beforeFirst);
+
+    viewer.destroy();
+  });
+
+  it('hydrates corrections with no-store and retries after a new correction event', async () => {
+    const h = makeHarness({
+      '/api/session/auto-test/turn-corrections': (url, options) => ({
+        ok: true,
+        json: () => Promise.resolve({
+          corrections: url.includes('?_=') ? [{
+            target_message_id: 'msg-1',
+            status: 'pending',
+            corrected_text: 'fixed',
+          }] : [],
+        }),
+      }),
+    });
+
+    const viewer = h.makeViewer();
+    viewer.sessionKey = 'auto-test';
+
+    await viewer._hydrateCorrections({ fresh: true });
+    const correctionCalls = h.fetchCalls.filter((c) =>
+      c.url.startsWith('/api/session/auto-test/turn-corrections')
+    );
+    assert.equal(correctionCalls.length, 1);
+    assert.ok(
+      correctionCalls[0].url.startsWith('/api/session/auto-test/turn-corrections?_='),
+      'fresh correction hydration should bust the URL cache key'
+    );
+    assert.equal(correctionCalls[0].options.cache, 'no-store');
+    assert.equal(correctionCalls[0].options.headers['Cache-Control'], 'no-cache');
+    assert.equal(viewer._corrections['msg-1'].corrected_text, 'fixed');
+
+    const callsBeforeRetry = correctionCalls.length;
+    viewer._refreshCorrectionsForNewEvent();
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const correctionCallsAfterRetry = h.fetchCalls.filter((c) =>
+      c.url.startsWith('/api/session/auto-test/turn-corrections')
+    );
+    assert.ok(
+      correctionCallsAfterRetry.length >= callsBeforeRetry + 2,
+      'new correction events should trigger an immediate refresh and one delayed retry'
+    );
 
     viewer.destroy();
   });
