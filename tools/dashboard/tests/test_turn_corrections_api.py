@@ -5,8 +5,10 @@ identity validation (session_uuid + target_message_id + original_sha256), and
 the SessionMonitor hook used during live tail and warm-up replay to persist
 ``turn_correction`` parser events into ``dashboard.db``.
 
-Parser-side upconversion of CLI output into ``turn_correction`` entries is
-covered by ``tools/dashboard/tests/test_parser.py`` under bead auto-edec1.1.
+Parser-side upconversion of CLI output into unresolved ``turn_correction``
+entries is covered by ``tools/dashboard/tests/test_parser.py`` under bead
+auto-edec1.1. SessionMonitor resolves those entries onto the most likely user
+turn before persisting them here.
 """
 
 from __future__ import annotations
@@ -494,16 +496,13 @@ def test_hydration_survives_fresh_client(test_app):
 
 
 def test_session_monitor_persists_turn_correction_entries(test_app):
-    """The hook the live tail invokes upserts every well-formed event."""
-    from tools.dashboard.session_monitor import SessionMonitor
+    """Unresolved turn-correction entries bind to the prior user turn."""
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
 
-    sha = _sha("Jason encoded")
     entries = [
         {"type": "user", "content": "Jason encoded", "message_id": "msg-1"},
         {
             "type": "turn_correction",
-            "target_message_id": "msg-1",
-            "original_sha256": sha,
             "corrected_text": "JSON encoded",
             "mode": "balanced",
             "confidence": 0.9,
@@ -511,71 +510,114 @@ def test_session_monitor_persists_turn_correction_entries(test_app):
         },
     ]
     row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    SessionMonitor._persist_turn_corrections(row, entries)
+    ts = _TailState()
+    SessionMonitor._persist_turn_corrections(row, ts, entries)
 
     stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
     assert stored is not None
     assert stored["status"] == "pending"
+    assert stored["target_message_id"] == "msg-1"
+    assert stored["original_sha256"] == _sha("Jason encoded")
     assert stored["corrected_text"] == "JSON encoded"
     assert stored["mode"] == "balanced"
     assert stored["confidence"] == pytest.approx(0.9)
     assert stored["reason"] == "dictation cleanup"
+    assert entries[1]["target_message_id"] == "msg-1"
+    assert entries[1]["original_sha256"] == _sha("Jason encoded")
 
 
 def test_session_monitor_skips_non_correction_entries(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
 
     entries = [
         {"type": "user", "content": "hi", "message_id": "msg-1"},
         {"type": "assistant", "content": "hello", "message_id": "msg-2"},
     ]
     row = {"session_uuid": SESSION_UUID}
-    SessionMonitor._persist_turn_corrections(row, entries)
+    SessionMonitor._persist_turn_corrections(row, _TailState(), entries)
     assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
 
 
 def test_session_monitor_skips_session_without_uuid(test_app):
     """Session still resolving — the helper defends by skipping persistence."""
-    from tools.dashboard.session_monitor import SessionMonitor
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
 
-    sha = _sha("text")
     entries = [{
+        "type": "user",
+        "content": "text",
+        "message_id": "msg-1",
+    }, {
         "type": "turn_correction",
-        "target_message_id": "msg-1",
-        "original_sha256": sha,
         "corrected_text": "corrected",
     }]
     row = {"session_uuid": None}
-    SessionMonitor._persist_turn_corrections(row, entries)
+    SessionMonitor._persist_turn_corrections(row, _TailState(), entries)
     assert dashboard_db.get_turn_correction("", "msg-1") is None
 
 
 def test_session_monitor_skips_malformed_event(test_app):
-    """Missing target_message_id / sha / corrected_text => silently dropped."""
-    from tools.dashboard.session_monitor import SessionMonitor
+    """Missing corrected_text or no resolvable user target => silently dropped."""
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
 
     entries = [
-        {  # missing target_message_id
+        {  # no preceding/following user turn to resolve against
             "type": "turn_correction",
-            "original_sha256": _sha("x"), "corrected_text": "y",
-        },
-        {  # missing original_sha256
-            "type": "turn_correction",
-            "target_message_id": "msg-x", "corrected_text": "y",
+            "corrected_text": "y",
         },
         {  # missing corrected_text
             "type": "turn_correction",
-            "target_message_id": "msg-y", "original_sha256": _sha("x"),
+            "mode": "balanced",
         },
     ]
     row = {"session_uuid": SESSION_UUID}
-    SessionMonitor._persist_turn_corrections(row, entries)
+    SessionMonitor._persist_turn_corrections(row, _TailState(), entries)
     assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
+
+
+def test_session_monitor_uses_recent_history_when_correction_arrives_next_batch(test_app):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+
+    SessionMonitor._persist_turn_corrections(
+        row,
+        ts,
+        [{"type": "user", "content": "Jason encoded", "message_id": "msg-1"}],
+    )
+    SessionMonitor._persist_turn_corrections(
+        row,
+        ts,
+        [{"type": "turn_correction", "corrected_text": "JSON encoded"}],
+    )
+
+    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
+    assert stored is not None
+    assert stored["original_sha256"] == _sha("Jason encoded")
+    assert stored["corrected_text"] == "JSON encoded"
+
+
+def test_session_monitor_out_of_order_batch_can_bind_to_following_user_turn(test_app):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+    entries = [
+        {"type": "turn_correction", "corrected_text": "JSON encoded"},
+        {"type": "user", "content": "Jason encoded", "message_id": "msg-1"},
+    ]
+
+    SessionMonitor._persist_turn_corrections(row, ts, entries)
+
+    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
+    assert stored is not None
+    assert stored["original_sha256"] == _sha("Jason encoded")
+    assert stored["corrected_text"] == "JSON encoded"
 
 
 def test_session_monitor_replay_does_not_mutate_terminal(test_app):
     """Replaying a history correction over an already-accepted row leaves it alone."""
-    from tools.dashboard.session_monitor import SessionMonitor
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
 
     sha = _sha("text")
     dashboard_db.upsert_turn_correction(
@@ -588,11 +630,9 @@ def test_session_monitor_replay_does_not_mutate_terminal(test_app):
 
     # Re-emitting the same event during replay/warm-up
     row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    SessionMonitor._persist_turn_corrections(row, [{
-        "type": "turn_correction",
-        "target_message_id": "msg-1",
-        "original_sha256": sha,
-        "corrected_text": "A",
-    }])
+    SessionMonitor._persist_turn_corrections(row, _TailState(), [
+        {"type": "user", "content": "text", "message_id": "msg-1"},
+        {"type": "turn_correction", "corrected_text": "A"},
+    ])
     stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
     assert stored["status"] == "accepted"

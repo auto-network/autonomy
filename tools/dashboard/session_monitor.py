@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -57,6 +58,7 @@ from tools.dashboard.dao.dashboard_db import (
     update_tail_state,
     update_nag_last_sent,
     update_todos,
+    get_turn_correction,
     upsert_turn_correction,
     count_live,
 )
@@ -547,6 +549,8 @@ class _TailState:
     last_enqueue_dedup_ts: float = 0.0
     last_full_rescan_ts: float = 0.0  # wall-clock ts of last reconciliation hit
     full_rescan_count: int = 0  # times reconciliation promoted this session
+    # Recent user turns retained for one-shot turn-correction resolution.
+    recent_user_turns: deque = field(default_factory=lambda: deque(maxlen=24))
 
 
 def _entry_identity(entry: dict) -> str:
@@ -605,6 +609,10 @@ def _apply_activity_entries(ts: _TailState, entries: list[dict]) -> str:
 # Entry kinds that count as operator input — typed user messages and
 # CrossTalk pings (which wake an agent the same way a typed message does).
 _OPERATOR_INPUT_TYPES = frozenset({"user", "crosstalk"})
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _record_operator_input(timestamp_iso: str) -> None:
@@ -1391,7 +1399,7 @@ class SessionMonitor:
             self._event_bus.update_cache("session:registry", self.get_registry())
 
         self._enrich_agent_entries(row, ts, new_entries)
-        self._persist_turn_corrections(row, new_entries)
+        self._persist_turn_corrections(row, ts, new_entries)
         # Warm-up rehydrates correction overlay state from history even when
         # the task-tracker enricher is not wired. Run it unconditionally so
         # the overlay survives restarts on minimal harness configurations.
@@ -1807,7 +1815,7 @@ class SessionMonitor:
         # Persist any turn_correction events from history regardless of whether
         # the task-tracker enricher is wired — the correction overlay must
         # rehydrate even on a minimal harness.
-        self._persist_turn_corrections(row, prior)
+        self._persist_turn_corrections(row, ts, prior)
         if self._entry_enricher is None:
             return
         if prior:
@@ -1854,13 +1862,15 @@ class SessionMonitor:
             await self._broadcast_registry()
 
     @staticmethod
-    def _persist_turn_corrections(row: dict, entries: list) -> None:
+    def _persist_turn_corrections(row: dict, ts: _TailState, entries: list) -> None:
         """Upsert any ``turn_correction`` parser events into dashboard.db.
 
         The parser (auto-edec1.1) upconverts valid ``graph turn-correction
-        suggest`` output into a typed ``turn_correction`` entry. We persist
-        the suggestion as a sparse row so refresh/reconnect can rehydrate
-        the overlay without rewriting JSONL.
+        suggest`` output into a typed ``turn_correction`` entry. The
+        agent-facing command only emits the corrected replacement text, so
+        we resolve that suggestion onto the nearest plausible user turn here,
+        compute the raw-text sha256 server-side, and persist the sparse row so
+        refresh/reconnect can rehydrate the overlay without rewriting JSONL.
 
         Sessions without a ``session_uuid`` silently skip. In the current
         session-monitor flow the tailer only reads a concrete JSONL after the
@@ -1870,17 +1880,85 @@ class SessionMonitor:
         """
         if not entries:
             return
+        batch_users: list[dict[str, Any]] = []
+        for idx, entry in enumerate(entries):
+            if entry.get("type") != "user":
+                continue
+            message_id = entry.get("message_id")
+            content = entry.get("content")
+            if not isinstance(message_id, str) or not message_id:
+                continue
+            if not isinstance(content, str) or not content:
+                continue
+            batch_users.append({
+                "index": idx,
+                "message_id": message_id,
+                "content": content,
+                "timestamp": entry.get("timestamp", "") or "",
+            })
         session_uuid = row.get("session_uuid")
+        prior_users = list(ts.recent_user_turns)
+
+        def _remember_batch_users() -> None:
+            for user in batch_users:
+                if (
+                    ts.recent_user_turns
+                    and ts.recent_user_turns[-1].get("message_id") == user["message_id"]
+                ):
+                    continue
+                ts.recent_user_turns.append({
+                    "message_id": user["message_id"],
+                    "content": user["content"],
+                    "timestamp": user["timestamp"],
+                })
+
         if not session_uuid:
+            _remember_batch_users()
             return
-        for entry in entries:
+
+        claimed_targets: set[str] = set()
+        existing_rows: dict[str, dict | None] = {}
+
+        def _existing_for(message_id: str) -> dict | None:
+            if message_id not in existing_rows:
+                existing_rows[message_id] = get_turn_correction(session_uuid, message_id)
+            return existing_rows[message_id]
+
+        def _candidate_available(user: dict[str, Any]) -> bool:
+            message_id = str(user.get("message_id") or "")
+            if not message_id or message_id in claimed_targets:
+                return False
+            return _existing_for(message_id) is None
+
+        def _resolve_candidate(turn_correction_index: int) -> dict[str, Any] | None:
+            for user in reversed(batch_users):
+                if user["index"] < turn_correction_index and _candidate_available(user):
+                    return user
+            for user in reversed(prior_users):
+                if _candidate_available(user):
+                    return user
+            for user in batch_users:
+                if user["index"] > turn_correction_index and _candidate_available(user):
+                    return user
+            return None
+
+        for idx, entry in enumerate(entries):
             if entry.get("type") != "turn_correction":
+                continue
+            corrected = entry.get("corrected_text")
+            if not isinstance(corrected, str):
                 continue
             target = entry.get("target_message_id")
             sha = entry.get("original_sha256")
-            corrected = entry.get("corrected_text")
-            if not target or not sha or corrected is None:
-                # Malformed event — skip rather than poison persistence.
+            if not isinstance(target, str) or not target or not isinstance(sha, str) or not sha:
+                candidate = _resolve_candidate(idx)
+                if candidate is None:
+                    continue
+                target = candidate["message_id"]
+                sha = _sha256_text(candidate["content"])
+                entry["target_message_id"] = target
+                entry["original_sha256"] = sha
+            if not target or not sha:
                 continue
             try:
                 upsert_turn_correction(
@@ -1892,12 +1970,15 @@ class SessionMonitor:
                     reason=entry.get("reason"),
                     confidence=entry.get("confidence"),
                 )
+                claimed_targets.add(target)
+                existing_rows[target] = {"status": "pending"}
             except Exception:
                 logger.exception(
                     "session_monitor: turn_correction persist failed"
                     " session=%s target=%s",
                     session_uuid, target,
                 )
+        _remember_batch_users()
 
     @staticmethod
     def _enrich_agent_entries(row: dict, ts: _TailState, entries: list) -> None:
