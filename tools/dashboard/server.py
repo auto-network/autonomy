@@ -129,6 +129,13 @@ from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
 from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
 
+# Activity tab notifications substrate (bead auto-5u8zb) — imported
+# eagerly so the four ``dashboard.activity.*`` SettingSchema classes
+# (ask, ask_vote, ask_refresh, operator_dismissed) are in the registry
+# before ``flush_schema_meta`` runs on the first writable GraphDB
+# connection. See pitfall ``graph://3fe60c25-fab``.
+from tools.dashboard import notifications_settings as _notifications_settings  # noqa: E402, F401
+
 # Surface Presence + OperatorActivity substrate (bead auto-i3tki) —
 # imported eagerly for the same reason: its three SettingSchema classes
 # (dashboard.surface.presence, dashboard.surface.ping,
