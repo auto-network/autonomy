@@ -656,17 +656,35 @@ def _worktree_dashboard_base_ref(worktree: Path, repo_name: str) -> str | None:
 
 
 def _worktree_commits_ahead(worktree: Path, *, base_ref: str | None = None) -> int:
-    """Count commits reachable from HEAD but not from the merge base ref."""
+    """Count commits whose patches are NOT yet on the merge base ref.
+
+    Previously did a plain ``git rev-list --count base..HEAD``, which
+    counts SHA-distinct commits. That overstated "ahead" any time a
+    commit had already been cherry-picked onto master — the cherry-pick
+    has a different SHA but the same patch-id, so the original commit
+    on the session branch kept counting forward forever (until the
+    branch was rebased).
+
+    ``git cherry <base>`` does patch-id matching: each commit on HEAD is
+    annotated with ``+`` (patch-id not in base) or ``-`` (patch-id
+    already in base, e.g. a cherry-pick of this commit). Counting only
+    the ``+`` lines gives "commits whose work the operator still needs
+    to land", which is the intent every caller actually wants:
+
+    - dual-state lit indicator on the session viewer's worktree button
+    - ff_eligible (no point fast-forwarding zero meaningful commits)
+    - the commit count on the worktree review card
+
+    Merge commits are skipped by ``git cherry`` by design, mirroring the
+    old behaviour.
+    """
     base_ref = base_ref or _worktree_merge_base_ref(worktree)
     if base_ref is None:
         return 0
-    rc, out, _ = _git_output(["rev-list", "--count", f"{base_ref}..HEAD"], worktree, timeout=15)
+    rc, out, _ = _git_output(["cherry", base_ref, "HEAD"], worktree, timeout=15)
     if rc != 0:
         return 0
-    try:
-        return int(out.strip() or "0")
-    except ValueError:
-        return 0
+    return sum(1 for line in out.splitlines() if line.startswith("+ "))
 
 
 def _worktree_ff_only_safe(worktree: Path, *, base_ref: str | None = None) -> bool:
