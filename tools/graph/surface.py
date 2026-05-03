@@ -18,10 +18,11 @@ Live behind the API today:
   ``user`` or ``crosstalk`` turn. ``is_idle`` treats a missing row as
   idle; ``last_user_input`` returns ``None`` in that case.
 
-Substrate gap (v1 limitation): no atomic upsert. Heartbeat / state
-writes use :func:`tools.graph.settings_ops.add_setting`, so concurrent
-writers race — the most recent row wins per :func:`read_set`'s
-tie-break. See signpost ``graph://dff97eec-c59`` (gap #2).
+Heartbeat / state writes route through
+:func:`tools.graph.settings_ops.upsert_by_key`, so the per-(surface,
+participant) row stays a single, evolving base under
+``BEGIN IMMEDIATE`` — concurrent writers in the same process serialize
+cleanly. Closed substrate gap #2 (signpost ``graph://dff97eec-c59``).
 
 Provenance:
 
@@ -352,9 +353,10 @@ class Presence:
     stop, joins it, and writes a final ``state="present"`` row so the
     participant remains findable for future pings.
 
-    Substrate gap: there is no atomic upsert today, so two writers
-    concurrently updating the same presence row may race. ``read_set``
-    tie-breaks by recency; v1 accepts the rare clobber.
+    Concurrent writers (same process) serialize cleanly: writes route
+    through :func:`settings_ops.upsert_by_key`, which holds SQLite's
+    reserved-write lock across SELECT + INSERT/UPDATE so the presence
+    row stays a single, evolving base.
 
     Args:
         surface_id: Page identifier (e.g. ``"settings-nexus"``).
@@ -425,11 +427,16 @@ class Presence:
 
         Imports :mod:`tools.graph.settings_ops` lazily so importing this
         module doesn't pull in the whole settings stack at server boot.
+
+        Routes through :func:`settings_ops.upsert_by_key` so the
+        per-``(surface, participant)`` row stays a single, evolving
+        base — heartbeat and ``set_state`` writes update the same row
+        instead of appending. Closes substrate gap #2 for this surface.
         """
         from tools.graph import settings_ops
 
         payload = self._build_payload()
-        settings_ops.add_setting(
+        settings_ops.upsert_by_key(
             SURFACE_PRESENCE_SET_ID, SCHEMA_REVISION, self._key, payload,
             org=self.org,
         )

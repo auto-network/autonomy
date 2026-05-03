@@ -568,6 +568,10 @@ def _record_operator_input(timestamp_iso: str) -> None:
     Fire-and-forget on a thread so the SSE broadcast pipeline is never
     gated on graph-DB I/O. Lazy-imports settings_ops/surface so this
     module's import doesn't drag the whole graph stack in at server boot.
+
+    Uses :func:`settings_ops.upsert_by_key` so the singleton row stays a
+    single row instead of accumulating one per call — earlier writes
+    update the same setting id rather than appending a fresh base.
     """
     try:
         from tools.graph import settings_ops
@@ -575,7 +579,7 @@ def _record_operator_input(timestamp_iso: str) -> None:
             OPERATOR_ACTIVITY_SET_ID,
             SCHEMA_REVISION as _OPERATOR_ACTIVITY_REVISION,
         )
-        settings_ops.add_setting(
+        settings_ops.upsert_by_key(
             OPERATOR_ACTIVITY_SET_ID,
             _OPERATOR_ACTIVITY_REVISION,
             "operator",
