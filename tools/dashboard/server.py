@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import pty
 import re
@@ -4240,6 +4241,63 @@ async def api_session_get(request):
         "nag_message": session.get("nag_message"),
         "nag_last_sent": session.get("nag_last_sent"),
     })
+
+
+_TMUX_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+async def api_session_output(request):
+    """GET /api/session/{tmux_name}/output/{path:path}
+
+    Serve a file the container CLI dropped into ``/workspace/output`` for the
+    named session. Resolves to ``data/agent-runs/<tmux_name>-<ts>/<path>``,
+    picking the most recent run directory when the session has been launched
+    more than once. Used by the viewer's ``viewer_attachment`` tile to render
+    images shared via ``graph share``.
+
+    Security: the trusted session value lives on the parsed entry (stamped
+    by SessionMonitor from the source JSONL stream); the viewer reads it
+    from there, not from the agent's tool_result content. We additionally
+    validate ``tmux_name`` shape so the glob below can't be coerced into
+    matching unrelated run directories via metacharacters.
+    """
+    tmux_name = request.path_params["tmux_name"]
+    rel_path = request.path_params["path"]
+
+    if not _TMUX_NAME_RE.match(tmux_name):
+        return JSONResponse({"error": "invalid session name"}, status_code=400)
+
+    # Path-traversal guard — reject any segment that escapes upward or has
+    # an absolute component. We then resolve and re-check against the run
+    # directory so symlinks can't fan out either.
+    if not rel_path or rel_path.startswith("/") or ".." in Path(rel_path).parts:
+        return JSONResponse({"error": "invalid path"}, status_code=400)
+
+    if not AGENT_RUNS_DIR.exists():
+        return JSONResponse({"error": "agent-runs not configured"}, status_code=404)
+
+    run_dirs = sorted(
+        (p for p in AGENT_RUNS_DIR.glob(f"{tmux_name}-*") if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not run_dirs:
+        return JSONResponse({"error": "session run dir not found"}, status_code=404)
+
+    for run_dir in run_dirs:
+        candidate = (run_dir / rel_path).resolve()
+        try:
+            candidate.relative_to(run_dir.resolve())
+        except ValueError:
+            continue
+        if candidate.is_file():
+            mime, _ = mimetypes.guess_type(candidate.name)
+            return FileResponse(
+                candidate,
+                media_type=mime or "application/octet-stream",
+                headers={"Cache-Control": "public, max-age=31536000, immutable"},
+            )
+    return JSONResponse({"error": "file not found"}, status_code=404)
 
 
 async def api_session_label(request):
@@ -11827,6 +11885,7 @@ routes = [
     Route("/api/session/send-handshake", api_session_send_handshake, methods=["POST"]),
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
+    Route("/api/session/{tmux_name}/output/{path:path}", api_session_output, methods=["GET"]),
     Route("/api/session/{tmux_name}/interrupt", api_session_interrupt, methods=["POST"]),
     Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
     Route("/api/session/{tmux_name}/topics", api_session_topics, methods=["PUT"]),

@@ -72,7 +72,31 @@
       if (entry.type === 'compact_summary') return 'sc-border-compact-summary';
       if (entry.type === 'crosstalk') return 'sc-border-crosstalk';
       if (entry.type === 'semantic_bash') return 'sc-border-default';
+      if (entry.type === 'viewer_attachment') return 'sc-border-default';
       return 'sc-border-default';
+    },
+
+    /** Build the dashboard URL that serves a viewer_attachment's underlying
+     *  file. Falls back to '' when the entry is missing the bits we need so
+     *  the template can hide the tile rather than render a broken image. */
+    viewerAttachmentSrc(entry) {
+      if (!entry || !entry.rel_path || !entry.session) return '';
+      var parts = entry.rel_path.split('/').map(encodeURIComponent).join('/');
+      return '/api/session/' + encodeURIComponent(entry.session) + '/output/' + parts;
+    },
+
+    viewerAttachmentIsImage(entry) {
+      var m = (entry && entry.mime) || '';
+      return typeof m === 'string' && m.indexOf('image/') === 0;
+    },
+
+    /** Friendly size label, e.g. 12 B, 4.2 KB, 1.7 MB. */
+    fmtFileSize(bytes) {
+      if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '';
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+      return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
     },
 
     headline(entry) {

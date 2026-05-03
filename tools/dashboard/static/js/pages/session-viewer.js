@@ -207,6 +207,20 @@
       showTerminal: false,
       _termInstance: null,   // result of window.mountTerminal(), or null
 
+      // Viewer-attachment lightbox: when src is set, the overlay shows the
+      // full-resolution image; clicking the backdrop or pressing ESC closes.
+      lightboxSrc: '',
+      lightboxAlt: '',
+      openLightbox(src, alt) {
+        if (!src) return;
+        this.lightboxSrc = src;
+        this.lightboxAlt = alt || '';
+      },
+      closeLightbox() {
+        this.lightboxSrc = '';
+        this.lightboxAlt = '';
+      },
+
       // Link terminal (Tier 3)
       linkState: 'idle',
       linkCandidates: [],

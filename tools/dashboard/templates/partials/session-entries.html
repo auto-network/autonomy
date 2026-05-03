@@ -300,6 +300,44 @@
               </a>
             </template>
 
+            <!-- ── Viewer attachment: thumbnail tile, tap to fullscreen ─── -->
+            <template x-if="resolveEntry(dEntry).type === 'viewer_attachment'">
+              <div class="sc-va-tile" data-testid="viewer-attachment">
+                <div class="sc-line1">
+                  <span class="sc-chip sc-chip-default">Attachment</span>
+                  <span class="sc-meta sc-meta-gray"
+                        x-text="resolveEntry(dEntry).filename || ''"></span>
+                  <span class="sc-meta sc-meta-gray"
+                        x-text="fmtFileSize(resolveEntry(dEntry).size)"></span>
+                  <span class="sc-timestamp"
+                        x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
+                </div>
+                <template x-if="viewerAttachmentIsImage(resolveEntry(dEntry)) && viewerAttachmentSrc(resolveEntry(dEntry))">
+                  <div class="sc-va-thumb-wrap">
+                    <img class="sc-va-thumb"
+                         :src="viewerAttachmentSrc(resolveEntry(dEntry))"
+                         :alt="resolveEntry(dEntry).alt || resolveEntry(dEntry).filename || ''"
+                         loading="lazy"
+                         @click="openLightbox(viewerAttachmentSrc(resolveEntry(dEntry)), resolveEntry(dEntry).alt || resolveEntry(dEntry).filename || '')">
+                  </div>
+                </template>
+                <template x-if="!viewerAttachmentIsImage(resolveEntry(dEntry)) && viewerAttachmentSrc(resolveEntry(dEntry))">
+                  <a class="sc-va-file"
+                     :href="viewerAttachmentSrc(resolveEntry(dEntry))"
+                     target="_blank" rel="noopener">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                      <polyline points="14 2 14 8 20 8"/>
+                    </svg>
+                    <span x-text="resolveEntry(dEntry).filename || 'file'"></span>
+                  </a>
+                </template>
+                <template x-if="resolveEntry(dEntry).caption">
+                  <div class="sc-va-caption" x-text="resolveEntry(dEntry).caption"></div>
+                </template>
+              </div>
+            </template>
+
           </div>
         </template>
 

@@ -4336,6 +4336,89 @@ def cmd_turn_correction_suggest(args):
             print(f"    confidence: {args.confidence}")
 
 
+_SHARE_OUTPUT_ROOT = Path("/workspace/output")
+_SHARE_ATTACHMENTS_DIR = ".attachments"
+
+
+def cmd_share(args):
+    """Copy a file into /workspace/output/.attachments/<ts>-<sha8>/ and emit a
+    typed ``viewer_attachment`` event so the session viewer renders it as a
+    thumbnail tile bound to the current turn.
+
+    Storage stays on the host mount (``/workspace/output`` → host's
+    ``data/agent-runs/<tmux>-<ts>/``). The dashboard exposes the file via
+    ``/api/session/<tmux>/output/<rel_path>``; the JSON payload only carries
+    the relative path so the viewer can resolve it through that route.
+
+    Security note: the payload **does not** include a session identifier.
+    The session that owns the entry is stamped by ``SessionMonitor`` after
+    parsing, sourced from the trusted JSONL stream the entry came from.
+    Letting agents claim a session in their own tool_result content would
+    create a cross-session read primitive (confused-deputy via the serve
+    route).
+    """
+    import hashlib
+    import mimetypes
+    import shutil
+    from datetime import datetime, timezone
+
+    src = Path(args.file).expanduser()
+    if not src.exists():
+        print(f"share: file not found: {src}", file=sys.stderr)
+        sys.exit(2)
+    if not src.is_file():
+        print(f"share: not a regular file: {src}", file=sys.stderr)
+        sys.exit(2)
+
+    if not _SHARE_OUTPUT_ROOT.is_dir():
+        print(
+            f"share: {_SHARE_OUTPUT_ROOT} is not mounted — this command only"
+            " runs inside a session container.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Content hash for dir uniqueness; full sha is overkill, 8 hex is enough
+    # to disambiguate within a session.
+    h = hashlib.sha256()
+    with src.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    sha8 = h.hexdigest()[:8]
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    sub = f"{ts}-{sha8}"
+    rel_path = f"{_SHARE_ATTACHMENTS_DIR}/{sub}/{src.name}"
+    dst_dir = _SHARE_OUTPUT_ROOT / _SHARE_ATTACHMENTS_DIR / sub
+    dst = dst_dir / src.name
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    size = dst.stat().st_size
+
+    mime, _ = mimetypes.guess_type(src.name)
+    if not mime:
+        mime = "application/octet-stream"
+
+    # No "session" field — see docstring. The harness pins it from the
+    # trusted JSONL-stream identity, not from anything we print here.
+    payload = {
+        "type": "viewer_attachment",
+        "version": 1,
+        "rel_path": rel_path,
+        "filename": src.name,
+        "mime": mime,
+        "size": size,
+        "sha8": sha8,
+    }
+    if args.alt:
+        payload["alt"] = args.alt
+    if args.caption:
+        payload["caption"] = args.caption
+
+    print(json.dumps(payload))
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="autonomy-graph",
@@ -4996,6 +5079,17 @@ def main():
         help="Emit one JSON object for parser upconversion (the contract)",
     )
     p_tc_suggest.set_defaults(func=cmd_turn_correction_suggest)
+
+    # share — copy a file to /workspace/output/.attachments/<ts>-<sha8>/ and
+    # emit a viewer_attachment tile bound to the current turn.
+    p_share = sub.add_parser(
+        "share",
+        help="Share a file (image/etc) into the session viewer as a tile",
+    )
+    p_share.add_argument("file", help="Path to the file to share")
+    p_share.add_argument("--alt", help="Alt text / accessibility description")
+    p_share.add_argument("--caption", help="Optional caption shown under the tile")
+    p_share.set_defaults(func=cmd_share)
 
     # set — Settings primitive (graph://0d3f750f-f9c)
     from .set_cmd import attach_set_subparser
