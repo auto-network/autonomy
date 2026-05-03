@@ -1,27 +1,22 @@
-"""Surface Presence + ParticipantActivity substrate library — v1 API surface.
+"""Surface Presence + OperatorActivity substrate library — v1 API surface.
 
 Multiplayer-shaped substrate primitive for live dashboard surfaces.
 Once the substrate ships these primitives, every plugin gets:
 
 * **Surface presence** — operators and agents on the same page see each
   other, with state, position, and intent.
-* **Participant activity** — adjacent primitive answering "has this
-  participant been active recently?" at the participant level
-  (independent of any surface).
+* **Operator activity** — single-row primitive answering "has the
+  operator typed anywhere recently?" Independent of any session or
+  surface; one timestamp, one writer.
 * **Summons (pinging)** — explicit, ID-targeted, delivered via CrossTalk.
-
-This module is the **API-surface wedge** (substrate.A): consumers can
-import against it immediately. The implementation behind the surface
-evolves through subsequent beads (B/C/D) without breaking importers.
 
 Live behind the API today:
 
-* :meth:`Presence.is_idle`, :meth:`Presence.last_user_input`,
-  :meth:`Presence.active_within`, :meth:`Presence.inputs_last_hour` —
-  read the ``dashboard.participant.activity#1`` row written by
-  ``tools/dashboard/session_monitor.py`` on every parsed turn
-  (substrate.D). Returns sensible defaults (treated as idle / no
-  recent activity / 0) when no row exists yet for *participant_id*.
+* :meth:`Presence.is_idle`, :meth:`Presence.last_user_input` — read the
+  singleton ``dashboard.operator.activity#1`` row written by
+  ``tools/dashboard/session_monitor.py`` whenever any session parses a
+  ``user`` or ``crosstalk`` turn. ``is_idle`` treats a missing row as
+  idle; ``last_user_input`` returns ``None`` in that case.
 
 Substrate gap (v1 limitation): no atomic upsert. Heartbeat / state
 writes use :func:`tools.graph.settings_ops.add_setting`, so concurrent
@@ -47,10 +42,10 @@ from tools.graph.schemas.registry import (
     SchemaValidationError,
     SettingSchema,
     append_only_log,
-    cache,
     field,
     keyed_per_entity,
     register_schema,
+    singleton,
 )
 
 
@@ -59,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 SURFACE_PRESENCE_SET_ID = "dashboard.surface.presence"
 SURFACE_PING_SET_ID = "dashboard.surface.ping"
-PARTICIPANT_ACTIVITY_SET_ID = "dashboard.participant.activity"
+OPERATOR_ACTIVITY_SET_ID = "dashboard.operator.activity"
 
 SCHEMA_REVISION = 1
 
@@ -79,11 +74,11 @@ SYNOPSIS = {
         "Multiplayer surface substrate: per-(surface, participant) "
         "presence rows (dashboard.surface.presence), explicit "
         "participant-id-targeted pings (dashboard.surface.ping), and "
-        "per-participant activity timestamps independent of any "
-        "surface (dashboard.participant.activity)"
+        "a singleton operator-activity timestamp answering 'has the "
+        "operator typed anywhere recently?' (dashboard.operator.activity)"
     ),
     "nouns": [
-        "surface presence", "surface ping", "participant activity",
+        "surface presence", "surface ping", "operator activity",
         "summons", "ping", "presence row", "heartbeat",
         "multiplayer", "follow-mode", "spectator",
     ],
@@ -295,47 +290,29 @@ class SurfacePingV1(SettingSchema):
             )
 
 
-# ── ParticipantActivity ──────────────────────────────────────
+# ── OperatorActivity ─────────────────────────────────────────
 
 
-@cache(ttl=timedelta(days=7))
-class ParticipantActivityV1(SettingSchema):
-    """Recent-activity timestamps. Independent of any surface.
+@singleton(key="operator")
+class OperatorActivityV1(SettingSchema):
+    """Has the operator typed anywhere recently? Singleton, one writer.
 
-    Key: ``<participant_id>``. Written whenever user input arrives or a
-    session turn completes (substrate.D — ``session_monitor.py``
-    integration). Single source of truth for "is this participant
-    actively driving things right now?". Cache TTL sweeps abandoned
-    sessions after 7 days; ``@cache`` implies caller-supplied keys, so
-    no separate ``@keyed_per_entity`` is needed (they would conflict on
-    ``_access_pattern``).
+    The use case is global: "is the human currently driving any
+    session?" — we don't care which session received the input, only
+    that the operator was active. One row, fixed key ``operator``,
+    latest write wins.
+
+    Written by ``tools/dashboard/session_monitor.py`` whenever any
+    session parses a ``user`` or ``crosstalk`` turn.
     """
 
-    set_id = PARTICIPANT_ACTIVITY_SET_ID
+    set_id = OPERATOR_ACTIVITY_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    participant_id: str = field(required=True)
-    participant_kind: str = field(
-        required=True,
-        enum=list(VALID_PARTICIPANT_KINDS),
-    )
-    participant_label: str = field(required=True)
-    last_user_input_at: str = field(
+    last_input_at: str = field(
         default="",
-        description="ISO timestamp of most recent operator input",
+        description="ISO timestamp of the operator's most recent input",
     )
-    last_session_turn_at: str = field(
-        default="",
-        description="ISO timestamp of most recent agent turn",
-    )
-    last_meaningful_at: str = field(
-        default="",
-        description=(
-            "Max of the above; one-stop 'when did anything happen'"
-        ),
-    )
-    inputs_last_hour: int = field(default=0)
-    turns_last_hour: int = field(default=0)
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -344,36 +321,11 @@ class ParticipantActivityV1(SettingSchema):
                 f"{cls.__name__}: payload must be a dict, "
                 f"got {type(payload).__name__}"
             )
-        for required_field in (
-            "participant_id", "participant_kind", "participant_label",
-        ):
-            v = payload.get(required_field)
-            if not isinstance(v, str) or not v:
-                raise SchemaValidationError(
-                    f"{cls.__name__}: missing or empty required field "
-                    f"{required_field!r}"
-                )
-        if payload["participant_kind"] not in VALID_PARTICIPANT_KINDS:
+        if "last_input_at" in payload \
+                and not isinstance(payload["last_input_at"], str):
             raise SchemaValidationError(
-                f"{cls.__name__}: 'participant_kind' must be one of "
-                f"{VALID_PARTICIPANT_KINDS}, got "
-                f"{payload['participant_kind']!r}"
+                f"{cls.__name__}: 'last_input_at' must be a string"
             )
-        for str_field in (
-            "last_user_input_at", "last_session_turn_at",
-            "last_meaningful_at",
-        ):
-            if str_field in payload \
-                    and not isinstance(payload[str_field], str):
-                raise SchemaValidationError(
-                    f"{cls.__name__}: {str_field!r} must be a string"
-                )
-        for int_field in ("inputs_last_hour", "turns_last_hour"):
-            if int_field in payload \
-                    and not isinstance(payload[int_field], int):
-                raise SchemaValidationError(
-                    f"{cls.__name__}: {int_field!r} must be an int"
-                )
         extra = set(payload) - set(cls._field_metadata)
         if extra:
             raise SchemaValidationError(
@@ -598,116 +550,44 @@ class Presence:
             org=self.org,
         )
 
-    # ── Static helpers — backed by ParticipantActivity rows ─────
-
-    @staticmethod
-    def _read_activity(
-        participant_id: str, *, org: str = "personal",
-    ) -> dict | None:
-        """Resolve *participant_id*'s ParticipantActivity payload.
-
-        Returns the payload dict, or ``None`` when no row exists or the
-        settings stack is unreachable. Lazy-imports ``settings_ops`` so a
-        bare import of :mod:`tools.graph.surface` does not pull in the
-        whole graph stack.
-        """
-        from tools.graph import settings_ops
-
-        try:
-            members = settings_ops.read_set(
-                PARTICIPANT_ACTIVITY_SET_ID, org=org, peers=[],
-            )
-        except Exception:
-            logger.exception(
-                "Presence: read_set failed for participant_id=%s",
-                participant_id,
-            )
-            return None
-        for m in members.members:
-            if m.key == participant_id:
-                payload = m.payload
-                if isinstance(payload, dict):
-                    return payload
-        return None
+    # ── Static helpers — backed by OperatorActivity row ─────────
 
     @staticmethod
     def is_idle(
-        participant_id: str,
-        *,
         threshold: timedelta = timedelta(minutes=30),
     ) -> bool:
-        """Has *participant_id* been idle longer than *threshold*?
+        """Has the operator been idle longer than *threshold*?
 
-        Reads the ParticipantActivity row written by
-        ``session_monitor.py``. Treats "no row" or "no
-        ``last_user_input_at``" as **idle** (True) — a participant we've
-        never seen the operator address can't be the operator's current
-        focus. ``threshold`` is the staleness window for
-        ``last_user_input_at``.
+        Treats 'no row yet' as idle (True).
         """
-        last = Presence.last_user_input(participant_id)
+        last = Presence.last_user_input()
         if last is None:
             return True
         return (datetime.now(timezone.utc) - last) > threshold
 
     @staticmethod
-    def last_user_input(participant_id: str) -> Optional[datetime]:
-        """Timestamp of *participant_id*'s most recent user input.
+    def last_user_input() -> Optional[datetime]:
+        """ISO timestamp of the operator's most recent input.
 
-        Returns a timezone-aware UTC :class:`~datetime.datetime`, or
-        ``None`` when no row exists or ``last_user_input_at`` has never
-        been set / cannot be parsed.
+        Returns a tz-aware UTC :class:`~datetime.datetime`, or ``None``
+        when no row exists or its ``last_input_at`` is empty/unparseable.
         """
-        activity = Presence._read_activity(participant_id)
-        if not activity:
+        from tools.graph import settings_ops
+
+        rows = settings_ops.read_set(
+            OPERATOR_ACTIVITY_SET_ID, org="personal", peers=[],
+        )
+        if not rows.members:
             return None
-        raw = activity.get("last_user_input_at", "")
-        if not raw:
+        last_iso = rows.members[0].payload.get("last_input_at", "")
+        if not last_iso:
             return None
         try:
-            iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-            return datetime.fromisoformat(iso)
-        except (TypeError, ValueError):
+            return datetime.fromisoformat(
+                last_iso.replace("Z", "+00:00")
+            )
+        except ValueError:
             return None
-
-    @staticmethod
-    def active_within(
-        participant_id: str, duration: timedelta,
-    ) -> bool:
-        """Has *participant_id* had any meaningful activity in the last *duration*?
-
-        Reads ``last_meaningful_at`` (the maximum of
-        ``last_user_input_at`` and ``last_session_turn_at``) so even a
-        purely-agent batch keeps the participant "active." Returns
-        ``False`` when no row exists or the timestamp is unparseable.
-        """
-        activity = Presence._read_activity(participant_id)
-        if not activity:
-            return False
-        raw = activity.get("last_meaningful_at", "") \
-            or activity.get("last_session_turn_at", "") \
-            or activity.get("last_user_input_at", "")
-        if not raw:
-            return False
-        try:
-            iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-            last = datetime.fromisoformat(iso)
-        except (TypeError, ValueError):
-            return False
-        return (datetime.now(timezone.utc) - last) <= duration
-
-    @staticmethod
-    def inputs_last_hour(participant_id: str) -> int:
-        """How many user inputs has *participant_id* sent in the last hour?
-
-        Returns the ``inputs_last_hour`` counter on the activity row, or
-        ``0`` when no row exists.
-        """
-        activity = Presence._read_activity(participant_id)
-        if not activity:
-            return 0
-        v = activity.get("inputs_last_hour", 0)
-        return v if isinstance(v, int) else 0
 
     @staticmethod
     def participant_color(participant_id: str) -> str:
@@ -733,5 +613,5 @@ register_schema(
     SURFACE_PING_SET_ID, SCHEMA_REVISION, SurfacePingV1,
 )
 register_schema(
-    PARTICIPANT_ACTIVITY_SET_ID, SCHEMA_REVISION, ParticipantActivityV1,
+    OPERATOR_ACTIVITY_SET_ID, SCHEMA_REVISION, OperatorActivityV1,
 )
