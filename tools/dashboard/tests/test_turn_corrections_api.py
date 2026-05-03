@@ -14,10 +14,12 @@ turn before persisting them here.
 from __future__ import annotations
 
 import hashlib
+import json
 import pytest
 from starlette.testclient import TestClient
 
 from tools.dashboard.dao import dashboard_db
+from tools.dashboard.session_harness import parse_codex_log_line
 
 
 SESSION_UUID = "uuid-auto-test-designer"
@@ -610,6 +612,63 @@ def test_session_monitor_out_of_order_batch_can_bind_to_following_user_turn(test
     SessionMonitor._persist_turn_corrections(row, ts, entries)
 
     stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
+    assert stored is not None
+    assert stored["original_sha256"] == _sha("Jason encoded")
+    assert stored["corrected_text"] == "JSON encoded"
+
+
+def test_session_monitor_persists_codex_event_message_correction_without_raw_uuid(test_app):
+    """Codex event_msg user turns without raw UUID still get a stable target id."""
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    raw_entries = [
+        {
+            "timestamp": "2026-05-03T08:57:01.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Jason encoded"},
+        },
+        {
+            "timestamp": "2026-05-03T08:57:02.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "exec_command_end",
+                "call_id": "call_tc_blank",
+                "aggregated_output": "",
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 0,
+                "status": "completed",
+                "cwd": "/workspace/repo",
+                "parsed_cmd": [{"type": "unknown", "cmd": (
+                    'graph turn-correction suggest "JSON encoded" '
+                    '--mode balanced --reason "dictation cleanup" --json'
+                )}],
+                "command": [
+                    "bash",
+                    "-lc",
+                    'graph turn-correction suggest "JSON encoded" '
+                    '--mode balanced --reason "dictation cleanup" --json',
+                ],
+                "duration": {"secs": 0, "nanos": 125_000_000},
+                "process_id": 4243,
+            },
+        },
+    ]
+    entries = []
+    for raw in raw_entries:
+        parsed = parse_codex_log_line(json.dumps(raw))
+        if isinstance(parsed, list):
+            entries.extend(parsed)
+        elif parsed:
+            entries.append(parsed)
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+    SessionMonitor._persist_turn_corrections(row, ts, entries)
+
+    user = next(e for e in entries if e.get("type") == "user")
+    assert user["message_id"].startswith("codex-user:")
+    stored = dashboard_db.get_turn_correction(SESSION_UUID, user["message_id"])
     assert stored is not None
     assert stored["original_sha256"] == _sha("Jason encoded")
     assert stored["corrected_text"] == "JSON encoded"

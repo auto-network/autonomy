@@ -8,6 +8,7 @@ viewer, without promoting cumulative usage into the context-token stat.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 from pathlib import Path
@@ -769,18 +770,50 @@ def test_parse_codex_user_and_agent_event_messages():
         "payload": {"type": "agent_message", "message": "Hello. How can I help?"},
     }))
 
-    assert user == {
-        "type": "user",
-        "role": "user",
-        "content": "Hello",
+    assert user["type"] == "user"
+    assert user["role"] == "user"
+    assert user["content"] == "Hello"
+    assert user["timestamp"] == TS
+    assert user["message_id"] == (
+        "codex-user:" + hashlib.sha1("user\nHello".encode("utf-8")).hexdigest()[:16]
+    )
+
+    assert assistant["type"] == "assistant_text"
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] == "Hello. How can I help?"
+    assert assistant["timestamp"] == TS
+    assert assistant["message_id"] == (
+        "codex-assistant:"
+        + hashlib.sha1("assistant\nHello. How can I help?".encode("utf-8")).hexdigest()[:16]
+    )
+
+
+def test_parse_codex_event_messages_preserve_explicit_identity():
+    user = parse_codex_log_line(_line({
         "timestamp": TS,
-    }
-    assert assistant == {
-        "type": "assistant_text",
-        "role": "assistant",
-        "content": "Hello. How can I help?",
+        "type": "event_msg",
+        "payload": {
+            "type": "user_message",
+            "message": "Hello",
+            "uuid": "msg-user-123",
+            "parentUuid": "parent-user-1",
+        },
+    }))
+    assistant = parse_codex_log_line(_line({
         "timestamp": TS,
-    }
+        "type": "event_msg",
+        "payload": {
+            "type": "agent_message",
+            "message": "Hi there",
+            "uuid": "msg-assistant-456",
+            "parentUuid": "parent-assistant-1",
+        },
+    }))
+
+    assert user["message_id"] == "msg-user-123"
+    assert user["parent_uuid"] == "parent-user-1"
+    assert assistant["message_id"] == "msg-assistant-456"
+    assert assistant["parent_uuid"] == "parent-assistant-1"
 
 
 def test_parse_codex_inbound_crosstalk_user_message():

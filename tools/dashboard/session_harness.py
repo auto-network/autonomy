@@ -7,6 +7,7 @@ shared normalized entries, activity state, SSE delivery, and rendering.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -1476,6 +1477,28 @@ def _extract_codex_text_blocks(blocks: Any) -> str:
     return "".join(parts).strip()
 
 
+def _codex_event_message_identity(payload: dict, role: str, text: str) -> dict[str, str]:
+    """Return stable tile identity for Codex event_msg chat turns.
+
+    Some live Codex ``event_msg`` user/agent messages do not carry a raw UUID
+    even though downstream viewer features need a stable `message_id`.
+    Prefer the explicit payload UUID when present; otherwise derive a
+    deterministic synthetic ID from role + text so replay/hydration keeps the
+    same identity across reconnects.
+    """
+    identity: dict[str, str] = {}
+    raw_uuid = payload.get("uuid") or payload.get("message_id")
+    if isinstance(raw_uuid, str) and raw_uuid:
+        identity["message_id"] = raw_uuid
+    elif text:
+        digest = hashlib.sha1(f"{role}\n{text}".encode("utf-8")).hexdigest()[:16]
+        identity["message_id"] = f"codex-{role}:{digest}"
+    parent = payload.get("parentUuid") or payload.get("parent_uuid")
+    if isinstance(parent, str) and parent:
+        identity["parent_uuid"] = parent
+    return identity
+
+
 def _is_codex_visible_message(role: str, text: str) -> bool:
     if role not in {"user", "assistant"}:
         return False
@@ -1829,6 +1852,7 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
         if event_type == "user_message":
             text = str(payload.get("message") or "")
             if text:
+                identity = _codex_event_message_identity(payload, "user", text)
                 ct = _classify_crosstalk(text)
                 if ct:
                     return {
@@ -1858,15 +1882,18 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
                     "role": "user",
                     "content": text,
                     "timestamp": timestamp,
+                    **identity,
                 }
         if event_type == "agent_message":
             text = str(payload.get("message") or "")
             if text:
+                identity = _codex_event_message_identity(payload, "assistant", text)
                 return {
                     "type": "assistant_text",
                     "role": "assistant",
                     "content": text,
                     "timestamp": timestamp,
+                    **identity,
                 }
         if event_type == "exec_command_end":
             return _parse_codex_exec_end(payload, timestamp)
