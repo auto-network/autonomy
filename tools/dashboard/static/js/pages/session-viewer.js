@@ -719,9 +719,10 @@
         var self = this;
         var promise = (async function() {
           try {
-            if (!window.Schema || typeof window.Schema.of !== 'function') {
-              return fallback;
-            }
+            // base.html loads schemas.js before page-init runs; the
+            // typeof guards against Schema.of were dead. Failures
+            // inside the resolver still fall through to ``fallback``
+            // via the catch below.
             var Workspace = await window.Schema.of('autonomy.workspace');
             var row = await Workspace.read(workspaceId);
             var payload = row && row.payload;
