@@ -4533,10 +4533,130 @@ async def _resolve_correction_transition(request, target_status: str):
              "correction": _serialize_turn_correction(row) if row else None},
             status_code=409,
         )
+
+    if outcome == "ok" and target_status == "accepted" and row is not None:
+        await asyncio.to_thread(
+            _maybe_persist_accepted_correction_to_graph,
+            session_id, session_uuid, row,
+        )
+
     return JSONResponse({
         "ok": True,
         "correction": _serialize_turn_correction(row) if row else None,
     })
+
+
+def _resolve_session_workspace(
+    session_id: str, session_uuid: str,
+) -> tuple[str, str] | None:
+    """Resolve ``(workspace_id, graph_project)`` for an accepted-correction session.
+
+    Reads the ``tmux_sessions`` row to recover the launch-time ``project``,
+    then maps that to a workspace via :func:`agents.workspace_settings.get_workspace`.
+    For host/path-derived sessions (``-workspace-repo``,
+    ``-home-jeremy-workspace-autonomy``), falls back to the org slug derived
+    by :func:`tools.dashboard.org_identity.session_org_slug` and the first
+    workspace whose ``graph_project`` matches that slug. Returns ``None``
+    when nothing maps — the caller fails closed and skips graph persistence.
+    """
+    from agents.workspace_settings import get_workspace as _get_workspace, \
+        load_workspaces as _load_workspaces
+    from tools.dashboard.org_identity import session_org_slug
+
+    db_row = dashboard_db.get_session(session_id)
+    if db_row is None:
+        return None
+    project = (db_row.get("project") or "").strip()
+    if project:
+        try:
+            ws = _get_workspace(project)
+            if ws.graph_project:
+                return (ws.id, ws.graph_project)
+        except KeyError:
+            pass
+
+    org_slug = session_org_slug(db_row)
+    if not org_slug or org_slug == "unknown":
+        return None
+    for ws in _load_workspaces().values():
+        if ws.graph_project == org_slug:
+            return (ws.id, ws.graph_project)
+    return None
+
+
+def _maybe_persist_accepted_correction_to_graph(
+    session_id: str, session_uuid: str, row: dict,
+) -> None:
+    """Best-effort: mirror an accepted correction as a graph supersedes thought.
+
+    Gated by ``autonomy.workspace.turn_correction#1.persist_accepts_to_graph``
+    on the workspace's owning org. Failures are logged and swallowed — the
+    dashboard accept transition has already succeeded; graph persistence is
+    opportunistic and must never break the API response.
+
+    The corrected thought is inserted into the same ingested session source
+    as the original turn, with a ``supersedes`` edge pointing back at the
+    original thought. Idempotency is enforced inside
+    :func:`tools.graph.ops.persist_corrected_thought` via a deterministic
+    derived ``message_id`` plus the ``edges.UNIQUE(source_id, target_id,
+    relation)`` constraint, so retries from a flaky operator click do not
+    multiply graph artifacts.
+    """
+    try:
+        resolved = _resolve_session_workspace(session_id, session_uuid)
+        if resolved is None:
+            return
+        workspace_id, graph_project = resolved
+
+        from tools.graph.schemas.turn_correction import (
+            SCHEMA_REVISION as _TC_REV,
+            SET_ID as _TC_SET_ID,
+            resolve_payload as _resolve_tc,
+        )
+        try:
+            members = graph_ops.read_set(
+                _TC_SET_ID,
+                org=graph_project,
+                peers=[],
+                target_revision=_TC_REV,
+            )
+        except Exception:
+            return
+        raw_payload: dict | None = None
+        for member in members.members:
+            if member.key == workspace_id:
+                if isinstance(member.payload, dict):
+                    raw_payload = dict(member.payload)
+                break
+        resolved_setting = _resolve_tc(raw_payload)
+        if not bool(resolved_setting.get("persist_accepts_to_graph")):
+            return
+
+        target_message_id = row.get("target_message_id") or ""
+        original_sha256 = row.get("original_sha256") or ""
+        corrected_text = row.get("corrected_text")
+        if not target_message_id or not original_sha256 \
+                or corrected_text is None:
+            return
+
+        graph_ops.persist_corrected_thought(
+            org=graph_project,
+            session_uuid=session_uuid,
+            target_message_id=target_message_id,
+            original_sha256=original_sha256,
+            corrected_text=corrected_text,
+            extra_metadata={
+                "mode": row.get("mode"),
+                "reason": row.get("reason"),
+                "confidence": row.get("confidence"),
+            },
+        )
+    except Exception:
+        logger.exception(
+            "turn_correction: graph persistence failed"
+            " session_uuid=%s target=%s",
+            session_uuid, row.get("target_message_id"),
+        )
 
 
 async def api_session_turn_correction_accept(request):

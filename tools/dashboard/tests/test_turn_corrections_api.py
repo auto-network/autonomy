@@ -695,3 +695,287 @@ def test_session_monitor_replay_does_not_mutate_terminal(test_app):
     ])
     stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
     assert stored["status"] == "accepted"
+
+
+# ── Accept → graph supersedes persistence (auto-edec1.6) ─────
+
+
+def _install_persist_capture(monkeypatch):
+    """Capture every ``persist_corrected_thought`` call without touching graph DB.
+
+    The accept handler runs persistence in a thread via
+    ``asyncio.to_thread``; the dashboard server imports
+    ``tools.graph.ops`` as ``graph_ops`` at module load, so patching
+    ``server.graph_ops.persist_corrected_thought`` is what actually
+    intercepts the call. Returns a list the test can assert against.
+    """
+    captured: list[dict] = []
+
+    def fake_persist(**kwargs):
+        captured.append(kwargs)
+        return {
+            "thought_id": "fake-thought",
+            "edge_id": "fake-edge",
+            "source_id": "fake-source",
+            "message_id": f"supersedes:{kwargs['target_message_id']}",
+            "created": True,
+        }
+
+    from tools.dashboard import server as _server
+    monkeypatch.setattr(
+        _server.graph_ops, "persist_corrected_thought", fake_persist,
+    )
+    return captured
+
+
+def _stub_workspace_resolver(monkeypatch, *, workspace_id="ws-test",
+                             graph_project="autonomy"):
+    """Pin _resolve_session_workspace so accept tests don't need real Settings.
+
+    ``_resolve_session_workspace`` walks ``agents.workspace_settings.load_workspaces``
+    which would otherwise hit shipped Settings or fail under the bare test
+    harness. Tests stub it directly so the surface under test is the persist
+    hook, not workspace registry plumbing.
+    """
+    from tools.dashboard import server as _server
+    monkeypatch.setattr(
+        _server, "_resolve_session_workspace",
+        lambda sid, suuid: (workspace_id, graph_project),
+    )
+
+
+def _stub_setting(monkeypatch, *, persist_accepts: bool,
+                  workspace_id="ws-test"):
+    """Pretend ``autonomy.workspace.turn_correction#1`` resolves a fixed payload.
+
+    Patches ``server.graph_ops.read_set`` to return one member with our chosen
+    ``persist_accepts_to_graph`` value, keyed by ``workspace_id``.
+    """
+    from tools.dashboard import server as _server
+
+    class _Member:
+        def __init__(self, key, payload):
+            self.key = key
+            self.payload = payload
+            self.org = "autonomy"
+
+    class _Members:
+        def __init__(self, members):
+            self.members = members
+
+    def fake_read_set(set_id, *, org=None, peers=None, target_revision=None):
+        return _Members([_Member(
+            workspace_id,
+            {"persist_accepts_to_graph": persist_accepts},
+        )])
+
+    monkeypatch.setattr(_server.graph_ops, "read_set", fake_read_set)
+
+
+def test_api_accept_with_persistence_setting_calls_graph(
+    test_app, client, monkeypatch,
+):
+    """Setting ``persist_accepts_to_graph=true`` triggers graph persistence."""
+    sha = _sha("Jason encoded")
+    dashboard_db.upsert_turn_correction(
+        SESSION_UUID, "msg-1",
+        original_sha256=sha, corrected_text="JSON encoded",
+        mode="balanced", reason="dictation cleanup", confidence=0.9,
+    )
+    captured = _install_persist_capture(monkeypatch)
+    _stub_workspace_resolver(monkeypatch)
+    _stub_setting(monkeypatch, persist_accepts=True)
+
+    r = client.post(
+        f"/api/session/{TMUX_NAME}/turn-corrections/msg-1/accept",
+        json={"original_sha256": sha},
+    )
+    assert r.status_code == 200
+    assert len(captured) == 1
+    call = captured[0]
+    assert call["org"] == "autonomy"
+    assert call["session_uuid"] == SESSION_UUID
+    assert call["target_message_id"] == "msg-1"
+    assert call["original_sha256"] == sha
+    assert call["corrected_text"] == "JSON encoded"
+    extra = call.get("extra_metadata") or {}
+    assert extra.get("mode") == "balanced"
+    assert extra.get("reason") == "dictation cleanup"
+    assert extra.get("confidence") == pytest.approx(0.9)
+
+
+def test_api_accept_without_persistence_setting_skips_graph(
+    test_app, client, monkeypatch,
+):
+    """Default Setting (``persist_accepts_to_graph=false``) keeps accept dashboard-only."""
+    sha = _sha("Jason encoded")
+    dashboard_db.upsert_turn_correction(
+        SESSION_UUID, "msg-1",
+        original_sha256=sha, corrected_text="JSON encoded",
+    )
+    captured = _install_persist_capture(monkeypatch)
+    _stub_workspace_resolver(monkeypatch)
+    _stub_setting(monkeypatch, persist_accepts=False)
+
+    r = client.post(
+        f"/api/session/{TMUX_NAME}/turn-corrections/msg-1/accept",
+        json={"original_sha256": sha},
+    )
+    assert r.status_code == 200
+    assert captured == []
+
+
+def test_api_dismiss_never_calls_graph_persistence(
+    test_app, client, monkeypatch,
+):
+    """Dismiss is never mirrored to graph, even with persistence enabled."""
+    sha = _sha("Jason encoded")
+    dashboard_db.upsert_turn_correction(
+        SESSION_UUID, "msg-1",
+        original_sha256=sha, corrected_text="JSON encoded",
+    )
+    captured = _install_persist_capture(monkeypatch)
+    _stub_workspace_resolver(monkeypatch)
+    _stub_setting(monkeypatch, persist_accepts=True)
+
+    r = client.post(
+        f"/api/session/{TMUX_NAME}/turn-corrections/msg-1/dismiss",
+        json={"original_sha256": sha},
+    )
+    assert r.status_code == 200
+    assert captured == []
+
+
+def test_api_accept_skips_graph_when_workspace_unresolved(
+    test_app, client, monkeypatch,
+):
+    """Host/path-derived sessions with no workspace mapping fail closed."""
+    sha = _sha("Jason encoded")
+    dashboard_db.upsert_turn_correction(
+        SESSION_UUID, "msg-1",
+        original_sha256=sha, corrected_text="JSON encoded",
+    )
+    captured = _install_persist_capture(monkeypatch)
+    from tools.dashboard import server as _server
+    monkeypatch.setattr(
+        _server, "_resolve_session_workspace", lambda sid, suuid: None,
+    )
+
+    r = client.post(
+        f"/api/session/{TMUX_NAME}/turn-corrections/msg-1/accept",
+        json={"original_sha256": sha},
+    )
+    assert r.status_code == 200
+    assert captured == []
+
+
+def test_api_accept_swallows_graph_exception(
+    test_app, client, monkeypatch,
+):
+    """Graph persistence failure must not break the accept response."""
+    sha = _sha("Jason encoded")
+    dashboard_db.upsert_turn_correction(
+        SESSION_UUID, "msg-1",
+        original_sha256=sha, corrected_text="JSON encoded",
+    )
+    _stub_workspace_resolver(monkeypatch)
+    _stub_setting(monkeypatch, persist_accepts=True)
+
+    from tools.dashboard import server as _server
+
+    def fake_persist(**kwargs):
+        raise RuntimeError("graph DB exploded")
+
+    monkeypatch.setattr(
+        _server.graph_ops, "persist_corrected_thought", fake_persist,
+    )
+
+    r = client.post(
+        f"/api/session/{TMUX_NAME}/turn-corrections/msg-1/accept",
+        json={"original_sha256": sha},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["correction"]["status"] == "accepted"
+    # Dashboard accept stays committed even though graph mirror failed.
+    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
+    assert stored["status"] == "accepted"
+
+
+def test_api_accept_idempotent_does_not_double_persist(
+    test_app, client, monkeypatch,
+):
+    """Repeated accept POSTs cannot trigger duplicate graph writes.
+
+    The second accept hits the dashboard's ``already_terminal`` short-circuit
+    (409) before reaching the persistence hook — proves the dashboard layer
+    itself guards against duplicate graph writes from a flaky operator click.
+    """
+    sha = _sha("Jason encoded")
+    dashboard_db.upsert_turn_correction(
+        SESSION_UUID, "msg-1",
+        original_sha256=sha, corrected_text="JSON encoded",
+    )
+    captured = _install_persist_capture(monkeypatch)
+    _stub_workspace_resolver(monkeypatch)
+    _stub_setting(monkeypatch, persist_accepts=True)
+
+    r1 = client.post(
+        f"/api/session/{TMUX_NAME}/turn-corrections/msg-1/accept",
+        json={"original_sha256": sha},
+    )
+    assert r1.status_code == 200
+    r2 = client.post(
+        f"/api/session/{TMUX_NAME}/turn-corrections/msg-1/accept",
+        json={"original_sha256": sha},
+    )
+    assert r2.status_code == 409
+    assert len(captured) == 1
+
+
+def test_resolve_session_workspace_uses_session_project(test_app, monkeypatch):
+    """Direct ``project`` → ``workspace.id`` lookup wins when populated."""
+    from tools.dashboard import server as _server
+    from agents import workspace_settings as _ws
+
+    captured_lookup: dict[str, str] = {}
+
+    class _FakeWS:
+        def __init__(self, wid, gp):
+            self.id = wid
+            self.graph_project = gp
+
+    def fake_get(workspace_id):
+        captured_lookup["wid"] = workspace_id
+        if workspace_id == "autonomy":
+            return _FakeWS("autonomy", "autonomy")
+        raise KeyError(workspace_id)
+
+    monkeypatch.setattr(_ws, "get_workspace", fake_get)
+    out = _server._resolve_session_workspace(TMUX_NAME, SESSION_UUID)
+    assert out == ("autonomy", "autonomy")
+    assert captured_lookup["wid"] == "autonomy"
+
+
+def test_resolve_session_workspace_unresolvable_returns_none(
+    test_app, monkeypatch,
+):
+    """Unknown ``project`` + no matching graph_project → None.
+
+    Drives the fail-closed path the accept hook depends on: an unresolvable
+    session must yield ``None`` so the caller can skip persistence rather
+    than guessing an org or workspace.
+    """
+    from tools.dashboard import server as _server
+    from agents import workspace_settings as _ws
+
+    def fake_get(workspace_id):
+        raise KeyError(workspace_id)
+
+    def fake_load():
+        return {}
+
+    monkeypatch.setattr(_ws, "get_workspace", fake_get)
+    monkeypatch.setattr(_ws, "load_workspaces", fake_load)
+    out = _server._resolve_session_workspace(TMUX_NAME, SESSION_UUID)
+    assert out is None
