@@ -1,10 +1,9 @@
-"""Tests for ParticipantActivity write integration (substrate.D).
+"""Tests for OperatorActivity write integration.
 
-Covers the ``_write_participant_activity`` helper that
-:meth:`SessionMonitor._process_tail_entries` calls on every batch of
-freshly-parsed JSONL entries. The activity row backs
-``Presence.is_idle()``; with these writes wired, Presence helpers stop
-returning stub defaults and start reflecting real session activity.
+Covers ``_record_operator_input``, the singleton-row write that
+``SessionMonitor._process_tail_entries`` schedules when any session
+parses a ``user`` or ``crosstalk`` entry. The row backs
+``Presence.is_idle()``.
 """
 from __future__ import annotations
 
@@ -13,14 +12,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tools.dashboard.session_monitor import (
-    _ACTIVITY_WINDOW_SECONDS,
-    _TailState,
-    _parse_iso_timestamp,
-    _write_participant_activity,
+    _OPERATOR_INPUT_TYPES,
+    _record_operator_input,
 )
 from tools.graph import settings_ops
 from tools.graph.surface import (
-    PARTICIPANT_ACTIVITY_SET_ID,
+    OPERATOR_ACTIVITY_SET_ID,
     Presence,
 )
 
@@ -40,248 +37,128 @@ def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _entry(etype: str, dt: datetime, **extra) -> dict:
-    return {"type": etype, "timestamp": _iso(dt), **extra}
-
-
-def _read_activity(participant_id: str) -> dict | None:
+def _read_singleton() -> dict | None:
     members = settings_ops.read_set(
-        PARTICIPANT_ACTIVITY_SET_ID, org="personal", peers=[],
+        OPERATOR_ACTIVITY_SET_ID, org="personal", peers=[],
     )
-    for m in members.members:
-        if m.key == participant_id:
-            return dict(m.payload)
-    return None
+    if not members.members:
+        return None
+    return dict(members.members[0].payload)
 
 
-# ── Acceptance #1: every parsed user turn writes the row ─────
+# ── Direct helper ────────────────────────────────────────────
 
 
-def test_user_turn_writes_activity_row(graph_db_env):
-    ts = _TailState()
+def test_record_writes_singleton_row(graph_db_env):
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    entries = [_entry("user", now, role="user", content="hi")]
+    _record_operator_input(_iso(now))
 
-    _write_participant_activity("sess-1", ts, entries)
-
-    payload = _read_activity("sess-1")
+    payload = _read_singleton()
     assert payload is not None
-    assert payload["participant_id"] == "sess-1"
-    assert payload["participant_kind"] == "agent"
-    assert payload["last_user_input_at"] == _iso(now)
-    assert payload["last_session_turn_at"] == _iso(now)
-    assert payload["last_meaningful_at"] == _iso(now)
-    assert payload["inputs_last_hour"] == 1
-    assert payload["turns_last_hour"] == 1
+    assert payload["last_input_at"] == _iso(now)
 
 
-def test_assistant_only_batch_does_not_clobber_user_input(graph_db_env):
-    """An assistant-only batch must carry forward last_user_input_at.
+def test_subsequent_record_overwrites(graph_db_env):
+    """The row is a singleton — the latest write wins."""
+    earlier = datetime.now(timezone.utc).replace(microsecond=0) \
+        - timedelta(minutes=10)
+    later = earlier + timedelta(minutes=5)
 
-    Asserts against the in-memory ``ts.last_activity_payload`` (the exact
-    final write) rather than ``read_set``: same-second writes hit the v1
-    substrate gap where ``read_set`` tie-breaks nondeterministically.
-    """
-    ts = _TailState()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    user_at = now - timedelta(minutes=5)
+    _record_operator_input(_iso(earlier))
+    _record_operator_input(_iso(later))
 
-    _write_participant_activity(
-        "sess-2", ts, [_entry("user", user_at, content="hi")],
-    )
-    _write_participant_activity(
-        "sess-2", ts,
-        [_entry("assistant_text", now, role="assistant", content="hi back")],
-    )
-
-    payload = ts.last_activity_payload
-    assert payload is not None
-    assert payload["last_user_input_at"] == _iso(user_at)
-    assert payload["last_session_turn_at"] == _iso(now)
-    # inputs_last_hour stays at 1 (the prior user input is still in window),
-    # turns_last_hour is now 2 (user + assistant).
-    assert payload["inputs_last_hour"] == 1
-    assert payload["turns_last_hour"] == 2
-
-
-def test_tool_only_batch_does_not_write(graph_db_env):
-    """Tool steps are substeps of an existing turn — they do NOT count."""
-    ts = _TailState()
-    now = datetime.now(timezone.utc)
-
-    _write_participant_activity(
-        "sess-tools",
-        ts,
-        [
-            _entry("tool_use", now, tool_id="tu-1"),
-            _entry("tool_result", now, tool_id="tu-1"),
-        ],
-    )
-    assert _read_activity("sess-tools") is None
-    assert not ts.activity_user_inputs
-    assert not ts.activity_turns
-
-
-def test_crosstalk_counts_as_user_input(graph_db_env):
-    """CrossTalk pings to a session wake the agent — count as input."""
-    ts = _TailState()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    _write_participant_activity(
-        "sess-ct", ts,
-        [_entry("crosstalk", now, sender="alice", content="hi")],
-    )
-    payload = _read_activity("sess-ct")
-    assert payload["last_user_input_at"] == _iso(now)
-    assert payload["inputs_last_hour"] == 1
-    assert payload["turns_last_hour"] == 1
-
-
-def test_empty_batch_is_a_noop(graph_db_env):
-    ts = _TailState()
-    _write_participant_activity("sess-empty", ts, [])
-    assert _read_activity("sess-empty") is None
-
-
-def test_unparseable_timestamp_skipped(graph_db_env):
-    """A malformed timestamp shouldn't take down the helper."""
-    ts = _TailState()
-    _write_participant_activity(
-        "sess-bad",
-        ts,
-        [{"type": "user", "timestamp": "not-a-date", "content": "x"}],
-    )
-    # Nothing parseable → no write.
-    assert _read_activity("sess-bad") is None
-
-
-# ── Acceptance #4: counters reflect last hour ────────────────
-
-
-def test_counters_prune_to_one_hour(graph_db_env):
-    """Old entries fall out of the sliding window once newer ones land."""
-    ts = _TailState()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    old = now - timedelta(seconds=_ACTIVITY_WINDOW_SECONDS + 600)
-    recent = now - timedelta(seconds=10)
-
-    _write_participant_activity(
-        "sess-prune", ts, [_entry("user", old, content="ancient")],
-    )
-    _write_participant_activity(
-        "sess-prune", ts, [_entry("user", recent, content="recent")],
-    )
-
-    # In-memory payload has the latest counter values (avoids the v1
-    # read_set same-second tie-break gap).
-    payload = ts.last_activity_payload
-    assert payload["inputs_last_hour"] == 1
-    assert payload["turns_last_hour"] == 1
-    # Both deques should have pruned the ancient entry.
-    assert len(ts.activity_user_inputs) == 1
-    assert len(ts.activity_turns) == 1
-
-
-def test_multiple_recent_inputs_increment_counter(graph_db_env):
-    ts = _TailState()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    _write_participant_activity(
-        "sess-multi", ts,
-        [
-            _entry("user", now - timedelta(minutes=10), content="first"),
-            _entry("user", now - timedelta(minutes=5), content="second"),
-            _entry("assistant_text", now, content="reply"),
-        ],
-    )
-    payload = _read_activity("sess-multi")
-    assert payload["inputs_last_hour"] == 2
-    assert payload["turns_last_hour"] == 3
-
-
-# ── Acceptance #2/#3: Presence helpers see the writes ────────
-
-
-def test_presence_is_idle_reflects_recent_input(graph_db_env):
-    """Acceptance #2: Presence.is_idle uses the row session_monitor wrote."""
-    ts = _TailState()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    _write_participant_activity(
-        "sess-live", ts, [_entry("user", now, content="hi")],
-    )
-    assert Presence.is_idle("sess-live") is False
-
-
-def test_presence_is_idle_true_for_stale_session(graph_db_env):
-    ts = _TailState()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    long_ago = now - timedelta(hours=2)
-    _write_participant_activity(
-        "sess-stale", ts, [_entry("user", long_ago, content="hi")],
-    )
-    assert Presence.is_idle(
-        "sess-stale", threshold=timedelta(minutes=30),
-    ) is True
-
-
-def test_presence_last_user_input_returns_actual_timestamp(graph_db_env):
-    """Acceptance #3: last_user_input returns the most-recent input."""
-    ts = _TailState()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    _write_participant_activity(
-        "sess-last", ts, [_entry("user", now, content="hi")],
-    )
-    got = Presence.last_user_input("sess-last")
+    # Presence.last_user_input reads the most recent row.
+    got = Presence.last_user_input()
     assert got is not None
-    assert int(got.timestamp()) == int(now.timestamp())
+    assert int(got.timestamp()) == int(later.timestamp())
 
 
-def test_presence_inputs_last_hour_matches_counter(graph_db_env):
-    """Acceptance #4: inputs_last_hour mirrors what the writer recorded."""
-    ts = _TailState()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    _write_participant_activity(
-        "sess-counter", ts,
-        [
-            _entry("user", now - timedelta(minutes=20), content="first"),
-            _entry("user", now - timedelta(minutes=2), content="second"),
-        ],
-    )
-    assert Presence.inputs_last_hour("sess-counter") == 2
+def test_writes_from_two_sessions_share_singleton(graph_db_env):
+    """Acceptance #4: any session's input updates the same row.
+
+    Conceptually both sessions hand the timestamp to the same writer;
+    no per-session keying. Asserts that both writes land on the
+    singleton key 'operator' (no per-session row sprawl). Inspects raw
+    rows directly because ``read_set``'s tie-break is nondeterministic
+    when same-second writes collide (v1 substrate gap per
+    ``graph://dff97eec-c59`` #2).
+    """
+    import json as _json
+
+    base = datetime.now(timezone.utc).replace(microsecond=0)
+    sess_a_ts = base
+    sess_b_ts = base + timedelta(seconds=30)
+
+    _record_operator_input(_iso(sess_a_ts))
+    _record_operator_input(_iso(sess_b_ts))
+
+    db = settings_ops._open(None)
+    try:
+        rows = db.conn.execute(
+            "SELECT key, payload FROM settings WHERE set_id = ?",
+            (OPERATOR_ACTIVITY_SET_ID,),
+        ).fetchall()
+    finally:
+        db.close()
+
+    # Both writes share the singleton key — never per-session.
+    assert len(rows) == 2
+    keys = {r["key"] for r in rows}
+    assert keys == {"operator"}
+
+    payloads = [_json.loads(r["payload"]) for r in rows]
+    timestamps = {p["last_input_at"] for p in payloads}
+    assert _iso(sess_a_ts) in timestamps
+    assert _iso(sess_b_ts) in timestamps
 
 
-def test_write_failure_swallows_exception(graph_db_env, monkeypatch):
-    """Settings hiccups must not propagate up to the tailer."""
-    ts = _TailState()
-    now = datetime.now(timezone.utc)
-
+def test_record_swallows_settings_failure(graph_db_env, monkeypatch):
+    """A graph-DB hiccup must not propagate up to the tailer."""
     def boom(*args, **kwargs):
         raise RuntimeError("simulated DB failure")
 
     monkeypatch.setattr(settings_ops, "add_setting", boom)
     # Should not raise.
-    _write_participant_activity(
-        "sess-boom", ts, [_entry("user", now, content="hi")],
-    )
+    _record_operator_input(_iso(datetime.now(timezone.utc)))
     # No row landed.
-    assert _read_activity("sess-boom") is None
+    assert _read_singleton() is None
 
 
-# ── Tiny unit checks on the timestamp parser ─────────────────
+# ── Operator-input type set ──────────────────────────────────
 
 
-def test_parse_iso_timestamp_z_suffix():
-    got = _parse_iso_timestamp("2026-05-02T12:34:56Z")
+def test_operator_input_types_covers_user_and_crosstalk():
+    """The two entry kinds the tailer treats as operator input."""
+    assert "user" in _OPERATOR_INPUT_TYPES
+    assert "crosstalk" in _OPERATOR_INPUT_TYPES
+    # Tool steps and assistant text are NOT operator input.
+    assert "tool_use" not in _OPERATOR_INPUT_TYPES
+    assert "assistant_text" not in _OPERATOR_INPUT_TYPES
+
+
+# ── Presence helpers reflect the writes ──────────────────────
+
+
+def test_presence_is_idle_no_row_returns_true(graph_db_env):
+    assert Presence.is_idle() is True
+
+
+def test_presence_is_idle_recent_input_returns_false(graph_db_env):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    _record_operator_input(_iso(now))
+    assert Presence.is_idle(threshold=timedelta(minutes=5)) is False
+
+
+def test_presence_is_idle_stale_input_returns_true(graph_db_env):
+    long_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+    _record_operator_input(_iso(long_ago))
+    assert Presence.is_idle(threshold=timedelta(minutes=30)) is True
+
+
+def test_presence_last_user_input_returns_parsed_datetime(graph_db_env):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    _record_operator_input(_iso(now))
+    got = Presence.last_user_input()
     assert got is not None
-    expected = datetime(
-        2026, 5, 2, 12, 34, 56, tzinfo=timezone.utc,
-    ).timestamp()
-    assert abs(got - expected) < 1e-3
-
-
-def test_parse_iso_timestamp_offset():
-    got = _parse_iso_timestamp("2026-05-02T12:34:56+00:00")
-    assert got is not None
-
-
-def test_parse_iso_timestamp_garbage_returns_none():
-    assert _parse_iso_timestamp("") is None
-    assert _parse_iso_timestamp("nope") is None
+    assert got.tzinfo is not None
+    assert int(got.timestamp()) == int(now.timestamp())

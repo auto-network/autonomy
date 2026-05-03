@@ -1,4 +1,4 @@
-"""Tests for the Surface Presence + ParticipantActivity substrate (v1).
+"""Tests for the Surface Presence + OperatorActivity substrate (v1).
 
 Bead: ``auto-i3tki``. Covers:
 
@@ -8,12 +8,13 @@ Bead: ``auto-i3tki``. Covers:
   starts heartbeat thread, joins on exit, writes final row,
 * heartbeat thread cleanup on exit (no leaked thread),
 * :meth:`Presence.participant_color` determinism + format,
-* stub static helpers return safe defaults without raising.
+* :meth:`Presence.is_idle` / :meth:`Presence.last_user_input` read
+  the singleton OperatorActivity row.
 """
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -22,11 +23,11 @@ from tools.graph.schemas.registry import (
     SCHEMAS, SchemaValidationError, schema_key,
 )
 from tools.graph.surface import (
-    PARTICIPANT_ACTIVITY_SET_ID,
+    OPERATOR_ACTIVITY_SET_ID,
     SCHEMA_REVISION,
     SURFACE_PING_SET_ID,
     SURFACE_PRESENCE_SET_ID,
-    ParticipantActivityV1,
+    OperatorActivityV1,
     Presence,
     SurfacePingV1,
     SurfacePresenceV1,
@@ -60,8 +61,8 @@ def test_schemas_registered_on_import():
         is SurfacePresenceV1
     assert SCHEMAS.get(schema_key(SURFACE_PING_SET_ID, 1)) \
         is SurfacePingV1
-    assert SCHEMAS.get(schema_key(PARTICIPANT_ACTIVITY_SET_ID, 1)) \
-        is ParticipantActivityV1
+    assert SCHEMAS.get(schema_key(OPERATOR_ACTIVITY_SET_ID, 1)) \
+        is OperatorActivityV1
 
 
 def test_presence_decorated_keyed_per_entity():
@@ -73,16 +74,10 @@ def test_ping_decorated_append_only_log():
     assert SurfacePingV1._key_strategy == "uuid_v4"
 
 
-def test_activity_decorated_with_cache_ttl():
-    """``@cache`` is its own access pattern (caller-supplied keys with
-    TTL-driven GC). Stacking ``@keyed_per_entity`` on top would
-    overwrite ``_access_pattern`` to ``"keyed_per_entity"`` and lose
-    the cache semantics — so the schema uses ``@cache`` alone, the
-    same shape as ``autonomy.source_control.review_state#1``.
-    """
-    assert ParticipantActivityV1._access_pattern == "cache"
-    # 7 days = 604_800 seconds
-    assert ParticipantActivityV1._cache_ttl_seconds == 7 * 24 * 60 * 60
+def test_operator_activity_decorated_singleton():
+    """OperatorActivity is a single, fixed-key row — latest write wins."""
+    assert OperatorActivityV1._access_pattern == "singleton"
+    assert OperatorActivityV1._key_strategy == "fixed:operator"
 
 
 def test_presence_field_metadata_present():
@@ -200,27 +195,34 @@ def test_ping_validate_rejects_missing_to_participant_id():
 
 
 def _valid_activity_payload() -> dict:
-    return {
-        "participant_id": "alice",
-        "participant_kind": "operator",
-        "participant_label": "Alice",
-        "last_user_input_at": "2026-05-02T12:00:00Z",
-        "last_session_turn_at": "2026-05-02T11:55:00Z",
-        "last_meaningful_at": "2026-05-02T12:00:00Z",
-        "inputs_last_hour": 5,
-        "turns_last_hour": 12,
-    }
+    return {"last_input_at": "2026-05-02T12:00:00Z"}
 
 
 def test_activity_validate_accepts_canonical_payload():
-    ParticipantActivityV1.validate(_valid_activity_payload())
+    OperatorActivityV1.validate(_valid_activity_payload())
 
 
-def test_activity_validate_rejects_non_int_count():
-    payload = _valid_activity_payload()
-    payload["inputs_last_hour"] = "many"
+def test_activity_validate_accepts_empty_payload():
+    """All fields default — an empty dict is a valid singleton row."""
+    OperatorActivityV1.validate({})
+
+
+def test_activity_validate_rejects_non_string_timestamp():
     with pytest.raises(SchemaValidationError):
-        ParticipantActivityV1.validate(payload)
+        OperatorActivityV1.validate({"last_input_at": 12345})
+
+
+def test_activity_validate_rejects_unknown_field():
+    with pytest.raises(SchemaValidationError):
+        OperatorActivityV1.validate({
+            "last_input_at": "2026-05-02T12:00:00Z",
+            "participant_id": "leftover",
+        })
+
+
+def test_activity_validate_rejects_non_dict_payload():
+    with pytest.raises(SchemaValidationError):
+        OperatorActivityV1.validate(["not", "a", "dict"])
 
 
 # ── Presence context manager lifecycle ───────────────────────
@@ -439,35 +441,16 @@ def test_heartbeat_writes_row_after_interval(graph_db_env):
     assert rows["n"] >= 3
 
 
-# ── Static helpers — read live ParticipantActivity rows ──────
+# ── Static helpers — read live OperatorActivity row ──────────
 
 
-def _write_activity(
-    participant_id: str,
-    *,
-    last_user_input_at: str = "",
-    last_session_turn_at: str = "",
-    last_meaningful_at: str = "",
-    inputs_last_hour: int = 0,
-    turns_last_hour: int = 0,
-    label: str = "Tester",
-    kind: str = "agent",
-) -> None:
-    """Helper: write a ParticipantActivity row at *participant_id*."""
+def _write_operator_activity(last_input_at: str) -> None:
+    """Helper: write the singleton OperatorActivity row."""
     settings_ops.add_setting(
-        PARTICIPANT_ACTIVITY_SET_ID,
+        OPERATOR_ACTIVITY_SET_ID,
         SCHEMA_REVISION,
-        participant_id,
-        {
-            "participant_id": participant_id,
-            "participant_kind": kind,
-            "participant_label": label,
-            "last_user_input_at": last_user_input_at,
-            "last_session_turn_at": last_session_turn_at,
-            "last_meaningful_at": last_meaningful_at,
-            "inputs_last_hour": inputs_last_hour,
-            "turns_last_hour": turns_last_hour,
-        },
+        "operator",
+        {"last_input_at": last_input_at},
         org="personal",
     )
 
@@ -477,123 +460,49 @@ def _iso(dt: datetime) -> str:
 
 
 def test_is_idle_no_row_returns_true(graph_db_env):
-    """Acceptance #2: 'never seen' participants default to idle."""
-    assert Presence.is_idle("never-written") is True
+    """Acceptance #2: missing row → idle."""
+    assert Presence.is_idle() is True
 
 
 def test_is_idle_recent_input_returns_false(graph_db_env):
     """A user input within the threshold = not idle."""
-    from datetime import timezone
     now = datetime.now(timezone.utc)
-    _write_activity(
-        "active-pid",
-        last_user_input_at=_iso(now - timedelta(seconds=30)),
-        last_meaningful_at=_iso(now - timedelta(seconds=30)),
-        inputs_last_hour=1,
-        turns_last_hour=1,
-    )
-    assert Presence.is_idle(
-        "active-pid", threshold=timedelta(minutes=5),
-    ) is False
+    _write_operator_activity(_iso(now - timedelta(seconds=30)))
+    assert Presence.is_idle(threshold=timedelta(minutes=5)) is False
 
 
 def test_is_idle_stale_input_returns_true(graph_db_env):
     """Last input older than threshold = idle."""
-    from datetime import timezone
     now = datetime.now(timezone.utc)
-    _write_activity(
-        "stale-pid",
-        last_user_input_at=_iso(now - timedelta(hours=2)),
-        last_meaningful_at=_iso(now - timedelta(hours=2)),
-        inputs_last_hour=0,
-        turns_last_hour=0,
-    )
-    assert Presence.is_idle(
-        "stale-pid", threshold=timedelta(minutes=30),
-    ) is True
+    _write_operator_activity(_iso(now - timedelta(hours=2)))
+    assert Presence.is_idle(threshold=timedelta(minutes=30)) is True
 
 
-def test_is_idle_empty_last_user_input_returns_true(graph_db_env):
-    """A row with an empty ``last_user_input_at`` reads as idle —
-    we've never seen the operator type into this session."""
-    _write_activity("never-typed", last_user_input_at="")
-    assert Presence.is_idle("never-typed") is True
+def test_is_idle_empty_last_input_returns_true(graph_db_env):
+    """A row with empty ``last_input_at`` reads as idle."""
+    _write_operator_activity("")
+    assert Presence.is_idle() is True
 
 
 def test_last_user_input_no_row_returns_none(graph_db_env):
     """No activity row → no last input."""
-    assert Presence.last_user_input("never-written") is None
+    assert Presence.last_user_input() is None
 
 
 def test_last_user_input_returns_parsed_datetime(graph_db_env):
     """The ISO timestamp comes back as a tz-aware datetime."""
-    from datetime import timezone
     when = datetime.now(timezone.utc).replace(microsecond=0)
-    _write_activity("hit", last_user_input_at=_iso(when))
-    got = Presence.last_user_input("hit")
+    _write_operator_activity(_iso(when))
+    got = Presence.last_user_input()
     assert got is not None
     assert got.tzinfo is not None
-    # Compare seconds (ISO precision strips microseconds).
     assert int(got.timestamp()) == int(when.timestamp())
 
 
-def test_active_within_no_row_returns_false(graph_db_env):
-    """Acceptance #4: an unknown participant is not 'active'."""
-    assert Presence.active_within("unknown", timedelta(hours=1)) is False
-
-
-def test_active_within_recent_meaningful_returns_true(graph_db_env):
-    from datetime import timezone
-    now = datetime.now(timezone.utc)
-    _write_activity(
-        "recent",
-        last_meaningful_at=_iso(now - timedelta(seconds=10)),
-    )
-    assert Presence.active_within("recent", timedelta(minutes=1)) is True
-
-
-def test_active_within_stale_returns_false(graph_db_env):
-    from datetime import timezone
-    now = datetime.now(timezone.utc)
-    _write_activity(
-        "stale",
-        last_meaningful_at=_iso(now - timedelta(hours=3)),
-    )
-    assert Presence.active_within("stale", timedelta(minutes=30)) is False
-
-
-def test_inputs_last_hour_no_row_returns_zero(graph_db_env):
-    assert Presence.inputs_last_hour("unknown") == 0
-
-
-def test_inputs_last_hour_returns_counter(graph_db_env):
-    _write_activity("counter", inputs_last_hour=7)
-    assert Presence.inputs_last_hour("counter") == 7
-
-
-def test_inputs_last_hour_handles_non_int_payload_safely(graph_db_env):
-    """Defensive: a malformed counter (e.g. legacy migration) reads as 0."""
-    # Insert a row with the expected schema, then patch the inner field
-    # by writing a follow-up row with the canonical type. The schema
-    # validator rejects non-ints on write, so this path is reached only
-    # by legacy / hand-edited rows; force one by going through the DB.
-    _write_activity("legacy", inputs_last_hour=4)
-    db = settings_ops._open(None)
-    try:
-        db.conn.execute(
-            "UPDATE settings SET payload = ? WHERE set_id = ? AND key = ?",
-            (
-                '{"participant_id": "legacy", "participant_kind": "agent",'
-                '"participant_label": "L", "last_user_input_at": "",'
-                '"last_session_turn_at": "", "last_meaningful_at": "",'
-                '"inputs_last_hour": "many", "turns_last_hour": 0}',
-                PARTICIPANT_ACTIVITY_SET_ID, "legacy",
-            ),
-        )
-        db.conn.commit()
-    finally:
-        db.close()
-    assert Presence.inputs_last_hour("legacy") == 0
+def test_last_user_input_unparseable_returns_none(graph_db_env):
+    """A garbled timestamp on the row should not crash callers."""
+    _write_operator_activity("not-an-iso-string")
+    assert Presence.last_user_input() is None
 
 
 # ── Color helper ─────────────────────────────────────────────
