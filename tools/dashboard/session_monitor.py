@@ -31,7 +31,6 @@ import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -503,16 +502,6 @@ class _TailState:
     last_enqueue_dedup_ts: float = 0.0
     last_full_rescan_ts: float = 0.0  # wall-clock ts of last reconciliation hit
     full_rescan_count: int = 0  # times reconciliation promoted this session
-    # Sliding-window timestamps backing ParticipantActivity counters.
-    # Pruned to the last hour on each batch write. Lost on process
-    # restart — counters drift low until activity refills the window;
-    # accepted v1 limitation per ``graph://dff97eec-c59`` substrate.D.
-    activity_user_inputs: deque = field(default_factory=deque)
-    activity_turns: deque = field(default_factory=deque)
-    # Last ParticipantActivity payload written for this session — lets
-    # subsequent assistant-only batches carry forward last_user_input_at
-    # without re-reading the settings DB on every turn.
-    last_activity_payload: dict | None = None
 
 
 def _entry_identity(entry: dict) -> str:
@@ -568,126 +557,35 @@ def _apply_activity_entries(ts: _TailState, entries: list[dict]) -> str:
     return "idle"
 
 
-# Sliding-window length for ParticipantActivity counters.
-_ACTIVITY_WINDOW_SECONDS = 3600.0
-
-# Entry kinds that count as a "turn" for the activity row. Tool steps
-# are excluded — they're substeps of an existing turn, not new ones.
-_ACTIVITY_TURN_TYPES = frozenset({"user", "assistant_text", "crosstalk"})
-
-# Entry kinds that count as "user input" — operator-initiated content
-# arriving in the session. CrossTalk pings to the session count too;
-# they wake the agent the same way a typed message does.
-_ACTIVITY_USER_INPUT_TYPES = frozenset({"user", "crosstalk"})
+# Entry kinds that count as operator input — typed user messages and
+# CrossTalk pings (which wake an agent the same way a typed message does).
+_OPERATOR_INPUT_TYPES = frozenset({"user", "crosstalk"})
 
 
-def _parse_iso_timestamp(s: str) -> float | None:
-    """Parse an ISO-8601 timestamp to a Unix-seconds float; ``None`` on failure."""
-    if not s:
-        return None
-    try:
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s).timestamp()
-    except (TypeError, ValueError):
-        return None
+def _record_operator_input(timestamp_iso: str) -> None:
+    """Single-row operator activity write.
 
-
-def _prune_window(buf: deque, cutoff_ts: float) -> None:
-    while buf and buf[0] < cutoff_ts:
-        buf.popleft()
-
-
-def _write_participant_activity(
-    tmux_name: str, ts: _TailState, new_entries: list[dict],
-) -> None:
-    """Persist a ParticipantActivity row reflecting the freshly parsed turns.
-
-    Substrate.D — the activity row that backs ``Presence.is_idle()`` and
-    its sibling helpers. Write is best-effort: a transient settings/DB
-    failure logs and is swallowed so the tailer never dies on a graph
-    hiccup. Coalesces a whole batch of new entries into one row write
-    (one ``add_setting`` per ``_process_tail_entries`` invocation).
+    Fire-and-forget on a thread so the SSE broadcast pipeline is never
+    gated on graph-DB I/O. Lazy-imports settings_ops/surface so this
+    module's import doesn't drag the whole graph stack in at server boot.
     """
-    if not new_entries:
-        return
-
-    last_user_input_iso = ""
-    last_user_input_ts = 0.0
-    last_turn_iso = ""
-    last_turn_ts = 0.0
-    most_recent_ts = 0.0
-
-    for entry in new_entries:
-        etype = entry.get("type", "")
-        ts_iso = entry.get("timestamp", "") or ""
-        if not ts_iso:
-            continue
-        ts_seconds = _parse_iso_timestamp(ts_iso)
-        if ts_seconds is None:
-            continue
-        if etype in _ACTIVITY_TURN_TYPES:
-            ts.activity_turns.append(ts_seconds)
-            if ts_seconds >= last_turn_ts:
-                last_turn_ts = ts_seconds
-                last_turn_iso = ts_iso
-            most_recent_ts = max(most_recent_ts, ts_seconds)
-        if etype in _ACTIVITY_USER_INPUT_TYPES:
-            ts.activity_user_inputs.append(ts_seconds)
-            if ts_seconds >= last_user_input_ts:
-                last_user_input_ts = ts_seconds
-                last_user_input_iso = ts_iso
-            most_recent_ts = max(most_recent_ts, ts_seconds)
-
-    if not last_turn_iso and not last_user_input_iso:
-        # Batch contained only tool steps / system noise — nothing to record.
-        return
-
-    cutoff = most_recent_ts - _ACTIVITY_WINDOW_SECONDS
-    _prune_window(ts.activity_user_inputs, cutoff)
-    _prune_window(ts.activity_turns, cutoff)
-
-    # Carry forward fields the current batch did not refresh — e.g., an
-    # assistant-only batch must not clobber ``last_user_input_at``.
-    prior = ts.last_activity_payload or {}
-    payload = {
-        "participant_id": tmux_name,
-        "participant_kind": "agent",
-        "participant_label": tmux_name,
-        "last_user_input_at": last_user_input_iso
-            or prior.get("last_user_input_at", ""),
-        "last_session_turn_at": last_turn_iso
-            or prior.get("last_session_turn_at", ""),
-        "last_meaningful_at": last_turn_iso or last_user_input_iso
-            or prior.get("last_meaningful_at", ""),
-        "inputs_last_hour": len(ts.activity_user_inputs),
-        "turns_last_hour": len(ts.activity_turns),
-    }
-
     try:
-        # Lazy import: importing surface registers schemas, and we don't
-        # want session_monitor's import to drag the whole graph stack in
-        # at server boot.
         from tools.graph import settings_ops
         from tools.graph.surface import (
-            PARTICIPANT_ACTIVITY_SET_ID,
-            SCHEMA_REVISION as _ACTIVITY_REVISION,
+            OPERATOR_ACTIVITY_SET_ID,
+            SCHEMA_REVISION as _OPERATOR_ACTIVITY_REVISION,
         )
         settings_ops.add_setting(
-            PARTICIPANT_ACTIVITY_SET_ID,
-            _ACTIVITY_REVISION,
-            tmux_name,
-            payload,
+            OPERATOR_ACTIVITY_SET_ID,
+            _OPERATOR_ACTIVITY_REVISION,
+            "operator",
+            {"last_input_at": timestamp_iso},
             org="personal",
         )
     except Exception:
         logger.exception(
-            "session_monitor: participant activity write failed for %s",
-            tmux_name,
+            "session_monitor: operator activity write failed",
         )
-        return
-
-    ts.last_activity_payload = payload
 
 
 class SessionMonitor:
@@ -1420,22 +1318,22 @@ class SessionMonitor:
         activity_state = _apply_activity_entries(ts, new_entries)
         update_activity_state(tmux_name, activity_state)
 
-        # Substrate.D: persist the per-participant activity row that
-        # backs ``Presence.is_idle()`` etc. Fire-and-forget on a thread
-        # — the ``add_setting`` SQLite write goes to the graph DB, which
-        # may be under contention on a busy host. We must NOT gate the
-        # SSE broadcast below on that I/O, so the write runs as a
-        # background task while the rest of the pipeline (broadcast,
-        # cache update, enrichment) proceeds. The helper swallows its
-        # own exceptions; ``asyncio.create_task`` orphans the future
-        # safely because the ``Task.exception()`` is consumed on
-        # completion.
-        asyncio.create_task(
-            asyncio.to_thread(
-                _write_participant_activity, tmux_name, ts, new_entries,
-            ),
-            name=f"participant-activity:{tmux_name}",
-        )
+        # Singleton OperatorActivity row that backs ``Presence.is_idle()``.
+        # Fire-and-forget on a thread so the SSE broadcast below is never
+        # gated on graph-DB I/O. Only one write per batch is needed; the
+        # singleton row only cares about the most recent operator-input
+        # timestamp.
+        for entry in new_entries:
+            if entry.get("type") in _OPERATOR_INPUT_TYPES:
+                ts_iso = entry.get("timestamp", "") or ""
+                if ts_iso:
+                    asyncio.create_task(
+                        asyncio.to_thread(
+                            _record_operator_input, ts_iso,
+                        ),
+                        name="operator-activity",
+                    )
+                    break
 
         # Soft-update the registry cache so new SSE connections get fresh
         # metadata. No broadcast — existing clients already have current
