@@ -2362,6 +2362,14 @@ def poll_and_collect_agentic() -> None:
                 f"  agentic completion: workspace cleanup failed for {run_id}: {e}",
                 file=sys.stderr,
             )
+        # Mark the session dead in the dashboard's tmux_sessions registry.
+        # Without this the session stays is_live=1 forever — the liveness
+        # loop now skips ``type='agentic'`` rows (commit d08879c) so it
+        # never marks them dead on its own. This is the explicit death
+        # signal the skip comment promises ("container-exit collection
+        # for agentic runs"). Mirrors the bead-dispatch path's calls to
+        # the same helper after collect_results.
+        _deregister_session_with_monitor(run_id)
 
         print(
             f"  Agentic completed: {run_id} (exit={exit_code}, "
