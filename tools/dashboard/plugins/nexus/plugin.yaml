@@ -1,0 +1,30 @@
+id: nexus
+api_version: 1
+org: autonomy
+
+# Ships dormant — operator opts in by writing
+# dashboard.plugin#1 → key=nexus, payload {"enabled": true}.
+# (The directory is named ``nexus`` rather than ``_nexus`` per the
+# pitfall at graph://2959661b-ecb — underscore-prefixed dirs default
+# disabled regardless of the bootstrap rule, which collapses the
+# default_enabled control. Default-disabled is the right knob here.)
+default_enabled: false
+
+paths:
+  - /nexus
+  - /settings-nexus
+
+assets:
+  template: page.html
+  script: page.js
+
+nav:
+  label: Nexus
+
+frontend:
+  alpine_root: nexus
+
+entrypoints:
+  schemas:
+    - tools.dashboard.plugins.nexus.entrypoints.schemas:NexusSceneV1
+    - tools.dashboard.plugins.nexus.entrypoints.schemas:NexusTileV1
