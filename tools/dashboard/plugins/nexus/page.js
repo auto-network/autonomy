@@ -26,6 +26,17 @@
 // Bead: auto-ct3ey (v1) + auto-klu7q (v1.5). Design: graph://9b0bdb8e-a9c4.
 // Worked example of the plugin pattern: graph://97ace518-788.
 // Surface Presence signpost: graph://dff97eec-c59.
+//
+// IIFE wrapper (bead auto-kckpd): plugin pages load as classic scripts
+// in alphabetical order, so every top-level const/let lands in the
+// shared global lexical environment. Coordinator-board parses first
+// and declares ``_schemaRuntime``; nexus parses second and would
+// SyntaxError on the duplicate, halting at parse — taking
+// ``window.nexus = nexus`` with it. Wrapping the body scopes every
+// identifier to this IIFE so the plugin is collision-proof against
+// any sibling that copies the schema-loader sniff.
+
+(function () {
 
 const _schemaRuntime = (typeof window !== 'undefined' && window.Schema)
   ? window.Schema
@@ -517,3 +528,5 @@ if (typeof window !== 'undefined') {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { nexus };
 }
+
+})();
