@@ -2281,8 +2281,36 @@ def poll_and_collect_agentic() -> None:
                 started_epoch = 0.0
 
         completed_epoch = time.time()
-        status = "DONE" if exit_code == 0 else "FAILED"
-        reason = "" if exit_code == 0 else f"container exited with code {exit_code}"
+
+        # Read the agent's decision.json (the authoritative outcome record).
+        # Without this, every zero-exit container collapses to DONE/empty —
+        # BLOCKED runs and informative reasons are lost in the dispatch_runs
+        # row and on the trace page. Mirrors the bead-dispatch convention in
+        # ``collect_results`` (decision.get("status") / decision.get("reason"))
+        # so the same downstream extractors in ``insert_run`` (scores,
+        # time_breakdown, failure_category, discovered_beads) work for
+        # agentic runs.
+        decision: dict | None = None
+        if output_dir:
+            decision_path = Path(output_dir) / "decision.json"
+            if decision_path.exists():
+                try:
+                    parsed = json.loads(decision_path.read_text())
+                    if isinstance(parsed, dict):
+                        decision = parsed
+                except (json.JSONDecodeError, OSError):
+                    decision = None
+
+        if decision is not None:
+            status = str(decision.get("status") or
+                         ("DONE" if exit_code == 0 else "FAILED"))
+            reason = str(decision.get("reason") or "")
+        elif exit_code == 0:
+            status = "DONE"
+            reason = "No decision file"
+        else:
+            status = "FAILED"
+            reason = f"container exited with code {exit_code}"
 
         try:
             insert_run(
@@ -2292,7 +2320,7 @@ def poll_and_collect_agentic() -> None:
                 completed_at=completed_epoch,
                 status=status,
                 reason=reason,
-                decision=None,
+                decision=decision,
                 commit_hash="",
                 branch="",
                 branch_base="",
