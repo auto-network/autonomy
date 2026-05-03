@@ -477,7 +477,7 @@ def run_tier2(base_url: str) -> dict:
             # Click the toggle (if present)
             r2 = subprocess.run(
                 ["agent-browser", "eval",
-                 "(function(){ var b = document.querySelector('.sv-term-toggle');"
+                 "(function(){ var b = document.querySelector('button[aria-label=\"Toggle terminal view\"]');"
                  " if (!b) return 'no_toggle'; b.click(); return 'clicked'; })()"],
                 capture_output=True, text=True, timeout=10,
             )
