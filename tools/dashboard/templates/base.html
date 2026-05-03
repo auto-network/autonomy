@@ -1048,6 +1048,15 @@
       .sv-term-toggle:hover { color: #d1d5db; background: rgba(55, 65, 81, 0.4); }
     }
     .sv-term-toggle.active { color: #a5b4fc; background: rgba(99, 102, 241, 0.15); }
+    /* Lit modifier — ``hasCommitsAhead`` flips this on the worktree-review
+       button when there's at least one commit waiting to merge. The button
+       still shows for dirty-only diffs but stays in the default gray. */
+    .sv-term-toggle.workspace-lit { color: #fbbf24; }
+    @media (hover: hover) and (pointer: fine) {
+      .sv-term-toggle.workspace-lit:hover {
+        color: #fde68a; background: rgba(251, 191, 36, 0.12);
+      }
+    }
     .sv-term-glyph {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 14px;
@@ -1475,6 +1484,7 @@
               onclick="event.stopPropagation();"
               @click.stop="openWorkspaceReview()"
               class="sv-term-toggle"
+              :class="{ 'workspace-lit': hasCommitsAhead }"
               x-show="hasWorkspaceChanges"
               :title="workspaceStatusTooltip"
               data-testid="session-worktree-review-button"

@@ -44,43 +44,50 @@
                   x-text="role ? role.charAt(0).toUpperCase() + role.slice(1) : ''"
                   data-testid="session-role"></span>
             <div style="flex:1"></div>
-            <template x-if="!isLive">
-              <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
-            </template>
-            <!-- Workspace-changes indicator. Same shape as the overlay
-                 control in base.html; both bind to the same component
-                 getter and open the persistent worktree review overlay,
-                 falling back to /worktrees?session=... only if needed. -->
-            <button type="button"
-                    class="sv-term-toggle"
-                    @click.stop="openWorkspaceReview()"
-                    x-show="hasWorkspaceChanges"
-                    :title="workspaceStatusTooltip"
-                    data-testid="session-worktree-review-button"
-                    aria-label="Open worktree review"
-                    style="display:none;"><span class="sv-term-glyph">⌥</span></button>
-            <template x-if="_tmuxSession && isLive">
-              <button class="sv-term-toggle sv-term-escape"
-                      @click.stop="interrupt()"
-                      aria-label="Send Escape"
-                      title="Send Escape">
-                <span class="sv-term-escape-label">ESC</span>
-              </button>
-            </template>
-            <template x-if="_tmuxSession && isLive">
-              <button class="sv-term-toggle"
-                      :class="{ 'active': showTerminal }"
-                      @click.stop="toggleTerminal()"
-                      aria-label="Toggle terminal view"
-                      title="Toggle terminal">
-                <span class="sv-term-glyph">&gt;_</span>
-              </button>
-            </template>
-            <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
-                 style="transition:transform 0.25s ease;color:#6b7280;flex-shrink:0;"
-                 :style="headerOpen ? 'transform:rotate(180deg);color:#6b7280' : 'color:#6b7280'">
-              <polyline points="6 9 12 15 18 9"/>
-            </svg>
+            <!-- Right cluster: entries count + ⌥ / ESC / >_ / chevron.
+                 Wrapped in its own flex with a wider gap so the icons
+                 breathe; the parent row's 12px stays for the left
+                 badges. -->
+            <div style="display:flex;align-items:center;gap:16px;">
+              <template x-if="!isLive">
+                <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
+              </template>
+              <!-- Workspace-changes indicator. Same shape as the overlay
+                   control in base.html; both bind to the same component
+                   getter and open the persistent worktree review overlay,
+                   falling back to /worktrees?session=... only if needed. -->
+              <button type="button"
+                      class="sv-term-toggle"
+                      :class="{ 'workspace-lit': hasCommitsAhead }"
+                      @click.stop="openWorkspaceReview()"
+                      x-show="hasWorkspaceChanges"
+                      :title="workspaceStatusTooltip"
+                      data-testid="session-worktree-review-button"
+                      aria-label="Open worktree review"
+                      style="display:none;"><span class="sv-term-glyph">⌥</span></button>
+              <template x-if="_tmuxSession && isLive">
+                <button class="sv-term-toggle sv-term-escape"
+                        @click.stop="interrupt()"
+                        aria-label="Send Escape"
+                        title="Send Escape">
+                  <span class="sv-term-escape-label">ESC</span>
+                </button>
+              </template>
+              <template x-if="_tmuxSession && isLive">
+                <button class="sv-term-toggle"
+                        :class="{ 'active': showTerminal }"
+                        @click.stop="toggleTerminal()"
+                        aria-label="Toggle terminal view"
+                        title="Toggle terminal">
+                  <span class="sv-term-glyph">&gt;_</span>
+                </button>
+              </template>
+              <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+                   style="transition:transform 0.25s ease;color:#6b7280;flex-shrink:0;"
+                   :style="headerOpen ? 'transform:rotate(180deg);color:#6b7280' : 'color:#6b7280'">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </div>
           </div>
           <!-- Header row 2: title, tokens.
                Title is intentionally static (non-contenteditable): a second

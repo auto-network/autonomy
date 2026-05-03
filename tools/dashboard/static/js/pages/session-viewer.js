@@ -135,6 +135,13 @@
       get hasWorkspaceChanges() {
         return !!(this._workspaceStatus && this._workspaceStatus.hasChanges);
       },
+      // Dual-state for the ⌥ button: dim when only dirty diffs, lit
+      // amber when at least one commit is ready to merge. The button
+      // itself shows on either condition (``hasWorkspaceChanges``); this
+      // flag drives the colour modifier.
+      get hasCommitsAhead() {
+        return !!(this._workspaceStatus && this._workspaceStatus.commitsAhead > 0);
+      },
       get workspaceStatusTooltip() {
         var ws = this._workspaceStatus;
         if (!ws || !ws.hasChanges) return '';
