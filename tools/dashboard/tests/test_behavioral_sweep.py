@@ -890,6 +890,46 @@ SWEEP_AGENT_ACTIONS = [
     }},
 ]
 
+# ── Harness usage fixture (bead auto-t0auy) ──────────────────────────
+#
+# Seeded under org=autonomy so a shell-route Schema.of(
+# 'dashboard.harness.usage').all() call returns non-empty members. Two
+# rows so the test asserts >1 (rules out an accidental scopeless leak
+# returning a single canonical row that happens to exist elsewhere).
+
+SWEEP_HARNESS_USAGE_AUTONOMY = [
+    {
+        "key": "claude:autonomy-host",
+        "payload": {
+            "harness": "claude",
+            "identity_id": "autonomy-host",
+            "identity_label": "autonomy-host",
+            "status": "ok",
+            "source": "test-fixture",
+            "updated_at": "2026-05-03T00:00:00Z",
+            "windows": {
+                "short": {"used_percent": 12.5, "window_minutes": 300, "resets_at": NOW + 600},
+                "long":  {"used_percent": 33.0, "window_minutes": 10080, "resets_at": NOW + 86400},
+            },
+        },
+    },
+    {
+        "key": "codex:autonomy-host",
+        "payload": {
+            "harness": "codex",
+            "identity_id": "autonomy-host",
+            "identity_label": "autonomy-host",
+            "status": "ok",
+            "source": "test-fixture",
+            "updated_at": "2026-05-03T00:00:00Z",
+            "windows": {
+                "short": {"used_percent": 8.0, "window_minutes": 300, "resets_at": NOW + 600},
+            },
+        },
+    },
+]
+
+
 SWEEP_GRAPH_SOURCES = {
     SWEEP_PLAIN_NOTE_ID: {
         "id": SWEEP_PLAIN_NOTE_ID,
@@ -1352,6 +1392,17 @@ def _build_fixture() -> dict:
         "settings": {
             "dashboard.agent-actions": {
                 "_orgs": {"autonomy": SWEEP_AGENT_ACTIONS},
+            },
+            # Bead auto-t0auy — Schema.of('dashboard.harness.usage')
+            # called from a shell route should return non-empty members.
+            # Seeded under org=autonomy so the shell-default org header
+            # actually scopes the read instead of falling through to a
+            # scopeless lookup. Schema.of's meta fetch lands on
+            # ``autonomy.schema`` which the production server resolves
+            # against the host's own autonomy graph DB (the schema is
+            # registered at boot via ``register_schema``).
+            "dashboard.harness.usage": {
+                "_orgs": {"autonomy": SWEEP_HARNESS_USAGE_AUTONOMY},
             },
         },
     }
@@ -6804,9 +6855,17 @@ class TestPluginOrgScoping:
       payload ``{enabled: true, org: anchore}`` overrides manifest org
       at runtime; ``/api/plugins`` returns ``org: anchore`` and
       page fetches stamp ``X-Graph-Org: anchore``.
-    * ``test_non_plugin_routes_do_not_carry_plugin_org_header`` —
-      navigating away from a plugin page clears ``_activePluginOrg``;
-      subsequent fetches must omit the header.
+    * ``test_shell_routes_carry_shell_default_org_header`` (bead
+      auto-t0auy) — navigating away from a plugin page clears
+      ``_activePluginOrg``; subsequent shell-route fetches must carry
+      the deployment's default org so non-plugin consumers (Schema.of,
+      direct ``Autonomy.fetch``) resolve against the right org slice
+      instead of falling through to the server's scopeless default.
+    * ``test_schema_of_returns_seeded_members_on_shell_route`` (bead
+      auto-t0auy) — end-to-end proof of the substrate's promise that
+      ``Schema.of(setId).all()`` works on every page, not just plugin
+      pages. Seeds rows under org=autonomy and asserts the shell
+      receives them.
     """
 
     @pytest.fixture(scope="function", autouse=True)
@@ -6913,7 +6972,7 @@ class TestPluginOrgScoping:
             f"X-Graph-Org=anchore (override). Calls: {calls}"
         )
 
-    def test_non_plugin_routes_do_not_carry_plugin_org_header(
+    def test_shell_routes_carry_shell_default_org_header(
         self, browser, sweep_server,
     ):
         # Enable example in autonomy so we can land on a plugin page first.
@@ -6937,8 +6996,14 @@ class TestPluginOrgScoping:
             f"({first})"
         )
 
-        # Step 2: navigate to /sessions, then exercise fetch — header must
-        # NOT be present (route() clears _activePluginOrg).
+        # Step 2: navigate to /sessions. ``_activePluginOrg`` must clear
+        # (route() resets it), but ``_activeShellOrg`` (server-injected
+        # via the ``autonomy-shell-org`` meta tag) keeps the deployment
+        # default in play so non-plugin consumers like
+        # ``Schema.of('dashboard.harness.usage')`` still send the
+        # header. Bead auto-t0auy fixed the prior behavior where the
+        # shell sent no header at all and the substrate silently
+        # returned ``[]``.
         result = _run_async_eval(
             _PLUGIN_FETCH_SPY_AND_PROBE_TEMPLATE.format(path="/sessions"),
         )
@@ -6948,17 +7013,81 @@ class TestPluginOrgScoping:
             f"{result.get('active_plugin_org')!r}"
         )
         calls = result.get("calls") or []
-        # Specifically: the Autonomy.fetch('/api/version') call from
-        # within /sessions context must not carry the header.
         helper_calls = [
             c for c in calls if "/api/version" in (c.get("url") or "")
         ]
         assert helper_calls, (
             f"Autonomy.fetch did not run on /sessions (probe broken?): {calls}"
         )
-        leaked = [c for c in helper_calls if c.get("org")]
-        assert not leaked, (
-            f"X-Graph-Org leaked into /sessions Autonomy.fetch: {leaked}"
+        # The spy captures every fetch, including bare ``fetch()``
+        # calls like ``_checkVersion``'s probe. Only the explicit
+        # ``Autonomy.fetch('/api/version')`` from the spy template
+        # exercises the org-header path; assert at least one
+        # ``/api/version`` call carried the shell-default org. The
+        # DASHBOARD_MOCK uvicorn process picks up GRAPH_ORG/GRAPH_SCOPE
+        # from its env or falls back to ``autonomy`` (see
+        # ``server._dashboard_default_org``).
+        scoped_calls = [c for c in helper_calls if c.get("org") == "autonomy"]
+        assert scoped_calls, (
+            f"no /api/version fetch carried X-Graph-Org=autonomy from "
+            f"shell route — auto-t0auy regression "
+            f"(active_plugin_org={result.get('active_plugin_org')!r}, "
+            f"all calls: {calls})"
+        )
+
+    def test_schema_of_returns_seeded_members_on_shell_route(
+        self, browser, sweep_server,
+    ):
+        # Bead auto-t0auy acceptance #5 — Schema.of(setId).all() must
+        # work end-to-end on every page, not just plugin pages.
+        # ``dashboard.harness.usage`` is seeded under org=autonomy by
+        # ``_build_fixture``; the shell-default org header (autonomy)
+        # is what makes the read return non-empty.
+
+        # Bounce to a known shell route via the SPA router so the page
+        # is fully booted with no plugin context.
+        _navigate_and_check("/sessions", "", wait_ms=400)
+
+        script = (
+            "(async () => {\n"
+            "  try {\n"
+            "    if (!(window.Schema && window.Schema.of)) {\n"
+            "      return JSON.stringify({"
+            "error: 'Schema runtime missing'});\n"
+            "    }\n"
+            "    if (window.Autonomy && window.Autonomy._activePluginOrg) {\n"
+            "      window.Autonomy._activePluginOrg = null;\n"
+            "    }\n"
+            "    if (window.Schema._clearCache) window.Schema._clearCache();\n"
+            "    var proxy = await window.Schema.of("
+            "'dashboard.harness.usage');\n"
+            "    var members = await proxy.all();\n"
+            "    return JSON.stringify({\n"
+            "      member_count: members.length,\n"
+            "      keys: members.map(function (m) { return m.key; }),\n"
+            "      shell_org:\n"
+            "        (window.Autonomy && window.Autonomy._activeShellOrg)"
+            " || null,\n"
+            "    });\n"
+            "  } catch (e) {\n"
+            "    return JSON.stringify({"
+            "error: e.message, stack: e.stack});\n"
+            "  }\n"
+            "})();\n"
+        )
+        result = _run_async_eval(script)
+        assert "error" not in result, f"Schema.of failed: {result}"
+        assert result.get("shell_org") == "autonomy", (
+            f"_activeShellOrg not bootstrapped from meta tag: {result}"
+        )
+        assert result.get("member_count", 0) >= 2, (
+            f"Schema.of('dashboard.harness.usage').all() returned "
+            f"{result.get('member_count')} members on shell route — "
+            f"the org-scopeless silent-empty bug is back: {result}"
+        )
+        keys = result.get("keys") or []
+        assert "claude:autonomy-host" in keys, (
+            f"expected seeded fixture key not present in shell read: {keys}"
         )
 
 
