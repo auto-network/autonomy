@@ -47,16 +47,27 @@ function renderMd(md) {
 
 // ── API Helpers ──────────────────────────────────────────────
 
-// Graph org context. The shell carries a default graph org from the
-// rendered HTML, and plugin pages may temporarily override it while a
-// plugin fragment is active. Every same-document `api()` /
-// `Autonomy.fetch()` call should carry the effective org so generic
-// Settings reads work on shell pages too.
+// Active org for any in-flight fetch. Two slots:
+//
+//   _activeShellOrg   — the deployment's default org. Stamped once at
+//                       module load from the server-injected meta tag
+//                       ``<meta name="autonomy-shell-org">``. Applies
+//                       to every shell route (``/``, ``/beads``,
+//                       ``/timeline``, etc.) so non-plugin consumers
+//                       like ``Schema.of(...)`` resolve against the
+//                       right org slice instead of falling through to
+//                       the server's scopeless default.
+//   _activePluginOrg  — set in ``renderPluginFragment`` to the plugin's
+//                       effective install org and cleared on every
+//                       ``route()`` call. Wins over the shell default
+//                       so plugin pages talk to their own org.
+//
+// `_withOrgHeader` consults both: plugin org first (override), shell
+// org as fallback. Bead auto-t0auy fixed the prior behavior where the
+// shell sent no header at all, leaving Schema.of(...) silently empty.
 window.Autonomy = window.Autonomy || {};
-window.Autonomy._defaultOrg = (
-  document.querySelector('meta[name="graph-org"]')?.content || null
-);
 window.Autonomy._activePluginOrg = null;
+window.Autonomy._activeShellOrg = null;
 // Active plugin id during a plugin's page render. Set alongside
 // ``_activePluginOrg`` in ``renderPluginFragment``; consumed by
 // ``Schema.alpine`` (bead auto-2D) so plugin pages can self-identify
@@ -64,13 +75,23 @@ window.Autonomy._activePluginOrg = null;
 // every ``route()`` call before the next fragment renders.
 window.Autonomy._activePluginId = null;
 
+(function _bootstrapShellOrg() {
+  if (typeof document === 'undefined') return;
+  const meta = document.querySelector('meta[name="autonomy-shell-org"]');
+  const value = meta && meta.getAttribute('content');
+  if (typeof value === 'string' && value) {
+    window.Autonomy._activeShellOrg = value;
+  }
+})();
+
 async function api(path) {
-  const res = await fetch(path, _withPluginOrgHeader());
+  const res = await fetch(path, _withOrgHeader());
   return res.json();
 }
 
-function _withPluginOrgHeader(opts) {
-  const org = window.Autonomy._activePluginOrg || window.Autonomy._defaultOrg;
+function _withOrgHeader(opts) {
+  const org = window.Autonomy._activePluginOrg
+           || window.Autonomy._activeShellOrg;
   if (!org) return opts || undefined;
   const init = Object.assign({}, opts || {});
   const headers = new Headers(init.headers || {});
@@ -80,7 +101,7 @@ function _withPluginOrgHeader(opts) {
 }
 
 window.Autonomy.fetch = function (path, opts) {
-  return fetch(path, _withPluginOrgHeader(opts));
+  return fetch(path, _withOrgHeader(opts));
 };
 
 // ── Badge Helpers ────────────────────────────────────────────
@@ -1884,7 +1905,7 @@ async function renderPluginFragment(plugin) {
   if (_fragmentCache.has(fragmentUrl)) {
     html = _fragmentCache.get(fragmentUrl);
   } else {
-    const res = await fetch(fragmentUrl, _withPluginOrgHeader());
+    const res = await fetch(fragmentUrl, _withOrgHeader());
     if (!res.ok) {
       _replaceFragment(content, '<div class="text-gray-400">Page not found</div>');
       return;
@@ -2156,11 +2177,6 @@ api('/api/stats').then(data => {
   }
 });
 
-api('/api/harness_usage').then(data => {
-  if (_harnessUsageMode !== 'settings') {
-    renderHarnessUsage(data);
-  }
-});
 initHarnessUsageSettings();
 
 // connectEvents() is defined in static/js/events.js (loaded before this file).

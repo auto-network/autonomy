@@ -5717,11 +5717,13 @@ async def page_experiments_redirect(request):
 def _load_template(name: str) -> str:
     # Render via Jinja so {% include %} partials are expanded; the static
     # version token stays a literal marker Jinja leaves untouched.
-    content = templates.env.get_template(name).render()
-    default_graph_org = os.environ.get("GRAPH_SCOPE") or "autonomy"
-    return (content
-            .replace("__STATIC_VERSION__", _static_version())
-            .replace("__DEFAULT_GRAPH_ORG__", default_graph_org))
+    # ``shell_org`` flows into ``base.html`` as the deployment's
+    # effective org so the SPA can stamp ``X-Graph-Org`` on shell-route
+    # fetches (auto-t0auy).
+    content = templates.env.get_template(name).render(
+        shell_org=_dashboard_default_org(),
+    )
+    return content.replace("__STATIC_VERSION__", _static_version())
 
 
 async def api_version(request):
@@ -7609,12 +7611,25 @@ def _collect_harness_usage() -> dict[str, list[dict[str, Any]]]:
     return {"harnesses": harnesses}
 
 
-def _harness_usage_org() -> str:
+def _dashboard_default_org() -> str:
+    """Deployment's effective org — the shell's default for any
+    non-plugin page render.
+
+    Bead auto-t0auy: ``base.html`` injects this value into
+    ``<meta name="autonomy-shell-org">`` so the SPA can stamp it as
+    ``X-Graph-Org`` on every shell-route fetch. Without it, calls like
+    ``Schema.of('dashboard.harness.usage').all()`` fall through to the
+    server's scopeless default and silently return ``[]``.
+    """
     return (
         os.environ.get("GRAPH_ORG")
         or os.environ.get("GRAPH_SCOPE")
         or "autonomy"
     )
+
+
+def _harness_usage_org() -> str:
+    return _dashboard_default_org()
 
 
 def _should_run_harness_usage_poller() -> bool:

@@ -178,13 +178,13 @@ class TestSessionsPageHTML:
     def test_shell_stamps_default_graph_org_for_schema_reads(self, test_client):
         resp = test_client.get("/beads")
         assert resp.status_code == 200
-        assert '<meta name="graph-org" content="autonomy">' in resp.text
+        assert '<meta name="autonomy-shell-org" content="autonomy">' in resp.text
 
     def test_shell_graph_org_falls_back_to_autonomy_without_env(self, test_client, monkeypatch):
         monkeypatch.delenv("GRAPH_SCOPE", raising=False)
         resp = test_client.get("/beads")
         assert resp.status_code == 200
-        assert '<meta name="graph-org" content="autonomy">' in resp.text
+        assert '<meta name="autonomy-shell-org" content="autonomy">' in resp.text
 
     def test_has_alpine_component(self, test_client):
         resp = test_client.get("/pages/sessions")

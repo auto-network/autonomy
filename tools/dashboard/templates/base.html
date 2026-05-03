@@ -3,7 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta name="graph-org" content="__DEFAULT_GRAPH_ORG__">
+  <!-- Deployment's effective org. The SPA stamps this as
+       X-Graph-Org on every shell-route fetch so non-plugin
+       Schema.of(...) calls resolve against the right org slice
+       (auto-t0auy). Plugin pages override this at render time. -->
+  <meta name="autonomy-shell-org" content="{{ shell_org }}">
   <!-- PWA -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
