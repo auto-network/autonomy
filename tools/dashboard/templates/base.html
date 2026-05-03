@@ -297,218 +297,181 @@
     .kb-stat { display: flex; justify-content: space-between; }
     .kb-stat-label { color: #6b7280; }
     .kb-stat-value { color: #9ca3af; font-variant-numeric: tabular-nums; }
-    /* Harness usage tiles */
+    /* Harness usage footer strip */
     #harness-usage {
       display: none;
-      flex-direction: column;
-      gap: 0.4rem;
-      margin-bottom: 0.75rem;
+      margin-bottom: 0.72rem;
     }
-    #harness-usage.has-tiles { display: flex; }
-    .harness-usage-title {
-      color: #94a3b8;
-      font-size: 0.58rem;
-      font-weight: 700;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      margin-left: 0.1rem;
+    #harness-usage.has-tiles { display: block; }
+    .harness-strip {
+      padding-top: 0.52rem;
+      border-top: 1px solid rgba(30, 41, 59, 0.75);
     }
-    .harness-tile {
-      --harness-accent: #64748b;
-      position: relative;
-      border-radius: 0.9rem;
-      border: 1px solid #1e293b;
-      background: linear-gradient(180deg, rgba(8,15,27,0.98), rgba(12,18,31,0.98));
-      overflow: hidden;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+    .harness-strip-scroller {
+      display: flex;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+      scroll-snap-type: x mandatory;
+      scroll-behavior: smooth;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
     }
-    .harness-tile::before {
-      content: "";
-      position: absolute;
-      left: 0;
-      top: 0;
-      bottom: 0;
-      width: 3px;
-      background: var(--harness-accent);
+    .harness-strip-scroller::-webkit-scrollbar { display: none; }
+    .harness-strip-page {
+      flex: 0 0 100%;
+      min-width: 100%;
+      scroll-snap-align: start;
+      scroll-snap-stop: always;
     }
-    .harness-tile[data-harness="claude"] {
-      --harness-accent: #a78bfa;
-    }
-    .harness-tile[data-harness="codex"] {
-      --harness-accent: #4ade80;
-    }
-    .harness-tile > summary {
-      list-style: none;
+    .harness-strip-hit {
+      appearance: none;
+      width: 100%;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
       cursor: pointer;
-      padding: 0.68rem 0.75rem 0.72rem;
+      text-align: left;
       display: flex;
       flex-direction: column;
-      gap: 0.5rem;
+      gap: 0.26rem;
     }
-    .harness-tile > summary::-webkit-details-marker { display: none; }
-    .harness-tile-top,
-    .harness-tile-meta,
-    .harness-heading {
+    .harness-strip-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 0.45rem;
-      min-width: 0;
+      gap: 0.5rem;
     }
-    .harness-heading {
-      justify-content: flex-start;
-      flex: 1 1 auto;
-      overflow: hidden;
+    .harness-strip-label {
+      color: #475569;
+      font-size: 0.67rem;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: lowercase;
     }
-    .harness-tile-bottom {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0.4rem;
-      align-items: stretch;
-    }
-    .harness-tile-count,
-    .harness-tile-detail-label {
-      color: #64748b;
-      font-size: 0.56rem;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-    }
-    .harness-tile-count {
-      color: #cbd5e1;
-      font-size: 0.68rem;
-      letter-spacing: 0.02em;
-      text-transform: none;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .harness-state {
+    .harness-strip-dots {
       display: inline-flex;
       align-items: center;
-      padding: 0.18rem 0.38rem;
-      border-radius: 999px;
-      border: 1px solid rgba(71,85,105,0.5);
-      color: #94a3b8;
-      font-size: 0.55rem;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      background: rgba(15,23,42,0.55);
+      gap: 0.22rem;
       flex-shrink: 0;
     }
-    .harness-state-ok {
-      border-color: rgba(74,222,128,0.35);
-      color: #86efac;
+    .harness-strip-dot {
+      width: 0.24rem;
+      height: 0.24rem;
+      border-radius: 999px;
+      background: rgba(100, 116, 139, 0.28);
+      transition: background 0.16s ease, transform 0.16s ease;
     }
-    .harness-state-unavailable {
-      border-color: rgba(251,191,36,0.35);
-      color: #fbbf24;
+    .harness-strip-dot.is-active {
+      background: #475569;
+      transform: scale(1.15);
     }
-    .harness-window {
+    .harness-strip-bars {
+      display: grid;
+      gap: 0.18rem;
+    }
+    .harness-strip-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 0.46rem;
       min-width: 0;
-      padding: 0.48rem 0.56rem 0.46rem;
-      border-radius: 0.72rem;
-      background: rgba(15,23,42,0.7);
-      border: 1px solid rgba(51,65,85,0.7);
-      display: flex;
-      flex-direction: column;
-      gap: 0.14rem;
     }
-    .harness-window-label {
+    .harness-strip-window {
       color: #94a3b8;
-      font-size: 0.56rem;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: 0.04em;
+      font-size: 0.51rem;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
-    }
-    .harness-window-value {
-      color: #f8fafc;
-      font-size: 0.92rem;
-      font-weight: 700;
-      line-height: 1;
-      font-variant-numeric: tabular-nums;
-    }
-    .harness-window-reset {
-      color: #94a3b8;
-      font-size: 0.62rem;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
     }
-    .harness-window-note {
-      grid-column: 1 / -1;
-    }
-    .harness-window-note .harness-window-value {
-      font-size: 0.76rem;
-      line-height: 1.2;
-    }
-    .harness-window-note .harness-window-reset {
-      white-space: normal;
-      line-height: 1.35;
-      font-family: inherit;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
+    .harness-strip-rail {
+      position: relative;
+      min-width: 0;
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(71, 85, 105, 0.32);
       overflow: hidden;
     }
-    .harness-window-warn .harness-window-value { color: #fbbf24; }
-    .harness-window-hot .harness-window-value { color: #f87171; }
-    .harness-window-cool .harness-window-value { color: #86efac; }
-    .harness-tile-details {
-      padding: 0.08rem 0.75rem 0.78rem;
-      border-top: 1px solid rgba(30,41,59,0.9);
-      display: grid;
-      gap: 0.45rem;
+    .harness-strip-fill {
+      display: block;
+      height: 100%;
+      width: 0;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #7dd3fc, #60a5fa);
+      transition: width 0.24s ease;
     }
-    .harness-detail-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0.42rem;
+    .harness-strip-row.is-cool .harness-strip-fill {
+      background: linear-gradient(90deg, #4ade80, #22c55e);
     }
-    .harness-detail-item {
-      display: flex;
-      flex-direction: column;
-      gap: 0.14rem;
-      min-width: 0;
-      padding: 0.45rem 0.52rem;
-      border-radius: 0.72rem;
-      background: rgba(15,23,42,0.52);
-      border: 1px solid rgba(51,65,85,0.55);
+    .harness-strip-row.is-warn .harness-strip-fill {
+      background: linear-gradient(90deg, #fbbf24, #f59e0b);
     }
-    .harness-detail-item-full { grid-column: 1 / -1; }
-    .harness-tile-detail-value {
-      color: #e2e8f0;
-      font-size: 0.72rem;
+    .harness-strip-row.is-hot .harness-strip-fill {
+      background: linear-gradient(90deg, #fb7185, #ef4444);
+    }
+    .harness-strip-row.is-unavailable .harness-strip-fill {
+      opacity: 0.18;
+    }
+    .harness-strip-reset {
+      color: #64748b;
+      font-size: 0.58rem;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      text-align: left;
-      line-height: 1.3;
       font-variant-numeric: tabular-nums;
-      word-break: break-word;
-    }
-    .harness-tile-empty {
-      color: #cbd5e1;
-      font-size: 0.75rem;
-      font-weight: 600;
-    }
-    .harness-tile-empty-note {
-      color: #94a3b8;
-      font-size: 0.68rem;
-      line-height: 1.3;
-    }
-    .harness-chevron {
-      color: #94a3b8;
-      font-size: 0.75rem;
-      transition: transform 0.18s ease;
+      text-transform: lowercase;
       flex-shrink: 0;
     }
-    .harness-tile[open] .harness-chevron { transform: rotate(180deg); }
+    .harness-strip-row.is-unavailable .harness-strip-reset {
+      color: #64748b;
+    }
+    .harness-strip-details {
+      max-height: 0;
+      overflow: hidden;
+      opacity: 0;
+      transform: translateY(-0.18rem);
+      transition: max-height 0.22s ease, opacity 0.18s ease, transform 0.18s ease, padding-top 0.18s ease;
+      border-top: 1px solid rgba(30, 41, 59, 0.72);
+      margin-top: 0.44rem;
+      padding-top: 0;
+      display: grid;
+      gap: 0.16rem;
+    }
+    .harness-strip-details.is-open {
+      max-height: 18rem;
+      opacity: 1;
+      transform: translateY(0);
+      padding-top: 0.44rem;
+    }
+    .harness-sheet-row {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: baseline;
+      gap: 0.4rem 0.7rem;
+      padding: 0.07rem 0;
+    }
+    .harness-sheet-label {
+      color: #64748b;
+      font-size: 0.54rem;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .harness-sheet-value {
+      color: #334155;
+      font-size: 0.66rem;
+      line-height: 1.35;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      word-break: break-word;
+    }
     @media (max-width: 640px) {
-      .harness-detail-grid {
+      #harness-usage { margin-bottom: 0.66rem; }
+      .harness-sheet-row {
         grid-template-columns: 1fr;
+        gap: 0.12rem;
       }
-      .harness-detail-item-full {
-        grid-column: auto;
-      }
+      .harness-sheet-value { text-align: left; }
     }
     /* Timeline card — reflow-v6 */
     .tl-card { background: #1f2937; border-radius: 8px; margin-bottom: 8px; padding: 12px 16px; cursor: pointer; }
