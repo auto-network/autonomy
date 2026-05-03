@@ -331,6 +331,17 @@
       mergeBurstActive: false,
       mergeBurstSeed: 0,
       poofingRowKey: '',
+      // Celebration timings, kept in sync with the CSS in worktrees.html:
+      //   .merge-confetti-piece — 820ms animation + up to 60ms per-piece delay
+      //   .merge-confetti-glow  — 760ms animation
+      //   .poofing-card         — 420ms animation
+      // The burst window has to outlast the slowest piece (880ms) and the
+      // overlay-dismissal has to happen *after* the window closes, otherwise
+      // the confetti DOM unmounts mid-animation and the user sees a stub.
+      // 1100ms gives ~220ms of safety on top of the longest paint.
+      _BURST_WINDOW_MS: 1100,
+      _POOF_START_MS: 520,
+      _POOF_DURATION_MS: 420,
       rebaseRequiredDialog: null,
       rebaseRequesting: false,
       cherryPicking: false,
@@ -1479,37 +1490,44 @@
       async cherryPickCommit(row) {
         if (!row || this.cherryPicking) return;
         this.cherryPicking = true;
+        let data;
         try {
           const resp = await fetch(
             '/api/worktrees/' + encodeURIComponent(row.session_name) + '/' +
               encodeURIComponent(row.repo_name) + '/cherry-pick',
             { method: 'POST' },
           );
-          const data = await _jsonOrError(resp);
-
-          // Same celebration shape as a successful FF merge — increment the
-          // seed (forces a re-trigger even if the user fires twice in a row),
-          // flash mergeBurstActive for the confetti window, then poof the
-          // row. Refresh reconciles backend state after the animation lands.
-          this.mergeBurstSeed += 1;
-          this.mergeBurstActive = true;
-          window.setTimeout(() => { this.mergeBurstActive = false; }, 860);
-          const rowKey = this.rowKey(row);
-          window.setTimeout(() => {
-            this.poofingRowKey = rowKey;
-            window.setTimeout(() => {
-              this.poofingRowKey = '';
-            }, 420);
-          }, 520);
-
-          _toast('Cherry-picked ' + (data.commit || '').slice(0, 8) +
-                 ' to ' + this.targetBranch(row), 'success');
-          await this.refresh(false);
+          data = await _jsonOrError(resp);
         } catch (err) {
           _toast('Cherry-pick failed: ' + (err.message || String(err)), 'error');
-        } finally {
           this.cherryPicking = false;
+          return;
         }
+
+        // Celebration sequence — must complete before refresh()/dismissal,
+        // otherwise syncOverlayRows() can null selectedCommit while the
+        // confetti template is still rendering and unmount the DOM mid-anim.
+        this.mergeBurstSeed += 1;
+        this.mergeBurstActive = true;
+        const rowKey = this.rowKey(row);
+        window.setTimeout(() => {
+          this.poofingRowKey = rowKey;
+        }, this._POOF_START_MS);
+        window.setTimeout(() => {
+          this.poofingRowKey = '';
+        }, this._POOF_START_MS + this._POOF_DURATION_MS);
+        window.setTimeout(async () => {
+          this.mergeBurstActive = false;
+          _toast('Cherry-picked ' + (data.commit || '').slice(0, 8) +
+                 ' to ' + this.targetBranch(row), 'success');
+          try {
+            await this.refresh(false);
+          } catch (_ignored) {
+            // refresh already toasts on failure
+          } finally {
+            this.cherryPicking = false;
+          }
+        }, this._BURST_WINDOW_MS);
       },
 
       async requestRebase(row) {
@@ -1572,38 +1590,45 @@
           this.mergeState = 'success';
           this.mergeBurstSeed += 1;
           this.mergeBurstActive = true;
-          window.setTimeout(() => {
-            this.mergeBurstActive = false;
-          }, 860);
 
           const row = item.row;
           const rowKey = this.rowKey(row);
+          // Row card fades out (poof) in parallel with the confetti, but
+          // both have to finish before we mutate this.rows / null
+          // selectedCommit. Doing the dismissal inside the poof's nested
+          // setTimeout (940ms) cut the confetti's 820ms+60ms-delay
+          // animation off mid-paint — selectedCommit going null unmounts
+          // the entire commit-detail subtree where the confetti lives.
           window.setTimeout(() => {
             this.poofingRowKey = rowKey;
-            window.setTimeout(async () => {
-              const commits = this.commitList(row).slice();
-              if (commits.length) {
-                commits.shift();
-                row.commits = commits;
-                row.commits_ahead = commits.length;
-                row.ff_eligible = commits.length > 0;
-                row.rebase_required = false;
-                this.rows = this.rows.slice();
-                this.queueBranchLayouts();
-                this.queuePathMeasurements();
-              }
+          }, this._POOF_START_MS);
+          window.setTimeout(() => {
+            this.poofingRowKey = '';
+          }, this._POOF_START_MS + this._POOF_DURATION_MS);
+          window.setTimeout(async () => {
+            this.mergeBurstActive = false;
 
-              this.poofingRowKey = '';
-              this.mergeState = 'idle';
-              _toast('Merged ' + (item.commit.short_sha || this.shortSha(item.commit.sha)), 'warning');
+            const commits = this.commitList(row).slice();
+            if (commits.length) {
+              commits.shift();
+              row.commits = commits;
+              row.commits_ahead = commits.length;
+              row.ff_eligible = commits.length > 0;
+              row.rebase_required = false;
+              this.rows = this.rows.slice();
+              this.queueBranchLayouts();
+              this.queuePathMeasurements();
+            }
 
-              if (commits.length) {
-                await this.openCommitAt(row, 0, { preserveShowDiff: true });
-              } else {
-                this.selectedCommit = null;
-              }
-            }, 420);
-          }, 520);
+            this.mergeState = 'idle';
+            _toast('Merged ' + (item.commit.short_sha || this.shortSha(item.commit.sha)), 'warning');
+
+            if (commits.length) {
+              await this.openCommitAt(row, 0, { preserveShowDiff: true });
+            } else {
+              this.selectedCommit = null;
+            }
+          }, this._BURST_WINDOW_MS);
         } catch (err) {
           this.mergeState = 'idle';
           this.mergeBurstActive = false;
