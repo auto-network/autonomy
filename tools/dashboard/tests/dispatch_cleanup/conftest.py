@@ -106,7 +106,11 @@ def init_dispatch_db(db_path: Path) -> None:
             tool_count INTEGER,
             turn_count INTEGER,
             librarian_type TEXT,
-            failure_class TEXT
+            failure_class TEXT,
+            kind TEXT,
+            agentic_source_id TEXT,
+            journal_source_id TEXT,
+            journal_compact TEXT
         )
         """
     )

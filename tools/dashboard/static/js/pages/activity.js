@@ -501,6 +501,26 @@
         }
       },
 
+      // auto-wvdhs: when the URL carries ``#journal-<source_id>``, surface
+      // the Attention tab and scroll the matching entry into view. The
+      // 📔 badge on each Feed card links here, so a click on a dispatch
+      // card jumps straight to its journal entry.
+      _handleJournalHash() {
+        const hash = (window.location.hash || '').replace(/^#/, '');
+        if (!hash.startsWith('journal-')) return;
+        this.tab = 'attention';
+        // Defer the scroll so Alpine can render the Attention tab body
+        // (x-show flips display:none → display:block) before getElementById
+        // returns the now-visible node.
+        const id = hash;
+        setTimeout(() => {
+          const el = document.getElementById(id);
+          if (el && typeof el.scrollIntoView === 'function') {
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        }, 50);
+      },
+
       async refreshTimeline() {
         const rangeParam = this.rangeToParam(this.range);
         const qs = rangeParam && rangeParam !== 'all' ? '?range=' + encodeURIComponent(rangeParam) : '?range=all';
@@ -608,11 +628,18 @@
         registerHandler('dispatcher_state', this._dispatcherStateHandler);
 
         this.refreshTimeline();
-        this.refreshAttention();
+        this.refreshAttention().then(() => this._handleJournalHash());
+        this._handleJournalHash();
+        this._hashHandler = () => this._handleJournalHash();
+        window.addEventListener('hashchange', this._hashHandler);
         this._intervalId = setInterval(() => this.refreshTimeline(), 15000);
       },
 
       destroy() {
+        if (this._hashHandler) {
+          window.removeEventListener('hashchange', this._hashHandler);
+          this._hashHandler = null;
+        }
         if (this._intervalId) {
           clearInterval(this._intervalId);
           this._intervalId = null;

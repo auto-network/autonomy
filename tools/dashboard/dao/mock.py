@@ -208,6 +208,9 @@ RUN_DEFAULTS: dict[str, Any] = {
     "discovered_beads_count": 0,
     "has_experience_report": False,
     "librarian_type": None,
+    # auto-wvdhs: optional journal entry shape ``{"source_id", "compact"}``;
+    # default None so the renderer's x-if guard hides the badge.
+    "journal_entry": None,
 }
 
 
@@ -711,6 +714,9 @@ TIMELINE_ENTRY_DEFAULTS: dict[str, Any] = {
     "reason": None,
     "discovered_beads_count": 0,
     "has_experience_report": False,
+    # auto-wvdhs: optional journal entry shape ``{"source_id", "compact"}``;
+    # default None so the renderer's x-if guard hides the badge.
+    "journal_entry": None,
 }
 
 TIMELINE_STATS_DEFAULTS: dict[str, Any] = {
