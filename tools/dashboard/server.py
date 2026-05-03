@@ -45,6 +45,7 @@ from sse_starlette.sse import EventSourceResponse
 from agents.dispatch_db import (
     list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH,
     clear_paused, is_paused, get_pause_reason,
+    get_consecutive_failures, reset_circuit_breaker,
 )
 from agents.session_launcher import launch_session
 from agents import workspace_settings
@@ -1100,6 +1101,41 @@ async def api_dispatch_wait(request):
             "state": "waiting",
         }
     )
+
+
+async def api_dispatch_reset(request):
+    """Reset a bead's dispatch circuit breaker on the host dispatcher DB.
+
+    Containerized ``graph dispatch reset`` cannot consult its local
+    ``data/dispatch.db`` because that file is not the host dispatcher's source
+    of truth. This API surfaces the reset operation against the live host DB so
+    container sessions can clear failure streaks correctly.
+    """
+    bead_id = request.path_params["bead_id"]
+    agent_fails, merge_fails = await asyncio.to_thread(
+        get_consecutive_failures, bead_id,
+    )
+    if agent_fails == 0 and merge_fails == 0:
+        return JSONResponse({
+            "bead_id": bead_id,
+            "reset": False,
+            "agent_failures": 0,
+            "merge_failures": 0,
+        })
+
+    run_id = await asyncio.to_thread(reset_circuit_breaker, bead_id)
+    agent_after, merge_after = await asyncio.to_thread(
+        get_consecutive_failures, bead_id,
+    )
+    return JSONResponse({
+        "bead_id": bead_id,
+        "reset": True,
+        "agent_failures": agent_fails,
+        "merge_failures": merge_fails,
+        "run_id": run_id,
+        "agent_failures_after": agent_after,
+        "merge_failures_after": merge_after,
+    })
 
 
 # ── Timeline API ─────────────────────────────────────────────
@@ -11168,6 +11204,7 @@ routes = [
     Route("/api/dispatch/status", api_dispatch_status),
     Route("/api/dispatch/approved", api_dispatch_approved),
     Route("/api/dispatch/runs", api_dispatch_runs),
+    Route("/api/dispatch/reset/{bead_id}", api_dispatch_reset, methods=["POST"]),
     Route("/api/dispatch/wait/{bead_id}", api_dispatch_wait),
     Route("/api/dispatch/trace/{run}", api_dispatch_trace),
     Route("/dispatch/trace/{run}", page_dispatch),
