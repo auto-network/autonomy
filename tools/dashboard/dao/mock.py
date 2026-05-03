@@ -902,6 +902,7 @@ JOURNAL_ENTRY_DEFAULTS: dict[str, Any] = {
     "entry_type": "attention",
     "created_at": "2026-01-01T00:00:00Z",
     "org": "autonomy",
+    "source_session_id": "",
 }
 
 

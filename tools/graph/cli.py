@@ -2780,6 +2780,22 @@ def cmd_journal_write(args):
             print(f"Error: missing required field: {field}", file=sys.stderr)
             sys.exit(1)
     data.setdefault("project", _get_scope() or "autonomy")
+    if not data.get("source_session_id"):
+        captured = (
+            os.environ.get("AUTONOMY_SESSION")
+            or os.environ.get("GRAPH_SESSION")
+            or _resolve_session_name()
+            or ""
+        )
+        if captured:
+            data["source_session_id"] = captured
+        else:
+            print(
+                "Warning: source_session_id unresolved "
+                "($AUTONOMY_SESSION/$GRAPH_SESSION unset); "
+                "writing journal entry without session attribution.",
+                file=sys.stderr,
+            )
     result = get_client().write_journal_entry(
         data, org=os.environ.get("GRAPH_ORG"),
     ) or {}
