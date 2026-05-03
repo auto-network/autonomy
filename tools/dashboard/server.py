@@ -989,6 +989,17 @@ async def api_dispatch_runs(request):
         if librarian_type:
             title = f"Librarian: {librarian_type}"
 
+        # auto-wvdhs: optional journal entry the agent wrote during wrap-up.
+        # Reconstruct the {source_id, compact} dict only when the row carries
+        # a non-empty source id; absent is the common case.
+        journal_entry = None
+        j_sid = row.get("journal_source_id")
+        if j_sid:
+            journal_entry = {
+                "source_id": j_sid,
+                "compact": row.get("journal_compact") or "",
+            }
+
         runs.append({
             "bead_id": bead_id,
             "timestamp": timestamp,
@@ -1012,6 +1023,7 @@ async def api_dispatch_runs(request):
             # rows. Front-end ``routeForRun`` reads this to compose
             # ``/graph/<asset_id>``. None for bead/librarian rows.
             "agentic_source_id": agentic_source_id,
+            "journal_entry": journal_entry,
             # internal fields for enrichment — stripped before response
             "_run_id": row.get("id", ""),
             "_output_dir": row.get("output_dir") or "",
@@ -1248,6 +1260,19 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         agentic_source_id = row["agentic_source_id"] or None
     except (IndexError, KeyError):
         agentic_source_id = None
+    # auto-wvdhs: journal_entry is None unless the agent wrote one during
+    # wrap-up. Pre-migration schemas may not have these columns; tolerate.
+    journal_entry = None
+    try:
+        j_sid = row["journal_source_id"]
+    except (IndexError, KeyError):
+        j_sid = None
+    if j_sid:
+        try:
+            j_compact = row["journal_compact"] or ""
+        except (IndexError, KeyError):
+            j_compact = ""
+        journal_entry = {"source_id": j_sid, "compact": j_compact}
     return {
         "run_id": row["id"] or "",
         "bead_id": row["bead_id"] or "",
@@ -1275,6 +1300,7 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         # (which fetches the agentic source row + target asset title).
         # Bead/librarian rows leave these as None.
         "agentic_source_id": agentic_source_id,
+        "journal_entry": journal_entry,
         "target_kind": None,
         "target_source_id": None,
         "target_org": None,

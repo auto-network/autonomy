@@ -188,7 +188,19 @@
           <span x-show="!e._isLibrarian && !e._isAgentic && e.bead_id" class="tl-bead-id" x-text="e.bead_id" style="display:none"></span>
           <!-- Agentic: show action label inline (e.g. "Update Title & Summary") -->
           <span x-show="e._isAgentic && e.action_label" class="tl-bead-id" x-text="e.action_label" style="display:none"></span>
-          <span class="tl-ts" :class="{'tl-ts-auto': true}" x-text="e._ts" style="margin-left:auto"></span>
+          <!-- auto-wvdhs: 📔 badge — present iff the agent wrote a journal
+               entry during wrap-up. Anchors to /activity#journal-<id> on
+               the Attention tab so a click jumps straight to the entry. -->
+          <template x-if="e.journal_entry && e.journal_entry.source_id">
+            <a :href="'/activity#journal-' + e.journal_entry.source_id"
+               @click.stop
+               :title="'Journal: ' + (e.journal_entry.compact || '')"
+               :data-testid="'activity-feed-journal-badge-' + e.run_id"
+               class="tl-lib-icon"
+               style="margin-left:auto; text-decoration:none; cursor:pointer;">📔</a>
+          </template>
+          <span class="tl-ts" :class="{'tl-ts-auto': true}" x-text="e._ts"
+                :style="(e.journal_entry && e.journal_entry.source_id) ? '' : 'margin-left:auto'"></span>
         </div>
         <!-- Title row: full-width, 2-line clamp on narrow viewports -->
         <div class="tl-title-row">
@@ -568,7 +580,8 @@
 
     <template x-for="(e, idx) in attentionEntries" :key="e.id || idx">
       <div
-        class="rounded-lg border border-gray-700 bg-gray-900/60 mb-3 overflow-hidden"
+        class="rounded-lg border border-gray-700 bg-gray-900/60 mb-3 overflow-hidden scroll-mt-20"
+        :id="e.id ? ('journal-' + e.id) : null"
         :data-testid="'activity-attention-entry-' + (e.id || idx)"
       >
         <div class="px-4 py-2 border-b border-gray-700 text-xs font-mono text-gray-400 flex items-center gap-2">
