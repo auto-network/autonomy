@@ -5406,7 +5406,7 @@ async def page_timeline(request):
     return HTMLResponse(_load_template("base.html"))
 
 async def page_timeline_fragment(request):
-    """Return the Timeline page as an HTML fragment for SPA injection."""
+    """Return the Activity page fragment shared by /timeline and /activity."""
     return templates.TemplateResponse(request, "pages/timeline.html")
 
 async def page_trace_fragment(request):
@@ -10714,6 +10714,7 @@ routes = [
     Route("/pages/source", page_source_fragment),
     Route("/bead/{id}", page_bead),
     Route("/timeline", page_timeline),
+    Route("/activity", page_timeline),
     Route("/terminal", page_terminal),
     Route("/terminal/{session_id}", page_terminal),
     Route("/pages/terminal", page_terminal_fragment),

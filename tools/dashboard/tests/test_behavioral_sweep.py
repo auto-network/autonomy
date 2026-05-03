@@ -1796,55 +1796,113 @@ BEADS_PAGE_CHECKS = """
     r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
 """
 
-# ── Timeline page JS check bundle ────────────────────────────────────
+# ── Activity page JS check bundle ────────────────────────────────────
 
-TIMELINE_PAGE_CHECKS = """
-    var bodyText = document.body.innerText;
+ACTIVITY_PAGE_CHECKS = """(async () => {
+    try {
+        var r = {};
+        var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
+        var waitFor = async function(predicate, timeoutMs) {
+            var deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+                if (predicate()) return true;
+                await sleep(50);
+            }
+            return false;
+        };
+        var tick = async function() {
+            await Alpine.nextTick();
+            await sleep(120);
+        };
 
-    // Timeframe toggle visible (1D, 1W, 1M, All buttons)
-    var rangeBtns = [];
-    document.querySelectorAll('button').forEach(function(b) {
-        var t = b.textContent.trim();
-        if (['1D', '1W', '1M', 'All'].indexOf(t) !== -1) rangeBtns.push(t);
-    });
-    r.range_buttons = rangeBtns;
-    r.has_range_toggle = rangeBtns.length === 4;
+        r.page_path = window.location.pathname;
+        r.has_page = await waitFor(function() {
+            return !!document.querySelector('[data-testid="activity-page"]');
+        }, 3000);
+        await waitFor(function() {
+            return document.querySelectorAll('.tl-card').length > 0;
+        }, 3000);
+        await waitFor(function() {
+            return document.querySelectorAll('[data-testid="activity-live"] a').length > 0
+                || !!document.querySelector('[data-testid="activity-live-empty"]');
+        }, 3000);
 
-    // Stats tiles visible — check for tile labels
-    r.has_completed_tile = bodyText.indexOf('Completed') !== -1;
-    r.has_failed_tile = bodyText.indexOf('Failed') !== -1 || bodyText.indexOf('Blocked') !== -1;
-    r.has_duration_tile = bodyText.indexOf('Avg Duration') !== -1;
-    r.has_tooling_tile = bodyText.indexOf('Avg Tooling') !== -1;
-    r.has_confidence_tile = bodyText.indexOf('Avg Confidence') !== -1;
+        var root = document.querySelector('[data-testid="activity-page"]');
+        var data = root ? Alpine.$data(root) : null;
+        var bodyText = document.body.innerText;
 
-    // Stats values present (from SWEEP_TIMELINE_STATS)
-    r.has_completed_count = bodyText.indexOf('5') !== -1;
-    r.has_success_pct = bodyText.indexOf('80%') !== -1;
+        r.root_testid = root ? root.getAttribute('data-testid') : '';
+        r.page_title = (document.getElementById('page-title') || {}).textContent?.trim() || '';
+        r.active_nav = Array.from(document.querySelectorAll('.nav-link.active')).map(function(el) {
+            return {
+                href: el.getAttribute('href') || '',
+                text: (el.textContent || '').replace(/\\s+/g, ' ').trim(),
+            };
+        });
+        r.activity_nav_active = !!document.querySelector('.nav-link.active[href="/activity"]');
 
-    // Feed heading
-    r.has_feed_heading = bodyText.indexOf('Feed') !== -1;
+        var rangeBtns = [];
+        document.querySelectorAll('[data-testid="activity-range"] button').forEach(function(btn) {
+            rangeBtns.push(btn.textContent.trim());
+        });
+        r.range_buttons = rangeBtns;
+        r.has_range_toggle = JSON.stringify(rangeBtns) === JSON.stringify(['6h', '24h', '7d', 'All']);
 
-    // Feed entries visible (timeline cards)
-    var tlCards = document.querySelectorAll('.tl-card');
-    r.feed_count = tlCards.length;
-    r.has_feed_entries = tlCards.length > 0;
+        r.has_pulse = !!document.querySelector('[data-testid="activity-pulse"]');
+        r.old_stats_gone = bodyText.indexOf('Avg Duration') === -1
+            && bodyText.indexOf('Avg Tooling') === -1
+            && bodyText.indexOf('Avg Confidence') === -1;
+        r.has_feed_heading = bodyText.indexOf('Feed') !== -1;
+        r.feed_count = document.querySelectorAll('.tl-card').length;
+        r.has_feed_entries = r.feed_count > 0;
 
-    // Status dots visible
-    var dots = document.querySelectorAll('.tl-dot');
-    r.dot_count = dots.length;
-    r.has_status_dots = dots.length > 0;
+        var liveCards = document.querySelectorAll('[data-testid="activity-live"] > a');
+        r.live_card_count = liveCards.length;
+        r.has_live_cards = liveCards.length > 0;
+        var firstLive = liveCards[0];
+        var firstFeed = document.querySelector('.tl-card');
+        r.live_before_feed = !!(firstLive && firstFeed && (firstLive.compareDocumentPosition(firstFeed) & Node.DOCUMENT_POSITION_FOLLOWING));
 
-    // Duration/time visible
-    r.has_duration_text = bodyText.indexOf('5m') !== -1 || bodyText.indexOf('2m') !== -1;
+        var cues = document.querySelector('[data-testid="activity-queue-cues"]');
+        r.has_queue_cues = !!cues;
+        r.queue_cue_text = cues ? cues.textContent.replace(/\\s+/g, ' ').trim() : '';
 
-    // Stars visible (avg scores from stats tiles)
-    var stars = document.querySelectorAll('.tl-star-on, .tl-star-off');
-    r.star_count = stars.length;
-    r.has_stars = stars.length > 0;
+        if (data) {
+            data.waiting = [];
+            data.blocked = [];
+            await tick();
+            r.cues_hidden_when_zero = !document.querySelector('[data-testid="activity-queue-cues"]');
 
-    // No template artifacts
-    r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
-"""
+            data.active = [];
+            await tick();
+            var liveEmpty = document.querySelector('[data-testid="activity-live-empty"]');
+            r.live_empty_state = !!liveEmpty;
+            r.live_empty_text = liveEmpty ? liveEmpty.textContent.trim() : '';
+
+            data.dispatcherState = {
+                paused: true,
+                reason: { reason: 'auth', message: 'auth failed' },
+                merge_health: { status: 'blocked', reason: 'UU: foo.txt', count: 1 },
+            };
+            await tick();
+            r.paused_banner_visible = !!document.querySelector('[data-testid="activity-paused-banner"]');
+            r.merge_banner_visible = !!document.querySelector('[data-testid="activity-merge-banner"]');
+            r.resume_button_visible = !!document.querySelector('[data-testid="activity-resume-dispatcher"]');
+        } else {
+            r.cues_hidden_when_zero = false;
+            r.live_empty_state = false;
+            r.live_empty_text = '';
+            r.paused_banner_visible = false;
+            r.merge_banner_visible = false;
+            r.resume_button_visible = false;
+        }
+
+        r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+        return JSON.stringify(r);
+    } catch (e) {
+        return JSON.stringify({error: e.message, stack: e.stack});
+    }
+})()"""
 
 # ── Collab page JS check bundle ──────────────────────────────────────
 
@@ -2643,52 +2701,67 @@ class TestBeadsPageBehavior:
         assert c.get("no_jinja"), "Raw Jinja template syntax visible on beads page"
 
 
-class TestTimelinePageBehavior:
-    """Timeline page behavioral sweep — stats tiles, feed entries, status indicators."""
+class TestActivitySurfaceBehavior:
+    """Unified Activity surface sweep across both /timeline and /activity."""
 
     @pytest.fixture(scope="class", autouse=True)
     def checks(self, browser, request):
-        result = _navigate_and_check("/timeline", TIMELINE_PAGE_CHECKS, wait_ms=1000)
-        request.cls._checks = result
+        request.cls._timeline = _navigate_and_eval_async("/timeline", ACTIVITY_PAGE_CHECKS, wait_ms=1200)
+        request.cls._activity = _navigate_and_eval_async("/activity", ACTIVITY_PAGE_CHECKS, wait_ms=1200)
 
-    def test_range_toggle(self):
-        """User sees timeframe toggle buttons (1D, 1W, 1M, All)."""
-        c = self._checks
-        assert c.get("has_range_toggle"), f"Missing range toggle, found: {c.get('range_buttons')}"
+    def test_both_routes_render_same_activity_root(self):
+        """Both /timeline and /activity serve the same activity root/testid."""
+        for c in (self._timeline, self._activity):
+            assert c.get("has_page"), f"Activity root missing on {c.get('page_path')}: {c}"
+            assert c.get("root_testid") == "activity-page", f"Unexpected root on {c.get('page_path')}: {c.get('root_testid')}"
 
-    def test_stats_tiles(self):
-        """User sees stats tiles (Completed, Failed/Blocked, Avg Duration, etc.)."""
-        c = self._checks
-        assert c.get("has_completed_tile"), "No 'Completed' tile visible"
-        assert c.get("has_duration_tile"), "No 'Avg Duration' tile visible"
-        assert c.get("has_tooling_tile"), "No 'Avg Tooling' tile visible"
-        assert c.get("has_confidence_tile"), "No 'Avg Confidence' tile visible"
+    def test_nav_and_title_use_activity(self):
+        """Nav label and page title read Activity for both routes."""
+        for c in (self._timeline, self._activity):
+            assert c.get("page_title") == "Activity", f"Expected Activity title on {c.get('page_path')}, got {c.get('page_title')!r}"
+            assert c.get("activity_nav_active"), f"/activity nav link not active on {c.get('page_path')}: {c.get('active_nav')}"
 
-    def test_stats_values(self):
-        """User sees actual stats values from fixture data."""
-        c = self._checks
-        assert c.get("has_completed_count"), "Completed count '5' not visible"
-        assert c.get("has_success_pct"), "Success rate '80%' not visible"
+    def test_range_toggle_uses_activity_ranges(self):
+        """User sees the 6h / 24h / 7d / All range controls."""
+        c = self._timeline
+        assert c.get("has_range_toggle"), f"Unexpected activity ranges: {c.get('range_buttons')}"
 
-    def test_feed_entries(self):
-        """User sees feed entries (timeline cards)."""
-        c = self._checks
-        assert c.get("has_feed_entries"), f"No feed entries visible (count={c.get('feed_count')})"
+    def test_compact_pulse_replaces_old_stats_wall(self):
+        """The pulse strip is present and the old five stats tiles are gone."""
+        c = self._timeline
+        assert c.get("has_pulse"), "Activity pulse strip missing"
+        assert c.get("old_stats_gone"), "Legacy timeline stats tiles still visible"
 
-    def test_status_indicators(self):
-        """User sees status dots on timeline entries."""
-        c = self._checks
-        assert c.get("has_status_dots"), f"No status dots visible (count={c.get('dot_count')})"
+    def test_live_dispatch_cards_render_above_feed(self):
+        """Live dispatch cards appear before historical feed entries."""
+        c = self._timeline
+        assert c.get("has_live_cards"), f"No live dispatch cards found (count={c.get('live_card_count')})"
+        assert c.get("has_feed_entries"), f"No historical feed entries found (count={c.get('feed_count')})"
+        assert c.get("live_before_feed"), "Live dispatch cards do not appear above the feed"
 
-    def test_stars_visible(self):
-        """User sees star ratings in stats tiles."""
-        c = self._checks
-        assert c.get("has_stars"), f"No stars visible (count={c.get('star_count')})"
+    def test_queue_cues_collapse_when_counts_go_zero(self):
+        """Waiting/blocked cues show when non-zero and disappear when emptied."""
+        c = self._timeline
+        assert c.get("has_queue_cues"), "Expected queue cues when waiting/blocked items exist"
+        assert c.get("cues_hidden_when_zero"), "Queue cues did not disappear after waiting/blocked were cleared"
+
+    def test_zero_live_state_is_thin_inline_message(self):
+        """Empty live state renders an inline 'No live dispatches' line."""
+        c = self._timeline
+        assert c.get("live_empty_state"), "No empty live state rendered after clearing active dispatches"
+        assert c.get("live_empty_text") == "No live dispatches", f"Unexpected live empty text: {c.get('live_empty_text')!r}"
+
+    def test_banners_remain_visible_and_actionable(self):
+        """Paused and merge-blocked banners still render with the resume action."""
+        c = self._timeline
+        assert c.get("paused_banner_visible"), "Paused dispatcher banner did not render"
+        assert c.get("merge_banner_visible"), "Merge-blocked banner did not render"
+        assert c.get("resume_button_visible"), "Resume button missing from paused banner"
 
     def test_no_template_artifacts(self):
-        """No raw Jinja template syntax visible."""
-        c = self._checks
-        assert c.get("no_jinja"), "Raw Jinja template syntax visible on timeline page"
+        """No raw Jinja template syntax is visible on either route."""
+        for c in (self._timeline, self._activity):
+            assert c.get("no_jinja"), f"Raw template syntax visible on {c.get('page_path')}"
 
 
 class TestCollabPageBehavior:
