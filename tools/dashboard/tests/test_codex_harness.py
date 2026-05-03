@@ -73,6 +73,60 @@ def test_context_tokens_use_last_input_not_cumulative_or_cached():
     assert CODEX_HARNESS.extract_context_tokens(raw, 0) == 140_593
 
 
+def test_extract_codex_harness_state_from_token_count_rate_limits():
+    raw = {
+        "timestamp": TS,
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": None,
+            "rate_limits": {
+                "limit_id": "codex",
+                "limit_name": None,
+                "primary": {
+                    "used_percent": 4.0,
+                    "window_minutes": 300,
+                    "resets_at": 1777755350,
+                },
+                "secondary": {
+                    "used_percent": 13.0,
+                    "window_minutes": 10080,
+                    "resets_at": 1777959419,
+                },
+                "credits": None,
+                "plan_type": "pro",
+                "rate_limit_reached_type": None,
+            },
+        },
+    }
+
+    state = CODEX_HARNESS.extract_harness_state(raw, {})
+
+    assert state == {
+        "kind": "rate_limits",
+        "harness": "codex",
+        "source": "transcript",
+        "updated_at": TS,
+        "limit_id": "codex",
+        "limit_name": None,
+        "plan_type": "pro",
+        "credits": None,
+        "rate_limit_reached_type": None,
+        "windows": {
+            "short": {
+                "used_percent": 4.0,
+                "window_minutes": 300,
+                "resets_at": 1777755350,
+            },
+            "long": {
+                "used_percent": 13.0,
+                "window_minutes": 10080,
+                "resets_at": 1777959419,
+            },
+        },
+    }
+
+
 def test_parse_codex_exec_command_call_as_tool_use():
     entry = parse_codex_log_line(_line({
         "timestamp": TS,

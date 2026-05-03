@@ -83,6 +83,36 @@ class TestActiveSessionsAPI:
         assert all(s["dispatch_nag_enabled"] is False for s in data)
 
 
+class TestHarnessUsageAPI:
+    """GET /api/harness_usage summarizes live harness rate-limit telemetry."""
+
+    def test_returns_live_harness_tiles(self, test_client):
+        resp = test_client.get("/api/harness_usage")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "harnesses" in data
+
+        by_harness = {item["harness"]: item for item in data["harnesses"]}
+        assert "claude" in by_harness
+        assert "codex" in by_harness
+
+    def test_surfaces_codex_rate_limits_and_claude_gap(self, test_client):
+        data = test_client.get("/api/harness_usage").json()
+        by_harness = {item["harness"]: item for item in data["harnesses"]}
+
+        codex = by_harness["codex"]
+        assert codex["available"] is True
+        assert codex["session_count"] == 1
+        assert codex["state"]["plan_type"] == "pro"
+        assert codex["state"]["windows"]["short"]["used_percent"] == 2.0
+        assert codex["state"]["windows"]["long"]["used_percent"] == 10.0
+
+        claude = by_harness["claude"]
+        assert claude["available"] is False
+        assert claude["session_count"] == 4
+        assert "reason" in claude
+
+
 # ── Recent Sessions API ─────────────────────────────────────────────
 
 

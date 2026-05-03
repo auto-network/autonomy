@@ -83,6 +83,33 @@ SESSIONS_PAGE_SESSIONS = [
     ),
 ]
 
+# One active Codex session with persisted rate-limit telemetry so the footer API
+# can surface a real tile shape in mock mode.
+SESSIONS_PAGE_SESSIONS[1]["harness"] = "codex"
+SESSIONS_PAGE_SESSIONS[1]["harness_state"] = json.dumps({
+    "kind": "rate_limits",
+    "harness": "codex",
+    "source": "transcript",
+    "updated_at": "2026-05-02T04:16:20.630Z",
+    "limit_id": "codex",
+    "limit_name": None,
+    "plan_type": "pro",
+    "credits": None,
+    "rate_limit_reached_type": None,
+    "windows": {
+        "short": {
+            "used_percent": 2.0,
+            "window_minutes": 300,
+            "resets_at": 1777709435,
+        },
+        "long": {
+            "used_percent": 10.0,
+            "window_minutes": 10080,
+            "resets_at": 1777959419,
+        },
+    },
+})
+
 # Add nag fields to gamma (the reviewer)
 SESSIONS_PAGE_SESSIONS[2]["nag_enabled"] = True
 SESSIONS_PAGE_SESSIONS[2]["nag_interval"] = 10

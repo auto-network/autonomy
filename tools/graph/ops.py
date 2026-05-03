@@ -45,6 +45,7 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
     SetMembers,
     MigrationReport,
     add_setting,
+    upsert_by_key,
     override_setting,
     exclude_setting,
     promote_setting,

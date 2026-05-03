@@ -4,13 +4,19 @@
 const content = document.getElementById('content');
 const pageTitle = document.getElementById('page-title');
 const statsSummary = document.getElementById('stats-summary');
+const harnessUsage = document.getElementById('harness-usage');
 const globalSearch = document.getElementById('global-search');
+const HARNESS_USAGE_SETTINGS_SET_ID = 'dashboard.harness.usage';
+const HARNESS_USAGE_STALE_MS = 15 * 60 * 1000;
 
 // ── Screenshot Capture (Design Studio) ───────────────────────
 // Persistent MediaStream for tab capture; survives page navigations within SPA.
 let _displayStream = null;
 let _captureVideo = null;
 let _displayCapturePending = false;
+let _harnessUsageMode = 'fallback';
+let _harnessUsageSchema = null;
+let _harnessUsageUnsub = null;
 
 // ── Markdown Rendering ───────────────────────────────────────
 
@@ -81,6 +87,273 @@ function priorityBadge(p) {
 function statusBadge(s) {
   const cls = s === 'closed' ? 'closed' : s === 'in_progress' ? 'in_progress' : s === 'blocked' ? 'blocked' : 'open';
   return `<span class="badge badge-${cls}">${s}</span>`;
+}
+
+function formatRatePercent(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '--';
+  return `${num % 1 === 0 ? num.toFixed(0) : num.toFixed(1)}%`;
+}
+
+function formatRateWindowLabel(windowMinutes) {
+  const minutes = Number(windowMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return '--';
+  if (minutes % 1440 === 0) return `${minutes / 1440}d`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${minutes}m`;
+}
+
+function formatResetShort(epochSeconds) {
+  const ts = Number(epochSeconds);
+  if (!Number.isFinite(ts) || ts <= 0) return '--';
+  const date = new Date(ts * 1000);
+  if (Number.isNaN(date.getTime())) return '--';
+  const now = new Date();
+  const diffMs = date.getTime() - now.getTime();
+  if (diffMs > 0 && diffMs < 24 * 60 * 60 * 1000) {
+    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function formatResetLong(epochSeconds) {
+  const ts = Number(epochSeconds);
+  if (!Number.isFinite(ts) || ts <= 0) return '--';
+  const date = new Date(ts * 1000);
+  if (Number.isNaN(date.getTime())) return '--';
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function formatUpdatedAt(timestamp) {
+  if (!timestamp) return '--';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '--';
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function harnessWindowTone(windowData) {
+  const used = Number(windowData && windowData.used_percent);
+  if (!Number.isFinite(used)) return '';
+  if (used >= 90) return 'harness-window-hot';
+  if (used >= 75) return 'harness-window-warn';
+  if (used <= 50) return 'harness-window-cool';
+  return '';
+}
+
+function renderHarnessWindow(windowData, fallbackLabel) {
+  if (!windowData) {
+    return `<div class="harness-window"><span class="harness-window-label">${_esc(fallbackLabel)}</span><span class="harness-window-value">--</span><span class="harness-window-reset">↺ --</span></div>`;
+  }
+  return `<div class="harness-window ${harnessWindowTone(windowData)}">
+    <span class="harness-window-label">${_esc(formatRateWindowLabel(windowData.window_minutes))}</span>
+    <span class="harness-window-value">${_esc(formatRatePercent(windowData.used_percent))}</span>
+    <span class="harness-window-reset">↺ ${_esc(formatResetShort(windowData.resets_at))}</span>
+  </div>`;
+}
+
+function normalizeLegacyHarnessUsageItem(item) {
+  const state = item && item.state ? item.state : {};
+  return {
+    harness: item && item.harness ? item.harness : 'unknown',
+    metaLabel: `${item && item.session_count ? item.session_count : 0} live`,
+    status: item && item.available ? 'ok' : 'unavailable',
+    source: state.source || null,
+    updatedAt: state.updated_at || null,
+    accountId: null,
+    identityLabel: null,
+    planType: state.plan_type || null,
+    tier: null,
+    limitId: state.limit_id || null,
+    limitName: state.limit_name || null,
+    rateLimitReachedType: state.rate_limit_reached_type || null,
+    note: item && item.reason ? item.reason : null,
+    windows: state.windows || {},
+  };
+}
+
+function normalizeSettingsHarnessUsageItem(item) {
+  return {
+    harness: item && item.harness ? item.harness : 'unknown',
+    metaLabel: item && item.identity_label ? item.identity_label : '',
+    status: item && item.status ? item.status : 'unknown',
+    source: item && item.source ? item.source : null,
+    updatedAt: item && item.updated_at ? item.updated_at : null,
+    accountId: item && item.account_id ? item.account_id : null,
+    identityLabel: item && item.identity_label ? item.identity_label : null,
+    planType: item && item.plan_type ? item.plan_type : null,
+    tier: item && item.tier ? item.tier : null,
+    limitId: item && item.limit_id ? item.limit_id : null,
+    limitName: item && item.limit_name ? item.limit_name : null,
+    rateLimitReachedType: item && item.rate_limit_reached_type ? item.rate_limit_reached_type : null,
+    note: item && item.note ? item.note : null,
+    windows: item && item.windows ? item.windows : {},
+  };
+}
+
+function normalizeHarnessUsageItems(data) {
+  const rawItems = Array.isArray(data && data.harnesses) ? data.harnesses : [];
+  return rawItems.map(item => {
+    if (item && Object.prototype.hasOwnProperty.call(item, 'status')) {
+      return normalizeSettingsHarnessUsageItem(item);
+    }
+    return normalizeLegacyHarnessUsageItem(item);
+  });
+}
+
+function renderHarnessUsage(data) {
+  if (!harnessUsage) return;
+  const items = normalizeHarnessUsageItems(data);
+  if (!items.length) {
+    harnessUsage.classList.remove('has-tiles');
+    harnessUsage.innerHTML = '';
+    return;
+  }
+  harnessUsage.classList.add('has-tiles');
+  harnessUsage.innerHTML = `<div class="harness-usage-title">Live Limits</div>` + items.map(item => {
+    const harness = item.harness || 'unknown';
+    const available = item.status === 'ok';
+    const windows = item.windows || {};
+    const badgeClass = harness === 'codex'
+      ? 'sc-harness-codex'
+      : harness === 'claude'
+        ? 'sc-harness-claude'
+        : 'sc-harness-unknown';
+    const metaLabel = item.metaLabel || '';
+    const detailRows = available ? `
+      <div class="harness-tile-detail-row">
+        <span class="harness-tile-detail-label">Updated</span>
+        <span class="harness-tile-detail-value">${_esc(formatUpdatedAt(item.updatedAt))}</span>
+      </div>
+      <div class="harness-tile-detail-row">
+        <span class="harness-tile-detail-label">Source</span>
+        <span class="harness-tile-detail-value">${_esc(item.source || '--')}</span>
+      </div>
+      <div class="harness-tile-detail-row">
+        <span class="harness-tile-detail-label">Short Reset</span>
+        <span class="harness-tile-detail-value">${_esc(formatResetLong(windows.short && windows.short.resets_at))}</span>
+      </div>
+      <div class="harness-tile-detail-row">
+        <span class="harness-tile-detail-label">Long Reset</span>
+        <span class="harness-tile-detail-value">${_esc(formatResetLong(windows.long && windows.long.resets_at))}</span>
+      </div>
+      <div class="harness-tile-detail-row">
+        <span class="harness-tile-detail-label">Plan</span>
+        <span class="harness-tile-detail-value">${_esc(item.planType || '--')}</span>
+      </div>
+      ${item.tier
+        ? `<div class="harness-tile-detail-row">
+            <span class="harness-tile-detail-label">Tier</span>
+            <span class="harness-tile-detail-value">${_esc(item.tier)}</span>
+          </div>`
+        : ''}
+      ${item.accountId
+        ? `<div class="harness-tile-detail-row">
+            <span class="harness-tile-detail-label">Account</span>
+            <span class="harness-tile-detail-value">${_esc(item.accountId)}</span>
+          </div>`
+        : ''}
+      <div class="harness-tile-detail-row">
+        <span class="harness-tile-detail-label">Limit</span>
+        <span class="harness-tile-detail-value">${_esc(item.limitId || item.limitName || '--')}</span>
+      </div>
+      ${item.rateLimitReachedType
+        ? `<div class="harness-tile-detail-row">
+            <span class="harness-tile-detail-label">Reached</span>
+            <span class="harness-tile-detail-value">${_esc(item.rateLimitReachedType)}</span>
+          </div>`
+        : ''}
+      ${item.note
+        ? `<div class="harness-tile-detail-row">
+            <span class="harness-tile-detail-label">Note</span>
+            <span class="harness-tile-detail-value">${_esc(item.note)}</span>
+          </div>`
+        : ''}`
+      : `<div class="harness-tile-empty">No telemetry</div>
+         <div class="harness-tile-empty-note">${_esc(item.note || 'No rate-limit telemetry captured yet')}</div>`;
+
+    return `<details class="harness-tile" data-harness="${_esc(harness)}">
+      <summary>
+        <div class="harness-tile-top">
+          <span class="sc-harness ${badgeClass}">${_esc(harness)}</span>
+          <div class="harness-tile-meta">
+            <span class="harness-tile-count">${_esc(metaLabel)}</span>
+            <span class="harness-chevron">▾</span>
+          </div>
+        </div>
+        ${available
+          ? `<div class="harness-tile-bottom">
+              ${renderHarnessWindow(windows.short, 'short')}
+              ${renderHarnessWindow(windows.long, 'long')}
+            </div>`
+          : `<div class="harness-tile-bottom">
+              <div class="harness-window">
+                <span class="harness-window-label">Status</span>
+                <span class="harness-window-value" style="font-size:0.82rem;">No data</span>
+                <span class="harness-window-reset">tap for details</span>
+              </div>
+            </div>`}
+      </summary>
+      <div class="harness-tile-details">${detailRows}</div>
+    </details>`;
+  }).join('');
+}
+
+function freshHarnessUsageSettings(members) {
+  const now = Date.now();
+  const items = [];
+  (Array.isArray(members) ? members : []).forEach(member => {
+    const payload = member && member.payload;
+    if (!payload || typeof payload !== 'object') return;
+    const updatedAt = member.updated_at || payload.updated_at;
+    const ts = updatedAt ? Date.parse(updatedAt) : NaN;
+    if (!Number.isFinite(ts)) return;
+    if ((now - ts) > HARNESS_USAGE_STALE_MS) return;
+    items.push({ ...payload, updated_at: updatedAt });
+  });
+  items.sort((a, b) => {
+    const order = { claude: 0, codex: 1 };
+    const byHarness = (order[a.harness] ?? 99) - (order[b.harness] ?? 99);
+    if (byHarness) return byHarness;
+    return String(a.identity_label || '').localeCompare(String(b.identity_label || ''));
+  });
+  return items;
+}
+
+async function refreshHarnessUsageFromSettings() {
+  if (!_harnessUsageSchema) return 0;
+  const members = await _harnessUsageSchema.all();
+  const items = freshHarnessUsageSettings(members);
+  if (items.length) {
+    _harnessUsageMode = 'settings';
+    renderHarnessUsage({ harnesses: items });
+  } else if (_harnessUsageMode === 'settings') {
+    renderHarnessUsage({ harnesses: [] });
+  }
+  return items.length;
+}
+
+async function initHarnessUsageSettings() {
+  if (!(window.Schema && typeof window.Schema.of === 'function')) return;
+  try {
+    _harnessUsageSchema = await window.Schema.of(HARNESS_USAGE_SETTINGS_SET_ID);
+    if (_harnessUsageUnsub) _harnessUsageUnsub();
+    _harnessUsageUnsub = _harnessUsageSchema.onChange(() => {
+      refreshHarnessUsageFromSettings().catch(() => {});
+    });
+    await refreshHarnessUsageFromSettings();
+  } catch (_) {
+    _harnessUsageSchema = null;
+  }
 }
 
 // ── Bead Actions ────────────────────────────────────────────
@@ -1723,6 +1996,9 @@ connectEvents(['nav', 'dispatch'], {
     if (data.pinned && window.Alpine) {
       Alpine.store('pinned').beads = data.pinned;
     }
+    if (_harnessUsageMode !== 'settings' && data.harness_usage) {
+      renderHarnessUsage(data.harness_usage);
+    }
   },
 });
 
@@ -1751,6 +2027,13 @@ api('/api/stats').then(data => {
     statsSummary.textContent = raw.trim() ? raw.trim().split('\n').slice(0, 2).join(', ') : '';
   }
 });
+
+api('/api/harness_usage').then(data => {
+  if (_harnessUsageMode !== 'settings') {
+    renderHarnessUsage(data);
+  }
+});
+initHarnessUsageSettings();
 
 // connectEvents() is defined in static/js/events.js (loaded before this file).
 

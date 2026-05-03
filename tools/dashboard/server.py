@@ -20,6 +20,8 @@ import sys
 import termios
 import time
 from contextlib import asynccontextmanager
+from typing import Any
+from urllib import error as urllib_error, request as urllib_request
 
 logger = logging.getLogger(__name__)
 from datetime import datetime, timedelta, timezone
@@ -124,6 +126,7 @@ from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 # connection runs ``flush_schema_meta``. The dispatch loop itself
 # starts inside the lifespan hook.
 from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
+from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
 
 # Surface Presence + OperatorActivity substrate (bead auto-i3tki) —
 # imported eagerly for the same reason: its three SettingSchema classes
@@ -2396,6 +2399,12 @@ async def api_stats(request):
     for table, count in data.items():
         lines.append(f"  {table:20s}  {count:6d}")
     return JSONResponse({"results": "\n".join(lines), "stats": data, "error": None})
+
+
+async def api_harness_usage(request):
+    _ = request
+    data = await asyncio.to_thread(_collect_harness_usage)
+    return JSONResponse(data)
 
 
 async def api_attention(request):
@@ -7322,11 +7331,12 @@ async def api_diag_settings_mediator(request):
 # ── Background watchers ───────────────────────────────────────
 
 _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
+_HARNESS_USAGE_POLL_INTERVAL = 60.0
 
 _WATCHER_HELPERS = [
     "collect_dispatch_data", "get_bead_counts", "count_active_sessions",
     "count_terminals", "count_today_done", "get_dispatcher_state", "get_pinned_beads",
-    "count_worktrees", "count_streams",
+    "count_worktrees", "count_streams", "collect_harness_usage",
 ]
 _watcher_errors: dict[str, str] = {}  # helper_name -> last error string
 
@@ -7335,6 +7345,7 @@ _watcher_errors: dict[str, str] = {}  # helper_name -> last error string
 # the watcher loops every 5s — without this we'd flood every connected
 # client with identical payloads 6x more often than the data changes).
 _worktrees_last_signature: str | None = None
+_harness_usage_last_refresh_context: dict[str, tuple[tuple[str, ...], float]] = {}
 
 
 async def _collect_dispatch_data() -> dict:
@@ -7514,6 +7525,382 @@ def _count_worktrees() -> dict[str, int]:
     }
 
 
+def _parse_harness_state(raw_state: Any) -> dict[str, Any]:
+    if isinstance(raw_state, dict):
+        return raw_state
+    if not isinstance(raw_state, str) or not raw_state.strip():
+        return {}
+    try:
+        parsed = json.loads(raw_state)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _state_timestamp(state: dict[str, Any], key: str) -> float:
+    value = state.get(key)
+    if not isinstance(value, str) or not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _has_rate_limit_state(state: dict[str, Any]) -> bool:
+    windows = state.get("windows")
+    return (
+        state.get("kind") == "rate_limits"
+        and isinstance(windows, dict)
+        and bool(windows)
+    )
+
+
+def _collect_harness_usage() -> dict[str, list[dict[str, Any]]]:
+    """Summarize rate-limit telemetry for each live harness."""
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        rows = dao_sessions.get_session_status_rows(None)
+    else:
+        rows = dashboard_db.get_live_sessions()
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not row.get("is_live", 1):
+            continue
+        harness = str(row.get("harness") or "claude").strip().lower() or "claude"
+        bucket = grouped.setdefault(
+            harness,
+            {
+                "harness": harness,
+                "session_count": 0,
+                "available": False,
+                "state": None,
+                "_updated_at": 0.0,
+            },
+        )
+        bucket["session_count"] += 1
+        state = _parse_harness_state(row.get("harness_state"))
+        if not _has_rate_limit_state(state):
+            continue
+        updated_at = _state_timestamp(state, "updated_at")
+        if (not bucket["available"]) or updated_at >= bucket["_updated_at"]:
+            bucket["available"] = True
+            bucket["state"] = state
+            bucket["_updated_at"] = updated_at
+
+    harnesses: list[dict[str, Any]] = []
+    order = {"claude": 0, "codex": 1}
+    for bucket in grouped.values():
+        item = {
+            "harness": bucket["harness"],
+            "session_count": bucket["session_count"],
+            "available": bucket["available"],
+        }
+        if bucket["available"]:
+            item["state"] = bucket["state"]
+        else:
+            item["reason"] = "No rate-limit telemetry captured yet"
+        harnesses.append(item)
+    harnesses.sort(key=lambda item: (order.get(item["harness"], 99), item["harness"]))
+    return {"harnesses": harnesses}
+
+
+def _harness_usage_org() -> str:
+    return (
+        os.environ.get("GRAPH_ORG")
+        or os.environ.get("GRAPH_SCOPE")
+        or "autonomy"
+    )
+
+
+def _should_run_harness_usage_poller() -> bool:
+    if os.environ.get("DASHBOARD_MOCK"):
+        return False
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    return True
+
+
+def operator_is_idle(*, threshold_minutes: int = 15) -> bool:
+    # TODO: swap to Presence.is_idle(operator_id, threshold=timedelta(...))
+    # once the participant-activity substrate lands. Until then the real
+    # overnight gate is the persisted last_user_message_at check below.
+    _ = threshold_minutes
+    return False
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z",
+    )
+
+
+def _publish_harness_usage_snapshot() -> None:
+    if operator_is_idle(threshold_minutes=15):
+        return
+
+    rows = dashboard_db.get_live_sessions()
+    updated_at = _now_iso()
+
+    codex_rows = [
+        row for row in rows
+        if str(row.get("harness") or "claude").strip().lower() == "codex"
+    ]
+    claude_rows = [
+        row for row in rows
+        if str(row.get("harness") or "claude").strip().lower() == "claude"
+    ]
+
+    org = _harness_usage_org()
+    _maybe_publish_harness_usage(
+        harness="codex",
+        rows=codex_rows,
+        updated_at=updated_at,
+        org=org,
+        collector=_collect_codex_usage_payloads,
+    )
+    _maybe_publish_harness_usage(
+        harness="claude",
+        rows=claude_rows,
+        updated_at=updated_at,
+        org=org,
+        collector=_collect_claude_usage_payloads,
+    )
+
+
+def _maybe_publish_harness_usage(
+    *,
+    harness: str,
+    rows: list[dict[str, Any]],
+    updated_at: str,
+    org: str,
+    collector,
+) -> None:
+    if not rows:
+        _harness_usage_last_refresh_context.pop(harness, None)
+        return
+
+    session_signature = tuple(sorted(
+        str(row.get("tmux_name") or "").strip()
+        for row in rows
+        if str(row.get("tmux_name") or "").strip()
+    ))
+    latest_user_message_at = _latest_harness_user_message_at(rows)
+    previous_context = _harness_usage_last_refresh_context.get(harness)
+    if previous_context is not None:
+        previous_signature, previous_user_message_at = previous_context
+        if (
+            previous_signature == session_signature
+            and latest_user_message_at <= previous_user_message_at
+        ):
+            return
+
+    payloads = collector(rows, updated_at)
+    for key, payload in payloads:
+        graph_ops.upsert_by_key(
+            _harness_usage_settings.HARNESS_USAGE_SET_ID,
+            _harness_usage_settings.HARNESS_USAGE_SCHEMA_REVISION,
+            key,
+            payload,
+            org=org,
+        )
+    _harness_usage_last_refresh_context[harness] = (
+        session_signature,
+        latest_user_message_at,
+    )
+
+
+def _latest_harness_user_message_at(rows: list[dict[str, Any]]) -> float:
+    latest = 0.0
+    for row in rows:
+        state = _parse_harness_state(row.get("harness_state"))
+        latest = max(latest, _state_timestamp(state, "last_user_message_at"))
+    return latest
+
+
+def _collect_codex_usage_payloads(
+    rows: list[dict[str, Any]],
+    updated_at: str,
+) -> list[tuple[str, dict[str, Any]]]:
+    freshest_state: dict[str, Any] | None = None
+    freshest_ts = 0.0
+    for row in rows:
+        state = _parse_harness_state(row.get("harness_state"))
+        if not _has_rate_limit_state(state):
+            continue
+        state_ts = _state_timestamp(state, "updated_at")
+        if freshest_state is None or state_ts >= freshest_ts:
+            freshest_state = state
+            freshest_ts = state_ts
+
+    key = _harness_usage_settings.make_harness_usage_key("codex", "default")
+    if freshest_state is None:
+        return [(
+            key,
+            _harness_usage_settings.make_unavailable_usage_payload(
+                harness="codex",
+                identity_id="default",
+                identity_label="default",
+                source="transcript",
+                note="No transcript rate-limit telemetry captured yet",
+                updated_at=updated_at,
+            ),
+        )]
+
+    return [(
+        key,
+        _harness_usage_settings.normalize_codex_usage_payload(
+            freshest_state,
+            updated_at=updated_at,
+        ),
+    )]
+
+
+def _collect_claude_usage_payloads(
+    rows: list[dict[str, Any]],
+    updated_at: str,
+) -> list[tuple[str, dict[str, Any]]]:
+    bundles: dict[str, dict[str, Any]] = {}
+    unresolved = False
+
+    for row in rows:
+        bundle = _resolve_claude_credential_bundle(row)
+        if bundle is None:
+            unresolved = True
+            continue
+        bundles.setdefault(bundle["fingerprint"], bundle)
+
+    payloads: dict[str, dict[str, Any]] = {}
+    now_ms = int(time.time() * 1000)
+    for bundle in bundles.values():
+        fallback_identity_id = f"acct:{bundle['fingerprint']}"
+        fallback_key = _harness_usage_settings.make_harness_usage_key(
+            "claude", fallback_identity_id,
+        )
+        expires_at_ms = bundle.get("expires_at_ms")
+        if isinstance(expires_at_ms, int) and expires_at_ms <= now_ms:
+            payloads[fallback_key] = _harness_usage_settings.make_unavailable_usage_payload(
+                harness="claude",
+                identity_id=fallback_identity_id,
+                identity_label=_harness_usage_settings.short_identity_label(
+                    "acct", bundle["fingerprint"],
+                ),
+                source="oauth_usage",
+                note="Credential copy expired; restart the session to refresh the token",
+                updated_at=updated_at,
+                plan_type=bundle.get("subscription_type"),
+                tier=bundle.get("rate_limit_tier"),
+            )
+            continue
+
+        try:
+            usage_body, response_headers = _fetch_claude_oauth_usage(
+                bundle["access_token"],
+            )
+        except Exception as exc:
+            payloads[fallback_key] = _harness_usage_settings.make_unavailable_usage_payload(
+                harness="claude",
+                identity_id=fallback_identity_id,
+                identity_label=_harness_usage_settings.short_identity_label(
+                    "acct", bundle["fingerprint"],
+                ),
+                source="oauth_usage",
+                note=str(exc),
+                updated_at=updated_at,
+                plan_type=bundle.get("subscription_type"),
+                tier=bundle.get("rate_limit_tier"),
+            )
+            continue
+
+        org_id = response_headers.get("anthropic-organization-id")
+        payload = _harness_usage_settings.normalize_claude_usage_payload(
+            bundle=bundle,
+            usage_body=usage_body,
+            org_id=org_id,
+            updated_at=updated_at,
+        )
+        payloads[
+            _harness_usage_settings.make_harness_usage_key(
+                "claude", payload["identity_id"],
+            )
+        ] = payload
+
+    if unresolved:
+        unresolved_id = "unresolved"
+        payloads[
+            _harness_usage_settings.make_harness_usage_key("claude", unresolved_id)
+        ] = _harness_usage_settings.make_unavailable_usage_payload(
+            harness="claude",
+            identity_id=unresolved_id,
+            identity_label="unresolved",
+            source="oauth_usage",
+            note="Active Claude credentials are not accessible in this dashboard container",
+            updated_at=updated_at,
+        )
+
+    return sorted(payloads.items(), key=lambda item: item[0])
+
+
+def _resolve_claude_credential_bundle(row: dict[str, Any]) -> dict[str, Any] | None:
+    for path in _harness_usage_settings.candidate_claude_credential_paths(row):
+        if not path.exists():
+            continue
+        bundle = _harness_usage_settings.load_claude_credential_bundle(path)
+        if bundle is not None:
+            return bundle
+    return None
+
+
+def _fetch_claude_oauth_usage(
+    access_token: str,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    req = urllib_request.Request(
+        "https://api.anthropic.com/api/oauth/usage",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "Content-Type": "application/json",
+            "User-Agent": "autonomy-dashboard/1.0",
+        },
+        method="GET",
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=10) as resp:
+            body_bytes = resp.read()
+            headers = {k.lower(): v for k, v in resp.headers.items()}
+    except urllib_error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            detail = ""
+        suffix = f": {detail[:160]}" if detail else ""
+        raise RuntimeError(f"Claude usage API returned HTTP {exc.code}{suffix}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Claude usage API failed: {type(exc).__name__}") from exc
+
+    try:
+        body = json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Claude usage API returned invalid JSON") from exc
+    if not isinstance(body, dict):
+        raise RuntimeError("Claude usage API returned a non-object payload")
+    return body, headers
+
+
+async def _harness_usage_poller() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(_publish_harness_usage_snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("harness usage poller tick failed")
+        await asyncio.sleep(_HARNESS_USAGE_POLL_INTERVAL)
+
+
 async def _dispatch_watcher():
     """Background task: poll dispatch state and broadcast to SSE topics.
 
@@ -7532,6 +7919,7 @@ async def _dispatch_watcher():
                 asyncio.to_thread(dao_beads.get_beads_by_label, "pinned"),
                 asyncio.to_thread(_count_worktrees),
                 asyncio.to_thread(_count_streams),
+                asyncio.to_thread(_collect_harness_usage),
                 return_exceptions=True,
             )
 
@@ -7557,6 +7945,7 @@ async def _dispatch_watcher():
             pinned_beads = results[6] if not isinstance(results[6], BaseException) else []
             worktree_counts = results[7] if not isinstance(results[7], BaseException) else {"with_commits": 0, "with_changes": 0}
             stream_count = results[8] if not isinstance(results[8], BaseException) else 0
+            harness_usage = results[9] if not isinstance(results[9], BaseException) else {"harnesses": []}
 
             nav_data = {
                 "open_beads": counts.get("open_count", 0),
@@ -7571,6 +7960,7 @@ async def _dispatch_watcher():
                 "worktrees_with_changes": worktree_counts.get("with_changes", 0),
                 "stream_count": stream_count,
                 "plugins": _collect_plugin_badges(),
+                "harness_usage": harness_usage,
             }
             await event_bus.broadcast("dispatch", dispatch_data)
             await event_bus.broadcast("nav", nav_data)
@@ -10817,6 +11207,7 @@ routes = [
     Route("/api/orgs/{slug}", api_orgs_show, methods=["GET"]),
     Route("/api/orgs/{slug}", api_orgs_delete, methods=["DELETE"]),
     Route("/api/stats", api_stats),
+    Route("/api/harness_usage", api_harness_usage),
     Route("/api/attention", api_attention),
     Route("/api/active", api_active_sessions),
     Route("/api/dao/active_sessions", api_dao_active_sessions),
@@ -10934,6 +11325,7 @@ routes = [
 # Background task handles — captured during startup, cancelled during shutdown
 _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
+_harness_usage_poller_task: asyncio.Task | None = None
 _settings_mediator_started: bool = False
 
 # Task* tile enricher — per-session taskId → subject/status map. Populated by
@@ -10982,7 +11374,7 @@ def _build_settings_mediator_services():
     )
 
 async def _on_startup():
-    global _dispatch_watcher_task, _mock_event_watcher_task
+    global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
     # Re-arm the emit hook on every lifespan startup. Module import
     # already wires it (so ASGITransport-based tests that skip lifespan
     # still get function-level emits), but we re-arm here so that
@@ -11054,6 +11446,8 @@ async def _on_startup():
     )
     await worktree_monitor.start()
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
+    if _should_run_harness_usage_poller():
+        _harness_usage_poller_task = asyncio.create_task(_harness_usage_poller())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
         _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
@@ -11076,7 +11470,8 @@ async def _on_startup():
         )
 
 async def _on_shutdown():
-    global _dispatch_watcher_task, _mock_event_watcher_task, _settings_mediator_started
+    global _dispatch_watcher_task, _mock_event_watcher_task
+    global _harness_usage_poller_task, _settings_mediator_started
     # Clear the emit hook so a subsequent process / test reload doesn't
     # leak a stale binding into a swapped module-level event_bus.
     try:
@@ -11096,13 +11491,21 @@ async def _on_shutdown():
         except Exception:
             logger.exception("error during settings_mediator.stop_action_loop()")
         _settings_mediator_started = False
-    tasks = [t for t in (_dispatch_watcher_task, _mock_event_watcher_task) if t and not t.done()]
+    tasks = [
+        t for t in (
+            _dispatch_watcher_task,
+            _mock_event_watcher_task,
+            _harness_usage_poller_task,
+        )
+        if t and not t.done()
+    ]
     for t in tasks:
         t.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _dispatch_watcher_task = None
     _mock_event_watcher_task = None
+    _harness_usage_poller_task = None
     try:
         await session_monitor.stop()
     except Exception:

@@ -99,6 +99,7 @@ SESSION_DEFAULTS: dict[str, Any] = {
     # graph://553c7437-036). Default unknown so legacy fixtures behave
     # the same as production rows that haven't seen an assistant turn yet.
     "harness": "claude",
+    "harness_state": "{}",
     "model": None,
     # Legacy fields for backward compat
     "size_bytes": 1024000,
@@ -543,6 +544,7 @@ def get_session_status_rows(since: str | None = None) -> list[dict]:
                     "label": sess.get("label") or "",
                     # auto-ngis4 — surface harness + model on every status row.
                     "harness": sess.get("harness") or "claude",
+                    "harness_state": sess.get("harness_state") or "{}",
                     "model": sess.get("model") or None,
                 }
             )
