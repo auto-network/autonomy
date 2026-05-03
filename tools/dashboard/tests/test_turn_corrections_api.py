@@ -647,6 +647,63 @@ def test_session_monitor_prefers_cleanest_nearby_candidate_over_nearest_prior(te
     assert dashboard_db.get_turn_correction(SESSION_UUID, "msg-nearest") is None
 
 
+def test_turn_correction_metrics_accepts_long_dictation_cleanup():
+    from tools.dashboard.session_monitor import _turn_correction_metrics
+
+    raw = (
+        "It worked and updated live. Congratulations I think the future is finally almost landed.\n\n"
+        "Now the next thing to do is product conversation, which means primers which explain the command "
+        "and explain when it should be used, which we want to biased towards using it aggressively I would "
+        "not be angry if almost every single one of my messages got a correction if it meant cleaning up the log.\n\n"
+        "Next effort products I want to go back and look at the source viewer so I want to see if corrections "
+        "actually show up when we viewed them in the source viewer and I know that they won’t and the source "
+        "view needs a lot of work because most of the time it doesn’t even know the difference between a "
+        "assistant turn in a user turn even that doesn’t render properly so that’ll be the next thing we work "
+        "on after this is productized"
+    )
+    corrected = (
+        "It worked and updated live. Congratulations. I think the future is finally almost landed.\n\n"
+        "Now the next thing to do is product conversation, which means primers that explain the command and "
+        "explain when it should be used. We want to be biased toward using it aggressively. I would not be "
+        "angry if almost every single one of my messages got a correction if it meant cleaning up the log.\n\n"
+        "Next effort: productize. I want to go back and look at the source viewer. I want to see whether "
+        "corrections actually show up when we view them in the source viewer, and I know they won’t. The "
+        "source viewer needs a lot of work because most of the time it doesn’t even know the difference "
+        "between an assistant turn and a user turn. Even that doesn’t render properly. So that’ll be the "
+        "next thing we work on after this is productized."
+    )
+
+    metrics = _turn_correction_metrics(raw, corrected)
+    assert metrics["acceptable"] is True
+    assert metrics["char_similarity"] >= 0.80
+
+
+def test_turn_correction_metrics_rejects_unrelated_message():
+    from tools.dashboard.session_monitor import _turn_correction_metrics
+
+    raw = "Proceed"
+    corrected = (
+        "It worked and updated live. Congratulations. I think the future is finally almost landed.\n\n"
+        "Now the next thing to do is product conversation, which means primers that explain the command."
+    )
+
+    metrics = _turn_correction_metrics(raw, corrected)
+    assert metrics["acceptable"] is False
+    assert metrics["char_similarity"] < 0.25
+
+
+def test_turn_correction_metrics_prefers_related_long_message_over_unrelated_short_one():
+    from tools.dashboard.session_monitor import _turn_correction_metrics
+
+    good_raw = "I’m gonna write a message which you can away a correction to."
+    bad_raw = "So now try to apply the correction and we’ll see if it can match it"
+    corrected = "I’m gonna write a message which you can apply a correction to."
+
+    good = _turn_correction_metrics(good_raw, corrected)
+    bad = _turn_correction_metrics(bad_raw, corrected)
+    assert good["score_key"] < bad["score_key"]
+
+
 def test_session_monitor_skips_stale_recent_history_candidates(test_app):
     from tools.dashboard.session_monitor import SessionMonitor, _TailState
 
@@ -676,6 +733,123 @@ def test_session_monitor_skips_stale_recent_history_candidates(test_app):
     assert dashboard_db.get_turn_correction(SESSION_UUID, "msg-1") is None
 
 
+def test_session_monitor_matches_long_productization_cleanup(test_app):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+
+    raw = (
+        "It worked and updated live. Congratulations I think the future is finally almost landed.\n\n"
+        "Now the next thing to do is product conversation, which means primers which explain the command "
+        "and explain when it should be used, which we want to biased towards using it aggressively I would "
+        "not be angry if almost every single one of my messages got a correction if it meant cleaning up the log.\n\n"
+        "Next effort products I want to go back and look at the source viewer so I want to see if corrections "
+        "actually show up when we viewed them in the source viewer and I know that they won’t and the source "
+        "view needs a lot of work because most of the time it doesn’t even know the difference between a "
+        "assistant turn in a user turn even that doesn’t render properly so that’ll be the next thing we work "
+        "on after this is productized"
+    )
+    corrected = (
+        "It worked and updated live. Congratulations. I think the future is finally almost landed.\n\n"
+        "Now the next thing to do is product conversation, which means primers that explain the command and "
+        "explain when it should be used. We want to be biased toward using it aggressively. I would not be "
+        "angry if almost every single one of my messages got a correction if it meant cleaning up the log.\n\n"
+        "Next effort: productize. I want to go back and look at the source viewer. I want to see whether "
+        "corrections actually show up when we view them in the source viewer, and I know they won’t. The "
+        "source viewer needs a lot of work because most of the time it doesn’t even know the difference "
+        "between an assistant turn and a user turn. Even that doesn’t render properly. So that’ll be the "
+        "next thing we work on after this is productized."
+    )
+
+    SessionMonitor._persist_turn_corrections(row, ts, [
+        {
+            "type": "user",
+            "content": "For the rest of this session, please be aggressive about issuing corrections.",
+            "message_id": "msg-other-1",
+            "timestamp": "2026-05-03T22:09:45.064Z",
+        },
+        {
+            "type": "user",
+            "content": "Proceed",
+            "message_id": "msg-other-2",
+            "timestamp": "2026-05-03T22:10:59.637Z",
+        },
+        {
+            "type": "user",
+            "content": "All right, here’s one short typo message for you to corruct",
+            "message_id": "msg-other-3",
+            "timestamp": "2026-05-03T22:12:00.173Z",
+        },
+        {
+            "type": "user",
+            "content": raw,
+            "message_id": "msg-target",
+            "timestamp": "2026-05-03T22:13:26.551Z",
+        },
+    ])
+    SessionMonitor._persist_turn_corrections(row, ts, [{
+        "type": "turn_correction",
+        "corrected_text": corrected,
+        "timestamp": "2026-05-03T22:13:45.008Z",
+    }])
+
+    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-target")
+    assert stored is not None
+    assert stored["corrected_text"] == corrected
+
+
+def test_session_monitor_matches_long_stop_message_cleanup(test_app):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+
+    raw = (
+        "Wait, stop what you’re saying makes no sense. You’re going at it again motherfucker\n\n"
+        "I think you’re confused by the fact that you issued a correction after the one that fail failed "
+        "which I accepted and it worked fine. We’re talking about the really long correction to the longer "
+        "message that didn’t match and I didn’t accept it. I never even saw it displayed please try to keep"
+    )
+    corrected = (
+        "Wait, stop. What you’re saying makes no sense. You’re doing it again, motherfucker.\n\n"
+        "I think you’re confused by the fact that you issued a correction after the one that failed, which "
+        "I accepted, and it worked fine. We’re talking about the really long correction to the longer "
+        "message that didn’t match, and I didn’t accept it. I never even saw it displayed. Please try to "
+        "keep that straight."
+    )
+
+    SessionMonitor._persist_turn_corrections(row, ts, [
+        {
+            "type": "user",
+            "content": "Proceed",
+            "message_id": "msg-other-1",
+            "timestamp": "2026-05-03T22:10:59.637Z",
+        },
+        {
+            "type": "user",
+            "content": "That one failed to match sad face",
+            "message_id": "msg-other-2",
+            "timestamp": "2026-05-03T22:14:02.991Z",
+        },
+        {
+            "type": "user",
+            "content": raw,
+            "message_id": "msg-target",
+            "timestamp": "2026-05-03T22:16:10.709Z",
+        },
+    ])
+    SessionMonitor._persist_turn_corrections(row, ts, [{
+        "type": "turn_correction",
+        "corrected_text": corrected,
+        "timestamp": "2026-05-03T22:16:30.599Z",
+    }])
+
+    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-target")
+    assert stored is not None
+    assert stored["corrected_text"] == corrected
+
+
 def test_session_monitor_limits_matching_to_last_five_live_user_messages(test_app):
     from tools.dashboard.session_monitor import SessionMonitor, _TailState
 
@@ -691,31 +865,31 @@ def test_session_monitor_limits_matching_to_last_five_live_user_messages(test_ap
         },
         {
             "type": "user",
-            "content": "message one filler",
+            "content": "alpha filler about deployment logs",
             "message_id": "msg-1",
             "timestamp": "2026-05-03T08:57:01.000Z",
         },
         {
             "type": "user",
-            "content": "message two filler",
+            "content": "beta filler about session cards",
             "message_id": "msg-2",
             "timestamp": "2026-05-03T08:57:02.000Z",
         },
         {
             "type": "user",
-            "content": "message three filler",
+            "content": "gamma filler about dashboard css",
             "message_id": "msg-3",
             "timestamp": "2026-05-03T08:57:03.000Z",
         },
         {
             "type": "user",
-            "content": "message four filler",
+            "content": "delta filler about graph search",
             "message_id": "msg-4",
             "timestamp": "2026-05-03T08:57:04.000Z",
         },
         {
             "type": "user",
-            "content": "message five filler",
+            "content": "epsilon filler about source viewer",
             "message_id": "msg-5",
             "timestamp": "2026-05-03T08:57:05.000Z",
         },
