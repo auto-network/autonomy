@@ -332,15 +332,17 @@
       mergeBurstSeed: 0,
       poofingRowKey: '',
       // Celebration timings, kept in sync with the CSS in worktrees.html:
-      //   .merge-confetti-piece — 820ms animation + up to 60ms per-piece delay
-      //   .merge-confetti-glow  — 760ms animation
+      //   .merge-confetti-piece — 1300ms animation + up to 90ms per-piece delay
+      //   .merge-confetti-glow  — 1100ms animation
       //   .poofing-card         — 420ms animation
-      // The burst window has to outlast the slowest piece (880ms) and the
-      // overlay-dismissal has to happen *after* the window closes, otherwise
-      // the confetti DOM unmounts mid-animation and the user sees a stub.
-      // 1100ms gives ~220ms of safety on top of the longest paint.
-      _BURST_WINDOW_MS: 1100,
-      _POOF_START_MS: 520,
+      // The burst window has to outlast the slowest piece (1300+90 = 1390ms)
+      // and the overlay-dismissal has to happen *after* the window closes,
+      // otherwise the confetti DOM unmounts mid-animation. 1500ms gives
+      // ~110ms of paint headroom on top of the longest piece path. Poof
+      // start is delayed so the row card doesn't visually shrink while the
+      // confetti is still arcing — confetti reads, then the row poofs.
+      _BURST_WINDOW_MS: 1500,
+      _POOF_START_MS: 900,
       _POOF_DURATION_MS: 420,
       rebaseRequiredDialog: null,
       rebaseRequesting: false,
@@ -357,20 +359,28 @@
       _reviewTitleObserver: null,
       _commitStickyRaf: 0,
       confettiPieces: [
-        { id: 1, dx: -108, dy: -78, rot: -180, delay: 0, color: '#818cf8' },
-        { id: 2, dx: -86, dy: -104, rot: -120, delay: 18, color: '#34d399' },
-        { id: 3, dx: -62, dy: -70, rot: -160, delay: 42, color: '#f9a8d4' },
-        { id: 4, dx: -28, dy: -118, rot: -90, delay: 0, color: '#fcd34d' },
-        { id: 5, dx: -10, dy: -84, rot: -70, delay: 32, color: '#e879f9' },
-        { id: 6, dx: 18, dy: -126, rot: 88, delay: 15, color: '#60a5fa' },
-        { id: 7, dx: 42, dy: -76, rot: 132, delay: 48, color: '#34d399' },
-        { id: 8, dx: 70, dy: -112, rot: 160, delay: 0, color: '#fb7185' },
-        { id: 9, dx: 96, dy: -82, rot: 210, delay: 28, color: '#818cf8' },
-        { id: 10, dx: -120, dy: -22, rot: -140, delay: 55, color: '#f472b6' },
-        { id: 11, dx: 118, dy: -24, rot: 152, delay: 60, color: '#facc15' },
-        { id: 12, dx: -54, dy: -132, rot: -220, delay: 24, color: '#38bdf8' },
-        { id: 13, dx: 54, dy: -134, rot: 240, delay: 36, color: '#a78bfa' },
-        { id: 14, dx: 0, dy: -144, rot: 180, delay: 12, color: '#4ade80' },
+        { id: 1,  dx: -148, dy: -82,  rot: -180, delay: 0,  color: '#818cf8' },
+        { id: 2,  dx: -118, dy: -116, rot: -120, delay: 18, color: '#34d399' },
+        { id: 3,  dx: -88,  dy: -78,  rot: -160, delay: 42, color: '#f9a8d4' },
+        { id: 4,  dx: -38,  dy: -134, rot: -90,  delay: 0,  color: '#fcd34d' },
+        { id: 5,  dx: -14,  dy: -94,  rot: -70,  delay: 32, color: '#e879f9' },
+        { id: 6,  dx: 22,   dy: -142, rot: 88,   delay: 15, color: '#60a5fa' },
+        { id: 7,  dx: 56,   dy: -84,  rot: 132,  delay: 48, color: '#34d399' },
+        { id: 8,  dx: 94,   dy: -126, rot: 160,  delay: 0,  color: '#fb7185' },
+        { id: 9,  dx: 132,  dy: -92,  rot: 210,  delay: 28, color: '#818cf8' },
+        { id: 10, dx: -160, dy: -28,  rot: -140, delay: 55, color: '#f472b6' },
+        { id: 11, dx: 158,  dy: -30,  rot: 152,  delay: 60, color: '#facc15' },
+        { id: 12, dx: -72,  dy: -158, rot: -220, delay: 24, color: '#38bdf8' },
+        { id: 13, dx: 72,   dy: -160, rot: 240,  delay: 36, color: '#a78bfa' },
+        { id: 14, dx: 0,    dy: -176, rot: 180,  delay: 12, color: '#4ade80' },
+        { id: 15, dx: -132, dy: -52,  rot: -260, delay: 70, color: '#fde047' },
+        { id: 16, dx: 138,  dy: -56,  rot: 280,  delay: 8,  color: '#22d3ee' },
+        { id: 17, dx: -50,  dy: -52,  rot: -100, delay: 90, color: '#f97316' },
+        { id: 18, dx: 50,   dy: -50,  rot: 110,  delay: 80, color: '#a3e635' },
+        { id: 19, dx: -100, dy: -160, rot: -300, delay: 50, color: '#ec4899' },
+        { id: 20, dx: 110,  dy: -158, rot: 320,  delay: 64, color: '#06b6d4' },
+        { id: 21, dx: -34,  dy: -168, rot: -40,  delay: 38, color: '#fb923c' },
+        { id: 22, dx: 36,   dy: -170, rot: 50,   delay: 26, color: '#84cc16' },
       ],
 
       get commitItems() {
