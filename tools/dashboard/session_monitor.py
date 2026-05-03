@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import time
 from collections import deque
@@ -40,6 +41,8 @@ from tools.dashboard.session_harness import (
     resolve_harness_for_path,
     resolve_harness_for_session_row,
 )
+from tools.dashboard import harness_usage_settings as _harness_usage_settings
+from tools.graph import ops as graph_ops
 
 from tools.dashboard.dao.dashboard_db import (
     get_conn,
@@ -73,6 +76,48 @@ try:
     _HAS_INOTIFY = True
 except ImportError:
     _HAS_INOTIFY = False
+
+
+def _harness_usage_org() -> str:
+    return (
+        os.environ.get("GRAPH_ORG")
+        or os.environ.get("GRAPH_SCOPE")
+        or "autonomy"
+    )
+
+
+def _codex_identity_for_row(row: dict[str, Any]) -> tuple[str, str]:
+    # Future-proof the key space for multiple Codex subscriptions. Launch-time
+    # auth-slot metadata is not available on session rows yet, so we fall back
+    # to the current singleton identity.
+    _ = row
+    return ("default", "default")
+
+
+def _publish_codex_harness_usage_setting(
+    row: dict[str, Any],
+    harness_state: dict[str, Any] | None,
+) -> bool:
+    state = harness_state if isinstance(harness_state, dict) else {}
+    windows = state.get("windows")
+    if state.get("kind") != "rate_limits" or not isinstance(windows, dict) or not windows:
+        return False
+
+    identity_id, identity_label = _codex_identity_for_row(row)
+    key = _harness_usage_settings.make_harness_usage_key("codex", identity_id)
+    payload = _harness_usage_settings.normalize_codex_usage_payload(
+        state,
+        identity_id=identity_id,
+        identity_label=identity_label,
+    )
+    graph_ops.upsert_by_key(
+        _harness_usage_settings.HARNESS_USAGE_SET_ID,
+        _harness_usage_settings.HARNESS_USAGE_SCHEMA_REVISION,
+        key,
+        payload,
+        org=_harness_usage_org(),
+    )
+    return True
 
 
 def _find_primary_jsonls(directory: Path) -> list[Path]:
@@ -1939,6 +1984,11 @@ class SessionMonitor:
         context_tokens = row.get("context_tokens", 0)
         prior_model = row.get("model") or None
         model = prior_model
+        prior_harness_state_raw = row.get("harness_state") or "{}"
+        try:
+            harness_state = json.loads(prior_harness_state_raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            harness_state = {}
         harness = resolve_harness_for_session_row(row)
 
         for raw_line in complete.splitlines():
@@ -1961,6 +2011,7 @@ class SessionMonitor:
 
             context_tokens = harness.extract_context_tokens(entry, context_tokens)
             model = harness.extract_model(entry, model)
+            harness_state = harness.extract_harness_state(entry, harness_state)
 
             # Parse full entry for SSE broadcast
             try:
@@ -1979,6 +2030,10 @@ class SessionMonitor:
         if new_entry_count > 0:
             # Only push model when it changed; the column is sticky once set.
             model_to_write = model if (model and model != prior_model) else None
+            harness_state_raw = json.dumps(harness_state or {}, sort_keys=True)
+            harness_state_to_write = (
+                harness_state_raw if harness_state_raw != prior_harness_state_raw else None
+            )
             update_tail_state(
                 tmux_name,
                 file_offset=new_offset,
@@ -1987,7 +2042,16 @@ class SessionMonitor:
                 entry_count=(row.get("entry_count", 0) + new_entry_count),
                 context_tokens=context_tokens,
                 model=model_to_write,
+                harness_state=harness_state_to_write,
             )
+            if str(row.get("harness") or "claude").strip().lower() == "codex":
+                try:
+                    _publish_codex_harness_usage_setting(row, harness_state)
+                except Exception:
+                    logger.exception(
+                        "session_monitor: failed to publish codex harness usage for %s",
+                        tmux_name,
+                    )
             return True, parsed_entries
 
         # Update offset even if no entries parsed (whitespace lines)

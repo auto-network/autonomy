@@ -13,6 +13,7 @@ def make_session(
     session_id, label="", role="", type="container",
     last_message="", entry_count=100, context_tokens=50000,
     is_live=True, topics="[]",
+    harness="claude", harness_state="{}", model=None,
 ):
     return {
         "session_id": session_id,
@@ -24,6 +25,9 @@ def make_session(
         "entry_count": entry_count,
         "context_tokens": context_tokens,
         "topics": topics,
+        "harness": harness,
+        "harness_state": harness_state,
+        "model": model,
     }
 
 

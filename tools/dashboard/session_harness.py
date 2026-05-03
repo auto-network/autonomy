@@ -95,6 +95,13 @@ class SessionHarness(Protocol):
         non-empty value to ``tmux_sessions.model`` (auto-ngis4).
         """
 
+    def extract_harness_state(
+        self,
+        raw_entry: dict,
+        current_state: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Return updated harness-specific session state, or ``current_state``."""
+
 
 class ClaudeSessionHarness:
     """Adapter over the current Claude-only implementation."""
@@ -240,6 +247,14 @@ class ClaudeSessionHarness:
             return model
         return current_model
 
+    def extract_harness_state(
+        self,
+        raw_entry: dict,
+        current_state: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        updated_state = _update_last_user_message_at(raw_entry, current_state)
+        return current_state if updated_state == (current_state or {}) else updated_state
+
 
 CLAUDE_HARNESS = ClaudeSessionHarness()
 
@@ -336,6 +351,13 @@ class CodexSessionHarness:
 
     def extract_model(self, raw_entry: dict, current_model: str | None) -> str | None:
         return extract_codex_model(raw_entry, current_model)
+
+    def extract_harness_state(
+        self,
+        raw_entry: dict,
+        current_state: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        return extract_codex_harness_state(raw_entry, current_state)
 
 
 CODEX_HARNESS = CodexSessionHarness()
@@ -1820,6 +1842,118 @@ def extract_codex_context_tokens(raw_entry: dict, current_tokens: int) -> int:
             if val > 0:
                 return val
     return current_tokens
+
+
+def _coerce_rate_limit_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_rate_limit_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_codex_rate_limit_window(window: Any) -> dict[str, float | int | None] | None:
+    if not isinstance(window, dict):
+        return None
+    used_percent = _coerce_rate_limit_float(window.get("used_percent"))
+    window_minutes = _coerce_rate_limit_int(window.get("window_minutes"))
+    resets_at = _coerce_rate_limit_int(window.get("resets_at"))
+    if used_percent is None and window_minutes is None and resets_at is None:
+        return None
+    return {
+        "used_percent": used_percent,
+        "window_minutes": window_minutes,
+        "resets_at": resets_at,
+    }
+
+
+def _update_last_user_message_at(
+    raw_entry: dict,
+    current_state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    original_state = current_state
+    state = dict(current_state or {})
+    timestamp = raw_entry.get("timestamp")
+    if not isinstance(timestamp, str) or not timestamp:
+        return original_state
+
+    if raw_entry.get("type") == "user" and not raw_entry.get("isSidechain"):
+        if state.get("last_user_message_at") == timestamp:
+            return original_state
+        state["last_user_message_at"] = timestamp
+        return state
+
+    payload = raw_entry.get("payload") or {}
+    if (
+        raw_entry.get("type") == "event_msg"
+        and isinstance(payload, dict)
+        and payload.get("type") == "user_message"
+    ):
+        if state.get("last_user_message_at") == timestamp:
+            return original_state
+        state["last_user_message_at"] = timestamp
+        return state
+
+    return original_state
+
+
+def extract_codex_harness_state(
+    raw_entry: dict,
+    current_state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Extract compact Codex rate-limit telemetry for persistent session state."""
+
+    current_state = _update_last_user_message_at(raw_entry, current_state)
+    if raw_entry.get("type") != "event_msg":
+        return current_state
+    payload = raw_entry.get("payload") or {}
+    if payload.get("type") != "token_count":
+        return current_state
+    rate_limits = payload.get("rate_limits")
+    if not isinstance(rate_limits, dict) or not rate_limits:
+        return current_state
+
+    windows_found: list[tuple[str, dict[str, float | int | None]]] = []
+    for key in ("primary", "secondary"):
+        normalized = _normalize_codex_rate_limit_window(rate_limits.get(key))
+        if normalized is not None:
+            windows_found.append((key, normalized))
+    if not windows_found:
+        return current_state
+
+    windows_found.sort(
+        key=lambda item: (
+            item[1].get("window_minutes") is None,
+            item[1].get("window_minutes") or 0,
+            item[0],
+        ),
+    )
+    windows: dict[str, dict[str, float | int | None]] = {
+        "short": windows_found[0][1],
+    }
+    if len(windows_found) > 1:
+        windows["long"] = windows_found[-1][1]
+
+    updated_state: dict[str, Any] = dict(current_state or {})
+    updated_state.update({
+        "kind": "rate_limits",
+        "harness": "codex",
+        "source": "transcript",
+        "updated_at": raw_entry.get("timestamp"),
+        "limit_id": rate_limits.get("limit_id"),
+        "limit_name": rate_limits.get("limit_name"),
+        "plan_type": rate_limits.get("plan_type"),
+        "credits": rate_limits.get("credits"),
+        "rate_limit_reached_type": rate_limits.get("rate_limit_reached_type"),
+        "windows": windows,
+    })
+    return current_state if updated_state == current_state else updated_state
 
 
 HARNESSES: dict[str, SessionHarness] = {

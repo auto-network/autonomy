@@ -575,6 +575,7 @@ def update_tail_state(
     entry_count: int | None = None,
     context_tokens: int | None = None,
     model: str | None = None,
+    harness_state: str | None = None,
 ) -> None:
     """TAIL step: update read position and latest content."""
     conn = get_conn()
@@ -598,6 +599,9 @@ def update_tail_state(
     if model is not None:
         parts.append("model=?")
         vals.append(model)
+    if harness_state is not None:
+        parts.append("harness_state=?")
+        vals.append(harness_state)
     if not parts:
         return
     vals.append(tmux_name)

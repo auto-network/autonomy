@@ -111,6 +111,20 @@ def test_add_and_read_round_trip(graph_db_env, example_schema):
     assert m.state == "raw"
 
 
+def test_upsert_by_key_updates_existing_row_in_place(graph_db_env, example_schema):
+    sid = ops.upsert_by_key(
+        "autonomy.test.example", 1, "foo", {"x": 1, "name": "bar"},
+    )
+    sid_again = ops.upsert_by_key(
+        "autonomy.test.example", 1, "foo", {"x": 2, "name": "baz"},
+    )
+    members = ops.read_set("autonomy.test.example")
+    assert sid_again == sid
+    assert len(members.members) == 1
+    assert members.members[0].id == sid
+    assert members.members[0].payload == {"x": 2, "name": "baz"}
+
+
 def test_add_unknown_schema_raises(graph_db_env):
     with pytest.raises(SchemaValidationError):
         ops.add_setting("unregistered.set", 1, "k", {})
