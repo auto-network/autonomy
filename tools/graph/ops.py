@@ -1151,6 +1151,7 @@ def list_journal_entries(
                 "timestamp_end": meta.get("timestamp_end", ""),
                 "entry_type": meta.get("entry_type", ""),
                 "created_at": s.get("created_at", ""),
+                "source_session_id": meta.get("source_session_id", ""),
             })
         return out
 
@@ -2946,18 +2947,22 @@ def write_journal_entry(
 
     project = data.get("project") or "autonomy"
     source_key = f"journal:{new_id()}"
+    metadata = {
+        "expanded": data.get("expanded", ""),
+        "timestamp_start": data["timestamp_start"],
+        "timestamp_end": data["timestamp_end"],
+        "entry_type": data.get("entry_type", "attention"),
+    }
+    source_session_id = data.get("source_session_id") or ""
+    if source_session_id:
+        metadata["source_session_id"] = source_session_id
     src = Source(
         type="journal",
         platform="autonomy",
         project=project,
         title=data["compact"],
         file_path=source_key,
-        metadata={
-            "expanded": data.get("expanded", ""),
-            "timestamp_start": data["timestamp_start"],
-            "timestamp_end": data["timestamp_end"],
-            "entry_type": data.get("entry_type", "attention"),
-        },
+        metadata=metadata,
         created_at=data["timestamp_start"],
     )
 
