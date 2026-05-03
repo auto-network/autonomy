@@ -23,7 +23,6 @@ import jinja2
 from agents.workspace_settings import REPO_ROOT, WorkspaceV1
 from tools.graph import ops as graph_ops
 from tools.graph.schemas.turn_correction import (
-    DEFAULT_PAYLOAD as TURN_CORRECTION_DEFAULT,
     SCHEMA_REVISION as TURN_CORRECTION_REVISION,
     SET_ID as TURN_CORRECTION_SET_ID,
     resolve_payload as resolve_turn_correction_payload,
@@ -187,27 +186,28 @@ _TURN_CORRECTION_COMMAND = (
 )
 
 
-def _read_turn_correction_setting(workspace_id: str) -> dict | None:
-    """Return the resolved Setting payload for ``workspace_id``, or ``None``.
+def _read_turn_correction_setting(config: WorkspaceV1) -> dict | None:
+    """Return the resolved Setting payload for ``config``, or ``None``.
 
-    Reads ``autonomy.workspace.turn_correction#1`` keyed by the
-    workspace id. A missing Setting is not an error — the renderer
-    falls back to :data:`DEFAULT_PAYLOAD` so primer output remains
-    useful for workspaces that have not authored a Setting yet.
+    Turn-correction policy is workspace-scoped by both owning org and
+    workspace id: the row lives in the workspace's org DB under
+    ``autonomy.workspace.turn_correction#1`` keyed by ``config.id``.
 
-    Setting reads can fail in test contexts where no graph DB is
-    pinned; we swallow those failures and treat the workspace as
-    "no Setting" rather than crash the primer render.
+    A missing Setting is not an error — the renderer falls back to the
+    schema defaults so primer output remains useful before any
+    workspace-specific row has been authored.
     """
     try:
         members = graph_ops.read_set(
             TURN_CORRECTION_SET_ID,
+            org=config.graph_project,
+            peers=[],
             target_revision=TURN_CORRECTION_REVISION,
         )
     except Exception:
         return None
-    for member in members:
-        if member.key == workspace_id:
+    for member in members.members:
+        if member.key == config.id:
             return dict(member.payload) if isinstance(member.payload, dict) \
                 else None
     return None
@@ -217,11 +217,11 @@ def _turn_correction_block(config: WorkspaceV1) -> dict:
     """Compose the turn-correction primer projection for ``config``.
 
     Resolves the ``autonomy.workspace.turn_correction#1`` Setting for
-    ``config.id``, layers it over :data:`DEFAULT_PAYLOAD`, and returns a
-    fully-populated dict the template can render without further
-    conditionals beyond the ``enabled`` switch.
+    ``(config.graph_project, config.id)``, layers it over the schema
+    defaults, and returns a fully-populated dict the template can
+    render without further conditionals beyond the ``enabled`` switch.
     """
-    raw = _read_turn_correction_setting(config.id)
+    raw = _read_turn_correction_setting(config)
     resolved = resolve_turn_correction_payload(raw)
     aggressiveness = resolved["aggressiveness"]
     instruction = (
@@ -230,10 +230,6 @@ def _turn_correction_block(config: WorkspaceV1) -> dict:
             aggressiveness, _TURN_CORRECTION_INSTRUCTIONS["balanced"]
         )
     )
-    command = (
-        resolved.get("command_hint")
-        or _TURN_CORRECTION_COMMAND
-    )
     return {
         "enabled": bool(resolved["enabled"]),
         "aggressiveness": aggressiveness,
@@ -241,7 +237,7 @@ def _turn_correction_block(config: WorkspaceV1) -> dict:
             resolved["persist_accepts_to_graph"]
         ),
         "instruction": instruction,
-        "command": command,
+        "command": _TURN_CORRECTION_COMMAND,
     }
 
 

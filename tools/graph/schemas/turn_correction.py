@@ -82,8 +82,8 @@ class TurnCorrectionSettingsV1(SettingSchema):
         "enabled": {
             "type": "boolean",
             "description": (
-                "Master switch. When false the primer omits the "
-                "turn-correction guidance block entirely."
+                "Master switch. When false the primer replaces the "
+                "detailed guidance with a short disabled note."
             ),
             "default": DEFAULT_PAYLOAD["enabled"],
         },
@@ -120,14 +120,6 @@ class TurnCorrectionSettingsV1(SettingSchema):
                 "uses the renderer's mode-specific default."
             ),
         },
-        "command_hint": {
-            "type": "string",
-            "description": (
-                "Optional override for the inline command-shape hint. "
-                "Empty/missing uses the canonical "
-                "``graph turn-correction suggest ... --json`` shape."
-            ),
-        },
     }
 
     @classmethod
@@ -161,11 +153,11 @@ class TurnCorrectionSettingsV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'persist_accepts_to_graph' must be a bool"
             )
-        for opt in ("instruction_template", "command_hint"):
-            if opt in payload and payload[opt] is not None \
-                    and not isinstance(payload[opt], str):
+        if "instruction_template" in payload \
+                and payload["instruction_template"] is not None \
+                and not isinstance(payload["instruction_template"], str):
                 raise SchemaValidationError(
-                    f"{cls.__name__}: {opt!r} must be a string or null"
+                    f"{cls.__name__}: 'instruction_template' must be a string or null"
                 )
 
 
