@@ -1669,7 +1669,13 @@ def _parse_codex_exec_end(payload: dict, timestamp: str) -> dict | list[dict] | 
         "stderr": payload.get("stderr") or "",
         "process_id": payload.get("process_id") or "",
     }
+    tc = _upconvert_turn_correction(output, timestamp, tool_id=tool_id)
     sem = _upconvert_graph_result(output, timestamp, tool_id=tool_id)
+    if tc and sem:
+        _enrich_semantic_tile(sem)
+        return [result, tc, sem]
+    if tc:
+        return [result, tc]
     if sem:
         _enrich_semantic_tile(sem)
         return [result, sem]

@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from tools.dashboard.session_harness import parse_codex_log_line as _parse_codex_line
 from tools.dashboard.session_harness import parse_claude_log_line as _parse_jsonl_entry
 
 
@@ -240,6 +241,25 @@ FIXTURE_USER_TOOL_RESULT_TURN_CORRECTION_LONG = {
          "content": _TC_LONG_JSON},
     ]},
     "timestamp": TS,
+}
+
+FIXTURE_CODEX_EXEC_END_TURN_CORRECTION = {
+    "type": "event_msg",
+    "timestamp": TS,
+    "payload": {
+        "type": "exec_command_end",
+        "call_id": "call_tc_exec",
+        "aggregated_output": _TC_SHORT_JSON + "\n",
+        "stdout": _TC_SHORT_JSON + "\n",
+        "stderr": "",
+        "exit_code": 0,
+        "status": "completed",
+        "cwd": "/workspace/repo",
+        "parsed_cmd": ["graph", "turn-correction", "suggest"],
+        "command": ["bash", "-lc", "graph turn-correction suggest ... --json"],
+        "duration": {"secs": 0, "nanos": 125_000_000},
+        "process_id": 4242,
+    },
 }
 
 FIXTURE_USER_TASK_NOTIFICATION = {
@@ -615,6 +635,18 @@ class TestTurnCorrectionUpconversion:
         assert "mode" not in tc
         assert "reason" not in tc
         assert "confidence" not in tc
+
+    def test_codex_exec_end_payload_emits_typed_event(self):
+        """Codex exec_command_end envelopes must upconvert too."""
+        result = _parse_codex_line(_line(FIXTURE_CODEX_EXEC_END_TURN_CORRECTION))
+        entries = result if isinstance(result, list) else [result]
+        tc = next((e for e in entries if e.get("type") == "turn_correction"), None)
+        assert tc is not None
+        assert tc["tool_id"] == "call_tc_exec"
+        assert tc["corrected_text"] == "JSON encoded message"
+        raw = next((e for e in entries if e.get("type") == "tool_result"), None)
+        assert raw is not None
+        assert raw["result_kind"] == "exec_command"
 
     def test_missing_required_field_skipped(self):
         """Payload without ``corrected_text`` is rejected -- no typed event."""
