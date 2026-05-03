@@ -125,7 +125,6 @@ def test_validate_accepts_full_payload():
         "aggressiveness": "aggressive",
         "persist_accepts_to_graph": True,
         "instruction_template": "Custom lead-in text.",
-        "command_hint": "graph turn-correction suggest ... --json",
     })
 
 
@@ -168,6 +167,18 @@ def test_resolve_payload_drops_explicit_none_values():
     """``None`` for an optional field means "use the default", not "set to None"."""
     resolved = resolve_payload({"aggressiveness": None})
     assert resolved["aggressiveness"] == DEFAULT_PAYLOAD["aggressiveness"]
+
+
+def test_validate_rejects_removed_command_hint_field():
+    """The canonical v1 command text is fixed by product contract.
+
+    Settings may tune wording, but they must not replace
+    ``graph turn-correction suggest ... --json`` with an arbitrary wrapper.
+    """
+    with pytest.raises(SchemaValidationError):
+        TurnCorrectionSettingsV1.validate(
+            {"command_hint": "my-wrapper turn-correction --json"}
+        )
 
 
 # ── ops round-trip ───────────────────────────────────────────
