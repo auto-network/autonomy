@@ -262,6 +262,60 @@ FIXTURE_CODEX_EXEC_END_TURN_CORRECTION = {
     },
 }
 
+FIXTURE_CODEX_EXEC_END_TURN_CORRECTION_BLANK_OUTPUT = {
+    "type": "event_msg",
+    "timestamp": TS,
+    "payload": {
+        "type": "exec_command_end",
+        "call_id": "call_tc_blank",
+        "aggregated_output": "",
+        "stdout": "",
+        "stderr": "",
+        "exit_code": 0,
+        "status": "completed",
+        "cwd": "/workspace/repo",
+        "parsed_cmd": [{"type": "unknown", "cmd": (
+            'graph turn-correction suggest "JSON encoded message" '
+            '--mode balanced --reason "dictation cleanup" --confidence 0.9 --json'
+        )}],
+        "command": [
+            "bash",
+            "-lc",
+            'graph turn-correction suggest "JSON encoded message" '
+            '--mode balanced --reason "dictation cleanup" --confidence 0.9 --json',
+        ],
+        "duration": {"secs": 0, "nanos": 125_000_000},
+        "process_id": 4243,
+    },
+}
+
+FIXTURE_CODEX_EXEC_END_TURN_CORRECTION_BLANK_STDIO = {
+    "type": "event_msg",
+    "timestamp": TS,
+    "payload": {
+        "type": "exec_command_end",
+        "call_id": "call_tc_blank_stdin",
+        "aggregated_output": "",
+        "stdout": "",
+        "stderr": "",
+        "exit_code": 0,
+        "status": "completed",
+        "cwd": "/workspace/repo",
+        "parsed_cmd": [{"type": "unknown", "cmd": (
+            "printf '%s' 'JSON encoded message' | "
+            "graph turn-correction suggest --stdin --mode balanced --json"
+        )}],
+        "command": [
+            "bash",
+            "-lc",
+            "printf '%s' 'JSON encoded message' | "
+            "graph turn-correction suggest --stdin --mode balanced --json",
+        ],
+        "duration": {"secs": 0, "nanos": 125_000_000},
+        "process_id": 4244,
+    },
+}
+
 FIXTURE_USER_TASK_NOTIFICATION = {
     "parentUuid": "ooo", "isSidechain": False, "type": "user",
     "message": {"role": "user", "content": (
@@ -647,6 +701,24 @@ class TestTurnCorrectionUpconversion:
         raw = next((e for e in entries if e.get("type") == "tool_result"), None)
         assert raw is not None
         assert raw["result_kind"] == "exec_command"
+
+    def test_codex_exec_end_blank_output_falls_back_to_command_contract(self):
+        """Blank live exec completions still upconvert from the canonical command."""
+        result = _parse_codex_line(_line(FIXTURE_CODEX_EXEC_END_TURN_CORRECTION_BLANK_OUTPUT))
+        entries = result if isinstance(result, list) else [result]
+        tc = next((e for e in entries if e.get("type") == "turn_correction"), None)
+        assert tc is not None
+        assert tc["tool_id"] == "call_tc_blank"
+        assert tc["corrected_text"] == "JSON encoded message"
+        assert tc["mode"] == "balanced"
+        assert tc["reason"] == "dictation cleanup"
+        assert tc["confidence"] == pytest.approx(0.9)
+
+    def test_codex_exec_end_blank_output_does_not_guess_stdin_payload(self):
+        """Command fallback stays conservative when the replacement text was piped via stdin."""
+        result = _parse_codex_line(_line(FIXTURE_CODEX_EXEC_END_TURN_CORRECTION_BLANK_STDIO))
+        entries = result if isinstance(result, list) else [result]
+        assert all(e.get("type") != "turn_correction" for e in entries)
 
     def test_missing_required_field_skipped(self):
         """Payload without ``corrected_text`` is rejected -- no typed event."""
