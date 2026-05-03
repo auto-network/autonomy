@@ -27,3 +27,8 @@
 .settings-page [data-testid="member-payload"] {
   white-space: pre;
 }
+
+/* Diagnostics bars feel better with a slight easing as windows change. */
+.settings-page [data-settings-bar] {
+  transition: width 160ms ease-out;
+}

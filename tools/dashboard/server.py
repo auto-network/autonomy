@@ -7352,6 +7352,44 @@ async def api_diag_settings(request):
     return JSONResponse(settings_ops.settings_api_stats_snapshot())
 
 
+async def api_diag_settings_sets(request):
+    """Storage + activity summary for Settings sets in the selected org."""
+    org = _caller_org(request)
+    resolved_org, windows, rows = _settings_diag_rows(org=org)
+    return JSONResponse({
+        "org": resolved_org,
+        "windows": windows,
+        "sets": rows,
+    })
+
+
+async def api_diag_settings_set_detail(request):
+    """Storage detail for one Settings set, including per-key footprint."""
+    set_id = request.path_params["set_id"]
+    org = _caller_org(request)
+    resolved_org, windows, rows = _settings_diag_rows(org=org)
+    summary = next((row for row in rows if row["set_id"] == set_id), None)
+    if summary is None:
+        return JSONResponse(
+            {"error": f"unknown set_id: {set_id!r}"},
+            status_code=404,
+        )
+    member_count, member_keys = _settings_member_snapshot(set_id, org=org)
+    key_rows = _settings_key_storage_rows(set_id, org=org)
+    for row in key_rows:
+        row["member_present"] = row["key"] in member_keys
+    return JSONResponse({
+        "org": resolved_org,
+        "windows": windows,
+        "set": {
+            **summary,
+            "member_count": member_count,
+            "count": member_count,
+        },
+        "keys": key_rows,
+    })
+
+
 async def api_diag_settings_mediator(request):
     """Heartbeat snapshot for the settings-mediator dispatch loop.
 
@@ -9478,10 +9516,253 @@ async def api_graph_setting_delete(request):
     return JSONResponse({"ok": True})
 
 
+def _settings_zero_activity_metrics() -> dict[str, int]:
+    return {
+        "calls": 0,
+        "reads": 0,
+        "writes": 0,
+        "upserts": 0,
+    }
+
+
+def _settings_activity_windows_for_set(
+    activity_snapshot: dict[str, Any],
+    set_id: str,
+) -> dict[str, dict[str, int]]:
+    out: dict[str, dict[str, int]] = {}
+    for window_name, window_metrics in activity_snapshot.items():
+        row = (
+            window_metrics.get(set_id)
+            if isinstance(window_metrics, dict) else None
+        )
+        merged = _settings_zero_activity_metrics()
+        if isinstance(row, dict):
+            merged.update({
+                "calls": int(row.get("calls") or 0),
+                "reads": int(row.get("reads") or 0),
+                "writes": int(row.get("writes") or 0),
+                "upserts": int(row.get("upserts") or 0),
+            })
+        out[window_name] = merged
+    return out
+
+
+def _settings_payload_size_bytes(payload: Any) -> int:
+    if payload is None:
+        return 0
+    if isinstance(payload, bytes):
+        return len(payload)
+    if isinstance(payload, str):
+        return len(payload.encode("utf-8"))
+    return len(json.dumps(payload, sort_keys=True).encode("utf-8"))
+
+
+def _settings_storage_summary_rows(
+    *,
+    org: str | None,
+) -> dict[str, dict[str, Any]]:
+    from tools.graph import settings_ops
+    from tools.graph.db import GraphDB, resolve_caller_db_path
+
+    resolved_org = settings_ops._resolve_settings_caller(org)
+    try:
+        db = GraphDB(resolve_caller_db_path(resolved_org), mode="ro")
+    except Exception:
+        return {}
+    try:
+        rows = db.conn.execute(
+            """
+            SELECT
+              set_id,
+              COUNT(*) AS stored_row_count,
+              COUNT(DISTINCT key) AS stored_key_count,
+              COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) AS payload_bytes,
+              COALESCE(SUM(CASE WHEN deprecated = 1 THEN 1 ELSE 0 END), 0)
+                AS deprecated_row_count,
+              MAX(updated_at) AS latest_updated_at
+            FROM settings
+            GROUP BY set_id
+            ORDER BY set_id
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        db.close()
+    return {
+        row["set_id"]: {
+            "stored_row_count": int(row["stored_row_count"] or 0),
+            "stored_key_count": int(row["stored_key_count"] or 0),
+            "payload_bytes": int(row["payload_bytes"] or 0),
+            "deprecated_row_count": int(row["deprecated_row_count"] or 0),
+            "latest_updated_at": row["latest_updated_at"],
+        }
+        for row in rows
+        if row["set_id"]
+    }
+
+
+def _settings_key_storage_rows(
+    set_id: str,
+    *,
+    org: str | None,
+) -> list[dict[str, Any]]:
+    from tools.graph import settings_ops
+    from tools.graph.db import GraphDB, resolve_caller_db_path
+
+    resolved_org = settings_ops._resolve_settings_caller(org)
+    try:
+        db = GraphDB(resolve_caller_db_path(resolved_org), mode="ro")
+    except Exception:
+        return []
+    try:
+        rows = db.conn.execute(
+            """
+            SELECT key, payload, publication_state, deprecated,
+                   created_at, updated_at, id
+            FROM settings
+            WHERE set_id = ?
+            ORDER BY key ASC, updated_at DESC, created_at DESC, id DESC
+            """,
+            (set_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        db.close()
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = row["key"]
+        summary = summaries.get(key)
+        if summary is None:
+            summary = {
+                "key": key,
+                "member_present": False,
+                "stored_row_count": 0,
+                "payload_bytes": 0,
+                "deprecated_row_count": 0,
+                "latest_updated_at": row["updated_at"],
+                "latest_state": row["publication_state"],
+            }
+            summaries[key] = summary
+        summary["stored_row_count"] += 1
+        summary["payload_bytes"] += _settings_payload_size_bytes(row["payload"])
+        if row["deprecated"]:
+            summary["deprecated_row_count"] += 1
+    return [summaries[key] for key in sorted(summaries)]
+
+
+def _settings_visible_set_ids(
+    *,
+    org: str | None,
+    tracked: bool,
+) -> list[str]:
+    from tools.graph import settings_ops
+
+    list_fn = graph_ops.list_set_ids if tracked else settings_ops.list_set_ids.__wrapped__
+    return list_fn(org=org)
+
+
+def _settings_member_snapshot(
+    set_id: str,
+    *,
+    org: str | None,
+) -> tuple[int, set[str]]:
+    from tools.graph import settings_ops
+
+    members = settings_ops.read_set.__wrapped__(set_id, org=org)
+    keys = {member.key for member in members.members}
+    return len(members.members), keys
+
+
+def _settings_set_summary_row(
+    set_id: str,
+    *,
+    org: str | None,
+    storage_by_set: dict[str, dict[str, Any]],
+    activity_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    member_count, _member_keys = _settings_member_snapshot(set_id, org=org)
+    storage = storage_by_set.get(set_id, {})
+    row = {
+        "set_id": set_id,
+        "count": member_count,
+        "member_count": member_count,
+        "stored_row_count": int(storage.get("stored_row_count") or 0),
+        "stored_key_count": int(storage.get("stored_key_count") or 0),
+        "payload_bytes": int(storage.get("payload_bytes") or 0),
+        "deprecated_row_count": int(storage.get("deprecated_row_count") or 0),
+        "latest_updated_at": storage.get("latest_updated_at"),
+    }
+    if activity_snapshot is not None:
+        row["activity"] = _settings_activity_windows_for_set(
+            activity_snapshot, set_id,
+        )
+    return row
+
+
+def _settings_summary_rows_for_visible_sets(
+    *,
+    org: str | None,
+    set_ids: list[str],
+) -> list[dict[str, Any]]:
+    storage_by_set = _settings_storage_summary_rows(org=org)
+    return [
+        _settings_set_summary_row(
+            set_id,
+            org=org,
+            storage_by_set=storage_by_set,
+        )
+        for set_id in set_ids
+    ]
+
+
+def _settings_diag_rows(
+    *,
+    org: str | None,
+) -> tuple[str | None, list[str], list[dict[str, Any]]]:
+    from tools.graph import settings_ops
+
+    resolved_org = settings_ops._resolve_settings_caller(org)
+    activity_snapshot = settings_ops.settings_api_set_metrics_snapshot(
+        org=resolved_org,
+    )
+    visible_set_ids = _settings_visible_set_ids(org=org, tracked=False)
+    storage_by_set = _settings_storage_summary_rows(org=org)
+    set_ids = set(visible_set_ids)
+    set_ids.update(storage_by_set)
+    for window_metrics in activity_snapshot.values():
+        if isinstance(window_metrics, dict):
+            set_ids.update(window_metrics)
+    rows = [
+        _settings_set_summary_row(
+            set_id,
+            org=org,
+            storage_by_set=storage_by_set,
+            activity_snapshot=activity_snapshot,
+        )
+        for set_id in sorted(set_ids)
+    ]
+    return resolved_org, list(activity_snapshot.keys()), rows
+
+
 async def api_graph_set_ids(request):
     """GET /api/graph/sets — list known set_ids."""
     org = _caller_org(request)
-    return JSONResponse({"set_ids": graph_ops.list_set_ids(org=org)})
+    set_ids = graph_ops.list_set_ids(org=org)
+    summary = request.query_params.get("summary", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if not summary:
+        return JSONResponse({"set_ids": set_ids})
+    return JSONResponse({
+        "set_ids": set_ids,
+        "sets": _settings_summary_rows_for_visible_sets(
+            org=org,
+            set_ids=set_ids,
+        ),
+    })
 
 
 async def api_graph_settings_migrate(request):
@@ -11185,6 +11466,8 @@ routes = [
     Route("/api/diag/client", api_diag_client, methods=["POST"]),
     Route("/api/diag/eventbus/snapshot", api_diag_eventbus_snapshot, methods=["POST"]),
     Route("/api/diag/settings", api_diag_settings),
+    Route("/api/diag/settings/sets", api_diag_settings_sets),
+    Route("/api/diag/settings/sets/{set_id}", api_diag_settings_set_detail),
     Route("/api/diag/settings_mediator", api_diag_settings_mediator),
 
     # API

@@ -138,6 +138,13 @@ class _SettingsStatsRollup:
     latency_ms: Counter[int] = field(default_factory=Counter)
     operations: Counter[str] = field(default_factory=Counter)
     set_ids: Counter[str] = field(default_factory=Counter)
+    set_reads: Counter[str] = field(default_factory=Counter)
+    set_writes: Counter[str] = field(default_factory=Counter)
+    set_upserts: Counter[str] = field(default_factory=Counter)
+    set_org_calls: Counter[tuple[str, str]] = field(default_factory=Counter)
+    set_org_reads: Counter[tuple[str, str]] = field(default_factory=Counter)
+    set_org_writes: Counter[tuple[str, str]] = field(default_factory=Counter)
+    set_org_upserts: Counter[tuple[str, str]] = field(default_factory=Counter)
     orgs: Counter[str] = field(default_factory=Counter)
 
 
@@ -244,6 +251,23 @@ class SettingsApiStats:
                 ),
             }
 
+    def set_metrics_snapshot(self, *, org: str | None = None) -> dict[str, Any]:
+        now = time.time()
+        scope = self._scope_label(org) if org is not None else None
+        with self._lock:
+            self._sweep_locked(now)
+            burst = self._aggregate_locked(self.burst_window_seconds, now)
+            recent = self._aggregate_locked(self.recent_window_seconds, now)
+            return {
+                "totals": self._render_set_metrics(self._totals, scope=scope),
+                f"last_{self.burst_window_seconds}s": self._render_set_metrics(
+                    burst, scope=scope,
+                ),
+                f"last_{self.recent_window_seconds}s": self._render_set_metrics(
+                    recent, scope=scope,
+                ),
+            }
+
     @staticmethod
     def _scope_label(org: str | None) -> str:
         return str(org) if org else _DEFAULT_SCOPE_LABEL
@@ -275,6 +299,16 @@ class SettingsApiStats:
         rollup.orgs[org] += 1
         if set_id:
             rollup.set_ids[set_id] += 1
+            rollup.set_org_calls[(org, set_id)] += 1
+            if kind == "read":
+                rollup.set_reads[set_id] += 1
+                rollup.set_org_reads[(org, set_id)] += 1
+            elif kind == "write":
+                rollup.set_writes[set_id] += 1
+                rollup.set_org_writes[(org, set_id)] += 1
+                if operation == "upsert_by_key":
+                    rollup.set_upserts[set_id] += 1
+                    rollup.set_org_upserts[(org, set_id)] += 1
 
     def _sweep_locked(self, now: float) -> None:
         cutoff = now - self.retention_seconds
@@ -298,6 +332,13 @@ class SettingsApiStats:
             out.latency_ms.update(bucket.latency_ms)
             out.operations.update(bucket.operations)
             out.set_ids.update(bucket.set_ids)
+            out.set_reads.update(bucket.set_reads)
+            out.set_writes.update(bucket.set_writes)
+            out.set_upserts.update(bucket.set_upserts)
+            out.set_org_calls.update(bucket.set_org_calls)
+            out.set_org_reads.update(bucket.set_org_reads)
+            out.set_org_writes.update(bucket.set_org_writes)
+            out.set_org_upserts.update(bucket.set_org_upserts)
             out.orgs.update(bucket.orgs)
         return out
 
@@ -343,7 +384,13 @@ class SettingsApiStats:
                 for key in sorted(rollup.operations)
             },
             "top_sets": [
-                {"set_id": set_id, "calls": count}
+                {
+                    "set_id": set_id,
+                    "calls": count,
+                    "reads": rollup.set_reads.get(set_id, 0),
+                    "writes": rollup.set_writes.get(set_id, 0),
+                    "upserts": rollup.set_upserts.get(set_id, 0),
+                }
                 for set_id, count in rollup.set_ids.most_common(
                     _STATS_TOP_LIMIT,
                 )
@@ -359,12 +406,50 @@ class SettingsApiStats:
             )
         return out
 
+    @staticmethod
+    def _render_set_metrics(
+        rollup: _SettingsStatsRollup,
+        *,
+        scope: str | None,
+    ) -> dict[str, dict[str, int]]:
+        if scope is None:
+            set_ids = sorted(rollup.set_ids)
+            return {
+                set_id: {
+                    "calls": rollup.set_ids.get(set_id, 0),
+                    "reads": rollup.set_reads.get(set_id, 0),
+                    "writes": rollup.set_writes.get(set_id, 0),
+                    "upserts": rollup.set_upserts.get(set_id, 0),
+                }
+                for set_id in set_ids
+            }
+        set_ids = sorted({
+            set_id for (org_name, set_id) in rollup.set_org_calls
+            if org_name == scope
+        })
+        return {
+            set_id: {
+                "calls": rollup.set_org_calls.get((scope, set_id), 0),
+                "reads": rollup.set_org_reads.get((scope, set_id), 0),
+                "writes": rollup.set_org_writes.get((scope, set_id), 0),
+                "upserts": rollup.set_org_upserts.get((scope, set_id), 0),
+            }
+            for set_id in set_ids
+        }
+
 
 _SETTINGS_API_STATS = SettingsApiStats()
 
 
 def settings_api_stats_snapshot() -> dict[str, Any]:
     return _SETTINGS_API_STATS.snapshot()
+
+
+def settings_api_set_metrics_snapshot(
+    *,
+    org: str | None = None,
+) -> dict[str, Any]:
+    return _SETTINGS_API_STATS.set_metrics_snapshot(org=org)
 
 
 def reset_settings_api_stats() -> None:

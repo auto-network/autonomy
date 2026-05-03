@@ -115,7 +115,30 @@ def test_get_set_ids(graph_db_env, example_schema, client):
     ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
     r = client.get("/api/graph/sets")
     assert r.status_code == 200
-    assert "autonomy.test.api" in r.json()["set_ids"]
+    body = r.json()
+    assert "autonomy.test.api" in body["set_ids"]
+    assert "sets" not in body
+
+
+def test_get_set_ids_summary(graph_db_env, example_schema, client):
+    base = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    ops.override_setting(base, {"label": "edited"})
+    r = client.get("/api/graph/sets?summary=1")
+    assert r.status_code == 200
+    body = r.json()
+    assert "autonomy.test.api" in body["set_ids"]
+    row = next(
+        item for item in body["sets"]
+        if item["set_id"] == "autonomy.test.api"
+    )
+    assert row["set_id"] == "autonomy.test.api"
+    assert row["count"] == 1
+    assert row["member_count"] == 1
+    assert row["stored_row_count"] == 2
+    assert row["stored_key_count"] == 1
+    assert row["deprecated_row_count"] == 0
+    assert row["payload_bytes"] > 0
+    assert row["latest_updated_at"] is not None
 
 
 # ── Read flag plumbing ─────────────────────────────────────
@@ -353,7 +376,13 @@ def test_diag_settings_counts_direct_and_http_traffic(
     }
     assert body["last_60s"]["calls"] == 3
     assert body["last_60s"]["top_sets"] == [
-        {"set_id": "autonomy.test.api", "calls": 3},
+        {
+            "set_id": "autonomy.test.api",
+            "calls": 3,
+            "reads": 2,
+            "writes": 1,
+            "upserts": 0,
+        },
     ]
     assert body["last_call"]["operation"] == "read_set"
     assert body["last_call"]["set_id"] == "autonomy.test.api"
@@ -406,3 +435,45 @@ def test_diag_settings_latency_percentiles(graph_db_env, client):
         "p95": 40,
         "p99": 40,
     }
+
+
+def test_diag_settings_sets_summary_and_detail(
+    graph_db_env, example_schema, client,
+):
+    settings_ops.reset_settings_api_stats()
+    base = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    ops.override_setting(base, {"label": "edited"})
+    r = client.get("/api/graph/settings/autonomy.test.api")
+    assert r.status_code == 200
+
+    summary = client.get("/api/diag/settings/sets")
+    assert summary.status_code == 200
+    body = summary.json()
+    assert body["windows"] == ["totals", "last_10s", "last_60s"]
+    row = next(
+        item for item in body["sets"]
+        if item["set_id"] == "autonomy.test.api"
+    )
+    assert row["member_count"] == 1
+    assert row["stored_row_count"] == 2
+    assert row["stored_key_count"] == 1
+    assert row["payload_bytes"] > 0
+    assert row["activity"]["totals"] == {
+        "calls": 3,
+        "reads": 1,
+        "writes": 2,
+        "upserts": 0,
+    }
+
+    detail = client.get("/api/diag/settings/sets/autonomy.test.api")
+    assert detail.status_code == 200
+    detail_body = detail.json()
+    assert detail_body["set"]["set_id"] == "autonomy.test.api"
+    assert detail_body["set"]["member_count"] == 1
+    assert len(detail_body["keys"]) == 1
+    key_row = detail_body["keys"][0]
+    assert key_row["key"] == "k"
+    assert key_row["member_present"] is True
+    assert key_row["stored_row_count"] == 2
+    assert key_row["payload_bytes"] > 0
+    assert key_row["latest_state"] == "raw"
