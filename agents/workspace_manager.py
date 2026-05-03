@@ -37,6 +37,7 @@ import logging
 import re
 import shutil
 import subprocess
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -1250,6 +1251,30 @@ def _delete_branch(clone: Path, branch: str) -> None:
         )
 
 
+def _log_worktree_removed(path: Path | str, *, method: str) -> None:
+    """Log a worktree-directory removal at INFO with a caller stack snippet.
+
+    Every code path that deletes a worktree under ``data/worktrees/`` MUST
+    log via this helper (or call something that does). The stack snippet
+    makes it possible to attribute a missing-worktree incident to a
+    specific call site months after the fact — without it, a silent
+    deletion path leaves no audit trail and root-causing requires
+    re-instrumenting every caller. See the 2026-05-02 auto-0502-123849
+    incident for the original motivation.
+    """
+    # Trim the immediate frame (this helper) and any internal trampoline
+    # so the first non-noise frame the operator sees is the deletion call.
+    stack = traceback.extract_stack()[:-1]
+    # Keep the last 4 frames — caller chain is short for these helpers
+    # and 4 is enough to identify both the workspace_manager function
+    # and the upstream API/dispatcher entry point.
+    chain = " ← ".join(f"{f.name}@{Path(f.filename).name}:{f.lineno}" for f in stack[-4:])
+    logger.info(
+        "workspace cleanup: REMOVED %s  method=%s  caller=%s",
+        path, method, chain,
+    )
+
+
 def _worktree_remove(clone: Path, worktree: Path) -> tuple[bool, str]:
     """``git worktree remove --force`` from the managed clone. Returns (ok, err)."""
     rc, _, err = _git_output(
@@ -1257,6 +1282,8 @@ def _worktree_remove(clone: Path, worktree: Path) -> tuple[bool, str]:
         clone,
         timeout=30,
     )
+    if rc == 0:
+        _log_worktree_removed(worktree, method="git-worktree-remove")
     return rc == 0, err.strip()
 
 
@@ -1321,6 +1348,7 @@ def cleanup_session_worktrees(
             # Stale worktree with no resolvable clone — remove the directory.
             try:
                 shutil.rmtree(entry)
+                _log_worktree_removed(entry, method="rmtree-no-clone")
                 result.removed.append(str(entry))
             except OSError as e:
                 result.errors.append((str(entry), f"rmtree: {e}"))
@@ -1333,6 +1361,7 @@ def cleanup_session_worktrees(
             if entry.exists():
                 try:
                     shutil.rmtree(entry)
+                    _log_worktree_removed(entry, method="rmtree-fallback")
                 except OSError as e:
                     result.errors.append((str(entry), f"remove failed: {err}; rmtree: {e}"))
                     continue
@@ -1354,6 +1383,7 @@ def cleanup_session_worktrees(
         if not remaining:
             try:
                 session_dir.rmdir()
+                _log_worktree_removed(session_dir, method="rmdir-empty-parent")
             except OSError as e:
                 result.errors.append((str(session_dir), f"rmdir: {e}"))
 
@@ -1412,6 +1442,7 @@ def cleanup_session_worktree(
     if clone is None:
         try:
             shutil.rmtree(entry)
+            _log_worktree_removed(entry, method="rmtree-no-clone")
             result.removed.append(str(entry))
         except OSError as e:
             result.errors.append((str(entry), f"rmtree: {e}"))
@@ -1422,6 +1453,7 @@ def cleanup_session_worktree(
             if entry.exists():
                 try:
                     shutil.rmtree(entry)
+                    _log_worktree_removed(entry, method="rmtree-fallback")
                 except OSError as e:
                     result.errors.append((str(entry), f"remove failed: {err}; rmtree: {e}"))
                     return result
@@ -1443,6 +1475,7 @@ def cleanup_session_worktree(
         if not remaining:
             try:
                 session_dir.rmdir()
+                _log_worktree_removed(session_dir, method="rmdir-empty-parent")
             except OSError as e:
                 result.errors.append((str(session_dir), f"rmdir: {e}"))
 
