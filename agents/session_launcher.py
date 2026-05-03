@@ -1,4 +1,4 @@
-"""Unified session launcher for all Claude agent containers.
+"""Unified session launcher for all agent containers.
 
 All four launch paths (dispatch, librarian, chatwith, terminal) go through
 launch_session(), which handles:
@@ -374,7 +374,7 @@ def launch_session(
     harness: str = "claude",
     extra_env: dict | None = None,
     output_dir: str | None = None,
-    model: str = DEFAULT_OPUS_MODEL,
+    model: str | None = None,
     global_claude_md: Path | str | None = None,
     resume_uuid: str | None = None,
     privileged: bool = False,
@@ -390,7 +390,7 @@ def launch_session(
     Args:
         session_type: "dispatch" | "librarian" | "chatwith" | "terminal"
         name: Container name (used in .session_meta.json and as label)
-        prompt: Prompt text for --print batch mode. None for interactive sessions.
+        prompt: Prompt text for a non-interactive run. None for interactive sessions.
         mounts: Extra volume mounts {host_path: "container_path[:mode]"}.
                 Entries whose container path matches a default override it.
         metadata: Extra fields merged into .session_meta.json
@@ -400,13 +400,15 @@ def launch_session(
                         shell-safe string for the caller to pass to tmux.
         image: Docker image to use.
         working_dir: Working directory inside the container.
-        harness: Interactive CLI to launch inside the container. ``claude``
-                    remains the default; ``codex`` is currently supported
-                    only for prompt-less interactive sessions.
+        harness: Agent CLI to launch inside the container. ``claude``
+                    remains the default; ``codex`` is also supported for
+                    interactive and non-interactive runs.
         extra_env: Additional environment variables {key: value}.
         output_dir: Pre-created output directory. If None, a new directory under
                     data/agent-runs/ is created using name + UTC timestamp.
-        model: Claude model to pass via --model flag. Defaults to DEFAULT_OPUS_MODEL.
+        model: Optional model id to pass to the selected harness. When omitted,
+                    Claude uses DEFAULT_OPUS_MODEL and Codex uses its own
+                    configured default.
         global_claude_md: Host path to mount as the Claude global user-level
                     CLAUDE.md (~/.claude/CLAUDE.md) inside the container.
                     None (default) skips the mount.
@@ -448,6 +450,7 @@ def launch_session(
             file=sys.stderr,
         )
         return None
+    resolved_model = model or (DEFAULT_OPUS_MODEL if harness == "claude" else None)
 
     # ── Credentials ───────────────────────────────────────────
     # Claude sessions need host auth injected into the container. Codex
@@ -671,17 +674,43 @@ def launch_session(
     # Write prompt to file instead of passing on command line — avoids the
     # prompt text appearing in /proc/cmdline where pkill -f can match it.
     if prompt is not None:
-        if harness != "claude":
-            print(
-                f"  ERROR: prompt mode is only implemented for Claude sessions "
-                f"('{name}')",
-                file=sys.stderr,
-            )
-            return None
         prompt_file = run_dir / ".prompt.md"
         prompt_file.write_text(prompt)
-        resume_flag = f" --resume {resume_uuid}" if resume_uuid else ""
-        shell_cmd = f"cat /workspace/output/.prompt.md | claude --dangerously-skip-permissions --model {model}{resume_flag} -p"
+        prompt_pipe = "cat /workspace/output/.prompt.md | "
+        if harness == "claude":
+            resume_flag = (
+                f" --resume {shlex.quote(resume_uuid)}"
+                if resume_uuid else ""
+            )
+            shell_cmd = (
+                f"{prompt_pipe}claude --dangerously-skip-permissions "
+                f"--model {shlex.quote(resolved_model or DEFAULT_OPUS_MODEL)}"
+                f"{resume_flag} -p"
+            )
+        else:
+            if resume_uuid:
+                m = re.search(
+                    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+                    resume_uuid,
+                )
+                codex_cmd = [
+                    "codex",
+                    "exec",
+                    "resume",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    m.group(1) if m else resume_uuid,
+                    "-",
+                ]
+            else:
+                codex_cmd = [
+                    "codex",
+                    "exec",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "-",
+                ]
+            if resolved_model:
+                codex_cmd[3:3] = ["--model", resolved_model]
+            shell_cmd = prompt_pipe + shlex.join(codex_cmd)
         if privileged:
             # Keep the dind wrapper entrypoint so /startup.sh still runs.
             cmd += [image, "sh", "-c", shell_cmd]
@@ -690,9 +719,20 @@ def launch_session(
     else:
         if harness == "claude":
             if privileged:
-                cmd += [image, "claude", "--dangerously-skip-permissions", "--model", model]
+                cmd += [
+                    image,
+                    "claude",
+                    "--dangerously-skip-permissions",
+                    "--model",
+                    resolved_model or DEFAULT_OPUS_MODEL,
+                ]
             else:
-                cmd += [image, "--dangerously-skip-permissions", "--model", model]
+                cmd += [
+                    image,
+                    "--dangerously-skip-permissions",
+                    "--model",
+                    resolved_model or DEFAULT_OPUS_MODEL,
+                ]
             if resume_uuid:
                 cmd += ["--resume", resume_uuid]
         else:
@@ -701,6 +741,8 @@ def launch_session(
                 "--no-alt-screen",
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
+            if resolved_model:
+                codex_args += ["--model", resolved_model]
             if resume_uuid:
                 # Dashboard stores the rollout filename stem
                 # (rollout-YYYY-MM-DDTHH-MM-SS-<uuid>) as session_uuid for

@@ -14,6 +14,7 @@ Usage:
         --output-dir /path/to/output \
         --image autonomy-agent \
         [--detach]
+        [--harness claude|codex]
 
 Prints to stdout (parseable by bash):
     CONTAINER_ID=<id>       (detach mode)
@@ -30,7 +31,7 @@ from agents.session_launcher import launch_session, DEFAULT_IMAGE, DEFAULT_OPUS_
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Launch a Claude agent session container")
+    parser = argparse.ArgumentParser(description="Launch an agent session container")
     parser.add_argument("--session-type", default="dispatch",
                         choices=["dispatch", "librarian", "chatwith", "terminal"])
     parser.add_argument("--name", required=True, help="Container name")
@@ -40,7 +41,9 @@ def main() -> int:
     parser.add_argument("--git-dir", default="", help="Git dir path (absolute, same on host+container)")
     parser.add_argument("--output-dir", default="", help="Pre-created output directory")
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Docker image")
-    parser.add_argument("--model", default=DEFAULT_OPUS_MODEL, help="Claude model to use")
+    parser.add_argument("--model", default="", help="Optional model override")
+    parser.add_argument("--harness", default="claude", choices=["claude", "codex"],
+                        help="Harness to launch inside the container")
     parser.add_argument("--detach", action="store_true", help="Run container in background")
     parser.add_argument("--graph-project", default="",
                         help="Graph scope (GRAPH_SCOPE env + .session_meta.json field)")
@@ -88,7 +91,8 @@ def main() -> int:
             detach=True,
             image=args.image,
             output_dir=output_dir,
-            model=args.model,
+            harness=args.harness,
+            model=args.model or None,
         )
         if not container_id:
             return 1
@@ -110,8 +114,8 @@ def main() -> int:
         )
         from datetime import datetime, timezone
 
-        creds = _resolve_credentials()
-        if creds is None:
+        creds = _resolve_credentials() if args.harness == "claude" else None
+        if args.harness == "claude" and creds is None:
             print("ERROR: No Claude credentials found", file=sys.stderr)
             return 1
 
@@ -131,6 +135,7 @@ def main() -> int:
             "type": args.session_type,
             "container_name": args.name,
             "launched_at": datetime.now(timezone.utc).isoformat(),
+            "harness": args.harness,
         }
         if metadata:
             meta_doc.update(metadata)
@@ -140,16 +145,22 @@ def main() -> int:
                     meta_doc["graph_org"] = gp
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
 
-        auth_args = _setup_auth_docker_args(creds, run_dir)
-        if auth_args is None:
-            return 1
+        auth_args: list[str] = []
+        if creds is not None:
+            auth_args = _setup_auth_docker_args(creds, run_dir)
+            if auth_args is None:
+                return 1
 
         mounts = {
             str(REPO_ROOT): "/workspace/repo:ro",
             str(REPO_ROOT / "data" / "graph.db"): "/home/agent/graph.db",
             str(REPO_ROOT / ".beads"): "/data/.beads",
             str(run_dir): "/workspace/output",
-            str(sessions_dir): "/home/agent/.claude/projects",
+            str(sessions_dir): (
+                "/home/agent/.codex/sessions"
+                if args.harness == "codex"
+                else "/home/agent/.claude/projects"
+            ),
         }
         if args.worktree:
             # Remove default repo mount, add writable worktree
@@ -180,11 +191,39 @@ def main() -> int:
             cmd.extend(["-v", f"{host_path}:{container_spec}"])
         cmd.extend(["-w", "/workspace/repo"])
 
+        resolved_model = args.model or (
+            DEFAULT_OPUS_MODEL if args.harness == "claude" else ""
+        )
+
         if prompt is not None:
-            cmd += ["--entrypoint", "claude", args.image,
-                    "--dangerously-skip-permissions", "--model", args.model, "--print", prompt]
+            prompt_in_output = run_dir / ".prompt.md"
+            prompt_in_output.write_text(prompt)
+            if args.harness == "claude":
+                shell_cmd = (
+                    "cat /workspace/output/.prompt.md | "
+                    f"claude --dangerously-skip-permissions --model "
+                    f"{shlex.quote(resolved_model)} -p"
+                )
+                cmd += ["--entrypoint", "sh", args.image, "-c", shell_cmd]
+            else:
+                codex_cmd = [
+                    "codex",
+                    "exec",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                ]
+                if resolved_model:
+                    codex_cmd += ["--model", resolved_model]
+                codex_cmd += ["-"]
+                shell_cmd = "cat /workspace/output/.prompt.md | " + shlex.join(codex_cmd)
+                cmd += ["--entrypoint", "sh", args.image, "-c", shell_cmd]
         else:
-            cmd += [args.image, "--dangerously-skip-permissions", "--model", args.model]
+            if args.harness == "claude":
+                cmd += [args.image, "--dangerously-skip-permissions", "--model", resolved_model]
+            else:
+                cmd += ["--entrypoint", "codex", args.image,
+                        "--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox"]
+                if resolved_model:
+                    cmd += ["--model", resolved_model]
 
         result = subprocess.run(cmd)
 

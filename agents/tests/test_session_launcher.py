@@ -171,16 +171,69 @@ def test_codex_interactive_does_not_require_claude_credentials(
     assert "codex" in cmd
 
 
-def test_codex_resume_not_supported_yet(
+def test_codex_interactive_resume_uses_resume_uuid(
     tmp_path, fake_creds, fake_crosstalk, captured_run,
 ):
     out = _run(
         output_dir=str(tmp_path / "run"),
         harness="codex",
-        resume_uuid="session-123",
+        resume_uuid="rollout-2026-05-02T20-00-00-12345678-1234-1234-1234-123456789abc",
     )
-    assert out is None
-    assert captured_run == []
+    assert out == "fake-container-id"
+    cmd = captured_run[0]
+    assert "resume" in cmd
+    assert "12345678-1234-1234-1234-123456789abc" in cmd
+
+
+def test_codex_noninteractive_uses_exec(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    _run(
+        output_dir=str(tmp_path / "run"),
+        harness="codex",
+        image="autonomy-agent:dashboard",
+        prompt="Write a summary.",
+        model=None,
+    )
+    cmd = captured_run[0]
+    assert "--entrypoint" in cmd
+    assert "sh" in cmd
+    shell_cmd = cmd[-1]
+    assert "cat /workspace/output/.prompt.md | codex exec" in shell_cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in shell_cmd
+    assert "--model" not in shell_cmd
+
+
+def test_codex_noninteractive_does_not_require_claude_credentials(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch,
+):
+    monkeypatch.setattr(session_launcher, "_resolve_credentials", lambda: None)
+    out = _run(
+        output_dir=str(tmp_path / "run"),
+        harness="codex",
+        image="autonomy-agent:dashboard",
+        prompt="Open the workspace and inspect files.",
+        model=None,
+    )
+    assert out == "fake-container-id"
+    shell_cmd = captured_run[0][-1]
+    assert "codex exec" in shell_cmd
+
+
+def test_codex_noninteractive_resume_uses_exec_resume(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    _run(
+        output_dir=str(tmp_path / "run"),
+        harness="codex",
+        prompt="Continue the run and write the result.",
+        resume_uuid="rollout-2026-05-02T20-00-00-12345678-1234-1234-1234-123456789abc",
+        model="gpt-5.4",
+    )
+    shell_cmd = captured_run[0][-1]
+    assert "codex exec resume" in shell_cmd
+    assert "12345678-1234-1234-1234-123456789abc" in shell_cmd
+    assert "--model gpt-5.4" in shell_cmd
 
 
 # ── Hardcoded license overlay removed (replaced by artifacts mechanism) ──────
