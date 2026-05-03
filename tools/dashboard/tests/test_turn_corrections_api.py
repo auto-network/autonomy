@@ -646,33 +646,6 @@ def test_session_monitor_prefers_cleanest_nearby_candidate_over_nearest_prior(te
     assert dashboard_db.get_turn_correction(SESSION_UUID, "msg-nearest") is None
 
 
-def test_session_monitor_out_of_order_tail_pass_can_bind_to_following_user_turn(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-    entries = [
-        {
-            "type": "turn_correction",
-            "corrected_text": "JSON encoded",
-            "timestamp": "2026-05-03T08:57:01.000Z",
-        },
-        {
-            "type": "user",
-            "content": "Jason encoded",
-            "message_id": "msg-1",
-            "timestamp": "2026-05-03T08:57:02.000Z",
-        },
-    ]
-
-    SessionMonitor._persist_turn_corrections(row, ts, entries)
-
-    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
-    assert stored is not None
-    assert stored["original_sha256"] == _sha("Jason encoded")
-    assert stored["corrected_text"] == "JSON encoded"
-
-
 def test_session_monitor_skips_stale_recent_history_candidates(test_app):
     from tools.dashboard.session_monitor import SessionMonitor, _TailState
 
@@ -700,6 +673,84 @@ def test_session_monitor_skips_stale_recent_history_candidates(test_app):
     )
 
     assert dashboard_db.get_turn_correction(SESSION_UUID, "msg-1") is None
+
+
+def test_session_monitor_limits_matching_to_last_five_live_user_messages(test_app):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+
+    SessionMonitor._persist_turn_corrections(row, ts, [
+        {
+            "type": "user",
+            "content": "message zero with the original typo",
+            "message_id": "msg-0",
+            "timestamp": "2026-05-03T08:57:00.000Z",
+        },
+        {
+            "type": "user",
+            "content": "message one filler",
+            "message_id": "msg-1",
+            "timestamp": "2026-05-03T08:57:01.000Z",
+        },
+        {
+            "type": "user",
+            "content": "message two filler",
+            "message_id": "msg-2",
+            "timestamp": "2026-05-03T08:57:02.000Z",
+        },
+        {
+            "type": "user",
+            "content": "message three filler",
+            "message_id": "msg-3",
+            "timestamp": "2026-05-03T08:57:03.000Z",
+        },
+        {
+            "type": "user",
+            "content": "message four filler",
+            "message_id": "msg-4",
+            "timestamp": "2026-05-03T08:57:04.000Z",
+        },
+        {
+            "type": "user",
+            "content": "message five filler",
+            "message_id": "msg-5",
+            "timestamp": "2026-05-03T08:57:05.000Z",
+        },
+    ])
+    SessionMonitor._persist_turn_corrections(
+        row,
+        ts,
+        [{
+            "type": "turn_correction",
+            "corrected_text": "message zero with the original fix",
+            "timestamp": "2026-05-03T08:57:06.000Z",
+        }],
+    )
+
+    assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
+
+
+def test_session_monitor_history_replay_does_not_warm_live_user_deque(test_app):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+
+    SessionMonitor._persist_turn_corrections(
+        row,
+        ts,
+        [{
+            "type": "user",
+            "content": "Jason encoded",
+            "message_id": "msg-1",
+            "timestamp": "2026-05-03T08:57:01.000Z",
+        }],
+        remember_users=False,
+    )
+
+    assert list(ts.recent_user_turns) == []
 
 
 def test_session_monitor_persists_codex_event_message_correction_without_raw_uuid(test_app):
