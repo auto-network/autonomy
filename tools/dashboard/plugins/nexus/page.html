@@ -1,6 +1,6 @@
 <div x-data="nexus()"
      data-testid="nexus-fragment-root"
-     class="nexus-page bg-gray-900 text-gray-200 antialiased min-h-screen flex flex-col">
+     class="nexus-page bg-gray-900 text-gray-200 antialiased">
 
 <style>
   /* Local: per-zone scrollbars stay subtle in the dark theme. Tailwind covers the rest. */
@@ -16,7 +16,7 @@
 </style>
 
   <!-- ========== ZONE 1 — BANNER + ANCHOR + DIMENSIONS ========== -->
-  <header class="sticky top-0 z-20 bg-gray-900 border-b border-gray-800" data-testid="nx-banner">
+  <header class="bg-gray-900 border-b border-gray-800" data-testid="nx-banner">
     <div class="max-w-7xl mx-auto px-6 pt-5 pb-4">
 
       <div class="flex items-baseline justify-between gap-4">
@@ -353,7 +353,7 @@ const row = await W.read(id);</code></pre>
 
   </main>
 
-  <footer class="border-t border-gray-800 mt-6 py-4 text-center text-[11px] text-gray-500">
+  <footer class="border-t border-gray-800 py-4 text-center text-[11px] text-gray-500">
     Settings Nexus — anchor: <code class="text-indigo-400">graph://cddb1c00-6a4</code>
     <span x-show="scene.presenter">· scene driven by <code class="text-gray-300" x-text="scene.presenter"></code></span>
     · the page is itself a no-backend frontend
