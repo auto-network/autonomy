@@ -47,12 +47,15 @@ function renderMd(md) {
 
 // ── API Helpers ──────────────────────────────────────────────
 
-// Plugin install-org context. While a plugin's page is rendered,
-// `Autonomy._activePluginOrg` is set to the plugin's effective org so
-// every same-document `api()` / `Autonomy.fetch()` call carries the
-// `X-Graph-Org` header. Cleared on every `route()` call before the new
-// fragment renders, so non-plugin routes never inherit a stale value.
+// Graph org context. The shell carries a default graph org from the
+// rendered HTML, and plugin pages may temporarily override it while a
+// plugin fragment is active. Every same-document `api()` /
+// `Autonomy.fetch()` call should carry the effective org so generic
+// Settings reads work on shell pages too.
 window.Autonomy = window.Autonomy || {};
+window.Autonomy._defaultOrg = (
+  document.querySelector('meta[name="graph-org"]')?.content || null
+);
 window.Autonomy._activePluginOrg = null;
 // Active plugin id during a plugin's page render. Set alongside
 // ``_activePluginOrg`` in ``renderPluginFragment``; consumed by
@@ -67,7 +70,7 @@ async function api(path) {
 }
 
 function _withPluginOrgHeader(opts) {
-  const org = window.Autonomy._activePluginOrg;
+  const org = window.Autonomy._activePluginOrg || window.Autonomy._defaultOrg;
   if (!org) return opts || undefined;
   const init = Object.assign({}, opts || {});
   const headers = new Headers(init.headers || {});

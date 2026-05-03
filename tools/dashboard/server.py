@@ -5718,7 +5718,9 @@ def _load_template(name: str) -> str:
     # Render via Jinja so {% include %} partials are expanded; the static
     # version token stays a literal marker Jinja leaves untouched.
     content = templates.env.get_template(name).render()
-    return content.replace("__STATIC_VERSION__", _static_version())
+    return (content
+            .replace("__STATIC_VERSION__", _static_version())
+            .replace("__DEFAULT_GRAPH_ORG__", os.environ.get("GRAPH_SCOPE", "")))
 
 
 async def api_version(request):
