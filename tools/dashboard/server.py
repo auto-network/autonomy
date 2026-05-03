@@ -140,6 +140,15 @@ from tools.graph import surface as _surface  # noqa: E402, F401
 # ``graph://1ba4d2e0-c5f``).
 from tools.dashboard import surface_actions as _surface_actions  # noqa: E402, F401
 
+# Settings Nexus plugin schemas (bead auto-ct3ey) — imported eagerly so
+# ``dashboard.nexus.scene#1`` + ``dashboard.nexus.tile#1`` are in the
+# registry before ``flush_schema_meta`` runs on the first writable
+# GraphDB connection. The plugin loader also imports the module via the
+# manifest's ``entrypoints.schemas`` list, but that import runs *after*
+# this top-level reference; the explicit import is the contract per
+# pitfall ``graph://3fe60c25-fab``.
+from tools.dashboard.plugins.nexus.entrypoints import schemas as _nexus_schemas  # noqa: E402, F401
+
 # Load every valid plugin (regardless of Setting state) so route
 # registration covers plugins that operators may flip on at runtime.
 # Per-request handlers gate via ``_plugin_enabled_map``; plugins
