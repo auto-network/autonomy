@@ -13,8 +13,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import threading
+import time
+from collections import Counter
 from dataclasses import dataclass, field, asdict, replace
+from functools import wraps
 from typing import Any, Callable, Generic, Iterator, TypeVar
 from uuid import uuid4
 
@@ -110,6 +115,298 @@ def _call_emit_hook(
             operation, snapshot.get("set_id"), snapshot.get("key"),
             exc_info=True,
         )
+
+
+# ── Throughput stats ────────────────────────────────────────
+
+
+_DEFAULT_SCOPE_LABEL = "(default)"
+_STATS_BURST_WINDOW_SECONDS = 10
+_STATS_RECENT_WINDOW_SECONDS = 60
+_STATS_RETENTION_SECONDS = 300
+_STATS_TOP_LIMIT = 10
+
+
+@dataclass
+class _SettingsStatsRollup:
+    calls: int = 0
+    reads: int = 0
+    writes: int = 0
+    errors: int = 0
+    result_count: int = 0
+    total_duration_ms: float = 0.0
+    latency_ms: Counter[int] = field(default_factory=Counter)
+    operations: Counter[str] = field(default_factory=Counter)
+    set_ids: Counter[str] = field(default_factory=Counter)
+    orgs: Counter[str] = field(default_factory=Counter)
+
+
+@dataclass
+class _SettingsStatsBucket(_SettingsStatsRollup):
+    second: int = 0
+
+
+class SettingsApiStats:
+    """Cheap process-local counters for Settings throughput visibility."""
+
+    burst_window_seconds = _STATS_BURST_WINDOW_SECONDS
+    recent_window_seconds = _STATS_RECENT_WINDOW_SECONDS
+    retention_seconds = _STATS_RETENTION_SECONDS
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self) -> None:
+        now = time.time()
+        with self._lock:
+            self._started_at = now
+            self._totals = _SettingsStatsRollup()
+            self._buckets: dict[int, _SettingsStatsBucket] = {}
+            self._last_call: dict[str, Any] | None = None
+            self._last_error: dict[str, Any] | None = None
+
+    def record(
+        self,
+        *,
+        operation: str,
+        set_id: str | None,
+        org: str | None,
+        kind: str,
+        ok: bool,
+        duration_ms: float,
+        result_count: int = 0,
+    ) -> None:
+        now = time.time()
+        second = int(now)
+        scope = self._scope_label(org)
+        count = max(int(result_count), 0)
+        call = {
+            "ts": now,
+            "operation": operation,
+            "set_id": set_id,
+            "org": scope,
+            "kind": kind,
+            "ok": bool(ok),
+            "duration_ms": round(float(duration_ms), 3),
+            "result_count": count,
+        }
+        with self._lock:
+            self._sweep_locked(now)
+            bucket = self._buckets.get(second)
+            if bucket is None:
+                bucket = _SettingsStatsBucket(second=second)
+                self._buckets[second] = bucket
+            self._apply_rollup(
+                self._totals,
+                operation=operation,
+                set_id=set_id,
+                org=scope,
+                kind=kind,
+                ok=ok,
+                duration_ms=duration_ms,
+                result_count=count,
+            )
+            self._apply_rollup(
+                bucket,
+                operation=operation,
+                set_id=set_id,
+                org=scope,
+                kind=kind,
+                ok=ok,
+                duration_ms=duration_ms,
+                result_count=count,
+            )
+            self._last_call = call
+            if not ok:
+                self._last_error = dict(call)
+
+    def snapshot(self) -> dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            self._sweep_locked(now)
+            burst = self._aggregate_locked(self.burst_window_seconds, now)
+            recent = self._aggregate_locked(self.recent_window_seconds, now)
+            return {
+                "started_at": self._started_at,
+                "now": now,
+                "burst_window_seconds": self.burst_window_seconds,
+                "recent_window_seconds": self.recent_window_seconds,
+                "retention_seconds": self.retention_seconds,
+                "last_call": dict(self._last_call) if self._last_call else None,
+                "last_error": dict(self._last_error) if self._last_error else None,
+                "totals": self._render_rollup(self._totals, window_seconds=None),
+                f"last_{self.burst_window_seconds}s": self._render_rollup(
+                    burst, window_seconds=self.burst_window_seconds,
+                ),
+                f"last_{self.recent_window_seconds}s": self._render_rollup(
+                    recent, window_seconds=self.recent_window_seconds,
+                ),
+            }
+
+    @staticmethod
+    def _scope_label(org: str | None) -> str:
+        return str(org) if org else _DEFAULT_SCOPE_LABEL
+
+    @staticmethod
+    def _apply_rollup(
+        rollup: _SettingsStatsRollup,
+        *,
+        operation: str,
+        set_id: str | None,
+        org: str,
+        kind: str,
+        ok: bool,
+        duration_ms: float,
+        result_count: int,
+    ) -> None:
+        rounded_duration_ms = max(int(round(duration_ms)), 0)
+        rollup.calls += 1
+        if kind == "read":
+            rollup.reads += 1
+        elif kind == "write":
+            rollup.writes += 1
+        if not ok:
+            rollup.errors += 1
+        rollup.result_count += result_count
+        rollup.total_duration_ms += float(duration_ms)
+        rollup.latency_ms[rounded_duration_ms] += 1
+        rollup.operations[operation] += 1
+        rollup.orgs[org] += 1
+        if set_id:
+            rollup.set_ids[set_id] += 1
+
+    def _sweep_locked(self, now: float) -> None:
+        cutoff = now - self.retention_seconds
+        stale = [second for second in self._buckets if second < cutoff]
+        for second in stale:
+            self._buckets.pop(second, None)
+
+    def _aggregate_locked(
+        self, window_seconds: int, now: float,
+    ) -> _SettingsStatsRollup:
+        out = _SettingsStatsRollup()
+        for second, bucket in self._buckets.items():
+            if now - second >= window_seconds:
+                continue
+            out.calls += bucket.calls
+            out.reads += bucket.reads
+            out.writes += bucket.writes
+            out.errors += bucket.errors
+            out.result_count += bucket.result_count
+            out.total_duration_ms += bucket.total_duration_ms
+            out.latency_ms.update(bucket.latency_ms)
+            out.operations.update(bucket.operations)
+            out.set_ids.update(bucket.set_ids)
+            out.orgs.update(bucket.orgs)
+        return out
+
+    @staticmethod
+    def _percentile_ms(
+        latency_ms: Counter[int], total_calls: int, percentile: float,
+    ) -> int | None:
+        if total_calls <= 0:
+            return None
+        threshold = max(int(math.ceil(total_calls * percentile)), 1)
+        seen = 0
+        for duration_ms in sorted(latency_ms):
+            seen += latency_ms[duration_ms]
+            if seen >= threshold:
+                return duration_ms
+        return max(latency_ms) if latency_ms else None
+
+    def _render_rollup(
+        self,
+        rollup: _SettingsStatsRollup,
+        *,
+        window_seconds: int | None,
+    ) -> dict[str, Any]:
+        calls = rollup.calls
+        total_ms = round(rollup.total_duration_ms, 3)
+        out = {
+            "calls": calls,
+            "reads": rollup.reads,
+            "writes": rollup.writes,
+            "errors": rollup.errors,
+            "result_count": rollup.result_count,
+            "total_duration_ms": total_ms,
+            "avg_duration_ms": round(
+                (rollup.total_duration_ms / calls), 3,
+            ) if calls else 0.0,
+            "latency_ms": {
+                "p50": self._percentile_ms(rollup.latency_ms, calls, 0.50),
+                "p95": self._percentile_ms(rollup.latency_ms, calls, 0.95),
+                "p99": self._percentile_ms(rollup.latency_ms, calls, 0.99),
+            },
+            "operations": {
+                key: rollup.operations[key]
+                for key in sorted(rollup.operations)
+            },
+            "top_sets": [
+                {"set_id": set_id, "calls": count}
+                for set_id, count in rollup.set_ids.most_common(
+                    _STATS_TOP_LIMIT,
+                )
+            ],
+            "top_orgs": [
+                {"org": org, "calls": count}
+                for org, count in rollup.orgs.most_common(_STATS_TOP_LIMIT)
+            ],
+        }
+        if window_seconds is not None:
+            out["calls_per_second"] = round(
+                calls / float(window_seconds), 3,
+            )
+        return out
+
+
+_SETTINGS_API_STATS = SettingsApiStats()
+
+
+def settings_api_stats_snapshot() -> dict[str, Any]:
+    return _SETTINGS_API_STATS.snapshot()
+
+
+def reset_settings_api_stats() -> None:
+    _SETTINGS_API_STATS.reset()
+
+
+def _record_settings_api_call(
+    *,
+    operation: str,
+    set_id: str | None,
+    org: str | None,
+    kind: str,
+    ok: bool,
+    start: float,
+    result_count: int = 0,
+) -> None:
+    _SETTINGS_API_STATS.record(
+        operation=operation,
+        set_id=set_id,
+        org=org,
+        kind=kind,
+        ok=ok,
+        duration_ms=(time.perf_counter() - start) * 1000.0,
+        result_count=result_count,
+    )
+
+
+def _stats_result_count(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, list):
+        return len(value)
+    members = getattr(value, "members", None)
+    if isinstance(members, list):
+        return len(members)
+    if isinstance(value, dict):
+        layers = value.get("layers")
+        if isinstance(layers, list):
+            return len(layers)
+    return 1
 
 
 # ── Result types ─────────────────────────────────────────────
@@ -1506,3 +1803,150 @@ def migrate_setting_revisions(
 def _now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _tracked_set_id_from_row_id(
+    row_id: str | None, org: str | None,
+) -> str | None:
+    if not row_id:
+        return None
+    row = _fetch_setting_any_org(row_id, org)
+    if row is None:
+        return None
+    return row.get("set_id")
+
+
+def _tracked_settings_call(
+    operation: str,
+    *,
+    kind: str,
+    set_id_getter: Callable[[tuple[Any, ...], dict[str, Any], Any], str | None] | None = None,
+    result_count_getter: Callable[[tuple[Any, ...], dict[str, Any], Any], int] | None = None,
+):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            start = time.perf_counter()
+            resolved_org = _resolve_settings_caller(kwargs.get("org"))
+            ok = False
+            result = None
+            try:
+                result = fn(*args, **kwargs)
+                ok = True
+                return result
+            finally:
+                set_id = None
+                if set_id_getter is not None:
+                    try:
+                        set_id = set_id_getter(args, kwargs, result)
+                    except Exception:
+                        set_id = None
+                result_count = 0
+                if ok:
+                    if result_count_getter is not None:
+                        try:
+                            result_count = max(
+                                int(result_count_getter(args, kwargs, result)),
+                                0,
+                            )
+                        except Exception:
+                            result_count = _stats_result_count(result)
+                    else:
+                        result_count = _stats_result_count(result)
+                _record_settings_api_call(
+                    operation=operation,
+                    set_id=set_id,
+                    org=resolved_org,
+                    kind=kind,
+                    ok=ok,
+                    start=start,
+                    result_count=result_count,
+                )
+
+        return wrapper
+
+    return decorator
+
+
+add_setting = _tracked_settings_call(
+    "add_setting",
+    kind="write",
+    set_id_getter=lambda args, _kwargs, _result: args[0] if args else None,
+)(add_setting)
+upsert_by_key = _tracked_settings_call(
+    "upsert_by_key",
+    kind="write",
+    set_id_getter=lambda args, _kwargs, _result: args[0] if args else None,
+)(upsert_by_key)
+override_setting = _tracked_settings_call(
+    "override_setting",
+    kind="write",
+    set_id_getter=lambda _args, kwargs, result: _tracked_set_id_from_row_id(
+        result, kwargs.get("org"),
+    ),
+)(override_setting)
+exclude_setting = _tracked_settings_call(
+    "exclude_setting",
+    kind="write",
+    set_id_getter=lambda _args, kwargs, result: _tracked_set_id_from_row_id(
+        result, kwargs.get("org"),
+    ),
+)(exclude_setting)
+promote_setting = _tracked_settings_call(
+    "promote_setting",
+    kind="write",
+    set_id_getter=lambda args, kwargs, _result: _tracked_set_id_from_row_id(
+        args[0] if args else None, kwargs.get("org"),
+    ),
+)(promote_setting)
+deprecate_setting = _tracked_settings_call(
+    "deprecate_setting",
+    kind="write",
+    set_id_getter=lambda args, kwargs, _result: _tracked_set_id_from_row_id(
+        args[0] if args else None, kwargs.get("org"),
+    ),
+)(deprecate_setting)
+remove_settings_by_key_prefix = _tracked_settings_call(
+    "remove_settings_by_key_prefix",
+    kind="write",
+    set_id_getter=lambda args, _kwargs, _result: args[0] if args else None,
+    result_count_getter=lambda _args, _kwargs, result: result,
+)(remove_settings_by_key_prefix)
+remove_setting = _tracked_settings_call(
+    "remove_setting",
+    kind="write",
+)(remove_setting)
+list_set_ids = _tracked_settings_call(
+    "list_set_ids",
+    kind="read",
+)(list_set_ids)
+resolve_setting_strict = _tracked_settings_call(
+    "resolve_setting_strict",
+    kind="read",
+)(resolve_setting_strict)
+chain_setting = _tracked_settings_call(
+    "chain_setting",
+    kind="read",
+    set_id_getter=lambda args, _kwargs, _result: args[0] if args else None,
+)(chain_setting)
+get_setting = _tracked_settings_call(
+    "get_setting",
+    kind="read",
+    set_id_getter=lambda _args, _kwargs, result: (
+        getattr(result, "set_id", None)
+        if result is not None else None
+    ),
+)(get_setting)
+read_set = _tracked_settings_call(
+    "read_set",
+    kind="read",
+    set_id_getter=lambda args, _kwargs, _result: args[0] if args else None,
+)(read_set)
+migrate_setting_revisions = _tracked_settings_call(
+    "migrate_setting_revisions",
+    kind="write",
+    set_id_getter=lambda args, _kwargs, _result: args[0] if args else None,
+    result_count_getter=lambda _args, _kwargs, result: (
+        result.rewrote if result is not None else 0
+    ),
+)(migrate_setting_revisions)

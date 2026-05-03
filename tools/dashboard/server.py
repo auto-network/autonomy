@@ -7295,6 +7295,13 @@ async def api_diag_eventbus_snapshot(request):
     return JSONResponse(summary)
 
 
+async def api_diag_settings(request):
+    """Process-local Settings throughput snapshot."""
+    from tools.graph import settings_ops
+
+    return JSONResponse(settings_ops.settings_api_stats_snapshot())
+
+
 async def api_diag_settings_mediator(request):
     """Heartbeat snapshot for the settings-mediator dispatch loop.
 
@@ -10732,6 +10739,7 @@ routes = [
     Route("/api/diag/sessions", api_diag_sessions),
     Route("/api/diag/client", api_diag_client, methods=["POST"]),
     Route("/api/diag/eventbus/snapshot", api_diag_eventbus_snapshot, methods=["POST"]),
+    Route("/api/diag/settings", api_diag_settings),
     Route("/api/diag/settings_mediator", api_diag_settings_mediator),
 
     # API
