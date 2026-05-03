@@ -4455,25 +4455,27 @@ async def api_session_turn_corrections_list(request):
     Used to rehydrate overlay state on page load and replay.
     """
     session_id = request.path_params["session_id"]
+    headers = {"Cache-Control": "no-store"}
     if os.environ.get("DASHBOARD_MOCK"):
         rows = dao_sessions.get_turn_corrections(session_id)
         return JSONResponse({
             "session_id": session_id,
             "session_uuid": session_id,
             "corrections": [_serialize_turn_correction(r) for r in rows],
-        })
+        }, headers=headers)
     session_uuid = _resolve_session_uuid(session_id)
     if not session_uuid:
         return JSONResponse(
             {"error": "session not found", "session_id": session_id},
             status_code=404,
+            headers=headers,
         )
     rows = dashboard_db.list_turn_corrections(session_uuid)
     return JSONResponse({
         "session_id": session_id,
         "session_uuid": session_uuid,
         "corrections": [_serialize_turn_correction(r) for r in rows],
-    })
+    }, headers=headers)
 
 
 async def _resolve_correction_transition(request, target_status: str):

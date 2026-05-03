@@ -274,6 +274,7 @@ def test_dao_keyed_per_session(test_app):
 def test_api_list_empty_session(test_app, client):
     r = client.get(f"/api/session/{TMUX_NAME}/turn-corrections")
     assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
     body = r.json()
     assert body["session_id"] == TMUX_NAME
     assert body["session_uuid"] == SESSION_UUID
