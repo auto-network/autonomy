@@ -211,9 +211,7 @@ FIXTURE_TOOL_RESULT_ERROR = {
 
 _TC_SHORT_JSON = json.dumps({
     "type": "turn_correction",
-    "version": 1,
-    "target_message_id": "msg-short",
-    "original_sha256": "deadbeefcafe",
+    "version": 2,
     "corrected_text": "JSON encoded message",
     "mode": "balanced",
     "reason": "dictation cleanup",
@@ -231,9 +229,7 @@ FIXTURE_TOOL_RESULT_TURN_CORRECTION_SHORT = {
 _TC_LONG_BODY = "\n\n".join(f"Paragraph {i}: " + ("z" * 400) for i in range(20))
 _TC_LONG_JSON = json.dumps({
     "type": "turn_correction",
-    "version": 1,
-    "target_message_id": "msg-long",
-    "original_sha256": "1234567890abcdef",
+    "version": 2,
     "corrected_text": _TC_LONG_BODY,
 })
 
@@ -597,9 +593,9 @@ class TestTurnCorrectionUpconversion:
         assert "tool_result" in kinds
         tc = next((e for e in entries if e.get("type") == "turn_correction"), None)
         assert tc is not None, "expected typed turn_correction entry"
-        assert tc["target_message_id"] == "msg-short"
-        assert tc["original_sha256"] == "deadbeefcafe"
         assert tc["corrected_text"] == "JSON encoded message"
+        assert "target_message_id" not in tc
+        assert "original_sha256" not in tc
         assert tc["mode"] == "balanced"
         assert tc["reason"] == "dictation cleanup"
         assert tc["confidence"] == pytest.approx(0.9)
@@ -612,8 +608,6 @@ class TestTurnCorrectionUpconversion:
         entries = result if isinstance(result, list) else [result]
         tc = next((e for e in entries if e.get("type") == "turn_correction"), None)
         assert tc is not None
-        assert tc["target_message_id"] == "msg-long"
-        assert tc["original_sha256"] == "1234567890abcdef"
         # The whole body is preserved -- no truncation, no re-escaping.
         assert tc["corrected_text"] == _TC_LONG_BODY
         assert len(tc["corrected_text"]) > 8000
@@ -623,10 +617,10 @@ class TestTurnCorrectionUpconversion:
         assert "confidence" not in tc
 
     def test_missing_required_field_skipped(self):
-        """Payload without ``original_sha256`` is rejected -- no typed event."""
+        """Payload without ``corrected_text`` is rejected -- no typed event."""
         bad = json.dumps({
             "type": "turn_correction", "version": 1,
-            "target_message_id": "msg", "corrected_text": "fixed",
+            "mode": "balanced",
         })
         fixture = {
             "type": "tool_result", "toolUseId": "toolu_bad",

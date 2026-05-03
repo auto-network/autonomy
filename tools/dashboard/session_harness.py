@@ -484,11 +484,10 @@ def _upconvert_turn_correction(content: str, timestamp: str, tool_id: str = "") 
 
     Bead auto-edec1.1. The CLI prints a single JSON object whose ``type`` is
     ``turn_correction``; we recognize that discriminator, validate the
-    required identity/payload fields, and emit a ``turn_correction`` entry
-    instead of leaving the result as opaque Bash text. Identity validation
-    against ``original_sha256`` happens later (DAO ``upsert_turn_correction``
-    short-circuits terminal rows; ``set_turn_correction_status`` enforces the
-    sha match on accept).
+    replacement text, and emit a ``turn_correction`` entry instead of leaving
+    the result as opaque Bash text. Target resolution and hash derivation now
+    happen later in SessionMonitor so the agent-facing command can stay
+    one-shot and only remit the corrected text.
     """
     if not isinstance(content, str):
         return None
@@ -504,23 +503,21 @@ def _upconvert_turn_correction(content: str, timestamp: str, tool_id: str = "") 
         return None
     if not isinstance(payload, dict) or payload.get("type") != "turn_correction":
         return None
-    target = payload.get("target_message_id")
-    sha = payload.get("original_sha256")
     corrected = payload.get("corrected_text")
-    if not isinstance(target, str) or not target:
-        return None
-    if not isinstance(sha, str) or not sha:
-        return None
     if not isinstance(corrected, str):
         return None
     entry: dict[str, Any] = {
         "type": "turn_correction",
         "role": "tool",
         "timestamp": timestamp,
-        "target_message_id": target,
-        "original_sha256": sha,
         "corrected_text": corrected,
     }
+    target = payload.get("target_message_id")
+    if isinstance(target, str) and target:
+        entry["target_message_id"] = target
+    sha = payload.get("original_sha256")
+    if isinstance(sha, str) and sha:
+        entry["original_sha256"] = sha
     if tool_id:
         entry["tool_id"] = tool_id
     mode = payload.get("mode")

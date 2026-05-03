@@ -4279,11 +4279,10 @@ def cmd_turn_correction_suggest(args):
     """Emit a typed turn-correction suggestion payload for the parser.
 
     Bead auto-edec1.1. The session parser upconverts ``--json`` output of this
-    command into a ``turn_correction`` dashboard event and the SessionMonitor
-    persists it as a sparse overlay row keyed by
-    ``(session_uuid, target_message_id)``. Identity is enforced via
-    ``original_sha256`` so a stale or mismatched target is rejected at apply
-    time.
+    command into a ``turn_correction`` dashboard event. The SessionMonitor
+    then resolves that suggestion onto the most likely nearby user turn,
+    computes the target ``message_id`` and raw-text ``sha256`` server-side,
+    and persists the sparse overlay row.
     """
     if args.stdin and args.corrected_text is not None:
         print(
@@ -4313,9 +4312,7 @@ def cmd_turn_correction_suggest(args):
 
     payload = {
         "type": "turn_correction",
-        "version": 1,
-        "target_message_id": args.target_message_id,
-        "original_sha256": args.original_sha256,
+        "version": 2,
         "corrected_text": corrected,
     }
     if args.mode is not None:
@@ -4330,7 +4327,7 @@ def cmd_turn_correction_suggest(args):
         # tool_result content and upconvert without fuzzy matching.
         print(json.dumps(payload))
     else:
-        print(f"  ✓ Suggested correction for {args.target_message_id}")
+        print("  ✓ Suggested turn correction")
         if args.mode:
             print(f"    mode: {args.mode}")
         if args.reason:
@@ -4973,21 +4970,13 @@ def main():
 
     p_tc_suggest = tc_sub.add_parser(
         "suggest",
-        help="Emit a typed turn-correction suggestion (full-replacement, identity-guarded)",
+        help="Emit a typed turn-correction suggestion (full replacement text)",
     )
     p_tc_suggest.add_argument(
         "corrected_text",
         nargs="?",
         default=None,
         help="Corrected text. Use --stdin for long payloads.",
-    )
-    p_tc_suggest.add_argument(
-        "--target-message-id", required=True,
-        help="message_id of the transcript turn being corrected",
-    )
-    p_tc_suggest.add_argument(
-        "--original-sha256", required=True,
-        help="sha256 of the original turn text — guards against stale targets",
     )
     p_tc_suggest.add_argument(
         "--mode", choices=_TURN_CORRECTION_MODES,

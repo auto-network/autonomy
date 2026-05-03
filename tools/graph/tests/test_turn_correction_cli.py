@@ -1,10 +1,9 @@
 """CLI tests for ``graph turn-correction suggest`` (auto-edec1.1).
 
-Covers the agent-facing command contract: required identity flags, short
-positional payloads, long ``--stdin`` payloads, optional ``mode``/``reason``/
-``confidence`` fields, ``--json`` envelope shape, and validation errors. The
-emitted JSON is the parser-upconvert contract — see
-``tools/dashboard/tests/test_parser.py`` for the parser side.
+Covers the agent-facing one-shot contract: the command only emits the corrected
+replacement text plus optional metadata. Target resolution and raw-text hashing
+happen later in SessionMonitor. The emitted JSON is the parser-upconvert
+contract — see ``tools/dashboard/tests/test_parser.py`` for the parser side.
 """
 
 from __future__ import annotations
@@ -47,18 +46,16 @@ def test_suggest_short_payload_emits_required_fields():
     rc, out, err = _run_cli([
         "turn-correction", "suggest",
         "JSON encoded message",
-        "--target-message-id", "msg-1",
-        "--original-sha256", "deadbeef",
         "--json",
     ])
     assert rc == 0, err
     payload = json.loads(out.strip())
     assert payload["type"] == "turn_correction"
-    assert payload["version"] == 1
-    assert payload["target_message_id"] == "msg-1"
-    assert payload["original_sha256"] == "deadbeef"
+    assert payload["version"] == 2
     assert payload["corrected_text"] == "JSON encoded message"
     # Optional fields stay absent when not provided.
+    assert "target_message_id" not in payload
+    assert "original_sha256" not in payload
     assert "mode" not in payload
     assert "reason" not in payload
     assert "confidence" not in payload
@@ -68,8 +65,6 @@ def test_suggest_optional_fields_propagate():
     rc, out, err = _run_cli([
         "turn-correction", "suggest",
         "fixed",
-        "--target-message-id", "msg-2",
-        "--original-sha256", "cafebabe",
         "--mode", "balanced",
         "--reason", "dictation cleanup",
         "--confidence", "0.9",
@@ -92,8 +87,6 @@ def test_suggest_long_stdin_payload_supported():
     rc, out, err = _run_cli(
         [
             "turn-correction", "suggest",
-            "--target-message-id", "msg-long",
-            "--original-sha256", "1234abcd",
             "--stdin", "--json",
         ],
         stdin_text=long_text,
@@ -101,7 +94,7 @@ def test_suggest_long_stdin_payload_supported():
     assert rc == 0, err
     payload = json.loads(out.strip())
     assert payload["corrected_text"] == long_text
-    assert payload["target_message_id"] == "msg-long"
+    assert "target_message_id" not in payload
 
 
 def test_suggest_stdin_preserves_trailing_newline():
@@ -109,8 +102,6 @@ def test_suggest_stdin_preserves_trailing_newline():
     rc, out, err = _run_cli(
         [
             "turn-correction", "suggest",
-            "--target-message-id", "msg-3",
-            "--original-sha256", "00ff",
             "--stdin", "--json",
         ],
         stdin_text="line one\nline two\n",
@@ -123,18 +114,9 @@ def test_suggest_stdin_preserves_trailing_newline():
 # ── validation ─────────────────────────────────────────────────
 
 
-def test_suggest_requires_target_and_sha():
-    rc, _, _ = _run_cli([
-        "turn-correction", "suggest", "x", "--json",
-    ])
-    assert rc != 0
-
-
 def test_suggest_requires_corrected_text():
     rc, _, err = _run_cli([
         "turn-correction", "suggest",
-        "--target-message-id", "msg",
-        "--original-sha256", "sha",
         "--json",
     ])
     assert rc != 0
@@ -146,8 +128,6 @@ def test_suggest_rejects_both_argv_and_stdin():
         [
             "turn-correction", "suggest",
             "from-argv",
-            "--target-message-id", "msg",
-            "--original-sha256", "sha",
             "--stdin", "--json",
         ],
         stdin_text="from-stdin",
@@ -159,8 +139,6 @@ def test_suggest_rejects_both_argv_and_stdin():
 def test_suggest_rejects_invalid_mode():
     rc, _, _ = _run_cli([
         "turn-correction", "suggest", "x",
-        "--target-message-id", "msg",
-        "--original-sha256", "sha",
         "--mode", "wild",
         "--json",
     ])
@@ -171,8 +149,6 @@ def test_suggest_rejects_invalid_mode():
 def test_suggest_rejects_out_of_range_confidence(bad):
     rc, _, err = _run_cli([
         "turn-correction", "suggest", "x",
-        "--target-message-id", "msg",
-        "--original-sha256", "sha",
         "--confidence", bad,
         "--json",
     ])
@@ -187,11 +163,9 @@ def test_suggest_without_json_flag_prints_human_summary():
     rc, out, err = _run_cli([
         "turn-correction", "suggest",
         "fixed",
-        "--target-message-id", "msg-h",
-        "--original-sha256", "abc",
     ])
     assert rc == 0, err
-    assert "msg-h" in out
+    assert "Suggested turn correction" in out
     # Non-JSON mode is for humans; it must not look like the parser contract.
     with pytest.raises(json.JSONDecodeError):
         json.loads(out.strip())
