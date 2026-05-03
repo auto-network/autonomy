@@ -2751,6 +2751,159 @@ def create_edge(
     }
 
 
+def persist_corrected_thought(
+    *,
+    org: str | None,
+    session_uuid: str,
+    target_message_id: str,
+    original_sha256: str,
+    corrected_text: str,
+    extra_metadata: dict | None = None,
+) -> dict | None:
+    """Persist an accepted turn correction as a superseding graph thought.
+
+    Inserts a new ``user`` thought into the same session source as the
+    original turn — body is *exactly* ``corrected_text``, mirroring the
+    contract on the dashboard side that an accepted correction is a full
+    replacement of the user message, never a patch or comment. The new
+    thought carries ``message_id = supersedes:<target_message_id>`` so a
+    second accept call for the same target hits the same row instead of
+    duplicating it. A ``supersedes`` edge from the corrected thought to the
+    original is also inserted (ignored on conflict — the
+    ``edges.UNIQUE(source_id, target_id, relation)`` constraint enforces
+    idempotency at the DB level).
+
+    Resolution:
+
+    * The session source is found inside the ``org`` DB by
+      ``type='session'`` AND ``metadata.session_uuid == session_uuid``.
+    * The original thought is found inside that source by
+      ``message_id == target_message_id``.
+
+    Fails closed: returns ``None`` (and writes nothing) when either lookup
+    misses. Callers should not surface that as an error to the operator —
+    the dashboard's accept transition is the source of truth for "the
+    correction was accepted"; graph-side persistence is opportunistic.
+
+    Returns ``{"thought_id", "edge_id", "source_id", "message_id",
+    "created"}`` on success, where ``created`` is ``False`` for an
+    idempotent re-call that found the prior corrected thought.
+    """
+    from .models import Thought as _Thought, Edge as _Edge
+
+    if not session_uuid or not target_message_id \
+            or not original_sha256 or corrected_text is None:
+        return None
+
+    derived_message_id = f"supersedes:{target_message_id}"
+
+    db = _open(org)
+    try:
+        src_row = db.conn.execute(
+            "SELECT id FROM sources WHERE type = 'session'"
+            " AND json_extract(metadata, '$.session_uuid') = ?"
+            " LIMIT 1",
+            (session_uuid,),
+        ).fetchone()
+        if not src_row:
+            return None
+        source_id = src_row["id"]
+
+        original = db.conn.execute(
+            "SELECT id FROM thoughts WHERE source_id = ? AND message_id = ?"
+            " LIMIT 1",
+            (source_id, target_message_id),
+        ).fetchone()
+        if not original:
+            return None
+        original_thought_id = original["id"]
+
+        existing = db.conn.execute(
+            "SELECT id FROM thoughts WHERE source_id = ? AND message_id = ?"
+            " LIMIT 1",
+            (source_id, derived_message_id),
+        ).fetchone()
+        if existing:
+            existing_id = existing["id"]
+            # Edge insert is idempotent via UNIQUE constraint, but call it
+            # anyway so a half-applied prior run gets healed.
+            edge = _Edge(
+                source_id=existing_id,
+                source_type="thought",
+                target_id=original_thought_id,
+                target_type="thought",
+                relation="supersedes",
+                metadata={
+                    "session_uuid": session_uuid,
+                    "target_message_id": target_message_id,
+                    "original_sha256": original_sha256,
+                },
+            )
+            db.insert_edge(edge)
+            db.commit()
+            return {
+                "thought_id": existing_id,
+                "edge_id": edge.id,
+                "source_id": source_id,
+                "message_id": derived_message_id,
+                "created": False,
+            }
+
+        next_turn_row = db.conn.execute(
+            "SELECT COALESCE(MAX(turn_number), 0) + 1 AS n"
+            " FROM thoughts WHERE source_id = ?",
+            (source_id,),
+        ).fetchone()
+        next_turn = int(next_turn_row["n"]) if next_turn_row else 1
+
+        meta: dict = {
+            "kind": "turn_correction_supersedes",
+            "session_uuid": session_uuid,
+            "target_message_id": target_message_id,
+            "original_thought_id": original_thought_id,
+            "original_sha256": original_sha256,
+        }
+        if extra_metadata:
+            for k, v in extra_metadata.items():
+                if v is not None and k not in meta:
+                    meta[k] = v
+
+        thought = _Thought(
+            source_id=source_id,
+            content=corrected_text,
+            role="user",
+            turn_number=next_turn,
+            message_id=derived_message_id,
+            metadata=meta,
+        )
+        db.insert_thought(thought)
+
+        edge = _Edge(
+            source_id=thought.id,
+            source_type="thought",
+            target_id=original_thought_id,
+            target_type="thought",
+            relation="supersedes",
+            metadata={
+                "session_uuid": session_uuid,
+                "target_message_id": target_message_id,
+                "original_sha256": original_sha256,
+            },
+        )
+        db.insert_edge(edge)
+        db.commit()
+
+        return {
+            "thought_id": thought.id,
+            "edge_id": edge.id,
+            "source_id": source_id,
+            "message_id": derived_message_id,
+            "created": True,
+        }
+    finally:
+        db.close()
+
+
 def get_turn_content(
     source_id: str,
     turn_number: int,

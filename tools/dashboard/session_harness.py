@@ -1477,22 +1477,39 @@ def _extract_codex_text_blocks(blocks: Any) -> str:
     return "".join(parts).strip()
 
 
+def codex_message_id(payload: dict, role: str, text: str) -> str | None:
+    """Return the deterministic ``message_id`` for a Codex event_msg chat turn.
+
+    Live Codex ``event_msg`` user/agent rows do not always carry a raw UUID,
+    but every downstream consumer (live viewer overlay, graph ingest, accepted
+    turn-correction lookup) needs the same stable identity. Prefer the
+    explicit payload UUID when present; otherwise derive a synthetic
+    ``codex-<role>:<sha1[:16]>`` so live overlay state, ingest, and graph
+    persistence all agree on the same key.
+
+    Returns ``None`` when neither a raw UUID nor any text is available — a
+    Codex turn with no body cannot have a stable identity.
+    """
+    raw_uuid = payload.get("uuid") or payload.get("message_id")
+    if isinstance(raw_uuid, str) and raw_uuid:
+        return raw_uuid
+    if text:
+        digest = hashlib.sha1(f"{role}\n{text}".encode("utf-8")).hexdigest()[:16]
+        return f"codex-{role}:{digest}"
+    return None
+
+
 def _codex_event_message_identity(payload: dict, role: str, text: str) -> dict[str, str]:
     """Return stable tile identity for Codex event_msg chat turns.
 
-    Some live Codex ``event_msg`` user/agent messages do not carry a raw UUID
-    even though downstream viewer features need a stable `message_id`.
-    Prefer the explicit payload UUID when present; otherwise derive a
-    deterministic synthetic ID from role + text so replay/hydration keeps the
-    same identity across reconnects.
+    Wraps :func:`codex_message_id` and adds ``parent_uuid`` when the payload
+    carries one; live tile rendering uses the parent edge but graph ingest
+    does not need it.
     """
     identity: dict[str, str] = {}
-    raw_uuid = payload.get("uuid") or payload.get("message_id")
-    if isinstance(raw_uuid, str) and raw_uuid:
-        identity["message_id"] = raw_uuid
-    elif text:
-        digest = hashlib.sha1(f"{role}\n{text}".encode("utf-8")).hexdigest()[:16]
-        identity["message_id"] = f"codex-{role}:{digest}"
+    msg_id = codex_message_id(payload, role, text)
+    if msg_id:
+        identity["message_id"] = msg_id
     parent = payload.get("parentUuid") or payload.get("parent_uuid")
     if isinstance(parent, str) and parent:
         identity["parent_uuid"] = parent

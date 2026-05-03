@@ -572,6 +572,32 @@ def _is_codex_noise_text(text: str) -> bool:
     return stripped.startswith(_CODEX_NOISE_PREFIXES)
 
 
+def _codex_message_id(
+    payload: dict, entry: dict, role: str, text: str,
+) -> str | None:
+    """Return the deterministic message_id for a Codex event_msg chat turn.
+
+    Mirrors :func:`tools.dashboard.session_harness.codex_message_id` so the
+    live overlay path and graph ingest agree on the same identity for
+    ``event_msg`` user/agent rows that lack a payload UUID. The shared
+    ``codex-<role>:<sha1[:16]>`` fallback is what lets accepted turn
+    corrections on those turns resolve back to the ingested thought.
+
+    Falls back to ``entry.uuid`` when the shared rule yields nothing — keeps
+    behaviour stable for legacy rollouts where the outer entry carried a
+    UUID but the payload did not.
+    """
+    from tools.dashboard.session_harness import codex_message_id
+
+    msg_id = codex_message_id(payload, role, text)
+    if msg_id:
+        return msg_id
+    outer = entry.get("uuid") if isinstance(entry, dict) else None
+    if isinstance(outer, str) and outer:
+        return outer
+    return None
+
+
 def parse_codex_session(file_path: Path) -> tuple[dict, list[dict]]:
     """Parse a Codex rollout JSONL session into metadata and content turns.
 
@@ -648,7 +674,9 @@ def parse_codex_session(file_path: Path) -> tuple[dict, list[dict]]:
                     "turn_number": turn_number,
                     "role": "user",
                     "content": text,
-                    "message_id": entry.get("uuid"),
+                    "message_id": _codex_message_id(
+                        payload, entry, "user", text,
+                    ),
                     "timestamp": ts,
                 })
                 continue
@@ -662,7 +690,9 @@ def parse_codex_session(file_path: Path) -> tuple[dict, list[dict]]:
                     "turn_number": turn_number,
                     "role": "assistant",
                     "content": text,
-                    "message_id": entry.get("uuid"),
+                    "message_id": _codex_message_id(
+                        payload, entry, "assistant", text,
+                    ),
                     "timestamp": ts,
                 })
 
