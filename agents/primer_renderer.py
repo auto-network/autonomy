@@ -21,6 +21,13 @@ from pathlib import Path
 import jinja2
 
 from agents.workspace_settings import REPO_ROOT, WorkspaceV1
+from tools.graph import ops as graph_ops
+from tools.graph.schemas.turn_correction import (
+    DEFAULT_PAYLOAD as TURN_CORRECTION_DEFAULT,
+    SCHEMA_REVISION as TURN_CORRECTION_REVISION,
+    SET_ID as TURN_CORRECTION_SET_ID,
+    resolve_payload as resolve_turn_correction_payload,
+)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "primers"
 PROJECTS_DIR = Path(__file__).resolve().parent / "projects"
@@ -141,6 +148,103 @@ def _capability_primer_blocks(config: WorkspaceV1) -> list[dict]:
     return rows
 
 
+# ── Turn-correction settings projection ──────────────────────
+
+
+# Mode → opening sentence the primer renders in front of the canonical
+# command. Centralized here so tests can assert each mode produces
+# distinct, mode-appropriate guidance and operators can override per
+# workspace via ``instruction_template`` on the Setting payload.
+_TURN_CORRECTION_INSTRUCTIONS: dict[str, str] = {
+    "off": (
+        "Turn-correction guidance is disabled for this workspace, but "
+        "the command is documented here for reference. Do not volunteer "
+        "corrections — only emit one if the operator explicitly asks."
+    ),
+    "conservative": (
+        "When a user message is clearly garbled and the perception gap "
+        "would meaningfully affect your reply, emit a turn-correction "
+        "suggestion. Skip it for typos that don't change meaning."
+    ),
+    "balanced": (
+        "When you suspect a perception gap on the most recent user "
+        "message — wording that obscures intent, transcription errors, "
+        "missing words — emit a turn-correction suggestion immediately."
+    ),
+    "aggressive": (
+        "Err on the side of suggesting a correction. If anything in the "
+        "most recent user message could plausibly be misread, emit a "
+        "turn-correction suggestion before continuing — the operator "
+        "can dismiss it cheaply, but a missed perception gap is costly."
+    ),
+}
+
+
+_TURN_CORRECTION_COMMAND = (
+    "graph turn-correction suggest [corrected_text | --stdin] "
+    "[--mode <off|conservative|balanced|aggressive>] "
+    "[--reason <text>] [--confidence <0..1>] --json"
+)
+
+
+def _read_turn_correction_setting(workspace_id: str) -> dict | None:
+    """Return the resolved Setting payload for ``workspace_id``, or ``None``.
+
+    Reads ``autonomy.workspace.turn_correction#1`` keyed by the
+    workspace id. A missing Setting is not an error — the renderer
+    falls back to :data:`DEFAULT_PAYLOAD` so primer output remains
+    useful for workspaces that have not authored a Setting yet.
+
+    Setting reads can fail in test contexts where no graph DB is
+    pinned; we swallow those failures and treat the workspace as
+    "no Setting" rather than crash the primer render.
+    """
+    try:
+        members = graph_ops.read_set(
+            TURN_CORRECTION_SET_ID,
+            target_revision=TURN_CORRECTION_REVISION,
+        )
+    except Exception:
+        return None
+    for member in members:
+        if member.key == workspace_id:
+            return dict(member.payload) if isinstance(member.payload, dict) \
+                else None
+    return None
+
+
+def _turn_correction_block(config: WorkspaceV1) -> dict:
+    """Compose the turn-correction primer projection for ``config``.
+
+    Resolves the ``autonomy.workspace.turn_correction#1`` Setting for
+    ``config.id``, layers it over :data:`DEFAULT_PAYLOAD`, and returns a
+    fully-populated dict the template can render without further
+    conditionals beyond the ``enabled`` switch.
+    """
+    raw = _read_turn_correction_setting(config.id)
+    resolved = resolve_turn_correction_payload(raw)
+    aggressiveness = resolved["aggressiveness"]
+    instruction = (
+        resolved.get("instruction_template")
+        or _TURN_CORRECTION_INSTRUCTIONS.get(
+            aggressiveness, _TURN_CORRECTION_INSTRUCTIONS["balanced"]
+        )
+    )
+    command = (
+        resolved.get("command_hint")
+        or _TURN_CORRECTION_COMMAND
+    )
+    return {
+        "enabled": bool(resolved["enabled"]),
+        "aggressiveness": aggressiveness,
+        "persist_accepts_to_graph": bool(
+            resolved["persist_accepts_to_graph"]
+        ),
+        "instruction": instruction,
+        "command": command,
+    }
+
+
 def render_workspace_primer(config: WorkspaceV1) -> str:
     """Render the workspace runtime primer for a given project config.
 
@@ -176,6 +280,7 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
             f"projects.yaml: " + "; ".join(drift)
         )
     capability_blocks = _capability_primer_blocks(config)
+    turn_correction = _turn_correction_block(config)
     return template.render(
         config=config,
         writable_repos=writable_repos,
@@ -184,4 +289,5 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         org_primer=org_primer,
         org=config.graph_project,
         capability_blocks=capability_blocks,
+        turn_correction=turn_correction,
     )

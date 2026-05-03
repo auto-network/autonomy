@@ -557,3 +557,216 @@ def test_capability_with_missing_primer_file_still_renders_heading(tmp_path, mon
     out = render_workspace_primer(_cfg(capabilities=(cap,)))
     assert "### autonomy/github — source_control@1" in out
     assert f"{CAPABILITIES_MOUNT_DIR}/autonomy-github" in out
+
+
+# ── Turn-correction guidance (auto-edec1.5) ─────────────────
+
+
+import json as _json  # noqa: E402
+
+from tools.graph.schemas.turn_correction import (  # noqa: E402
+    SCHEMA_REVISION as _TC_REV,
+    SET_ID as _TC_SET_ID,
+)
+
+
+@pytest.fixture
+def _graph_db_env(tmp_path, monkeypatch):
+    """Pin GRAPH_DB to a fresh tmp file so primer Setting reads see it."""
+    db_path = tmp_path / "graph.db"
+    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    yield db_path
+
+
+def _write_tc_setting(workspace_id: str, payload: dict) -> None:
+    """Helper: upsert an ``autonomy.workspace.turn_correction#1`` row."""
+    from tools.graph import ops as _ops
+    _ops.upsert_by_key(_TC_SET_ID, _TC_REV, workspace_id, payload)
+
+
+def test_turn_correction_section_present_by_default(_graph_db_env):
+    """No Setting → the renderer applies the safe defaults and still
+    renders the section. The feature must be useful before any operator
+    has authored a workspace-specific Setting.
+    """
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "## Turn Corrections" in out
+    # Defaults: enabled, balanced, do not persist accepts.
+    assert "aggressiveness=balanced" in out
+    assert "accepted corrections persist to the graph" not in out
+
+
+def test_turn_correction_command_shape_is_canonical(_graph_db_env):
+    """Pin the exact v1 command shape an agent should emit.
+
+    The session side derives ``target_message_id`` and the guard hash
+    internally; the agent must NOT supply them. The primer guidance
+    has to make the contract explicit so future agents stop inventing
+    new flag shapes.
+    """
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert (
+        "graph turn-correction suggest [corrected_text | --stdin] "
+        "[--mode <off|conservative|balanced|aggressive>] "
+        "[--reason <text>] [--confidence <0..1>] --json"
+    ) in out
+    # The agent must NOT supply target_message_id or original_sha256.
+    assert "target_message_id" in out and "original_sha256" in out
+    assert "Do **not** supply" in out
+
+
+def test_turn_correction_explains_full_replacement_semantics(_graph_db_env):
+    """``corrected_text`` is the full corrected replacement message,
+    not a span or a diff. Pin that wording so future renderer changes
+    don't regress to "the changed span"."""
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "complete corrected replacement message" in out
+
+
+def test_turn_correction_explains_session_side_resolution(_graph_db_env):
+    """The primer must teach the workflow, not just the command name.
+
+    Specifically: the session side (a) attaches the suggestion to the
+    most likely nearby user turn, and (b) derives the guard hash. The
+    agent doesn't supply either. The viewer renders the overlay; the
+    operator may accept or dismiss it.
+    """
+    out = render_workspace_primer(_cfg(id="sample"))
+    # Whitespace-normalized: markdown wrap may split phrases across lines.
+    flat = " ".join(out.split())
+    assert "session side" in flat
+    assert "most likely nearby user turn" in flat
+    assert "derives the guard hash" in flat
+    assert "accept" in flat and "dismiss" in flat
+
+
+def test_turn_correction_framed_around_perception_gaps(_graph_db_env):
+    """Framing must be perception-gap reduction, NOT generic grammar cleanup."""
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "perception gap" in out
+    # Explicit "not grammar pass" framing.
+    assert "not** a grammar pass" in out
+
+
+def test_turn_correction_includes_worked_example(_graph_db_env):
+    """Acceptance criterion: one concrete worked example of immediate
+    one-shot usage on a garbled user message must be present."""
+    out = render_workspace_primer(_cfg(id="sample"))
+    # The example shows the operator's garbled message...
+    assert "wat are the implickatons of teh new auth fix" in out
+    # ...and the agent's corrected, full-replacement response.
+    assert (
+        '"What are the implications of the new auth fix?"' in out
+    ), "worked example must show full corrected replacement, not a span"
+
+
+def test_turn_correction_off_mode_disables_volunteering(_graph_db_env):
+    """``aggressiveness=off`` instructs the agent not to volunteer
+    corrections. The command stays documented for reference so an
+    explicit operator request still works.
+    """
+    _write_tc_setting("sample", {"aggressiveness": "off"})
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "aggressiveness=off" in out
+    assert "Do not volunteer" in out
+    # Reference is preserved so the agent can still emit on request.
+    assert "graph turn-correction suggest" in out
+
+
+def test_turn_correction_conservative_mode_distinct_wording(_graph_db_env):
+    _write_tc_setting("sample", {"aggressiveness": "conservative"})
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "aggressiveness=conservative" in out
+    assert "clearly garbled" in out
+
+
+def test_turn_correction_balanced_mode_distinct_wording(_graph_db_env):
+    _write_tc_setting("sample", {"aggressiveness": "balanced"})
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "aggressiveness=balanced" in out
+    assert "suspect a perception gap" in out
+
+
+def test_turn_correction_aggressive_mode_distinct_wording(_graph_db_env):
+    _write_tc_setting("sample", {"aggressiveness": "aggressive"})
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "aggressiveness=aggressive" in out
+    assert "Err on the side" in out
+
+
+def test_turn_correction_disabled_renders_explicit_note(_graph_db_env):
+    """``enabled=false`` swaps the body for a short "disabled" note.
+
+    The block is still present so the agent knows the feature exists
+    and is intentionally disabled rather than missing.
+    """
+    _write_tc_setting("sample", {"enabled": False})
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "## Turn Corrections" in out
+    assert "**disabled**" in out
+    # The full workflow / command / example are gated on enabled.
+    assert "wat are the implickatons" not in out
+
+
+def test_turn_correction_persist_accepts_surfaces_in_status_line(_graph_db_env):
+    """``persist_accepts_to_graph=true`` is surfaced in the primer's
+    status line so the agent knows operator-accepted corrections will
+    be persisted to the graph (in addition to the dashboard overlay).
+    """
+    _write_tc_setting("sample", {"persist_accepts_to_graph": True})
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "accepted corrections persist to the graph" in out
+
+
+def test_turn_correction_per_workspace_isolation(_graph_db_env):
+    """Setting keyed by workspace.id — each workspace reads its own row."""
+    _write_tc_setting("sample-a", {"aggressiveness": "off"})
+    _write_tc_setting("sample-b", {"aggressiveness": "aggressive"})
+    a = render_workspace_primer(_cfg(id="sample-a"))
+    b = render_workspace_primer(_cfg(id="sample-b"))
+    assert "aggressiveness=off" in a
+    assert "aggressiveness=aggressive" in b
+    assert "aggressiveness=aggressive" not in a
+    assert "aggressiveness=off" not in b
+
+
+def test_turn_correction_instruction_template_override(_graph_db_env):
+    """``instruction_template`` overrides the mode-specific lead-in.
+
+    Operators can swap the wording without touching the renderer.
+    """
+    _write_tc_setting("sample", {
+        "aggressiveness": "balanced",
+        "instruction_template": "MARKER: emit corrections aggressively for this workspace.",
+    })
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "MARKER: emit corrections aggressively for this workspace." in out
+    # Default lead-in is suppressed when an override is supplied.
+    assert "suspect a perception gap" not in out
+
+
+def test_turn_correction_command_hint_override(_graph_db_env):
+    """``command_hint`` overrides the canonical command shape.
+
+    Useful for workspaces that ship a wrapper around ``graph
+    turn-correction suggest`` (e.g. via a capability tool path).
+    """
+    _write_tc_setting("sample", {
+        "command_hint": "my-wrapper turn-correction --json",
+    })
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "my-wrapper turn-correction --json" in out
+
+
+def test_turn_correction_section_appears_after_bead_polishing(_graph_db_env):
+    """Document order: bead polishing → turn corrections → working style.
+
+    Pinned so future template changes don't accidentally split the
+    block away from the rest of the agent-facing protocol guidance.
+    """
+    out = render_workspace_primer(_cfg(id="sample"))
+    bp_idx = out.index("## Bead Polishing Protocol")
+    tc_idx = out.index("## Turn Corrections")
+    assert bp_idx < tc_idx
+

@@ -230,6 +230,63 @@ the org.
 When formulating or refining beads, read the protocol directly:
 `graph://f6c6c43e-24a`  (resolves to: `graph read f6c6c43e-24a`)
 
+## Turn Corrections — closing perception gaps on user messages
+
+This is **not** a grammar pass on the user. The goal is to reduce
+**perception gaps**: moments where a user message arrives garbled —
+voice-dictation slips, transcription errors, missing words, half-typed
+phrases — and your reply would otherwise act on a misread of what they
+actually meant.
+
+`aggressiveness={{ turn_correction.aggressiveness }}`{% if turn_correction.persist_accepts_to_graph %} · accepted corrections persist to the graph{% endif %}
+
+{% if turn_correction.enabled %}
+{{ turn_correction.instruction }}
+
+The command shape (v1 contract):
+
+```bash
+{{ turn_correction.command }}
+```
+
+`corrected_text` is the **complete corrected replacement message**, not
+a span or a diff. Pass `--stdin` for long corrections. Do **not** supply
+`target_message_id` or `original_sha256` — the session side derives both
+internally when it attaches the suggestion to the most likely nearby
+user turn.
+
+Workflow, end to end:
+
+1. Inspect the garbled user message.
+2. Form a full corrected replacement string in your head.
+3. Emit `graph turn-correction suggest ... --json` immediately
+   (`--stdin` for long corrections), in the same turn — one shot, no
+   confirmation prompt to the operator.
+4. The session side attaches the suggestion to the most likely nearby
+   user turn and derives the guard hash on its own.
+5. The viewer renders the suggestion as a pending overlay; the
+   operator may accept (the corrected text becomes the effective
+   message body) or dismiss (the raw message stands).
+
+Worked example — operator just sent "wat are the implickatons of teh new auth fix", you respond in the same turn with:
+
+```bash
+graph turn-correction suggest \
+  "What are the implications of the new auth fix?" \
+  --mode {{ turn_correction.aggressiveness }} \
+  --reason "voice-dictation typos obscured intent" \
+  --confidence 0.9 --json
+```
+
+Then continue your normal reply against the corrected reading. If the
+operator dismisses the suggestion, your reply still stands; the
+correction is purely additive.
+{% else %}
+Turn-correction guidance is **disabled** for this workspace
+(`enabled=false`). Do not emit `graph turn-correction suggest` unless
+the operator explicitly requests it.
+{% endif %}
+
 ## Working Style
 - In design discussions, your role is to formulate and polish beads — not to dispatch or implement while the design is ongoing. The user will signal when work is ready to dispatch.
 - Orient yourself using the tools above **after** the user tells you what they need — not as a startup ritual.
