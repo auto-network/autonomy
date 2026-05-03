@@ -205,6 +205,47 @@ FIXTURE_TOOL_RESULT_ERROR = {
     "timestamp": TS,
 }
 
+# auto-edec1.1 — `graph turn-correction suggest --json` output. Single JSON
+# object on stdout; the parser upconverts it to a typed ``turn_correction``
+# entry that the SessionMonitor persists into ``dashboard.db``.
+
+_TC_SHORT_JSON = json.dumps({
+    "type": "turn_correction",
+    "version": 1,
+    "target_message_id": "msg-short",
+    "original_sha256": "deadbeefcafe",
+    "corrected_text": "JSON encoded message",
+    "mode": "balanced",
+    "reason": "dictation cleanup",
+    "confidence": 0.9,
+})
+
+FIXTURE_TOOL_RESULT_TURN_CORRECTION_SHORT = {
+    "type": "tool_result", "toolUseId": "toolu_01TCS",
+    "message": {"role": "user", "content": _TC_SHORT_JSON},
+    "timestamp": TS,
+}
+
+# Long body intentionally exceeds the inline-argv ergonomic limit so this
+# fixture also encodes the "stdin path round-trips through the parser" claim.
+_TC_LONG_BODY = "\n\n".join(f"Paragraph {i}: " + ("z" * 400) for i in range(20))
+_TC_LONG_JSON = json.dumps({
+    "type": "turn_correction",
+    "version": 1,
+    "target_message_id": "msg-long",
+    "original_sha256": "1234567890abcdef",
+    "corrected_text": _TC_LONG_BODY,
+})
+
+FIXTURE_USER_TOOL_RESULT_TURN_CORRECTION_LONG = {
+    "parentUuid": "tc-long", "isSidechain": False, "type": "user",
+    "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_01TCL",
+         "content": _TC_LONG_JSON},
+    ]},
+    "timestamp": TS,
+}
+
 FIXTURE_USER_TASK_NOTIFICATION = {
     "parentUuid": "ooo", "isSidechain": False, "type": "user",
     "message": {"role": "user", "content": (
@@ -537,6 +578,97 @@ class TestUpconversion:
         assert sem is not None
         assert sem["semantic_type"] == "note-created"
         assert sem["source_id"] == "abcdef12-3456"
+
+
+# ── TestTurnCorrectionUpconversion ──────────────────────────────────
+# auto-edec1.1: parser upconverts ``graph turn-correction suggest --json``
+# output into a typed ``turn_correction`` entry instead of opaque Bash text.
+
+class TestTurnCorrectionUpconversion:
+    """Parser upconversion of the turn-correction CLI contract."""
+
+    def test_short_payload_emits_typed_event(self):
+        """Top-level ``tool_result`` envelope (assistant-side) -> typed entry."""
+        result = _parse_jsonl_entry(_line(FIXTURE_TOOL_RESULT_TURN_CORRECTION_SHORT))
+        entries = result if isinstance(result, list) else [result]
+        # Raw tool_result is preserved alongside the typed event so existing
+        # consumers don't lose visibility into the original Bash output.
+        kinds = [e.get("type") for e in entries]
+        assert "tool_result" in kinds
+        tc = next((e for e in entries if e.get("type") == "turn_correction"), None)
+        assert tc is not None, "expected typed turn_correction entry"
+        assert tc["target_message_id"] == "msg-short"
+        assert tc["original_sha256"] == "deadbeefcafe"
+        assert tc["corrected_text"] == "JSON encoded message"
+        assert tc["mode"] == "balanced"
+        assert tc["reason"] == "dictation cleanup"
+        assert tc["confidence"] == pytest.approx(0.9)
+        assert tc["role"] == "tool"
+        assert tc["tool_id"] == "toolu_01TCS"
+
+    def test_long_stdin_payload_round_trips_through_user_block(self):
+        """Long bodies routed through stdin must survive parser upconversion."""
+        result = _parse_jsonl_entry(_line(FIXTURE_USER_TOOL_RESULT_TURN_CORRECTION_LONG))
+        entries = result if isinstance(result, list) else [result]
+        tc = next((e for e in entries if e.get("type") == "turn_correction"), None)
+        assert tc is not None
+        assert tc["target_message_id"] == "msg-long"
+        assert tc["original_sha256"] == "1234567890abcdef"
+        # The whole body is preserved -- no truncation, no re-escaping.
+        assert tc["corrected_text"] == _TC_LONG_BODY
+        assert len(tc["corrected_text"]) > 8000
+        # Optional fields stay absent when the CLI didn't emit them.
+        assert "mode" not in tc
+        assert "reason" not in tc
+        assert "confidence" not in tc
+
+    def test_missing_required_field_skipped(self):
+        """Payload without ``original_sha256`` is rejected -- no typed event."""
+        bad = json.dumps({
+            "type": "turn_correction", "version": 1,
+            "target_message_id": "msg", "corrected_text": "fixed",
+        })
+        fixture = {
+            "type": "tool_result", "toolUseId": "toolu_bad",
+            "message": {"role": "user", "content": bad},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        entries = result if isinstance(result, list) else [result]
+        assert all(e.get("type") != "turn_correction" for e in entries)
+
+    def test_wrong_type_discriminator_not_upconverted(self):
+        """JSON without ``type=turn_correction`` stays a plain tool_result."""
+        wrong = json.dumps({"type": "something_else", "target_message_id": "x"})
+        fixture = {
+            "type": "tool_result", "toolUseId": "toolu_wt",
+            "message": {"role": "user", "content": wrong},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        entries = result if isinstance(result, list) else [result]
+        assert all(e.get("type") != "turn_correction" for e in entries)
+
+    def test_malformed_json_not_upconverted(self):
+        """Garbage that mentions ``turn_correction`` still doesn't poison the parser."""
+        fixture = {
+            "type": "tool_result", "toolUseId": "toolu_garb",
+            "message": {"role": "user", "content": "{not turn_correction json"},
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        entries = result if isinstance(result, list) else [result]
+        assert all(e.get("type") != "turn_correction" for e in entries)
+        # Plain tool_result is still emitted so the operator sees the raw output.
+        assert any(e.get("type") == "tool_result" for e in entries)
+
+    def test_normal_tool_result_unaffected(self):
+        """Regression guard: existing semantic parsing isn't disturbed."""
+        result = _parse_jsonl_entry(_line(FIXTURE_TOOL_RESULT_STRING))
+        # Plain content -> bare tool_result (no list wrapping, no extra entries).
+        assert isinstance(result, dict)
+        assert result["type"] == "tool_result"
+        assert "turn_correction" not in result.get("content", "")
 
 
 # ── TestContentExtraction ────────────────────────────────────────────
