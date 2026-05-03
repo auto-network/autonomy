@@ -54,3 +54,15 @@ def test_manifest_default_enabled_omitted_so_plugin_boots_enabled() -> None:
     )
     manifest = PluginManifest.model_validate(raw)
     assert manifest.default_enabled is None
+
+
+def test_fragment_defaults_to_browse_when_new_html_meets_old_js() -> None:
+    """The fragment must stay usable if the shell is still holding an older
+    in-memory ``page.js`` during a live deploy.
+    """
+    fragment = (_MANIFEST_PATH.parent / "page.html").read_text()
+
+    assert "typeof activeTab === 'undefined' || activeTab === 'browse'" in fragment
+    assert "typeof activeTab !== 'undefined' && activeTab === 'diagnostics'" in fragment
+    assert "typeof switchTab === 'function' ? switchTab('browse') : null" in fragment
+    assert "typeof switchTab === 'function' ? switchTab('diagnostics') : null" in fragment
