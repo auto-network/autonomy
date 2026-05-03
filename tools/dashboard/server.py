@@ -5479,6 +5479,29 @@ async def page_session_view_fragment(request):
     return templates.TemplateResponse(request, "pages/session-view.html")
 
 
+async def page_session_view_by_name(request):
+    """Resolve /session/{session_id} → /session/{project}/{session_id}.
+
+    Journal entries (auto-fjfki) link to /session/<source_session_id> with no
+    project segment. Look up the project from the registered session, or fall
+    back to the sessions index when the name is unknown.
+    """
+    session_id = request.path_params["session_id"]
+    if os.environ.get("DASHBOARD_MOCK"):
+        return HTMLResponse(_load_template("base.html"))
+    session = dashboard_db.get_session(session_id)
+    project = (session or {}).get("project")
+    if not project:
+        return RedirectResponse(
+            url=f"/sessions?session={session_id}",
+            status_code=302,
+        )
+    return RedirectResponse(
+        url=f"/session/{project}/{session_id}",
+        status_code=302,
+    )
+
+
 async def page_test_input(request):
     """Serve the mobile chat input prototype as a standalone full page.
 
@@ -11471,6 +11494,7 @@ routes = [
     Route("/terminal/{session_id}", page_terminal),
     Route("/pages/terminal", page_terminal_fragment),
     Route("/pages/design", page_design_fragment),
+    Route("/session/{session_id}", page_session_view_by_name),
     Route("/session/{project}/{session_id}", page_session_view),
     Route("/pages/session-view", page_session_view_fragment),
     Route("/test/input", page_test_input),
