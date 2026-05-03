@@ -27,11 +27,14 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import logging
 import os
 import sqlite3
 import subprocess
 import sys
 import time
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -850,11 +853,33 @@ def merge_branch(branch: str, bead_id: str, reason: str) -> tuple[bool, str]:
 def cleanup_worktree(worktree_path: str) -> None:
     """Remove a git worktree after dispatch."""
     if worktree_path and Path(worktree_path).exists():
-        subprocess.run(
+        # Capture the call chain so a missing-worktree incident can be
+        # attributed to the responsible code path months later. See the
+        # 2026-05-02 incident audit (auto-0502-123849) and the
+        # ``_log_worktree_removed`` helper in workspace_manager.py for
+        # the broader contract: every deletion of a worktree directory
+        # must produce an INFO log line at the source.
+        import traceback as _tb
+        chain = " ← ".join(
+            f"{f.name}@{Path(f.filename).name}:{f.lineno}"
+            for f in _tb.extract_stack()[-5:-1]
+        )
+        result = subprocess.run(
             ["git", "worktree", "remove", worktree_path, "--force"],
             capture_output=True, text=True, timeout=15,
             cwd=str(REPO_ROOT),
         )
+        if result.returncode == 0:
+            logger.info(
+                "workspace cleanup: REMOVED %s  method=git-worktree-remove(dispatcher)  caller=%s",
+                worktree_path, chain,
+            )
+        else:
+            logger.warning(
+                "workspace cleanup: git worktree remove FAILED for %s rc=%d err=%s caller=%s",
+                worktree_path, result.returncode,
+                (result.stderr or "").strip(), chain,
+            )
 
 
 def find_worktree_for_bead(bead_id: str) -> str:
@@ -3046,11 +3071,22 @@ def reconcile_state(running: list[RunningAgent]) -> None:
 
             # No new commits — safe to remove
             print(f"  reconcile: removing orphaned worktree {name} (no commits)")
-            subprocess.run(
+            result = subprocess.run(
                 ["git", "worktree", "remove", str(worktree), "--force"],
                 capture_output=True, text=True, timeout=15,
                 cwd=str(REPO_ROOT),
             )
+            if result.returncode == 0:
+                logger.info(
+                    "workspace cleanup: REMOVED %s  method=git-worktree-remove(reconcile)  "
+                    "caller=reconcile_worktrees@dispatcher.py",
+                    worktree,
+                )
+            else:
+                logger.warning(
+                    "workspace cleanup: reconcile remove FAILED for %s rc=%d err=%s",
+                    worktree, result.returncode, (result.stderr or "").strip(),
+                )
     except Exception as e:
         print(f"  WARNING: reconcile worktrees failed: {e}", file=sys.stderr)
 
