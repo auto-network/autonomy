@@ -1251,6 +1251,110 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
     }
 
 
+def _walk_decision_path(decision: dict | None, path: str):
+    """Walk a dotted ``path`` into ``decision``; return None if any hop misses.
+
+    Used by :func:`_resolve_card_summary_slots` to look up declarative
+    paths from an action's ``card_summary`` Setting field. Both list
+    indices (``foo.0.bar``) and dict keys are supported; non-dict/list
+    intermediates short-circuit to None rather than raising.
+    """
+    cur: object = decision
+    for part in path.split("."):
+        if cur is None:
+            return None
+        if isinstance(cur, list):
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError):
+                return None
+        elif isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            return None
+    return cur
+
+
+def _resolve_card_summary_slots(slots, decision: dict | None) -> list[dict]:
+    """Resolve a card_summary slot list against ``decision``.
+
+    Each input slot is ``{label, path, format?}``; output slots are
+    ``{label, value, format}`` with ``value`` already walked from the
+    decision dict. Slots whose path doesn't resolve are dropped (silent
+    no-op) so the rendered card matches what's actually known. Returns
+    an empty list if either side is missing.
+    """
+    if not slots or not isinstance(slots, list):
+        return []
+    out: list[dict] = []
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        label = slot.get("label")
+        path = slot.get("path")
+        if not isinstance(label, str) or not label:
+            continue
+        if not isinstance(path, str) or not path:
+            continue
+        value = _walk_decision_path(decision, path)
+        if value is None or value == "" or value == [] or value == {}:
+            continue
+        out.append({
+            "label": label,
+            "value": value,
+            "format": slot.get("format") or "text",
+        })
+    return out
+
+
+def _load_action_card_summaries(
+    member_keys: set[tuple[str, str]],
+) -> dict[tuple[str, str], list]:
+    """Bulk-load ``card_summary`` slots for a set of (member_key, org) pairs.
+
+    Returns a dict keyed by ``(member_key, target_org)``. Missing or
+    invalid lookups yield empty lists so callers don't have to guard.
+    """
+    out: dict[tuple[str, str], list] = {}
+    by_org: dict[str, set[str]] = {}
+    for mk, org in member_keys:
+        if not mk or not org:
+            continue
+        by_org.setdefault(org, set()).add(mk)
+    for org, keys in by_org.items():
+        try:
+            members = graph_ops.read_set(
+                "dashboard.agent-actions", org=org, peers=[],
+            ).members
+        except Exception:  # noqa: BLE001 — agentic UI must not crash
+            logger.exception(
+                "card_summary: read_set failed org=%s", org,
+            )
+            continue
+        for m in members:
+            if m.key not in keys:
+                continue
+            payload = m.payload if isinstance(m.payload, dict) else {}
+            cs = payload.get("card_summary")
+            if isinstance(cs, list) and cs:
+                out[(m.key, org)] = cs
+    return out
+
+
+def _load_decision_for_run(output_dir: str | None) -> dict | None:
+    """Read ``decision.json`` from a dispatch run's output dir, if present."""
+    if not output_dir:
+        return None
+    path = Path(output_dir) / "decision.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _enrich_timeline_agentic(entries: list[dict]) -> None:
     """Populate the agentic-only timeline fields in-place via the
     shared identity resolver. See :func:`_resolve_agentic_identity`."""
@@ -1282,6 +1386,28 @@ def _enrich_timeline_agentic(entries: list[dict]) -> None:
             entry["title"] = ident["title"]
         elif not entry.get("title"):
             entry["title"] = ""
+
+    # Per-action card_summary slots (auto-56o4m). The action's Setting
+    # member declares which decision-dict paths matter for its card; we
+    # walk them here, server-side, so the timeline JS just iterates a
+    # flat list of resolved {label, value, format} slots.
+    pairs = {
+        (e.get("member_key") or "", e.get("target_org") or "")
+        for e in entries
+        if e.get("kind") == "agentic"
+    }
+    summaries = _load_action_card_summaries(pairs - {("", "")})
+    for entry in entries:
+        if entry.get("kind") != "agentic":
+            continue
+        slots = summaries.get(
+            (entry.get("member_key") or "", entry.get("target_org") or ""),
+        )
+        if not slots:
+            entry["card_summary"] = []
+            continue
+        decision = _load_decision_for_run(entry.get("_output_dir"))
+        entry["card_summary"] = _resolve_card_summary_slots(slots, decision)
 
 
 def _parse_review_summary(text: str) -> dict | None:
@@ -1569,8 +1695,6 @@ async def api_timeline(request):
             rows = conn.execute(sql, params).fetchall()
             entries = [_row_to_timeline_entry(r) for r in rows]
             _enrich_with_librarian_data(conn, entries)
-            for e in entries:
-                e.pop("_output_dir", None)
             return entries
         finally:
             conn.close()
@@ -1583,7 +1707,11 @@ async def api_timeline(request):
     # Agentic identity enrichment: fills in member_key, action_label,
     # target_source_id, target_org, and a card-friendly title for every
     # ``kind='agentic'`` entry. Bead/librarian entries are unaffected.
+    # Reads decision.json from _output_dir for card_summary resolution,
+    # so the pop happens *after* this step (auto-56o4m).
     await asyncio.to_thread(_enrich_timeline_agentic, entries)
+    for e in entries:
+        e.pop("_output_dir", None)
 
     # Enrich with bead title and priority from Dolt
     bead_ids = [e["bead_id"] for e in entries if e.get("bead_id")]
@@ -1800,12 +1928,22 @@ async def api_dispatch_trace(request):
         sender_project = ""
         if sender and sender != "dashboard":
             sender_project = _session_meta_for_tmux(sender).get("project") or ""
+        # Per-action card_summary (auto-56o4m): same shape as on the
+        # timeline so the trace card reuses the timeline's slot template.
+        card_summary: list[dict] = []
+        if identity["member_key"] and identity["target_org"]:
+            slots = _load_action_card_summaries(
+                {(identity["member_key"], identity["target_org"])},
+            ).get((identity["member_key"], identity["target_org"]))
+            if slots:
+                card_summary = _resolve_card_summary_slots(slots, decision)
         return JSONResponse({
             "run": run_name,
             "kind": "agentic",
             "bead_id": "",
             "bead": None,
             "decision": decision,
+            "card_summary": card_summary,
             "experience_report": "",
             "commit_hash": "",
             "branch": "",
