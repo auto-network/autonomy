@@ -1,11 +1,10 @@
 // Settings UI plugin — frontend Alpine factory.
 //
-// Reads + writes Setting rows across orgs via the existing
+// Browse mode reads + writes Setting rows across orgs via the existing
 // /api/orgs, /api/graph/sets, /api/graph/settings/<set_id>, and
-// POST /api/graph/setting endpoints. The org picker is per-fetch
-// override of X-Graph-Org so the page can show data from any org
-// while the substrate's plugin-org stamping (autonomy) remains the
-// default for everything else.
+// POST /api/graph/setting endpoints. Diagnostics mode adds read-only
+// visibility into Settings throughput, storage footprint, and per-key
+// storage using the dashboard's diag surfaces.
 //
 // Selection state (org / set / member) persists to localStorage so
 // SPA navigations restore where the operator left off.
@@ -20,6 +19,7 @@ const DEFAULT_SCHEMA_REVISION = 1;
 function settingsPage() {
   return {
     // ── Selection ──────────────────────────────────────────────
+    activeTab: 'browse',
     orgs: [],
     selectedOrg: 'autonomy',
     sets: {},          // { org: [{set_id, count}, ...] }
@@ -32,10 +32,21 @@ function settingsPage() {
     editorText: '',
     errorMessage: null,
 
+    // ── Diagnostics state ──────────────────────────────────────
+    diagSummary: null,
+    diagMediator: null,
+    diagSets: [],
+    diagSelectedSetId: null,
+    diagSetDetail: null,
+    diagWindow: 'last_60s',
+    diagLoadedOrg: null,
+    diagError: null,
+
     // ── Loading / error gating ─────────────────────────────────
     loadingOrgs: false,
     loadingSets: false,
     loadingMembers: false,
+    diagLoading: false,
 
     // ── Lifecycle ──────────────────────────────────────────────
     async init() {
@@ -66,7 +77,7 @@ function settingsPage() {
     // ── Computed-style getters ─────────────────────────────────
     get totalMembers() {
       return (this.sets[this.selectedOrg] || []).reduce(
-        (s, r) => s + (r.count || 0), 0,
+        (sum, row) => sum + this._setRowCount(row), 0,
       );
     },
 
@@ -75,14 +86,54 @@ function settingsPage() {
       return list.find(m => m.key === this.selectedKey) || null;
     },
 
+    get diagWindowBlock() {
+      return this.diagSummary && this.diagSummary[this.diagWindow]
+        ? this.diagSummary[this.diagWindow]
+        : null;
+    },
+
+    get diagSortedSets() {
+      return this._sortDiagRows(this.diagSets);
+    },
+
+    get diagTopSets() {
+      return this.diagSortedSets.slice(0, 8);
+    },
+
+    get currentDiagSet() {
+      return this.diagSetDetail && this.diagSetDetail.set
+        ? this.diagSetDetail.set
+        : null;
+    },
+
+    // ── Tab state ──────────────────────────────────────────────
+    async switchTab(tab) {
+      this.activeTab = tab;
+      if (tab === 'diagnostics') {
+        await this.refreshDiagnostics();
+      }
+    },
+
+    setDiagWindow(windowName) {
+      this.diagWindow = windowName;
+    },
+
     // ── Org picker ────────────────────────────────────────────
     async onOrgChange() {
       this.selectedSetId = null;
       this.selectedKey = null;
       this.editing = false;
       this.errorMessage = null;
+      this.diagLoadedOrg = null;
+      this.diagSets = [];
+      this.diagSelectedSetId = null;
+      this.diagSetDetail = null;
+      this.diagError = null;
       this._persistSelection();
       await this._loadSetsForOrg(this.selectedOrg);
+      if (this.activeTab === 'diagnostics') {
+        await this.refreshDiagnostics();
+      }
     },
 
     // ── Set selection ─────────────────────────────────────────
@@ -113,20 +164,73 @@ function settingsPage() {
     },
 
     _refreshEditorFromMember() {
-      const m = this.currentMember;
-      this.editorText = this.formatPayload(m && m.payload);
+      const member = this.currentMember;
+      this.editorText = this.formatPayload(member && member.payload);
     },
 
     // ── Display helpers ───────────────────────────────────────
-    formatPayload(p) { return JSON.stringify(p || {}, null, 2); },
+    formatPayload(payload) { return JSON.stringify(payload || {}, null, 2); },
 
-    stateClass(s) {
+    formatBytes(value) {
+      const bytes = Number(value || 0);
+      if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+      if (bytes < 1024) return bytes.toLocaleString() + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    },
+
+    formatCount(value) {
+      return Number(value || 0).toLocaleString();
+    },
+
+    formatTimestamp(value) {
+      return value || 'n/a';
+    },
+
+    formatFloat(value, digits) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return 'n/a';
+      }
+      return Number(value).toFixed(digits);
+    },
+
+    stateClass(state) {
       return ({
         canonical: 'bg-green-950/60 text-green-300',
         published: 'bg-blue-950/60 text-blue-300',
-        curated:   'bg-amber-950/60 text-amber-300',
-        raw:       'bg-gray-800 text-gray-400',
-      })[s] || 'bg-gray-800 text-gray-400';
+        curated: 'bg-amber-950/60 text-amber-300',
+        raw: 'bg-gray-800 text-gray-400',
+      })[state] || 'bg-gray-800 text-gray-400';
+    },
+
+    diagActivityFor(row) {
+      if (!row || !row.activity) return this._zeroActivity();
+      return this.diagActivityForWindow(row, this.diagWindow);
+    },
+
+    diagActivityForWindow(row, windowName) {
+      const block = row && row.activity && row.activity[windowName];
+      if (!block) return this._zeroActivity();
+      return {
+        calls: Number(block.calls || 0),
+        reads: Number(block.reads || 0),
+        writes: Number(block.writes || 0),
+        upserts: Number(block.upserts || 0),
+      };
+    },
+
+    diagOperationsUpserts() {
+      const block = this.diagWindowBlock;
+      if (!block || !block.operations) return 0;
+      return Number(block.operations.upsert_by_key || 0);
+    },
+
+    diagTopBarWidth(row) {
+      const rows = this.diagTopSets;
+      if (!rows.length) return '0%';
+      const maxCalls = Math.max(...rows.map(item => this.diagActivityFor(item).calls), 1);
+      const pct = (this.diagActivityFor(row).calls / maxCalls) * 100;
+      return Math.max(Math.round(pct), 6) + '%';
     },
 
     // ── Save (edited payload) ─────────────────────────────────
@@ -141,13 +245,13 @@ function settingsPage() {
       const setId = this.selectedSetId;
       const key = this.selectedKey;
       if (!setId || !key) return;
-      const m = this.currentMember;
+      const member = this.currentMember;
       const body = {
         set_id: setId,
-        schema_revision: (m && m.schema_revision) || DEFAULT_SCHEMA_REVISION,
+        schema_revision: (member && member.schema_revision) || DEFAULT_SCHEMA_REVISION,
         key: key,
         payload: parsed,
-        state: (m && m.state) || 'raw',
+        state: (member && member.state) || 'raw',
       };
       const res = await this._postSetting(body, this.selectedOrg);
       if (!res.ok) {
@@ -159,18 +263,19 @@ function settingsPage() {
       // Re-fetch members so the row reflects the new payload + revision.
       await this._loadMembersForSet(setId);
       this._refreshEditorFromMember();
+      this.diagLoadedOrg = null;
     },
 
     // ── One-click plugin toggle ───────────────────────────────
-    async togglePlugin(m) {
+    async togglePlugin(member) {
       if (this.selectedSetId !== 'dashboard.plugin') return;
-      const flipped = !(m.payload && m.payload.enabled);
+      const flipped = !(member.payload && member.payload.enabled);
       const body = {
         set_id: 'dashboard.plugin',
-        schema_revision: m.schema_revision || DEFAULT_SCHEMA_REVISION,
-        key: m.key,
-        payload: { ...(m.payload || {}), enabled: flipped },
-        state: m.state || 'raw',
+        schema_revision: member.schema_revision || DEFAULT_SCHEMA_REVISION,
+        key: member.key,
+        payload: { ...(member.payload || {}), enabled: flipped },
+        state: member.state || 'raw',
       };
       const res = await this._postSetting(body, this.selectedOrg);
       if (!res.ok) {
@@ -184,6 +289,73 @@ function settingsPage() {
       if (window.Autonomy && typeof window.Autonomy.refreshPlugins === 'function') {
         await window.Autonomy.refreshPlugins();
       }
+      this.diagLoadedOrg = null;
+    },
+
+    // ── Diagnostics loading ───────────────────────────────────
+    async refreshDiagnostics() {
+      if (this.diagLoading && this.diagLoadedOrg === this.selectedOrg) return;
+      this.diagLoading = true;
+      this.diagError = null;
+      try {
+        const [summaryRes, mediatorRes, setsRes] = await Promise.all([
+          this._fetchAsOrg('/api/diag/settings', this.selectedOrg),
+          this._fetchAsOrg('/api/diag/settings_mediator', this.selectedOrg),
+          this._fetchAsOrg('/api/diag/settings/sets', this.selectedOrg),
+        ]);
+        if (!summaryRes.ok || !mediatorRes.ok || !setsRes.ok) {
+          throw new Error(
+            'Diagnostics request failed (' +
+            [summaryRes.status, mediatorRes.status, setsRes.status].join(', ') + ')',
+          );
+        }
+        const [summary, mediator, setsPayload] = await Promise.all([
+          summaryRes.json(),
+          mediatorRes.json(),
+          setsRes.json(),
+        ]);
+        const rows = setsPayload.sets || [];
+        const availableWindows = setsPayload.windows || ['totals', 'last_10s', 'last_60s'];
+        this.diagSummary = summary;
+        this.diagMediator = mediator;
+        this.diagSets = rows;
+        this.diagLoadedOrg = this.selectedOrg;
+        this.diagWindow = availableWindows.includes(this.diagWindow)
+          ? this.diagWindow
+          : (availableWindows.includes('last_60s') ? 'last_60s' : availableWindows[0]);
+        const sortedRows = this._sortDiagRows(rows);
+        const stillSelected = rows.some(row => row.set_id === this.diagSelectedSetId);
+        this.diagSelectedSetId = stillSelected
+          ? this.diagSelectedSetId
+          : (sortedRows[0] ? sortedRows[0].set_id : null);
+        if (this.diagSelectedSetId) {
+          await this.loadDiagSetDetail(this.diagSelectedSetId);
+        } else {
+          this.diagSetDetail = null;
+        }
+      } catch (e) {
+        this.diagError = e && e.message ? e.message : String(e);
+        this.diagSetDetail = null;
+      } finally {
+        this.diagLoading = false;
+      }
+    },
+
+    async loadDiagSetDetail(setId) {
+      this.diagSelectedSetId = setId;
+      try {
+        const res = await this._fetchAsOrg(
+          '/api/diag/settings/sets/' + encodeURIComponent(setId),
+          this.selectedOrg,
+        );
+        if (!res.ok) {
+          this.diagSetDetail = null;
+          return;
+        }
+        this.diagSetDetail = await res.json();
+      } catch (_e) {
+        this.diagSetDetail = null;
+      }
     },
 
     // ── Data loading ──────────────────────────────────────────
@@ -194,11 +366,11 @@ function settingsPage() {
         if (!res.ok) { this.orgs = ['autonomy']; return; }
         const data = await res.json();
         const slugs = (data.orgs || [])
-          .map(e => (e && e.org && e.org.slug) || e.slug)
+          .map(entry => (entry && entry.org && entry.org.slug) || entry.slug)
           .filter(Boolean);
         // Always make autonomy available even if the orgs endpoint is empty.
         this.orgs = slugs.length ? slugs : ['autonomy'];
-      } catch (e) {
+      } catch (_e) {
         this.orgs = ['autonomy'];
       } finally {
         this.loadingOrgs = false;
@@ -208,13 +380,21 @@ function settingsPage() {
     async _loadSetsForOrg(org) {
       this.loadingSets = true;
       try {
-        const res = await this._fetchAsOrg('/api/graph/sets', org);
+        const res = await this._fetchAsOrg('/api/graph/sets?summary=1', org);
         if (!res.ok) { this.sets = { ...this.sets, [org]: [] }; return; }
         const data = await res.json();
-        const ids = data.set_ids || [];
-        const rows = ids.map(id => ({ set_id: id, count: 0 }));
+        let rows = [];
+        if (Array.isArray(data.sets) && data.sets.length) {
+          rows = data.sets.map(row => ({
+            ...row,
+            count: this._setRowCount(row),
+          }));
+        } else {
+          const ids = data.set_ids || [];
+          rows = ids.map(id => ({ set_id: id, count: 0, member_count: 0 }));
+        }
         this.sets = { ...this.sets, [org]: rows };
-      } catch (e) {
+      } catch (_e) {
         this.sets = { ...this.sets, [org]: [] };
       } finally {
         this.loadingSets = false;
@@ -233,11 +413,13 @@ function settingsPage() {
         const list = data.members || [];
         this.members = { ...this.members, [setId]: list };
         // Update the count in the left rail for this set.
-        const orgRows = (this.sets[this.selectedOrg] || []).map(r =>
-          r.set_id === setId ? { ...r, count: list.length } : r,
+        const orgRows = (this.sets[this.selectedOrg] || []).map(row =>
+          row.set_id === setId
+            ? { ...row, count: list.length, member_count: list.length }
+            : row,
         );
         this.sets = { ...this.sets, [this.selectedOrg]: orgRows };
-      } catch (e) {
+      } catch (_e) {
         this.members = { ...this.members, [setId]: [] };
       } finally {
         this.loadingMembers = false;
@@ -246,8 +428,8 @@ function settingsPage() {
 
     // ── Cross-org fetch helper ────────────────────────────────
     // The substrate's ``Autonomy.fetch`` stamps the plugin's effective
-    // org (autonomy) onto every request, *overwriting* any explicit
-    // X-Graph-Org we pass — so it can't be used for picker-driven
+    // org (autonomy) onto every request, overwriting any explicit
+    // X-Graph-Org we pass, so it can't be used for picker-driven
     // cross-org reads. We call ``fetch`` directly with the header the
     // picker dictates; non-picker reads (``/api/orgs``) still go
     // through ``Autonomy.fetch`` so they pick up the substrate default.
@@ -290,7 +472,7 @@ function settingsPage() {
           set_id: this.selectedSetId,
           key: this.selectedKey,
         }));
-      } catch (e) { /* storage disabled — selection is just session-local */ }
+      } catch (_e) { /* storage disabled — selection is just session-local */ }
     },
 
     _readPersistedSelection() {
@@ -304,9 +486,35 @@ function settingsPage() {
           set_id: typeof saved.set_id === 'string' ? saved.set_id : null,
           key: typeof saved.key === 'string' ? saved.key : null,
         };
-      } catch (e) {
+      } catch (_e) {
         return null;
       }
+    },
+
+    _setRowCount(row) {
+      return Number(
+        row && row.count !== undefined
+          ? row.count
+          : (row && row.member_count !== undefined ? row.member_count : 0),
+      ) || 0;
+    },
+
+    _zeroActivity() {
+      return { calls: 0, reads: 0, writes: 0, upserts: 0 };
+    },
+
+    _sortDiagRows(rows) {
+      return [...(rows || [])].sort((left, right) => {
+        const leftActivity = this.diagActivityFor(left);
+        const rightActivity = this.diagActivityFor(right);
+        return (
+          rightActivity.calls - leftActivity.calls
+          || rightActivity.upserts - leftActivity.upserts
+          || rightActivity.writes - leftActivity.writes
+          || this._setRowCount(right) - this._setRowCount(left)
+          || String(left.set_id || '').localeCompare(String(right.set_id || ''))
+        );
+      });
     },
   };
 }

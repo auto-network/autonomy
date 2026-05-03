@@ -57,6 +57,64 @@ window.__settingsStubData = window.__settingsStubData || {
         ],
     },
     saveResponse: {ok: true, status: 201, body: {id: 'new-id'}},
+    diagSettings: {
+        totals: {
+            calls: 18,
+            reads: 11,
+            writes: 7,
+            errors: 0,
+            calls_per_second: 0,
+            latency_ms: {p50: 10, p95: 40, p99: 70},
+            operations: {upsert_by_key: 6},
+        },
+        last_10s: {
+            calls: 4,
+            reads: 2,
+            writes: 2,
+            errors: 0,
+            calls_per_second: 0.4,
+            latency_ms: {p50: 9, p95: 18, p99: 20},
+            operations: {upsert_by_key: 2},
+        },
+        last_60s: {
+            calls: 12,
+            reads: 7,
+            writes: 5,
+            errors: 0,
+            calls_per_second: 0.2,
+            latency_ms: {p50: 11, p95: 28, p99: 33},
+            operations: {upsert_by_key: 4},
+        },
+        last_call: {
+            operation: 'read_set',
+            set_id: 'dashboard.plugin',
+        },
+        last_error: null,
+    },
+    diagMediator: {
+        last_tick_age_s: 1.7,
+        events_received_count: 8,
+        handlers_fired_count: {'sync.dashboard.plugin': 2},
+        last_handler_error: {},
+    },
+    diagSetActivity: {
+        'dashboard.plugin': {
+            totals: {calls: 12, reads: 7, writes: 5, upserts: 4},
+            last_10s: {calls: 4, reads: 2, writes: 2, upserts: 2},
+            last_60s: {calls: 9, reads: 5, writes: 4, upserts: 3},
+        },
+        'autonomy.workspace': {
+            totals: {calls: 6, reads: 4, writes: 2, upserts: 1},
+            last_10s: {calls: 1, reads: 1, writes: 0, upserts: 0},
+            last_60s: {calls: 3, reads: 2, writes: 1, upserts: 1},
+        },
+        'anchore.policy': {
+            totals: {calls: 3, reads: 2, writes: 1, upserts: 1},
+            last_10s: {calls: 0, reads: 0, writes: 0, upserts: 0},
+            last_60s: {calls: 2, reads: 1, writes: 1, upserts: 1},
+        },
+    },
+    diagTimestamp: '2026-05-03T02:30:00Z',
     refreshPluginsCalls: 0,
 };
 
@@ -88,6 +146,63 @@ if (!window.__settingsFetchInstalled) {
             ));
         }
 
+        function payloadBytes(payload) {
+            return JSON.stringify(payload || {}).length;
+        }
+
+        function buildSetSummaries(slug) {
+            var ids = stub.sets[slug] || [];
+            return ids.map(function (setId) {
+                var members = stub.members[setId] || [];
+                return {
+                    set_id: setId,
+                    count: members.length,
+                    member_count: members.length,
+                    stored_row_count: members.length,
+                    stored_key_count: members.length,
+                    payload_bytes: members.reduce(function (sum, member) {
+                        return sum + payloadBytes(member.payload);
+                    }, 0),
+                    deprecated_row_count: members.filter(function (member) {
+                        return !!member.deprecated;
+                    }).length,
+                    latest_updated_at: stub.diagTimestamp,
+                };
+            });
+        }
+
+        function zeroActivity() {
+            return {calls: 0, reads: 0, writes: 0, upserts: 0};
+        }
+
+        function diagActivity(setId) {
+            return stub.diagSetActivity[setId] || {
+                totals: zeroActivity(),
+                last_10s: zeroActivity(),
+                last_60s: zeroActivity(),
+            };
+        }
+
+        function diagSetRows(slug) {
+            return buildSetSummaries(slug).map(function (row) {
+                return Object.assign({}, row, {activity: diagActivity(row.set_id)});
+            });
+        }
+
+        function diagKeyRows(setId) {
+            return (stub.members[setId] || []).map(function (member) {
+                return {
+                    key: member.key,
+                    member_present: true,
+                    stored_row_count: 1,
+                    payload_bytes: payloadBytes(member.payload),
+                    deprecated_row_count: member.deprecated ? 1 : 0,
+                    latest_updated_at: stub.diagTimestamp,
+                    latest_state: member.state || 'raw',
+                };
+            });
+        }
+
         // /api/orgs
         if (url === '/api/orgs') {
             return jsonResp({orgs: stub.orgs}, 200);
@@ -96,7 +211,10 @@ if (!window.__settingsFetchInstalled) {
         // /api/graph/sets — org-scoped
         if (url.indexOf('/api/graph/sets') === 0) {
             var slug = orgHeader || 'autonomy';
-            return jsonResp({set_ids: stub.sets[slug] || []}, 200);
+            return jsonResp({
+                set_ids: stub.sets[slug] || [],
+                sets: buildSetSummaries(slug),
+            }, 200);
         }
 
         // /api/graph/settings/<set_id>
@@ -106,6 +224,42 @@ if (!window.__settingsFetchInstalled) {
                 url.replace('/api/graph/settings/', '').split('?')[0],
             );
             return jsonResp({members: stub.members[setId] || []}, 200);
+        }
+
+        // /api/diag/settings
+        if (url === '/api/diag/settings') {
+            return jsonResp(stub.diagSettings, 200);
+        }
+
+        // /api/diag/settings_mediator
+        if (url === '/api/diag/settings_mediator') {
+            return jsonResp(stub.diagMediator, 200);
+        }
+
+        // /api/diag/settings/sets/<set_id>
+        if (url.indexOf('/api/diag/settings/sets/') === 0) {
+            var detailSetId = decodeURIComponent(
+                url.replace('/api/diag/settings/sets/', '').split('?')[0],
+            );
+            var detailRow = diagSetRows(orgHeader || 'autonomy').find(
+                function (row) { return row.set_id === detailSetId; },
+            );
+            return jsonResp({
+                org: orgHeader || 'autonomy',
+                windows: ['totals', 'last_10s', 'last_60s'],
+                set: detailRow || null,
+                keys: diagKeyRows(detailSetId),
+            }, 200);
+        }
+
+        // /api/diag/settings/sets
+        if (url.indexOf('/api/diag/settings/sets') === 0) {
+            var diagSlug = orgHeader || 'autonomy';
+            return jsonResp({
+                org: diagSlug,
+                windows: ['totals', 'last_10s', 'last_60s'],
+                sets: diagSetRows(diagSlug),
+            }, 200);
         }
 
         // POST /api/graph/setting
@@ -299,6 +453,30 @@ class TestSettingsPlugin:
             "expected_member_count"
         ), f"row count != API members.length: {result}"
         assert "settings" in (result.get("member_keys") or []), result
+
+    def test_first_load_uses_summary_counts(self):
+        """First-load set counts come from ``/api/graph/sets?summary=1``
+        and do not require a member fetch first."""
+        _navigate_to_settings_and_check("", pre_settings_path="/sessions")
+        time.sleep(0.6)
+        result = _ab_eval_batch(
+            """
+            var r = {};
+            var target = Array.from(document.querySelectorAll(
+                '[data-testid="set-row"]')).find(function (button) {
+                return button.dataset.setId === 'dashboard.plugin';
+            });
+            r.count_text = target
+                ? target.querySelector('span:last-child').textContent.trim()
+                : null;
+            r.member_fetches = window.__settingsFetchSpy.filter(function (call) {
+                return call.url.indexOf('/api/graph/settings/dashboard.plugin') === 0;
+            }).length;
+            return r;
+            """
+        )
+        assert result.get("count_text") == "2", result
+        assert result.get("member_fetches") == 0, result
 
     def test_member_drawer_shows_payload(self):
         """Clicking a member row reveals the detail drawer with the
@@ -630,6 +808,54 @@ class TestSettingsPlugin:
         assert "anchore.policy" in (result.get("set_ids_after") or []), result
         # Alpine's :value binding propagated selectedOrg → picker DOM.
         assert result.get("picker_value_after") == "anchore", result
+
+    def test_diagnostics_tab_shows_activity_and_key_storage(self):
+        """Diagnostics renders noisy-set activity and per-key storage
+        detail from the read-only Settings diag endpoints."""
+        _navigate_to_settings_and_check("", pre_settings_path="/sessions")
+        time.sleep(0.6)
+        result = _ab_eval_batch(
+            """
+            var r = {};
+            window.__settingsFetchSpy = [];
+            var button = document.querySelector(
+                '[data-testid="settings-tab-diagnostics"]');
+            if (button) button.click();
+            return new Promise(function (resolve) {
+                setTimeout(function () {
+                    var rows = document.querySelectorAll(
+                        '[data-testid="settings-diag-set-row"]');
+                    var keys = document.querySelectorAll(
+                        '[data-testid="settings-diag-key-row"]');
+                    var noisy = document.querySelectorAll(
+                        '[data-testid="settings-noisy-row"]');
+                    r.diag_row_count = rows.length;
+                    r.key_row_count = keys.length;
+                    r.noisy_row_count = noisy.length;
+                    r.first_set_id = rows.length ? rows[0].dataset.setId : null;
+                    r.calls_text = rows.length
+                        ? rows[0].children[4].textContent.trim()
+                        : null;
+                    r.diag_fetches = window.__settingsFetchSpy
+                        .filter(function (call) {
+                            return call.url.indexOf('/api/diag/settings') === 0;
+                        })
+                        .map(function (call) { return call.url; });
+                    resolve(r);
+                }, 700);
+            });
+            """
+        )
+        assert result.get("diag_row_count", 0) >= 1, result
+        assert result.get("key_row_count", 0) >= 1, result
+        assert result.get("noisy_row_count", 0) >= 1, result
+        assert result.get("first_set_id") == "dashboard.plugin", result
+        assert result.get("calls_text") == "9", result
+        assert "/api/diag/settings" in (result.get("diag_fetches") or []), result
+        assert "/api/diag/settings/sets" in (result.get("diag_fetches") or []), result
+        assert "/api/diag/settings/sets/dashboard.plugin" in (
+            result.get("diag_fetches") or []
+        ), result
 
     def test_state_persists_across_navigation(self):
         """Selecting org/set/member, navigating away, and returning
