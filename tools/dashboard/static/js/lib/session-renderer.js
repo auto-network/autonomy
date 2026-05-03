@@ -601,5 +601,43 @@
       this.attachments = [];
     },
 
+    // ── Turn-correction overlay (auto-edec1.4) ─────────────────────
+    //
+    // Sparse: only user entries whose message_id matches a row in
+    // ``this._corrections`` get overlaid. Everything else flows through
+    // the unmodified raw rendering path.
+
+    _correctionFor(entry) {
+      if (!entry || entry.type !== 'user') return null;
+      var mid = entry.message_id;
+      if (!mid) return null;
+      var corrections = this._corrections || {};
+      return corrections[mid] || null;
+    },
+
+    correctionStateFor(entry) {
+      var c = this._correctionFor(entry);
+      return c ? c.status : '';
+    },
+
+    correctionEntryClasses(entry) {
+      var state = this.correctionStateFor(entry);
+      if (state === 'pending') return 'tc-entry-pending';
+      if (state === 'accepted') return 'tc-entry-accepted';
+      return '';
+    },
+
+    correctionDisplayText(entry) {
+      var c = this._correctionFor(entry);
+      if (c && c.status === 'accepted') return c.corrected_text || '';
+      return entry.content || '';
+    },
+
+    correctionFragmentsFor(entry) {
+      var c = this._correctionFor(entry);
+      if (!c) return [];
+      return window.SessionDiff.fragments(entry.content || '', c.corrected_text || '');
+    },
+
   };
 })();

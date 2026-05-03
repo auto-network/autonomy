@@ -78,16 +78,49 @@
              resolveEntry(dEntry).type === 'compact_summary' ? 'sc-entry-compact-summary' : '',
              resolveEntry(dEntry).type === 'crosstalk' ? 'sc-entry-crosstalk' : '',
              resolveEntry(dEntry).type === 'crosstalk' && resolveEntry(dEntry).direction === 'sent' ? 'sc-entry-crosstalk-sent' : '',
-           ]">
+             resolveEntry(dEntry).type === 'user' ? correctionEntryClasses(resolveEntry(dEntry)) : '',
+           ]"
+           :data-correction-state="resolveEntry(dEntry).type === 'user' ? (correctionStateFor(resolveEntry(dEntry)) || null) : null"
+           :data-testid="resolveEntry(dEntry).type === 'user' && correctionStateFor(resolveEntry(dEntry)) === 'pending' ? 'turn-correction-target' : null">
 
             <!-- ── User message ────────────────────────────── -->
             <template x-if="resolveEntry(dEntry).type === 'user'">
               <div>
                 <div class="flex items-center gap-2 mb-1">
                   <span class="sc-user-label">USER</span>
-                  <span class="sc-timestamp" x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
+                  <div class="tc-meta-cluster">
+                    <template x-if="correctionStateFor(resolveEntry(dEntry)) === 'accepted'">
+                      <span class="tc-marker" data-testid="turn-correction-revised">
+                        <svg class="tc-marker-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                          <path d="M5 1.75h4.5l2.75 2.75v6.75A2 2 0 0 1 10.25 13H5.75a2 2 0 0 1-2-2v-7.25a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                          <path d="M9.5 1.75V4.5h2.75" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                          <path d="m5.9 8.35 1.15 1.15 2.95-2.95" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <span class="hidden md:inline">accepted</span>
+                      </span>
+                    </template>
+                    <span class="sc-timestamp" x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
+                    <template x-if="correctionStateFor(resolveEntry(dEntry)) === 'pending'">
+                      <div class="tc-actions" data-testid="turn-correction-actions">
+                        <button class="tc-action-btn tc-action-dismiss"
+                                @click.stop="dismissCorrection(resolveEntry(dEntry))"
+                                aria-label="Dismiss correction suggestion" title="Dismiss">×</button>
+                        <button class="tc-action-btn tc-action-accept"
+                                @click.stop="acceptCorrection(resolveEntry(dEntry))"
+                                aria-label="Accept correction suggestion" title="Accept">✓</button>
+                      </div>
+                    </template>
+                  </div>
                 </div>
-                <div class="sc-user-content" x-text="resolveEntry(dEntry).content || ''"></div>
+
+                <template x-if="correctionStateFor(resolveEntry(dEntry)) === 'pending'">
+                  <div class="sc-user-content tc-diff-content min-w-0" data-testid="turn-correction-pending"><template x-for="(fragment, fIdx) in correctionFragmentsFor(resolveEntry(dEntry))" :key="fIdx"><span :class="fragment.kind === 'delete' ? 'tc-frag-del' : fragment.kind === 'insert' ? 'tc-frag-ins' : 'tc-frag-same'" x-text="fragment.text"></span></template></div>
+                </template>
+
+                <template x-if="correctionStateFor(resolveEntry(dEntry)) !== 'pending'">
+                  <div class="sc-user-content"
+                       x-text="correctionDisplayText(resolveEntry(dEntry))"></div>
+                </template>
               </div>
             </template>
 

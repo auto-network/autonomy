@@ -4438,6 +4438,13 @@ async def api_session_turn_corrections_list(request):
     Used to rehydrate overlay state on page load and replay.
     """
     session_id = request.path_params["session_id"]
+    if os.environ.get("DASHBOARD_MOCK"):
+        rows = dao_sessions.get_turn_corrections(session_id)
+        return JSONResponse({
+            "session_id": session_id,
+            "session_uuid": session_id,
+            "corrections": [_serialize_turn_correction(r) for r in rows],
+        })
     session_uuid = _resolve_session_uuid(session_id)
     if not session_uuid:
         return JSONResponse(
@@ -4470,6 +4477,29 @@ async def _resolve_correction_transition(request, target_status: str):
         return JSONResponse(
             {"error": "original_sha256 is required"}, status_code=400,
         )
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        outcome, row = dao_sessions.set_turn_correction_status(
+            session_id, message_id, target_status, expected_sha256=expected_sha,
+        )
+        if outcome == "not_found":
+            return JSONResponse(
+                {"error": "correction not found",
+                 "target_message_id": message_id},
+                status_code=404,
+            )
+        if outcome == "sha_mismatch":
+            return JSONResponse(
+                {"error": "stale target — original_sha256 does not match",
+                 "stored_sha256": row["original_sha256"] if row else None,
+                 "submitted_sha256": expected_sha,
+                 "correction": _serialize_turn_correction(row) if row else None},
+                status_code=409,
+            )
+        return JSONResponse({
+            "ok": True,
+            "correction": _serialize_turn_correction(row) if row else None,
+        })
 
     session_uuid = _resolve_session_uuid(session_id)
     if not session_uuid:
