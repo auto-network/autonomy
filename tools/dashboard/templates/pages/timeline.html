@@ -279,9 +279,14 @@
               <template x-if="!e._isAgentic && e.bead_id">
                 <a class="tl-exp-link" :href="'/bead/' + e.bead_id">Bead &#8594;</a>
               </template>
-              <!-- Agentic: link to the asset the action operated on -->
+              <!-- Agentic: link to the asset the action operated on.
+                   Server-side identity-resolver tags ``target_kind`` ('bead'
+                   or 'source'); the frontend branches on it so bead targets
+                   route to /bead/<id> instead of being treated as graph
+                   source IDs (which 404s the resolver). -->
               <template x-if="e._isAgentic && e.target_source_id">
-                <a class="tl-exp-link" :href="'/graph/' + e.target_source_id">Asset &#8594;</a>
+                <a class="tl-exp-link"
+                   :href="(e.target_kind === 'bead' ? '/bead/' : '/graph/') + e.target_source_id">Asset &#8594;</a>
               </template>
               <!-- Agentic sender: when the dispatch was triggered by another
                    live session (not the "dashboard" sentinel), link back to
