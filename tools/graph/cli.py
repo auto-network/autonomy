@@ -2838,6 +2838,31 @@ def _read_text_input(path_value: str | None, stdin_flag: bool, label: str) -> st
     return ""
 
 
+def _attach_source_session_id(data: dict) -> None:
+    """Auto-capture source_session_id from env if not already set on ``data``.
+
+    Mutates ``data`` in place. Emits a stderr warning (without failing) when
+    no session can be resolved so the entry still writes.
+    """
+    if data.get("source_session_id"):
+        return
+    captured = (
+        os.environ.get("AUTONOMY_SESSION")
+        or os.environ.get("GRAPH_SESSION")
+        or _resolve_session_name()
+        or ""
+    )
+    if captured:
+        data["source_session_id"] = captured
+    else:
+        print(
+            "Warning: source_session_id unresolved "
+            "($AUTONOMY_SESSION/$GRAPH_SESSION unset); "
+            "writing journal entry without session attribution.",
+            file=sys.stderr,
+        )
+
+
 def cmd_journal_write(args):
     """Write a structured journal entry.
 
@@ -2865,6 +2890,7 @@ def cmd_journal_write(args):
                 print(f"Error: missing required field: {field}", file=sys.stderr)
                 sys.exit(1)
         data.setdefault("project", _get_scope() or "autonomy")
+        _attach_source_session_id(data)
         result = get_client().write_journal_entry(
             data, org=os.environ.get("GRAPH_ORG"),
         ) or {}
@@ -2949,6 +2975,7 @@ def cmd_journal_write(args):
         "edges": edges,
         "project": _get_scope() or "autonomy",
     }
+    _attach_source_session_id(data)
 
     result = get_client().write_journal_entry(
         data, org=os.environ.get("GRAPH_ORG"),
