@@ -4075,6 +4075,73 @@ def cmd_crosstalk(args):
             print(f"         ... ({len(msg['message'])} chars)")
 
 
+_TURN_CORRECTION_MODES = ("off", "conservative", "balanced", "aggressive")
+
+
+def cmd_turn_correction_suggest(args):
+    """Emit a typed turn-correction suggestion payload for the parser.
+
+    Bead auto-edec1.1. The session parser upconverts ``--json`` output of this
+    command into a ``turn_correction`` dashboard event and the SessionMonitor
+    persists it as a sparse overlay row keyed by
+    ``(session_uuid, target_message_id)``. Identity is enforced via
+    ``original_sha256`` so a stale or mismatched target is rejected at apply
+    time.
+    """
+    if args.stdin and args.corrected_text is not None:
+        print(
+            "turn-correction suggest: pass corrected text either as a positional"
+            " argument or via --stdin, not both",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.stdin:
+        corrected = sys.stdin.read()
+    elif args.corrected_text is not None:
+        corrected = args.corrected_text
+    else:
+        print(
+            "turn-correction suggest: corrected text is required"
+            " (positional argument or --stdin)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if args.confidence is not None and not (0.0 <= args.confidence <= 1.0):
+        print(
+            "turn-correction suggest: --confidence must be between 0.0 and 1.0",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    payload = {
+        "type": "turn_correction",
+        "version": 1,
+        "target_message_id": args.target_message_id,
+        "original_sha256": args.original_sha256,
+        "corrected_text": corrected,
+    }
+    if args.mode is not None:
+        payload["mode"] = args.mode
+    if args.reason is not None:
+        payload["reason"] = args.reason
+    if args.confidence is not None:
+        payload["confidence"] = args.confidence
+
+    if args.json_output:
+        # One JSON object on a single line so the session parser can scan
+        # tool_result content and upconvert without fuzzy matching.
+        print(json.dumps(payload))
+    else:
+        print(f"  ✓ Suggested correction for {args.target_message_id}")
+        if args.mode:
+            print(f"    mode: {args.mode}")
+        if args.reason:
+            print(f"    reason: {args.reason}")
+        if args.confidence is not None:
+            print(f"    confidence: {args.confidence}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="autonomy-graph",
@@ -4644,6 +4711,51 @@ def main():
     p_ct_log.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d")
     p_ct_log.add_argument("--limit", type=int, default=30, help="Max messages (default: 30)")
     p_ct_log.set_defaults(func=cmd_crosstalk)
+
+    # turn-correction — overlay suggestions for the session viewer (auto-edec1.1)
+    p_tc = sub.add_parser(
+        "turn-correction",
+        help="Suggest a session-viewer turn correction (overlay, not transcript edit)",
+    )
+    p_tc.set_defaults(func=lambda _a: p_tc.print_help())
+    tc_sub = p_tc.add_subparsers(dest="tc_subcmd")
+
+    p_tc_suggest = tc_sub.add_parser(
+        "suggest",
+        help="Emit a typed turn-correction suggestion (full-replacement, identity-guarded)",
+    )
+    p_tc_suggest.add_argument(
+        "corrected_text",
+        nargs="?",
+        default=None,
+        help="Corrected text. Use --stdin for long payloads.",
+    )
+    p_tc_suggest.add_argument(
+        "--target-message-id", required=True,
+        help="message_id of the transcript turn being corrected",
+    )
+    p_tc_suggest.add_argument(
+        "--original-sha256", required=True,
+        help="sha256 of the original turn text — guards against stale targets",
+    )
+    p_tc_suggest.add_argument(
+        "--mode", choices=_TURN_CORRECTION_MODES,
+        help="Correction mode (off|conservative|balanced|aggressive)",
+    )
+    p_tc_suggest.add_argument("--reason", help="Optional human-readable reason")
+    p_tc_suggest.add_argument(
+        "--confidence", type=float,
+        help="Optional confidence score in [0.0, 1.0]",
+    )
+    p_tc_suggest.add_argument(
+        "--stdin", action="store_true",
+        help="Read corrected text from stdin instead of argv",
+    )
+    p_tc_suggest.add_argument(
+        "--json", dest="json_output", action="store_true",
+        help="Emit one JSON object for parser upconversion (the contract)",
+    )
+    p_tc_suggest.set_defaults(func=cmd_turn_correction_suggest)
 
     # set — Settings primitive (graph://0d3f750f-f9c)
     from .set_cmd import attach_set_subparser

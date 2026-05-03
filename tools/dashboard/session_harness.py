@@ -478,6 +478,63 @@ def _parse_bd_setstate_cmd(command: str, timestamp: str) -> dict | None:
     }
 
 
+def _upconvert_turn_correction(content: str, timestamp: str, tool_id: str = "") -> dict | None:
+    """Upconvert ``graph turn-correction suggest --json`` output into a typed
+    parser entry the SessionMonitor can persist as a sparse overlay row.
+
+    Bead auto-edec1.1. The CLI prints a single JSON object whose ``type`` is
+    ``turn_correction``; we recognize that discriminator, validate the
+    required identity/payload fields, and emit a ``turn_correction`` entry
+    instead of leaving the result as opaque Bash text. Identity validation
+    against ``original_sha256`` happens later (DAO ``upsert_turn_correction``
+    short-circuits terminal rows; ``set_turn_correction_status`` enforces the
+    sha match on accept).
+    """
+    if not isinstance(content, str):
+        return None
+    stripped = content.strip()
+    if not stripped or stripped[0] != "{":
+        return None
+    # Cheap discriminator gate so we don't try to JSON-decode every Bash line.
+    if "turn_correction" not in stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "turn_correction":
+        return None
+    target = payload.get("target_message_id")
+    sha = payload.get("original_sha256")
+    corrected = payload.get("corrected_text")
+    if not isinstance(target, str) or not target:
+        return None
+    if not isinstance(sha, str) or not sha:
+        return None
+    if not isinstance(corrected, str):
+        return None
+    entry: dict[str, Any] = {
+        "type": "turn_correction",
+        "role": "tool",
+        "timestamp": timestamp,
+        "target_message_id": target,
+        "original_sha256": sha,
+        "corrected_text": corrected,
+    }
+    if tool_id:
+        entry["tool_id"] = tool_id
+    mode = payload.get("mode")
+    if isinstance(mode, str) and mode:
+        entry["mode"] = mode
+    reason = payload.get("reason")
+    if isinstance(reason, str) and reason:
+        entry["reason"] = reason
+    confidence = payload.get("confidence")
+    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+        entry["confidence"] = float(confidence)
+    return entry
+
+
 def _upconvert_graph_result(content: str, timestamp: str, tool_id: str = "") -> dict | None:
     if not isinstance(content, str):
         return None
@@ -695,6 +752,11 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                         "is_error": block.get("is_error", False),
                         "timestamp": timestamp,
                     })
+                    tc = _upconvert_turn_correction(
+                        result_content, timestamp, tool_id=tool_use_id,
+                    )
+                    if tc:
+                        tool_results.append(tc)
                     sem = _upconvert_graph_result(result_content, timestamp, tool_id=tool_use_id)
                     if sem:
                         _enrich_semantic_tile(sem)
@@ -821,7 +883,13 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
             "is_error": raw.get("is_error", False),
             "timestamp": timestamp,
         }
+        tc = _upconvert_turn_correction(result_content, timestamp, tool_id=tool_id)
         sem = _upconvert_graph_result(result_content, timestamp, tool_id=tool_id)
+        if tc and sem:
+            _enrich_semantic_tile(sem)
+            return [base_result, tc, sem]
+        if tc:
+            return [base_result, tc]
         if sem:
             _enrich_semantic_tile(sem)
             return [base_result, sem]
