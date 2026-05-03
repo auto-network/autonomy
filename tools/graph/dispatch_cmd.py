@@ -31,6 +31,21 @@ def _api_call(base_url: str, path: str, ctx):
     return json.loads(resp.read())
 
 
+def _api_post(base_url: str, path: str, ctx, body: dict | None = None):
+    data = None if body is None else json.dumps(body).encode()
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        f"{base_url}{path}",
+        data=data,
+        headers=headers,
+        method="POST",
+    )
+    resp = urllib.request.urlopen(req, context=ctx, timeout=10)
+    return json.loads(resp.read())
+
+
 def _format_duration(secs) -> str:
     if secs is None:
         return "?"
@@ -403,6 +418,47 @@ def cmd_dispatch_reset(args):
     """Reset the circuit breaker for a bead by inserting a synthetic DONE record."""
     import subprocess
 
+    bead_id = args.bead_id
+    graph_api = os.environ.get("GRAPH_API")
+
+    if graph_api:
+        base = _get_dashboard_url()
+        ctx = _make_ssl_ctx()
+        try:
+            data = _api_post(
+                base,
+                f"/api/dispatch/reset/{urllib.parse.quote(bead_id)}",
+                ctx,
+            )
+        except (urllib.error.URLError, OSError):
+            print(f"Dashboard not reachable at {base} — is it running?")
+            sys.exit(1)
+
+        if not data.get("reset"):
+            print(f"  {bead_id}: no consecutive failures — circuit breaker not tripped")
+            return
+
+        print(
+            f"  {bead_id}: {data.get('agent_failures', 0)} agent failures, "
+            f"{data.get('merge_failures', 0)} merge failures"
+        )
+        print(f"  ✓ Inserted synthetic DONE record: {data.get('run_id', '')}")
+        print(
+            f"  ✓ Failure count now: {data.get('agent_failures_after', 0)} agent, "
+            f"{data.get('merge_failures_after', 0)} merge"
+        )
+
+        result = subprocess.run(
+            ["bd", "set-state", bead_id, "readiness=approved"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print(f"  ✓ {bead_id} re-approved for dispatch")
+        else:
+            print(f"  ✗ Failed to re-approve: {result.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        return
+
     # Import dispatch_db — it lives in agents/ which may not be on sys.path
     import importlib
     import pathlib
@@ -410,8 +466,6 @@ def cmd_dispatch_reset(args):
     if agents_dir not in sys.path:
         sys.path.insert(0, agents_dir)
     import dispatch_db
-
-    bead_id = args.bead_id
 
     # Check current failure count
     agent_fails, merge_fails = dispatch_db.get_consecutive_failures(bead_id)
