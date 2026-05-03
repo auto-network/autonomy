@@ -38,7 +38,10 @@ SYNOPSIS = {
 _ALLOWED_FIELDS = {
     "asset_type", "label", "icon", "model", "prompt_template",
     "estimated_seconds", "writes", "universal", "workspace",
+    "card_summary",
 }
+
+_CARD_SUMMARY_FORMATS = ("text", "badge", "stars", "code")
 
 
 class AgentActionV1(SettingSchema):
@@ -103,6 +106,18 @@ class AgentActionV1(SettingSchema):
                 "workspace behavior."
             ),
         },
+        "card_summary": {
+            "type": "array",
+            "description": (
+                "Per-action timeline/trace card slots. Each slot is "
+                "{label, path, format?} where path is a dotted accessor "
+                "into the agent's decision dict (e.g. 'primary_outcome' "
+                "or 'quality_scores.architecture_fit') and format is one "
+                f"of {list(_CARD_SUMMARY_FORMATS)}. The dashboard renders "
+                "these as a definition list under the agentic card."
+            ),
+            "element": {"type": "object"},
+        },
     }
 
     @classmethod
@@ -161,6 +176,36 @@ class AgentActionV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'universal' must be a bool"
             )
+
+        if "card_summary" in payload:
+            cs = payload["card_summary"]
+            if not isinstance(cs, list):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: 'card_summary' must be a list of slot dicts"
+                )
+            for i, slot in enumerate(cs):
+                if not isinstance(slot, dict):
+                    raise SchemaValidationError(
+                        f"{cls.__name__}: card_summary[{i}] must be a dict"
+                    )
+                for key in ("label", "path"):
+                    v = slot.get(key)
+                    if not isinstance(v, str) or not v:
+                        raise SchemaValidationError(
+                            f"{cls.__name__}: card_summary[{i}] missing or empty {key!r}"
+                        )
+                fmt = slot.get("format")
+                if fmt is not None and fmt not in _CARD_SUMMARY_FORMATS:
+                    raise SchemaValidationError(
+                        f"{cls.__name__}: card_summary[{i}] format must be one of "
+                        f"{_CARD_SUMMARY_FORMATS}, got {fmt!r}"
+                    )
+                extra_keys = set(slot) - {"label", "path", "format"}
+                if extra_keys:
+                    raise SchemaValidationError(
+                        f"{cls.__name__}: card_summary[{i}] has unknown keys: "
+                        f"{sorted(extra_keys)}"
+                    )
 
         extra = set(payload) - _ALLOWED_FIELDS
         if extra:
