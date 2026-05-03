@@ -25,7 +25,7 @@
   // (e.g. /sessions, /dispatch) intentionally yield no asset_type so the
   // button stays hidden until those types ship members.
   var TYPELESS_ROUTES = [
-    /^\/sessions/, /^\/dispatch/, /^\/timeline/, /^\/worktrees/,
+    /^\/sessions/, /^\/dispatch/, /^\/timeline/, /^\/activity/, /^\/worktrees/,
     /^\/beads/, /^\/orgs/, /^\/search/, /^\/$/,
   ];
 

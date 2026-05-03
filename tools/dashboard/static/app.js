@@ -209,7 +209,7 @@ async function renderDispatchFragment() {
 // ── Timeline Page (Jinja2 fragment + Alpine) ──────────────────
 
 async function renderTimelineFragment() {
-  pageTitle.textContent = 'Timeline';
+  pageTitle.textContent = 'Activity';
   let html;
   if (_fragmentCache.has('/pages/timeline')) {
     html = _fragmentCache.get('/pages/timeline');
@@ -1552,7 +1552,12 @@ async function route() {
 
   // Update active nav
   document.querySelectorAll('.nav-link').forEach(el => {
-    el.classList.toggle('active', path.startsWith('/' + el.dataset.page));
+    const raw = el.dataset.activeMatch || el.dataset.page || '';
+    const prefixes = raw.split(',').map(s => s.trim()).filter(Boolean);
+    const isActive = prefixes.some(prefix => (
+      path === '/' + prefix || path.startsWith('/' + prefix + '/')
+    ));
+    el.classList.toggle('active', isActive);
   });
 
   // Update global search placeholder based on page
@@ -1574,7 +1579,7 @@ async function route() {
     renderDispatchFragment();
   } else if (path.startsWith('/bead/')) {
     renderBeadDetailFragment(path.split('/bead/')[1]);
-  } else if (path === '/timeline') {
+  } else if (path === '/timeline' || path === '/activity') {
     renderTimelineFragment();
   } else if (path === '/sessions') {
     renderSessionsFragment();
@@ -1705,8 +1710,8 @@ connectEvents(['nav', 'dispatch'], {
     const sessionsEl = document.getElementById('badge-sessions');
     if (sessionsEl) sessionsEl.textContent = data.active_sessions || '';
 
-    const timelineEl = document.getElementById('badge-timeline');
-    if (timelineEl) timelineEl.textContent = data.today_done || '';
+    const activityEl = document.getElementById('badge-activity');
+    if (activityEl) activityEl.textContent = data.today_done || '';
 
     const terminalEl = document.getElementById('badge-terminal');
     if (terminalEl) terminalEl.textContent = data.terminal_count || '';

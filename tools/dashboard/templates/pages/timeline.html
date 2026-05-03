@@ -1,9 +1,7 @@
-<section x-data="timelinePage()" class="pb-safe" aria-label="Timeline">
-
-  <!-- Timeframe Toggle -->
-  <div class="flex items-center gap-2 mb-6">
+<section x-data="activityPage()" class="pb-safe" aria-label="Activity" data-testid="activity-page">
+  <div class="flex items-center gap-2 mb-4" data-testid="activity-range">
     <div class="inline-flex rounded-lg bg-gray-800 border border-gray-700 p-0.5">
-      <template x-for="r in ['1D', '1W', '1M', 'All']" :key="r">
+      <template x-for="r in ['6h', '24h', '7d', 'All']" :key="r">
         <button
           @click="setRange(r)"
           :class="range === r ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'"
@@ -14,64 +12,127 @@
     </div>
   </div>
 
-  <!-- Stats Tiles -->
-  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
-
-    <div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div class="text-xs text-gray-500 mb-1">Completed</div>
-      <div class="text-2xl font-bold text-green-400" x-text="stats.completed_count || 0"></div>
-      <div class="text-xs text-gray-500 mt-1">
-        <span x-text="stats.success_rate != null ? (stats.success_rate * 100).toFixed(0) + '%' : '--'"></span> success
+  <template x-if="dispatcherState.paused && dispatcherState.reason">
+    <div
+      class="mb-3 px-4 py-3 rounded-lg border flex items-center justify-between gap-3 bg-red-900/30 border-red-600 text-red-200"
+      data-testid="activity-paused-banner"
+    >
+      <div class="flex items-center gap-2">
+        <span class="text-lg">&#x26D4;</span>
+        <span x-show="dispatcherState.reason.reason === 'auth'">
+          <strong>Dispatcher paused:</strong> Auth failed &mdash; re-authenticate then resume
+        </span>
+        <span x-show="dispatcherState.reason.reason !== 'auth'">
+          <strong>Dispatcher paused:</strong> <span x-text="dispatcherState.reason.message || dispatcherState.reason.reason"></span>
+        </span>
       </div>
+      <button
+        @click="resumeDispatcher()"
+        class="px-3 py-1 rounded-md text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors flex-shrink-0"
+        data-testid="activity-resume-dispatcher"
+      >
+        Resume
+      </button>
     </div>
+  </template>
 
-    <div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div class="text-xs text-gray-500 mb-1">Failed / Blocked</div>
-      <div class="text-2xl font-bold text-red-400" x-text="(stats.failed_count || 0) + (stats.blocked_count || 0)"></div>
-      <div class="text-xs text-gray-500 mt-1" x-text="(stats.failed_count || 0) + ' failed, ' + (stats.blocked_count || 0) + ' blocked'"></div>
-    </div>
-
-    <div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div class="text-xs text-gray-500 mb-1">Avg Duration</div>
-      <div class="text-2xl font-bold text-indigo-400" x-text="fmtDuration(stats.avg_duration)"></div>
-    </div>
-
-    <div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div class="text-xs text-gray-500 mb-1">Avg Tooling</div>
-      <div class="text-lg mt-1">
-        <template x-if="stats.avg_tooling_score != null">
-          <span>
-            <template x-for="(on, i) in starsFor(stats.avg_tooling_score)" :key="i">
-              <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
-            </template>
-          </span>
+  <template x-if="dispatcherState?.merge_health?.status === 'blocked'">
+    <div
+      class="mb-3 px-4 py-3 rounded-lg border flex items-center gap-3 bg-amber-900/30 border-amber-600 text-amber-200"
+      data-testid="activity-merge-banner"
+    >
+      <span class="text-lg">&#x26A0;</span>
+      <div>
+        <strong>Merges blocked:</strong>
+        <span x-text="dispatcherState.merge_health.reason"></span>
+        <template x-if="dispatcherState.merge_health.count > 1">
+          <span x-text="'(' + dispatcherState.merge_health.count + ' unmerged files)'"></span>
         </template>
-        <span x-show="stats.avg_tooling_score == null" class="text-xs text-gray-600">--</span>
+        <span class="text-amber-400 text-xs ml-2">Resolve conflicts manually, then resume</span>
       </div>
-      <div class="text-xs text-gray-500 mt-1" x-text="stats.avg_tooling_score != null ? stats.avg_tooling_score.toFixed(1) + '/5' : '--'"></div>
     </div>
+  </template>
 
-    <div class="p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div class="text-xs text-gray-500 mb-1">Avg Confidence</div>
-      <div class="text-lg mt-1">
-        <template x-if="stats.avg_confidence_score != null">
-          <span>
-            <template x-for="(on, i) in starsFor(stats.avg_confidence_score)" :key="i">
-              <span :class="on ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
-            </template>
-          </span>
+  <div
+    class="mb-3 rounded-lg border border-gray-700 bg-gray-900/80 px-3 py-2"
+    data-testid="activity-pulse"
+  >
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-gray-300">
+      <template x-for="item in pulseItems()" :key="item.label">
+        <span class="inline-flex items-center gap-1 font-mono">
+          <span :class="item.cls" x-text="item.value"></span>
+          <span class="text-gray-500" x-text="item.label"></span>
+        </span>
+      </template>
+      <span class="ml-auto flex flex-wrap items-center gap-2">
+        <template x-for="(isPaused, label) in paused" :key="label">
+          <button
+            @click="togglePause(label)"
+            class="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs font-medium transition-colors"
+            :class="isPaused
+              ? 'border-red-600 bg-red-900/40 text-red-300 hover:bg-red-900/60'
+              : 'border-green-600 bg-green-900/30 text-green-300 hover:bg-green-900/50'"
+            :title="isPaused && reasons[label] ? reasons[label] : (label + ' queue')"
+          >
+            <span class="inline-block h-2 w-2 rounded-full" :class="isPaused ? 'bg-red-500' : 'bg-green-500'"></span>
+            <span x-text="label"></span>
+          </button>
         </template>
-        <span x-show="stats.avg_confidence_score == null" class="text-xs text-gray-600">--</span>
-      </div>
-      <div class="text-xs text-gray-500 mt-1" x-text="stats.avg_confidence_score != null ? stats.avg_confidence_score.toFixed(1) + '/5' : '--'"></div>
+      </span>
     </div>
-
   </div>
 
-  <!-- Feed header -->
-  <div class="mb-4">
+  <template x-if="waiting.length > 0 || blocked.length > 0">
+    <div class="mb-3 flex flex-wrap items-center gap-2 text-xs text-gray-400" data-testid="activity-queue-cues">
+      <button
+        x-show="waiting.length > 0"
+        @click="showWaiting = !showWaiting"
+        class="rounded-full border border-gray-700 px-3 py-1 hover:border-blue-500 hover:text-blue-300"
+        x-text="showWaiting ? 'Hide queue' : 'Reveal queue'"
+      ></button>
+      <button
+        x-show="blocked.length > 0"
+        @click="showBlocked = !showBlocked"
+        class="rounded-full border border-gray-700 px-3 py-1 hover:border-amber-500 hover:text-amber-300"
+        x-text="showBlocked ? 'Hide blocked' : 'Reveal blocked'"
+      ></button>
+    </div>
+  </template>
+
+  <div class="mb-4" data-testid="activity-live">
+    <template x-if="active.length === 0">
+      <div class="text-sm text-gray-500" data-testid="activity-live-empty">No live dispatches</div>
+    </template>
+    <template x-for="b in active" :key="'active-' + (b.run_id || b.id || b.title)">
+      {% include 'partials/bead-card.html' %}
+    </template>
+  </div>
+
+  <template x-if="showWaiting && waiting.length > 0">
+    <div class="mb-4" data-testid="activity-waiting-section">
+      <div class="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-blue-400">Queued</div>
+      <template x-for="b in waiting" :key="'waiting-' + b.id">
+        {% include 'partials/bead-card.html' %}
+      </template>
+    </div>
+  </template>
+
+  <template x-if="showBlocked && blocked.length > 0">
+    <div class="mb-4" data-testid="activity-blocked-section">
+      <div class="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-amber-400">Blocked</div>
+      <template x-for="b in blocked" :key="'blocked-' + b.id">
+        {% include 'partials/bead-card.html' %}
+      </template>
+    </div>
+  </template>
+
+  <div class="mb-4 flex items-center justify-between" data-testid="activity-feed-header">
     <h2 class="text-lg font-semibold text-indigo-400">Feed</h2>
   </div>
+
+  <template x-if="loading">
+    <div class="text-gray-500 text-sm">Loading feed...</div>
+  </template>
 
   <!-- Empty state -->
   <template x-if="!loading && entries.length === 0">
@@ -79,7 +140,7 @@
   </template>
 
   <!-- Feed cards -->
-  <div>
+  <div data-testid="activity-feed">
     <template x-for="e in entries" :key="e._key">
       <div
         x-show="!e._hiddenByParent"

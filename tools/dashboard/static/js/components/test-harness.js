@@ -41,7 +41,8 @@
         beads: get('badge-beads'),
         sessions: get('badge-sessions'),
         dispatch: get('badge-dispatch'),
-        timeline: get('badge-timeline'),
+        activity: get('badge-activity'),
+        timeline: get('badge-activity'),
         terminal: get('badge-terminal'),
       };
     },
