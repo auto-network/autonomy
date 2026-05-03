@@ -374,8 +374,8 @@ SWEEP_JOURNAL_ENTRIES = [
     {
         "id": "journal-sweep-001",
         "compact": "Testing infra planning — mock DAO gaps, L2B, baseline tests, SSE mocking",
-        "normal": "Reviewed mock DAO coverage. Identified three gaps: session_monitor, SSE injection, JSONL fixture pipeline.\n⚙ auto-cqhx merged: sessions page tests + topics fix (+594)",
-        "expanded": "USER: Whats missing from mock dao?\nAGENT: Three gaps: session_monitor returns static registry, no SSE event simulation, no JSONL fixture pipeline.\n⚙ auto-cqhx merged: sessions page tests + topics fix (+594)",
+        "normal": "Reviewed **mock DAO** coverage. Identified three gaps: session_monitor, SSE injection, JSONL fixture pipeline.\n\n⚙ auto-cqhx merged: sessions page tests + topics fix (+594)",
+        "expanded": "USER: Whats missing from mock dao?\n\nAGENT: Three gaps: session_monitor returns static registry, no SSE event simulation, no JSONL fixture pipeline.\n\n⚙ auto-cqhx merged: sessions page tests + topics fix (+594)",
         "timestamp_start": "2026-03-27T14:00:00Z",
         "timestamp_end": "2026-03-27T14:25:00Z",
         "entry_type": "attention",
@@ -2908,6 +2908,19 @@ ACTIVITY_ATTENTION_CHECKS = """(async () => {
         r.entry_count = entryCards.length;
         r.has_entries = entryCards.length > 0;
 
+        // Normal zoom rendering — markdown + bead-link auto-linking (auto-20lci)
+        var normalBody = document.querySelector('[data-testid="attention-body-normal"]');
+        if (normalBody) {
+            r.normal_uses_markdown_body = normalBody.classList.contains('markdown-body');
+            r.normal_renders_strong = !!normalBody.querySelector('strong');
+            var normalBeadLink = normalBody.querySelector('a[href^="/bead/auto-"]');
+            r.normal_renders_bead_link = !!normalBeadLink;
+            r.normal_bead_link_href = normalBeadLink ? normalBeadLink.getAttribute('href') : '';
+            // Computed font: must NOT be a monospace stack
+            var normalFamily = window.getComputedStyle(normalBody).fontFamily || '';
+            r.normal_font_not_mono = normalFamily.toLowerCase().indexOf('mono') === -1;
+        }
+
         // Switch to compact zoom and verify class moves
         var compactBtn = document.querySelector('[data-testid="activity-attention-zoom-compact"]');
         if (compactBtn) compactBtn.click();
@@ -2917,6 +2930,14 @@ ACTIVITY_ATTENTION_CHECKS = """(async () => {
         var normalBtn = document.querySelector('[data-testid="activity-attention-zoom-normal"]');
         r.zoom_normal_unpressed_after_compact = normalBtn ? normalBtn.getAttribute('aria-pressed') === 'false' : false;
 
+        // Compact body — must NOT use monospace font (auto-20lci)
+        var compactBody = document.querySelector('[data-testid="attention-body-compact"]');
+        if (compactBody) {
+            var compactFamily = window.getComputedStyle(compactBody).fontFamily || '';
+            r.compact_font_not_mono = compactFamily.toLowerCase().indexOf('mono') === -1;
+            r.compact_no_pre_ancestor = compactBody.closest('pre') === null;
+        }
+
         // Switch to expanded
         var expandedBtn = document.querySelector('[data-testid="activity-attention-zoom-expanded"]');
         if (expandedBtn) expandedBtn.click();
@@ -2924,10 +2945,37 @@ ACTIVITY_ATTENTION_CHECKS = """(async () => {
         r.zoom_expanded_active = data ? (data.attentionZoom === 'expanded') : false;
         r.zoom_expanded_pressed = expandedBtn ? expandedBtn.getAttribute('aria-pressed') === 'true' : false;
 
+        // Expanded body — markdown rendering (auto-20lci)
+        var expandedBody = document.querySelector('[data-testid="attention-body-expanded"]');
+        if (expandedBody) {
+            r.expanded_uses_markdown_body = expandedBody.classList.contains('markdown-body');
+            var expandedFamily = window.getComputedStyle(expandedBody).fontFamily || '';
+            r.expanded_font_not_mono = expandedFamily.toLowerCase().indexOf('mono') === -1;
+        }
+
         // Switch back to normal
         if (normalBtn) normalBtn.click();
         await tick();
         r.zoom_normal_active = data ? (data.attentionZoom === 'normal') : false;
+
+        // XSS regression — inject raw <script> via fixture and confirm DOMPurify strips it
+        if (data && data.attentionEntries.length > 0) {
+            var origEntries = JSON.parse(JSON.stringify(data.attentionEntries));
+            data.attentionEntries = [{
+                id: 'xss-probe',
+                compact: 'xss probe',
+                normal: 'before<script>window.__attn_xss_fired=true;</script>after',
+                expanded: 'expanded<script>window.__attn_xss_fired=true;</script>tail',
+                timestamp_start: '2026-05-03T10:00:00Z',
+                timestamp_end:   '2026-05-03T10:05:00Z',
+            }];
+            await tick();
+            var probeBody = document.querySelector('[data-testid="attention-body-normal"]');
+            r.xss_script_stripped = probeBody ? (probeBody.innerHTML.toLowerCase().indexOf('<script') === -1) : false;
+            r.xss_no_global = !window.__attn_xss_fired;
+            data.attentionEntries = origEntries;
+            await tick();
+        }
 
         // Empty state — clear entries via Alpine, verify empty state appears
         if (data) {
@@ -3034,6 +3082,44 @@ class TestActivityAttentionTabBehavior:
         assert c.get("has_attention_tab"), "Attention tab missing on /activity"
         assert c.get("attention_body_visible_after_click"), "Attention body did not become visible on /activity"
         assert c.get("has_entries"), f"No journal entries on /activity (count={c.get('entry_count')})"
+
+    def test_normal_zoom_renders_markdown(self):
+        """auto-20lci: normal zoom renders **bold** as <strong> via markdown-body."""
+        c = self._timeline
+        assert c.get("normal_uses_markdown_body"), "Normal body missing .markdown-body class"
+        assert c.get("normal_renders_strong"), \
+            "Normal body did not render <strong> for **bold** in fixture"
+
+    def test_normal_zoom_auto_links_bead_refs(self):
+        """auto-20lci: bead refs in journal text become /bead/<id> anchors."""
+        c = self._timeline
+        assert c.get("normal_renders_bead_link"), \
+            "Normal body did not auto-link auto-cqhx bead reference"
+        href = c.get("normal_bead_link_href", "")
+        assert href.startswith("/bead/auto-"), \
+            f"Bead link href did not target /bead/<id>, got {href!r}"
+
+    def test_zoom_fonts_consistent_no_monospace(self):
+        """auto-20lci: compact / normal / expanded all use a non-monospace font."""
+        c = self._timeline
+        assert c.get("compact_font_not_mono"), "Compact body computed-font is monospace"
+        assert c.get("normal_font_not_mono"), "Normal body computed-font is monospace"
+        assert c.get("expanded_font_not_mono"), "Expanded body computed-font is monospace"
+        assert c.get("compact_no_pre_ancestor"), "Compact body still wrapped in <pre>"
+
+    def test_expanded_zoom_uses_markdown_body(self):
+        """auto-20lci: expanded zoom carries .markdown-body so global styles apply."""
+        c = self._timeline
+        assert c.get("expanded_uses_markdown_body"), \
+            "Expanded body missing .markdown-body class"
+
+    def test_xss_regression_script_stripped(self):
+        """auto-20lci: DOMPurify still strips raw <script> from journal text."""
+        c = self._timeline
+        assert c.get("xss_script_stripped"), \
+            "Raw <script> survived in rendered Attention body"
+        assert c.get("xss_no_global"), \
+            "Injected <script> from fixture executed (XSS regression)"
 
 
 class TestCollabPageBehavior:

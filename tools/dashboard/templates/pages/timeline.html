@@ -576,13 +576,13 @@
         </div>
         <div class="px-4 py-3 text-sm text-gray-200">
           <template x-if="attentionZoom === 'compact'">
-            <div class="font-mono text-xs text-gray-300 whitespace-pre-wrap" x-text="e.compact || ''"></div>
+            <div class="text-gray-300" data-testid="attention-body-compact" x-text="e.compact || ''"></div>
           </template>
           <template x-if="attentionZoom === 'normal'">
-            <div class="whitespace-pre-wrap leading-relaxed text-gray-200" x-text="e.normal || ''"></div>
+            <div class="leading-relaxed text-gray-200" data-testid="attention-body-normal" x-markdown="e.normal || ''"></div>
           </template>
           <template x-if="attentionZoom === 'expanded'">
-            <div class="whitespace-pre-wrap leading-relaxed text-gray-200" x-text="e.expanded || ''"></div>
+            <div class="leading-relaxed text-gray-200" data-testid="attention-body-expanded" x-markdown="e.expanded || ''"></div>
           </template>
         </div>
       </div>
