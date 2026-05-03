@@ -10951,6 +10951,8 @@ async def api_journal(request):
     """List journal entries with three zoom levels."""
     limit = int(request.query_params.get("limit", "50"))
     since_param = request.query_params.get("since")
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"entries": dao_beads.get_journal_entries(since=since_param, limit=limit)})
     since_iso = _parse_range(since_param) if since_param else None
     return JSONResponse({"entries": graph_ops.list_journal_entries(since=since_iso, limit=limit)})
 

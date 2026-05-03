@@ -336,6 +336,13 @@
     };
   }
 
+  function _formatHHMM(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
   document.addEventListener('alpine:init', () => {
     Alpine.data('activityPage', () => ({
       range: '24h',
@@ -350,6 +357,9 @@
       dispatcherState: { paused: false, reason: null, merge_health: { status: 'ok' } },
       showWaiting: false,
       showBlocked: false,
+      tab: 'feed',
+      attentionZoom: 'normal',
+      attentionEntries: [],
       routeForRun: window.routeForRun || null,
       _intervalId: null,
       _dispatchHandler: null,
@@ -364,9 +374,32 @@
         return '1d';
       },
 
+      _journalRangeParam(range) {
+        if (range === '6h') return '6h';
+        if (range === '24h') return '24h';
+        if (range === '7d') return '7d';
+        return null;
+      },
+
       setRange(range) {
         this.range = range;
         this.refreshTimeline();
+        this.refreshAttention();
+      },
+
+      setTab(tab) {
+        this.tab = tab;
+      },
+
+      setAttentionZoom(mode) {
+        this.attentionZoom = mode;
+      },
+
+      formatAttentionTimeRange(entry) {
+        const start = _formatHHMM(entry && entry.timestamp_start);
+        const end = _formatHHMM(entry && entry.timestamp_end);
+        if (start && end) return start + '–' + end;
+        return start || end || '';
       },
 
       fmtDuration(secs) {
@@ -444,6 +477,20 @@
             this.dispatcherState = { paused: false, reason: null, merge_health: this.dispatcherState.merge_health || { status: 'ok' } };
           }
         } catch (_) {}
+      },
+
+      async refreshAttention() {
+        const param = this._journalRangeParam(this.range);
+        const limit = param ? 50 : 200;
+        const qs = param
+          ? '?since=' + encodeURIComponent(param) + '&limit=' + limit
+          : '?limit=' + limit;
+        try {
+          const data = await fetch('/api/journal' + qs).then(r => r.json());
+          this.attentionEntries = Array.isArray(data && data.entries) ? data.entries : [];
+        } catch (_) {
+          this.attentionEntries = [];
+        }
       },
 
       async refreshTimeline() {
@@ -553,6 +600,7 @@
         registerHandler('dispatcher_state', this._dispatcherStateHandler);
 
         this.refreshTimeline();
+        this.refreshAttention();
         this._intervalId = setInterval(() => this.refreshTimeline(), 15000);
       },
 
