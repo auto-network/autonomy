@@ -433,15 +433,7 @@ def _turn_correction_metrics(raw_text: str, corrected_text: str) -> dict[str, An
     total_len = max(len(raw_text) + len(corrected_text), 1)
     edit_chars = delete_chars + insert_chars
     edit_ratio = edit_chars / total_len
-    acceptable = False
-    if edit_fragments <= 2 and edit_chars <= 32:
-        acceptable = True
-    elif char_similarity >= 0.55 and edit_fragments <= 6:
-        acceptable = True
-    elif char_similarity >= 0.80 and edit_fragments <= 10:
-        acceptable = True
-    if edit_ratio > 0.75 and char_similarity < 0.75:
-        acceptable = False
+    acceptable = char_similarity >= 0.25
     return {
         "fragments": fragments,
         "same_chars": same_chars,
@@ -453,9 +445,9 @@ def _turn_correction_metrics(raw_text: str, corrected_text: str) -> dict[str, An
         "edit_ratio": edit_ratio,
         "acceptable": acceptable,
         "score_key": (
-            edit_fragments,
-            edit_chars,
             -int(round(char_similarity * 1000)),
+            edit_chars,
+            edit_fragments,
             abs(len(raw_text) - len(corrected_text)),
         ),
     }
