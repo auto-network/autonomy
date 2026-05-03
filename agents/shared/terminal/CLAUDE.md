@@ -71,6 +71,37 @@ Run `graph --help` for full reference.
 2. `graph wait <bead-id>` — block until dispatched bead completes
 3. `graph dispatch status` — check overall queue at any time
 
+### graph journal — narrative trail across sessions
+The Activity surface's Attention tab reads journal entries to show the operator what mattered across sessions. Not a log of every action — only arcs worth remembering.
+
+**When to write an entry:**
+- A decision landed (architecture choice, scope cut, direction change)
+- A pitfall was found and pinned (with a follow-up note or bead)
+- A substrate gap was surfaced
+- A major review concluded
+- An incident response wrapped
+
+NOT for: routine bash calls, individual file reads, every commit.
+
+**How to write:**
+```bash
+graph journal write "Auth shape decided — passkeys not OAuth" \
+    --normal /tmp/normal.md \
+    --since 2h
+# → ✓ Journal entry saved (src:abc123def456)
+```
+
+Three zoom levels — make each readable on its own:
+- `compact` (positional) — one-line headline. ~80 chars.
+- `--normal <path>` — ~3-5 paragraphs. Fits on screen. Key quotes, bead refs (`auto-xxxxx` auto-link in the surface), substrate pointers. The default reading level.
+- `--expanded <path>` — full thread. Optional. For someone digging in.
+
+**Compression principle:** each level must stand alone. A reader should never need to read expanded to understand normal, or normal to understand compact.
+
+**See also:**
+- Activity surface: `/activity` (Attention tab)
+- Architecture note: `graph://f069c902-d65`
+
 ### bd — Beads Issue Tracker
 Work tracking. Dolt-backed, read-write in this session.
 
