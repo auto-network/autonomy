@@ -24,7 +24,36 @@
           <h1 class="text-3xl md:text-4xl font-bold tracking-tight text-white" x-text="scene.title" data-testid="nx-title"></h1>
           <span class="text-sm md:text-base text-gray-400" x-text="scene.subtitle"></span>
         </div>
-        <div class="hidden md:flex flex-col items-end text-right text-xs text-gray-500">
+        <div class="hidden md:flex flex-col items-end text-right text-xs text-gray-500 gap-1.5">
+          <!-- Presence panel — substrate.B SurfacePresence rows for this surface.
+               Each avatar is a 24px circle filled with Presence.participantColor()
+               so operator and agents agree on the hue. The summon button is the
+               req-button 3-state pattern lifted from coordinator-board. -->
+          <div class="flex items-center gap-2" data-testid="nx-presence-panel">
+            <div class="nx-avatar-stack" style="--nx-stack-cap: 5;" data-testid="nx-presence-stack">
+              <template x-for="p in (participants || [])" :key="p.participant_id">
+                <span class="nx-avatar"
+                      :style="'background:' + participantColor(p.participant_id)"
+                      :title="p.participant_label + ' — ' + (p.intent || p.state)"
+                      :data-testid="'nx-presence-avatar-' + p.participant_id"
+                      x-text="participantInitial(p)"></span>
+              </template>
+            </div>
+            <template x-for="p in (participants || []).filter(x => x &amp;&amp; x.participant_kind === 'agent' &amp;&amp; x.accepts_pings !== false)"
+                      :key="'sb-' + p.participant_id">
+              <button type="button"
+                      class="req-button"
+                      :data-state="(pingState &amp;&amp; pingState[p.participant_id]) || 'idle'"
+                      :data-testid="'nx-summon-' + p.participant_id"
+                      :title="'Ping ' + p.participant_label"
+                      @click="summon(p)">
+                <span x-show="!pingState[p.participant_id] || pingState[p.participant_id] === 'idle'">↻</span>
+                <span x-show="pingState[p.participant_id] === 'pending'">…</span>
+                <span x-show="pingState[p.participant_id] === 'requested'" x-text="'pinged ' + (p.participant_label || p.participant_id)"></span>
+              </button>
+            </template>
+            <span class="text-[11px] text-gray-500" x-show="!participants || participants.length === 0" data-testid="nx-presence-empty">no one here yet</span>
+          </div>
           <span><span class="text-indigo-400 font-semibold">Presenter:</span> <span x-text="scene.presenter_label || scene.presenter"></span></span>
           <span><span class="text-gray-500">Last update:</span> <span x-text="lastUpdated"></span></span>
         </div>
@@ -71,6 +100,17 @@
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-3" data-testid="nx-tiles">
         <template x-for="t in nonCodeTiles" :key="t.id">
           <div :class="tileClass(t)" :data-testid="'nx-tile-' + t.id" :data-tile-kind="t.kind">
+            <!-- per-tile presence markers (substrate.B) — one dot per
+                 participant whose ``position_kind='tile'`` and
+                 ``position_value`` matches this tile id. -->
+            <div class="flex items-center gap-1 mb-1.5" x-show="tileMarkers(t.id).length" :data-testid="'nx-tile-markers-' + t.id">
+              <template x-for="p in tileMarkers(t.id)" :key="'tm-' + p.participant_id">
+                <span class="nx-tile-marker"
+                      :style="'--nx-marker-color: ' + participantColor(p.participant_id)"
+                      :title="p.participant_label + ' is here'"
+                      :data-testid="'nx-tile-marker-' + t.id + '-' + p.participant_id"></span>
+              </template>
+            </div>
             <!-- markdown -->
             <template x-if="t.kind === 'markdown'">
               <div class="text-sm text-gray-200 leading-relaxed" x-html="renderMarkdown(t.body)"></div>
@@ -102,6 +142,14 @@
       <!-- code variant gets its own wide tile -->
       <template x-for="t in codeTiles" :key="t.id">
         <div class="mt-3 rounded-md border border-gray-800 bg-gray-900/40 p-4" :data-testid="'nx-tile-' + t.id" data-tile-kind="code">
+          <div class="flex items-center gap-1 mb-1.5" x-show="tileMarkers(t.id).length" :data-testid="'nx-tile-markers-' + t.id">
+            <template x-for="p in tileMarkers(t.id)" :key="'tm-' + p.participant_id">
+              <span class="nx-tile-marker"
+                    :style="'--nx-marker-color: ' + participantColor(p.participant_id)"
+                    :title="p.participant_label + ' is here'"
+                    :data-testid="'nx-tile-marker-' + t.id + '-' + p.participant_id"></span>
+            </template>
+          </div>
           <div class="text-xs text-gray-400 mb-2" x-text="(t.data && t.data.caption) || t.title || ''"></div>
           <pre class="nx-code"><code x-text="t.body"></code></pre>
         </div>
