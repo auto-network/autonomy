@@ -137,6 +137,35 @@
           </div>
         </div>
 
+        <!-- Agentic card_summary (auto-56o4m): per-action declarative slots
+             rendered as a flat definition list. Server attaches resolved
+             {label, value, format} entries; we just iterate. -->
+        <div class="tl-card-summary"
+             x-show="e._isAgentic && e.card_summary && e.card_summary.length"
+             style="display:none">
+          <template x-for="(slot, i) in (e.card_summary || [])" :key="i">
+            <span class="tl-card-slot">
+              <span class="tl-card-slot-label" x-text="slot.label + ':'"></span>
+              <template x-if="slot.format === 'badge'">
+                <span class="tl-card-slot-badge" x-text="slot.value"></span>
+              </template>
+              <template x-if="slot.format === 'stars'">
+                <span class="tl-card-slot-stars">
+                  <template x-for="n in [0,1,2,3]" :key="n">
+                    <span :class="n < (Number(slot.value) || 0) ? 'tl-star-on' : 'tl-star-off'">&#9733;</span>
+                  </template>
+                </span>
+              </template>
+              <template x-if="slot.format === 'code'">
+                <code class="tl-card-slot-code" x-text="typeof slot.value === 'string' ? slot.value : JSON.stringify(slot.value)"></code>
+              </template>
+              <template x-if="!slot.format || slot.format === 'text'">
+                <span class="tl-card-slot-text" x-text="typeof slot.value === 'string' ? slot.value : JSON.stringify(slot.value)"></span>
+              </template>
+            </span>
+          </template>
+        </div>
+
         <!-- Expanded detail (dispatch card) -->
         <div class="tl-exp-detail" x-show="e._open && !e._isLibrarian" @click.stop style="display:none">
           <div class="tl-exp-row">
