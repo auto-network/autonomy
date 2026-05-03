@@ -161,20 +161,25 @@ _TURN_CORRECTION_INSTRUCTIONS: dict[str, str] = {
         "corrections — only emit one if the operator explicitly asks."
     ),
     "conservative": (
-        "When a user message is clearly garbled and the perception gap "
-        "would meaningfully affect your reply, emit a turn-correction "
-        "suggestion. Skip it for typos that don't change meaning."
+        "When a user message is clearly garbled or ambiguous enough that "
+        "your interpretation would materially affect the reply, emit a "
+        "turn-correction suggestion. Skip low-value style edits that do "
+        "not change meaning."
     ),
     "balanced": (
         "When you suspect a perception gap on the most recent user "
         "message — wording that obscures intent, transcription errors, "
-        "missing words — emit a turn-correction suggestion immediately."
+        "missing words, or ambiguity that forces you to guess — emit a "
+        "turn-correction suggestion immediately, then continue if the "
+        "path forward is still clear."
     ),
     "aggressive": (
-        "Err on the side of suggesting a correction. If anything in the "
-        "most recent user message could plausibly be misread, emit a "
-        "turn-correction suggestion before continuing — the operator "
-        "can dismiss it cheaply, but a missed perception gap is costly."
+        "Assume every user message is a candidate. If a correction would "
+        "add even slight clarity, transcript hygiene, terminology "
+        "accuracy, or reveal your best reading of an ambiguous message, "
+        "emit it silently and keep working. Do not mention that you are "
+        "making a correction; only acknowledge it explicitly if you are "
+        "too unsure to proceed and need to ask, 'Is this what you meant?'"
     ),
 }
 

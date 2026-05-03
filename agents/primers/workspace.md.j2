@@ -235,8 +235,8 @@ When formulating or refining beads, read the protocol directly:
 This is **not** a grammar pass on the user. The goal is to reduce
 **perception gaps**: moments where a user message arrives garbled —
 voice-dictation slips, transcription errors, missing words, half-typed
-phrases — and your reply would otherwise act on a misread of what they
-actually meant.
+phrases, or ambiguity that forces you to guess — and your reply would
+otherwise act on a misread of what they actually meant.
 
 `aggressiveness={{ turn_correction.aggressiveness }}`{% if turn_correction.persist_accepts_to_graph %} · accepted corrections persist to the graph{% endif %}
 
@@ -267,6 +267,11 @@ Workflow, end to end:
 5. The viewer renders the suggestion as a pending overlay; the
    operator may accept (the corrected text becomes the effective
    message body) or dismiss (the raw message stands).
+6. Do **not** talk about the correction. Just issue it and keep
+   working if the path forward is still clear.
+7. Only stop and acknowledge the correction explicitly when the meaning
+   is too uncertain to proceed; in that case, use it as a clarification
+   proposal, e.g. `Is this what you meant?`
 
 Worked example — operator just sent "wat are the implickatons of teh new auth fix", you respond in the same turn with:
 
@@ -280,7 +285,10 @@ graph turn-correction suggest \
 
 Then continue your normal reply against the corrected reading. If the
 operator dismisses the suggestion, your reply still stands; the
-correction is purely additive.
+correction is purely additive. Use this for communication, not just
+transcription: when the message is ambiguous, the correction can make
+your best reading visible so the operator can accept it, reject it, or
+clarify what they actually meant.
 {% else %}
 Turn-correction guidance is **disabled** for this workspace
 (`enabled=false`). Do not emit `graph turn-correction suggest` unless

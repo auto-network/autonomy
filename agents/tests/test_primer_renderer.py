@@ -607,8 +607,8 @@ def test_turn_correction_section_present_by_default(_turn_correction_org_env):
     """
     out = render_workspace_primer(_cfg(id="sample"))
     assert "## Turn Corrections" in out
-    # Defaults: enabled, balanced, do not persist accepts.
-    assert "aggressiveness=balanced" in out
+    # Defaults: enabled, aggressive, do not persist accepts.
+    assert "aggressiveness=aggressive" in out
     assert "accepted corrections persist to the graph" not in out
 
 
@@ -693,7 +693,7 @@ def test_turn_correction_conservative_mode_distinct_wording(_turn_correction_org
     _write_tc_setting("sample", {"aggressiveness": "conservative"})
     out = render_workspace_primer(_cfg(id="sample"))
     assert "aggressiveness=conservative" in out
-    assert "clearly garbled" in out
+    assert "clearly garbled or ambiguous enough" in out
 
 
 def test_turn_correction_balanced_mode_distinct_wording(_turn_correction_org_env):
@@ -701,13 +701,26 @@ def test_turn_correction_balanced_mode_distinct_wording(_turn_correction_org_env
     out = render_workspace_primer(_cfg(id="sample"))
     assert "aggressiveness=balanced" in out
     assert "suspect a perception gap" in out
+    assert "continue if the path forward is still clear" in out
 
 
 def test_turn_correction_aggressive_mode_distinct_wording(_turn_correction_org_env):
     _write_tc_setting("sample", {"aggressiveness": "aggressive"})
     out = render_workspace_primer(_cfg(id="sample"))
     assert "aggressiveness=aggressive" in out
-    assert "Err on the side" in out
+    assert "Assume every user message is a candidate." in out
+    assert "emit it silently and keep working" in out
+
+
+def test_turn_correction_silent_and_action_biased_guidance_present(_turn_correction_org_env):
+    out = render_workspace_primer(_cfg(id="sample"))
+    flat = " ".join(out.split())
+    assert "Do **not** talk about the correction." in out
+    assert "keep working if the path forward is still clear" in flat
+    assert "Only stop and acknowledge the correction explicitly" in flat
+    assert "Is this what you meant?" in out
+    assert "Use this for communication, not just transcription" in flat
+    assert "best reading visible" in flat
 
 
 def test_turn_correction_disabled_renders_explicit_note(_turn_correction_org_env):

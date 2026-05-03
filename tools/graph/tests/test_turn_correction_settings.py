@@ -62,15 +62,15 @@ def test_valid_aggressiveness_levels_match_cli():
     )
 
 
-def test_default_payload_is_safe_baseline():
-    """Defaults: enabled, balanced, do not persist accepts.
+def test_default_payload_is_action_biased_baseline():
+    """Defaults: enabled, aggressive, do not persist accepts.
 
     This is what the renderer falls back to when no Setting exists, so
     the feature is useful even before an operator has authored
     workspace-specific knobs.
     """
     assert DEFAULT_PAYLOAD["enabled"] is True
-    assert DEFAULT_PAYLOAD["aggressiveness"] == "balanced"
+    assert DEFAULT_PAYLOAD["aggressiveness"] == "aggressive"
     assert DEFAULT_PAYLOAD["persist_accepts_to_graph"] is False
 
 
