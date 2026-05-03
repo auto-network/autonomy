@@ -2107,13 +2107,18 @@ class SessionMonitor:
 
                 for row in sessions:
                     tmux_name = row["tmux_name"]
-                    # Dispatch + librarian sessions are owned by their
-                    # respective dispatchers (agents/dispatcher.py). They
+                    # Dispatch + librarian + agentic sessions are owned by
+                    # their respective dispatchers/watchers (see
+                    # agents/dispatcher.py — poll_and_collect for dispatch,
+                    # poll_and_collect_agentic for kind='agentic'). They
                     # never had a tmux session, so has-session always
                     # returns False and polling would mark them dead within
-                    # 10s. Their death signal is an explicit POST to
-                    # /api/monitor/deregister, not tmux polling.
-                    if row.get("type") in ("dispatch", "librarian"):
+                    # 10s — and the cleanup_session_worktrees that follows
+                    # would yank /workspace/repo out from under a still-running
+                    # container. Their death signal is an explicit POST to
+                    # /api/monitor/deregister or container-exit collection,
+                    # not tmux polling.
+                    if row.get("type") in ("dispatch", "librarian", "agentic"):
                         continue
                     alive = await asyncio.to_thread(self._check_tmux, tmux_name)
                     if not alive:
