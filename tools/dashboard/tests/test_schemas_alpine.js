@@ -292,6 +292,149 @@ describe('Schema.alpine — destroy() composition', () => {
 });
 
 
+// ── onChange auto-dispose ────────────────────────────────────
+//
+// Schema.alpine wraps every attached proxy in a tracking shim that
+// captures the unsubscribe functions returned by ``.onChange`` and
+// drains them on destroy. Consumers therefore don't need to maintain
+// their own _unsubs arrays — the wrapper is the dispose surface.
+
+describe('Schema.alpine — onChange auto-dispose', () => {
+  function fakeProxyOnChange() {
+    const calls = [];
+    let nextId = 0;
+    const fn = function(callback) {
+      const id = ++nextId;
+      calls.push({ id, callback, alive: true });
+      return function unsub() {
+        const entry = calls.find(c => c.id === id);
+        if (entry) entry.alive = false;
+      };
+    };
+    fn._calls = calls;
+    return fn;
+  }
+
+  it('disposes registered onChange listeners on destroy', async () => {
+    const fooFetch = makeFetchStub({
+      '/api/graph/settings/autonomy.schema/x.foo%231': metaResponse(nonVariantPayload('x.foo')),
+    });
+    Schema._setFetchOverride(fooFetch);
+
+    const state = Schema.alpine({
+      async init() {
+        this.Foo.onChange(() => {});
+        this.Foo.onChange(() => {});
+      },
+    }, { schemas: { Foo: 'x.foo' } });
+
+    // Replace the cached proxy's onChange with a fake we can inspect.
+    await state.init.call(state);
+    // The shim's onChange forwards to the underlying proxy's onChange,
+    // which is the no-op fallback in test (events.js not loaded). Swap
+    // it for a tracker so we can assert dispose actually runs.
+    const cached = await Schema.of('x.foo');  // returns same cached proxy
+    cached.onChange = fakeProxyOnChange();
+    // Re-register through the shim so the tracker observes them.
+    state.Foo.onChange(() => {});
+    state.Foo.onChange(() => {});
+    assert.equal(cached.onChange._calls.length, 2);
+    assert.equal(cached.onChange._calls.every(c => c.alive), true);
+
+    state.destroy();
+    assert.equal(cached.onChange._calls.every(c => !c.alive), true,
+      'all listeners registered through the shim should be released');
+  });
+
+  it('does not affect onChange listeners of other components sharing the same cached proxy', async () => {
+    const fooFetch = makeFetchStub({
+      '/api/graph/settings/autonomy.schema/x.foo%231': metaResponse(nonVariantPayload('x.foo')),
+    });
+    Schema._setFetchOverride(fooFetch);
+
+    const stateA = Schema.alpine({}, { schemas: { Foo: 'x.foo' } });
+    await stateA.init.call(stateA);
+    const stateB = Schema.alpine({}, { schemas: { Foo: 'x.foo' } });
+    await stateB.init.call(stateB);
+
+    const cached = await Schema.of('x.foo');
+    cached.onChange = fakeProxyOnChange();
+
+    stateA.Foo.onChange(() => {});  // listener owned by A
+    stateB.Foo.onChange(() => {});  // listener owned by B
+    assert.equal(cached.onChange._calls.length, 2);
+
+    stateA.destroy();
+    // A's listener released, B's untouched.
+    assert.equal(cached.onChange._calls[0].alive, false);
+    assert.equal(cached.onChange._calls[1].alive, true);
+
+    stateB.destroy();
+    assert.equal(cached.onChange._calls[1].alive, false);
+  });
+
+  it('runs auto-dispose before the consumer destroy() so handlers stop firing during teardown', async () => {
+    const fooFetch = makeFetchStub({
+      '/api/graph/settings/autonomy.schema/x.foo%231': metaResponse(nonVariantPayload('x.foo')),
+    });
+    Schema._setFetchOverride(fooFetch);
+
+    const order = [];
+    const state = Schema.alpine({
+      destroy() { order.push('user-destroy'); },
+    }, { schemas: { Foo: 'x.foo' } });
+    await state.init.call(state);
+
+    const cached = await Schema.of('x.foo');
+    cached.onChange = function() {
+      order.push('onChange-registered');
+      return function() { order.push('listener-released'); };
+    };
+    state.Foo.onChange(() => {});
+
+    state.destroy();
+    assert.deepEqual(order, [
+      'onChange-registered',
+      'listener-released',
+      'user-destroy',
+    ]);
+  });
+
+  it('continues releasing remaining listeners if one unsub throws', async () => {
+    const fooFetch = makeFetchStub({
+      '/api/graph/settings/autonomy.schema/x.foo%231': metaResponse(nonVariantPayload('x.foo')),
+    });
+    Schema._setFetchOverride(fooFetch);
+
+    const state = Schema.alpine({}, { schemas: { Foo: 'x.foo' } });
+    await state.init.call(state);
+
+    const released = [];
+    const cached = await Schema.of('x.foo');
+    let unsubId = 0;
+    cached.onChange = function() {
+      const id = ++unsubId;
+      return function() {
+        if (id === 1) throw new Error('boom');
+        released.push(id);
+      };
+    };
+    state.Foo.onChange(() => {});
+    state.Foo.onChange(() => {});
+    state.Foo.onChange(() => {});
+
+    const origWarn = console.warn;
+    console.warn = () => {};
+    try {
+      state.destroy();
+    } finally {
+      console.warn = origWarn;
+    }
+    assert.deepEqual(released, [2, 3]);
+  });
+});
+
+
 // ── Page-shell injection seam ────────────────────────────────
 
 describe('Schema.alpine — page-shell injection seam', () => {
