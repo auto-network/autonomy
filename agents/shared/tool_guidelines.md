@@ -106,7 +106,11 @@ When you complete your work, write a decision file to `/workspace/output/decisio
       "labels": ["refinement"],
       "priority": 2
     }
-  ]
+  ],
+  "journal_entry": {
+    "source_id": "src:abc123def456",
+    "compact": "headline of the arc"
+  }
 }
 ```
 
@@ -149,6 +153,29 @@ When you complete your work, write a decision file to `/workspace/output/decisio
 - `timeout` — ran out of time
 - `code` — tests fail, won't compile, logic errors
 - `other` — anything else
+
+## Optional: write a journal entry
+
+If this arc revealed something an operator should follow — a substrate gap,
+an unexpected pitfall, a design pattern that generalized, a non-obvious
+workaround — write a journal entry BEFORE writing decision.json. Then put
+the returned `source_id` in decision.json's `journal_entry.source_id` field
+and a one-line outcome in `journal_entry.compact`.
+
+Skip this if the arc was routine implementation. Most arcs are. The bar is
+"operator should know about this," not "I did the work."
+
+```bash
+graph journal write "Brief headline" \
+  --normal /tmp/journal-normal.md \
+  --since <duration since dispatch start>
+# → ✓ Journal entry saved (src:<id>)
+```
+
+The compact text in `journal_entry.compact` should be the bead's outcome in
+one line, not the bead title. When the field is set, the dashboard's
+Activity Feed card renders a 📔 indicator that links to your entry on the
+Attention tab.
 
 ## Merge Retry
 
