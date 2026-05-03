@@ -498,6 +498,14 @@ def project_for_bead(bead: dict) -> WorkspaceV1 | None:
     return None
 
 
+def _workspace_for_graph_project(graph_project: str) -> WorkspaceV1 | None:
+    """Return the first workspace whose owning graph_project matches."""
+    for cfg in load_workspaces().values():
+        if cfg.graph_project == graph_project:
+            return cfg
+    return None
+
+
 def image_for_bead(bead: dict) -> str:
     """Select container image. Rig default, with per-bead label override."""
     project = project_for_bead(bead)
@@ -513,6 +521,7 @@ def start_agent(
     bead_id: str,
     image: str = DEFAULT_IMAGE,
     *,
+    harness: str = "claude",
     graph_project: str | None = None,
     graph_tags: tuple[str, ...] = (),
 ) -> RunningAgent | None:
@@ -531,7 +540,13 @@ def start_agent(
     """
     print(f"  Starting agent for {bead_id} (image: {image})...")
 
-    cmd = [str(LAUNCH_SCRIPT), bead_id, f"--image={image}", "--detach"]
+    cmd = [
+        str(LAUNCH_SCRIPT),
+        bead_id,
+        f"--image={image}",
+        f"--harness={harness}",
+        "--detach",
+    ]
     if graph_project:
         cmd.append(f"--graph-project={graph_project}")
     if graph_tags:
@@ -1803,6 +1818,10 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
     output_dir = str(REPO_ROOT / "data" / "agent-runs" / run_id)
 
     container_name = f"librarian-{job_type}-{os.getpid()}-{job_id[:8]}"
+    harness = "claude"
+    workspace = _workspace_for_graph_project("autonomy")
+    if workspace is not None:
+        harness = workspace.harness
 
     container_id = launch_session(
         session_type="librarian",
@@ -1815,8 +1834,9 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
         },
         detach=True,
         image=_rig_image,
+        harness=harness,
         output_dir=output_dir,
-        model=DEFAULT_SONNET_MODEL,
+        model=DEFAULT_SONNET_MODEL if harness == "claude" else None,
     )
     if not container_id:
         return None
@@ -2570,9 +2590,23 @@ def dispatch_cycle(
         graph_project = (
             project.graph_project if project is not None else "autonomy"
         )
+        fallback_workspace = (
+            _workspace_for_graph_project(graph_project)
+            if project is None else None
+        )
+        harness = (
+            project.harness
+            if project is not None
+            else (
+                fallback_workspace.harness
+                if fallback_workspace is not None
+                else "claude"
+            )
+        )
         agent = start_agent(
             bead_id,
             image=image,
+            harness=harness,
             graph_project=graph_project,
             graph_tags=project.default_tags if project is not None else (),
         )

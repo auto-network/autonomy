@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch an agent container to work on a bead.
 #
-# Usage: ./agents/launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach]
+# Usage: ./agents/launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach] [--harness=claude|codex]
 #
 # Lifecycle (foreground mode — default):
 # 1. Creates a git worktree on a bead-specific branch
@@ -22,10 +22,11 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 IMAGE="autonomy-agent"
 
 # ── Args ──────────────────────────────────────────────
-BEAD_ID="${1:?Usage: launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach] [--graph-project=NAME] [--graph-tags=a,b,c]}"
+BEAD_ID="${1:?Usage: launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach] [--harness=claude|codex] [--graph-project=NAME] [--graph-tags=a,b,c]}"
 shift
 DRY_RUN=false
 DETACH=false
+HARNESS="claude"
 GRAPH_PROJECT=""
 GRAPH_TAGS=""
 for arg in "$@"; do
@@ -33,6 +34,7 @@ for arg in "$@"; do
         --dry-run) DRY_RUN=true ;;
         --detach) DETACH=true ;;
         --image=*) IMAGE="${arg#*=}" ;;
+        --harness=*) HARNESS="${arg#*=}" ;;
         --graph-project=*) GRAPH_PROJECT="${arg#*=}" ;;
         --graph-tags=*) GRAPH_TAGS="${arg#*=}" ;;
     esac
@@ -168,6 +170,7 @@ if $DETACH; then
         --git-dir "$GIT_DIR" \
         --output-dir "$OUTPUT_DIR" \
         --image "$IMAGE" \
+        --harness "$HARNESS" \
         ${SCOPE_ARGS[@]+"${SCOPE_ARGS[@]}"} \
         --detach)
 
@@ -204,6 +207,7 @@ fi
     --git-dir "$GIT_DIR" \
     --output-dir "$OUTPUT_DIR" \
     --image "$IMAGE" \
+    --harness "$HARNESS" \
     ${SCOPE_ARGS[@]+"${SCOPE_ARGS[@]}"}
 
 EXIT_CODE=$?

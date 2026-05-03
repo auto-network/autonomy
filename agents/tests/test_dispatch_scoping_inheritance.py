@@ -45,6 +45,7 @@ def test_projects():
             description="",
             image="autonomy-agent:dashboard",
             graph_project="autonomy",
+            harness="claude",
             default_tags=("dashboard", "ui"),
             dispatch_labels=("dashboard",),
         ),
@@ -54,6 +55,7 @@ def test_projects():
             description="",
             image="autonomy-agent:enterprise",
             graph_project="anchore",
+            harness="codex",
             default_tags=("enterprise",),
             dispatch_labels=("enterprise",),
         ),
@@ -99,7 +101,7 @@ class TestLabelToImageRouting:
 
 
 class TestStartAgentForwardsScope:
-    """start_agent → launch.sh argv includes --graph-project + --graph-tags."""
+    """start_agent → launch.sh argv includes harness + scope flags."""
 
     @patch("agents.dispatcher.subprocess.run")
     def test_launch_argv_carries_scope_flags(self, mock_run):
@@ -117,6 +119,7 @@ class TestStartAgentForwardsScope:
         agent = dispatcher.start_agent(
             "auto-xyz",
             image="autonomy-agent:dashboard",
+            harness="codex",
             graph_project="autonomy",
             graph_tags=("dashboard", "ui"),
         )
@@ -126,6 +129,7 @@ class TestStartAgentForwardsScope:
         assert argv[0].endswith("launch.sh")
         assert argv[1] == "auto-xyz"
         assert "--image=autonomy-agent:dashboard" in argv
+        assert "--harness=codex" in argv
         assert "--detach" in argv
         assert "--graph-project=autonomy" in argv
         assert "--graph-tags=dashboard,ui" in argv
@@ -140,14 +144,63 @@ class TestStartAgentForwardsScope:
         )
         dispatcher.start_agent("auto-abc", image="autonomy-agent")
         argv = mock_run.call_args[0][0]
+        assert "--harness=claude" in argv
         assert not any(a.startswith("--graph-project") for a in argv)
         assert not any(a.startswith("--graph-tags") for a in argv)
+
+
+class TestStartLibrarianHarness:
+    """Librarians derive harness from the autonomy workspace when available."""
+
+    def test_librarian_uses_autonomy_workspace_harness(self, test_projects):
+        job = {"id": "lib-1234", "job_type": "review_report", "payload": "{}"}
+        captured: dict = {}
+
+        def fake_launch_session(**kwargs):
+            captured.update(kwargs)
+            return "fake-container-id"
+
+        with patch.object(dispatcher, "_build_librarian_prompt", return_value="prompt"):
+            with patch.object(dispatcher, "launch_session", fake_launch_session):
+                lib = dispatcher.start_librarian(job)
+
+        assert lib is not None
+        assert captured["harness"] == "claude"
+        assert captured["model"] == dispatcher.DEFAULT_SONNET_MODEL
+
+    def test_librarian_omits_claude_model_for_codex_harness(self, test_projects):
+        codex_projects = dict(test_projects)
+        codex_projects["autonomy"] = ProjectConfig(
+            id="autonomy",
+            name="Autonomy Network",
+            description="",
+            image="autonomy-agent:dashboard",
+            graph_project="autonomy",
+            harness="codex",
+            default_tags=("dashboard", "ui"),
+            dispatch_labels=("dashboard",),
+        )
+        job = {"id": "lib-5678", "job_type": "review_report", "payload": "{}"}
+        captured: dict = {}
+
+        def fake_launch_session(**kwargs):
+            captured.update(kwargs)
+            return "fake-container-id"
+
+        with patch.object(dispatcher, "load_workspaces", return_value=codex_projects):
+            with patch.object(dispatcher, "_build_librarian_prompt", return_value="prompt"):
+                with patch.object(dispatcher, "launch_session", fake_launch_session):
+                    lib = dispatcher.start_librarian(job)
+
+        assert lib is not None
+        assert captured["harness"] == "codex"
+        assert captured["model"] is None
 
 
 class TestLaunchSessionCliMetadata:
     """launch_session_cli --graph-project/--graph-tags → launch_session metadata."""
 
-    def _invoke_cli(self, tmp_path, *, argv_extra: list[str]):
+    def _invoke_cli(self, tmp_path, *, argv_extra: list[str], harness: str = "claude"):
         """Run launch_session_cli.main() in --detach mode with launch_session stubbed."""
         prompt_file = tmp_path / "prompt.md"
         prompt_file.write_text("prompt body")
@@ -168,6 +221,7 @@ class TestLaunchSessionCliMetadata:
             "--bead-id", "auto-xyz",
             "--output-dir", str(output_dir),
             "--image", "autonomy-agent:dashboard",
+            "--harness", harness,
             "--detach",
             *argv_extra,
         ]
@@ -194,6 +248,11 @@ class TestLaunchSessionCliMetadata:
         meta = captured.get("metadata") or {}
         assert "graph_project" not in meta
         assert "graph_tags" not in meta
+
+    def test_harness_reaches_launch_session(self, tmp_path):
+        captured = self._invoke_cli(tmp_path, argv_extra=[], harness="codex")
+        assert captured["harness"] == "codex"
+        assert captured["model"] is None
 
 
 class TestLaunchSessionMetaAndEnv:
