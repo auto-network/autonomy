@@ -417,17 +417,36 @@ def test_heartbeat_writes_row_after_interval(graph_db_env):
     """A short heartbeat interval triggers at least one extra write
     while inside the context — a smoke check that the loop actually
     runs.
-    """
-    with Presence(
-        surface_id="surf", participant_kind="agent",
-        participant_id="hb", label="HB", heartbeat_interval=0.05,
-    ):
-        # Wait long enough for at least a couple heartbeats to fire.
-        threading.Event().wait(0.25)
 
-    # We expect more than one row (the initial + one or more heartbeats
-    # + the final). read_set collapses by key, so query the raw count
-    # directly.
+    Writes route through ``upsert_by_key`` so the row count stays at
+    one; we count emit-hook invocations instead, which fire once per
+    successful write (initial + heartbeats + final).
+    """
+    write_calls = []
+
+    def hook(*, operation, snapshot, org):
+        if snapshot.get("key") == "surf:hb":
+            write_calls.append(operation)
+
+    settings_ops.set_emit_hook(hook)
+    try:
+        with Presence(
+            surface_id="surf", participant_kind="agent",
+            participant_id="hb", label="HB", heartbeat_interval=0.05,
+        ):
+            # Wait long enough for at least a couple heartbeats to fire.
+            threading.Event().wait(0.25)
+    finally:
+        settings_ops.set_emit_hook(None)
+
+    # Initial enter + final exit = 2 writes; the heartbeat loop adds
+    # at least one more during the 0.25s wait at a 0.05s interval.
+    assert len(write_calls) >= 3, (
+        f"expected initial + heartbeat + final writes, got {write_calls}"
+    )
+
+    # Upsert keeps the row count at one regardless of how many heartbeats
+    # fired — that's the whole point of the migration.
     db = settings_ops._open(None)
     try:
         rows = db.conn.execute(
@@ -437,8 +456,7 @@ def test_heartbeat_writes_row_after_interval(graph_db_env):
         ).fetchone()
     finally:
         db.close()
-    # Initial + final = 2; heartbeat adds at least one more.
-    assert rows["n"] >= 3
+    assert rows["n"] == 1
 
 
 # ── Static helpers — read live OperatorActivity row ──────────

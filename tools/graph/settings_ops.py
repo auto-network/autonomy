@@ -409,6 +409,94 @@ def add_setting(
     return sid
 
 
+def upsert_by_key(
+    set_id: str,
+    schema_revision: int,
+    key: str,
+    payload: dict,
+    *,
+    org: str | None = None,
+    state: str = "raw",
+) -> str:
+    """Atomic single-tx UPDATE-or-INSERT at ``(set_id, schema_revision, key)``.
+
+    Closes substrate gap #2 (``graph://dff97eec-c59``): callers that want
+    a single, evolving base row per composite key get one — no
+    ``read_set`` / ``add_setting`` race window, no append-by-default
+    surprise. The returned setting id is stable across subsequent
+    upserts of the same key, so callers can hold ids long-term.
+
+    Algorithm (one transaction, ``BEGIN IMMEDIATE``):
+        1. validate ``payload`` against the registered schema,
+        2. ``SELECT`` the newest base row (``supersedes IS NULL AND
+           excludes IS NULL``) for ``(set_id, schema_revision, key)``,
+        3. INSERT a fresh row when none exists, otherwise UPDATE that
+           row in place (id, ``created_at`` preserved),
+        4. restamp ``expires_at`` from :func:`schemas.cache_expires_at`
+           so ``@cache``-decorated schemas keep sliding-window TTLs,
+        5. fire exactly one ``set_emit_hook`` callback after commit
+           (``operation="write"`` — same shape :func:`add_setting`
+           emits today).
+
+    Legacy duplicates (multiple base rows for the same composite key
+    left behind by older :func:`add_setting` callers) are tolerated:
+    the newest by ``created_at`` wins and is updated in place — no
+    error, no cleanup. Override (``supersedes``) and exclude
+    (``excludes``) rows are deliberately ignored: they belong to a
+    separate layer and are not the "writable base."
+
+    Concurrency: ``BEGIN IMMEDIATE`` acquires SQLite's reserved-write
+    lock before the SELECT, so two writers in the same process serialize
+    cleanly — one blocks until the other commits, then sees the row it
+    just wrote.
+
+    Returns the upserted row's setting id (new on insert, preserved on
+    update). Raises :class:`schemas.SchemaValidationError` on bad
+    payload or unknown schema; ``ValueError`` on bad ``state``.
+    """
+    if state not in VALID_STATES:
+        raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
+    schemas.validate_payload(set_id, schema_revision, payload)
+    now = _now_iso()
+    expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
+    payload_json = json.dumps(payload)
+    db = _open(org)
+    try:
+        db.conn.execute("BEGIN IMMEDIATE")
+        existing = db.conn.execute(
+            "SELECT id FROM settings "
+            "WHERE set_id = ? AND schema_revision = ? AND key = ? "
+            "  AND supersedes IS NULL AND excludes IS NULL "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (set_id, int(schema_revision), key),
+        ).fetchone()
+        if existing is None:
+            sid = str(uuid4())
+            db.conn.execute(
+                "INSERT INTO settings(id, set_id, schema_revision, key, "
+                "payload, publication_state, created_at, updated_at, "
+                "expires_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (sid, set_id, int(schema_revision), key, payload_json,
+                 state, now, now, expires_at),
+            )
+        else:
+            sid = existing["id"]
+            db.conn.execute(
+                "UPDATE settings SET payload = ?, publication_state = ?, "
+                "updated_at = ?, expires_at = ? WHERE id = ?",
+                (payload_json, state, now, expires_at, sid),
+            )
+        db.conn.commit()
+    finally:
+        db.close()
+    _call_emit_hook(
+        operation="write",
+        snapshot=_make_snapshot(set_id, schema_revision, key, state, False),
+        org=org,
+    )
+    return sid
+
+
 def override_setting(
     target_id: str,
     payload_overrides: dict,
