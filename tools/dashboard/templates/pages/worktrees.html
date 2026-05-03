@@ -24,39 +24,29 @@
   }
 
   @keyframes mergeConfettiBurst {
-    0% {
-      opacity: 0;
-      transform: translate3d(0, 0, 0) rotate(0deg) scale(0.65);
-    }
-    12% {
-      opacity: 1;
-    }
-    100% {
-      opacity: 0;
-      transform: translate3d(var(--dx), var(--dy), 0) rotate(var(--rot)) scale(1.05);
-    }
+    /* Hold opacity 1 across most of the flight so pieces actually read as
+       a burst on small screens; the previous 12%→100% linear fade left
+       them visible for ~80ms total. The closing fade only kicks in over
+       the last quarter of the timeline. */
+    0%   { opacity: 0; transform: translate3d(0, 0, 0) rotate(0deg) scale(0.65); }
+    8%   { opacity: 1; }
+    75%  { opacity: 1; }
+    100% { opacity: 0; transform: translate3d(var(--dx), var(--dy), 0) rotate(var(--rot)) scale(1.1); }
   }
 
   @keyframes mergeConfettiGlow {
-    0% {
-      opacity: 0;
-      transform: translate(-50%, 0) scale(0.5);
-    }
-    18% {
-      opacity: 0.9;
-    }
-    100% {
-      opacity: 0;
-      transform: translate(-50%, -8px) scale(1.8);
-    }
+    0%   { opacity: 0; transform: translate(-50%, 0) scale(0.5); }
+    18%  { opacity: 0.9; }
+    70%  { opacity: 0.6; }
+    100% { opacity: 0; transform: translate(-50%, -8px) scale(2.0); }
   }
 
   .merge-confetti-piece {
-    animation: mergeConfettiBurst 820ms cubic-bezier(0.18, 0.82, 0.24, 1) forwards;
+    animation: mergeConfettiBurst 1300ms cubic-bezier(0.18, 0.82, 0.24, 1) forwards;
   }
 
   .merge-confetti-glow {
-    animation: mergeConfettiGlow 760ms ease-out forwards;
+    animation: mergeConfettiGlow 1100ms ease-out forwards;
   }
 
   .worktree-review-overlay {
@@ -722,7 +712,7 @@
                         <div class="relative h-24 w-72 max-w-full">
                           <div class="merge-confetti-glow absolute left-1/2 top-8 h-16 w-16 rounded-full bg-emerald-300/20 blur-2xl"></div>
                           <template x-for="piece in confettiPieces" :key="mergeBurstSeed + '-' + piece.id">
-                            <span class="merge-confetti-piece absolute left-1/2 top-10 h-3 w-1.5 rounded-full shadow-[0_0_12px_rgba(255,255,255,0.18)]"
+                            <span class="merge-confetti-piece absolute left-1/2 top-10 h-4 w-2 rounded-full shadow-[0_0_14px_rgba(255,255,255,0.28)]"
                                   :style="'--dx:' + piece.dx + 'px; --dy:' + piece.dy + 'px; --rot:' + piece.rot + 'deg; background:' + piece.color + '; animation-delay:' + piece.delay + 'ms'"></span>
                           </template>
                         </div>
