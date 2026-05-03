@@ -3963,6 +3963,16 @@ async def api_session_tail(request):
         entries,
         session_dir=session_file.parent / session_file.stem,
     )
+    # Stamp trusted session identity onto entry types whose serve URLs
+    # depend on it. Mirror of the live-tail loop in
+    # ``SessionMonitor._process_tail_entries`` — the HTTP tail re-parses
+    # the JSONL on demand, bypassing the monitor entirely, so it must do
+    # its own stamping to avoid leaving ``viewer_attachment`` entries
+    # without a session and breaking thumbnail URLs on viewer reload.
+    if tmux_name:
+        for entry in entries:
+            if entry.get("type") == "viewer_attachment":
+                entry["session"] = tmux_name
     # Task* tile annotations need full-history context to resolve taskId→subject.
     # Partial polls (after>0) miss earlier TaskCreates, so replay from offset 0.
     if after > 0:
