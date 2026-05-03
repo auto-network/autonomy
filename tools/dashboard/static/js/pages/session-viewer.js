@@ -211,14 +211,33 @@
       // full-resolution image; clicking the backdrop or pressing ESC closes.
       lightboxSrc: '',
       lightboxAlt: '',
+      _lightboxPrevViewport: null,
       openLightbox(src, alt) {
         if (!src) return;
         this.lightboxSrc = src;
         this.lightboxAlt = alt || '';
+        // The base layout pins the viewport to maximum-scale=1,
+        // user-scalable=no so the chat UI doesn't accidentally zoom on
+        // mobile. We want pinch-zoom inside the lightbox though, so swap
+        // the meta tag content while it's open and restore on close. iOS
+        // re-evaluates the zoom limits on mutation.
+        var meta = document.querySelector('meta[name="viewport"]');
+        if (meta && this._lightboxPrevViewport === null) {
+          this._lightboxPrevViewport = meta.getAttribute('content');
+          meta.setAttribute(
+            'content',
+            'width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes, viewport-fit=cover',
+          );
+        }
       },
       closeLightbox() {
         this.lightboxSrc = '';
         this.lightboxAlt = '';
+        var meta = document.querySelector('meta[name="viewport"]');
+        if (meta && this._lightboxPrevViewport !== null) {
+          meta.setAttribute('content', this._lightboxPrevViewport);
+          this._lightboxPrevViewport = null;
+        }
       },
 
       // Link terminal (Tier 3)
