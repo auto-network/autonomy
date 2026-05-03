@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS dispatch_runs (
   librarian_type TEXT,
   failure_class TEXT,
   kind TEXT,
-  agentic_source_id TEXT
+  agentic_source_id TEXT,
+  journal_source_id TEXT,
+  journal_compact TEXT
 )
 """
 
@@ -87,6 +89,12 @@ _MIGRATIONS = [
     "ALTER TABLE dispatch_runs ADD COLUMN failure_class TEXT",
     "ALTER TABLE dispatch_runs ADD COLUMN kind TEXT",
     "ALTER TABLE dispatch_runs ADD COLUMN agentic_source_id TEXT",
+    # auto-wvdhs: optional journal entry written by the agent during wrap-up.
+    # source_id points at the graph sources row created by `graph journal write`;
+    # compact mirrors the entry's compact line so the UI can render it without
+    # a follow-up fetch.
+    "ALTER TABLE dispatch_runs ADD COLUMN journal_source_id TEXT",
+    "ALTER TABLE dispatch_runs ADD COLUMN journal_compact TEXT",
 ]
 
 CREATE_INDEX = """\
@@ -321,6 +329,22 @@ def insert_run(
     discovered_beads = (decision or {}).get("discovered_beads") or []
     discovered_beads_count = len(discovered_beads)
 
+    # auto-wvdhs: optional ``journal_entry`` written by the agent during
+    # wrap-up. Accept dict shape ``{"source_id": "...", "compact": "..."}``
+    # and split into flat columns. ``source_id`` is the anchor for the UI
+    # link, so a missing / non-string / blank id collapses BOTH columns to
+    # NULL — a compact line with no source id is meaningless to the badge.
+    journal_entry = (decision or {}).get("journal_entry")
+    journal_source_id = None
+    journal_compact = None
+    if isinstance(journal_entry, dict):
+        sid = journal_entry.get("source_id")
+        if isinstance(sid, str) and sid.strip():
+            journal_source_id = sid.strip()
+            compact = journal_entry.get("compact")
+            if isinstance(compact, str) and compact.strip():
+                journal_compact = compact.strip()
+
     # Check for experience report
     has_experience_report = (Path(output_dir) / "experience_report.md").exists() if output_dir else False
 
@@ -341,7 +365,8 @@ def insert_run(
                 score_tooling, score_clarity, score_confidence,
                 time_research_pct, time_coding_pct, time_debugging_pct, time_tooling_pct,
                 discovered_beads_count, has_experience_report, output_dir, librarian_type,
-                failure_class, kind, agentic_source_id
+                failure_class, kind, agentic_source_id,
+                journal_source_id, journal_compact
             ) VALUES (
                 ?, ?, ?, ?, ?,
                 ?, ?, ?,
@@ -351,7 +376,8 @@ def insert_run(
                 ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, ?, ?
+                ?, ?, ?,
+                ?, ?
             )
             """,
             (
@@ -365,6 +391,7 @@ def insert_run(
                 time_breakdown.get("debugging_pct"), time_breakdown.get("tooling_workaround_pct"),
                 discovered_beads_count, has_experience_report, output_dir or None, librarian_type,
                 failure_class, kind, agentic_source_id,
+                journal_source_id, journal_compact,
             ),
         )
         conn.commit()
