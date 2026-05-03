@@ -576,7 +576,7 @@ def test_session_monitor_skips_malformed_event(test_app):
     assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
 
 
-def test_session_monitor_uses_recent_history_when_correction_arrives_next_batch(test_app):
+def test_session_monitor_uses_recent_history_when_correction_arrives_next_tail_pass(test_app):
     from tools.dashboard.session_monitor import SessionMonitor, _TailState
 
     row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
@@ -585,12 +585,21 @@ def test_session_monitor_uses_recent_history_when_correction_arrives_next_batch(
     SessionMonitor._persist_turn_corrections(
         row,
         ts,
-        [{"type": "user", "content": "Jason encoded", "message_id": "msg-1"}],
+        [{
+            "type": "user",
+            "content": "Jason encoded",
+            "message_id": "msg-1",
+            "timestamp": "2026-05-03T08:57:01.000Z",
+        }],
     )
     SessionMonitor._persist_turn_corrections(
         row,
         ts,
-        [{"type": "turn_correction", "corrected_text": "JSON encoded"}],
+        [{
+            "type": "turn_correction",
+            "corrected_text": "JSON encoded",
+            "timestamp": "2026-05-03T08:57:02.000Z",
+        }],
     )
 
     stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
@@ -599,14 +608,61 @@ def test_session_monitor_uses_recent_history_when_correction_arrives_next_batch(
     assert stored["corrected_text"] == "JSON encoded"
 
 
-def test_session_monitor_out_of_order_batch_can_bind_to_following_user_turn(test_app):
+def test_session_monitor_prefers_cleanest_nearby_candidate_over_nearest_prior(test_app):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+    SessionMonitor._persist_turn_corrections(row, ts, [
+        {
+            "type": "user",
+            "content": "I'm gonna write a message which you can away a correction to.",
+            "message_id": "msg-typo",
+            "timestamp": "2026-05-03T08:57:01.000Z",
+        },
+        {
+            "type": "user",
+            "content": "Time I'm gonna put it two messages back",
+            "message_id": "msg-middle",
+            "timestamp": "2026-05-03T08:57:02.000Z",
+        },
+        {
+            "type": "user",
+            "content": "So now try to apply the correction and we'll see if it can match it",
+            "message_id": "msg-nearest",
+            "timestamp": "2026-05-03T08:57:03.000Z",
+        },
+    ])
+    SessionMonitor._persist_turn_corrections(row, ts, [{
+        "type": "turn_correction",
+        "corrected_text": "I'm gonna write a message which you can apply a correction to.",
+        "timestamp": "2026-05-03T08:57:04.000Z",
+    }])
+
+    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-typo")
+    assert stored is not None
+    assert stored["original_sha256"] == _sha("I'm gonna write a message which you can away a correction to.")
+    assert stored["corrected_text"] == "I'm gonna write a message which you can apply a correction to."
+    assert dashboard_db.get_turn_correction(SESSION_UUID, "msg-nearest") is None
+
+
+def test_session_monitor_out_of_order_tail_pass_can_bind_to_following_user_turn(test_app):
     from tools.dashboard.session_monitor import SessionMonitor, _TailState
 
     row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
     ts = _TailState()
     entries = [
-        {"type": "turn_correction", "corrected_text": "JSON encoded"},
-        {"type": "user", "content": "Jason encoded", "message_id": "msg-1"},
+        {
+            "type": "turn_correction",
+            "corrected_text": "JSON encoded",
+            "timestamp": "2026-05-03T08:57:01.000Z",
+        },
+        {
+            "type": "user",
+            "content": "Jason encoded",
+            "message_id": "msg-1",
+            "timestamp": "2026-05-03T08:57:02.000Z",
+        },
     ]
 
     SessionMonitor._persist_turn_corrections(row, ts, entries)
@@ -615,6 +671,35 @@ def test_session_monitor_out_of_order_batch_can_bind_to_following_user_turn(test
     assert stored is not None
     assert stored["original_sha256"] == _sha("Jason encoded")
     assert stored["corrected_text"] == "JSON encoded"
+
+
+def test_session_monitor_skips_stale_recent_history_candidates(test_app):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+
+    SessionMonitor._persist_turn_corrections(
+        row,
+        ts,
+        [{
+            "type": "user",
+            "content": "Jason encoded",
+            "message_id": "msg-1",
+            "timestamp": "2026-05-03T08:00:00.000Z",
+        }],
+    )
+    SessionMonitor._persist_turn_corrections(
+        row,
+        ts,
+        [{
+            "type": "turn_correction",
+            "corrected_text": "JSON encoded",
+            "timestamp": "2026-05-03T08:06:01.000Z",
+        }],
+    )
+
+    assert dashboard_db.get_turn_correction(SESSION_UUID, "msg-1") is None
 
 
 def test_session_monitor_persists_codex_event_message_correction_without_raw_uuid(test_app):

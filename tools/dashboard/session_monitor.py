@@ -29,10 +29,13 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +74,11 @@ from agents.workspace_manager import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TURN_CORRECTION_HISTORY_WINDOW_SECONDS = 5 * 60
+_TURN_CORRECTION_PRIOR_CANDIDATES = 3
+_TURN_CORRECTION_FORWARD_CANDIDATES = 1
+_TURN_CORRECTION_TOKEN_RE = re.compile(r"(\s+|\S+)")
 
 # inotify — optional, falls back to polling if unavailable
 try:
@@ -348,6 +356,110 @@ def _format_pause_duration(paused_at: str | None) -> str:
         return f" ({hours}h{remaining}m ago)"
     except Exception:
         return ""
+
+
+def _parse_iso_timestamp(ts: str | None) -> float | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _turn_correction_tokenize(text: str) -> list[str]:
+    if not text:
+        return []
+    return _TURN_CORRECTION_TOKEN_RE.findall(text)
+
+
+def _turn_correction_lcs(a: list[str], b: list[str]) -> list[list[int]]:
+    n, m = len(a), len(b)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = dp[i - 1][j] if dp[i - 1][j] >= dp[i][j - 1] else dp[i][j - 1]
+    return dp
+
+
+def _turn_correction_fragments(raw_text: str, corrected_text: str) -> list[dict[str, str]]:
+    if raw_text == corrected_text:
+        return [{"kind": "same", "text": raw_text}] if raw_text else []
+    if not raw_text:
+        return [{"kind": "insert", "text": corrected_text}] if corrected_text else []
+    if not corrected_text:
+        return [{"kind": "delete", "text": raw_text}]
+    a = _turn_correction_tokenize(raw_text)
+    b = _turn_correction_tokenize(corrected_text)
+    dp = _turn_correction_lcs(a, b)
+    ops: list[dict[str, str]] = []
+    i, j = len(a), len(b)
+    while i > 0 and j > 0:
+        if a[i - 1] == b[j - 1]:
+            ops.append({"kind": "same", "text": a[i - 1]})
+            i -= 1
+            j -= 1
+        elif dp[i - 1][j] >= dp[i][j - 1]:
+            ops.append({"kind": "delete", "text": a[i - 1]})
+            i -= 1
+        else:
+            ops.append({"kind": "insert", "text": b[j - 1]})
+            j -= 1
+    while i > 0:
+        ops.append({"kind": "delete", "text": a[i - 1]})
+        i -= 1
+    while j > 0:
+        ops.append({"kind": "insert", "text": b[j - 1]})
+        j -= 1
+    ops.reverse()
+    merged: list[dict[str, str]] = []
+    for op in ops:
+        if merged and merged[-1]["kind"] == op["kind"]:
+            merged[-1]["text"] += op["text"]
+        else:
+            merged.append(dict(op))
+    return merged
+
+
+def _turn_correction_metrics(raw_text: str, corrected_text: str) -> dict[str, Any]:
+    fragments = _turn_correction_fragments(raw_text, corrected_text)
+    same_chars = sum(len(f["text"]) for f in fragments if f["kind"] == "same")
+    delete_chars = sum(len(f["text"]) for f in fragments if f["kind"] == "delete")
+    insert_chars = sum(len(f["text"]) for f in fragments if f["kind"] == "insert")
+    edit_fragments = sum(1 for f in fragments if f["kind"] != "same")
+    char_similarity = SequenceMatcher(None, raw_text.lower(), corrected_text.lower()).ratio()
+    total_len = max(len(raw_text) + len(corrected_text), 1)
+    edit_chars = delete_chars + insert_chars
+    edit_ratio = edit_chars / total_len
+    acceptable = False
+    if edit_fragments <= 2 and edit_chars <= 32:
+        acceptable = True
+    elif char_similarity >= 0.55 and edit_fragments <= 6:
+        acceptable = True
+    elif char_similarity >= 0.80 and edit_fragments <= 10:
+        acceptable = True
+    if edit_ratio > 0.75 and char_similarity < 0.75:
+        acceptable = False
+    return {
+        "fragments": fragments,
+        "same_chars": same_chars,
+        "delete_chars": delete_chars,
+        "insert_chars": insert_chars,
+        "edit_chars": edit_chars,
+        "edit_fragments": edit_fragments,
+        "char_similarity": char_similarity,
+        "edit_ratio": edit_ratio,
+        "acceptable": acceptable,
+        "score_key": (
+            edit_fragments,
+            edit_chars,
+            -int(round(char_similarity * 1000)),
+            abs(len(raw_text) - len(corrected_text)),
+        ),
+    }
 
 
 @dataclass
@@ -1868,9 +1980,10 @@ class SessionMonitor:
         The parser (auto-edec1.1) upconverts valid ``graph turn-correction
         suggest`` output into a typed ``turn_correction`` entry. The
         agent-facing command only emits the corrected replacement text, so
-        we resolve that suggestion onto the nearest plausible user turn here,
-        compute the raw-text sha256 server-side, and persist the sparse row so
-        refresh/reconnect can rehydrate the overlay without rewriting JSONL.
+        we score a narrow set of nearby user turns here, choose the cleanest
+        inline diff match, compute the raw-text sha256 server-side, and
+        persist the sparse row so refresh/reconnect can rehydrate the overlay
+        without rewriting JSONL.
 
         Sessions without a ``session_uuid`` silently skip. In the current
         session-monitor flow the tailer only reads a concrete JSONL after the
@@ -1880,7 +1993,7 @@ class SessionMonitor:
         """
         if not entries:
             return
-        batch_users: list[dict[str, Any]] = []
+        current_users: list[dict[str, Any]] = []
         for idx, entry in enumerate(entries):
             if entry.get("type") != "user":
                 continue
@@ -1890,7 +2003,7 @@ class SessionMonitor:
                 continue
             if not isinstance(content, str) or not content:
                 continue
-            batch_users.append({
+            current_users.append({
                 "index": idx,
                 "message_id": message_id,
                 "content": content,
@@ -1899,8 +2012,8 @@ class SessionMonitor:
         session_uuid = row.get("session_uuid")
         prior_users = list(ts.recent_user_turns)
 
-        def _remember_batch_users() -> None:
-            for user in batch_users:
+        def _remember_current_users() -> None:
+            for user in current_users:
                 if (
                     ts.recent_user_turns
                     and ts.recent_user_turns[-1].get("message_id") == user["message_id"]
@@ -1913,7 +2026,7 @@ class SessionMonitor:
                 })
 
         if not session_uuid:
-            _remember_batch_users()
+            _remember_current_users()
             return
 
         claimed_targets: set[str] = set()
@@ -1930,17 +2043,103 @@ class SessionMonitor:
                 return False
             return _existing_for(message_id) is None
 
-        def _resolve_candidate(turn_correction_index: int) -> dict[str, Any] | None:
-            for user in reversed(batch_users):
-                if user["index"] < turn_correction_index and _candidate_available(user):
-                    return user
-            for user in reversed(prior_users):
-                if _candidate_available(user):
-                    return user
-            for user in batch_users:
-                if user["index"] > turn_correction_index and _candidate_available(user):
-                    return user
-            return None
+        def _candidate_is_recent(
+            correction_epoch: float | None,
+            candidate_epoch: float | None,
+        ) -> bool:
+            if correction_epoch is None or candidate_epoch is None:
+                return True
+            return abs(correction_epoch - candidate_epoch) <= _TURN_CORRECTION_HISTORY_WINDOW_SECONDS
+
+        def _resolve_candidate(turn_correction_index: int, corrected_text: str, correction_ts: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+            correction_epoch = _parse_iso_timestamp(correction_ts)
+            prior_pool: list[dict[str, Any]] = []
+            for user in prior_users:
+                if not _candidate_available(user):
+                    continue
+                candidate_epoch = _parse_iso_timestamp(str(user.get("timestamp") or ""))
+                if not _candidate_is_recent(correction_epoch, candidate_epoch):
+                    continue
+                candidate = dict(user)
+                candidate["source"] = "recent_cache"
+                candidate["candidate_epoch"] = candidate_epoch
+                prior_pool.append(candidate)
+            for user in current_users:
+                if user["index"] >= turn_correction_index or not _candidate_available(user):
+                    continue
+                candidate_epoch = _parse_iso_timestamp(str(user.get("timestamp") or ""))
+                if not _candidate_is_recent(correction_epoch, candidate_epoch):
+                    continue
+                candidate = dict(user)
+                candidate["source"] = "same_pass_prior"
+                candidate["candidate_epoch"] = candidate_epoch
+                prior_pool.append(candidate)
+            candidates = prior_pool[-_TURN_CORRECTION_PRIOR_CANDIDATES:]
+            forward_added = 0
+            for user in current_users:
+                if user["index"] <= turn_correction_index or not _candidate_available(user):
+                    continue
+                candidate_epoch = _parse_iso_timestamp(str(user.get("timestamp") or ""))
+                if not _candidate_is_recent(correction_epoch, candidate_epoch):
+                    continue
+                candidate = dict(user)
+                candidate["source"] = "same_pass_forward"
+                candidate["candidate_epoch"] = candidate_epoch
+                candidates.append(candidate)
+                forward_added += 1
+                if forward_added >= _TURN_CORRECTION_FORWARD_CANDIDATES:
+                    break
+
+            evaluated: list[dict[str, Any]] = []
+            winner: dict[str, Any] | None = None
+            for order, candidate in enumerate(candidates):
+                metrics = _turn_correction_metrics(str(candidate.get("content") or ""), corrected_text)
+                age_seconds = None
+                if correction_epoch is not None and candidate.get("candidate_epoch") is not None:
+                    age_seconds = round(correction_epoch - float(candidate["candidate_epoch"]), 3)
+                rec = {
+                    **candidate,
+                    "order": order,
+                    "age_seconds": age_seconds,
+                    "metrics": metrics,
+                }
+                evaluated.append(rec)
+                if not metrics["acceptable"]:
+                    continue
+                if winner is None:
+                    winner = rec
+                    continue
+                winner_key = winner["metrics"]["score_key"] + (-winner["order"],)
+                candidate_key = metrics["score_key"] + (-order,)
+                if candidate_key < winner_key:
+                    winner = rec
+
+            debug_payload = {
+                "correction_ts": correction_ts,
+                "candidate_count": len(evaluated),
+                "candidates": [
+                    {
+                        "message_id": rec.get("message_id"),
+                        "source": rec.get("source"),
+                        "timestamp": rec.get("timestamp", ""),
+                        "age_seconds": rec.get("age_seconds"),
+                        "acceptable": rec["metrics"]["acceptable"],
+                        "edit_fragments": rec["metrics"]["edit_fragments"],
+                        "edit_chars": rec["metrics"]["edit_chars"],
+                        "char_similarity": round(float(rec["metrics"]["char_similarity"]), 4),
+                        "score_key": rec["metrics"]["score_key"],
+                        "content_preview": str(rec.get("content") or "")[:120],
+                    }
+                    for rec in evaluated
+                ],
+                "winner": {
+                    "message_id": winner.get("message_id"),
+                    "source": winner.get("source"),
+                    "score_key": winner["metrics"]["score_key"],
+                    "char_similarity": round(float(winner["metrics"]["char_similarity"]), 4),
+                } if winner else None,
+            }
+            return winner, debug_payload
 
         for idx, entry in enumerate(entries):
             if entry.get("type") != "turn_correction":
@@ -1951,7 +2150,19 @@ class SessionMonitor:
             target = entry.get("target_message_id")
             sha = entry.get("original_sha256")
             if not isinstance(target, str) or not target or not isinstance(sha, str) or not sha:
-                candidate = _resolve_candidate(idx)
+                candidate, debug_payload = _resolve_candidate(
+                    idx,
+                    corrected,
+                    str(entry.get("timestamp", "") or ""),
+                )
+                logger.debug(
+                    "session_monitor: turn_correction resolve session=%s same_pass_users=%d cached_prior_users=%d corrected_preview=%r debug=%s",
+                    session_uuid,
+                    len(current_users),
+                    len(prior_users),
+                    corrected[:160],
+                    debug_payload,
+                )
                 if candidate is None:
                     continue
                 target = candidate["message_id"]
@@ -1978,7 +2189,7 @@ class SessionMonitor:
                     " session=%s target=%s",
                     session_uuid, target,
                 )
-        _remember_batch_users()
+        _remember_current_users()
 
     @staticmethod
     def _enrich_agent_entries(row: dict, ts: _TailState, entries: list) -> None:

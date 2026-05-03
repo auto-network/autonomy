@@ -604,12 +604,16 @@
           },
           function(newLen) {
             var s = Alpine.store('sessions')[sid];
+            var sawTurnCorrection = false;
             if (newLen > lastLen) {
               if (s && s._displayDirty) {
                 self._rebuildDisplay();
               } else if (s) {
                 // Incremental: append each new entry (O(1) per entry)
                 for (var i = lastLen; i < newLen; i++) {
+                  if (s.entries[i] && s.entries[i].type === 'turn_correction') {
+                    sawTurnCorrection = true;
+                  }
                   window.SessionDisplay.appendOne(self.displayEntries, s.entries, i);
                 }
               }
@@ -621,6 +625,9 @@
             }
             if (self.autoScroll) {
               self._scrollToBottom();
+            }
+            if (sawTurnCorrection) {
+              self._hydrateCorrections();
             }
             // Update overlay header if in overlay mode
             if (self._mode === 'overlay') self._updateHeader();
