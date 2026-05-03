@@ -11,7 +11,7 @@ import json
 import pytest
 from starlette.testclient import TestClient
 
-from tools.graph import ops, schemas
+from tools.graph import ops, schemas, settings_ops
 from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS, SchemaValidationError
 
 
@@ -323,3 +323,86 @@ def test_settings_chain_returns_layers(graph_db_env, example_schema, client):
 def test_settings_chain_404(graph_db_env, example_schema, client):
     r = client.get("/api/graph/settings/autonomy.test.api/missing/chain")
     assert r.status_code == 404
+
+
+# ── Diag throughput endpoint ───────────────────────────────
+
+
+def test_diag_settings_counts_direct_and_http_traffic(
+    graph_db_env, example_schema, client,
+):
+    settings_ops.reset_settings_api_stats()
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    assert ops.get_setting(sid) is not None
+
+    r = client.get("/api/graph/settings/autonomy.test.api")
+    assert r.status_code == 200
+
+    diag = client.get("/api/diag/settings")
+    assert diag.status_code == 200
+    body = diag.json()
+
+    assert body["totals"]["calls"] == 3
+    assert body["totals"]["reads"] == 2
+    assert body["totals"]["writes"] == 1
+    assert body["totals"]["errors"] == 0
+    assert body["totals"]["operations"] == {
+        "add_setting": 1,
+        "get_setting": 1,
+        "read_set": 1,
+    }
+    assert body["last_60s"]["calls"] == 3
+    assert body["last_60s"]["top_sets"] == [
+        {"set_id": "autonomy.test.api", "calls": 3},
+    ]
+    assert body["last_call"]["operation"] == "read_set"
+    assert body["last_call"]["set_id"] == "autonomy.test.api"
+    assert set(body["last_60s"]["latency_ms"]) == {"p50", "p95", "p99"}
+    assert body["last_60s"]["latency_ms"]["p50"] is not None
+    assert body["last_60s"]["latency_ms"]["p95"] is not None
+    assert body["last_60s"]["latency_ms"]["p99"] is not None
+
+
+def test_diag_settings_counts_errors(graph_db_env, example_schema, client):
+    settings_ops.reset_settings_api_stats()
+
+    with pytest.raises(LookupError):
+        ops.promote_setting(
+            "00000000-0000-0000-0000-000000000000", "canonical",
+        )
+
+    diag = client.get("/api/diag/settings")
+    assert diag.status_code == 200
+    body = diag.json()
+
+    assert body["totals"]["calls"] == 1
+    assert body["totals"]["writes"] == 1
+    assert body["totals"]["errors"] == 1
+    assert body["totals"]["operations"] == {"promote_setting": 1}
+    assert body["last_error"]["operation"] == "promote_setting"
+    assert body["last_error"]["ok"] is False
+
+
+def test_diag_settings_latency_percentiles(graph_db_env, client):
+    settings_ops.reset_settings_api_stats()
+    for duration_ms in (10, 20, 30, 40):
+        settings_ops._SETTINGS_API_STATS.record(
+            operation="synthetic_read",
+            set_id="autonomy.test.synthetic",
+            org=None,
+            kind="read",
+            ok=True,
+            duration_ms=duration_ms,
+            result_count=1,
+        )
+
+    diag = client.get("/api/diag/settings")
+    assert diag.status_code == 200
+    body = diag.json()
+
+    assert body["totals"]["calls"] == 4
+    assert body["totals"]["latency_ms"] == {
+        "p50": 20,
+        "p95": 40,
+        "p99": 40,
+    }
