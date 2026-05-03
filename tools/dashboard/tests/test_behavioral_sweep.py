@@ -203,6 +203,112 @@ SWEEP_SESSION_ENTRIES["auto-sweep-alpha"].append(
      "timestamp": NOW - 3580}
 )
 
+# ── Turn-correction overlay fixtures (auto-edec1.4) ───────────────
+# Four user entries on auto-sweep-alpha exercise the full state matrix:
+#   tc-pending-msg   — pending overlay (short message; default desktop layout)
+#   tc-mobile-msg    — pending overlay with a long message (mobile layout)
+#   tc-accepted-msg  — accepted (effective text + revised marker)
+#   tc-dismissed-msg — dismissed (raw text, no overlay artifacts)
+# Plus a no-overlay control message right after, to assert adjacent
+# tiles remain unchanged.
+TC_PENDING_RAW = "Plese check the auth flow, and add tests for the new edge cases."
+TC_PENDING_FIX = "Please check the auth flow, and add tests for the new edge cases."
+TC_PENDING_SHA = "90d0b9fee1f1f7af7a7205476aaf6163c9d041b86b8ff1a7776bddd72378f8a2"
+
+TC_MOBILE_RAW = (
+    "Bring the dashboard mock up on port 8083 with the long-form fixture "
+    "so the design viewer can compare both layouts side by side without restarting."
+)
+TC_MOBILE_FIX = (
+    "Bring the dashboard mock up on port 8083 with the long-form fixture "
+    "so the design viewer can compare both proposed layouts side by side "
+    "without restarting the server."
+)
+TC_MOBILE_SHA = "a281e3e5c4c19497987fcf9300ebc61004f5aa06a09fc897139943c2b0d1202e"
+
+TC_ACCEPTED_RAW = "cna we lokk at the corrections api?"
+TC_ACCEPTED_FIX = "Can we look at the corrections API?"
+TC_ACCEPTED_SHA = "e5e1a93833fb0c38447f22a5386920470f62c752c5d5c858f4333505dedd9818"
+
+TC_DISMISSED_RAW = "i need an extra fixture for the dismiss flow"
+TC_DISMISSED_FIX = "I need an extra fixture for the dismiss flow."
+TC_DISMISSED_SHA = "dd2c5f5058555a8feeceeb7deed1e49f87d03287a4e6c7da8b268260221100cf"
+
+SWEEP_SESSION_ENTRIES["auto-sweep-alpha"].extend([
+    {"type": "user", "content": TC_PENDING_RAW, "message_id": "tc-pending-msg",
+     "timestamp": NOW - 3540},
+    {"type": "assistant_text", "content": "Looking now.", "timestamp": NOW - 3539},
+    {"type": "user", "content": TC_MOBILE_RAW, "message_id": "tc-mobile-msg",
+     "timestamp": NOW - 3530},
+    {"type": "assistant_text", "content": "On it.", "timestamp": NOW - 3529},
+    {"type": "user", "content": TC_ACCEPTED_RAW, "message_id": "tc-accepted-msg",
+     "timestamp": NOW - 3520},
+    {"type": "assistant_text", "content": "Yes — pulling it up.", "timestamp": NOW - 3519},
+    {"type": "user", "content": TC_DISMISSED_RAW, "message_id": "tc-dismissed-msg",
+     "timestamp": NOW - 3510},
+    {"type": "assistant_text", "content": "Acknowledged.", "timestamp": NOW - 3509},
+    # Control: a user turn with no correction row — must remain raw.
+    {"type": "user", "content": "control message — no overlay", "message_id": "tc-control-msg",
+     "timestamp": NOW - 3500},
+])
+
+# Sparse correction fixture keyed by tmux_name. Mock DAO surfaces these
+# rows through GET /api/session/{id}/turn-corrections, and accept/dismiss
+# POSTs mutate an in-memory overlay so terminal transitions stick across
+# subsequent reads inside the same module-scoped server.
+SWEEP_TURN_CORRECTIONS = {
+    "auto-sweep-alpha": [
+        {
+            "session_uuid": "auto-sweep-alpha",
+            "target_message_id": "tc-pending-msg",
+            "status": "pending",
+            "original_sha256": TC_PENDING_SHA,
+            "corrected_text": TC_PENDING_FIX,
+            "mode": "spelling",
+            "reason": "typo",
+            "confidence": 0.95,
+            "created_at": NOW - 3539,
+            "updated_at": NOW - 3539,
+        },
+        {
+            "session_uuid": "auto-sweep-alpha",
+            "target_message_id": "tc-mobile-msg",
+            "status": "pending",
+            "original_sha256": TC_MOBILE_SHA,
+            "corrected_text": TC_MOBILE_FIX,
+            "mode": "clarity",
+            "reason": "verbosity",
+            "confidence": 0.8,
+            "created_at": NOW - 3528,
+            "updated_at": NOW - 3528,
+        },
+        {
+            "session_uuid": "auto-sweep-alpha",
+            "target_message_id": "tc-accepted-msg",
+            "status": "accepted",
+            "original_sha256": TC_ACCEPTED_SHA,
+            "corrected_text": TC_ACCEPTED_FIX,
+            "mode": "spelling",
+            "reason": "typo",
+            "confidence": 0.99,
+            "created_at": NOW - 3518,
+            "updated_at": NOW - 3517,
+        },
+        {
+            "session_uuid": "auto-sweep-alpha",
+            "target_message_id": "tc-dismissed-msg",
+            "status": "dismissed",
+            "original_sha256": TC_DISMISSED_SHA,
+            "corrected_text": TC_DISMISSED_FIX,
+            "mode": "punctuation",
+            "reason": "trailing-period",
+            "confidence": 0.7,
+            "created_at": NOW - 3508,
+            "updated_at": NOW - 3507,
+        },
+    ],
+}
+
 # Task* tool_use tile state matrix — exercised by TestSessionViewerTodoTiles.
 # Entries are already in parsed shape; the mock tail endpoint runs the
 # TaskStateTracker enricher across the list before returning.
@@ -1405,6 +1511,7 @@ def _build_fixture() -> dict:
         "bead_deps": SWEEP_BEAD_DEPS,
         "graph_sources": SWEEP_GRAPH_SOURCES,
         "graph_attachments": SWEEP_GRAPH_ATTACHMENTS,
+        "turn_corrections": SWEEP_TURN_CORRECTIONS,
         # All fixtures coexist in the same list; the mock DAO substring-
         # filters by query, so:
         #   ?q=dashboard  → SWEEP_SEARCH_RESULTS_DASHBOARD (auto-qlfg1)
@@ -3862,6 +3969,427 @@ class TestSessionViewerWorktreeOverlay:
     def test_session_header_restored_after_close(self):
         assert self._checks.get("session_header_visible_after_close"), (
             "Session header was not visible after closing worktree review overlay"
+        )
+
+
+# ── Turn-correction overlay (auto-edec1.4) ────────────────────────
+# Asserts the design-studio overlay (design 7b959395-c4f3) is integrated
+# into the live session viewer and behaves across the full state matrix:
+# pending markup, mobile long-message overflow, accept transition,
+# persistent revised marker, dismiss clearing, no standalone tile.
+#
+# Fixture additions (see SWEEP_SESSION_ENTRIES + SWEEP_TURN_CORRECTIONS):
+#   tc-pending-msg   — pending overlay (short message)
+#   tc-mobile-msg    — pending overlay with a long message
+#   tc-accepted-msg  — accepted (effective text + revised marker)
+#   tc-dismissed-msg — dismissed (raw text only)
+#   tc-control-msg   — adjacent control (no overlay row)
+
+TURN_CORRECTION_OVERLAY_CHECKS = """
+    var content = document.getElementById('content');
+    function findUserTileByText(text) {
+      var tiles = content ? content.querySelectorAll('.sc-entry') : [];
+      for (var i = 0; i < tiles.length; i++) {
+        var tile = tiles[i];
+        if (!tile.querySelector('.sc-user-label')) continue;
+        var body = tile.textContent || '';
+        if (body.indexOf(text) !== -1) return tile;
+      }
+      return null;
+    }
+
+    // ── Pending overlay attaches to the targeted user tile ───────
+    var pendingTile = document.querySelector('[data-testid="turn-correction-target"]');
+    r.has_pending_target = !!pendingTile;
+    if (pendingTile) {
+      r.pending_state = pendingTile.getAttribute('data-correction-state');
+      r.pending_has_pending_class = pendingTile.classList.contains('tc-entry-pending');
+      r.pending_diff_block = !!pendingTile.querySelector('[data-testid="turn-correction-pending"]');
+      r.pending_actions = !!pendingTile.querySelector('[data-testid="turn-correction-actions"]');
+      r.pending_has_del = !!pendingTile.querySelector('.tc-frag-del');
+      r.pending_has_ins = !!pendingTile.querySelector('.tc-frag-ins');
+      var del = pendingTile.querySelector('.tc-frag-del');
+      var ins = pendingTile.querySelector('.tc-frag-ins');
+      r.pending_del_text = del ? del.textContent : '';
+      r.pending_ins_text = ins ? ins.textContent : '';
+      var diffBlock = pendingTile.querySelector('[data-testid="turn-correction-pending"]');
+      r.pending_diff_text = diffBlock ? diffBlock.textContent.replace(/\\s+/g, ' ').trim() : '';
+      // sha256 must NOT appear in the rendered DOM
+      r.pending_no_sha = (pendingTile.textContent || '').indexOf('90d0b9fee1f1f7af7a7205476aaf6163c9d041b86b8ff1a7776bddd72378f8a2') === -1;
+    }
+
+    // ── Accepted tile shows corrected text and persistent marker ──
+    var acceptedTile = findUserTileByText('Can we look at the corrections API?');
+    r.has_accepted_tile = !!acceptedTile;
+    if (acceptedTile) {
+      r.accepted_state = acceptedTile.getAttribute('data-correction-state');
+      r.accepted_has_accepted_class = acceptedTile.classList.contains('tc-entry-accepted');
+      r.accepted_marker = !!acceptedTile.querySelector('[data-testid="turn-correction-revised"]');
+      r.accepted_no_actions = !acceptedTile.querySelector('[data-testid="turn-correction-actions"]');
+      r.accepted_no_pending_diff = !acceptedTile.querySelector('[data-testid="turn-correction-pending"]');
+      var body = acceptedTile.querySelector('.sc-user-content');
+      r.accepted_body_text = body ? body.textContent.trim() : '';
+      r.accepted_does_not_show_raw = (acceptedTile.textContent || '').indexOf('cna we lokk') === -1;
+    }
+
+    // ── Dismissed tile renders raw text, no overlay artifacts ────
+    var dismissedTile = findUserTileByText('i need an extra fixture for the dismiss flow');
+    r.has_dismissed_tile = !!dismissedTile;
+    if (dismissedTile) {
+      r.dismissed_state = dismissedTile.getAttribute('data-correction-state');
+      r.dismissed_no_pending_class = !dismissedTile.classList.contains('tc-entry-pending');
+      r.dismissed_no_accepted_class = !dismissedTile.classList.contains('tc-entry-accepted');
+      r.dismissed_no_marker = !dismissedTile.querySelector('[data-testid="turn-correction-revised"]');
+      r.dismissed_no_actions = !dismissedTile.querySelector('[data-testid="turn-correction-actions"]');
+      r.dismissed_no_pending_diff = !dismissedTile.querySelector('[data-testid="turn-correction-pending"]');
+      var body = dismissedTile.querySelector('.sc-user-content');
+      r.dismissed_body_text = body ? body.textContent.trim() : '';
+    }
+
+    // ── Adjacent control tile must remain unchanged ──────────────
+    var controlTile = findUserTileByText('control message — no overlay');
+    r.has_control_tile = !!controlTile;
+    if (controlTile) {
+      r.control_state = controlTile.getAttribute('data-correction-state');
+      r.control_no_pending_class = !controlTile.classList.contains('tc-entry-pending');
+      r.control_no_accepted_class = !controlTile.classList.contains('tc-entry-accepted');
+      r.control_no_marker = !controlTile.querySelector('[data-testid="turn-correction-revised"]');
+      r.control_no_actions = !controlTile.querySelector('[data-testid="turn-correction-actions"]');
+      r.control_no_pending_diff = !controlTile.querySelector('[data-testid="turn-correction-pending"]');
+    }
+
+    // ── Whole-page invariants: no standalone bulky correction tile ──
+    // A standalone correction tile would be one whose text contains the
+    // corrected_text but NOT the original raw text (i.e. rendered as a
+    // second free-floating entry). Walk every sc-entry and check the
+    // corrected text is only present on overlay-bearing user tiles.
+    var bulkyHits = [];
+    var allTiles = content ? content.querySelectorAll('.sc-entry') : [];
+    var fixedFor = function(tile) {
+      var s = tile.getAttribute('data-correction-state') || '';
+      return s === 'pending' || s === 'accepted';
+    };
+    for (var i = 0; i < allTiles.length; i++) {
+      var t = allTiles[i];
+      var txt = t.textContent || '';
+      // tc-pending-msg's corrected_text adds "Please" — appears only on pending or accepted tiles
+      if (txt.indexOf('Please check the auth flow') !== -1 && !fixedFor(t)) {
+        bulkyHits.push(t.outerHTML.slice(0, 200));
+      }
+    }
+    r.no_bulky_correction_tile = bulkyHits.length === 0;
+    r.bulky_hits = bulkyHits;
+
+    // Pending fixture count: exactly two pending targets in fixtures
+    r.pending_target_count = document.querySelectorAll('[data-testid="turn-correction-target"]').length;
+"""
+
+
+TURN_CORRECTION_MOBILE_CHECKS = """
+    var content = document.getElementById('content');
+    var pendingTiles = document.querySelectorAll('[data-testid="turn-correction-target"]');
+    // Find the long-message tile by its raw text fingerprint
+    var mobileTile = null;
+    for (var i = 0; i < pendingTiles.length; i++) {
+      var t = pendingTiles[i];
+      if ((t.textContent || '').indexOf('long-form fixture') !== -1) { mobileTile = t; break; }
+    }
+    r.has_mobile_target = !!mobileTile;
+    if (mobileTile) {
+      var actions = mobileTile.querySelector('[data-testid="turn-correction-actions"]');
+      r.mobile_actions_visible = !!(actions && actions.offsetParent !== null);
+      // Horizontal overflow check: tile and any descendant must fit within
+      // the entries scrollport width. scrollWidth > clientWidth on the
+      // scroll container indicates the page itself overflowed.
+      var entriesEl = document.querySelector('.sv-entries');
+      var entriesWidth = entriesEl ? entriesEl.clientWidth : 0;
+      r.entries_scroll_width = entriesEl ? entriesEl.scrollWidth : 0;
+      r.entries_client_width = entriesWidth;
+      r.no_horizontal_overflow = entriesEl
+        ? entriesEl.scrollWidth <= entriesEl.clientWidth + 1
+        : true;
+      // Tile visible width must not exceed its parent entries column.
+      var rect = mobileTile.getBoundingClientRect();
+      r.tile_width = Math.round(rect.width);
+      r.tile_within_viewport = rect.right <= window.innerWidth + 1;
+    }
+"""
+
+
+TURN_CORRECTION_ACCEPT_CHECKS = """(async () => {
+  var sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  var waitFor = async (predicate, timeoutMs) => {
+    var deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (predicate()) return true;
+      await sleep(50);
+    }
+    return false;
+  };
+  var r = {};
+
+  // Find the short-message pending target
+  var pendingTiles = document.querySelectorAll('[data-testid="turn-correction-target"]');
+  var target = null;
+  for (var i = 0; i < pendingTiles.length; i++) {
+    var t = pendingTiles[i];
+    if ((t.textContent || '').indexOf('Plese check') !== -1) { target = t; break; }
+  }
+  r.found_target = !!target;
+  if (!target) return JSON.stringify(r);
+
+  var acceptBtn = target.querySelector('.tc-action-accept');
+  r.has_accept_btn = !!acceptBtn;
+  if (!acceptBtn) return JSON.stringify(r);
+  acceptBtn.click();
+
+  // Optimistic flip is synchronous on the next tick; wait for the
+  // marker to appear (network round-trip can take a beat).
+  var ok = await waitFor(function() {
+    var content = document.getElementById('content');
+    var tiles = content ? content.querySelectorAll('.sc-entry') : [];
+    for (var i = 0; i < tiles.length; i++) {
+      var tile = tiles[i];
+      if (!tile.querySelector('.sc-user-label')) continue;
+      if ((tile.textContent || '').indexOf('Please check the auth flow') !== -1
+          && tile.getAttribute('data-correction-state') === 'accepted') {
+        return true;
+      }
+    }
+    return false;
+  }, 4000);
+  r.accepted_after_click = ok;
+
+  // Re-locate the tile by its NEW corrected content
+  var content = document.getElementById('content');
+  var tiles = content ? content.querySelectorAll('.sc-entry') : [];
+  var acceptedTile = null;
+  for (var i = 0; i < tiles.length; i++) {
+    var tile = tiles[i];
+    if (!tile.querySelector('.sc-user-label')) continue;
+    if ((tile.textContent || '').indexOf('Please check the auth flow') !== -1
+        && tile.getAttribute('data-correction-state') === 'accepted') {
+      acceptedTile = tile; break;
+    }
+  }
+  r.accepted_tile_present = !!acceptedTile;
+  if (acceptedTile) {
+    var body = acceptedTile.querySelector('.sc-user-content');
+    r.accepted_body = body ? body.textContent.trim() : '';
+    r.has_revised_marker = !!acceptedTile.querySelector('[data-testid="turn-correction-revised"]');
+    r.no_actions_after_accept = !acceptedTile.querySelector('[data-testid="turn-correction-actions"]');
+    r.no_diff_after_accept = !acceptedTile.querySelector('[data-testid="turn-correction-pending"]');
+    r.no_raw_text_visible = (acceptedTile.textContent || '').indexOf('Plese ') === -1;
+  }
+  return JSON.stringify(r);
+})()"""
+
+
+TURN_CORRECTION_MOBILE_VIEWPORT = "(() => { window.resizeTo && window.resizeTo(390, 844); document.body.style.maxWidth = '390px'; document.body.style.width = '390px'; document.documentElement.style.maxWidth = '390px'; return true; })()"
+
+
+class TestSessionTurnCorrectionOverlay:
+    """Behavioral sweep: turn-correction overlay (auto-edec1.4).
+
+    Validates the design-studio template (design 7b959395-c4f3) is wired
+    end-to-end against persisted correction state. Fixture additions:
+
+      SWEEP_SESSION_ENTRIES["auto-sweep-alpha"] (5 user tiles + control)
+      SWEEP_TURN_CORRECTIONS["auto-sweep-alpha"] (4 correction rows)
+
+    No new fixture sections beyond the two above.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        # Fresh navigation so prior class-scoped page state doesn't leak.
+        result = _navigate_and_check(
+            "/session/autonomy/auto-sweep-alpha",
+            TURN_CORRECTION_OVERLAY_CHECKS,
+            wait_ms=2500,
+        )
+        request.cls._checks = result
+
+    def test_pending_overlay_attached_to_target_tile(self):
+        c = self._checks
+        assert c.get("has_pending_target"), (
+            "No element with data-testid='turn-correction-target' rendered. "
+            "Pending overlay did not attach to a user tile keyed by message_id."
+        )
+        assert c.get("pending_state") == "pending", (
+            f"Pending tile data-correction-state was {c.get('pending_state')!r}, expected 'pending'"
+        )
+        assert c.get("pending_has_pending_class"), (
+            "Pending tile missing .tc-entry-pending class"
+        )
+
+    def test_pending_renders_inline_diff_fragments(self):
+        c = self._checks
+        assert c.get("pending_diff_block"), (
+            "Pending overlay missing data-testid='turn-correction-pending' diff block"
+        )
+        assert c.get("pending_has_del"), "Pending overlay missing .tc-frag-del span (deleted text)"
+        assert c.get("pending_has_ins"), "Pending overlay missing .tc-frag-ins span (inserted text)"
+        # The single-word typo should produce one delete (Plese) and one
+        # insert (Please). Anything else means the diff regressed.
+        assert "Plese" in (c.get("pending_del_text") or ""), (
+            f"Deleted fragment did not contain 'Plese' typo: {c.get('pending_del_text')!r}"
+        )
+        assert "Please" in (c.get("pending_ins_text") or ""), (
+            f"Inserted fragment did not contain corrected 'Please': {c.get('pending_ins_text')!r}"
+        )
+        # Both raw and corrected words appear in the inline diff
+        diff_text = c.get("pending_diff_text") or ""
+        assert "Plese" in diff_text and "Please" in diff_text, (
+            f"Inline diff did not show both raw + corrected text: {diff_text!r}"
+        )
+
+    def test_pending_actions_rendered(self):
+        c = self._checks
+        assert c.get("pending_actions"), (
+            "Pending overlay missing data-testid='turn-correction-actions' (accept/dismiss controls)"
+        )
+
+    def test_original_sha256_not_displayed(self):
+        c = self._checks
+        assert c.get("pending_no_sha"), (
+            "original_sha256 must be a guard, not display content — but the hash leaked into the DOM"
+        )
+
+    def test_accepted_shows_corrected_text(self):
+        c = self._checks
+        assert c.get("has_accepted_tile"), "Accepted user tile not found"
+        assert c.get("accepted_state") == "accepted", (
+            f"Accepted tile data-correction-state was {c.get('accepted_state')!r}, expected 'accepted'"
+        )
+        assert c.get("accepted_has_accepted_class"), (
+            "Accepted tile missing .tc-entry-accepted class"
+        )
+        assert "Can we look at the corrections API?" in (c.get("accepted_body_text") or ""), (
+            f"Accepted tile body did not show corrected_text. Got: {c.get('accepted_body_text')!r}"
+        )
+        assert c.get("accepted_does_not_show_raw"), (
+            "Accepted tile still shows raw 'cna we lokk' text — corrected_text should be the effective body"
+        )
+
+    def test_persistent_revised_marker_on_accepted(self):
+        c = self._checks
+        assert c.get("accepted_marker"), (
+            "Accepted tile missing data-testid='turn-correction-revised' marker"
+        )
+        assert c.get("accepted_no_actions"), (
+            "Accepted tile must NOT render accept/dismiss controls anymore"
+        )
+        assert c.get("accepted_no_pending_diff"), (
+            "Accepted tile must NOT render the pending diff block"
+        )
+
+    def test_dismissed_returns_to_raw(self):
+        c = self._checks
+        assert c.get("has_dismissed_tile"), "Dismissed user tile not found"
+        assert c.get("dismissed_no_pending_class"), (
+            "Dismissed tile must not carry .tc-entry-pending class"
+        )
+        assert c.get("dismissed_no_accepted_class"), (
+            "Dismissed tile must not carry .tc-entry-accepted class"
+        )
+        assert c.get("dismissed_no_marker"), "Dismissed tile must not show revised marker"
+        assert c.get("dismissed_no_actions"), "Dismissed tile must not show accept/dismiss controls"
+        assert c.get("dismissed_no_pending_diff"), "Dismissed tile must not render the pending diff block"
+        assert "i need an extra fixture for the dismiss flow" in (c.get("dismissed_body_text") or ""), (
+            f"Dismissed tile must render raw text. Got: {c.get('dismissed_body_text')!r}"
+        )
+
+    def test_adjacent_tiles_unchanged(self):
+        c = self._checks
+        assert c.get("has_control_tile"), "Adjacent control user tile not found"
+        # Control state attribute is empty/None when no correction row exists
+        assert (c.get("control_state") or "") == "", (
+            f"Control tile should have no correction state, got {c.get('control_state')!r}"
+        )
+        assert c.get("control_no_pending_class"), "Control tile must not carry .tc-entry-pending"
+        assert c.get("control_no_accepted_class"), "Control tile must not carry .tc-entry-accepted"
+        assert c.get("control_no_marker"), "Control tile must not show revised marker"
+        assert c.get("control_no_actions"), "Control tile must not show accept/dismiss controls"
+        assert c.get("control_no_pending_diff"), "Control tile must not render the pending diff block"
+
+    def test_no_standalone_bulky_correction_tile(self):
+        c = self._checks
+        assert c.get("no_bulky_correction_tile"), (
+            "Found standalone bulky correction tile(s) — overlay must edit the original "
+            "user tile in place, not render a second card. "
+            f"Hits: {c.get('bulky_hits')!r}"
+        )
+
+    def test_pending_overlay_count_matches_fixture(self):
+        c = self._checks
+        # Fixture seeds two pending corrections; the dismissed/accepted/control
+        # tiles must NOT also be marked as pending targets.
+        assert c.get("pending_target_count") == 2, (
+            f"Expected exactly 2 pending overlays, found {c.get('pending_target_count')!r}"
+        )
+
+    def test_pending_overlay_mobile_390x844(self):
+        """Mobile viewport (390x844): controls remain visible and the
+        page does not horizontally overflow even with a long message."""
+        # Force the viewport to mobile width via JS, then re-check.
+        _ab_eval_batch(
+            "document.documentElement.style.maxWidth = '390px';"
+            "document.body.style.maxWidth = '390px';"
+            "document.body.style.width = '390px';"
+            "var main = document.querySelector('main'); if (main) main.style.maxWidth = '390px';"
+            "var content = document.getElementById('content'); if (content) content.style.maxWidth = '390px';"
+            "return true;"
+        )
+        time.sleep(0.5)
+        full_js = "var r = {}; " + TURN_CORRECTION_MOBILE_CHECKS + " return r;"
+        m = _ab_eval_batch(full_js) or {}
+        # Reset width so subsequent tests in the module aren't affected.
+        _ab_eval_batch(
+            "document.documentElement.style.maxWidth = '';"
+            "document.body.style.maxWidth = '';"
+            "document.body.style.width = '';"
+            "var main = document.querySelector('main'); if (main) main.style.maxWidth = '';"
+            "var content = document.getElementById('content'); if (content) content.style.maxWidth = '';"
+            "return true;"
+        )
+        assert m.get("has_mobile_target"), "Mobile pending tile not found"
+        assert m.get("mobile_actions_visible"), (
+            "Accept/dismiss controls must remain visible on mobile (390x844)"
+        )
+        assert m.get("no_horizontal_overflow"), (
+            f"Mobile 390-wide layout overflowed horizontally: "
+            f"scrollWidth={m.get('entries_scroll_width')} clientWidth={m.get('entries_client_width')}"
+        )
+
+    def test_accept_transition_to_effective_text(self):
+        """Click accept on the pending-pending fixture; the tile must
+        flip to the 'accepted' state, swap to corrected_text as effective
+        body, hide accept/dismiss controls, and gain the revised marker.
+
+        This test mutates the in-memory mock state so it is the LAST
+        pending-tile assertion; later tests in this class do not depend
+        on tc-pending-msg's pending state."""
+        result = _run_async_eval(TURN_CORRECTION_ACCEPT_CHECKS)
+        assert result.get("found_target"), "Could not find pending tile to accept"
+        assert result.get("has_accept_btn"), "Pending tile missing accept button"
+        assert result.get("accepted_after_click"), (
+            "Pending tile did not transition to accepted state after click"
+        )
+        assert result.get("accepted_tile_present"), "Accepted tile not present after click"
+        body = result.get("accepted_body") or ""
+        assert "Please check the auth flow" in body, (
+            f"Accepted tile body should be corrected_text, got: {body!r}"
+        )
+        assert result.get("has_revised_marker"), "Accepted tile must show revised marker"
+        assert result.get("no_actions_after_accept"), (
+            "Accept/dismiss controls must be removed from accepted tile"
+        )
+        assert result.get("no_diff_after_accept"), (
+            "Pending diff block must be removed from accepted tile"
+        )
+        assert result.get("no_raw_text_visible"), (
+            "Accepted tile must not still show the raw 'Plese ' typo"
         )
 
 
