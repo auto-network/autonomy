@@ -890,6 +890,27 @@ def get_thoughts(limit: int = 50, thread_id: str | None = None, since: str | Non
     return items[:limit]
 
 
+# ── graph journal DAO interface ─────────────────────────────────────
+
+JOURNAL_ENTRY_DEFAULTS: dict[str, Any] = {
+    "id": "journal-mock-001",
+    "compact": "",
+    "normal": "",
+    "expanded": "",
+    "timestamp_start": "",
+    "timestamp_end": "",
+    "entry_type": "attention",
+    "created_at": "2026-01-01T00:00:00Z",
+    "org": "autonomy",
+}
+
+
+def get_journal_entries(since: str | None = None, limit: int = 50) -> list[dict]:
+    data = _load()
+    items = [_fill(e, JOURNAL_ENTRY_DEFAULTS) for e in data.get("journal_entries", [])]
+    return items[:limit]
+
+
 # ── graph threads DAO interface ─────────────────────────────────────
 
 THREAD_DEFAULTS: dict[str, Any] = {

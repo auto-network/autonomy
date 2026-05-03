@@ -370,6 +370,31 @@ SWEEP_THOUGHTS = [
     },
 ]
 
+SWEEP_JOURNAL_ENTRIES = [
+    {
+        "id": "journal-sweep-001",
+        "compact": "Testing infra planning — mock DAO gaps, L2B, baseline tests, SSE mocking",
+        "normal": "Reviewed mock DAO coverage. Identified three gaps: session_monitor, SSE injection, JSONL fixture pipeline.\n⚙ auto-cqhx merged: sessions page tests + topics fix (+594)",
+        "expanded": "USER: Whats missing from mock dao?\nAGENT: Three gaps: session_monitor returns static registry, no SSE event simulation, no JSONL fixture pipeline.\n⚙ auto-cqhx merged: sessions page tests + topics fix (+594)",
+        "timestamp_start": "2026-03-27T14:00:00Z",
+        "timestamp_end": "2026-03-27T14:25:00Z",
+        "entry_type": "attention",
+        "created_at": "2026-03-27T14:25:00Z",
+        "org": "autonomy",
+    },
+    {
+        "id": "journal-sweep-002",
+        "compact": "Tmux send-keys race — double-Enter retry with per-session lock. 7 call sites unified.",
+        "normal": "Investigated tmux send-keys reliability and resolved with a per-session asyncio lock plus double-Enter retry.\n⚙ auto-gab6 merged: unified tmux_send (+93 -78)",
+        "expanded": "USER: Do we even bother to check if its already gone through?\nAGENT: No. Just send \\r twice. If the first one worked, the second hits an empty prompt and does nothing.\n⚙ auto-gab6 merged: unified tmux_send with per-session lock and double-Enter retry",
+        "timestamp_start": "2026-03-27T19:25:00Z",
+        "timestamp_end": "2026-03-27T19:40:00Z",
+        "entry_type": "attention",
+        "created_at": "2026-03-27T19:40:00Z",
+        "org": "autonomy",
+    },
+]
+
 SWEEP_THREADS = [
     {
         "id": "thread-sweep-001", "title": "Passkey auth design",
@@ -1373,6 +1398,7 @@ def _build_fixture() -> dict:
         "recent_notes": SWEEP_RECENT_NOTES,
         "thoughts": SWEEP_THOUGHTS,
         "threads": SWEEP_THREADS,
+        "journal_entries": SWEEP_JOURNAL_ENTRIES,
         "streams": SWEEP_STREAMS,
         "traces": {**SWEEP_TRACES, **SWEEP_TRACE_DATA},
         "primers": {**SWEEP_PRIMERS, **SWEEP_PRIMER_DATA},
@@ -2813,6 +2839,201 @@ class TestActivitySurfaceBehavior:
         """No raw Jinja template syntax is visible on either route."""
         for c in (self._timeline, self._activity):
             assert c.get("no_jinja"), f"Raw template syntax visible on {c.get('page_path')}"
+
+
+ACTIVITY_ATTENTION_CHECKS = """(async () => {
+    try {
+        var r = {};
+        var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
+        var waitFor = async function(predicate, timeoutMs) {
+            var deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+                if (predicate()) return true;
+                await sleep(50);
+            }
+            return false;
+        };
+        var tick = async function() {
+            await Alpine.nextTick();
+            await sleep(120);
+        };
+
+        r.page_path = window.location.pathname;
+        r.has_page = await waitFor(function() {
+            return !!document.querySelector('[data-testid="activity-page"]');
+        }, 3000);
+
+        var root = document.querySelector('[data-testid="activity-page"]');
+        var data = root ? Alpine.$data(root) : null;
+
+        // Tabs visible
+        var tabStrip = document.querySelector('[data-testid="activity-tabs"]');
+        r.has_tab_strip = !!tabStrip;
+        r.tab_count = tabStrip ? tabStrip.querySelectorAll('button').length : 0;
+        r.has_feed_tab = !!document.querySelector('[data-testid="activity-tab-feed"]');
+        r.has_attention_tab = !!document.querySelector('[data-testid="activity-tab-attention"]');
+        r.has_notifications_tab = !!document.querySelector('[data-testid="activity-tab-notifications"]');
+
+        // Default: Feed tab active, Feed body visible, Attention body hidden
+        var feedBody = document.querySelector('[data-testid="activity-feed-body"]');
+        var attentionBody = document.querySelector('[data-testid="activity-attention"]');
+        r.feed_body_visible_initially = !!feedBody && feedBody.offsetParent !== null;
+        r.attention_body_hidden_initially = !!attentionBody && attentionBody.offsetParent === null;
+
+        // Click Attention tab
+        var attentionBtn = document.querySelector('[data-testid="activity-tab-attention"]');
+        if (attentionBtn) attentionBtn.click();
+        await tick();
+
+        // Wait for refreshAttention's fetch to settle
+        await waitFor(function() {
+            return data && Array.isArray(data.attentionEntries) && data.attentionEntries.length > 0;
+        }, 3000);
+
+        feedBody = document.querySelector('[data-testid="activity-feed-body"]');
+        attentionBody = document.querySelector('[data-testid="activity-attention"]');
+        r.feed_body_hidden_after_click = !!feedBody && feedBody.offsetParent === null;
+        r.attention_body_visible_after_click = !!attentionBody && attentionBody.offsetParent !== null;
+
+        // Zoom toolbar
+        var zoom = document.querySelector('[data-testid="activity-attention-zoom"]');
+        r.has_zoom_toolbar = !!zoom;
+        r.zoom_button_count = zoom ? zoom.querySelectorAll('button').length : 0;
+
+        // Default zoom = 'normal'
+        r.zoom_default = data ? data.attentionZoom : null;
+
+        // Entries rendered
+        var entryCards = document.querySelectorAll('[data-testid^="activity-attention-entry-"]');
+        r.entry_count = entryCards.length;
+        r.has_entries = entryCards.length > 0;
+
+        // Switch to compact zoom and verify class moves
+        var compactBtn = document.querySelector('[data-testid="activity-attention-zoom-compact"]');
+        if (compactBtn) compactBtn.click();
+        await tick();
+        r.zoom_compact_active = data ? (data.attentionZoom === 'compact') : false;
+        r.zoom_compact_pressed = compactBtn ? compactBtn.getAttribute('aria-pressed') === 'true' : false;
+        var normalBtn = document.querySelector('[data-testid="activity-attention-zoom-normal"]');
+        r.zoom_normal_unpressed_after_compact = normalBtn ? normalBtn.getAttribute('aria-pressed') === 'false' : false;
+
+        // Switch to expanded
+        var expandedBtn = document.querySelector('[data-testid="activity-attention-zoom-expanded"]');
+        if (expandedBtn) expandedBtn.click();
+        await tick();
+        r.zoom_expanded_active = data ? (data.attentionZoom === 'expanded') : false;
+        r.zoom_expanded_pressed = expandedBtn ? expandedBtn.getAttribute('aria-pressed') === 'true' : false;
+
+        // Switch back to normal
+        if (normalBtn) normalBtn.click();
+        await tick();
+        r.zoom_normal_active = data ? (data.attentionZoom === 'normal') : false;
+
+        // Empty state — clear entries via Alpine, verify empty state appears
+        if (data) {
+            data.attentionEntries = [];
+            await tick();
+            var empty = document.querySelector('[data-testid="activity-attention-empty"]');
+            r.empty_state_visible = !!empty;
+            r.empty_state_text = empty ? empty.textContent.trim() : '';
+        }
+
+        // Range filter sends since param — instrument fetch
+        var capturedUrl = '';
+        var origFetch = window.fetch;
+        window.fetch = function(url, opts) {
+            if (typeof url === 'string' && url.indexOf('/api/journal') === 0) {
+                capturedUrl = url;
+            }
+            return origFetch.apply(this, arguments);
+        };
+        if (data) {
+            data.setRange('6h');
+            await sleep(200);
+        }
+        window.fetch = origFetch;
+        r.journal_fetch_url = capturedUrl;
+        r.journal_since_6h = capturedUrl.indexOf('since=6h') !== -1;
+
+        return JSON.stringify(r);
+    } catch (e) {
+        return JSON.stringify({error: e.message, stack: e.stack});
+    }
+})()"""
+
+
+class TestActivityAttentionTabBehavior:
+    """Activity surface — Attention tab over /api/journal (auto-ruhdw)."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        request.cls._timeline = _navigate_and_eval_async("/timeline", ACTIVITY_ATTENTION_CHECKS, wait_ms=1200)
+        request.cls._activity = _navigate_and_eval_async("/activity", ACTIVITY_ATTENTION_CHECKS, wait_ms=1200)
+
+    def test_tab_strip_present_on_both_routes(self):
+        """Both /timeline and /activity render the Feed/Attention/Notifications tab strip."""
+        for c in (self._timeline, self._activity):
+            assert c.get("has_page"), f"Activity root missing on {c.get('page_path')}: {c}"
+            assert c.get("has_tab_strip"), f"Tab strip missing on {c.get('page_path')}"
+            assert c.get("has_feed_tab"), f"Feed tab missing on {c.get('page_path')}"
+            assert c.get("has_attention_tab"), f"Attention tab missing on {c.get('page_path')}"
+            assert c.get("has_notifications_tab"), f"Notifications tab missing on {c.get('page_path')}"
+            assert c.get("tab_count") == 3, f"Expected 3 tabs, got {c.get('tab_count')} on {c.get('page_path')}"
+
+    def test_feed_active_initially_attention_hidden(self):
+        """Feed body is visible by default; Attention body is hidden until tab click."""
+        c = self._timeline
+        assert c.get("feed_body_visible_initially"), "Feed body should be visible initially"
+        assert c.get("attention_body_hidden_initially"), "Attention body should be hidden until tab clicked"
+
+    def test_clicking_attention_tab_swaps_bodies(self):
+        """Clicking the Attention tab hides the Feed body and shows the Attention body."""
+        c = self._timeline
+        assert c.get("attention_body_visible_after_click"), "Attention body did not become visible after tab click"
+        assert c.get("feed_body_hidden_after_click"), "Feed body did not hide after Attention tab click"
+
+    def test_zoom_toolbar_has_three_buttons(self):
+        """Zoom toolbar exposes compact/normal/expanded buttons; default is normal."""
+        c = self._timeline
+        assert c.get("has_zoom_toolbar"), "Zoom toolbar missing on Attention tab"
+        assert c.get("zoom_button_count") == 3, f"Expected 3 zoom buttons, got {c.get('zoom_button_count')}"
+        assert c.get("zoom_default") == "normal", f"Expected default zoom 'normal', got {c.get('zoom_default')!r}"
+
+    def test_zoom_buttons_toggle_active_state(self):
+        """Clicking each zoom button switches the active state and aria-pressed flag."""
+        c = self._timeline
+        assert c.get("zoom_compact_active"), "Compact zoom not active after click"
+        assert c.get("zoom_compact_pressed"), "Compact zoom button missing aria-pressed=true"
+        assert c.get("zoom_normal_unpressed_after_compact"), "Normal zoom button still aria-pressed after compact click"
+        assert c.get("zoom_expanded_active"), "Expanded zoom not active after click"
+        assert c.get("zoom_expanded_pressed"), "Expanded zoom button missing aria-pressed=true"
+        assert c.get("zoom_normal_active"), "Normal zoom not active after click-back"
+
+    def test_entries_render_from_fixture(self):
+        """At least one journal entry card renders from the fixture."""
+        c = self._timeline
+        assert c.get("has_entries"), f"No journal entry cards rendered (count={c.get('entry_count')})"
+        assert c.get("entry_count") >= 1, f"Expected ≥1 entry, got {c.get('entry_count')}"
+
+    def test_empty_state_renders(self):
+        """When attentionEntries is cleared, the inline empty state renders."""
+        c = self._timeline
+        assert c.get("empty_state_visible"), "Empty state did not render after clearing entries"
+        assert c.get("empty_state_text") == "No journal entries in this time range", \
+            f"Unexpected empty state text: {c.get('empty_state_text')!r}"
+
+    def test_range_filter_passes_since_param(self):
+        """Switching the range to 6h calls /api/journal?since=6h."""
+        c = self._timeline
+        assert c.get("journal_since_6h"), \
+            f"Expected /api/journal?since=6h, got {c.get('journal_fetch_url')!r}"
+
+    def test_attention_tab_exposed_on_activity_route(self):
+        """The Attention tab works the same way on /activity."""
+        c = self._activity
+        assert c.get("has_attention_tab"), "Attention tab missing on /activity"
+        assert c.get("attention_body_visible_after_click"), "Attention body did not become visible on /activity"
+        assert c.get("has_entries"), f"No journal entries on /activity (count={c.get('entry_count')})"
 
 
 class TestCollabPageBehavior:

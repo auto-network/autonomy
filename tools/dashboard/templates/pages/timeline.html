@@ -99,6 +99,29 @@
     </div>
   </template>
 
+  <div class="mb-4 flex items-center gap-1 border-b border-gray-700" data-testid="activity-tabs" role="tablist">
+    <template x-for="t in [
+      { id: 'feed', label: 'Feed' },
+      { id: 'attention', label: 'Attention' },
+      { id: 'notifications', label: 'Notifications' },
+    ]" :key="t.id">
+      <button
+        type="button"
+        role="tab"
+        :data-testid="'activity-tab-' + t.id"
+        :aria-selected="tab === t.id ? 'true' : 'false'"
+        @click="setTab(t.id)"
+        :class="tab === t.id
+          ? 'text-indigo-300 border-indigo-500'
+          : 'text-gray-400 hover:text-gray-200 border-transparent'"
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
+        x-text="t.label"
+      ></button>
+    </template>
+  </div>
+
+  <!-- Feed tab body -->
+  <div x-show="tab === 'feed'" data-testid="activity-feed-body">
   <div class="mb-4" data-testid="activity-live">
     <template x-if="active.length === 0">
       <div class="text-sm text-gray-500" data-testid="activity-live-empty">No live dispatches</div>
@@ -489,5 +512,88 @@
       </div>
     </template>
   </div>
+  </div>
+  <!-- /Feed tab body -->
+
+  <!-- Attention tab body -->
+  <div x-show="tab === 'attention'" data-testid="activity-attention" style="display:none">
+    <div class="mb-4" data-testid="activity-attention-zoom" role="toolbar" aria-label="Journal zoom">
+      <div class="inline-flex gap-1 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1">
+        <template x-for="m in [
+          { id: 'compact',  title: 'Compact',  icon: 'compact'  },
+          { id: 'normal',   title: 'Normal',   icon: 'normal'   },
+          { id: 'expanded', title: 'Expanded', icon: 'expanded' },
+        ]" :key="m.id">
+          <button
+            type="button"
+            :data-testid="'activity-attention-zoom-' + m.id"
+            :title="m.title"
+            :aria-label="m.title"
+            :aria-pressed="attentionZoom === m.id ? 'true' : 'false'"
+            @click="setAttentionZoom(m.id)"
+            :class="attentionZoom === m.id
+              ? 'bg-indigo-600/20 text-indigo-300'
+              : 'text-gray-500 hover:text-gray-300'"
+            class="w-7 h-7 flex items-center justify-center rounded transition-colors"
+          >
+            <template x-if="m.icon === 'compact'">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <rect x="1" y="4" width="12" height="2.5" rx="1" fill="currentColor"/>
+                <rect x="1" y="8" width="8" height="2.5" rx="1" fill="currentColor"/>
+              </svg>
+            </template>
+            <template x-if="m.icon === 'normal'">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <rect x="1" y="1.5" width="12" height="2.5" rx="1" fill="currentColor"/>
+                <rect x="1" y="5.5" width="9" height="2.5" rx="1" fill="currentColor"/>
+                <rect x="1" y="9.5" width="11" height="2.5" rx="1" fill="currentColor"/>
+              </svg>
+            </template>
+            <template x-if="m.icon === 'expanded'">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <rect x="1" y="0.5" width="12" height="2" rx="1" fill="currentColor"/>
+                <rect x="1" y="3.5" width="9" height="2" rx="1" fill="currentColor"/>
+                <rect x="1" y="6.5" width="11" height="2" rx="1" fill="currentColor"/>
+                <rect x="1" y="9.5" width="7" height="2" rx="1" fill="currentColor"/>
+              </svg>
+            </template>
+          </button>
+        </template>
+      </div>
+    </div>
+
+    <template x-if="attentionEntries.length === 0">
+      <div class="text-sm text-gray-500" data-testid="activity-attention-empty">No journal entries in this time range</div>
+    </template>
+
+    <template x-for="(e, idx) in attentionEntries" :key="e.id || idx">
+      <div
+        class="rounded-lg border border-gray-700 bg-gray-900/60 mb-3 overflow-hidden"
+        :data-testid="'activity-attention-entry-' + (e.id || idx)"
+      >
+        <div class="px-4 py-2 border-b border-gray-700 text-xs font-mono text-gray-400 flex items-center gap-2">
+          <span class="text-gray-300" x-text="formatAttentionTimeRange(e)"></span>
+        </div>
+        <div class="px-4 py-3 text-sm text-gray-200">
+          <template x-if="attentionZoom === 'compact'">
+            <div class="font-mono text-xs text-gray-300 whitespace-pre-wrap" x-text="e.compact || ''"></div>
+          </template>
+          <template x-if="attentionZoom === 'normal'">
+            <div class="whitespace-pre-wrap leading-relaxed text-gray-200" x-text="e.normal || ''"></div>
+          </template>
+          <template x-if="attentionZoom === 'expanded'">
+            <div class="whitespace-pre-wrap leading-relaxed text-gray-200" x-text="e.expanded || ''"></div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+  <!-- /Attention tab body -->
+
+  <!-- Notifications tab body -->
+  <div x-show="tab === 'notifications'" data-testid="activity-notifications" style="display:none">
+    <div class="text-sm text-gray-500">Notifications coming soon</div>
+  </div>
+  <!-- /Notifications tab body -->
 
 </section>
