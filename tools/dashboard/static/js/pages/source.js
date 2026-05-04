@@ -132,6 +132,117 @@
       // Has any secondary metadata to show in row 3
       get authorOrMeta() { return !!(this.author || this.commentCount || this.provenanceLink); },
 
+      // ── Header metadata strip (turns · range · duration · tokens) ──
+      // Chat-only. All getters return null/false for non-chat or empty
+      // sources so the wrapper template's x-if collapses cleanly.
+
+      get turnsCount() {
+        if (!this.isChat || !this.allEntries.length) return null;
+        return this.allEntries.length;
+      },
+
+      _entryDates() {
+        if (!this.isChat || !this.allEntries.length) return [];
+        const out = [];
+        for (const e of this.allEntries) {
+          if (!e || !e.created_at) continue;
+          const d = new Date(e.created_at);
+          if (!isNaN(d.getTime())) out.push(d);
+        }
+        return out;
+      },
+
+      get startAt() {
+        const dates = this._entryDates();
+        if (!dates.length) return null;
+        const ms = Math.min(...dates.map(d => d.getTime()));
+        return new Date(ms).toISOString();
+      },
+
+      get endAt() {
+        const dates = this._entryDates();
+        if (!dates.length) return null;
+        const ms = Math.max(...dates.map(d => d.getTime()));
+        return new Date(ms).toISOString();
+      },
+
+      get durationMs() {
+        if (!this.startAt || !this.endAt) return null;
+        return new Date(this.endAt).getTime() - new Date(this.startAt).getTime();
+      },
+
+      get durationFormatted() {
+        const d = this.durationMs;
+        if (d == null) return null;
+        if (d < 60000) return null;                       // < 60s → omit
+        if (d < 3600000) return `${Math.floor(d / 60000)}m`;
+        if (d < 86400000) {
+          const h = Math.floor(d / 3600000);
+          const m = Math.floor((d - h * 3600000) / 60000);
+          return `${h}h ${m}m`;
+        }
+        const days = Math.floor(d / 86400000);
+        const h = Math.floor((d - days * 86400000) / 3600000);
+        return `${days}d ${h}h`;
+      },
+
+      get timeRangeFormatted() {
+        if (!this.isChat || this.allEntries.length < 2) return null;
+        if (!this.startAt || !this.endAt) return null;
+        const start = new Date(this.startAt);
+        const end = new Date(this.endAt);
+        if (isNaN(start.getTime()) || isNaN(end.getTime())) return null;
+        const sameDay = (
+          start.getFullYear() === end.getFullYear() &&
+          start.getMonth() === end.getMonth() &&
+          start.getDate() === end.getDate()
+        );
+        const within24h = (end.getTime() - start.getTime()) < 86400000;
+        // Format time and date separately and join with a space so the
+        // output stays "May 4 14:23" across locales — Intl's combined
+        // medium format inserts locale-specific punctuation (e.g.
+        // "Apr 28, 12:00" in en-US) which doesn't match the spec.
+        const timeFmt = new Intl.DateTimeFormat(undefined, {
+          hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+        if (sameDay && within24h) {
+          return `${timeFmt.format(start)} → ${timeFmt.format(end)}`;
+        }
+        const dateFmt = new Intl.DateTimeFormat(undefined, {
+          month: 'short', day: 'numeric',
+        });
+        const fmtBoth = (d) => `${dateFmt.format(d)} ${timeFmt.format(d)}`;
+        return `${fmtBoth(start)} → ${fmtBoth(end)}`;
+      },
+
+      get tokenEstimate() {
+        if (!this.isChat || !this.allEntries.length) return null;
+        let total = 0;
+        for (const e of this.allEntries) {
+          if (e && typeof e.content === 'string') total += e.content.length;
+        }
+        if (total <= 0) return null;
+        return Math.ceil(total / 4);
+      },
+
+      get tokensFormatted() {
+        const n = this.tokenEstimate;
+        if (n == null) return null;
+        if (n < 1000) return `~${n} tokens`;
+        if (n < 1_000_000) return `~${(n / 1000).toFixed(1)}k tokens`;
+        return `~${(n / 1_000_000).toFixed(1)}M tokens`;
+      },
+
+      get hasMeta() {
+        if (!this.isChat || !this.allEntries.length) return false;
+        return !!(
+          this.turnsCount ||
+          this.timeRangeFormatted ||
+          this.durationFormatted ||
+          this.tokensFormatted
+        );
+      },
+
       // Copy graph:// link to clipboard with visual feedback
       copyGraphLink() {
         navigator.clipboard.writeText('graph://' + (this.src.id || '').slice(0, 12));
