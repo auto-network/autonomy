@@ -327,6 +327,50 @@ describe('Schema.read', () => {
     const member = await proxy.read('default', { target_revision: 2 });
     assert.equal(member.payload.question, 'q');
   });
+
+  it('forwards opts.headers to the underlying fetch', async () => {
+    const stub = makeFetchStub({
+      '/api/graph/settings/autonomy.schema/dashboard.coordinator-canvas%231':
+        metaResponse(nonVariantPayload()),
+      '/api/graph/settings/dashboard.coordinator-canvas/default': {
+        ok: true,
+        status: 200,
+        json: async () => ({ payload: { question: 'q' } }),
+      },
+    });
+    Schema._setFetchOverride(stub);
+
+    const proxy = await Schema.of('dashboard.coordinator-canvas');
+    await proxy.read('default', { headers: { 'X-Graph-Org': 'anchore' } });
+
+    const readCall = stub.calls.find(c =>
+      c.path === '/api/graph/settings/dashboard.coordinator-canvas/default'
+    );
+    assert.ok(readCall, 'read fetch should have been called');
+    assert.deepEqual(readCall.opts.headers, { 'X-Graph-Org': 'anchore' });
+  });
+
+  it('omits the headers key from fetch opts when opts.headers is absent', async () => {
+    const stub = makeFetchStub({
+      '/api/graph/settings/autonomy.schema/dashboard.coordinator-canvas%231':
+        metaResponse(nonVariantPayload()),
+      '/api/graph/settings/dashboard.coordinator-canvas/default': {
+        ok: true,
+        status: 200,
+        json: async () => ({ payload: { question: 'q' } }),
+      },
+    });
+    Schema._setFetchOverride(stub);
+
+    const proxy = await Schema.of('dashboard.coordinator-canvas');
+    await proxy.read('default');
+
+    const readCall = stub.calls.find(c =>
+      c.path === '/api/graph/settings/dashboard.coordinator-canvas/default'
+    );
+    assert.ok(readCall, 'read fetch should have been called');
+    assert.equal(Object.prototype.hasOwnProperty.call(readCall.opts, 'headers'), false);
+  });
 });
 
 describe('Schema.all', () => {
@@ -362,6 +406,51 @@ describe('Schema.all', () => {
     const proxy = await Schema.of('plain.example');
     const members = await proxy.all();
     assert.deepEqual(members, []);
+  });
+
+  it('forwards opts.headers to the underlying fetch (cross-org passthrough)', async () => {
+    const stub = makeFetchStub({
+      '/api/graph/settings/autonomy.schema/dashboard.coordinator-canvas%231':
+        metaResponse(nonVariantPayload()),
+      '/api/graph/settings/dashboard.coordinator-canvas': {
+        ok: true,
+        status: 200,
+        json: async () => ({ members: [{ key: 'a' }] }),
+      },
+    });
+    Schema._setFetchOverride(stub);
+
+    const proxy = await Schema.of('dashboard.coordinator-canvas');
+    const members = await proxy.all({ headers: { 'X-Graph-Org': 'anchore' } });
+
+    assert.deepEqual(members, [{ key: 'a' }]);
+    const allCall = stub.calls.find(c =>
+      c.path === '/api/graph/settings/dashboard.coordinator-canvas'
+    );
+    assert.ok(allCall, 'all fetch should have been called');
+    assert.deepEqual(allCall.opts.headers, { 'X-Graph-Org': 'anchore' });
+  });
+
+  it('omits the headers key from fetch opts when opts.headers is absent', async () => {
+    const stub = makeFetchStub({
+      '/api/graph/settings/autonomy.schema/dashboard.coordinator-canvas%231':
+        metaResponse(nonVariantPayload()),
+      '/api/graph/settings/dashboard.coordinator-canvas': {
+        ok: true,
+        status: 200,
+        json: async () => ({ members: [] }),
+      },
+    });
+    Schema._setFetchOverride(stub);
+
+    const proxy = await Schema.of('dashboard.coordinator-canvas');
+    await proxy.all();
+
+    const allCall = stub.calls.find(c =>
+      c.path === '/api/graph/settings/dashboard.coordinator-canvas'
+    );
+    assert.ok(allCall, 'all fetch should have been called');
+    assert.equal(Object.prototype.hasOwnProperty.call(allCall.opts, 'headers'), false);
   });
 });
 
