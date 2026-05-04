@@ -67,7 +67,6 @@ from tools.graph.schemas.registry import (
     append_only_log,
     field,
     keyed_per_entity,
-    register_schema,
     singleton,
 )
 
@@ -426,22 +425,22 @@ class CoordinatorTileV2(SettingSchema):
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"
             )
 
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        """Wrap a v1 tile payload (string ``detail``) into v2 shape.
 
-def _upconvert_tile_v1_to_v2(payload: dict) -> dict:
-    """Wrap a v1 tile payload (string ``detail``) into v2 shape.
-
-    The v1 ``detail`` was a free-text supporting blurb. v2 promotes it
-    to ``detail.context`` and adds an empty ``choices`` list — old rows
-    surface in the new detail panel without a Resolution-choices
-    section, just the prose.
-    """
-    out = dict(payload)
-    detail = payload.get("detail")
-    if detail is None:
-        out.pop("detail", None)
-    elif isinstance(detail, str):
-        out["detail"] = {"context": detail, "choices": []}
-    return out
+        The v1 ``detail`` was a free-text supporting blurb. v2 promotes it
+        to ``detail.context`` and adds an empty ``choices`` list — old rows
+        surface in the new detail panel without a Resolution-choices
+        section, just the prose.
+        """
+        out = dict(payload)
+        detail = payload.get("detail")
+        if detail is None:
+            out.pop("detail", None)
+        elif isinstance(detail, str):
+            out["detail"] = {"context": detail, "choices": []}
+        return out
 
 
 # ── Thread (v1, retained for upconvert chain) ────────────────────────
@@ -577,10 +576,10 @@ class CoordinatorThreadV2(SettingSchema):
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"
             )
 
-
-def _upconvert_thread_v1_to_v2(payload: dict) -> dict:
-    """Pass through — the payload shape is identical between v1 and v2."""
-    return dict(payload)
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        """Pass through — the payload shape is identical between v1 and v2."""
+        return dict(payload)
 
 
 # ── Decision (append-only event log; variants per kind) ──────────────
@@ -971,30 +970,4 @@ class CoordinatorDocsV1(SettingSchema):
             )
 
 
-# ── Registration ─────────────────────────────────────────────────────
-
-register_schema(COORDINATOR_SET_ID, SCHEMA_REVISION, CoordinatorV1)
-register_schema(COORDINATOR_CANVAS_SET_ID, SCHEMA_REVISION, CoordinatorCanvasV1)
-register_schema(OPERATOR_MESSAGE_SET_ID, SCHEMA_REVISION, OperatorMessageToCoordinatorV1)
-register_schema(COORDINATOR_TILE_SET_ID, SCHEMA_REVISION, CoordinatorTileV1)
-register_schema(
-    COORDINATOR_TILE_SET_ID, TILE_SCHEMA_REVISION, CoordinatorTileV2,
-    upconvert_from_prev=_upconvert_tile_v1_to_v2,
-)
-register_schema(COORDINATOR_THREAD_SET_ID, SCHEMA_REVISION, CoordinatorThreadV1)
-register_schema(
-    COORDINATOR_THREAD_SET_ID, THREAD_SCHEMA_REVISION, CoordinatorThreadV2,
-    upconvert_from_prev=_upconvert_thread_v1_to_v2,
-)
-register_schema(COORDINATOR_DECISION_SET_ID, SCHEMA_REVISION, CoordinatorDecisionV1)
-register_schema(COORDINATOR_SPRINT_SET_ID, SCHEMA_REVISION, CoordinatorSprintV1)
-register_schema(COORDINATOR_BEAD_SET_ID, SCHEMA_REVISION, CoordinatorBeadV1)
-register_schema(
-    COORDINATOR_CONVERGENT_DECISION_SET_ID, SCHEMA_REVISION,
-    CoordinatorConvergentDecisionV1,
-)
-register_schema(
-    COORDINATOR_OPEN_FOLLOWUP_SET_ID, SCHEMA_REVISION,
-    CoordinatorOpenFollowupV1,
-)
-register_schema(COORDINATOR_DOCS_SET_ID, SCHEMA_REVISION, CoordinatorDocsV1)
+# Schemas auto-register via ``SettingSchema.__init_subclass__``.

@@ -33,7 +33,6 @@ from .registry import (
     SettingSchema,
     field,
     keyed_per_entity,
-    register_schema,
 )
 
 
@@ -139,6 +138,3 @@ def parse_binding_key(key: str) -> tuple[str, str, str, str]:
             f"binding key has empty segment: {key!r}"
         )
     return session, repo, branch, review_id
-
-
-register_schema(SET_ID, SCHEMA_REVISION, WorktreeReviewBindingV1)

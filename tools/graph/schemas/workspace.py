@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SettingSchema, SchemaValidationError, register_schema
+from .registry import SettingSchema, SchemaValidationError
 
 
 WORKSPACE_SET_ID = "autonomy.workspace"
@@ -259,6 +259,3 @@ class WorkspaceV1(SettingSchema):
                     f"{cls.__name__}: 'harness' must be one of "
                     f"{sorted(_VALID_HARNESSES)}, got {harness!r}"
                 )
-
-
-register_schema(WORKSPACE_SET_ID, WORKSPACE_REVISION, WorkspaceV1)

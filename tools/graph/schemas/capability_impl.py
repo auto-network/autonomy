@@ -38,7 +38,7 @@ from __future__ import annotations
 import posixpath
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field, register_schema
+from .registry import SchemaValidationError, SettingSchema, field
 
 
 SET_ID = "autonomy.capability.impl"
@@ -519,6 +519,3 @@ class CapabilityImplV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'notes' must be a string"
             )
-
-
-register_schema(SET_ID, SCHEMA_REVISION, CapabilityImplV1)

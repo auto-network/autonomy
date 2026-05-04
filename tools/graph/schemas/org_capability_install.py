@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field, register_schema
+from .registry import SchemaValidationError, SettingSchema, field
 
 
 SET_ID = "autonomy.org.capability.install"
@@ -175,6 +175,3 @@ class OrgCapabilityInstallV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'notes' must be a string"
             )
-
-
-register_schema(SET_ID, SCHEMA_REVISION, OrgCapabilityInstallV1)
