@@ -11,7 +11,7 @@ in one of the two work-queue Settings owned by the coordinator board:
 * ``dashboard.operator-message-to-coordinator`` — operator → coordinator
   free text. The handler resolves the bound session from the
   ``dashboard.coordinator`` singleton Setting and forwards the body
-  verbatim. No binding resolved → log + drop.
+  with a ``COORDINATOR:`` prefix. No binding resolved → log + drop.
 
 Module-level ``register_action_decorator`` calls fire at import time —
 the plugin loader imports this module via ``entrypoints.actions`` in
@@ -65,7 +65,7 @@ def _bound_coordinator_session() -> str | None:
 async def thumb_yes(row, svc):
     await svc.session_send(
         row["target_session"],
-        f"Operator: thumb yes on {row['tile_id']}.",
+        f"COORDINATOR: Operator: thumb yes on {row['tile_id']}.",
     )
 
 
@@ -77,7 +77,7 @@ async def thumb_yes(row, svc):
 async def thumb_no(row, svc):
     await svc.session_send(
         row["target_session"],
-        f"Operator: thumb no on {row['tile_id']}.",
+        f"COORDINATOR: Operator: thumb no on {row['tile_id']}.",
     )
 
 
@@ -89,7 +89,7 @@ async def thumb_no(row, svc):
 async def choice(row, svc):
     await svc.session_send(
         row["target_session"],
-        f"Operator chose: {row['choice']} on {row['tile_id']}.",
+        f"COORDINATOR: Operator chose: {row['choice']} on {row['tile_id']}.",
     )
 
 
@@ -99,8 +99,8 @@ async def choice(row, svc):
     name="coordinator_board.custom_reply",
 )
 async def custom_reply(row, svc):
-    # Operator-authored free text; pass through unmodified.
-    await svc.session_send(row["target_session"], row["choice"])
+    # Operator-authored free text; preserve body after the board prefix.
+    await svc.session_send(row["target_session"], f"COORDINATOR: {row['choice']}")
 
 
 @register_action_decorator(
@@ -111,7 +111,7 @@ async def custom_reply(row, svc):
 async def sitrep_request(row, svc):
     await svc.session_send(
         row["target_session"],
-        f"Operator requests a sitrep on {row['tile_id']}.",
+        f"COORDINATOR: Operator requests a sitrep on {row['tile_id']}.",
     )
 
 
@@ -123,7 +123,7 @@ async def sitrep_request(row, svc):
 async def refresh_request(row, svc):
     await svc.session_send(
         row["target_session"],
-        f"Operator requests a refresh on {row['tile_id']}.",
+        f"COORDINATOR: Operator requests a refresh on {row['tile_id']}.",
     )
 
 
@@ -143,4 +143,4 @@ async def operator_message(row, svc):
             row.id,
         )
         return
-    await svc.session_send(target, row["text"])
+    await svc.session_send(target, f"COORDINATOR: {row['text']}")
