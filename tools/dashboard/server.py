@@ -5462,20 +5462,20 @@ async def api_upload(request):
     except Exception:
         return JSONResponse({"error": "invalid multipart form"}, status_code=400)
 
-    upload = form.get("file")
-    if upload is None:
+    # Support multi-file POSTs: one tile per file. The dashboard SPA's
+    # addFiles loop fires N separate POSTs, but mobile share-sheets and
+    # raw curl can bundle N files into one multipart body — that shape
+    # was previously dropping every part past the first.
+    uploads = form.getlist("file") if hasattr(form, "getlist") else (
+        [form.get("file")] if form.get("file") is not None else []
+    )
+    uploads = [u for u in uploads if u is not None]
+    if not uploads:
         return JSONResponse({"error": "file field is required"}, status_code=400)
 
-    filename = Path(upload.filename).name if upload.filename else "upload"
-    # Sanitize filename — strip path separators, limit length
-    filename = re.sub(r"[^\w.\-]", "_", filename)[:200] or "upload"
-
-    # Pick destination: explicit ``path`` override, the session's
-    # run-dir ``.uploads/`` subdir, or the shared no-session fallback.
     target_dir_param = (form.get("path") or "").strip()
     tmux_session = (form.get("tmux_session") or "").strip()
     if target_dir_param:
-        # Resolve relative to repo root, prevent path traversal
         target_dir = (_REPO_ROOT / target_dir_param).resolve()
         if not str(target_dir).startswith(str(_REPO_ROOT)):
             return JSONResponse({"error": "invalid path"}, status_code=400)
@@ -5498,76 +5498,80 @@ async def api_upload(request):
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # Avoid clobbering existing files by appending a counter
-    dest = target_dir / filename
-    if dest.exists():
-        stem = dest.stem
-        suffix = dest.suffix
-        counter = 1
-        while dest.exists():
-            dest = target_dir / f"{stem}_{counter}{suffix}"
-            counter += 1
+    results = []
+    for upload in uploads:
+        filename = Path(upload.filename).name if upload.filename else "upload"
+        filename = re.sub(r"[^\w.\-]", "_", filename)[:200] or "upload"
 
-    contents = await upload.read()
-    dest.write_bytes(contents)
+        dest = target_dir / filename
+        if dest.exists():
+            stem = dest.stem
+            suffix = dest.suffix
+            counter = 1
+            while dest.exists():
+                dest = target_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
 
-    host_path = str(dest)
-    agent_path = host_path
+        contents = await upload.read()
+        dest.write_bytes(contents)
 
-    if tmux_session:
-        try:
-            inspect = subprocess.run(
-                ["docker", "inspect", "-f", "{{.State.Running}}", tmux_session],
-                capture_output=True, text=True,
-            )
-        except (FileNotFoundError, OSError):
-            # docker binary missing (test env / mock dashboard outside the
-            # Docker host). Skip the cp side-effect; the substrate-write
-            # below still records the upload so the viewer test path works.
-            inspect = None
-        if inspect and inspect.returncode == 0 and inspect.stdout.strip() == "true":
-            container_path = f"/tmp/{dest.name}"
+        host_path = str(dest)
+        agent_path = host_path
+
+        if tmux_session:
             try:
-                cp = subprocess.run(
-                    ["docker", "cp", host_path, f"{tmux_session}:{container_path}"],
+                inspect = subprocess.run(
+                    ["docker", "inspect", "-f", "{{.State.Running}}", tmux_session],
                     capture_output=True, text=True,
                 )
             except (FileNotFoundError, OSError):
-                cp = None
-            if cp and cp.returncode == 0:
-                agent_path = container_path
+                inspect = None
+            if inspect and inspect.returncode == 0 and inspect.stdout.strip() == "true":
+                container_path = f"/tmp/{dest.name}"
+                try:
+                    cp = subprocess.run(
+                        ["docker", "cp", host_path, f"{tmux_session}:{container_path}"],
+                        capture_output=True, text=True,
+                    )
+                except (FileNotFoundError, OSError):
+                    cp = None
+                if cp and cp.returncode == 0:
+                    agent_path = container_path
 
-    # Substrate-native upload event: when the upload landed under the
-    # session's run dir (the standard tmux_session path), write one
-    # SessionUploadV1 row per upload so the session viewer can render
-    # a viewer_attachment tile inline. The viewer subscribes via
-    # Schema.of(SESSION_UPLOAD_SET_ID).onChange and merges the row in
-    # at this exact timestamp; persistence falls out of the substrate.
-    if tmux_session and AGENT_RUNS_DIR in dest.parents:
-        rel_path_parts = dest.relative_to(_REPO_ROOT).parts
-        # rel_path under run dir: e.g. ".uploads/foo.png". Skip the
-        # "data/agent-runs/<run>/" prefix.
-        if len(rel_path_parts) > 3:
-            rel_path = "/".join(rel_path_parts[3:])
-            settings_ops.add_setting(
-                _session_upload.SESSION_UPLOAD_SET_ID,
-                _session_upload.SCHEMA_REVISION,
-                str(uuid.uuid4()),
-                {
-                    "target_session": tmux_session,
-                    "filename": dest.name,
-                    "rel_path": rel_path,
-                    "mime": (mimetypes.guess_type(dest.name)[0]
-                             or "application/octet-stream"),
-                    "size": len(contents),
-                    "timestamp": datetime.now(timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%S.%f"
-                    )[:-3] + "Z",
-                },
-                org=_caller_org(request),
-            )
+        if tmux_session and AGENT_RUNS_DIR in dest.parents:
+            rel_path_parts = dest.relative_to(_REPO_ROOT).parts
+            if len(rel_path_parts) > 3:
+                rel_path = "/".join(rel_path_parts[3:])
+                settings_ops.add_setting(
+                    _session_upload.SESSION_UPLOAD_SET_ID,
+                    _session_upload.SCHEMA_REVISION,
+                    str(uuid.uuid4()),
+                    {
+                        "target_session": tmux_session,
+                        "filename": dest.name,
+                        "rel_path": rel_path,
+                        "mime": (mimetypes.guess_type(dest.name)[0]
+                                 or "application/octet-stream"),
+                        "size": len(contents),
+                        "timestamp": datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%S.%f"
+                        )[:-3] + "Z",
+                    },
+                    org=_caller_org(request),
+                )
 
-    return JSONResponse({"ok": True, "path": agent_path, "host_path": host_path, "filename": dest.name})
+        results.append({
+            "path": agent_path, "host_path": host_path, "filename": dest.name,
+        })
+
+    # Top-level path/host_path/filename keep the first file so existing
+    # single-file callers (the SPA's per-file POST) read it unchanged.
+    first = results[0]
+    return JSONResponse({
+        "ok": True, "files": results,
+        "path": first["path"], "host_path": first["host_path"],
+        "filename": first["filename"],
+    })
 
 
 # ── WebSocket Terminal ─────────────────────────────────────────
@@ -8658,6 +8662,9 @@ class _FallbackFormData:
 
     def multi_items(self):
         return list(self._items)
+
+    def getlist(self, key: str):
+        return [value for name, value in self._items if name == key]
 
 
 async def _parse_form_data(request):
