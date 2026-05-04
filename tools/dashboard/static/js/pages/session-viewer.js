@@ -1128,6 +1128,9 @@
         if (!el) return;
         var text = el.innerText.trim();
         if ((this.attachments.length === 0 && !text) || this.sending) return;
+        // Block if any attachment upload is still in flight — sending now
+        // would post a body without paths and skip the substrate write.
+        if (this.uploading) return;
         this.sending = true;
         var tmux = this._tmuxSession;
         try {
