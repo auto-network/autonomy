@@ -679,6 +679,27 @@
       return entry.content || '';
     },
 
+    // Harness-emitted scaffolding that the operator never wants to see:
+    // each multi-line user paste containing image markers gets split into
+    // one tiny user-turn per marker line, e.g. "[Image #43]" and
+    // "[Image: source: /tmp/foo.png]". The substrate-driven viewer_attachment
+    // tile already shows the image; these turns are pure noise.
+    isUserNoise(entry) {
+      if (!entry || entry.type !== 'user') return false;
+      var content = (entry.content || '').trim();
+      if (!content) return false;
+      var lines = content.split(/\n+/);
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line) continue;
+        if (!/^\[Image #\d+\]$/i.test(line)
+            && !/^\[Image: source: .+\]$/i.test(line)) {
+          return false;
+        }
+      }
+      return true;
+    },
+
     correctionFragmentsFor(entry) {
       var c = this._correctionFor(entry);
       if (!c) return [];
