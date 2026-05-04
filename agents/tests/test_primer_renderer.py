@@ -636,7 +636,7 @@ def test_turn_correction_explains_full_replacement_semantics(_turn_correction_or
     not a span or a diff. Pin that wording so future renderer changes
     don't regress to "the changed span"."""
     out = render_workspace_primer(_cfg(id="sample"))
-    assert "complete corrected replacement message" in out
+    assert "full replacement message" in out
 
 
 def test_turn_correction_explains_session_side_resolution(_turn_correction_org_env):
@@ -652,16 +652,17 @@ def test_turn_correction_explains_session_side_resolution(_turn_correction_org_e
     flat = " ".join(out.split())
     assert "session side" in flat
     assert "most likely nearby user turn" in flat
-    assert "derives the guard hash" in flat
+    assert "session side resolves them" in flat
     assert "accept" in flat and "dismiss" in flat
 
 
 def test_turn_correction_framed_around_perception_gaps(_turn_correction_org_env):
     """Framing must be perception-gap reduction, NOT generic grammar cleanup."""
     out = render_workspace_primer(_cfg(id="sample"))
-    assert "perception gap" in out
-    # Explicit "not grammar pass" framing.
-    assert "not** a grammar pass" in out
+    assert "shared-understanding hygiene" in out
+    assert "push you into a guess" in out
+    # Explicit "not copyediting" framing.
+    assert "not** copyediting" in out
 
 
 def test_turn_correction_includes_worked_example(_turn_correction_org_env):
@@ -709,7 +710,8 @@ def test_turn_correction_aggressive_mode_distinct_wording(_turn_correction_org_e
     out = render_workspace_primer(_cfg(id="sample"))
     assert "aggressiveness=aggressive" in out
     assert "Assume every user message is a candidate." in out
-    assert "emit it silently and keep working" in out
+    assert "shared transcript or your understanding even slightly better" in out
+    assert "Favor dictation, terminology, and ambiguity fixes" in out
 
 
 def test_turn_correction_silent_and_action_biased_guidance_present(_turn_correction_org_env):
@@ -717,10 +719,12 @@ def test_turn_correction_silent_and_action_biased_guidance_present(_turn_correct
     flat = " ".join(out.split())
     assert "Do **not** talk about the correction." in out
     assert "keep working if the path forward is still clear" in flat
-    assert "Only stop and acknowledge the correction explicitly" in flat
+    assert "Only stop and acknowledge it when the meaning is too uncertain" in flat
     assert "Is this what you meant?" in out
     assert "Use this for communication, not just transcription" in flat
-    assert "best reading visible" in flat
+    assert "shared-understanding hygiene" in flat
+    assert "make the user's meaning easier to act on" in flat
+    assert "best reading visible before a misread turns into a bad reply or a bad log" in flat
 
 
 def test_turn_correction_disabled_renders_explicit_note(_turn_correction_org_env):

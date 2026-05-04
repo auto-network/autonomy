@@ -175,11 +175,11 @@ _TURN_CORRECTION_INSTRUCTIONS: dict[str, str] = {
     ),
     "aggressive": (
         "Assume every user message is a candidate. If a correction would "
-        "add even slight clarity, transcript hygiene, terminology "
-        "accuracy, or reveal your best reading of an ambiguous message, "
-        "emit it silently and keep working. Do not mention that you are "
-        "making a correction; only acknowledge it explicitly if you are "
-        "too unsure to proceed and need to ask, 'Is this what you meant?'"
+        "make the shared transcript or your understanding even slightly "
+        "better, emit it silently and keep working. Favor dictation, "
+        "terminology, and ambiguity fixes; skip pure style nits. Only "
+        "acknowledge it explicitly if you are too unsure to proceed and "
+        "need to ask, 'Is this what you meant?'"
     ),
 }
 
