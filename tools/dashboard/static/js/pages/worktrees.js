@@ -346,6 +346,18 @@
       _POOF_DURATION_MS: 420,
       rebaseRequiredDialog: null,
       rebaseRequesting: false,
+      // Per-row rebase status, keyed by ``rowKey(row)``. Each entry is
+      // ``{ state, error, optimistic }`` where ``state`` is one of
+      // ``'awaiting' | 'in_progress' | 'done' | 'failed'``. ``awaiting``
+      // is the optimistic local placeholder set when the operator clicks
+      // Request Rebase — it covers the gap between the dashboard POST and
+      // the agent's first ``WorktreeRebaseStatusV1`` write, then the
+      // setting.changed callback overwrites it with the agent's true
+      // state. ``optimistic`` flags an entry as locally-set so the
+      // setting subscription handler can clear it on first transition.
+      rebaseStatus: {},
+      _rebaseStatusUnsubs: [],
+      _RebaseStatusSchema: null,
       cherryPicking: false,
       commitStickyTop: 0,
       commitFileRowStickyTop: 0,
@@ -1543,6 +1555,13 @@
       async requestRebase(row) {
         if (!row || this.rebaseRequesting) return;
         this.rebaseRequesting = true;
+        // Optimistic local "awaiting" placeholder covers the gap between
+        // this POST and the agent's first WorktreeRebaseStatusV1 write.
+        // The strict ``rebaseRequesting`` guard above already debounces
+        // in-flight POSTs; this also prevents a second click from
+        // double-stamping the row's status while one POST is in flight.
+        const key = this.rowKey(row);
+        this._setRebaseStatus(key, { state: 'awaiting', error: '', optimistic: true });
         try {
           const resp = await fetch(
             '/api/worktrees/' + encodeURIComponent(row.session_name) + '/' +
@@ -1554,10 +1573,132 @@
           this.rebaseRequiredDialog = null;
           await this.refresh(false);
         } catch (err) {
+          // POST itself failed — the agent will never write a status,
+          // so clear the optimistic awaiting placeholder.
+          this._clearRebaseStatus(key);
           _toast('Request Rebase failed: ' + (err.message || String(err)), 'error');
         } finally {
           this.rebaseRequesting = false;
         }
+      },
+
+      // ── Rebase status state machine ────────────────────────────
+      //
+      // Three concerns layered together:
+      //
+      // 1. Local optimistic state — set by ``requestRebase`` so the
+      //    button immediately flips to "Awaiting agent..." for the
+      //    operator the moment they click. Lives in ``rebaseStatus``
+      //    keyed by ``rowKey(row)``.
+      // 2. Agent-driven transitions — the agent writes
+      //    ``WorktreeRebaseStatusV1`` (set_id
+      //    ``dashboard.session.worktree.rebase_status``) at three
+      //    points: ``in_progress`` on ack, ``done`` on success,
+      //    ``failed`` with ``error`` on conflict. The substrate's
+      //    ``setting.changed`` fires; this component reads the new
+      //    payload via ``proxy.read(key)`` and updates state.
+      // 3. UI side-effects — ``done`` re-opens the commit at the new
+      //    SHA via ``openCommitAt`` (rebase changes the SHA, so a
+      //    plain ``refreshSelectedRow`` would leave the diff stuck
+      //    on the old SHA). ``failed`` toasts the error.
+      rebaseStatusFor(row) {
+        if (!row) return null;
+        const entry = this.rebaseStatus[this.rowKey(row)];
+        return entry ? entry.state : null;
+      },
+
+      rebaseErrorFor(row) {
+        if (!row) return '';
+        const entry = this.rebaseStatus[this.rowKey(row)];
+        return entry ? (entry.error || '') : '';
+      },
+
+      _setRebaseStatus(key, entry) {
+        if (!key) return;
+        // Replace the whole map so Alpine reactivity sees the change
+        // (mutating a single property on a nested object can miss the
+        // re-render in some Alpine setups; copy-on-write is bulletproof).
+        this.rebaseStatus = { ...this.rebaseStatus, [key]: entry };
+      },
+
+      _clearRebaseStatus(key) {
+        if (!key) return;
+        if (!(key in this.rebaseStatus)) return;
+        const next = { ...this.rebaseStatus };
+        delete next[key];
+        this.rebaseStatus = next;
+      },
+
+      _rowForRebaseKey(key) {
+        if (!key) return null;
+        return this.rows.find((r) => this.rowKey(r) === key) || null;
+      },
+
+      // Subscription handler. Fired when the agent (or anyone) writes
+      // to the WorktreeRebaseStatusV1 set. ``payload`` is the
+      // ``setting.changed`` envelope: ``{set_id, schema_revision, key,
+      // org, publication_state, deprecated, operation}``. The actual
+      // payload requires a follow-up read.
+      async _onRebaseStatusChanged(notify) {
+        if (!this._RebaseStatusSchema || !notify || !notify.key) return;
+        let entry;
+        try {
+          entry = await this._RebaseStatusSchema.read(notify.key);
+        } catch (_err) {
+          return;
+        }
+        if (!entry || !entry.payload) return;
+        const state = entry.payload.state || '';
+        const error = entry.payload.error || '';
+        if (!state) return;
+        // Agent transition wins over the optimistic local placeholder.
+        this._setRebaseStatus(notify.key, { state, error, optimistic: false });
+        await this._applyRebaseTransition(notify.key, state, error);
+      },
+
+      async _applyRebaseTransition(key, state, error) {
+        if (state === 'done') {
+          // Rebase changed the SHA — refetch the row and reopen the
+          // commit at the same index so the diff matches the new SHA.
+          // refreshSelectedRow alone re-fetches row data but leaves the
+          // commit detail stuck on the old SHA. Order: refresh rows
+          // first so commitAt(row, idx) finds the new commit list.
+          try {
+            await this.refresh(false);
+          } catch (_err) {
+            // refresh toasts on its own
+          }
+          if (this.selectedCommit && this.rowKey(this.selectedCommit.row) === key) {
+            const row = this._rowForRebaseKey(key) || this.selectedCommit.row;
+            const idx = this.selectedCommit.commitIndex || 0;
+            await this.openCommitAt(row, idx, { preserveShowDiff: true });
+          }
+          return;
+        }
+        if (state === 'failed') {
+          _toast('Rebase failed: ' + (error || 'unknown error'), 'error');
+          return;
+        }
+        // 'in_progress' / other — no side effect; the button label
+        // updates reactively from rebaseStatusFor().
+      },
+
+      async _initRebaseStatusSubscription() {
+        const Schema = (typeof window !== 'undefined') ? window.Schema : null;
+        if (!Schema || typeof Schema.of !== 'function') return;
+        let proxy;
+        try {
+          proxy = await Schema.of('dashboard.session.worktree.rebase_status');
+        } catch (err) {
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[worktrees] rebase_status schema bind failed:', err);
+          }
+          return;
+        }
+        this._RebaseStatusSchema = proxy;
+        if (typeof proxy.onChange !== 'function') return;
+        const unsub = proxy.onChange((notify) => this._onRebaseStatusChanged(notify));
+        if (typeof unsub === 'function') this._rebaseStatusUnsubs.push(unsub);
       },
 
       async confirmDiscard() {
@@ -1662,6 +1803,11 @@
         } else {
           this.refresh(false).then(() => this._handleDeeplink());
         }
+        // Bind the agent-→dashboard rebase status channel. Failures
+        // inside the bind log + return — the page still works without
+        // it (the operator just loses the live "Rebasing..." spinner
+        // and has to refresh manually).
+        this._initRebaseStatusSubscription();
         this.$watch('selectedCommit', (value) => {
           if (!value) {
             this.reviewTitlePinned = false;
@@ -1740,6 +1886,10 @@
           window.removeEventListener('resize', this._resizeHandler);
           this._resizeHandler = null;
         }
+        for (const u of (this._rebaseStatusUnsubs || [])) {
+          try { u(); } catch (_) {}
+        }
+        this._rebaseStatusUnsubs = [];
       },
     }));
   });

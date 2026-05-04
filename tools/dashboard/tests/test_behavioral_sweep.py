@@ -4560,6 +4560,283 @@ class TestWorktreesPageBehavior:
         assert self._checks.get("no_jinja"), "Raw template syntax visible on worktrees page"
 
 
+# ── Worktrees rebase-status state machine (auto-r1dc4) ───────────────
+#
+# Drives the agent-→dashboard rebase progress channel:
+# WorktreeRebaseStatusV1 writes from the agent transition the per-row
+# Request Rebase button through awaiting → in_progress → done | failed.
+# All tests stub the schema proxy onto Alpine.$data so we exercise the
+# state-machine directly, no real /api/graph/setting round-trip needed.
+
+WORKTREES_REBASE_STATUS_CHECKS = """(async () => {
+    var r = {};
+    var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
+    var waitFor = async function(predicate, timeoutMs) {
+        var deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (predicate()) return true;
+            await sleep(40);
+        }
+        return false;
+    };
+    var tick = async function() {
+        await Alpine.nextTick();
+        await sleep(60);
+    };
+
+    r.has_page = await waitFor(function() {
+        return !!document.querySelector('[data-testid="worktrees-page"]');
+    }, 3000);
+    if (!r.has_page) return JSON.stringify(r);
+
+    var pageRoot = document.querySelector('[data-testid="worktrees-page"]');
+    var data = Alpine.$data(pageRoot);
+    if (!data) { r.error = 'no Alpine data on worktrees-page'; return JSON.stringify(r); }
+
+    // ── Force a rebase-eligible row into state ────────────────────
+    // Existing fixtures all have rebase_required:false; mutate the
+    // first card's row so canRequestRebase() returns true. We work
+    // off the row reference we just saved so the same row is the
+    // selectedCommit's row throughout (rowKey identity matters for
+    // the rebaseStatus map).
+    var row = data.rows[0];
+    row.rebase_required = true;
+    row.session_live = true;
+    row.ff_eligible = false;
+    row.clone_stale = false;
+    var rowKey = row.session_name + '/' + row.repo_name;
+    r.row_key = rowKey;
+
+    // Open the row's first commit so the Request Rebase button mounts.
+    if (typeof data.openCommitAt === 'function') {
+        await data.openCommitAt(row, 0);
+    }
+    await tick();
+
+    // Stub the schema proxy + capture POST attempts so requestRebase
+    // doesn't hit the network. We track three concerns: the POST
+    // itself (proves debounce works), schema reads (proves the
+    // setting.changed handler refetches the payload), and the
+    // openCommitAt vs refreshSelectedRow distinction (proves the
+    // 'done' branch refetches the diff at the new SHA).
+    var postCount = 0;
+    var origFetch = window.fetch;
+    window.fetch = function(url, opts) {
+        if (typeof url === 'string' && url.indexOf('/request-rebase') !== -1) {
+            postCount++;
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                json: function() { return Promise.resolve({status: 'ok'}); },
+            });
+        }
+        return origFetch.apply(this, arguments);
+    };
+    r.fetch_stubbed = true;
+
+    // Stub schema proxy — no real subscription, just .read() returning
+    // whatever payload we hand over for this assertion's transition.
+    var nextRead = null;
+    data._RebaseStatusSchema = {
+        read: function(key) {
+            return Promise.resolve(nextRead);
+        },
+        all: function() { return Promise.resolve([]); },
+        onChange: function() { return function() {}; },
+    };
+
+    // Track openCommitAt invocations so the 'done' branch test can
+    // assert the diff was refetched.
+    var openCalls = [];
+    var origOpenCommitAt = data.openCommitAt.bind(data);
+    data.openCommitAt = async function(r2, idx, opts) {
+        openCalls.push({ row_key: r2 ? (r2.session_name + '/' + r2.repo_name) : null, idx: idx });
+        return await origOpenCommitAt(r2, idx, opts);
+    };
+    // refreshSelectedRow is the FALSE answer for the 'done' branch —
+    // make sure we never call it instead of openCommitAt.
+    var refreshSelectedRowCalls = 0;
+    var origRefreshRow = data.refreshSelectedRow.bind(data);
+    data.refreshSelectedRow = async function() {
+        refreshSelectedRowCalls++;
+        return await origRefreshRow();
+    };
+
+    // Stub data.refresh — we don't want a network call inside the
+    // 'done' transition path. Returns a resolved promise.
+    var refreshCalls = 0;
+    data.refresh = function() { refreshCalls++; return Promise.resolve(); };
+
+    // Helper: read button label as flat text (collapse whitespace).
+    var buttonLabel = function() {
+        var btn = document.querySelector('[data-testid="worktree-request-rebase-button"]');
+        if (!btn) return null;
+        return btn.textContent.replace(/\\s+/g, ' ').trim();
+    };
+
+    // Helper: button has spinner sub-element?
+    var buttonHasSpinner = function() {
+        var btn = document.querySelector('[data-testid="worktree-request-rebase-button"]');
+        if (!btn) return false;
+        return !!btn.querySelector('.animate-spin');
+    };
+
+    // ── Initial state — Request Rebase ────────────────────────────
+    r.button_initial_visible = !!document.querySelector('[data-testid="worktree-request-rebase-button"]');
+    r.button_initial_label = buttonLabel();
+
+    // ── Step 1: rapid double-click — only one optimistic awaiting ──
+    // Two synchronous calls to requestRebase; the second must early-
+    // return because rebaseRequesting is already true. Net effect:
+    // exactly one POST, exactly one rebaseStatus entry, state =
+    // 'awaiting' + optimistic flag.
+    var p1 = data.requestRebase(row);
+    var p2 = data.requestRebase(row);
+    await Promise.all([p1, p2]);
+    await tick();
+    r.post_count_after_double_click = postCount;
+    var status = data.rebaseStatus[rowKey] || null;
+    r.optimistic_state = status ? status.state : null;
+    r.optimistic_flag = status ? !!status.optimistic : false;
+    r.label_after_request = buttonLabel();
+    // Toast hook — confirm the existing 'Rebase request sent' toast still fires.
+    // (No assertion needed; just exercise the path.)
+
+    // ── Step 2: agent writes 'in_progress' ───────────────────────
+    nextRead = { payload: { state: 'in_progress', error: '' } };
+    await data._onRebaseStatusChanged({ set_id: 'dashboard.session.worktree.rebase_status', key: rowKey });
+    await tick();
+    var s2 = data.rebaseStatus[rowKey] || null;
+    r.in_progress_state = s2 ? s2.state : null;
+    r.in_progress_optimistic = s2 ? !!s2.optimistic : false;
+    r.label_in_progress = buttonLabel();
+    r.spinner_present = buttonHasSpinner();
+    r.openCommitAt_calls_after_in_progress = openCalls.length;
+
+    // ── Step 3: agent writes 'done' ──────────────────────────────
+    var openCallsBefore = openCalls.length;
+    var refreshRowBefore = refreshSelectedRowCalls;
+    nextRead = { payload: { state: 'done', error: '' } };
+    await data._onRebaseStatusChanged({ set_id: 'dashboard.session.worktree.rebase_status', key: rowKey });
+    await tick();
+    var s3 = data.rebaseStatus[rowKey] || null;
+    r.done_state = s3 ? s3.state : null;
+    r.openCommitAt_called_on_done = openCalls.length > openCallsBefore;
+    r.openCommitAt_call_row_key = openCalls.length ? openCalls[openCalls.length - 1].row_key : null;
+    r.refreshSelectedRow_not_called_on_done = (refreshSelectedRowCalls === refreshRowBefore);
+    r.refresh_called_on_done = refreshCalls > 0;
+
+    // ── Step 4: agent writes 'failed' (separate row to avoid done-already collision) ──
+    // Reset optimistic + status, then drive the failed branch on the
+    // same row. The toast helper is captured via window.showToast.
+    var toasts = [];
+    var origToast = window.showToast;
+    window.showToast = function(msg, type) {
+        toasts.push({ msg: msg, type: type });
+        if (typeof origToast === 'function') return origToast(msg, type);
+    };
+    nextRead = { payload: { state: 'failed', error: 'conflict in foo.py' } };
+    await data._onRebaseStatusChanged({ set_id: 'dashboard.session.worktree.rebase_status', key: rowKey });
+    await tick();
+    var s4 = data.rebaseStatus[rowKey] || null;
+    r.failed_state = s4 ? s4.state : null;
+    r.failed_error = s4 ? s4.error : '';
+    r.label_failed = buttonLabel();
+    r.failed_toast_count = toasts.filter(function(t) { return t.type === 'error'; }).length;
+    var lastErrToast = toasts.filter(function(t) { return t.type === 'error'; }).pop();
+    r.failed_toast_msg = lastErrToast ? lastErrToast.msg : '';
+
+    // Cleanup: restore globals.
+    window.fetch = origFetch;
+    if (origToast) window.showToast = origToast;
+
+    return JSON.stringify(r);
+})()"""
+
+
+class TestWorktreesRebaseStatusBehavior:
+    """Worktrees page agent-→dashboard rebase status channel (auto-r1dc4).
+
+    Drives ``WorktreeRebaseStatusV1`` transitions through the page's
+    ``_onRebaseStatusChanged`` handler and asserts the per-row Request
+    Rebase button reflects each agent state. Stubs the schema proxy +
+    fetch so the test runs without a real /api/graph/setting roundtrip.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            "/worktrees", WORKTREES_REBASE_STATUS_CHECKS, wait_ms=1500,
+        )
+        request.cls._checks = result
+
+    def test_page_mounts(self):
+        c = self._checks
+        assert c.get("has_page"), f"Worktrees page missing: {c}"
+        assert c.get("button_initial_visible"), \
+            "Request Rebase button should be visible after fixture mutation"
+
+    def test_rapid_double_click_only_one_optimistic(self):
+        """Double-clicking Request Rebase fires one POST and stamps one optimistic state."""
+        c = self._checks
+        assert c.get("post_count_after_double_click") == 1, \
+            f"Expected 1 POST from double-click, got {c.get('post_count_after_double_click')}"
+        assert c.get("optimistic_state") in ("awaiting", "in_progress"), (
+            "After click + agent ack, status should be awaiting or in_progress; "
+            f"got {c.get('optimistic_state')!r}"
+        )
+
+    def test_in_progress_shows_rebasing_spinner(self):
+        """Agent writes state:in_progress → button shows 'Rebasing...' with spinner."""
+        c = self._checks
+        assert c.get("in_progress_state") == "in_progress", \
+            f"Status state should be 'in_progress', got {c.get('in_progress_state')!r}"
+        assert c.get("in_progress_optimistic") is False, \
+            "Agent transition should clear the optimistic flag"
+        label = c.get("label_in_progress") or ""
+        assert "Rebasing" in label, \
+            f"Button label should say 'Rebasing...', got {label!r}"
+        assert c.get("spinner_present"), \
+            "Button should render a spinner during in_progress"
+
+    def test_done_calls_openCommitAt_not_refreshSelectedRow(self):
+        """Agent writes state:done → handler calls openCommitAt (refetches diff at new SHA), NOT refreshSelectedRow.
+
+        The post-rebase SHA change means the diff is stale; openCommitAt
+        re-fetches /commits/<sha> at the new sha. refreshSelectedRow
+        alone would only re-fetch row data — the diff would stay stuck.
+        """
+        c = self._checks
+        assert c.get("done_state") == "done", \
+            f"Status state should be 'done', got {c.get('done_state')!r}"
+        assert c.get("openCommitAt_called_on_done"), \
+            "On 'done', handler must call openCommitAt to refetch diff at new SHA"
+        assert c.get("openCommitAt_call_row_key") == c.get("row_key"), (
+            "openCommitAt must be called with the same row that received the "
+            f"transition; got {c.get('openCommitAt_call_row_key')!r} vs "
+            f"{c.get('row_key')!r}"
+        )
+        assert c.get("refreshSelectedRow_not_called_on_done"), \
+            "On 'done', refreshSelectedRow alone is the WRONG path — must use openCommitAt"
+        assert c.get("refresh_called_on_done"), \
+            "On 'done', a top-level refresh is needed before openCommitAt so the new commit list is current"
+
+    def test_failed_toasts_error_and_shows_retry_label(self):
+        """Agent writes state:failed → toast fires with error text; button shows retry state."""
+        c = self._checks
+        assert c.get("failed_state") == "failed", \
+            f"Status state should be 'failed', got {c.get('failed_state')!r}"
+        assert c.get("failed_error") == "conflict in foo.py", \
+            f"Status error should be propagated, got {c.get('failed_error')!r}"
+        assert c.get("failed_toast_count") >= 1, \
+            "On 'failed', an error toast must fire"
+        assert "conflict in foo.py" in (c.get("failed_toast_msg") or ""), \
+            f"Toast message must include the error text, got {c.get('failed_toast_msg')!r}"
+        label = c.get("label_failed") or ""
+        assert "retry" in label.lower() or "failed" in label.lower(), \
+            f"Button should show retry/failed state after failure, got {label!r}"
+
+
 class TestBeadDetailPageBehavior:
     """Bead detail page behavioral sweep — title, priority, status, description."""
 
