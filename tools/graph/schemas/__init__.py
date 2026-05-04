@@ -31,6 +31,12 @@ from .registry import (
     singleton,
     keyed_per_entity,
     cache,
+    # Mediator-action marker decorators: declare a default action or a
+    # per-``kind`` action method directly on the schema class. Discovery
+    # in ``SettingSchema.__init_subclass__`` registers each via the
+    # settings-mediator substrate.
+    action,
+    on_kind,
 )
 
 # Concrete schema registrations. Importing for side effects — each module
@@ -72,4 +78,6 @@ __all__ = [
     "singleton",
     "keyed_per_entity",
     "cache",
+    "action",
+    "on_kind",
 ]
