@@ -167,9 +167,16 @@ def api_client(dashboard_app, monkeypatch):
     Sets ``GRAPH_API`` so ``get_client()`` returns HttpClient, then patches
     ``urllib.request.urlopen`` so HttpClient's calls land on the
     in-process ASGI app instead of a real TCP socket.
+
+    The conftest's ``_isolate_graph_env`` autouse fixture pins
+    ``_FORCE_HOST_DIRECT = True`` to keep host-mode tests stable after the
+    API-first flip; this fixture overrides it back to ``False`` so HTTP
+    routing actually happens.
     """
+    from tools.graph import client as _client_mod
     client = TestClient(dashboard_app)
     monkeypatch.setenv("GRAPH_API", "https://localhost:8080")
+    monkeypatch.setattr(_client_mod, "_FORCE_HOST_DIRECT", False)
     # All three modules that hold urllib.request need the same patch — the
     # api_client.py write helpers still use urlopen too.
     opener = _testclient_urlopen(client)

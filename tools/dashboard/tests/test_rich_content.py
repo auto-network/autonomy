@@ -44,8 +44,15 @@ def _ensure_read_gate_marker():
 
 
 def _graph_cmd(*args, stdin_text=None, db_path=None, bypass_read_gate=False):
-    """Run a graph CLI command, return (returncode, stdout, stderr)."""
-    cmd = [sys.executable, "-m", "tools.graph.cli"]
+    """Run a graph CLI command, return (returncode, stdout, stderr).
+
+    Always invoked with ``--force-host`` because these tests assert against a
+    tmp graph DB. Post auto-lq20j the CLI defaults to HttpClient against the
+    live dashboard, which would silently route writes to the production DB
+    and leave the tmp DB empty. ``--force-host`` pins direct ops.* writes
+    to ``--db <tmp>``.
+    """
+    cmd = [sys.executable, "-m", "tools.graph.cli", "--force-host"]
     if db_path:
         cmd.extend(["--db", str(db_path)])
     cmd.extend(args)
