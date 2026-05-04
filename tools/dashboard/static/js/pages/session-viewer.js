@@ -201,6 +201,10 @@
       attachments: [],
       _nextAttachId: 0,
 
+      _uploadProxy: null,
+      _uploadUnsub: null,
+      _uploadSeen: null,
+
       // Header expand/collapse
       headerOpen: false,
       // Drawer tab: 'topics' | 'todos'. Only meaningful when hasTodos is true.
@@ -356,9 +360,11 @@
 
             var store = window.getSessionStore(sessionId);
 
-            // Populate store from dispatch tail
+            // Hydrate uploads before the tail ingest so they merge inline.
+            await this._initUploads();
+
             if (data.entries && data.entries.length > 0) {
-              this._ingestEntries(store, data);
+              window.appendSessionEntries(store, data, 'fetch');
             }
             store.isLive = isLiveHint !== undefined ? !!isLiveHint : !!data.is_live;
             if (data.resolved !== undefined) store.resolved = !!data.resolved;
@@ -443,6 +449,8 @@
 
           store._loading = true;
           window.ensureSessionMessages();
+
+          await this._initUploads();
 
           try {
             await this._fetchBacklog(store);
@@ -640,6 +648,10 @@
         if (this._workspaceHandler && typeof window.unregisterHandler === 'function') {
           window.unregisterHandler('worktrees', this._workspaceHandler);
           this._workspaceHandler = null;
+        }
+        if (this._uploadUnsub) {
+          try { this._uploadUnsub(); } catch (_) {}
+          this._uploadUnsub = null;
         }
         // Dispose terminal WS + xterm if the toggle was active. Leaking these
         // holds a server-side tmux attach and exhausts WebSocket slots.
@@ -915,6 +927,63 @@
         return this._resumeRefreshInFlight;
       },
 
+      async _initUploads() {
+        if (this._uploadProxy || !this._tmuxSession) return;
+        if (!window.Schema || typeof window.Schema.of !== 'function') return;
+        this._uploadProxy = await window.Schema.of('dashboard.session.upload');
+        var members = await this._uploadProxy.all();
+        var tmux = this._tmuxSession;
+        var store = window.getSessionStore(this.sessionKey);
+        this._uploadSeen = new Set();
+        store._pendingAttachments = [];
+        for (var i = 0; i < (members || []).length; i++) {
+          var m = members[i];
+          var p = m && m.payload;
+          if (!p || p.target_session !== tmux) continue;
+          this._uploadSeen.add(m.key);
+          store._pendingAttachments.push(this._buildUploadEntry(p));
+        }
+        store._pendingAttachments.sort(function(a, b) {
+          return (a.timestamp || '').localeCompare(b.timestamp || '');
+        });
+        var self = this;
+        this._uploadUnsub = this._uploadProxy.onChange(function() {
+          self._handleNewUpload();
+        });
+      },
+
+      async _handleNewUpload() {
+        if (!this._uploadProxy || !this._tmuxSession) return;
+        var members;
+        try {
+          members = await this._uploadProxy.all();
+        } catch (err) { return; }
+        var store = window.getSessionStore && window.getSessionStore(this.sessionKey);
+        if (!store) return;
+        var tmux = this._tmuxSession;
+        for (var i = 0; i < (members || []).length; i++) {
+          var m = members[i];
+          if (this._uploadSeen.has(m.key)) continue;
+          var p = m && m.payload;
+          if (!p || p.target_session !== tmux) continue;
+          this._uploadSeen.add(m.key);
+          store.entries.push(this._buildUploadEntry(p));
+        }
+      },
+
+      _buildUploadEntry(p) {
+        return {
+          type: 'viewer_attachment',
+          role: 'tool',
+          timestamp: p.timestamp || '',
+          rel_path: p.rel_path,
+          filename: p.filename,
+          mime: p.mime,
+          size: p.size,
+          session: p.target_session,
+        };
+      },
+
       _applyTailPayload(store, data) {
         if (!store || !data) return;
         if (data.offset !== undefined) store.offset = data.offset || 0;
@@ -927,7 +996,7 @@
           store.seq = data.seq;
         }
         if (data.entries && data.entries.length > 0) {
-          this._ingestEntries(store, data);
+          window.appendSessionEntries(store, data, 'fetch');
         }
       },
 
@@ -1059,19 +1128,24 @@
             return res.json();
           };
 
+          // Compose attachments + text into one tmux paste so the agent's
+          // transcript records a single user turn whose content is the
+          // image path(s) plus the operator's description, instead of the
+          // previous N+1 turns (one per attachment, one for the text). The
+          // viewer's user-turn renderer detects ``/tmp/<filename>.<ext>``
+          // lines in the body and surfaces inline thumbnails for each.
+          var lines = [];
           for (var ai = 0; ai < this.attachments.length; ai++) {
             var att = this.attachments[ai];
-            if (!att.path) continue;
-            var pathData = await _send(att.path);
-            if (!pathData.ok) {
-              console.warn('[sessionViewer] send error (path):', pathData.error);
-              return;
-            }
-            await new Promise(function(r) { setTimeout(r, 200); });
+            if (att.path) lines.push(att.path);
           }
-
           if (text) {
-            var data = await _send(text);
+            if (lines.length) lines.push('');   // blank line between paths and prose
+            lines.push(text);
+          }
+          var body = lines.join('\n');
+          if (body) {
+            var data = await _send(body);
             if (!data.ok) {
               console.warn('[sessionViewer] send error:', data.error);
               return;
@@ -1347,15 +1421,6 @@
         return data;
       },
 
-      // ── Ingest entries through the shared session store path ──
-
-      _ingestEntries(store, payload, provenance) {
-        // /api/diag tracks where entries came from. Default 'fetch' covers
-        // session-viewer's initial dispatch tail + dispatch tail polling
-        // paths; the SSE flush path passes 'sse' explicitly.
-        return window.appendSessionEntries(store, payload || {}, provenance || 'fetch');
-      },
-
       // ── Overlay: dispatch tail polling ──────────────────────────
 
       async _pollTail(currentOffset) {
@@ -1371,7 +1436,7 @@
           store.isLive = !!data.is_live;
 
           if (data.entries && data.entries.length > 0) {
-            this._ingestEntries(store, data);
+            window.appendSessionEntries(store, data, 'fetch');
             this._rebuildDisplay();
             if (this.autoScroll) this._scrollToBottom();
           }
