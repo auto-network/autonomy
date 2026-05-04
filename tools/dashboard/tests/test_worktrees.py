@@ -287,12 +287,7 @@ class TestWorktreeAPI:
         self, test_client, monkeypatch,
     ):
         """Bead auto-ecmss: a successful ff-merge writes a kind='worktree-merge'
-        row via record_worktree_merge_run with reason='ff'.
-
-        Bead auto-614q7: the merge helper's measured ``duration_secs``
-        is forwarded to the writer so the timeline row stores a real
-        bracket instead of the placeholder 0.
-        """
+        row via record_worktree_merge_run with reason='ff'."""
         server, _fake = _install_fake_monitor(monkeypatch, [_row()])
 
         def fake_merge(_session_name, _repo_name):
@@ -301,7 +296,6 @@ class TestWorktreeAPI:
                 "message": "merged",
                 "target_repo": "/repo",
                 "target_branch": "master",
-                "duration_secs": 19,
             }
 
         monkeypatch.setattr(server, "merge_session_worktree", fake_merge)
@@ -323,37 +317,6 @@ class TestWorktreeAPI:
         assert captured["branch"] == "session/auto-test"
         assert captured["branch_base"] == "master"
         assert captured["target_repo"] == "/repo"
-        assert captured["duration_secs"] == 19
-
-    def test_merge_endpoint_defaults_duration_secs_to_zero_when_helper_omits_it(
-        self, test_client, monkeypatch,
-    ):
-        """auto-614q7: a merge helper that doesn't return ``duration_secs``
-        (legacy or shimmed) still produces a valid writer call — duration
-        falls back to 0 instead of crashing the merge handler."""
-        server, _fake = _install_fake_monitor(monkeypatch, [_row()])
-
-        def fake_merge(_session_name, _repo_name):
-            return {
-                "commit": "abc1234",
-                "message": "merged",
-                "target_repo": "/repo",
-                "target_branch": "master",
-            }
-
-        monkeypatch.setattr(server, "merge_session_worktree", fake_merge)
-        captured = {}
-
-        def fake_record(**kwargs):
-            captured.update(kwargs)
-            return f"wt-{kwargs['commit_hash'][:12]}"
-
-        monkeypatch.setattr(server, "record_worktree_merge_run", fake_record)
-
-        resp = test_client.post("/api/worktrees/auto-test/autonomy/merge")
-
-        assert resp.status_code == 200
-        assert captured["duration_secs"] == 0
 
     def test_merge_endpoint_swallows_timeline_writer_failure(
         self, test_client, monkeypatch,
@@ -529,11 +492,7 @@ class TestWorktreeAPI:
     def test_commit_merge_endpoint_writes_worktree_merge_timeline_row(
         self, test_client, monkeypatch,
     ):
-        """Bead auto-ecmss: commit-merge writes a row with reason='commit-merge'.
-
-        Bead auto-614q7: helper-measured ``duration_secs`` reaches the
-        writer.
-        """
+        """Bead auto-ecmss: commit-merge writes a row with reason='commit-merge'."""
         server, _fake = _install_fake_monitor(monkeypatch, [_row()])
 
         def fake_merge(_session_name, _repo_name, _sha):
@@ -542,7 +501,6 @@ class TestWorktreeAPI:
                 "message": "Add worktree dashboard",
                 "target_repo": "/repo",
                 "target_branch": "master",
-                "duration_secs": 4,
             }
 
         monkeypatch.setattr(server, "merge_session_worktree_commit", fake_merge)
@@ -565,7 +523,6 @@ class TestWorktreeAPI:
         # session/* convention.
         assert captured["branch"] == "session/auto-test"
         assert captured["branch_base"] == "master"
-        assert captured["duration_secs"] == 4
 
     def test_commit_merge_endpoint_swallows_timeline_writer_failure(
         self, test_client, monkeypatch,
@@ -594,11 +551,7 @@ class TestWorktreeAPI:
     def test_cherry_pick_endpoint_writes_worktree_merge_timeline_row(
         self, test_client, monkeypatch,
     ):
-        """Bead auto-ecmss: cherry-pick writes a row with reason='cherry-pick'.
-
-        Bead auto-614q7: ``duration_secs`` returned by the helper is
-        forwarded to the writer.
-        """
+        """Bead auto-ecmss: cherry-pick writes a row with reason='cherry-pick'."""
         server, _fake = _install_fake_monitor(
             monkeypatch,
             [_row(cherry_pick_eligible=True, cherry_pick_commit="abcdef1234567890")],
@@ -611,7 +564,6 @@ class TestWorktreeAPI:
                 "message": "Trim header padding",
                 "target_repo": "/repo",
                 "target_branch": "master",
-                "duration_secs": 7,
             }
 
         monkeypatch.setattr(server, "cherry_pick_session_worktree", fake_cherry_pick)
@@ -643,7 +595,6 @@ class TestWorktreeAPI:
         assert captured["container_name"] == "auto-test"
         assert captured["branch"] == "session/auto-test"
         assert captured["branch_base"] == "master"
-        assert captured["duration_secs"] == 7
 
     def test_cherry_pick_endpoint_swallows_timeline_writer_failure(
         self, test_client, monkeypatch,
