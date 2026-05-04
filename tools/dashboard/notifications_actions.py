@@ -43,14 +43,18 @@ _FROM_ID_FALLBACK = "operator:notifications"
 _ENVELOPE_KIND = "ask-refresh"
 
 
-def _resolve_session_ask(ask_id: str):
+def _resolve_session_ask(ask_id: str, *, org: str | None):
     """Return the SessionAsk row keyed by *ask_id* or None.
 
-    ``org=None`` reads from the default DB. Multi-org routing for
-    cross-set lookups isn't surfaced through ``Row`` yet — see the
-    auto-rc27t gap noted on auto-tdlhq's audit comment.
+    ``org`` is threaded from the originating refresh-row's org so the
+    dependent SessionAsk lookup stays scoped to the same DB as the
+    event that triggered it. A scopeless refresh row (``org=None``)
+    reads scopelessly; an org-scoped refresh row reads only that org's
+    DB. Mixing these (e.g. hardcoding ``org=None``) would silently
+    cross-pollinate ask previews across orgs in any future multi-org
+    deployment — see auto-dcegc.
     """
-    members = settings_ops.read_set(SESSION_ASK_SET_ID, org=None, peers=[])
+    members = settings_ops.read_set(SESSION_ASK_SET_ID, org=org, peers=[])
     for m in members.members:
         if m.key == ask_id:
             return m
@@ -81,12 +85,14 @@ def _format_ping_body(ask_row, refresh_payload: dict) -> dict:
 )
 async def deliver_refresh_ping(row, services) -> None:
     ask_id = row.key
-    ask_row = await asyncio.to_thread(_resolve_session_ask, ask_id)
+    ask_row = await asyncio.to_thread(
+        _resolve_session_ask, ask_id, org=row.org,
+    )
     if ask_row is None:
         logger.warning(
             "[ask_refresh] SessionAsk row missing for ask_id=%s "
-            "(refresh row exists, ask row gone) — skip ping",
-            ask_id,
+            "org=%s (refresh row exists, ask row gone) — skip ping",
+            ask_id, row.org,
         )
         return
     body = _format_ping_body(ask_row, row.payload)
