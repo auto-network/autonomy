@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -1095,6 +1096,90 @@ SWEEP_CHAT_SOURCE = {
     ],
 }
 
+# Fixtures for TestSourceViewerHeaderMetadata (auto-ptptn). Four sources
+# exercising the chat-header metadata strip's visibility matrix:
+#   A — single-day chat (5 entries spanning 1h 12m, 50,000 chars)
+#   B — multi-day chat  (3 entries spanning 30 hours, modest content)
+#   C — single-entry chat (1 entry, ~400 chars; range + duration omitted)
+#   D — note             (strip must be hidden for non-chat sources)
+#
+# Times are mid-day UTC so local-time bucketing puts both ends on the
+# same calendar day across every realistic browser timezone for A.
+# IDs differ in the first 12 chars so /graph/{id[:12]} URLs are distinct;
+# navigateTo() short-circuits when the path doesn't change, which would
+# otherwise pin the page to the first fixture's content for every test.
+SWEEP_HEADER_META_SINGLE_DAY_ID   = "cc20000a-0000-0000-0000-000000000001"
+SWEEP_HEADER_META_MULTIDAY_ID     = "cc20000b-0000-0000-0000-000000000002"
+SWEEP_HEADER_META_SINGLE_ENTRY_ID = "cc20000c-0000-0000-0000-000000000003"
+SWEEP_HEADER_META_NOTE_ID         = "cc20000d-0000-0000-0000-000000000004"
+
+_HEADER_META_LONG_CONTENT = "a" * 10000  # 5 × 10k = 50k chars → ~12.5k tokens
+
+SWEEP_HEADER_META_SINGLE_DAY = {
+    "id": SWEEP_HEADER_META_SINGLE_DAY_ID,
+    "title": "Header meta sweep — single-day chat",
+    "type": "session",
+    "project": "autonomy",
+    "created_at": "2026-05-15T12:00:00Z",
+    "metadata": "{}",
+    "content": "Single-day chat fixture",
+    "entries": [
+        {"turn_number": 1, "role": "user",      "content": _HEADER_META_LONG_CONTENT,
+         "created_at": "2026-05-15T12:00:00Z"},
+        {"turn_number": 2, "role": "assistant", "content": _HEADER_META_LONG_CONTENT,
+         "created_at": "2026-05-15T12:18:00Z"},
+        {"turn_number": 3, "role": "user",      "content": _HEADER_META_LONG_CONTENT,
+         "created_at": "2026-05-15T12:36:00Z"},
+        {"turn_number": 4, "role": "assistant", "content": _HEADER_META_LONG_CONTENT,
+         "created_at": "2026-05-15T12:54:00Z"},
+        {"turn_number": 5, "role": "user",      "content": _HEADER_META_LONG_CONTENT,
+         "created_at": "2026-05-15T13:12:00Z"},
+    ],
+}
+
+SWEEP_HEADER_META_MULTIDAY = {
+    "id": SWEEP_HEADER_META_MULTIDAY_ID,
+    "title": "Header meta sweep — multi-day chat",
+    "type": "session",
+    "project": "autonomy",
+    "created_at": "2026-04-28T12:00:00Z",
+    "metadata": "{}",
+    "content": "Multi-day chat fixture",
+    "entries": [
+        {"turn_number": 1, "role": "user",      "content": "first turn",
+         "created_at": "2026-04-28T12:00:00Z"},
+        {"turn_number": 2, "role": "assistant", "content": "second turn",
+         "created_at": "2026-04-29T00:00:00Z"},
+        {"turn_number": 3, "role": "user",      "content": "third turn",
+         "created_at": "2026-04-29T18:00:00Z"},
+    ],
+}
+
+SWEEP_HEADER_META_SINGLE_ENTRY = {
+    "id": SWEEP_HEADER_META_SINGLE_ENTRY_ID,
+    "title": "Header meta sweep — single-entry chat",
+    "type": "session",
+    "project": "autonomy",
+    "created_at": "2026-05-15T12:00:00Z",
+    "metadata": "{}",
+    "content": "Single-entry chat fixture",
+    "entries": [
+        # ~400 chars → ceil(400/4) = 100 tokens, matches /^~\d+ tokens$/
+        {"turn_number": 1, "role": "user", "content": "x" * 400,
+         "created_at": "2026-05-15T12:00:00Z"},
+    ],
+}
+
+SWEEP_HEADER_META_NOTE = {
+    "id": SWEEP_HEADER_META_NOTE_ID,
+    "title": "Header meta sweep — note (strip must be hidden)",
+    "type": "note",
+    "project": "autonomy",
+    "created_at": "2026-05-15T12:00:00Z",
+    "metadata": "{}",
+    "content": "# Header meta sweep — note\n\nNotes never render the chat metadata strip.",
+}
+
 # Fixtures for TestAgentActionsDropdown (auto-aia85). Two notes — one in
 # the autonomy org (which has the seeded action set) and one in an org
 # with no seeded actions. The dropdown must render for the first and
@@ -1258,6 +1343,10 @@ SWEEP_GRAPH_SOURCES = {
     SWEEP_AGENT_ACTIONS_EMPTY_NOTE_ID: SWEEP_AGENT_ACTIONS_SOURCE_EMPTY_ORG,
     SWEEP_AGENTIC_SOURCE_ID: SWEEP_AGENTIC_GRAPH_SOURCE,
     SWEEP_CHAT_SOURCE_ID: SWEEP_CHAT_SOURCE,
+    SWEEP_HEADER_META_SINGLE_DAY_ID: SWEEP_HEADER_META_SINGLE_DAY,
+    SWEEP_HEADER_META_MULTIDAY_ID: SWEEP_HEADER_META_MULTIDAY,
+    SWEEP_HEADER_META_SINGLE_ENTRY_ID: SWEEP_HEADER_META_SINGLE_ENTRY,
+    SWEEP_HEADER_META_NOTE_ID: SWEEP_HEADER_META_NOTE,
 }
 
 SWEEP_GRAPH_ATTACHMENTS = {
@@ -6098,6 +6187,159 @@ class TestSourceViewerRoleRendering:
                 f"turn-{turn_num}: expected label {want!r}, got {got!r} "
                 f"(full labels map: {labels!r})"
             )
+
+
+# ── Source viewer header metadata strip (auto-ptptn) ────────────────
+#
+# A new row in the source-page header card surfaces orienting metadata
+# for chat sources: turns, time range, duration, token estimate.
+# Visibility per state matrix: hidden for notes/docs, hidden when entry
+# count is 0, range/duration suppressed for single-entry or sub-minute
+# chats. Token estimate uses ``ceil(sum(content.length) / 4)``.
+
+HEADER_META_CHECKS = r"""
+    function _i(testid) {
+        var el = document.querySelector('[data-testid="' + testid + '"]');
+        return {
+            present: !!el,
+            // Spec: "absent or offsetParent === null". Both shapes satisfy
+            // the visibility-rule check (hidden via x-if collapse, or via
+            // CSS ``display:none``). Alpine x-if removes the node entirely
+            // so ``present === false`` is the common path.
+            absent_or_hidden: !el || el.offsetParent === null,
+            text: el ? (el.textContent || '').trim() : '',
+        };
+    }
+    r.strip    = _i('sv-meta-strip');
+    r.turns    = _i('sv-meta-turns');
+    r.range    = _i('sv-meta-time-range');
+    r.duration = _i('sv-meta-duration');
+    r.tokens   = _i('sv-meta-tokens');
+"""
+
+
+class TestSourceViewerHeaderMetadata:
+    """Header metadata strip renders per the visibility matrix (auto-ptptn).
+
+    Four fixtures cover the state matrix from the bead spec:
+
+    - A — single-day chat (5 entries, 1h 12m, 50,000 chars):
+      turns + range + duration + tokens.
+    - B — multi-day chat (3 entries, 30 hours): multi-day range,
+      ``Xd Yh`` duration.
+    - C — single-entry chat (1 entry, 400 chars): turns + tokens only;
+      range and duration suppressed by visibility rules.
+    - D — note (non-chat type): strip hidden entirely.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        request.cls._a = _navigate_and_check(
+            f"/graph/{SWEEP_HEADER_META_SINGLE_DAY_ID[:12]}",
+            HEADER_META_CHECKS,
+            wait_ms=900,
+        )
+        request.cls._b = _navigate_and_check(
+            f"/graph/{SWEEP_HEADER_META_MULTIDAY_ID[:12]}",
+            HEADER_META_CHECKS,
+            wait_ms=900,
+        )
+        request.cls._c = _navigate_and_check(
+            f"/graph/{SWEEP_HEADER_META_SINGLE_ENTRY_ID[:12]}",
+            HEADER_META_CHECKS,
+            wait_ms=900,
+        )
+        request.cls._d = _navigate_and_check(
+            f"/graph/{SWEEP_HEADER_META_NOTE_ID[:12]}",
+            HEADER_META_CHECKS,
+            wait_ms=900,
+        )
+
+    # ── Fixture A — single-day chat ──────────────────────────────────
+
+    def test_a_strip_visible(self):
+        assert self._a.get("strip", {}).get("present"), (
+            "Fixture A: meta strip must render for a multi-entry chat — "
+            f"got: {self._a!r}"
+        )
+
+    def test_a_turns_text(self):
+        assert self._a.get("turns", {}).get("text") == "5 turns", (
+            f"Fixture A: expected '5 turns', got {self._a.get('turns', {}).get('text')!r}"
+        )
+
+    def test_a_time_range_format(self):
+        text = self._a.get("range", {}).get("text", "")
+        assert re.match(r"^\d{2}:\d{2} → \d{2}:\d{2}$", text), (
+            f"Fixture A: time range must match HH:MM → HH:MM (no date), got {text!r}"
+        )
+
+    def test_a_duration_text(self):
+        assert self._a.get("duration", {}).get("text") == "1h 12m", (
+            f"Fixture A: expected duration '1h 12m', got "
+            f"{self._a.get('duration', {}).get('text')!r}"
+        )
+
+    def test_a_tokens_format(self):
+        text = self._a.get("tokens", {}).get("text", "")
+        assert re.match(r"^~\d+(\.\d)?k tokens$", text), (
+            f"Fixture A: tokens must match '~Nk tokens' (12.5k expected), got {text!r}"
+        )
+
+    # ── Fixture B — multi-day chat ───────────────────────────────────
+
+    def test_b_strip_visible(self):
+        assert self._b.get("strip", {}).get("present"), (
+            f"Fixture B: meta strip must render — got: {self._b!r}"
+        )
+
+    def test_b_time_range_multi_day_format(self):
+        text = self._b.get("range", {}).get("text", "")
+        assert re.match(
+            r"[A-Z][a-z]{2} \d+ \d{2}:\d{2} → [A-Z][a-z]{2} \d+ \d{2}:\d{2}",
+            text,
+        ), (
+            f"Fixture B: multi-day range must include month abbreviations "
+            f"on both sides of '→', got {text!r}"
+        )
+
+    def test_b_duration_days_hours_format(self):
+        text = self._b.get("duration", {}).get("text", "")
+        assert re.match(r"^\d+d \d+h$", text), (
+            f"Fixture B: duration must match 'Xd Yh' for ≥24h spans, got {text!r}"
+        )
+
+    # ── Fixture C — single-entry chat ────────────────────────────────
+
+    def test_c_turns_singular(self):
+        assert self._c.get("turns", {}).get("text") == "1 turn", (
+            f"Fixture C: singular form expected for 1 entry, got "
+            f"{self._c.get('turns', {}).get('text')!r}"
+        )
+
+    def test_c_time_range_hidden(self):
+        assert self._c.get("range", {}).get("absent_or_hidden"), (
+            "Fixture C: time range must be absent or hidden for single-entry chat"
+        )
+
+    def test_c_duration_hidden(self):
+        assert self._c.get("duration", {}).get("absent_or_hidden"), (
+            "Fixture C: duration must be absent or hidden for single-entry chat"
+        )
+
+    def test_c_tokens_sub_1k_format(self):
+        text = self._c.get("tokens", {}).get("text", "")
+        assert re.match(r"^~\d+ tokens$", text), (
+            f"Fixture C: tokens must match '~N tokens' (sub-1k branch), got {text!r}"
+        )
+
+    # ── Fixture D — note (non-chat) ──────────────────────────────────
+
+    def test_d_strip_hidden_for_note(self):
+        assert self._d.get("strip", {}).get("absent_or_hidden"), (
+            "Fixture D: meta strip must be absent or hidden for non-chat sources — "
+            f"got: {self._d!r}"
+        )
 
 
 # ── Agent-actions dropdown JS check bundle ──────────────────────────
