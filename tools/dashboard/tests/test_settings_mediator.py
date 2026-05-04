@@ -115,10 +115,7 @@ def services():
     async def _send(session: str, text: str) -> None:
         sent.append((session, text))
 
-    async def _find(role: str) -> str | None:
-        return None
-
-    svc = Services(session_send=_send, find_session_by_role=_find)
+    svc = Services(session_send=_send)
     svc._sent = sent  # test introspection
     return svc
 

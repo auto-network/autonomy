@@ -22,6 +22,7 @@ frontend:
 
 entrypoints:
   schemas:
+    - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorV1
     - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorCanvasV1
     - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:OperatorMessageToCoordinatorV1
     - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorTileV1

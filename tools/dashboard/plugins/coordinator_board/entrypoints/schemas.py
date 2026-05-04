@@ -1,6 +1,10 @@
 """Setting schemas owned by the coordinator-board plugin.
 
-The plugin owns ten Settings:
+The plugin owns eleven Settings:
+
+* ``dashboard.coordinator`` — explicit singleton binding for the live
+  coordinator session that should receive operator messages and board-
+  level refresh requests. Key: ``default``.
 
 * ``dashboard.coordinator-canvas`` — coordinator's primary output: a
   single perfectly-framed question with just enough context to be
@@ -67,7 +71,7 @@ from tools.graph.schemas.registry import (
     singleton,
 )
 
-
+COORDINATOR_SET_ID = "dashboard.coordinator"
 COORDINATOR_CANVAS_SET_ID = "dashboard.coordinator-canvas"
 OPERATOR_MESSAGE_SET_ID = "dashboard.operator-message-to-coordinator"
 COORDINATOR_TILE_SET_ID = "dashboard.coordinator-tile"
@@ -106,21 +110,55 @@ VALID_BEAD_STATUSES = ("landed", "closed-duplicate", "specified")
 
 SYNOPSIS = {
     "summary": (
-        "Coordinator board Settings: canvas (the banger), operator "
-        "message back, tile + thread editorial cards (peer-session "
-        "keyed), decision log, sprints, beads, convergent decisions, "
-        "open follow-ups, docs"
+        "Coordinator board Settings: coordinator binding, canvas (the "
+        "banger), operator message back, tile + thread editorial cards "
+        "(peer-session keyed), decision log, sprints, beads, "
+        "convergent decisions, open follow-ups, docs"
     ),
     "nouns": [
-        "coordinator board", "coordinator canvas", "operator message",
-        "coordinator tile", "coordinator thread", "coordinator decision",
-        "coordinator sprint", "coordinator bead",
-        "coordinator convergent decision", "coordinator open follow-up",
-        "coordinator docs",
+        "coordinator board", "coordinator", "coordinator canvas",
+        "operator message", "coordinator tile", "coordinator thread",
+        "coordinator decision", "coordinator sprint",
+        "coordinator bead", "coordinator convergent decision",
+        "coordinator open follow-up", "coordinator docs",
         "thumb yes", "thumb no", "sitrep", "tile refresh",
     ],
     "related_set_ids": [],
 }
+
+
+# ── Coordinator binding ──────────────────────────────────────────────
+
+
+@singleton(key="default")
+class CoordinatorV1(SettingSchema):
+    """Singleton live coordinator binding. Key: ``default``."""
+
+    set_id = COORDINATOR_SET_ID
+    schema_revision = SCHEMA_REVISION
+
+    session_id: str = field(
+        required=True,
+        description="Bound coordinator session id for board-level routing",
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'session_id' must be a non-empty string"
+            )
+        extra = set(payload) - {"session_id"}
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
 
 
 # ── Canvas ───────────────────────────────────────────────────────────
@@ -935,6 +973,7 @@ class CoordinatorDocsV1(SettingSchema):
 
 # ── Registration ─────────────────────────────────────────────────────
 
+register_schema(COORDINATOR_SET_ID, SCHEMA_REVISION, CoordinatorV1)
 register_schema(COORDINATOR_CANVAS_SET_ID, SCHEMA_REVISION, CoordinatorCanvasV1)
 register_schema(OPERATOR_MESSAGE_SET_ID, SCHEMA_REVISION, OperatorMessageToCoordinatorV1)
 register_schema(COORDINATOR_TILE_SET_ID, SCHEMA_REVISION, CoordinatorTileV1)

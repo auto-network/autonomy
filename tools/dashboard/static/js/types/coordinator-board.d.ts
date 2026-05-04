@@ -5,11 +5,21 @@
 // live Python schema declarations.
 //
 // Source schemas:
+//   - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorV1
 //   - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorCanvasV1
 //   - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:OperatorMessageToCoordinatorV1
 //   - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorTileV1
 //   - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorThreadV1
 //   - tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorDecisionV1
+
+/**
+ * dashboard.coordinator#1
+ * Access pattern: singleton (key strategy: fixed:default)
+ */
+export interface CoordinatorV1 {
+  /** Bound coordinator session id for board-level routing */
+  session_id: string;
+}
 
 /**
  * dashboard.coordinator-canvas#1

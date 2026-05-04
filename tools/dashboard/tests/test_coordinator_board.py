@@ -12,6 +12,8 @@ Bead history:
 * auto-lffg5 — facade retired; three new Setting schemas
   (``CoordinatorTileV1``, ``CoordinatorThreadV1``,
   ``CoordinatorDecisionV1``) replace the facade's payload synthesis.
+* auto-y98f2 — explicit ``dashboard.coordinator`` binding replaces
+  coordinator-role discovery for board-level routing.
 """
 from __future__ import annotations
 
@@ -51,8 +53,9 @@ def test_manifest_yaml_parses_and_validates():
     assert manifest.frontend.alpine_root == "coordinatorBoard"
     # Bead auto-lffg5 retired the api.py facade — no api routes.
     assert manifest.entrypoints.api is None
-    # All five schemas declared on the manifest.
+    # All six schemas declared on the manifest.
     assert manifest.entrypoints.schemas == [
+        "tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorV1",
         "tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorCanvasV1",
         "tools.dashboard.plugins.coordinator_board.entrypoints.schemas:OperatorMessageToCoordinatorV1",
         "tools.dashboard.plugins.coordinator_board.entrypoints.schemas:CoordinatorTileV1",
@@ -74,8 +77,8 @@ def test_plugin_discovers_with_real_substrate():
     assert by_id["coordinator-board"].plugin_dir == PLUGIN_DIR
 
 
-def test_load_all_resolves_no_routes_and_five_schemas():
-    """``load_all`` resolves the plugin with no api routes + 5 schemas."""
+def test_load_all_resolves_no_routes_and_six_schemas():
+    """``load_all`` resolves the plugin with no api routes + 6 schemas."""
     loaded = loader.load_all()
     by_id = {p.id: p for p in loaded}
     plugin = by_id.get("coordinator-board")
@@ -84,10 +87,11 @@ def test_load_all_resolves_no_routes_and_five_schemas():
     )
     # api.py is gone — no routes contributed by the plugin.
     assert plugin.routes == []
-    # Five schemas: canvas + operator-message + tile + thread + decision.
-    assert len(plugin.schemas) == 5
+    # Six schemas: coordinator + canvas + operator-message + tile + thread + decision.
+    assert len(plugin.schemas) == 6
     schema_ids = {s.set_id for s in plugin.schemas}
     assert schema_ids == {
+        "dashboard.coordinator",
         "dashboard.coordinator-canvas",
         "dashboard.operator-message-to-coordinator",
         "dashboard.coordinator-tile",
@@ -107,6 +111,26 @@ def test_static_files_present():
 
 
 # ── Setting schemas ──────────────────────────────────────────────────
+
+
+class TestCoordinatorSchema:
+    def _validate(self, payload):
+        coord_schemas.CoordinatorV1.validate(payload)
+
+    def test_minimum_payload_passes(self):
+        self._validate({"session_id": "auto-0503-230356"})
+
+    def test_missing_session_id_rejected(self):
+        with pytest.raises(SchemaValidationError):
+            self._validate({})
+
+    def test_blank_session_id_rejected(self):
+        with pytest.raises(SchemaValidationError):
+            self._validate({"session_id": "   "})
+
+    def test_unknown_field_rejected(self):
+        with pytest.raises(SchemaValidationError):
+            self._validate({"session_id": "auto-1", "extra": True})
 
 
 class TestCoordinatorCanvasSchema:
@@ -339,6 +363,7 @@ def test_schema_synopsis_published():
 def test_schema_field_metadata_populated():
     """Each new schema declares ``_field_metadata`` so ``set schema`` works."""
     for cls in (
+        coord_schemas.CoordinatorV1,
         coord_schemas.CoordinatorTileV1,
         coord_schemas.CoordinatorThreadV1,
         coord_schemas.CoordinatorDecisionV1,

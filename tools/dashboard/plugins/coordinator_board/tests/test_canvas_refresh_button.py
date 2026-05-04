@@ -55,8 +55,9 @@ def _node_available() -> bool:
 #
 #   1. serves the schema-meta payloads each ``Schema.of`` proxy needs
 #      to construct itself (one per (set_id, revision) the page binds);
-#   2. returns seeded members for the coordinator-canvas read and an
-#      empty list for every other read; and
+#   2. returns a seeded singleton row for the coordinator binding,
+#      seeded members for the coordinator-canvas read, and an empty
+#      list for every other read; and
 #   3. captures every ``POST /api/graph/setting`` body into ``writes``
 #      so the test can assert payload shape.
 #
@@ -99,6 +100,8 @@ function meta(setId, revision, accessPattern, keyStrategy, variants) {
 }
 
 const META = {
+  'dashboard.coordinator#1':
+    meta('dashboard.coordinator', 1, 'singleton', 'fixed:default'),
   'dashboard.coordinator-canvas#1':
     meta('dashboard.coordinator-canvas', 1, 'keyed_per_entity', 'natural'),
   'dashboard.operator-message-to-coordinator#1':
@@ -145,7 +148,18 @@ Schema._setFetchOverride(async (path, opts) => {
     });
     return { ok: true, status: 200, json: async () => ({ id: 'stub' }) };
   }
-  // 3) list read — /api/graph/settings/<set_id>(?target_revision=N).
+  // 3) keyed singleton read — /api/graph/settings/<set_id>/<key>.
+  const keyed = path.match(/^\/api\/graph\/settings\/([^/?]+)\/([^/?]+)(?:\?.*)?$/);
+  if (keyed) {
+    const setId = decodeURIComponent(keyed[1]);
+    const key = decodeURIComponent(keyed[2]);
+    if (setId === 'dashboard.coordinator' && key === 'default') {
+      const row = seeded.coordinator || null;
+      if (!row) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => row };
+    }
+  }
+  // 4) list read — /api/graph/settings/<set_id>(?target_revision=N).
   const m = path.match(/^\/api\/graph\/settings\/([^/?]+)(?:\?.*)?$/);
   if (m) {
     const setId = decodeURIComponent(m[1]);
@@ -201,12 +215,17 @@ class TestCanvasRefreshButton:
 
     def test_writes_refresh_request_decision_with_coord_session(self):
         """Acceptance #1 — operator tap writes a decision row whose
-        ``target_session`` equals the coord-session pulled from the
-        canvas member's key."""
+        ``target_session`` equals the explicit coordinator binding,
+        not the latest canvas member's key."""
         seeded = {
+            "coordinator": {
+                "key": "default",
+                "payload": {"session_id": "auto-coord-9"},
+                "updated_at": "2026-04-30T00:01:00Z",
+            },
             "canvas": [
                 {
-                    "key": "auto-coord-9",
+                    "key": "auto-canvas-owner",
                     "payload": {"question": "ship or hold?"},
                     "updated_at": "2026-04-30T00:00:00Z",
                 },
@@ -246,9 +265,14 @@ class TestCanvasRefreshButton:
         tap, even though ``loadBoard`` typically completes before the
         decision write — i.e. the legacy 700ms-timer race is gone."""
         seeded = {
+            "coordinator": {
+                "key": "default",
+                "payload": {"session_id": "auto-coord-fast"},
+                "updated_at": "2026-04-30T00:01:00Z",
+            },
             "canvas": [
                 {
-                    "key": "auto-coord-fast",
+                    "key": "auto-canvas-owner-fast",
                     "payload": {"question": "?"},
                     "updated_at": "2026-04-30T00:00:00Z",
                 },
@@ -293,9 +317,14 @@ class TestCanvasRefreshButton:
         """Acceptance #3 — tapping the button while it shows 'Refresh
         requested' returns it to idle; no second decision row is written."""
         seeded = {
+            "coordinator": {
+                "key": "default",
+                "payload": {"session_id": "auto-coord-x"},
+                "updated_at": "2026-04-30T00:01:00Z",
+            },
             "canvas": [
                 {
-                    "key": "auto-coord-x",
+                    "key": "auto-canvas-owner-x",
                     "payload": {"question": "?"},
                     "updated_at": "2026-04-30T00:00:00Z",
                 },
@@ -326,14 +355,14 @@ class TestCanvasRefreshButton:
             f"{out['writesAfterSecondTap']} writes"
         )
 
-    def test_no_canvas_skip_decision_write_but_still_settle_state(self):
-        """Edge — operator hits refresh before the canvas has loaded
-        (no member yet). No decision row is written (no target session
-        to forward to), but the state still settles to 'requested' so
-        the affordance feels alive."""
+    def test_no_binding_skips_decision_write_even_with_canvas(self):
+        """Edge — no explicit coordinator binding means no decision row
+        is written, even if a canvas exists. The button still settles to
+        'requested' so the affordance feels alive."""
         out = _run(
             """
-            // init()'s loadBoard saw an empty canvas list — no _coordSession.
+            // init() saw a canvas but no dashboard.coordinator binding —
+            // board-level refresh must not fall back to canvas ownership.
             c.onRefreshAll();
             await new Promise((resolve) => setImmediate(resolve));
             return {
@@ -342,10 +371,19 @@ class TestCanvasRefreshButton:
                 coordSession: c._coordSession,
             };
             """,
-            seeded={"canvas": []},
+            seeded={
+                "coordinator": None,
+                "canvas": [
+                    {
+                        "key": "auto-canvas-owner-without-binding",
+                        "payload": {"question": "?"},
+                        "updated_at": "2026-04-30T00:00:00Z",
+                    },
+                ],
+            },
         )
         assert out["coordSession"] == "", out
         assert out["writeCount"] == 0, (
-            f"no canvas member → no coord session → no decision row: {out}"
+            f"no dashboard.coordinator binding → no decision row: {out}"
         )
         assert out["refreshState"] == "requested", out

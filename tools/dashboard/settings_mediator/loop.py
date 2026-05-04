@@ -110,7 +110,6 @@ class Services:
     surface tight.
     """
     session_send: Callable[[str, str], Awaitable[None]]
-    find_session_by_role: Callable[[str], Awaitable[str | None]]
     log: logging.Logger = field(default_factory=lambda: logger)
     crosstalk: Any = field(default_factory=_UnboundCrosstalk)
 

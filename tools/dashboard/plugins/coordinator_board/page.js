@@ -10,6 +10,7 @@
 // declared as named entries, with tile/thread bound at revision 2.
 //
 //   reads + setting.changed subscribes:
+//     dashboard.coordinator
 //     dashboard.coordinator-canvas
 //     dashboard.operator-message-to-coordinator
 //     dashboard.coordinator-tile  (target_revision=2)
@@ -52,10 +53,10 @@ function coordinatorBoard() {
     lastAction: '',
     operatorDraft: '',
     refreshState: 'idle',
-    // Latest canvas member's key — the ``<coord-session>`` that owns the
-    // currently-rendered canvas. Captured on every canvas read so the
-    // canvas-corner refresh button can target the coordinator session
-    // without a separate server contract.
+    // Explicit board-owner binding from ``dashboard.coordinator``.
+    // Board-level operator actions (freeform message routing,
+    // canvas-corner refresh) target this session rather than inferring
+    // ownership from the latest canvas row.
     _coordSession: '',
     wins: 0,
     winCelebrating: false,
@@ -120,9 +121,11 @@ function coordinatorBoard() {
       // are revision-2-aware: ``target_revision=2`` so any v1 rows
       // resolve through the registered upconvert chain.
       const [
+        coordinator,
         canvas, op, tiles, threads, decisions,
         sprints, beads, convergent, followups, docs,
       ] = await Promise.all([
+        this.Coordinator.read('default'),
         this.Canvas.all(),
         this.OperatorMsg.all(),
         this.Tile.all({ target_revision: TILE_SCHEMA_REVISION }),
@@ -135,8 +138,8 @@ function coordinatorBoard() {
         this.Docs.all(),
       ]);
 
+      this._coordSession = this._normalizeCoordinator(coordinator);
       const latestCanvas = this._latest(canvas);
-      this._coordSession = (latestCanvas && latestCanvas.key) || '';
       this.data.canvas = this._normalizeCanvas(latestCanvas);
       this.data.operatorMessage = this._normalizeOperatorMessage(this._latest(op));
       this.data.tiles = (tiles || []).map(m => this._normalizeTile(m));
@@ -166,6 +169,7 @@ function coordinatorBoard() {
       // Each subscription targets exactly the named proxy's set_id —
       // routed through the proxy so a single grep against page.js can
       // still prove every subscribed set (see auto-obo63 acceptance #2).
+      this._unsubscribers.push(this.Coordinator.onChange(        () => this._refreshCoordinator()));
       this._unsubscribers.push(this.Canvas.onChange(             () => this._refreshCanvas()));
       this._unsubscribers.push(this.OperatorMsg.onChange(        () => this._refreshOperatorMessage()));
       this._unsubscribers.push(this.Tile.onChange(               () => this._refreshTiles()));
@@ -178,11 +182,14 @@ function coordinatorBoard() {
       this._unsubscribers.push(this.Docs.onChange(               () => this._refreshDocs()));
     },
 
+    async _refreshCoordinator() {
+      const member = await this.Coordinator.read('default');
+      this._coordSession = this._normalizeCoordinator(member);
+    },
+
     async _refreshCanvas() {
       const members = await this.Canvas.all();
-      const latest = this._latest(members);
-      this._coordSession = (latest && latest.key) || '';
-      this.data.canvas = this._normalizeCanvas(latest);
+      this.data.canvas = this._normalizeCanvas(this._latest(members));
     },
 
     async _refreshOperatorMessage() {
@@ -265,6 +272,11 @@ function coordinatorBoard() {
         if (ta > tb) return 1;
         return 0;
       });
+    },
+
+    _normalizeCoordinator(member) {
+      const p = (member && member.payload) || {};
+      return typeof p.session_id === 'string' ? p.session_id : '';
     },
 
     _normalizeCanvas(member) {
@@ -666,8 +678,8 @@ function coordinatorBoard() {
       this.loadBoard();
       // Write a decision row so the mediator forwards "operator
       // requests a canvas refresh" to the coordinator session. The
-      // canvas is keyed by ``<coord-session>``; ``_coordSession`` is
-      // the latest canvas member's key, captured on every canvas read.
+      // target session comes from the explicit ``dashboard.coordinator``
+      // singleton binding rather than the latest canvas row.
       const coordSession = this._coordSession;
       if (coordSession) {
         this.Decision.append({
@@ -761,6 +773,7 @@ function coordinatorBoard() {
   if (_schemaRuntime && typeof _schemaRuntime.alpine === 'function') {
     return _schemaRuntime.alpine(state, {
       schemas: {
+        Coordinator:        'dashboard.coordinator',
         Canvas:             'dashboard.coordinator-canvas',
         OperatorMsg:        'dashboard.operator-message-to-coordinator',
         Tile:               { set_id: 'dashboard.coordinator-tile',   revision: TILE_SCHEMA_REVISION },
