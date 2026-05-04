@@ -26,8 +26,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from .registry import register_schema
-
 
 SET_ID = "autonomy.workspace.mount"
 SCHEMA_REVISION = 1
@@ -141,6 +139,3 @@ class _WorkspaceMountSchemaAdapter(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: {exc}"
             ) from exc
-
-
-register_schema(SET_ID, SCHEMA_REVISION, _WorkspaceMountSchemaAdapter)

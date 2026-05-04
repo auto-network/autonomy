@@ -343,28 +343,36 @@ def test_explicit_flush_is_idempotent(graph_db_env):
 
 
 # ── 7. registration of a fresh schema flushes on next DB op ─
+#
+# ``_DemoSchema`` is built inside the tests so its
+# ``__init_subclass__`` auto-registration is scoped to the test that
+# uses it; the per-test ``_isolate_schema_registry`` fixture cleans it
+# up afterward. A module-level definition would auto-register at import
+# time and pollute every other test in the file.
 
 
-class _DemoSchema(schemas.SettingSchema):
-    set_id = "autonomy.test.demo"
-    schema_revision = 1
+def _build_demo_schema() -> type:
+    class _DemoSchema(schemas.SettingSchema):
+        set_id = "autonomy.test.demo"
+        schema_revision = 1
 
-    _field_metadata = {
-        "label": {
-            "type": "string",
-            "required": True,
-            "description": "Demo label field",
-        },
-        "count": {
-            "type": "integer",
-            "description": "Demo count field",
-            "default": 0,
-        },
-    }
+        _field_metadata = {
+            "label": {
+                "type": "string",
+                "required": True,
+                "description": "Demo label field",
+            },
+            "count": {
+                "type": "integer",
+                "description": "Demo count field",
+                "default": 0,
+            },
+        }
+    return _DemoSchema
 
 
 def test_newly_registered_schema_flushes_on_first_db_op(graph_db_env):
-    schemas.register_schema("autonomy.test.demo", 1, _DemoSchema)
+    _build_demo_schema()  # auto-registers via __init_subclass__
 
     # Force a writable connection so the lazy flush fires.
     _trigger_flush(graph_db_env)
@@ -378,9 +386,11 @@ def test_newly_registered_schema_flushes_on_first_db_op(graph_db_env):
 
 def test_register_schema_synopsis_round_trip(graph_db_env, monkeypatch):
     """A module-level SYNOPSIS dict surfaces in autonomy.schema.synopsis."""
+    demo_cls = _build_demo_schema()
+
     # Stamp a SYNOPSIS onto _DemoSchema's defining module.
     import sys as _sys
-    mod = _sys.modules[_DemoSchema.__module__]
+    mod = _sys.modules[demo_cls.__module__]
     monkeypatch.setattr(
         mod,
         "SYNOPSIS",
@@ -391,7 +401,6 @@ def test_register_schema_synopsis_round_trip(graph_db_env, monkeypatch):
         },
         raising=False,
     )
-    schemas.register_schema("autonomy.test.demo", 1, _DemoSchema)
 
     _trigger_flush(graph_db_env)
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 from .registry import (
     SchemaValidationError,
     SettingSchema,
-    register_schema,
 )
 
 
@@ -113,6 +112,3 @@ class WorkspaceArtifactV1(SettingSchema):
                     f"{cls.__name__}: {opt!r} must be a string or null, "
                     f"got {type(payload[opt]).__name__}"
                 )
-
-
-register_schema(SET_ID, SCHEMA_REVISION, WorkspaceArtifactV1)

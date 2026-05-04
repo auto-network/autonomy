@@ -22,7 +22,6 @@ from tools.graph.schemas.registry import (
     SettingSchema,
     append_only_log,
     field,
-    register_schema,
 )
 
 
@@ -70,8 +69,3 @@ class SessionUploadV1(SettingSchema):
             "viewer's timestamp-merge into the displayed entries."
         ),
     )
-
-
-register_schema(
-    SESSION_UPLOAD_SET_ID, SCHEMA_REVISION, SessionUploadV1,
-)

@@ -12,7 +12,6 @@ from typing import Any
 from tools.graph.schemas.registry import (
     SchemaValidationError,
     SettingSchema,
-    register_schema,
 )
 
 
@@ -56,6 +55,3 @@ class DashboardPluginV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"
             )
-
-
-register_schema(PLUGIN_SET_ID, PLUGIN_SCHEMA_REVISION, DashboardPluginV1)

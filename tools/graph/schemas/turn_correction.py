@@ -27,7 +27,6 @@ from .registry import (
     SchemaValidationError,
     SettingSchema,
     keyed_per_entity,
-    register_schema,
 )
 
 
@@ -175,6 +174,3 @@ def resolve_payload(payload: dict | None) -> dict:
                 continue
             merged[k] = v
     return merged
-
-
-register_schema(SET_ID, SCHEMA_REVISION, TurnCorrectionSettingsV1)

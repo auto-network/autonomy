@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, register_schema
+from .registry import SchemaValidationError, SettingSchema
 
 
 AGENT_ACTIONS_SET_ID = "dashboard.agent-actions"
@@ -239,6 +239,15 @@ class AgentActionV2(SettingSchema):
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"
             )
 
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        """Identity upconvert: ``#1`` payloads pass through unchanged.
+
+        ``input_prompt`` is optional in ``#2``, so a ``#1`` row without it is
+        already a valid ``#2`` payload.
+        """
+        return dict(payload)
+
 
 class AgentActionV1(SettingSchema):
     """Legacy ``dashboard.agent-actions#1`` shape — identical to ``#2``
@@ -267,19 +276,3 @@ class AgentActionV1(SettingSchema):
                 "at #1 so storage stamps the right revision"
             )
         AgentActionV2.validate(payload)
-
-
-def _upconvert_v1_to_v2(payload: dict) -> dict:
-    """Identity upconvert: ``#1`` payloads pass through unchanged.
-
-    ``input_prompt`` is optional in ``#2``, so a ``#1`` row without it is
-    already a valid ``#2`` payload.
-    """
-    return dict(payload)
-
-
-register_schema(AGENT_ACTIONS_SET_ID, 1, AgentActionV1)
-register_schema(
-    AGENT_ACTIONS_SET_ID, AGENT_ACTIONS_REVISION, AgentActionV2,
-    upconvert_from_prev=_upconvert_v1_to_v2,
-)

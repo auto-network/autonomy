@@ -45,7 +45,6 @@ from tools.graph.schemas.registry import (
     append_only_log,
     field,
     keyed_per_entity,
-    register_schema,
     singleton,
 )
 
@@ -66,10 +65,9 @@ VALID_POSITION_KINDS_PRESENCE = ("none", "tile", "zone", "coord", "label")
 VALID_POSITION_KINDS_PING = ("tile", "zone", "coord", "label")
 
 
-# SYNOPSIS must be defined ABOVE register_schema() — flush_schema_meta
-# reads ``sys.modules[model_cls.__module__].SYNOPSIS`` at registration
-# time, so a SYNOPSIS placed below register_schema would be missed.
-# See pitfall ``graph://4f142305-6fb``.
+# SYNOPSIS must be defined ABOVE the schema classes that auto-register —
+# ``flush_schema_meta`` reads ``sys.modules[model_cls.__module__].SYNOPSIS``
+# when the DB connection is first opened. See pitfall ``graph://4f142305-6fb``.
 SYNOPSIS = {
     "summary": (
         "Multiplayer surface substrate: per-(surface, participant) "
@@ -610,15 +608,4 @@ class Presence:
         return f"hsl({h % 360} 70% 60%)"
 
 
-# ── Registration (must come AFTER SYNOPSIS) ──────────────────
-
-
-register_schema(
-    SURFACE_PRESENCE_SET_ID, SCHEMA_REVISION, SurfacePresenceV1,
-)
-register_schema(
-    SURFACE_PING_SET_ID, SCHEMA_REVISION, SurfacePingV1,
-)
-register_schema(
-    OPERATOR_ACTIVITY_SET_ID, SCHEMA_REVISION, OperatorActivityV1,
-)
+# Schemas auto-register via ``SettingSchema.__init_subclass__``.

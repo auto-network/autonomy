@@ -12,7 +12,6 @@ from tools.graph.schemas.registry import (
     SchemaValidationError,
     SettingSchema,
     cache,
-    register_schema,
 )
 
 
@@ -162,13 +161,6 @@ def _validate_window(schema_name: str, window_name: str, window: Any) -> None:
         raise SchemaValidationError(
             f"{schema_name}: window {window_name!r} resets_at must be int or null"
         )
-
-
-register_schema(
-    HARNESS_USAGE_SET_ID,
-    HARNESS_USAGE_SCHEMA_REVISION,
-    DashboardHarnessUsageV1,
-)
 
 
 def fingerprint_secret(secret: str) -> str:
