@@ -47,6 +47,8 @@ def _row(
     live=False,
     commits=None,
     dirty_files=None,
+    cherry_pick_eligible=False,
+    cherry_pick_commit=None,
 ):
     if commits is None and ahead:
         commits = [_commit()]
@@ -62,6 +64,8 @@ def _row(
         clone_stale=clone_stale,
         rebase_required=rebase_required,
         session_live=live,
+        cherry_pick_eligible=cherry_pick_eligible,
+        cherry_pick_commit=cherry_pick_commit,
         commits=commits or [],
         dirty_files=dirty_files or [],
     )
@@ -279,6 +283,66 @@ class TestWorktreeAPI:
         assert called["args"] == ("auto-test", "autonomy")
         assert fake.refresh_count == 1
 
+    def test_merge_endpoint_writes_worktree_merge_timeline_row(
+        self, test_client, monkeypatch,
+    ):
+        """Bead auto-ecmss: a successful ff-merge writes a kind='worktree-merge'
+        row via record_worktree_merge_run with reason='ff'."""
+        server, _fake = _install_fake_monitor(monkeypatch, [_row()])
+
+        def fake_merge(_session_name, _repo_name):
+            return {
+                "commit": "abc1234",
+                "message": "merged",
+                "target_repo": "/repo",
+                "target_branch": "master",
+            }
+
+        monkeypatch.setattr(server, "merge_session_worktree", fake_merge)
+        captured = {}
+
+        def fake_record(**kwargs):
+            captured.update(kwargs)
+            return f"wt-{kwargs['commit_hash'][:12]}"
+
+        monkeypatch.setattr(server, "record_worktree_merge_run", fake_record)
+
+        resp = test_client.post("/api/worktrees/auto-test/autonomy/merge")
+
+        assert resp.status_code == 200
+        assert captured["reason"] == "ff"
+        assert captured["commit_hash"] == "abc1234"
+        assert captured["commit_message"] == "merged"
+        assert captured["container_name"] == "auto-test"
+        assert captured["branch"] == "session/auto-test"
+        assert captured["branch_base"] == "master"
+        assert captured["target_repo"] == "/repo"
+
+    def test_merge_endpoint_swallows_timeline_writer_failure(
+        self, test_client, monkeypatch,
+    ):
+        """A writer hiccup must not break the merge response (best-effort)."""
+        server, _fake = _install_fake_monitor(monkeypatch, [_row()])
+
+        def fake_merge(_session_name, _repo_name):
+            return {
+                "commit": "abc1234",
+                "message": "merged",
+                "target_repo": "/repo",
+                "target_branch": "master",
+            }
+
+        def boom(**_kwargs):
+            raise RuntimeError("dispatch.db full")
+
+        monkeypatch.setattr(server, "merge_session_worktree", fake_merge)
+        monkeypatch.setattr(server, "record_worktree_merge_run", boom)
+
+        resp = test_client.post("/api/worktrees/auto-test/autonomy/merge")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "commit": "abc1234", "message": "merged"}
+
     def test_merge_endpoint_returns_409_when_cached_row_not_ff_eligible(self, test_client, monkeypatch):
         server, _fake = _install_fake_monitor(
             monkeypatch,
@@ -424,6 +488,147 @@ class TestWorktreeAPI:
         }
         assert called["args"] == ("auto-test", "autonomy", "abcdef1")
         assert fake.refresh_count == 1
+
+    def test_commit_merge_endpoint_writes_worktree_merge_timeline_row(
+        self, test_client, monkeypatch,
+    ):
+        """Bead auto-ecmss: commit-merge writes a row with reason='commit-merge'."""
+        server, _fake = _install_fake_monitor(monkeypatch, [_row()])
+
+        def fake_merge(_session_name, _repo_name, _sha):
+            return {
+                "commit": "abcdef1234567890",
+                "message": "Add worktree dashboard",
+                "target_repo": "/repo",
+                "target_branch": "master",
+            }
+
+        monkeypatch.setattr(server, "merge_session_worktree_commit", fake_merge)
+        captured = {}
+
+        def fake_record(**kwargs):
+            captured.update(kwargs)
+            return f"wt-{kwargs['commit_hash'][:12]}"
+
+        monkeypatch.setattr(server, "record_worktree_merge_run", fake_record)
+
+        resp = test_client.post("/api/worktrees/auto-test/autonomy/commits/abcdef1/merge")
+
+        assert resp.status_code == 200
+        assert captured["reason"] == "commit-merge"
+        assert captured["commit_hash"] == "abcdef1234567890"
+        assert captured["commit_message"] == "Add worktree dashboard"
+        assert captured["container_name"] == "auto-test"
+        # No row lookup on this endpoint, so branch falls back to the
+        # session/* convention.
+        assert captured["branch"] == "session/auto-test"
+        assert captured["branch_base"] == "master"
+
+    def test_commit_merge_endpoint_swallows_timeline_writer_failure(
+        self, test_client, monkeypatch,
+    ):
+        server, _fake = _install_fake_monitor(monkeypatch, [_row()])
+
+        def fake_merge(_session_name, _repo_name, _sha):
+            return {
+                "commit": "abcdef1234567890",
+                "message": "ok",
+                "target_repo": "/repo",
+                "target_branch": "master",
+            }
+
+        def boom(**_kwargs):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(server, "merge_session_worktree_commit", fake_merge)
+        monkeypatch.setattr(server, "record_worktree_merge_run", boom)
+
+        resp = test_client.post("/api/worktrees/auto-test/autonomy/commits/abcdef1/merge")
+
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+    def test_cherry_pick_endpoint_writes_worktree_merge_timeline_row(
+        self, test_client, monkeypatch,
+    ):
+        """Bead auto-ecmss: cherry-pick writes a row with reason='cherry-pick'."""
+        server, _fake = _install_fake_monitor(
+            monkeypatch,
+            [_row(cherry_pick_eligible=True, cherry_pick_commit="abcdef1234567890")],
+        )
+
+        def fake_cherry_pick(_session_name, _repo_name):
+            return {
+                "commit": "fedcba9876543210",
+                "source_commit": "abcdef1234567890",
+                "message": "Trim header padding",
+                "target_repo": "/repo",
+                "target_branch": "master",
+            }
+
+        monkeypatch.setattr(server, "cherry_pick_session_worktree", fake_cherry_pick)
+
+        async def fake_signal(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(
+            server, "_signal_session_merge_celebration", fake_signal,
+        )
+
+        captured = {}
+
+        def fake_record(**kwargs):
+            captured.update(kwargs)
+            return f"wt-{kwargs['commit_hash'][:12]}"
+
+        monkeypatch.setattr(server, "record_worktree_merge_run", fake_record)
+
+        resp = test_client.post("/api/worktrees/auto-test/autonomy/cherry-pick")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["commit"] == "fedcba9876543210"
+        assert captured["reason"] == "cherry-pick"
+        assert captured["commit_hash"] == "fedcba9876543210"
+        assert captured["commit_message"] == "Trim header padding"
+        assert captured["container_name"] == "auto-test"
+        assert captured["branch"] == "session/auto-test"
+        assert captured["branch_base"] == "master"
+
+    def test_cherry_pick_endpoint_swallows_timeline_writer_failure(
+        self, test_client, monkeypatch,
+    ):
+        server, _fake = _install_fake_monitor(
+            monkeypatch,
+            [_row(cherry_pick_eligible=True, cherry_pick_commit="abcdef1234567890")],
+        )
+
+        def fake_cherry_pick(_session_name, _repo_name):
+            return {
+                "commit": "fedcba9876543210",
+                "source_commit": "abcdef1234567890",
+                "message": "Trim header padding",
+                "target_repo": "/repo",
+                "target_branch": "master",
+            }
+
+        async def fake_signal(*_args, **_kwargs):
+            return None
+
+        def boom(**_kwargs):
+            raise RuntimeError("dispatch.db locked")
+
+        monkeypatch.setattr(server, "cherry_pick_session_worktree", fake_cherry_pick)
+        monkeypatch.setattr(
+            server, "_signal_session_merge_celebration", fake_signal,
+        )
+        monkeypatch.setattr(server, "record_worktree_merge_run", boom)
+
+        resp = test_client.post("/api/worktrees/auto-test/autonomy/cherry-pick")
+
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
 
     def test_commit_merge_endpoint_returns_structured_rebase_required_payload(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row(ff=False, live=True)])

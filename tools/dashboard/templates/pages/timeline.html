@@ -177,6 +177,7 @@
         x-show="!e._hiddenByParent"
         class="tl-card"
         :class="{'tl-card-lib': e._isLibrarian, 'open': e._open}"
+        :data-testid="e._isWorktreeMerge ? ('tl-card-worktree-merge-' + e.run_id) : null"
         @click="e._open = !e._open"
       >
 
@@ -189,13 +190,15 @@
           <span x-show="e._isLibrarian" class="tl-lib-icon" style="display:none">📚</span>
           <!-- Agentic: lightning icon -->
           <span x-show="e._isAgentic" class="tl-lib-icon" style="display:none">⚡</span>
-          <!-- Bead dispatch: status dot -->
+          <!-- Bead dispatch / worktree merge: status dot (green for DONE merges) -->
           <span x-show="!e._isLibrarian && !e._isAgentic" class="tl-dot" :class="e._dotCls"></span>
 
           <!-- Bead dispatch: show bead id inline -->
-          <span x-show="!e._isLibrarian && !e._isAgentic && e.bead_id" class="tl-bead-id" x-text="e.bead_id" style="display:none"></span>
+          <span x-show="!e._isLibrarian && !e._isAgentic && !e._isWorktreeMerge && e.bead_id" class="tl-bead-id" x-text="e.bead_id" style="display:none"></span>
           <!-- Agentic: show action label inline (e.g. "Update Title & Summary") -->
           <span x-show="e._isAgentic && e.action_label" class="tl-bead-id" x-text="e.action_label" style="display:none"></span>
+          <!-- Worktree merge: method badge ('ff' / 'commit-merge' / 'cherry-pick') -->
+          <span x-show="e._isWorktreeMerge" class="tl-method-badge" x-text="e.reason || ''" style="display:none"></span>
           <!-- auto-wvdhs: 📔 badge — present iff the agent wrote a journal
                entry during wrap-up. Anchors to /activity#journal-<id> on
                the Attention tab so a click jumps straight to the entry. -->
@@ -214,12 +217,22 @@
         <div class="tl-title-row">
           <span
             class="tl-title-block"
-            x-text="e._isLibrarian ? e._libTitle : (e.title || e.bead_id || '(no title)')"
+            x-text="e._isWorktreeMerge ? e._wtMergeTitle : (e._isLibrarian ? e._libTitle : (e.title || e.bead_id || '(no title)'))"
           ></span>
         </div>
 
+        <!-- Row 2 (worktree merge): commit subject + short SHA, no priority badge -->
+        <div class="tl-row2" x-show="e._isWorktreeMerge" style="display:none">
+          <div class="tl-reason" x-text="e.commit_message || ''"></div>
+          <div class="tl-row2-badges">
+            <template x-if="e.commit_hash">
+              <span class="tl-ft tl-ft-done" x-text="(e.commit_hash || '').slice(0,7)"></span>
+            </template>
+          </div>
+        </div>
+
         <!-- Row 2 (dispatch): reason + priority/status badges -->
-        <div class="tl-row2" x-show="!e._isLibrarian">
+        <div class="tl-row2" x-show="!e._isLibrarian && !e._isWorktreeMerge">
           <div
             class="tl-reason"
             :style="e._open ? 'white-space: normal; overflow: visible; text-overflow: clip;' : ''"
@@ -274,7 +287,11 @@
         <div class="tl-exp-detail" x-show="e._open && !e._isLibrarian" @click.stop style="display:none">
           <div class="tl-exp-row">
             <div class="tl-exp-links">
-              <a class="tl-exp-link" :href="'/dispatch/trace/' + e.run_id">Trace &#8594;</a>
+              <!-- Worktree-merge rows have no run dir / agent trace, so only
+                   show the Trace link for dispatched runs. -->
+              <template x-if="!e._isWorktreeMerge">
+                <a class="tl-exp-link" :href="'/dispatch/trace/' + e.run_id">Trace &#8594;</a>
+              </template>
               <!-- Bead dispatch: link to the bead -->
               <template x-if="!e._isAgentic && e.bead_id">
                 <a class="tl-exp-link" :href="'/bead/' + e.bead_id">Bead &#8594;</a>
