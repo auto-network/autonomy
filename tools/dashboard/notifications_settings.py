@@ -53,7 +53,6 @@ from tools.graph.schemas.registry import (
     SettingSchema,
     field,
     keyed_per_entity,
-    register_schema,
     singleton,
 )
 
@@ -73,10 +72,9 @@ ASK_TEXT_MAX_BYTES = 2048
 VALID_VOTE_DIRECTIONS = ("up", "down")
 
 
-# SYNOPSIS must be defined ABOVE register_schema() — flush_schema_meta
-# reads ``sys.modules[model_cls.__module__].SYNOPSIS`` at registration
-# time, so a SYNOPSIS placed below register_schema would be missed
-# (pitfall ``graph://4f142305-6fb``).
+# SYNOPSIS must be defined ABOVE the schema classes that auto-register —
+# ``flush_schema_meta`` reads ``sys.modules[model_cls.__module__].SYNOPSIS``
+# when the DB connection is first opened (pitfall ``graph://4f142305-6fb``).
 SYNOPSIS = {
     "summary": (
         "Activity tab notifications substrate: per-session asks "
@@ -400,12 +398,4 @@ class OperatorDismissedAsksV1(SettingSchema):
             )
 
 
-# ── Registration (must come AFTER SYNOPSIS) ──────────────────
-
-
-register_schema(SESSION_ASK_SET_ID, SCHEMA_REVISION, SessionAskV1)
-register_schema(ASK_VOTE_SET_ID, SCHEMA_REVISION, AskVoteV1)
-register_schema(ASK_REFRESH_SET_ID, SCHEMA_REVISION, AskRefreshRequestV1)
-register_schema(
-    OPERATOR_DISMISSED_SET_ID, SCHEMA_REVISION, OperatorDismissedAsksV1,
-)
+# Schemas auto-register via ``SettingSchema.__init_subclass__``.

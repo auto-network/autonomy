@@ -39,7 +39,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field, register_schema
+from .registry import SchemaValidationError, SettingSchema, field
 
 
 SET_ID = "autonomy.capability.contract"
@@ -259,6 +259,3 @@ class CapabilityContractV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'ui_hints' must be an object"
             )
-
-
-register_schema(SET_ID, SCHEMA_REVISION, CapabilityContractV1)

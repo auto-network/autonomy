@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, register_schema
+from .registry import SchemaValidationError, SettingSchema
 
 
 SET_ID = "autonomy.workspace.capability.enable"
@@ -176,6 +176,3 @@ class WorkspaceCapabilityEnableV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'notes' must be a string"
             )
-
-
-register_schema(SET_ID, SCHEMA_REVISION, WorkspaceCapabilityEnableV1)

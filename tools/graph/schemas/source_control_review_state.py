@@ -24,7 +24,6 @@ from .registry import (
     SettingSchema,
     cache,
     field,
-    register_schema,
 )
 
 
@@ -258,6 +257,3 @@ def parse_state_key(key: str) -> tuple[str, str]:
             f"state key has empty segment: {key!r}"
         )
     return repo_slug, review_id
-
-
-register_schema(SET_ID, SCHEMA_REVISION, SourceControlReviewStateV1)

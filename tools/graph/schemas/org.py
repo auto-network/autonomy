@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SettingSchema, SchemaValidationError, register_schema
+from .registry import SettingSchema, SchemaValidationError
 
 
 ORG_SET_ID = "autonomy.org"
@@ -133,6 +133,3 @@ class OrgV1(SettingSchema):
                 f"{cls.__name__}: 'type' must be one of {VALID_ORG_TYPES}, "
                 f"got {payload['type']!r}"
             )
-
-
-register_schema(ORG_SET_ID, ORG_REVISION, OrgV1)

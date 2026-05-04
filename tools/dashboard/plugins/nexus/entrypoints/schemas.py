@@ -19,8 +19,9 @@ the cross-field shape rules the metadata cannot yet describe
 extra-field rejection).
 
 Eager-import note: this module is referenced from ``server.py`` so
-that ``register_schema`` runs before ``GraphDB._init_schema`` calls
-``flush_schema_meta``. See pitfall ``graph://3fe60c25-fab``.
+that auto-registration via ``SettingSchema.__init_subclass__`` runs
+before ``GraphDB._init_schema`` calls ``flush_schema_meta``. See
+pitfall ``graph://3fe60c25-fab``.
 """
 from __future__ import annotations
 
@@ -31,7 +32,6 @@ from tools.graph.schemas.registry import (
     SettingSchema,
     field,
     keyed_per_entity,
-    register_schema,
     singleton,
 )
 
@@ -273,8 +273,4 @@ class NexusTileV1(SettingSchema):
             )
 
 
-# ── Registration ─────────────────────────────────────────────────────
-
-
-register_schema(NEXUS_SCENE_SET_ID, SCHEMA_REVISION, NexusSceneV1)
-register_schema(NEXUS_TILE_SET_ID, SCHEMA_REVISION, NexusTileV1)
+# Schemas auto-register via ``SettingSchema.__init_subclass__``.

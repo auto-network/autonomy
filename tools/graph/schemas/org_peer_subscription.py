@@ -18,7 +18,6 @@ from __future__ import annotations
 from .registry import (
     SchemaValidationError,
     SettingSchema,
-    register_schema,
 )
 
 
@@ -84,6 +83,3 @@ class OrgPeerSubscriptionV1(SettingSchema):
                 raise SchemaValidationError(
                     f"{cls.__name__}: peers[{i}] must be a non-empty string"
                 )
-
-
-register_schema(SET_ID, SCHEMA_REVISION, OrgPeerSubscriptionV1)
