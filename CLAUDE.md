@@ -91,6 +91,18 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph thread done <id>` | Mark thread as done | `graph thread done abc123` |
 | `graph thread assign <cap> <thr>` | Assign capture to thread | `graph thread assign cap123 thr456` |
 | `graph thread` / `graph threads` | List active threads | `graph threads --all` |
+| `graph set list` | List all known set_ids visible to caller | `graph set list` |
+| `graph set members <set_id>` | List resolved members of a set | `graph set members dashboard.agent-actions` |
+| `graph set show <id>` | Show a single Setting in detail | `graph set show eb54d2c6-8d` |
+| `graph set read <set_id> <key>` | Resolved effective payload for a member | `graph set read dashboard.agent-actions bead.dry-run-implement` |
+| `graph set schema <set_id>` | Print the registered schema for a set_id | `graph set schema dashboard.agent-actions` |
+| `graph set example <set_id>` | Emit a stub JSON payload for a registered schema | `graph set example dashboard.agent-actions` |
+| `graph set add <set_id> <key> --payload @<file>` | Create a base Setting | `graph set add dashboard.agent-actions bead.ask-question --payload @ask-question.json` |
+| `graph set override / exclude / deprecate / remove` | Lifecycle commands for layered overrides | `graph set --help` for full list |
+| `graph set find <noun>` | Search schemas by topic | `graph set find action` |
+| `graph set migrate <set_id> --target <rev>` | Rewrite stored rows up to a target schema revision | `graph set migrate dashboard.agent-actions --target 2` |
+
+When to read or author a Setting (e.g. dashboard actions, coordinator config, workspace policies), prefer `graph set` over hitting the dashboard HTTP API — it's faster, surfaces the schema, and gives you a stub via `graph set example`.
 
 ### Beads (`bd`)
 | Command | What | Example |
