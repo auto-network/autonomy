@@ -11,7 +11,6 @@ from tools.graph.schemas.agent_actions import (
     AGENT_ACTIONS_SET_ID,
     AgentActionV1,
     AgentActionV2,
-    _upconvert_v1_to_v2,
 )
 from tools.graph.schemas.registry import (
     SchemaValidationError,
@@ -186,8 +185,8 @@ def test_v2_ask_question_realistic_round_trip():
 
 
 def test_upconvert_v1_to_v2_is_identity_for_legacy_payload():
-    """A real-shaped #1 row passes through ``_upconvert_v1_to_v2`` unchanged
-    and the result validates against #2.
+    """A real-shaped #1 row passes through ``AgentActionV2.upconvert_from_prev``
+    unchanged and the result validates against #2.
     """
     legacy = {
         "asset_type": "bead",
@@ -199,7 +198,7 @@ def test_upconvert_v1_to_v2_is_identity_for_legacy_payload():
         "writes": ["bead.comment", "bead.labels"],
         "prompt_template": "audit",
     }
-    upconverted = _upconvert_v1_to_v2(legacy)
+    upconverted = AgentActionV2.upconvert_from_prev(legacy)
     assert upconverted == legacy
     assert "input_prompt" not in upconverted
     AgentActionV2.validate(upconverted)

@@ -19,7 +19,6 @@ from __future__ import annotations
 from .registry import (
     SchemaValidationError,
     SettingSchema,
-    register_schema,
 )
 
 
@@ -77,6 +76,3 @@ class ArtifactPathV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'path' must be a non-empty string"
             )
-
-
-register_schema(SET_ID, SCHEMA_REVISION, ArtifactPathV1)

@@ -123,3 +123,95 @@ def test_upconvert_payload_returns_none_on_gap():
     schemas.register_schema("g.g", 1, V1)
     schemas.register_schema("g.g", 3, V3)  # no 2; no chain
     assert schemas.upconvert_payload("g.g", 1, 3, {"x": 1}) is None
+
+
+# ── Auto-registration via __init_subclass__ ──────────────────
+
+
+def test_auto_register_subclass_with_set_id_and_revision():
+    """A subclass declaring both ``set_id`` and ``schema_revision`` is
+    discoverable via ``get_schema`` without an explicit ``register_schema``
+    call."""
+
+    class V1(schemas.SettingSchema):
+        set_id = "auto.reg"
+        schema_revision = 1
+
+    assert schemas.get_schema("auto.reg", 1) is V1
+
+
+def test_auto_register_skipped_when_revision_missing():
+    """A subclass with only ``set_id`` (no ``schema_revision``) does NOT
+    register — that's an abstract intermediate base."""
+
+    class AbstractBase(schemas.SettingSchema):
+        set_id = "auto.abstract"
+        # schema_revision intentionally omitted
+
+    assert schemas.get_schema("auto.abstract", 0) is None
+    assert schemas.get_schema("auto.abstract", 1) is None
+
+
+def test_auto_register_skipped_when_set_id_missing():
+    """A subclass with only ``schema_revision`` (no ``set_id``) does NOT
+    register — that's an abstract intermediate base."""
+
+    class AbstractBase(schemas.SettingSchema):
+        schema_revision = 1
+        # set_id intentionally omitted
+
+    # Nothing landed under the empty set_id + revision 1 combination.
+    assert schemas.get_schema("", 1) is None
+
+
+def test_auto_register_picks_up_classmethod_upconvert_from_prev():
+    """A subclass defining an ``upconvert_from_prev`` classmethod
+    auto-registers the upconverter alongside the schema."""
+
+    class V1(schemas.SettingSchema):
+        set_id = "auto.up"
+        schema_revision = 1
+
+    class V2(schemas.SettingSchema):
+        set_id = "auto.up"
+        schema_revision = 2
+
+        @classmethod
+        def upconvert_from_prev(cls, payload: dict) -> dict:
+            return {**payload, "v2": True}
+
+    chain = schemas.upconvert_chain("auto.up", 1, 2)
+    assert chain is not None
+    assert len(chain) == 1
+    assert chain[0]({"x": 1}) == {"x": 1, "v2": True}
+
+
+def test_auto_register_idempotent_with_explicit_call():
+    """Explicit ``register_schema`` on the same triple is idempotent
+    after auto-registration — re-registration overwrites with the same
+    class."""
+
+    class V1(schemas.SettingSchema):
+        set_id = "auto.idem"
+        schema_revision = 1
+
+    schemas.register_schema("auto.idem", 1, V1)
+    assert schemas.get_schema("auto.idem", 1) is V1
+
+
+def test_auto_register_inherited_set_id_does_not_register_subclass():
+    """Variant subclasses inheriting ``set_id`` / ``schema_revision`` from
+    a parent (not declaring them in their own ``__dict__``) do NOT
+    re-register under the parent's key."""
+
+    class Parent(schemas.SettingSchema):
+        set_id = "auto.var"
+        schema_revision = 1
+
+    class Variant(Parent):
+        pass
+
+    # The lookup still resolves to the parent — the subclass's
+    # auto-registration was skipped because it didn't declare its own
+    # set_id/schema_revision.
+    assert schemas.get_schema("auto.var", 1) is Parent

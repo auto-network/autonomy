@@ -346,6 +346,35 @@ def _register_variant(cls: type) -> None:
     cls._variant_slug = slug
 
 
+def _auto_register_schema(cls: type) -> None:
+    """Auto-register *cls* in the schema registry when it declares both
+    ``set_id`` and ``schema_revision`` in its own ``__dict__``.
+
+    Skips silently when either is missing — that's an abstract intermediate
+    base, not a concrete schema. ``register_schema`` is idempotent on the
+    same ``(set_id, revision, class)`` triple, so any explicit call left
+    in a module ends up re-registering the same row.
+
+    A classmethod named ``upconvert_from_prev`` declared on the subclass
+    is reflected and forwarded to ``register_schema``'s optional param.
+    The classmethod must be on this class's own ``__dict__`` (inherited
+    classmethods are skipped) so a subclass doesn't accidentally inherit
+    its parent's upconverter.
+    """
+    set_id = cls.__dict__.get("set_id")
+    schema_revision = cls.__dict__.get("schema_revision")
+    if not set_id or not schema_revision:
+        return
+    upconvert_fn: Callable[[dict], dict] | None = None
+    if "upconvert_from_prev" in cls.__dict__:
+        # classmethod descriptors expose the bound function via getattr.
+        upconvert_fn = getattr(cls, "upconvert_from_prev", None)
+    register_schema(
+        set_id, int(schema_revision), cls,
+        upconvert_from_prev=upconvert_fn,
+    )
+
+
 def _merged_inherited_field_metadata(cls: type) -> dict[str, dict]:
     """Return inherited ``_field_metadata`` merged across the MRO.
 
@@ -461,6 +490,7 @@ class SettingSchema:
                 merged.update(explicit)
                 cls._field_metadata = merged
             _register_variant(cls)
+            _auto_register_schema(cls)
             return
         # Annotations may be strings under ``from __future__ import
         # annotations``. Resolve them in the defining module's namespace
@@ -508,6 +538,7 @@ class SettingSchema:
             merged.update(derived)
             cls._field_metadata = merged
         _register_variant(cls)
+        _auto_register_schema(cls)
 
     @classmethod
     def validate(cls, payload: dict) -> None:
