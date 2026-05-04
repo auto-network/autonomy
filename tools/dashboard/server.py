@@ -420,8 +420,116 @@ async def api_beads_search(request):
     return JSONResponse(results)
 
 
+_TERMINAL_CREATED_BY_PREFIX = "terminal:"
+
+
+def _author_session_for_bead(bead: dict | None) -> str | None:
+    """Extract a tmux session id from ``bead.created_by`` if it is one.
+
+    The dispatcher writes ``terminal:<session_id>`` for beads authored from
+    a terminal session; everything else (manual entries, automation handles,
+    e-mail addresses) is stripped. Returns the trimmed session id or None.
+    """
+    created_by = (bead or {}).get("created_by")
+    if not isinstance(created_by, str):
+        return None
+    if not created_by.startswith(_TERMINAL_CREATED_BY_PREFIX):
+        return None
+    session_id = created_by[len(_TERMINAL_CREATED_BY_PREFIX):].strip()
+    return session_id or None
+
+
+def _build_dashboard_approval_envelope(bead_id: str, title: str) -> str:
+    """Build the CrossTalk envelope delivered for a dashboard-approved bead.
+
+    Sender is the synthetic ``dashboard`` system identity — there is no
+    authenticated session, only the proxy "approval came via dashboard ⇒
+    a human did it." Source / turn / harness / model are intentionally
+    blank; the envelope still validates against the receive-side parser.
+    """
+    iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    safe_title = (title or bead_id).replace('"', "'")
+    body = (
+        f"Bead {bead_id} ({safe_title}) approved for dispatch via dashboard."
+    )
+    return (
+        f'<crosstalk from="dashboard"\n'
+        f'           label="dashboard approval"\n'
+        f'           source="" turn=""\n'
+        f'           harness="" model=""\n'
+        f'           timestamp="{iso_now}">\n'
+        f'{body}\n'
+        f'</crosstalk>'
+    )
+
+
+async def _send_dashboard_approval_nag(
+    bead_id: str, title: str, *, session_id: str
+) -> None:
+    """Targeted launch nag for a dashboard-approved bead.
+
+    Bypasses the global ``dispatch_nag`` flag — this is per-bead targeting
+    aimed at the authoring session only. CLI approvals never call this; the
+    dashboard endpoint is the sole entry point.
+    """
+    envelope = _build_dashboard_approval_envelope(bead_id, title)
+    await tmux_send(session_id, envelope)
+
+
+async def _maybe_send_dashboard_approval_nag(bead_id: str) -> None:
+    """If ``bead_id`` was authored by a live terminal session, ping it.
+
+    Best-effort: any DAO failure or unexpected exception is swallowed so a
+    nag-side hiccup never fails the underlying approval. The approval has
+    already succeeded by the time this runs.
+    """
+    try:
+        bead = await asyncio.to_thread(dao_beads.get_bead, bead_id)
+    except Exception:
+        logger.exception(
+            "dashboard approval nag: get_bead failed for %s (best-effort)",
+            bead_id,
+        )
+        return
+
+    session_id = _author_session_for_bead(bead)
+    if not session_id:
+        return
+
+    try:
+        is_live = await asyncio.to_thread(
+            dashboard_db.is_session_live, session_id
+        )
+    except Exception:
+        logger.exception(
+            "dashboard approval nag: liveness check failed for %s "
+            "(best-effort)", session_id,
+        )
+        return
+    if not is_live:
+        return
+
+    title = (bead or {}).get("title") or bead_id
+    try:
+        await _send_dashboard_approval_nag(
+            bead_id, title, session_id=session_id,
+        )
+    except Exception:
+        logger.exception(
+            "dashboard approval nag: send failed for %s -> %s "
+            "(best-effort)", bead_id, session_id,
+        )
+
+
 async def api_bead_approve(request):
-    """Set readiness=approved on a bead, releasing it for dispatch."""
+    """Set readiness=approved on a bead, releasing it for dispatch.
+
+    On success, ping the authoring session via CrossTalk if it was created
+    from a live terminal session (``created_by="terminal:<session_id>"``).
+    The CLI approval path (``cmd_dispatch_approve``) does NOT trigger this
+    targeted nag — only this dashboard endpoint does, on the proxy that
+    "approval came via dashboard ⇒ a human did it."
+    """
     bead_id = request.path_params["id"]
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"ok": True, "bead_id": bead_id})
@@ -429,6 +537,7 @@ async def api_bead_approve(request):
                                          "--reason", "dashboard: approved for dispatch"])
     if rc != 0:
         return JSONResponse({"error": stderr.strip(), "ok": False}, status_code=400)
+    await _maybe_send_dashboard_approval_nag(bead_id)
     return JSONResponse({"ok": True, "bead_id": bead_id})
 
 async def api_pinned_beads(request):
