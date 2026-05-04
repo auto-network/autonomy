@@ -148,8 +148,26 @@ graph set-label "title"               # set session working title
 graph set-topics "Line 1" "Line 2"    # set card status lines
 graph set-role researcher             # set session role
 graph set-nag --interval 10           # enable idle nag (--off to disable)
+graph share <file> --alt "..." --caption "..."  # render a file as an inline tile in the session viewer
 ```
 Run `graph --help` for full reference.
+
+**Sharing files with the operator (`graph share`)**
+
+Use `graph share <file> [--alt ...] [--caption ...]` to drop an image (or
+any file) into the session viewer as an inline tile. One tool call →
+one tile, rendered at the current turn. The operator clicks for fullscreen.
+
+- **One share per Bash tool_result.** The harness up-converts a single JSON
+  object whose `type` is `viewer_attachment`; chaining shares (`graph
+  share a && graph share b`) in one Bash call concatenates two JSON
+  objects and *neither* renders. Use one Bash invocation per share.
+- **Don't print anything else in the same Bash call** — extra stdout
+  breaks the parse.
+- **No `--session` flag, no need.** The session is stamped from the
+  trusted JSONL stream, not anything the agent prints.
+
+Canonical how-to with examples + security model: `graph read 3570406f-29a`.
 
 **Dispatch workflow:**
 1. `graph dispatch approve <bead-id>` — release bead for dispatch
