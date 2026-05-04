@@ -271,16 +271,16 @@
           <template x-for="e in visibleEntries" :key="e._key">
             <div class="p-4 bg-gray-800 rounded-lg border-l-4"
                  :class="{
-                   'border-blue-500 mr-16': e.entry_type === 'thought',
-                   'border-gray-600 ml-16': e.entry_type !== 'thought',
+                   'border-blue-500 mr-16': e.role === 'user',
+                   'border-gray-600 ml-16': e.role !== 'user',
                    'ring-2 ring-indigo-500': isHighlighted(e.turn_number)
                  }"
                  :id="'turn-' + e.turn_number"
                  :data-source-id="src.id">
               <div class="flex items-center gap-2 mb-2">
                 <span class="text-xs font-semibold"
-                      :class="e.entry_type === 'thought' ? 'text-blue-400' : 'text-gray-400'"
-                      x-text="e.entry_type === 'thought' ? 'USER' : 'ASSISTANT'"></span>
+                      :class="e.role === 'user' ? 'text-blue-400' : 'text-gray-400'"
+                      x-text="e.role === 'user' ? 'USER' : 'ASSISTANT'"></span>
                 <span class="text-xs text-gray-600" x-text="'t' + e.turn_number"></span>
               </div>
               <div class="text-sm" x-markdown="e.content || ''"></div>
