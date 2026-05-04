@@ -139,6 +139,30 @@
             </div>
           </template>
 
+          <!-- Identity-refresh nudge: agents sometimes forget to set their
+               label/topics/role after the operator briefs them. When the
+               drawer expands and any of those is missing, surface a button
+               that pings the session via CrossTalk to update them. -->
+          <template x-if="isLive && _tmuxSession && (!_label || !topics || topics.length === 0)">
+            <div class="sv-exp-section">
+              <button type="button"
+                      class="sv-identity-refresh-btn"
+                      :disabled="identityRefreshState !== 'idle'"
+                      @click.stop="requestIdentityRefresh()"
+                      data-testid="drawer-identity-refresh-button">
+                <template x-if="identityRefreshState === 'idle'">
+                  <span>Ask agent to set title &amp; topics</span>
+                </template>
+                <template x-if="identityRefreshState === 'sending'">
+                  <span>Sending&hellip;</span>
+                </template>
+                <template x-if="identityRefreshState === 'sent'">
+                  <span>&check; Asked — awaiting update</span>
+                </template>
+              </button>
+            </div>
+          </template>
+
           <template x-if="(topics && topics.length > 0) || hasTodos">
             <div class="sv-exp-section">
               <template x-if="!hasTodos">

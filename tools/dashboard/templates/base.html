@@ -890,6 +890,29 @@
       margin-bottom: 6px;
     }
     .sv-exp-topics { display: flex; flex-direction: column; gap: 4px; }
+    /* Identity-refresh nudge button: shows in the drawer when label or
+       topics are missing. Same visual weight as a Request-Refresh affordance
+       elsewhere — indigo border, no fill, full-width inside the section. */
+    .sv-identity-refresh-btn {
+      width: 100%;
+      min-height: 36px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      background: transparent;
+      color: #a5b4fc;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      .sv-identity-refresh-btn:hover { background: rgba(99, 102, 241, 0.1); }
+    }
+    .sv-identity-refresh-btn:disabled {
+      cursor: default;
+      opacity: 0.7;
+    }
     .sv-exp-topic-item {
       display: block; color: #b0b6bf;
       font-size: 14px; line-height: 1.4;
