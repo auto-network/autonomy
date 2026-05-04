@@ -142,15 +142,15 @@ def test_upconvert_payload_applies_chain(linear_chain):
 
 def _seed_three(set_id):
     """Seed one row at each of revs 1, 2, 3 (different keys to keep all)."""
-    a = ops.add_setting(set_id, 1, "k1", {"x": 1})
-    b = ops.add_setting(set_id, 2, "k2", {"x": 2})
-    c = ops.add_setting(set_id, 3, "k3", {"x": 3})
+    a = ops.add_setting(set_id, 1, "k1", {"x": 1}, org=ops.CALLER_ORG)
+    b = ops.add_setting(set_id, 2, "k2", {"x": 2}, org=ops.CALLER_ORG)
+    c = ops.add_setting(set_id, 3, "k3", {"x": 3}, org=ops.CALLER_ORG)
     return a, b, c
 
 
 def test_default_returns_stored_revisions(graph_db_env, linear_chain):
     _seed_three("autonomy.test.linear")
-    members = ops.read_set("autonomy.test.linear")
+    members = ops.read_set("autonomy.test.linear", org=ops.CALLER_ORG)
     by_key = {m.key: m for m in members.members}
     assert by_key["k1"].stored_revision == 1
     assert by_key["k2"].stored_revision == 2
@@ -161,7 +161,7 @@ def test_default_returns_stored_revisions(graph_db_env, linear_chain):
 
 def test_target_revision_upconverts_lower(graph_db_env, linear_chain):
     _seed_three("autonomy.test.linear")
-    members = ops.read_set("autonomy.test.linear", target_revision=3)
+    members = ops.read_set("autonomy.test.linear", target_revision=3, org=ops.CALLER_ORG)
     by_key = {m.key: m for m in members.members}
     # rev-1 row got upconverted through both hops.
     assert by_key["k1"].payload == {"x": 1, "added_in_v2": True, "added_in_v3": True}
@@ -173,7 +173,7 @@ def test_target_revision_upconverts_lower(graph_db_env, linear_chain):
 def test_target_revision_drops_higher(graph_db_env, linear_chain):
     """Asking for rev=2 drops rev-3 rows (no downgrade)."""
     _seed_three("autonomy.test.linear")
-    members = ops.read_set("autonomy.test.linear", target_revision=2)
+    members = ops.read_set("autonomy.test.linear", target_revision=2, org=ops.CALLER_ORG)
     keys = {m.key for m in members.members}
     assert "k3" not in keys
     assert members.dropped["above_target_no_downgrade"] == 1
@@ -181,9 +181,9 @@ def test_target_revision_drops_higher(graph_db_env, linear_chain):
 
 def test_target_revision_drops_when_no_chain(graph_db_env, chain_with_gap):
     """Rev-1 row cannot upconvert to rev-3 — gap at 1 → 2."""
-    ops.add_setting("autonomy.test.v", 1, "k1", {"x": 1})
-    ops.add_setting("autonomy.test.v", 3, "k3", {"x": 3})
-    members = ops.read_set("autonomy.test.v", target_revision=3)
+    ops.add_setting("autonomy.test.v", 1, "k1", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.v", 3, "k3", {"x": 3}, org=ops.CALLER_ORG)
+    members = ops.read_set("autonomy.test.v", target_revision=3, org=ops.CALLER_ORG)
     keys = {m.key for m in members.members}
     assert "k1" not in keys
     assert "k3" in keys
@@ -192,7 +192,7 @@ def test_target_revision_drops_when_no_chain(graph_db_env, chain_with_gap):
 
 def test_min_revision_filters_floor(graph_db_env, linear_chain):
     _seed_three("autonomy.test.linear")
-    members = ops.read_set("autonomy.test.linear", min_revision=2)
+    members = ops.read_set("autonomy.test.linear", min_revision=2, org=ops.CALLER_ORG)
     keys = {m.key for m in members.members}
     assert "k1" not in keys
     assert "k2" in keys and "k3" in keys
@@ -206,7 +206,7 @@ def test_combined_min_and_target(graph_db_env, linear_chain):
     _seed_three("autonomy.test.linear")
     members = ops.read_set(
         "autonomy.test.linear", min_revision=2, target_revision=2,
-    )
+     org=ops.CALLER_ORG)
     keys = {m.key for m in members.members}
     assert keys == {"k2"}  # k1 below floor; k3 above target
     assert members.dropped["below_min_revision"] == 1
@@ -214,16 +214,16 @@ def test_combined_min_and_target(graph_db_env, linear_chain):
 
 
 def test_get_setting_with_target_revision(graph_db_env, linear_chain):
-    sid = ops.add_setting("autonomy.test.linear", 1, "k", {"x": 1})
-    got = ops.get_setting(sid, target_revision=3)
+    sid = ops.add_setting("autonomy.test.linear", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
+    got = ops.get_setting(sid, target_revision=3, org=ops.CALLER_ORG)
     assert got is not None
     assert got.payload == {"x": 1, "added_in_v2": True, "added_in_v3": True}
     assert got.target_revision == 3
 
 
 def test_get_setting_above_target_returns_none(graph_db_env, linear_chain):
-    sid = ops.add_setting("autonomy.test.linear", 3, "k", {"x": 3})
-    assert ops.get_setting(sid, target_revision=2) is None
+    sid = ops.add_setting("autonomy.test.linear", 3, "k", {"x": 3}, org=ops.CALLER_ORG)
+    assert ops.get_setting(sid, target_revision=2, org=ops.CALLER_ORG) is None
 
 
 # ── migrate ────────────────────────────────────────────────
@@ -233,39 +233,39 @@ def test_migrate_dry_run_does_not_write(graph_db_env, linear_chain):
     a, b, c = _seed_three("autonomy.test.linear")
     report = ops.migrate_setting_revisions(
         "autonomy.test.linear", 3, dry_run=True,
-    )
+     org=ops.CALLER_ORG)
     assert report.rewrote == 2  # k1 (rev 1→3) and k2 (rev 2→3)
     assert report.already_at_target == 1
     assert set(report.affected_ids) == {a, b}
     # Storage unchanged.
-    members = ops.read_set("autonomy.test.linear")
+    members = ops.read_set("autonomy.test.linear", org=ops.CALLER_ORG)
     by_key = {m.key: m.stored_revision for m in members.members}
     assert by_key == {"k1": 1, "k2": 2, "k3": 3}
 
 
 def test_migrate_writes_when_committed(graph_db_env, linear_chain):
     _seed_three("autonomy.test.linear")
-    report = ops.migrate_setting_revisions("autonomy.test.linear", 3)
+    report = ops.migrate_setting_revisions("autonomy.test.linear", 3, org=ops.CALLER_ORG)
     assert report.rewrote == 2
-    members = ops.read_set("autonomy.test.linear")
+    members = ops.read_set("autonomy.test.linear", org=ops.CALLER_ORG)
     by_key = {m.key: m for m in members.members}
     assert by_key["k1"].stored_revision == 3
     assert by_key["k1"].payload == {"x": 1, "added_in_v2": True, "added_in_v3": True}
 
 
 def test_migrate_reports_no_chain(graph_db_env, chain_with_gap):
-    ops.add_setting("autonomy.test.v", 1, "k1", {"x": 1})
-    ops.add_setting("autonomy.test.v", 3, "k3", {"x": 3})
-    report = ops.migrate_setting_revisions("autonomy.test.v", 3)
+    ops.add_setting("autonomy.test.v", 1, "k1", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.v", 3, "k3", {"x": 3}, org=ops.CALLER_ORG)
+    report = ops.migrate_setting_revisions("autonomy.test.v", 3, org=ops.CALLER_ORG)
     assert report.no_upconvert_path == 1
     assert report.already_at_target == 1
     assert report.rewrote == 0
 
 
 def test_migrate_leaves_above_target_alone(graph_db_env, linear_chain):
-    sid = ops.add_setting("autonomy.test.linear", 3, "k", {"x": 3})
-    report = ops.migrate_setting_revisions("autonomy.test.linear", 2)
+    sid = ops.add_setting("autonomy.test.linear", 3, "k", {"x": 3}, org=ops.CALLER_ORG)
+    report = ops.migrate_setting_revisions("autonomy.test.linear", 2, org=ops.CALLER_ORG)
     assert report.above_target == 1
     # Storage stayed at 3.
-    got = ops.get_setting(sid)
+    got = ops.get_setting(sid, org=ops.CALLER_ORG)
     assert got.stored_revision == 3

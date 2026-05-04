@@ -5,8 +5,21 @@ Imported into ``tools.graph.ops`` for unified discovery; tests may reach in
 here directly. Spec: graph://0d3f750f-f9c. Cross-org rules:
 graph://bcce359d-a1d.
 
-Single-DB world: ``org`` and ``peers`` are plumbed but no-op.
-Routing slots in cleanly when per-org DB ships (auto-txg5.x).
+Public API contract (auto-cfb8u): every function below takes ``org`` as
+a **required keyword-only** argument. There is no default. Forgetting
+``org=`` is a ``TypeError`` at call time, not a silent route to the
+scopeless default DB. Pass:
+
+* a non-empty org slug — route to that org's DB (the common case);
+* :data:`CALLER_ORG` — opt into the env-cascade resolver (per-request
+  contextvar → ``GRAPH_ORG`` env → scopeless default). Used by CLIs and
+  env-driven test contexts that legitimately want today's behavior;
+* ``None`` — explicit "scopeless default DB" (rare; loud).
+
+Background: dashboard handlers were silently writing to the scopeless DB
+when the writer forgot ``org=`` while the reader carried ``X-Graph-Org``
+— the row appeared to vanish (graph://53f7412f-51e). Required-org makes
+that intent explicit at the API boundary.
 """
 
 from __future__ import annotations
@@ -36,6 +49,51 @@ logger = logging.getLogger(__name__)
 VALID_STATES = ("raw", "curated", "published", "canonical")
 PRECEDENCE = {"canonical": 0, "published": 1, "curated": 2, "raw": 3}
 PEER_VISIBLE_STATES = ("published", "canonical")
+
+
+# ── org= argument contract (auto-cfb8u) ──────────────────────
+
+
+class _CallerOrgSentinel:
+    """Sentinel marker for "resolve org via the caller cascade."
+
+    Pass :data:`CALLER_ORG` as ``org=`` to opt into the env-driven
+    resolver — per-request contextvar → ``GRAPH_ORG`` env → scopeless
+    default. Used by CLIs, env-pinned tests, and any other process-context
+    caller. A literal ``None`` is treated as "scopeless explicit"; the
+    sentinel is the only path that consults the cascade.
+    """
+
+    _instance: "_CallerOrgSentinel | None" = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "<settings_ops.CALLER_ORG>"
+
+
+CALLER_ORG = _CallerOrgSentinel()
+
+
+def _resolve_org_arg(org: "str | None | _CallerOrgSentinel") -> str | None:
+    """Collapse a public ``org=`` argument to a literal slug-or-None.
+
+    * :data:`CALLER_ORG` → run :func:`_resolve_settings_caller`
+      (contextvar → ``GRAPH_ORG`` env → ``None``).
+    * Any other value (a string, or ``None``) is returned as-is.
+
+    The point of separating "literal None" from "go consult the cascade"
+    is to make the dashboard foot-gun (graph://53f7412f-51e) impossible:
+    a writer that lands in the scopeless DB while the reader carries
+    ``X-Graph-Org`` is now either a typo (None passed where the slug was
+    intended) or a deliberate choice — never silent.
+    """
+    if isinstance(org, _CallerOrgSentinel):
+        return _resolve_settings_caller(None)
+    return org
 
 
 # ── Emit hook (commit-then-emit) ─────────────────────────────
@@ -640,22 +698,21 @@ class MigrationReport:
 # ── DB selection (mirrors ops._open) ─────────────────────────
 
 
-def _db_path(org: str | None = None) -> str | None:
-    """Resolve Settings DB path via the same cascade as ``ops._db_path``.
+def _db_path(org: str | None) -> str | None:
+    """Resolve Settings DB path for a literal ``org`` value.
 
-    Explicit ``org`` wins; otherwise ``GRAPH_ORG`` env is used; the
-    resolver applies the scopeless default (``personal``) when neither is
-    set. ``GRAPH_DB`` env pins the path regardless (test override).
+    ``org`` is the post-:func:`_resolve_org_arg` value: a slug (route to
+    that org's DB) or ``None`` (scopeless default). No env-cascade here —
+    public callers pre-resolve via :data:`CALLER_ORG` if they want it.
+    ``GRAPH_DB`` env pins the path regardless (test override).
     """
     env_db = os.environ.get("GRAPH_DB")
     if env_db:
         return env_db
-    if org is None:
-        org = os.environ.get("GRAPH_ORG")
     return str(resolve_caller_db_path(org))
 
 
-def _open(org: str | None = None) -> GraphDB:
+def _open(org: str | None) -> GraphDB:
     return GraphDB(_db_path(org))
 
 
@@ -756,15 +813,21 @@ def add_setting(
     key: str,
     payload: dict,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
 ) -> str:
     """Create a base Setting in org's DB.
+
+    ``org`` is **required**: pass an org slug for that org's DB,
+    :data:`CALLER_ORG` for the env-cascade resolver, or ``None`` for an
+    explicit scopeless write. Forgetting ``org=`` is a ``TypeError`` —
+    see module docstring.
 
     Validates payload against ``(set_id, schema_revision)``. Returns the new
     Setting id. Raises ``schemas.SchemaValidationError`` on validation
     failure, ``ValueError`` on bad ``state``.
     """
+    org = _resolve_org_arg(org)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
     schemas.validate_payload(set_id, schema_revision, payload)
@@ -797,7 +860,7 @@ def upsert_by_key(
     key: str,
     payload: dict,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
 ) -> str:
     """Atomic single-tx UPDATE-or-INSERT at ``(set_id, schema_revision, key)``.
@@ -835,7 +898,10 @@ def upsert_by_key(
     Returns the upserted row's setting id (new on insert, preserved on
     update). Raises :class:`schemas.SchemaValidationError` on bad
     payload or unknown schema; ``ValueError`` on bad ``state``.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
+    org = _resolve_org_arg(org)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
     schemas.validate_payload(set_id, schema_revision, payload)
@@ -883,7 +949,7 @@ def override_setting(
     target_id: str,
     payload_overrides: dict,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
 ) -> str:
     """Create a Setting with ``supersedes=target_id`` and partial payload.
@@ -894,7 +960,10 @@ def override_setting(
     be either own-org or peer-origin — overriding peer content is the
     expected way to adapt shared primitives to a local org. Raises
     ``LookupError`` only when the target exists nowhere (own or peers).
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
+    org = _resolve_org_arg(org)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
     target = _fetch_setting_any_org(target_id, org)
@@ -938,14 +1007,17 @@ def override_setting(
 def exclude_setting(
     target_id: str,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
 ) -> str:
     """Create a Setting with ``excludes=target_id`` and empty payload.
 
     The exclude row itself lives in org's DB and only affects
     reads scoped to this caller — so peer-origin targets are allowed.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
+    org = _resolve_org_arg(org)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
     target = _fetch_setting_any_org(target_id, org)
@@ -993,7 +1065,9 @@ def _reject_peer_setting_target(
     from .cross_org import open_peer_db, resolve_peers
     from .ops import CrossOrgWriteError  # local: avoid import cycle at top
 
-    resolved_org = _resolve_settings_caller(org)
+    # Internal helper — public callers have already normalized via
+    # ``_resolve_org_arg``, so ``org`` is a literal slug-or-None.
+    resolved_org = org
     for peer in sorted(resolve_peers(resolved_org, None)):
         peer_db = open_peer_db(peer)
         if peer_db is None:
@@ -1009,13 +1083,16 @@ def promote_setting(
     setting_id: str,
     to_state: str,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
 ) -> None:
     """Transition publication_state. ``LookupError`` if not present.
 
     Peer-origin targets raise :class:`ops.CrossOrgWriteError` — only the
     origin org may alter a Setting's publication state.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
+    org = _resolve_org_arg(org)
     if to_state not in VALID_STATES:
         raise ValueError(f"invalid state {to_state!r}; valid: {VALID_STATES}")
     now = _now_iso()
@@ -1061,13 +1138,16 @@ def promote_setting(
 def deprecate_setting(
     setting_id: str,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     successor_id: str | None = None,
 ) -> None:
     """Mark a Setting deprecated, optionally pointing at a successor.
 
     Peer-origin targets raise :class:`ops.CrossOrgWriteError`.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
+    org = _resolve_org_arg(org)
     now = _now_iso()
     db = _open(org)
     snapshot = None
@@ -1108,10 +1188,12 @@ def remove_settings_by_key_prefix(
     set_id: str,
     *,
     prefix: str,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
 ) -> int:
     """Hard-delete every base/override Setting under ``set_id`` whose key
     matches ``<prefix>:%`` (composite-key child rows).
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
 
     Bypasses the per-row ``raw``-only constraint that :func:`remove_setting`
     enforces because this is a system-level cleanup path: callers wipe
@@ -1125,6 +1207,7 @@ def remove_settings_by_key_prefix(
     from this caller's perspective, so the SQL ``DELETE`` simply finds
     nothing in the local DB and returns 0 — there is no silent writethrough.
     """
+    org = _resolve_org_arg(org)
     db = _open(org)
     deleted_keys: list[tuple[str, int, str, str, bool]] = []
     try:
@@ -1161,13 +1244,16 @@ def remove_settings_by_key_prefix(
 def remove_setting(
     setting_id: str,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
 ) -> None:
     """Hard-delete a Setting. Spec restricts to ``raw``; higher states must
     be deprecated first.
 
     Peer-origin targets raise :class:`ops.CrossOrgWriteError`.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
+    org = _resolve_org_arg(org)
     db = _open(org)
     snapshot = None
     try:
@@ -1203,7 +1289,7 @@ def remove_setting(
 
 def list_set_ids(
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     peers: list[str] | None = None,
 ) -> list[str]:
     """Distinct ``set_id`` values visible to org.
@@ -1211,6 +1297,8 @@ def list_set_ids(
     Own DB contributes every ``set_id``; peer DBs contribute only
     ``set_id`` values backed by a ``published``/``canonical`` row. See
     graph://bcce359d-a1d § External view.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     from .cross_org import (
         PEER_VISIBLE_STATES,
@@ -1218,6 +1306,7 @@ def list_set_ids(
         resolve_peers,
     )
 
+    org = _resolve_org_arg(org)
     seen: set[str] = set()
     db = _open(org)
     try:
@@ -1230,7 +1319,7 @@ def list_set_ids(
     finally:
         db.close()
 
-    resolved_org = _resolve_settings_caller(org)
+    resolved_org = org
     for peer in sorted(resolve_peers(resolved_org, peers)):
         peer_db = open_peer_db(peer)
         if peer_db is None:
@@ -1260,7 +1349,7 @@ def _resolve_settings_caller(org: str | None) -> str | None:
 def resolve_setting_strict(
     value: str,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     peers: list[str] | None = None,
 ) -> dict | list[dict] | None:
     """Resolve a Setting by full id or id-prefix, own-first then peers.
@@ -1277,6 +1366,8 @@ def resolve_setting_strict(
     The resolver short-circuits as soon as a scope (own, then each peer)
     yields any match, so an exact own-org hit wins over a peer prefix
     match — consistent with how source resolution already behaves.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     from .cross_org import (
         PEER_VISIBLE_STATES,
@@ -1284,6 +1375,7 @@ def resolve_setting_strict(
         resolve_peers,
     )
 
+    org = _resolve_org_arg(org)
     db = _open(org)
     try:
         # 1. Exact id, own org
@@ -1304,7 +1396,7 @@ def resolve_setting_strict(
         db.close()
 
     # 3. Peer scan (public surface only)
-    resolved_org = _resolve_settings_caller(org)
+    resolved_org = org
     placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
     for peer in sorted(resolve_peers(resolved_org, peers)):
         peer_db = open_peer_db(peer)
@@ -1333,7 +1425,7 @@ def resolve_set_key(
     set_id: str,
     key: str,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     peers: list[str] | None = None,
 ) -> dict | None:
     """Resolve ``(set_id, key)`` to the winning base Setting row.
@@ -1342,7 +1434,10 @@ def resolve_set_key(
     runtime — same precedence, same cross-org visibility, same exclude
     rules. Returns the underlying base row dict (the one that becomes
     ``ResolvedSetting.id`` post-merge), or None if no member matches.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
+    org = _resolve_org_arg(org)
     members = read_set(set_id, org=org, peers=peers)
     for m in members.members:
         if m.key == key:
@@ -1355,7 +1450,7 @@ def chain_setting(
     set_id: str,
     key: str,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     peers: list[str] | None = None,
 ) -> dict | None:
     """Walk the supersedes chain for ``(set_id, key)`` and return the
@@ -1385,6 +1480,8 @@ def chain_setting(
     whose ``supersedes`` points at the chosen base contributes one
     layer. Overrides of overrides are not currently followed (the
     underlying resolver does not chase them either).
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     from .cross_org import (
         PEER_VISIBLE_STATES,
@@ -1392,7 +1489,8 @@ def chain_setting(
         resolve_peers,
     )
 
-    resolved_org = _resolve_settings_caller(org)
+    org = _resolve_org_arg(org)
+    resolved_org = org
     raw_rows: list[tuple[str | None, Any]] = []
     db = _open(org)
     try:
@@ -1528,7 +1626,7 @@ def _fetch_setting_any_org(
 def get_setting(
     setting_id: str,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     peers: list[str] | None = None,
     target_revision: int | None = None,
     model: type[Any] | None = None,
@@ -1543,6 +1641,8 @@ def get_setting(
     passed through ``model.model_validate`` and the returned
     :class:`ResolvedSetting` carries the typed instance. A validation
     failure logs WARN and returns ``None``.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     from .cross_org import (
         PEER_VISIBLE_STATES,
@@ -1550,7 +1650,8 @@ def get_setting(
         resolve_peers,
     )
 
-    resolved_org = _resolve_settings_caller(org)
+    org = _resolve_org_arg(org)
+    resolved_org = org
     db = _open(org)
     try:
         row = db.conn.execute(
@@ -1609,7 +1710,7 @@ def _prefix_like_pattern(prefix: str) -> str:
 def read_set(
     set_id: str,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     peers: list[str] | None = None,
     target_revision: int | None = None,
     min_revision: int | None = None,
@@ -1633,6 +1734,8 @@ def read_set(
     produces ``SetMembers[Model]``; validation failures are dropped and
     counted in ``dropped.schema_invalid``. Returns a ``SetMembers`` with
     drop accounting populated.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     from .cross_org import (
         PEER_VISIBLE_STATES,
@@ -1640,7 +1743,8 @@ def read_set(
         resolve_peers,
     )
 
-    resolved_org = _resolve_settings_caller(org)
+    org = _resolve_org_arg(org)
+    resolved_org = org
     raw_rows: list[tuple[str | None, Any]] = []
     deprecated_filtered = 0
     prefix_clause = ""
@@ -1815,7 +1919,7 @@ def migrate_setting_revisions(
     set_id: str,
     to_revision: int,
     *,
-    org: str | None = None,
+    org: "str | None | _CallerOrgSentinel",
     dry_run: bool = False,
 ) -> MigrationReport:
     """Rewrite stored rows at lower revisions up to ``to_revision``.
@@ -1824,7 +1928,10 @@ def migrate_setting_revisions(
     it. Rows already at ``to_revision`` are skipped; rows above it are left
     alone (downgrades are explicit opt-ins, not part of migrate). Rows with
     no upconvert chain are reported, not rewritten.
+
+    ``org`` is **required** — see :func:`add_setting` for the contract.
     """
+    org = _resolve_org_arg(org)
     report = MigrationReport(
         set_id=set_id, to_revision=int(to_revision), dry_run=dry_run,
     )
@@ -1912,7 +2019,16 @@ def _tracked_settings_call(
         @wraps(fn)
         def wrapper(*args, **kwargs):
             start = time.perf_counter()
-            resolved_org = _resolve_settings_caller(kwargs.get("org"))
+            # Public API normalizes ``org=`` via ``_resolve_org_arg``;
+            # mirror that here so stats labels reflect the resolved slug
+            # (including the cascade result when ``CALLER_ORG`` is in
+            # play). Missing ``org=`` would raise ``TypeError`` inside
+            # the wrapped function — the wrapper still records the
+            # failed call.
+            try:
+                resolved_org = _resolve_org_arg(kwargs.get("org"))
+            except Exception:
+                resolved_org = None
             ok = False
             result = None
             try:

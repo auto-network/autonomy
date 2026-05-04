@@ -94,7 +94,7 @@ def test_parser_set_add_requires_args(graph_db_env):
 
 
 def test_parser_set_promote_validates_state(graph_db_env, example_schema):
-    sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1})
+    sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1}, org=ops.CALLER_ORG)
     rc, _, err = _run_cli(["set", "promote", sid, "--to", "garbage"])
     assert rc != 0
 
@@ -117,7 +117,7 @@ def test_cli_add_then_show(graph_db_env, example_schema, tmp_path):
     assert rc == 0, err
     assert "Setting:" in out
 
-    members = ops.read_set("autonomy.test.example")
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     assert len(members.members) == 1
     sid = members.members[0].id
 
@@ -154,13 +154,13 @@ def test_cli_override_merges(graph_db_env, example_schema, tmp_path):
     base_payload = tmp_path / "base.json"
     base_payload.write_text(json.dumps({"a": 1, "b": 2}))
     _run_cli(["set", "add", "autonomy.test.example#1", "--key", "k", "--from", str(base_payload)])
-    base = ops.read_set("autonomy.test.example").members[0].id
+    base = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members[0].id
 
     over_payload = tmp_path / "over.json"
     over_payload.write_text(json.dumps({"b": 99}))
     rc, out, err = _run_cli(["set", "override", base, "--from", str(over_payload)])
     assert rc == 0, err
-    members = ops.read_set("autonomy.test.example").members
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members
     assert len(members) == 1
     assert members[0].payload == {"a": 1, "b": 99}
 
@@ -170,40 +170,40 @@ def test_cli_exclude_drops_target(graph_db_env, example_schema, tmp_path):
     p.write_text(json.dumps({"v": 1}))
     _run_cli(["set", "add", "autonomy.test.example#1", "--key", "doomed",
               "--from", str(p), "--state", "canonical"])
-    target = ops.read_set("autonomy.test.example").members[0].id
+    target = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members[0].id
     rc, _, _ = _run_cli(["set", "exclude", target])
     assert rc == 0
-    assert ops.read_set("autonomy.test.example").members == []
+    assert ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members == []
 
 
 def test_cli_promote(graph_db_env, example_schema, tmp_path):
     p = tmp_path / "p.json"
     p.write_text(json.dumps({"v": 1}))
     _run_cli(["set", "add", "autonomy.test.example#1", "--key", "k", "--from", str(p)])
-    sid = ops.read_set("autonomy.test.example").members[0].id
+    sid = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members[0].id
     rc, _, _ = _run_cli(["set", "promote", sid, "--to", "canonical"])
     assert rc == 0
-    assert ops.get_setting(sid).state == "canonical"
+    assert ops.get_setting(sid, org=ops.CALLER_ORG).state == "canonical"
 
 
 def test_cli_deprecate(graph_db_env, example_schema, tmp_path):
     p = tmp_path / "p.json"
     p.write_text(json.dumps({"v": 1}))
     _run_cli(["set", "add", "autonomy.test.example#1", "--key", "k", "--from", str(p)])
-    sid = ops.read_set("autonomy.test.example").members[0].id
+    sid = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members[0].id
     rc, _, _ = _run_cli(["set", "deprecate", sid])
     assert rc == 0
-    assert ops.get_setting(sid).deprecated is True
+    assert ops.get_setting(sid, org=ops.CALLER_ORG).deprecated is True
 
 
 def test_cli_remove_raw(graph_db_env, example_schema, tmp_path):
     p = tmp_path / "p.json"
     p.write_text(json.dumps({"v": 1}))
     _run_cli(["set", "add", "autonomy.test.example#1", "--key", "k", "--from", str(p)])
-    sid = ops.read_set("autonomy.test.example").members[0].id
+    sid = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members[0].id
     rc, _, _ = _run_cli(["set", "remove", sid])
     assert rc == 0
-    assert ops.get_setting(sid) is None
+    assert ops.get_setting(sid, org=ops.CALLER_ORG) is None
 
 
 def test_cli_remove_canonical_blocked(graph_db_env, example_schema, tmp_path):
@@ -211,7 +211,7 @@ def test_cli_remove_canonical_blocked(graph_db_env, example_schema, tmp_path):
     p.write_text(json.dumps({"v": 1}))
     _run_cli(["set", "add", "autonomy.test.example#1", "--key", "k",
               "--from", str(p), "--state", "canonical"])
-    sid = ops.read_set("autonomy.test.example").members[0].id
+    sid = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members[0].id
     rc, _, err = _run_cli(["set", "remove", sid])
     assert rc != 0
     assert "deprecate first" in err.lower() or "raw" in err.lower()
@@ -231,12 +231,12 @@ def test_cli_migrate_dry_run(graph_db_env, tmp_path):
     schemas.register_schema("autonomy.test.lin", 2, V2,
                             upconvert_from_prev=lambda p: {**p, "v2": True})
 
-    sid = ops.add_setting("autonomy.test.lin", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.lin", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     rc, out, err = _run_cli(["set", "migrate", "autonomy.test.lin",
                               "--to-rev", "2", "--dry-run"])
     assert rc == 0, err
     assert "DRY RUN" in out
-    assert ops.get_setting(sid).stored_revision == 1
+    assert ops.get_setting(sid, org=ops.CALLER_ORG).stored_revision == 1
 
 
 def test_cli_migrate_writes(graph_db_env):
@@ -250,10 +250,10 @@ def test_cli_migrate_writes(graph_db_env):
     schemas.register_schema("autonomy.test.lin", 2, V2,
                             upconvert_from_prev=lambda p: {**p, "v2": True})
 
-    sid = ops.add_setting("autonomy.test.lin", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.lin", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     rc, out, _ = _run_cli(["set", "migrate", "autonomy.test.lin", "--to-rev", "2"])
     assert rc == 0
-    got = ops.get_setting(sid)
+    got = ops.get_setting(sid, org=ops.CALLER_ORG)
     assert got.stored_revision == 2
     assert got.payload == {"x": 1, "v2": True}
 
@@ -271,7 +271,7 @@ def test_cli_members_as_rev_upconverts(graph_db_env):
     schemas.register_schema("autonomy.test.up", 1, V1)
     schemas.register_schema("autonomy.test.up", 2, V2,
                             upconvert_from_prev=lambda p: {**p, "v2": True})
-    ops.add_setting("autonomy.test.up", 1, "k", {"x": 1})
+    ops.add_setting("autonomy.test.up", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     rc, out, _ = _run_cli(["set", "members", "autonomy.test.up", "--as-rev", "2"])
     assert rc == 0
     assert "k" in out
@@ -288,8 +288,8 @@ def test_cli_members_min_rev_drops(graph_db_env):
         schema_revision = 2
     schemas.register_schema("autonomy.test.floor", 1, V1)
     schemas.register_schema("autonomy.test.floor", 2, V2)
-    ops.add_setting("autonomy.test.floor", 1, "k1", {"x": 1})
-    ops.add_setting("autonomy.test.floor", 2, "k2", {"x": 2})
+    ops.add_setting("autonomy.test.floor", 1, "k1", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.floor", 2, "k2", {"x": 2}, org=ops.CALLER_ORG)
     rc, out, _ = _run_cli(["set", "members", "autonomy.test.floor", "--min-rev", "2"])
     assert rc == 0
     assert "k2" in out
@@ -305,8 +305,8 @@ def test_cli_members_stored_rev_filter(graph_db_env):
         schema_revision = 2
     schemas.register_schema("autonomy.test.flt", 1, V1)
     schemas.register_schema("autonomy.test.flt", 2, V2)
-    ops.add_setting("autonomy.test.flt", 1, "k1", {"x": 1})
-    ops.add_setting("autonomy.test.flt", 2, "k2", {"x": 2})
+    ops.add_setting("autonomy.test.flt", 1, "k1", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.flt", 2, "k2", {"x": 2}, org=ops.CALLER_ORG)
     rc, out, _ = _run_cli(["set", "members", "autonomy.test.flt", "--stored-rev", "1"])
     assert rc == 0
     assert "k1" in out

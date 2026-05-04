@@ -102,7 +102,7 @@ def test_cli_succeeds_when_force_host_passed_and_api_unreachable(
     assert rc == 0, f"stderr={err!r} stdout={out!r}"
 
     # Write actually landed in SQLite via direct ops.* path.
-    members = ops.read_set("autonomy.test.example").members
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members
     assert len(members) == 1
     assert members[0].key == "k1"
     assert members[0].payload == {"v": 1}
@@ -143,7 +143,7 @@ def test_cli_without_force_host_attempts_http_and_surfaces_error(
         ])
 
     # Nothing landed in the local DB — the CLI did not silently fall back to ops.
-    assert ops.read_set("autonomy.test.example").members == []
+    assert ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members == []
 
 
 # ── Visibility: the flag is documented globally ─────────────────

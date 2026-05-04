@@ -298,6 +298,7 @@ def _add_ping_row(payload: dict, *, key: str | None = None) -> str:
     key = key or str(uuid4())
     sid = settings_ops.add_setting(
         SURFACE_PING_SET_ID, SCHEMA_REVISION, key, payload,
+        org=settings_ops.CALLER_ORG,
     )
     return key
 

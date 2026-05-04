@@ -132,7 +132,7 @@ async def test_event_driven_wakeup_under_one_second(
     try:
         await asyncio.sleep(0.05)
         write_at = time.monotonic()
-        ops.add_setting(TEST_SET_ID, TEST_REVISION, "ev-key", {"x": 1})
+        ops.add_setting(TEST_SET_ID, TEST_REVISION, "ev-key", {"x": 1}, org=ops.CALLER_ORG)
         await asyncio.wait_for(handler_invoked.wait(), timeout=2.0)
         latency = invoked_at[0] - write_at
         assert latency < 1.0, (

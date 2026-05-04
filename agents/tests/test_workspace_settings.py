@@ -183,7 +183,7 @@ def _seed_github_install():
     ops.add_setting(
         CAPABILITY_IMPL_SET_ID, CAPABILITY_IMPL_REVISION,
         key="autonomy/github", payload=_GITHUB_IMPL, state="published",
-    )
+     org=ops.CALLER_ORG)
     ops.add_setting(
         ORG_CAPABILITY_INSTALL_SET_ID, ORG_CAPABILITY_INSTALL_REVISION,
         key="source_control",
@@ -194,14 +194,14 @@ def _seed_github_install():
             "implementation_version": 1,
             "env_bindings": {"GH_TOKEN": "ghp_test_value"},
         },
-    )
+     org=ops.CALLER_ORG)
 
 
 def _seed_jira_install():
     ops.add_setting(
         CAPABILITY_IMPL_SET_ID, CAPABILITY_IMPL_REVISION,
         key="autonomy/jira", payload=_JIRA_IMPL, state="published",
-    )
+     org=ops.CALLER_ORG)
     ops.add_setting(
         ORG_CAPABILITY_INSTALL_SET_ID, ORG_CAPABILITY_INSTALL_REVISION,
         key="issue_tracker",
@@ -218,7 +218,7 @@ def _seed_jira_install():
                 "/run/secrets/jira_token": "/etc/autonomy/secrets/jira_token",
             },
         },
-    )
+     org=ops.CALLER_ORG)
 
 
 def _enable_capability(workspace_id: str, contract: str, *, enabled: bool = True):
@@ -227,7 +227,7 @@ def _enable_capability(workspace_id: str, contract: str, *, enabled: bool = True
         WORKSPACE_CAPABILITY_ENABLE_REVISION,
         key=f"{workspace_id}:{contract}",
         payload={"contract": contract, "enabled": enabled},
-    )
+     org=ops.CALLER_ORG)
 
 
 def test_resolve_capabilities_no_enables_returns_empty(graph_db_env):
@@ -324,7 +324,7 @@ def test_resolve_capabilities_drops_impl_not_implementing_contract_version(graph
     ops.add_setting(
         CAPABILITY_IMPL_SET_ID, CAPABILITY_IMPL_REVISION,
         key="autonomy/github", payload=drift_impl, state="published",
-    )
+     org=ops.CALLER_ORG)
     ops.add_setting(
         ORG_CAPABILITY_INSTALL_SET_ID, ORG_CAPABILITY_INSTALL_REVISION,
         key="source_control",
@@ -334,7 +334,7 @@ def test_resolve_capabilities_drops_impl_not_implementing_contract_version(graph
             "implementation": "autonomy/github",
             "implementation_version": 1,
         },
-    )
+     org=ops.CALLER_ORG)
     _enable_capability("dashboard", "source_control")
 
     assert resolve_capabilities("dashboard") == ()

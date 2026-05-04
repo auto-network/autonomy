@@ -101,8 +101,8 @@ def test_merge_patch_adds_new_key():
 def test_add_and_read_round_trip(graph_db_env, example_schema):
     sid = ops.add_setting(
         "autonomy.test.example", 1, "foo", {"x": 1, "name": "bar"},
-    )
-    members = ops.read_set("autonomy.test.example")
+     org=ops.CALLER_ORG)
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     assert len(members.members) == 1
     m = members.members[0]
     assert m.id == sid
@@ -114,11 +114,11 @@ def test_add_and_read_round_trip(graph_db_env, example_schema):
 def test_upsert_by_key_updates_existing_row_in_place(graph_db_env, example_schema):
     sid = ops.upsert_by_key(
         "autonomy.test.example", 1, "foo", {"x": 1, "name": "bar"},
-    )
+     org=ops.CALLER_ORG)
     sid_again = ops.upsert_by_key(
         "autonomy.test.example", 1, "foo", {"x": 2, "name": "baz"},
-    )
-    members = ops.read_set("autonomy.test.example")
+     org=ops.CALLER_ORG)
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     assert sid_again == sid
     assert len(members.members) == 1
     assert members.members[0].id == sid
@@ -127,35 +127,35 @@ def test_upsert_by_key_updates_existing_row_in_place(graph_db_env, example_schem
 
 def test_add_unknown_schema_raises(graph_db_env):
     with pytest.raises(SchemaValidationError):
-        ops.add_setting("unregistered.set", 1, "k", {})
+        ops.add_setting("unregistered.set", 1, "k", {}, org=ops.CALLER_ORG)
 
 
 def test_add_strict_schema_rejects_invalid(graph_db_env, strict_schema):
     with pytest.raises(SchemaValidationError):
-        ops.add_setting("autonomy.test.strict", 1, "k", {"x": 1})
+        ops.add_setting("autonomy.test.strict", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
 
 
 def test_add_strict_schema_accepts_valid(graph_db_env, strict_schema):
-    sid = ops.add_setting("autonomy.test.strict", 1, "k", {"name": "ok"})
+    sid = ops.add_setting("autonomy.test.strict", 1, "k", {"name": "ok"}, org=ops.CALLER_ORG)
     assert sid
 
 
 def test_get_setting_returns_resolved(graph_db_env, example_schema):
-    sid = ops.add_setting("autonomy.test.example", 1, "foo", {"a": 1})
-    got = ops.get_setting(sid)
+    sid = ops.add_setting("autonomy.test.example", 1, "foo", {"a": 1}, org=ops.CALLER_ORG)
+    got = ops.get_setting(sid, org=ops.CALLER_ORG)
     assert got is not None
     assert got.id == sid
     assert got.payload == {"a": 1}
 
 
 def test_get_setting_missing_returns_none(graph_db_env):
-    assert ops.get_setting("does-not-exist") is None
+    assert ops.get_setting("does-not-exist", org=ops.CALLER_ORG) is None
 
 
 def test_list_set_ids(graph_db_env, example_schema, strict_schema):
-    ops.add_setting("autonomy.test.example", 1, "k1", {"x": 1})
-    ops.add_setting("autonomy.test.strict", 1, "k2", {"name": "y"})
-    ids = ops.list_set_ids()
+    ops.add_setting("autonomy.test.example", 1, "k1", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.strict", 1, "k2", {"name": "y"}, org=ops.CALLER_ORG)
+    ids = ops.list_set_ids(org=ops.CALLER_ORG)
     assert "autonomy.test.example" in ids
     assert "autonomy.test.strict" in ids
 
@@ -167,9 +167,9 @@ def test_override_merges_per_field(graph_db_env, example_schema):
     base = ops.add_setting(
         "autonomy.test.example", 1, "foo",
         {"name": "Alice", "color": "blue", "limit": 10},
-    )
-    ops.override_setting(base, {"color": "red"})
-    members = ops.read_set("autonomy.test.example")
+     org=ops.CALLER_ORG)
+    ops.override_setting(base, {"color": "red"}, org=ops.CALLER_ORG)
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     assert len(members.members) == 1
     m = members.members[0]
     # Per-field merge: name and limit preserved; color overridden
@@ -180,10 +180,10 @@ def test_override_chain_applies_all(graph_db_env, example_schema):
     base = ops.add_setting(
         "autonomy.test.example", 1, "foo",
         {"a": 1, "b": 2, "c": 3},
-    )
-    ops.override_setting(base, {"a": 10})
-    ops.override_setting(base, {"b": 20})
-    members = ops.read_set("autonomy.test.example")
+     org=ops.CALLER_ORG)
+    ops.override_setting(base, {"a": 10}, org=ops.CALLER_ORG)
+    ops.override_setting(base, {"b": 20}, org=ops.CALLER_ORG)
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     m = members.members[0]
     assert m.payload["a"] == 10
     assert m.payload["b"] == 20
@@ -192,7 +192,7 @@ def test_override_chain_applies_all(graph_db_env, example_schema):
 
 def test_override_missing_target_raises(graph_db_env, example_schema):
     with pytest.raises(LookupError):
-        ops.override_setting("nope", {"x": 1})
+        ops.override_setting("nope", {"x": 1}, org=ops.CALLER_ORG)
 
 
 # ── exclude ─────────────────────────────────────────────────
@@ -202,13 +202,13 @@ def test_exclude_drops_target(graph_db_env, example_schema):
     canonical = ops.add_setting(
         "autonomy.test.example", 1, "foo", {"name": "X"},
         state="canonical",
-    )
+     org=ops.CALLER_ORG)
     ops.add_setting(
         "autonomy.test.example", 1, "bar", {"name": "Y"},
         state="canonical",
-    )
-    ops.exclude_setting(canonical)
-    members = ops.read_set("autonomy.test.example")
+     org=ops.CALLER_ORG)
+    ops.exclude_setting(canonical, org=ops.CALLER_ORG)
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     keys = {m.key for m in members.members}
     assert "bar" in keys
     assert "foo" not in keys
@@ -216,7 +216,7 @@ def test_exclude_drops_target(graph_db_env, example_schema):
 
 def test_exclude_missing_target_raises(graph_db_env):
     with pytest.raises(LookupError):
-        ops.exclude_setting("nope")
+        ops.exclude_setting("nope", org=ops.CALLER_ORG)
 
 
 # ── precedence ──────────────────────────────────────────────
@@ -225,11 +225,11 @@ def test_exclude_missing_target_raises(graph_db_env):
 def test_precedence_canonical_beats_raw(graph_db_env, example_schema):
     raw_sid = ops.add_setting(
         "autonomy.test.example", 1, "k", {"name": "raw"}, state="raw",
-    )
+     org=ops.CALLER_ORG)
     can_sid = ops.add_setting(
         "autonomy.test.example", 1, "k", {"name": "canonical"}, state="canonical",
-    )
-    members = ops.read_set("autonomy.test.example")
+     org=ops.CALLER_ORG)
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     # Two bases with same key; canonical wins.
     assert len(members.members) == 1
     assert members.members[0].id == can_sid
@@ -239,11 +239,11 @@ def test_precedence_canonical_beats_raw(graph_db_env, example_schema):
 def test_precedence_published_beats_curated(graph_db_env, example_schema):
     ops.add_setting(
         "autonomy.test.example", 1, "k", {"v": "curated"}, state="curated",
-    )
+     org=ops.CALLER_ORG)
     pub_sid = ops.add_setting(
         "autonomy.test.example", 1, "k", {"v": "published"}, state="published",
-    )
-    members = ops.read_set("autonomy.test.example")
+     org=ops.CALLER_ORG)
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     assert members.members[0].id == pub_sid
 
 
@@ -252,12 +252,12 @@ def test_precedence_tiebreak_by_recency(graph_db_env, example_schema):
     import time
     first = ops.add_setting(
         "autonomy.test.example", 1, "k", {"v": "first"}, state="raw",
-    )
+     org=ops.CALLER_ORG)
     time.sleep(1.1)  # ISO seconds-resolution timestamps need a real gap
     second = ops.add_setting(
         "autonomy.test.example", 1, "k", {"v": "second"}, state="raw",
-    )
-    members = ops.read_set("autonomy.test.example")
+     org=ops.CALLER_ORG)
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     assert members.members[0].id == second
     assert members.members[0].payload["v"] == "second"
 
@@ -266,43 +266,43 @@ def test_precedence_tiebreak_by_recency(graph_db_env, example_schema):
 
 
 def test_promote_changes_state(graph_db_env, example_schema):
-    sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1})
-    ops.promote_setting(sid, "canonical")
-    got = ops.get_setting(sid)
+    sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1}, org=ops.CALLER_ORG)
+    ops.promote_setting(sid, "canonical", org=ops.CALLER_ORG)
+    got = ops.get_setting(sid, org=ops.CALLER_ORG)
     assert got.state == "canonical"
 
 
 def test_promote_invalid_state_raises(graph_db_env, example_schema):
-    sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1})
+    sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1}, org=ops.CALLER_ORG)
     with pytest.raises(ValueError):
-        ops.promote_setting(sid, "garbage")
+        ops.promote_setting(sid, "garbage", org=ops.CALLER_ORG)
 
 
 def test_promote_missing_setting_raises(graph_db_env):
     with pytest.raises(LookupError):
-        ops.promote_setting("nope", "canonical")
+        ops.promote_setting("nope", "canonical", org=ops.CALLER_ORG)
 
 
 def test_deprecate_marks_flag_and_successor(graph_db_env, example_schema):
-    a = ops.add_setting("autonomy.test.example", 1, "k1", {"v": 1})
-    b = ops.add_setting("autonomy.test.example", 1, "k2", {"v": 2})
-    ops.deprecate_setting(a, successor_id=b)
-    got = ops.get_setting(a)
+    a = ops.add_setting("autonomy.test.example", 1, "k1", {"v": 1}, org=ops.CALLER_ORG)
+    b = ops.add_setting("autonomy.test.example", 1, "k2", {"v": 2}, org=ops.CALLER_ORG)
+    ops.deprecate_setting(a, successor_id=b, org=ops.CALLER_ORG)
+    got = ops.get_setting(a, org=ops.CALLER_ORG)
     assert got.deprecated is True
     assert got.successor_id == b
 
 
 def test_remove_only_works_on_raw(graph_db_env, example_schema):
     sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1},
-                          state="canonical")
+                          state="canonical", org=ops.CALLER_ORG)
     with pytest.raises(ValueError):
-        ops.remove_setting(sid)
+        ops.remove_setting(sid, org=ops.CALLER_ORG)
 
 
 def test_remove_raw_succeeds(graph_db_env, example_schema):
-    sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1})
-    ops.remove_setting(sid)
-    assert ops.get_setting(sid) is None
+    sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1}, org=ops.CALLER_ORG)
+    ops.remove_setting(sid, org=ops.CALLER_ORG)
+    assert ops.get_setting(sid, org=ops.CALLER_ORG) is None
 
 
 # ── org / peers plumbing ─────────────────────────────
@@ -332,14 +332,14 @@ def test_read_set_skips_deprecated_rows(graph_db_env, example_schema):
     ops.add_setting(
         "autonomy.test.example", 1, "active.key",
         {"name": "active"}, state="canonical",
-    )
+     org=ops.CALLER_ORG)
     retired = ops.add_setting(
         "autonomy.test.example", 1, "retired.key",
         {"name": "retired"}, state="canonical",
-    )
-    ops.deprecate_setting(retired)
+     org=ops.CALLER_ORG)
+    ops.deprecate_setting(retired, org=ops.CALLER_ORG)
 
-    members = ops.read_set("autonomy.test.example")
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     keys = {m.key for m in members.members}
     assert "active.key" in keys
     assert "retired.key" not in keys
@@ -353,6 +353,6 @@ def test_read_set_deprecated_filter_counts_zero_when_none(
     ops.add_setting(
         "autonomy.test.example", 1, "active.key",
         {"name": "active"}, state="canonical",
-    )
-    members = ops.read_set("autonomy.test.example")
+     org=ops.CALLER_ORG)
+    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     assert members.dropped.deprecated_filtered == 0

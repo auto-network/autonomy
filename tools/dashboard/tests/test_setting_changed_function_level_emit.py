@@ -125,9 +125,9 @@ def test_override_setting_fires_hook(
 ):
     base = settings_ops.add_setting(
         TEST_SET_ID, TEST_REVISION, "k", {"a": 1, "b": 2},
-    )
+     org=settings_ops.CALLER_ORG)
     captured_events.clear()
-    settings_ops.override_setting(base, {"b": 99}, state="raw")
+    settings_ops.override_setting(base, {"b": 99}, state="raw", org=settings_ops.CALLER_ORG)
     assert len(captured_events) == 1
     assert captured_events[0]["operation"] == "override"
     assert captured_events[0]["snapshot"]["key"] == "k"
@@ -138,9 +138,9 @@ def test_exclude_setting_fires_hook(
 ):
     base = settings_ops.add_setting(
         TEST_SET_ID, TEST_REVISION, "k", {"x": 1}, state="canonical",
-    )
+     org=settings_ops.CALLER_ORG)
     captured_events.clear()
-    settings_ops.exclude_setting(base)
+    settings_ops.exclude_setting(base, org=settings_ops.CALLER_ORG)
     assert len(captured_events) == 1
     assert captured_events[0]["operation"] == "exclude"
 
@@ -150,9 +150,9 @@ def test_promote_setting_fires_hook(
 ):
     sid = settings_ops.add_setting(
         TEST_SET_ID, TEST_REVISION, "k", {"x": 1},
-    )
+     org=settings_ops.CALLER_ORG)
     captured_events.clear()
-    settings_ops.promote_setting(sid, "canonical")
+    settings_ops.promote_setting(sid, "canonical", org=settings_ops.CALLER_ORG)
     assert len(captured_events) == 1
     ev = captured_events[0]
     assert ev["operation"] == "promote"
@@ -165,9 +165,9 @@ def test_deprecate_setting_fires_hook(
 ):
     sid = settings_ops.add_setting(
         TEST_SET_ID, TEST_REVISION, "k", {"x": 1},
-    )
+     org=settings_ops.CALLER_ORG)
     captured_events.clear()
-    settings_ops.deprecate_setting(sid)
+    settings_ops.deprecate_setting(sid, org=settings_ops.CALLER_ORG)
     assert len(captured_events) == 1
     ev = captured_events[0]
     assert ev["operation"] == "deprecate"
@@ -179,9 +179,9 @@ def test_remove_setting_fires_hook_with_predelete_snapshot(
 ):
     sid = settings_ops.add_setting(
         TEST_SET_ID, TEST_REVISION, "k", {"x": 1},
-    )
+     org=settings_ops.CALLER_ORG)
     captured_events.clear()
-    settings_ops.remove_setting(sid)
+    settings_ops.remove_setting(sid, org=settings_ops.CALLER_ORG)
     assert len(captured_events) == 1
     ev = captured_events[0]
     assert ev["operation"] == "delete"
@@ -193,10 +193,10 @@ def test_remove_setting_fires_hook_with_predelete_snapshot(
 def test_migrate_setting_fires_hook_per_affected(
     graph_db_env, fixture_schema, captured_events,
 ):
-    settings_ops.add_setting(TEST_SET_ID, TEST_REVISION, "a", {"x": 1})
-    settings_ops.add_setting(TEST_SET_ID, TEST_REVISION, "b", {"x": 2})
+    settings_ops.add_setting(TEST_SET_ID, TEST_REVISION, "a", {"x": 1}, org=settings_ops.CALLER_ORG)
+    settings_ops.add_setting(TEST_SET_ID, TEST_REVISION, "b", {"x": 2}, org=settings_ops.CALLER_ORG)
     captured_events.clear()
-    report = settings_ops.migrate_setting_revisions(TEST_SET_ID, 2)
+    report = settings_ops.migrate_setting_revisions(TEST_SET_ID, 2, org=settings_ops.CALLER_ORG)
     assert report.rewrote == 2
     assert len(captured_events) == 2
     for ev in captured_events:
@@ -207,9 +207,9 @@ def test_migrate_setting_fires_hook_per_affected(
 def test_migrate_dry_run_does_not_fire(
     graph_db_env, fixture_schema, captured_events,
 ):
-    settings_ops.add_setting(TEST_SET_ID, TEST_REVISION, "a", {"x": 1})
+    settings_ops.add_setting(TEST_SET_ID, TEST_REVISION, "a", {"x": 1}, org=settings_ops.CALLER_ORG)
     captured_events.clear()
-    settings_ops.migrate_setting_revisions(TEST_SET_ID, 2, dry_run=True)
+    settings_ops.migrate_setting_revisions(TEST_SET_ID, 2, dry_run=True, org=settings_ops.CALLER_ORG)
     assert captured_events == []
 
 
@@ -218,9 +218,9 @@ def test_no_hook_registered_is_a_no_op(graph_db_env, fixture_schema):
     settings_ops.set_emit_hook(None)
     sid = settings_ops.add_setting(
         TEST_SET_ID, TEST_REVISION, "k", {"x": 1},
-    )
+     org=settings_ops.CALLER_ORG)
     assert isinstance(sid, str)
-    members = settings_ops.read_set(TEST_SET_ID)
+    members = settings_ops.read_set(TEST_SET_ID, org=settings_ops.CALLER_ORG)
     assert any(m.id == sid for m in members.members)
 
 
@@ -235,10 +235,10 @@ def test_hook_exception_does_not_block_write(
     # Should not raise.
     sid = settings_ops.add_setting(
         TEST_SET_ID, TEST_REVISION, "k", {"x": 1},
-    )
+     org=settings_ops.CALLER_ORG)
     assert isinstance(sid, str)
     # Row is committed despite the hook failure.
-    members = settings_ops.read_set(TEST_SET_ID)
+    members = settings_ops.read_set(TEST_SET_ID, org=settings_ops.CALLER_ORG)
     assert any(m.id == sid for m in members.members)
 
 
@@ -266,7 +266,7 @@ def test_emit_after_commit_or_subscriber_misses_row(
         # Immediate re-resolve on receipt of "new row" notification.
         if operation != "write":
             return
-        members = settings_ops.read_set(snapshot["set_id"])
+        members = settings_ops.read_set(snapshot["set_id"], org=settings_ops.CALLER_ORG)
         match = next(
             (m for m in members.members if m.key == snapshot["key"]),
             None,
@@ -281,7 +281,7 @@ def test_emit_after_commit_or_subscriber_misses_row(
     for i in range(100):
         sid = settings_ops.add_setting(
             TEST_SET_ID, TEST_REVISION, f"k-{i:03d}", {"x": i},
-        )
+         org=settings_ops.CALLER_ORG)
         seen[-1] == sid  # noqa: B015 — readability check, not assertion
 
     assert len(misses) == 0, (

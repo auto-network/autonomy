@@ -129,7 +129,7 @@ def _set_row_expires_at(db_path: Path, sid: str, expires_at: str | None) -> None
 def test_add_setting_on_cache_schema_populates_expires_at(
     graph_db_env, cache_schema,
 ):
-    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     row = _read_row(graph_db_env, sid)
     assert row["expires_at"] is not None
     # expires_at = updated_at + 30 days; both are ISO strings.
@@ -139,20 +139,20 @@ def test_add_setting_on_cache_schema_populates_expires_at(
 def test_add_setting_on_non_cache_schema_leaves_expires_at_null(
     graph_db_env, non_cache_schema,
 ):
-    sid = ops.add_setting("autonomy.test.solo", 1, "default", {"x": 1})
+    sid = ops.add_setting("autonomy.test.solo", 1, "default", {"x": 1}, org=ops.CALLER_ORG)
     row = _read_row(graph_db_env, sid)
     assert row["expires_at"] is None
 
 
 def test_promote_recomputes_expires_at(graph_db_env, cache_schema):
-    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     pre_row = _read_row(graph_db_env, sid)
     pre_expires = pre_row["expires_at"]
     # Promotion is a state change, but TTL is sliding — promote bumps
     # updated_at and therefore expires_at. Cache rows are unusual at
     # 'curated' state (the docs note this); the substrate doesn't
     # forbid it.
-    ops.promote_setting(sid, "curated")
+    ops.promote_setting(sid, "curated", org=ops.CALLER_ORG)
     post_row = _read_row(graph_db_env, sid)
     assert post_row["expires_at"] is not None
     # New expires_at must be >= old (time monotonically advances or
@@ -162,9 +162,9 @@ def test_promote_recomputes_expires_at(graph_db_env, cache_schema):
 
 
 def test_deprecate_recomputes_expires_at(graph_db_env, cache_schema):
-    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     pre_row = _read_row(graph_db_env, sid)
-    ops.deprecate_setting(sid)
+    ops.deprecate_setting(sid, org=ops.CALLER_ORG)
     post_row = _read_row(graph_db_env, sid)
     assert post_row["expires_at"] is not None
     assert post_row["expires_at"] >= pre_row["expires_at"]
@@ -174,8 +174,8 @@ def test_deprecate_recomputes_expires_at(graph_db_env, cache_schema):
 def test_override_setting_inherits_cache_schema_expires_at(
     graph_db_env, cache_schema,
 ):
-    base_sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1})
-    override_sid = ops.override_setting(base_sid, {"x": 2})
+    base_sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
+    override_sid = ops.override_setting(base_sid, {"x": 2}, org=ops.CALLER_ORG)
     row = _read_row(graph_db_env, override_sid)
     assert row["expires_at"] is not None
 
@@ -183,8 +183,8 @@ def test_override_setting_inherits_cache_schema_expires_at(
 def test_exclude_setting_inherits_cache_schema_expires_at(
     graph_db_env, cache_schema,
 ):
-    base_sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1})
-    exclude_sid = ops.exclude_setting(base_sid)
+    base_sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
+    exclude_sid = ops.exclude_setting(base_sid, org=ops.CALLER_ORG)
     row = _read_row(graph_db_env, exclude_sid)
     assert row["expires_at"] is not None
 
@@ -193,7 +193,7 @@ def test_exclude_setting_inherits_cache_schema_expires_at(
 
 
 def test_sweep_db_deletes_elapsed_raw_cache_rows(graph_db_env, cache_schema):
-    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     # Backdate the expires_at to the past.
     _set_row_expires_at(graph_db_env, sid, "1970-01-01T00:00:00Z")
 
@@ -212,7 +212,7 @@ def test_sweep_db_deletes_elapsed_raw_cache_rows(graph_db_env, cache_schema):
 
 
 def test_sweep_db_skips_non_expired_rows(graph_db_env, cache_schema):
-    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     # Default expires_at is 30 days in the future — should not be swept.
     from tools.graph.db import GraphDB
     db = GraphDB(str(graph_db_env))
@@ -226,7 +226,7 @@ def test_sweep_db_skips_non_expired_rows(graph_db_env, cache_schema):
 
 def test_sweep_db_skips_null_expires_at(graph_db_env, non_cache_schema):
     """Non-cache rows have NULL expires_at and must never be swept."""
-    sid = ops.add_setting("autonomy.test.solo", 1, "default", {"x": 1})
+    sid = ops.add_setting("autonomy.test.solo", 1, "default", {"x": 1}, org=ops.CALLER_ORG)
     from tools.graph.db import GraphDB
     db = GraphDB(str(graph_db_env))
     try:
@@ -246,10 +246,10 @@ def test_sweep_db_spares_published_with_warning(
     """
     sid = ops.add_setting(
         "autonomy.test.cache", 1, "k", {"x": 1}, state="raw",
-    )
+     org=ops.CALLER_ORG)
     # Promote past the GC's reach.
-    ops.promote_setting(sid, "curated")
-    ops.promote_setting(sid, "published")
+    ops.promote_setting(sid, "curated", org=ops.CALLER_ORG)
+    ops.promote_setting(sid, "published", org=ops.CALLER_ORG)
     # Backdate so expires_at < now.
     _set_row_expires_at(graph_db_env, sid, "1970-01-01T00:00:00Z")
 
@@ -273,7 +273,7 @@ def test_sweep_db_spares_published_with_warning(
 
 def test_sweep_db_respects_limit(graph_db_env, cache_schema):
     sids = [
-        ops.add_setting("autonomy.test.cache", 1, f"k{i}", {"i": i})
+        ops.add_setting("autonomy.test.cache", 1, f"k{i}", {"i": i}, org=ops.CALLER_ORG)
         for i in range(5)
     ]
     for sid in sids:
@@ -297,7 +297,7 @@ def test_sweep_db_respects_limit(graph_db_env, cache_schema):
 def test_sweep_db_dry_run_logs_but_does_not_delete(
     graph_db_env, cache_schema, caplog,
 ):
-    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.cache", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     _set_row_expires_at(graph_db_env, sid, "1970-01-01T00:00:00Z")
 
     from tools.graph.db import GraphDB
@@ -318,7 +318,7 @@ def test_sweep_db_dry_run_logs_but_does_not_delete(
 def test_sweep_db_emits_structured_per_row_log(
     graph_db_env, cache_schema, caplog,
 ):
-    sid = ops.add_setting("autonomy.test.cache", 1, "the-key", {"x": 1})
+    sid = ops.add_setting("autonomy.test.cache", 1, "the-key", {"x": 1}, org=ops.CALLER_ORG)
     _set_row_expires_at(graph_db_env, sid, "1970-01-01T00:00:00Z")
 
     from tools.graph.db import GraphDB

@@ -405,7 +405,7 @@ def test_settings_scopeless_add_setting_lands_in_personal(orgs_root, stub_schema
 
     settings_ops.add_setting(
         "test.routing", 1, "scopeless", {"ok": True},
-    )
+     org=ops.CALLER_ORG)
 
     assert _count_settings(orgs_root / "personal.db") == 1
     assert _count_settings(orgs_root / "autonomy.db") == 0
@@ -418,7 +418,7 @@ def test_settings_graph_org_env_drives_routing(orgs_root, stub_schema, monkeypat
 
     settings_ops.add_setting(
         "test.routing", 1, "env-driven", {"ok": True},
-    )
+     org=ops.CALLER_ORG)
 
     assert _count_settings(orgs_root / "anchore.db") == 1
     assert _count_settings(orgs_root / "personal.db") == 0

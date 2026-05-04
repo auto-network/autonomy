@@ -42,6 +42,34 @@ class GraphHttpError(Exception):
         self.body = body or {}
 
 
+def _resolve_client_org_arg(org):
+    """Mirror :func:`settings_ops._resolve_org_arg` for HTTP-client use.
+
+    Settings methods (auto-cfb8u) require ``org=``. The
+    :data:`settings_ops.CALLER_ORG` sentinel opts into the env-cascade
+    (only ``GRAPH_ORG`` is checked in container/CLI contexts — there is
+    no per-request contextvar on the client side; the dashboard server
+    does that resolution server-side from ``X-Graph-Org``).
+
+    A non-empty string slug routes that org. ``None`` is preserved as
+    "no ``X-Graph-Org`` header" — the server treats that as scopeless.
+    """
+    from .settings_ops import _CallerOrgSentinel
+    if isinstance(org, _CallerOrgSentinel):
+        return os.environ.get("GRAPH_ORG")
+    return org
+
+
+def _settings_headers(org: str | None) -> dict:
+    """Build the ``X-Graph-Org`` header dict for a Settings call.
+
+    ``org`` is the post-:func:`_resolve_client_org_arg` value: a slug
+    (sets the header) or ``None`` (omits it, signalling scopeless to the
+    server). No env fallback — Settings methods own their cascade.
+    """
+    return {"X-Graph-Org": org} if org else {}
+
+
 def _translate_http_error(status: int, body: dict) -> Exception:
     """Convert a dashboard API error response into the exception the
     local-mode callers already handle (so cmd_ bodies stay unchanged).
@@ -594,41 +622,57 @@ class HttpClient:
         }
 
     # ── settings ───────────────────────────────────────────
+    #
+    # Mirror of :mod:`tools.graph.settings_ops` — ``org=`` is required on
+    # every Settings method (auto-cfb8u). Pass an org slug, the
+    # :data:`settings_ops.CALLER_ORG` sentinel for env-cascade
+    # semantics, or ``None`` for explicit scopeless. Forgetting ``org=``
+    # is a ``TypeError``.
 
-    def list_set_ids(self, *, org=None):
-        result = self._get("/api/graph/sets", org=org)
+    def list_set_ids(self, *, org):
+        org = _resolve_client_org_arg(org)
+        result = self._request(
+            "GET", "/api/graph/sets", headers=_settings_headers(org),
+        )
         if isinstance(result, dict) and "set_ids" in result:
             return result["set_ids"]
         return result if isinstance(result, list) else []
 
-    def read_set(self, set_id, *, target_revision=None, min_revision=None, org=None):
+    def read_set(self, set_id, *, org, target_revision=None, min_revision=None):
         from .settings_ops import SetMembers, ResolvedSetting, DropAccounting
+        org = _resolve_client_org_arg(org)
         params: dict[str, Any] = {}
         if target_revision is not None:
             params["as_rev"] = str(target_revision)
         if min_revision is not None:
             params["min_rev"] = str(min_revision)
-        result = self._get(f"/api/graph/settings/{set_id}", params, org=org)
+        result = self._request(
+            "GET", f"/api/graph/settings/{set_id}",
+            params=params, headers=_settings_headers(org),
+        )
         return SetMembers(
             members=[_dict_to_resolved_setting(m) for m in result.get("members", [])],
             dropped=DropAccounting(**(result.get("dropped") or {})),
         )
 
-    def get_setting(self, setting_id, *, target_revision=None, org=None):
+    def get_setting(self, setting_id, *, org, target_revision=None):
+        org = _resolve_client_org_arg(org)
         params: dict[str, Any] = {}
         if target_revision is not None:
             params["as_rev"] = str(target_revision)
         try:
-            result = self._get(
-                f"/api/graph/setting/{setting_id}", params, org=org,
+            result = self._request(
+                "GET", f"/api/graph/setting/{setting_id}",
+                params=params, headers=_settings_headers(org),
             )
         except LookupError:
             return None
         return _dict_to_resolved_setting(result)
 
     def add_setting(
-        self, set_id, schema_revision, key, payload, *, state="raw", org=None,
+        self, set_id, schema_revision, key, payload, *, org, state="raw",
     ):
+        org = _resolve_client_org_arg(org)
         body = {
             "set_id": set_id,
             "schema_revision": schema_revision,
@@ -636,51 +680,66 @@ class HttpClient:
             "payload": payload,
             "state": state,
         }
-        result = self._post("/api/graph/setting", body, org=org)
+        result = self._request(
+            "POST", "/api/graph/setting", body=body,
+            headers=_settings_headers(org),
+        )
         return result.get("id")
 
-    def override_setting(self, target_id, payload, *, state="raw", org=None):
+    def override_setting(self, target_id, payload, *, org, state="raw"):
+        org = _resolve_client_org_arg(org)
         body = {"payload": payload, "state": state}
-        result = self._post(
-            f"/api/graph/setting/{target_id}/override", body, org=org,
+        result = self._request(
+            "POST", f"/api/graph/setting/{target_id}/override",
+            body=body, headers=_settings_headers(org),
         )
         return result.get("id")
 
-    def exclude_setting(self, target_id, *, state="raw", org=None):
+    def exclude_setting(self, target_id, *, org, state="raw"):
+        org = _resolve_client_org_arg(org)
         body = {"state": state}
-        result = self._post(
-            f"/api/graph/setting/{target_id}/exclude", body, org=org,
+        result = self._request(
+            "POST", f"/api/graph/setting/{target_id}/exclude",
+            body=body, headers=_settings_headers(org),
         )
         return result.get("id")
 
-    def promote_setting(self, setting_id, to_state, *, org=None):
-        self._post(
-            f"/api/graph/setting/{setting_id}/promote",
-            {"to_state": to_state},
-            org=org,
+    def promote_setting(self, setting_id, to_state, *, org):
+        org = _resolve_client_org_arg(org)
+        self._request(
+            "POST", f"/api/graph/setting/{setting_id}/promote",
+            body={"to_state": to_state}, headers=_settings_headers(org),
         )
 
-    def deprecate_setting(self, setting_id, *, successor_id=None, org=None):
+    def deprecate_setting(self, setting_id, *, org, successor_id=None):
+        org = _resolve_client_org_arg(org)
         body: dict[str, Any] = {}
         if successor_id:
             body["successor_id"] = successor_id
-        self._post(
-            f"/api/graph/setting/{setting_id}/deprecate", body, org=org,
+        self._request(
+            "POST", f"/api/graph/setting/{setting_id}/deprecate",
+            body=body, headers=_settings_headers(org),
         )
 
-    def remove_setting(self, setting_id, *, org=None):
-        self._delete(f"/api/graph/setting/{setting_id}", org=org)
+    def remove_setting(self, setting_id, *, org):
+        org = _resolve_client_org_arg(org)
+        self._request(
+            "DELETE", f"/api/graph/setting/{setting_id}",
+            headers=_settings_headers(org),
+        )
 
-    def resolve_setting_strict(self, value, *, org=None):
+    def resolve_setting_strict(self, value, *, org):
         """Resolve a Setting by full id or id-prefix.
 
         Returns dict (unique match), list[dict] (ambiguous candidates),
         or None (no match). Mirrors :func:`ops.resolve_setting_strict`.
         """
+        org = _resolve_client_org_arg(org)
         try:
-            result = self._get(
+            result = self._request(
+                "GET",
                 f"/api/graph/setting-resolve/{urllib.parse.quote(value, safe='')}",
-                org=org,
+                headers=_settings_headers(org),
             )
         except LookupError:
             return None
@@ -690,27 +749,31 @@ class HttpClient:
             raise
         return result
 
-    def chain_setting(self, set_id, key, *, org=None):
+    def chain_setting(self, set_id, key, *, org):
         """Return the supersedes chain for ``(set_id, key)``.
 
         ``None`` if no member resolves under the caller's scope.
         """
+        org = _resolve_client_org_arg(org)
         try:
-            return self._get(
+            return self._request(
+                "GET",
                 f"/api/graph/settings/{urllib.parse.quote(set_id, safe='')}/"
                 f"{urllib.parse.quote(key, safe='')}/chain",
-                org=org,
+                headers=_settings_headers(org),
             )
         except LookupError:
             return None
 
     def migrate_setting_revisions(
-        self, set_id, to_rev, *, dry_run=False, org=None,
+        self, set_id, to_rev, *, org, dry_run=False,
     ):
         from .settings_ops import MigrationReport
+        org = _resolve_client_org_arg(org)
         body = {"to_rev": to_rev, "dry_run": dry_run}
-        result = self._post(
-            f"/api/graph/settings/{set_id}/migrate", body, org=org,
+        result = self._request(
+            "POST", f"/api/graph/settings/{set_id}/migrate",
+            body=body, headers=_settings_headers(org),
         )
         return MigrationReport(
             set_id=result.get("set_id", set_id),

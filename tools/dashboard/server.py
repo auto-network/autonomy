@@ -8617,13 +8617,36 @@ _MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 
 def _caller_org(request) -> str | None:
-    """Resolve caller org for a dashboard write: header > env > None.
+    """Resolve caller org for a dashboard write: header > None.
 
+    Returns the ``X-Graph-Org`` header value when present, else ``None``.
     Per graph://bcce359d-a1d §Cross-org write semantics, explicit caller
-    org selects the destination DB; ``None`` lets ops fall through to
-    ``GRAPH_ORG`` env / scopeless default.
+    org selects the destination DB.
+
+    .. note:: The Settings public API (auto-cfb8u) requires ``org=``, and
+       a literal ``None`` means *scopeless* — the bug this contract
+       prevents. Settings handlers should pass
+       ``_settings_caller_org(request)`` instead, which returns
+       :data:`graph_ops.CALLER_ORG` on no-header so the env-cascade is
+       used (matches pre-cfb8u behavior, just made explicit).
     """
     return request.headers.get("X-Graph-Org") or None
+
+
+def _settings_caller_org(request):
+    """Resolve caller org for a Settings public-API call.
+
+    Returns the ``X-Graph-Org`` header value when present, else
+    :data:`graph_ops.CALLER_ORG` — a sentinel that opts the Settings
+    call into the env-cascade resolver (per-request contextvar →
+    ``GRAPH_ORG`` env → scopeless default).
+
+    Forgetting this on a Settings write inside a handler used to land
+    the row silently in the scopeless DB while readers carrying
+    ``X-Graph-Org`` saw nothing (graph://53f7412f-51e). Required-org +
+    this helper makes the intent loud at every call site.
+    """
+    return request.headers.get("X-Graph-Org") or graph_ops.CALLER_ORG
 
 
 class _FallbackUpload:
@@ -9756,7 +9779,7 @@ async def _emit_setting_changed(
         if setting_id is None:
             return
         try:
-            got = graph_ops.get_setting(setting_id, org=org)
+            got = graph_ops.get_setting(setting_id, org=org or graph_ops.CALLER_ORG)
         except Exception:
             logger.debug(
                 "setting.changed: get_setting(%s) failed", setting_id,
@@ -9798,7 +9821,8 @@ async def api_graph_settings_list(request):
             "dropped": {},
         })
     members = graph_ops.read_set(
-        set_id, target_revision=target, min_revision=minrev, org=org,
+        set_id, target_revision=target, min_revision=minrev,
+        org=org or graph_ops.CALLER_ORG,
     )
     out = members.as_payload()
     if stored is not None:
@@ -9815,7 +9839,8 @@ async def api_graph_settings_get_by_key(request):
         return JSONResponse({"error": err}, status_code=400)
     org = _caller_org(request)
     members = graph_ops.read_set(
-        set_id, target_revision=target, min_revision=minrev, org=org,
+        set_id, target_revision=target, min_revision=minrev,
+        org=org or graph_ops.CALLER_ORG,
     )
     for m in members.members:
         if m.key == key:
@@ -9830,7 +9855,9 @@ async def api_graph_setting_get(request):
     if err:
         return JSONResponse({"error": err}, status_code=400)
     org = _caller_org(request)
-    got = graph_ops.get_setting(sid, target_revision=target, org=org)
+    got = graph_ops.get_setting(
+        sid, target_revision=target, org=org or graph_ops.CALLER_ORG,
+    )
     if got is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(got.to_dict())
@@ -9871,7 +9898,7 @@ async def api_graph_setting_create(request):
             body["key"],
             body["payload"],
             state=body.get("state", "raw"),
-            org=org,
+            org=org or graph_ops.CALLER_ORG,
         )
     except SchemaValidationError as e:
         return JSONResponse(
@@ -9895,7 +9922,8 @@ async def api_graph_setting_override(request):
     org = _caller_org(request)
     try:
         sid = graph_ops.override_setting(
-            target_id, body["payload"], state=body.get("state", "raw"), org=org,
+            target_id, body["payload"], state=body.get("state", "raw"),
+            org=org or graph_ops.CALLER_ORG,
         )
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
@@ -9920,7 +9948,8 @@ async def api_graph_setting_exclude(request):
     org = _caller_org(request)
     try:
         sid = graph_ops.exclude_setting(
-            target_id, state=body.get("state", "raw"), org=org,
+            target_id, state=body.get("state", "raw"),
+            org=org or graph_ops.CALLER_ORG,
         )
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
@@ -9938,7 +9967,7 @@ async def api_graph_setting_promote(request):
         return JSONResponse({"error": "to_state required"}, status_code=400)
     org = _caller_org(request)
     try:
-        graph_ops.promote_setting(sid, to_state, org=org)
+        graph_ops.promote_setting(sid, to_state, org=org or graph_ops.CALLER_ORG)
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
     except ValueError as e:
@@ -9987,7 +10016,8 @@ async def api_graph_setting_deprecate(request):
     org = _caller_org(request)
     try:
         graph_ops.deprecate_setting(
-            sid, successor_id=body.get("successor_id"), org=org,
+            sid, successor_id=body.get("successor_id"),
+            org=org or graph_ops.CALLER_ORG,
         )
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
@@ -9999,7 +10029,7 @@ async def api_graph_setting_delete(request):
     sid = request.path_params["id"]
     org = _caller_org(request)
     try:
-        graph_ops.remove_setting(sid, org=org)
+        graph_ops.remove_setting(sid, org=org or graph_ops.CALLER_ORG)
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
     except ValueError as e:
@@ -10154,7 +10184,7 @@ def _settings_visible_set_ids(
     from tools.graph import settings_ops
 
     list_fn = graph_ops.list_set_ids if tracked else settings_ops.list_set_ids.__wrapped__
-    return list_fn(org=org)
+    return list_fn(org=org or graph_ops.CALLER_ORG)
 
 
 def _settings_member_snapshot(
@@ -10164,7 +10194,9 @@ def _settings_member_snapshot(
 ) -> tuple[int, set[str]]:
     from tools.graph import settings_ops
 
-    members = settings_ops.read_set.__wrapped__(set_id, org=org)
+    members = settings_ops.read_set.__wrapped__(
+        set_id, org=org or graph_ops.CALLER_ORG,
+    )
     keys = {member.key for member in members.members}
     return len(members.members), keys
 
@@ -10243,7 +10275,7 @@ def _settings_diag_rows(
 async def api_graph_set_ids(request):
     """GET /api/graph/sets — list known set_ids."""
     org = _caller_org(request)
-    set_ids = graph_ops.list_set_ids(org=org)
+    set_ids = graph_ops.list_set_ids(org=org or graph_ops.CALLER_ORG)
     summary = request.query_params.get("summary", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
@@ -10276,7 +10308,8 @@ async def api_graph_settings_migrate(request):
     org = _caller_org(request)
     try:
         report = graph_ops.migrate_setting_revisions(
-            set_id, to_rev, dry_run=dry_run, org=org,
+            set_id, to_rev, dry_run=dry_run,
+            org=org or graph_ops.CALLER_ORG,
         )
     except Exception as e:  # noqa: BLE001 — mirror CLI surface
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -10298,7 +10331,7 @@ async def api_graph_setting_resolve(request):
     """
     value = request.path_params["value"]
     org = _caller_org(request)
-    hit = graph_ops.resolve_setting_strict(value, org=org)
+    hit = graph_ops.resolve_setting_strict(value, org=org or graph_ops.CALLER_ORG)
     if hit is None:
         return JSONResponse(
             {"error": f"no setting matches {value!r}"}, status_code=404,
@@ -10324,7 +10357,7 @@ async def api_graph_settings_chain(request):
     set_id = request.path_params["set_id"]
     key = request.path_params["key"]
     org = _caller_org(request)
-    chain = graph_ops.chain_setting(set_id, key, org=org)
+    chain = graph_ops.chain_setting(set_id, key, org=org or graph_ops.CALLER_ORG)
     if chain is None:
         return JSONResponse(
             {"error": f"no member matches ({set_id!r}, {key!r})"},

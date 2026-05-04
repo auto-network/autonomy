@@ -239,7 +239,7 @@ def test_presence_writes_initial_row_on_enter(graph_db_env):
         label="Test Agent",
         heartbeat_interval=1000,  # disable heartbeat noise
     ):
-        members = settings_ops.read_set(SURFACE_PRESENCE_SET_ID)
+        members = settings_ops.read_set(SURFACE_PRESENCE_SET_ID, org=settings_ops.CALLER_ORG)
         keys = {m.key for m in members.members}
         assert "test-surface:test-pid" in keys
 
@@ -368,7 +368,7 @@ def test_presence_summon_writes_ping_row(graph_db_env):
         )
         assert ping_id
 
-    pings = settings_ops.read_set(SURFACE_PING_SET_ID)
+    pings = settings_ops.read_set(SURFACE_PING_SET_ID, org=settings_ops.CALLER_ORG)
     assert len(pings.members) == 1
     payload = pings.members[0].payload
     assert payload["from_participant_id"] == "alice"

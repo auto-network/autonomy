@@ -225,8 +225,19 @@ def _resolve_set_key(set_id: str, key: str, *, org: str | None) -> str:
 # ── list / members / show / read ────────────────────────────
 
 
-def _org(args) -> str | None:
-    return getattr(args, "org", None)
+def _org(args):
+    """Return the explicit ``--org`` slug or :data:`ops.CALLER_ORG`.
+
+    The Settings public API requires ``org=`` (auto-cfb8u). When the CLI
+    operator did not pass ``--org``, the historical behavior was the
+    env-cascade (``GRAPH_ORG`` env → scopeless default). The
+    :data:`CALLER_ORG` sentinel preserves that behavior.
+    """
+    val = getattr(args, "org", None)
+    if val:
+        return val
+    from . import ops
+    return ops.CALLER_ORG
 
 
 def cmd_set_list(args) -> None:

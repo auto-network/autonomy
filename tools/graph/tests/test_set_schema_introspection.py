@@ -85,7 +85,7 @@ def _run_cli(argv: list[str], *, stdin: str | None = None) -> tuple[int, str, st
 
 def _trigger_flush(graph_db_env):
     """Force at least one writable connection so ``flush_schema_meta`` runs."""
-    ops.list_set_ids()
+    ops.list_set_ids(org=ops.CALLER_ORG)
 
 
 # ── 1. registration upserts on import + first DB op ─────────
@@ -93,7 +93,7 @@ def _trigger_flush(graph_db_env):
 
 def test_registered_schemas_appear_as_meta_settings(graph_db_env):
     _trigger_flush(graph_db_env)
-    members = ops.read_set(SCHEMA_META_SET_ID).members
+    members = ops.read_set(SCHEMA_META_SET_ID, org=ops.CALLER_ORG).members
     keys = {m.key for m in members}
     # All real autonomy schemas should be flushed in.
     for expected in (
@@ -108,7 +108,7 @@ def test_registered_schemas_appear_as_meta_settings(graph_db_env):
 
 def test_workspace_schema_payload_shape(graph_db_env):
     _trigger_flush(graph_db_env)
-    members = ops.read_set(SCHEMA_META_SET_ID).members
+    members = ops.read_set(SCHEMA_META_SET_ID, org=ops.CALLER_ORG).members
     ws = next(m for m in members if m.key == "autonomy.workspace#1")
     payload = ws.payload
     assert payload["set_id"] == "autonomy.workspace"
@@ -133,7 +133,7 @@ def test_workspace_schema_payload_shape(graph_db_env):
 
 def test_synopses_appear_for_every_autonomy_schema(graph_db_env):
     _trigger_flush(graph_db_env)
-    syn_members = ops.read_set(SYNOPSIS_META_SET_ID).members
+    syn_members = ops.read_set(SYNOPSIS_META_SET_ID, org=ops.CALLER_ORG).members
     syn_keys = {m.key for m in syn_members}
     autonomy_keys = {
         sk for sk, _ in SCHEMAS.items() if sk.split(".", 1)[0] == "autonomy"
@@ -215,7 +215,7 @@ def test_set_example_round_trips_through_set_add(graph_db_env, tmp_path):
         "--from", str(p),
     ])
     assert rc2 == 0, err2
-    members = ops.read_set("autonomy.workspace").members
+    members = ops.read_set("autonomy.workspace", org=ops.CALLER_ORG).members
     assert any(m.key == "from-example" for m in members)
 
 
@@ -318,7 +318,7 @@ def test_second_connection_does_not_duplicate_meta_rows(graph_db_env):
     db2 = GraphDB(graph_db_env)
     db2.close()
 
-    members = ops.read_set(SCHEMA_META_SET_ID).members
+    members = ops.read_set(SCHEMA_META_SET_ID, org=ops.CALLER_ORG).members
     seen: dict[str, int] = {}
     for m in members:
         seen[m.key] = seen.get(m.key, 0) + 1
@@ -336,7 +336,7 @@ def test_explicit_flush_is_idempotent(graph_db_env):
         flush_schema_meta(db)
     finally:
         db.close()
-    members = ops.read_set(SCHEMA_META_SET_ID).members
+    members = ops.read_set(SCHEMA_META_SET_ID, org=ops.CALLER_ORG).members
     keys = [m.key for m in members]
     # No duplicates.
     assert len(keys) == len(set(keys))
@@ -395,7 +395,7 @@ def test_register_schema_synopsis_round_trip(graph_db_env, monkeypatch):
 
     _trigger_flush(graph_db_env)
 
-    syn_members = ops.read_set(SYNOPSIS_META_SET_ID).members
+    syn_members = ops.read_set(SYNOPSIS_META_SET_ID, org=ops.CALLER_ORG).members
     demo = next(
         (m for m in syn_members if m.key == "autonomy.test.demo#1"), None,
     )

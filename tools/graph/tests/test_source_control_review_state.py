@@ -201,10 +201,10 @@ def test_atomic_write_via_add_setting(tmp_path, monkeypatch):
     ])
     sid = settings_ops.add_setting(
         SET_ID, SCHEMA_REVISION, "owner/repo:1", payload,
-    )
+     org=settings_ops.CALLER_ORG)
     assert sid
 
-    members = settings_ops.read_set(SET_ID).to_dict()
+    members = settings_ops.read_set(SET_ID, org=settings_ops.CALLER_ORG).to_dict()
     assert "owner/repo:1" in members
     stored = members["owner/repo:1"].payload
     assert stored["title"] == payload["title"]

@@ -94,7 +94,7 @@ def test_session_ask_round_trips_through_upsert(graph_db_env):
             "created_at": "2026-05-03T12:00:00Z",
             "revision_seq": 1,
         },
-    )
+     org=settings_ops.CALLER_ORG)
     rows = _base_rows(ns.SESSION_ASK_SET_ID, "session-1")
     assert len(rows) == 1
     assert rows[0]["id"] == sid
@@ -122,7 +122,7 @@ def test_session_ask_keyed_per_session(graph_db_env):
                 "revision_seq": i,
                 "created_at": "2026-05-03T12:00:00Z",
             },
-        )
+         org=settings_ops.CALLER_ORG)
     for i in range(1, 4):
         settings_ops.upsert_by_key(
             ns.SESSION_ASK_SET_ID, 1, "session-2",
@@ -132,7 +132,7 @@ def test_session_ask_keyed_per_session(graph_db_env):
                 "revision_seq": i,
                 "created_at": "2026-05-03T12:01:00Z",
             },
-        )
+         org=settings_ops.CALLER_ORG)
 
     s1 = _base_rows(ns.SESSION_ASK_SET_ID, "session-1")
     s2 = _base_rows(ns.SESSION_ASK_SET_ID, "session-2")
@@ -192,7 +192,7 @@ def test_ask_text_size_cap_via_upsert(graph_db_env):
         "created_at": "2026-05-03T12:00:00Z",
     }
     with pytest.raises(SchemaValidationError):
-        settings_ops.upsert_by_key(ns.SESSION_ASK_SET_ID, 1, "s", payload)
+        settings_ops.upsert_by_key(ns.SESSION_ASK_SET_ID, 1, "s", payload, org=settings_ops.CALLER_ORG)
     assert _base_rows(ns.SESSION_ASK_SET_ID, "s") == []
 
 
@@ -211,7 +211,7 @@ def _write_session_ask(
             "revision_seq": revision_seq,
             "created_at": "2026-05-03T12:00:00Z",
         },
-    )
+     org=settings_ops.CALLER_ORG)
 
 
 def _write_refresh_request(
@@ -226,7 +226,7 @@ def _write_refresh_request(
             "requested_by": requested_by,
             "target_revision": target_revision,
         },
-    )
+     org=settings_ops.CALLER_ORG)
 
 
 def _refresh_is_requested(ask_id: str, current_revision_seq: int) -> bool:
@@ -358,13 +358,13 @@ def test_operator_dismissed_local_only(graph_db_env):
                 "revision_seq": 1,
                 "created_at": "2026-05-03T12:00:00Z",
             },
-        )
+         org=settings_ops.CALLER_ORG)
 
     # Operator dismisses two of them.
     settings_ops.upsert_by_key(
         ns.OPERATOR_DISMISSED_SET_ID, 1, "dismissed",
         {"dismissed_ask_ids": ["session-0", "session-1"]},
-    )
+     org=settings_ops.CALLER_ORG)
 
     asks = _base_rows(ns.SESSION_ASK_SET_ID)
     assert len(asks) == 3, "asks remain in substrate after dismissal"
@@ -397,7 +397,7 @@ def test_operator_dismissed_singleton_stays_one_row(graph_db_env):
         settings_ops.upsert_by_key(
             ns.OPERATOR_DISMISSED_SET_ID, 1, "dismissed",
             {"dismissed_ask_ids": ids},
-        )
+         org=settings_ops.CALLER_ORG)
     rows = _base_rows(ns.OPERATOR_DISMISSED_SET_ID, "dismissed")
     assert len(rows) == 1
     assert json.loads(rows[0]["payload"])["dismissed_ask_ids"] == ["b"]
@@ -422,7 +422,7 @@ def test_explicit_id_targeting_only(graph_db_env):
             "revision_seq": 1,
             "created_at": "2026-05-03T12:00:00Z",
         },
-    )
+     org=settings_ops.CALLER_ORG)
     rows = _base_rows(ns.SESSION_ASK_SET_ID, "s-explicit")
     assert len(rows) == 1
     payload = json.loads(rows[0]["payload"])
@@ -438,7 +438,7 @@ def test_explicit_id_targeting_only(graph_db_env):
             "revision_seq": 1,
             "created_at": "2026-05-03T12:00:00Z",
         },
-    )
+     org=settings_ops.CALLER_ORG)
 
     # The schema has ZERO logic that interprets "role:operator" or
     # similar prefixes — it's a string field, no resolver. Pin that

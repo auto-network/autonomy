@@ -692,9 +692,7 @@ def load_workspaces() -> dict[str, WorkspaceV1]:
     """Return every visible workspace, keyed by workspace id.
 
     Iterates per-org DBs via :func:`tools.graph.org_ops.list_orgs` and reads
-    ``autonomy.workspace#1`` from each, attaching its artifact Settings. In
-    the single-DB fallback (no ``data/orgs/*.db`` yet), reads from the
-    default DB and uses the caller's default org slug for every workspace.
+    ``autonomy.workspace#1`` from each, attaching its artifact Settings.
     Ops owns DB routing; consumers do not enumerate peers themselves.
 
     Process-wide cached on the per-org DB landscape — see the cache block
@@ -712,9 +710,10 @@ def load_workspaces() -> dict[str, WorkspaceV1]:
 def _load_workspaces_uncached() -> dict[str, WorkspaceV1]:
     refs = org_ops.list_orgs()
     if not refs:
-        # Pre-migration fallback: no per-org DBs exist. All Settings live in
-        # the default DB; graph_project is unknown from Setting data alone.
-        members = ops.read_set(WORKSPACE_SET_ID).members
+        # Pre-migration / empty-orgs fallback: read scopelessly so a
+        # workspace Setting authored in the default DB is still
+        # discoverable. ``org=None`` is explicit per auto-cfb8u.
+        members = ops.read_set(WORKSPACE_SET_ID, org=None).members
         out: dict[str, WorkspaceV1] = {}
         for m in members:
             artifacts = _artifacts_for_workspace(m.key, org=None)
@@ -768,7 +767,10 @@ def _load_org_overrides_uncached() -> dict[str, OrgOverride]:
     refs = org_ops.list_orgs()
     out: dict[str, OrgOverride] = {}
     if not refs:
-        members = ops.read_set(ORG_SET_ID).members
+        # Empty-orgs fallback: read scopelessly so identity Settings
+        # authored in the default DB remain discoverable. ``org=None``
+        # is explicit per auto-cfb8u.
+        members = ops.read_set(ORG_SET_ID, org=None).members
         for m in members:
             out[m.key] = _org_override_from_payload(m.key, m.payload)
         return out
