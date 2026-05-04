@@ -65,8 +65,8 @@
       </div>
     </template>
 
-    <!-- ── Regular entries (skip tool_result) ────────── -->
-    <template x-if="resolveEntry(dEntry).type !== 'tool_result' && resolveEntry(dEntry).type !== 'tool_group'">
+    <!-- ── Regular entries (skip tool_result + harness image-marker noise) ─── -->
+    <template x-if="resolveEntry(dEntry).type !== 'tool_result' && resolveEntry(dEntry).type !== 'tool_group' && !isUserNoise(resolveEntry(dEntry))">
       <div class="sc-entry"
            :class="[
              borderClass(resolveEntry(dEntry)),
