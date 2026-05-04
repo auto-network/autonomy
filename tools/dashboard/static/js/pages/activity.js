@@ -291,6 +291,16 @@
     const isLibrarian = !!e.librarian_type;
     const libTitle = isLibrarian ? (_LIB_NAMES[e.librarian_type] || e.librarian_type) : '';
     const isAgentic = e.kind === 'agentic';
+    // auto-ecmss: worktree merges performed via the /worktrees dashboard
+    // UI write a kind='worktree-merge' row to dispatch_runs so they show
+    // up here. The card reuses the existing tl-card chrome (green dot
+    // for DONE, lines/files chips) plus a small method badge.
+    const isWorktreeMerge = e.kind === 'worktree-merge';
+    let wtMergeTitle = '';
+    if (isWorktreeMerge) {
+      const src = e.container_name || '';
+      wtMergeTitle = src ? ('Worktree merge — from ' + src) : 'Worktree merge';
+    }
 
     let reviewItems = null;
     const rev = e.librarian_review;
@@ -324,6 +334,8 @@
       _barT: barT,
       _isLibrarian: isLibrarian,
       _isAgentic: isAgentic,
+      _isWorktreeMerge: isWorktreeMerge,
+      _wtMergeTitle: wtMergeTitle,
       _libTitle: libTitle,
       _tokenFmt: tokenFmt,
       _reviewCollapsed: _reviewCollapsedLabel(e.librarian_review),
