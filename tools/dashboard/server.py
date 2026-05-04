@@ -4696,6 +4696,17 @@ async def _resolve_correction_transition(request, target_status: str):
             session_id, session_uuid, row,
         )
 
+    if row is not None:
+        await event_bus.broadcast(
+            "session:turn_corrections",
+            {
+                "session_id": session_id,
+                "session_uuid": session_uuid,
+                "correction": _serialize_turn_correction(row),
+            },
+            dedup=False,
+        )
+
     return JSONResponse({
         "ok": True,
         "correction": _serialize_turn_correction(row) if row else None,
