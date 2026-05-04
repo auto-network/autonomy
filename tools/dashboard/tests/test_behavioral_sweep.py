@@ -1849,6 +1849,42 @@ def browser(sweep_server):
     close_browser()
 
 
+def _reset_sweep_state(sweep_server: dict) -> None:
+    """Rewrite the module fixture file to ``_build_fixture()`` so prior
+    classes that mutate it cannot bleed into the caller.
+
+    Earlier classes (``TestPluginSubstrate``, ``TestPluginOrgScoping``,
+    ``TestCoordinatorBoard``, ``TestCoordinatorBoardSettingsWiring``,
+    plus the substrate plugin classes) toggle the ``dashboard.plugin``
+    Setting, seed coordinator-canvas + tile + thread + decision rows,
+    and tuck data into custom ``_orgs.<slug>`` buckets through
+    ``_set_plugin_setting`` / ``_set_coord_canvas`` / ``_seed_coord_setting_member``.
+    Their teardowns only drop specific keys, so out-of-band rows can
+    survive into later classes whose tests assume the canonical shape.
+    Rewriting the file from ``_build_fixture()`` is the "(or equivalent
+    reset)" the bead's option 1 calls for.
+
+    Bounce the SPA through ``/`` after the rewrite so the next
+    ``navigateTo`` from the caller's checks fixture forces
+    ``Alpine.destroyTree`` + ``Alpine.initTree`` on the target page —
+    ``navigateTo`` short-circuits identical paths, so without this the
+    polluted Alpine root from a prior class can survive a same-page
+    reseat. A hard browser reload would be cleaner but the
+    module-scoped agent-browser session is degraded enough by this
+    point in the sweep that any synchronous eval driving a hard
+    navigation hangs past its subprocess timeout, so this stays
+    in-band on the existing SPA router.
+    """
+    Path(sweep_server["fixture_path"]).write_text(
+        json.dumps(_build_fixture(), indent=2),
+    )
+    subprocess.run(
+        ["agent-browser", "eval", "navigateTo('/')"],
+        capture_output=True, timeout=10,
+    )
+    time.sleep(0.4)
+
+
 # ── Sessions page JS check bundle ────────────────────────────────────
 
 SESSIONS_PAGE_CHECKS = """
@@ -10265,7 +10301,14 @@ class TestSessionHarnessBadge:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    def checks(self, browser, sweep_server, request):
+        # auto-wquxx — earlier classes in the sweep mutate the module
+        # fixture file (plugin enables, coordinator-canvas seeds,
+        # custom ``_orgs`` buckets) and the page's Alpine root
+        # (``data.active = []`` etc. in ACTIVITY_PAGE_CHECKS).
+        # Reset both before this class's checks run so /sessions
+        # reflects the canonical fixture rows.
+        _reset_sweep_state(sweep_server)
         result = _navigate_and_check("/sessions", HARNESS_API_BADGE_CHECKS, wait_ms=1500)
         request.cls._checks = result
 
@@ -10555,8 +10598,21 @@ class TestCoordinatorBoardParityV2:
     (auto-1aef5 audit, graph://52b21234-8e2).
     """
 
+    @pytest.fixture(scope="class", autouse=True)
+    def _reset_class_state(self, sweep_server):
+        # auto-wquxx — earlier classes (the activity sweep, the plugin
+        # / coordinator-board classes) leave fixture-file rows and
+        # Alpine component state in a polluted shape. SPA ``navigateTo``
+        # reuses already-initialized Alpine roots, so the function-scoped
+        # ``_seed_full_board`` below cannot reach the rendered DOM
+        # without first dropping that pollution. Rewrite the fixture
+        # file from canonical defaults + park the SPA on ``/`` once at
+        # the class boundary so the next ``navigateTo('/coordinator')``
+        # forces ``Alpine.destroyTree`` + ``Alpine.initTree``.
+        _reset_sweep_state(sweep_server)
+
     @pytest.fixture(scope="function", autouse=True)
-    def _seed_full_board(self, sweep_server):
+    def _seed_full_board(self, sweep_server, _reset_class_state):
         fp = sweep_server["fixture_path"]
         _set_coord_plugin_enabled(fp, True)
         _set_coord_canvas(fp, {
