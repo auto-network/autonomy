@@ -755,6 +755,43 @@ def _record_operator_input(timestamp_iso: str) -> None:
         )
 
 
+def _read_claude_token_alias_from_meta(
+    *,
+    run_dir: Path | str | None,
+    resolution_dir: Path | None,
+) -> str | None:
+    """Pull ``claude_token_alias`` from the launcher's ``.session_meta.json``.
+
+    The launcher writes ``<run_dir>/sessions/.session_meta.json`` (auto-10lsv).
+    Either ``run_dir`` or the already-resolved ``resolution_dir`` (which the
+    launcher uses as the sessions/ directory) suffices. Returns ``None`` if
+    no meta file is found, the JSON is malformed, or the field is absent.
+    Best-effort by design — a missing alias never blocks registration.
+    """
+    candidates: list[Path] = []
+    if run_dir is not None:
+        rd = run_dir if isinstance(run_dir, Path) else Path(run_dir)
+        candidates.append(rd / "sessions" / ".session_meta.json")
+        candidates.append(rd / ".session_meta.json")
+    if resolution_dir is not None:
+        candidates.append(resolution_dir / ".session_meta.json")
+    for path in candidates:
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        try:
+            doc = json.loads(text)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        alias = doc.get("claude_token_alias")
+        if isinstance(alias, str) and alias.strip():
+            return alias.strip()
+    return None
+
+
 class SessionMonitor:
     """DB-backed session registry with background tailing and liveness checking."""
 
@@ -799,6 +836,7 @@ class SessionMonitor:
         resolution_dir: Path | None = None,
         harness: str = "claude",
         harness_state: str = "{}",
+        claude_token_alias: str | None = None,
     ) -> None:
         """Register a new session — INSERT into dashboard.db."""
         path_is_dir = False
@@ -829,6 +867,7 @@ class SessionMonitor:
                 jsonl_path=path_str,
                 session_uuid=session_uuid,
                 resolution_dir=str(res_dir) if res_dir else None,
+                claude_token_alias=claude_token_alias,
             )
         except Exception:
             logger.warning("session_monitor: INSERT failed for tmux=%s (may already exist)", tmux_name)
@@ -877,6 +916,11 @@ class SessionMonitor:
         register dispatch + librarian sessions with the monitor. Run_dir is
         accepted for dispatch sessions where the JSONL is inside an agent-run
         tree; it is used as resolution_dir when jsonl_path is a directory.
+
+        When ``run_dir`` is supplied, the launcher's ``.session_meta.json``
+        is read for the ``claude_token_alias`` field (auto-10lsv) so the
+        dashboard surfaces which Anthropic account each container is
+        burning. Missing or unreadable meta is non-fatal.
         """
         jp: Path | None = None
         if jsonl_path is not None:
@@ -900,6 +944,10 @@ class SessionMonitor:
         if proj is None:
             proj = "autonomy"
 
+        claude_token_alias = _read_claude_token_alias_from_meta(
+            run_dir=run_dir, resolution_dir=res_dir,
+        )
+
         await self.register(
             tmux_name=tmux_name,
             session_type=type,
@@ -908,6 +956,7 @@ class SessionMonitor:
             bead_id=bead_id,
             session_uuid=session_uuid,
             resolution_dir=res_dir,
+            claude_token_alias=claude_token_alias,
         )
 
     async def deregister_session(self, tmux_name: str) -> None:
