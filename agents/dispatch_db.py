@@ -474,7 +474,12 @@ def record_worktree_merge_run(
         target_repo or str(REPO_ROOT), commit_hash,
     )
 
-    subject = (commit_message or "").splitlines()[0] if commit_message else ""
+    # auto-24a60: store the FULL commit message (subject + body). Earlier
+    # versions truncated to the subject line; the activity-feed worktree-
+    # merge card now renders the body as a subtitle, so the body needs to
+    # round-trip. Storage is unbounded text; large bodies stay rendering-
+    # capped on the client.
+    full_message = commit_message or ""
 
     conn = _get_conn()
     try:
@@ -499,7 +504,7 @@ def record_worktree_merge_run(
             (
                 run_id, now_dt, now_dt,
                 reason,
-                commit_hash, subject, branch or None, branch_base or None,
+                commit_hash, full_message, branch or None, branch_base or None,
                 container_name or None,
                 lines_added, lines_removed, files_changed,
             ),

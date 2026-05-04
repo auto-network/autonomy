@@ -72,8 +72,9 @@ def test_record_worktree_merge_writes_done_row(isolated_dispatch_env, monkeypatc
     assert row["status"] == "DONE"
     assert row["bead_id"] is None
     assert row["commit_hash"] == "abcdef0123456789"
-    # commit_message is truncated to the subject line
-    assert row["commit_message"] == "Add worktree dashboard"
+    # commit_message stores the full message (subject + body) so the
+    # activity-feed card can render the body as a subtitle (auto-24a60).
+    assert row["commit_message"] == "Add worktree dashboard\n\nLong body"
     assert row["branch"] == "session/auto-foo"
     assert row["branch_base"] == "master"
     assert row["container_name"] == "auto-foo"

@@ -1333,6 +1333,16 @@ def test_scan_all_worktrees_hides_commits_already_in_target_branch(tmp_path, mon
             session, "autonomy", merged_sha[:7], worktrees_dir=worktrees_dir,
         )
 
+    # auto-24a60: get_repo_commit_detail bypasses the ahead-range
+    # gate so the activity-feed Diff overlay can read commits that
+    # have already been merged into master (and therefore aren't
+    # "ahead" of any session worktree). Same SHA the gated reader
+    # rejected above.
+    detail = wm.get_repo_commit_detail(target_repo, merged_sha[:7])
+    assert detail.sha == merged_sha
+    assert detail.subject == "already merged"
+    assert "merged.txt" in (detail.patch or "")
+
 
 def test_scan_all_worktrees_marks_clone_stale_until_base_synced(tmp_path, monkeypatch):
     session = "sess-clone-stale"

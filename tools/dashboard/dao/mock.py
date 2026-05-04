@@ -756,6 +756,22 @@ def get_runs_for_bead(bead_id: str) -> list[dict]:
     return [r for r in _runs() if r.get("bead_id") == bead_id]
 
 
+def get_dispatch_run_commit_detail(run_id: str) -> dict | None:
+    """Return commit detail for a dispatch run by id (auto-24a60).
+
+    Powers the activity-feed worktree-merge Diff overlay in mock mode.
+    Fixtures store details under the ``dispatch_run_commit_details``
+    map keyed by run id; missing keys return ``None`` so the endpoint
+    can 404 cleanly.
+    """
+    data = _load()
+    details = data.get("dispatch_run_commit_details", {})
+    detail = details.get(run_id)
+    if detail is None:
+        return None
+    return _worktree_commit(detail)
+
+
 # ── timeline DAO interface ──────────────────────────────────────────
 
 TIMELINE_ENTRY_DEFAULTS: dict[str, Any] = {

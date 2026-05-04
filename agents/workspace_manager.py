@@ -1957,6 +1957,30 @@ def get_session_worktree_commit_detail(
     return commit
 
 
+def get_repo_commit_detail(
+    repo_path: Path,
+    sha: str,
+    *,
+    include_patch: bool = True,
+) -> WorktreeCommit:
+    """Read one commit (subject, body, files, optionally patch) from any repo path.
+
+    Used by the activity-feed worktree-merge diff overlay (auto-24a60):
+    after a merge to master, the commit is no longer in any session
+    worktree's "ahead range" (which is what
+    :func:`get_session_worktree_commit_detail` requires), but it is in
+    the main repo's history. This wrapper shares the same reader
+    plumbing without the ahead-range gate.
+    """
+    if not repo_path.exists():
+        raise WorkspaceError(f"repo path does not exist: {repo_path}")
+    resolved = _resolve_worktree_commit(repo_path, sha)
+    commit = _read_worktree_commit(repo_path, resolved, include_patch=include_patch)
+    if commit is None:
+        raise WorkspaceError(f"commit could not be read: {sha}")
+    return commit
+
+
 def get_session_worktree_dirty_detail(
     session_name: str,
     repo_name: str,

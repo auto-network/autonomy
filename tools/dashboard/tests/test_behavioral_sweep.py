@@ -416,7 +416,16 @@ SWEEP_TIMELINE_WORKTREE_MERGE = [
         "completed_at": "2026-03-25T11:00:01Z",
         "duration_secs": 0,
         "commit_hash": "feedfacecafebabe",
-        "commit_message": "Land worktree dashboard polish",
+        # auto-24a60: commit_message stores the full message (subject +
+        # body) so the activity-feed card can render the body as a
+        # subtitle below the headline. Subject + short body fits inside
+        # the 150-char default cap.
+        "commit_message": (
+            "Land worktree dashboard polish\n"
+            "\n"
+            "Tighten spacing on the commit-detail header and align the\n"
+            "branch chips with the action button row."
+        ),
         "branch": "session/auto-AAAAA",
         "container_name": "auto-AAAAA",
         "lines_added": 12,
@@ -435,9 +444,11 @@ SWEEP_TIMELINE_WORKTREE_MERGE = [
         "completed_at": "2026-03-25T11:01:01Z",
         "duration_secs": 0,
         "commit_hash": "aaaabbbbccccdddd",
+        # Subject-only commit — no body, so the subtitle row stays hidden.
         "commit_message": "Pick a stray fix",
         "branch": None,
-        # No source session attribution — title falls back to bare "Worktree merge"
+        # No source session attribution — session link in the footer is
+        # gated off when container_name is empty.
         "container_name": None,
         "lines_added": 1,
         "lines_removed": 0,
@@ -455,7 +466,13 @@ SWEEP_TIMELINE_WORKTREE_MERGE = [
         "completed_at": "2026-03-25T11:02:01Z",
         "duration_secs": 0,
         "commit_hash": "1111222233334444",
-        "commit_message": "Pick the second commit",
+        # Massive body — exercises the expand-cap (~500 char) + the
+        # "…full body in diff" hint at the bottom of the expanded view.
+        "commit_message": (
+            "Pick the second commit\n"
+            "\n"
+            + ("This long body explains every nuance of the change. " * 30)
+        ),
         "branch": "session/auto-YYYYY",
         "container_name": "auto-YYYYY",
         "lines_added": 4,
@@ -464,6 +481,36 @@ SWEEP_TIMELINE_WORKTREE_MERGE = [
         "title": "",
     },
 ]
+
+
+# Diff-overlay fixture — keyed by run_id, returned by
+# /api/dispatch/runs/<run_id>/commit-detail in mock mode (auto-24a60).
+SWEEP_DISPATCH_RUN_COMMIT_DETAILS = {
+    "wt-feedfacecafe": {
+        "sha": "feedfacecafebabe",
+        "short_sha": "feedfac",
+        "subject": "Land worktree dashboard polish",
+        "author": "Mock Agent",
+        "date": "2026-03-25 11:00",
+        "body": (
+            "Tighten spacing on the commit-detail header and align the\n"
+            "branch chips with the action button row."
+        ),
+        "files": [
+            {"status": "M", "path": "tools/dashboard/templates/pages/worktrees.html",
+             "additions": 8, "deletions": 2},
+            {"status": "M", "path": "tools/dashboard/static/css/worktrees.css",
+             "additions": 4, "deletions": 1},
+        ],
+        "patch": (
+            "diff --git a/tools/dashboard/templates/pages/worktrees.html "
+            "b/tools/dashboard/templates/pages/worktrees.html\n"
+            "@@ -1,3 +1,3 @@\n"
+            "-old line\n"
+            "+new line\n"
+        ),
+    },
+}
 
 SWEEP_TIMELINE_ENTRIES = SWEEP_RUNS + SWEEP_TIMELINE_WORKTREE_MERGE
 
@@ -1573,6 +1620,8 @@ def _build_fixture() -> dict:
         "worktrees": SWEEP_WORKTREE_ROWS,
         "worktree_commit_details": SWEEP_WORKTREE_COMMIT_DETAILS,
         "worktree_changes_details": SWEEP_WORKTREE_CHANGES_DETAILS,
+        # auto-24a60 — diff overlay endpoint backing fixture, keyed by run_id.
+        "dispatch_run_commit_details": SWEEP_DISPATCH_RUN_COMMIT_DETAILS,
         "beads": SWEEP_BEADS + [SWEEP_BEAD_DISPATCHED],
         "runs": SWEEP_RUNS + [SWEEP_DISPATCH_RUN],
         "experiments": [SWEEP_EXPERIMENT],
@@ -2161,13 +2210,15 @@ ACTIVITY_PAGE_CHECKS = """(async () => {
 
         r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
 
-        // Bead auto-ecmss: worktree-merge cards land on the timeline
-        // alongside dispatched bead runs. Assertions cover the state
-        // matrix: container_name='auto-XXXXX' (title contains "from
-        // auto-"), container_name=NULL (title is bare "Worktree merge"),
-        // and all three reason variants ('ff', 'cherry-pick',
-        // 'commit-merge'). Negative assertions confirm bead-only
-        // sections (scores, time-breakdown, librarian) don't appear.
+        // auto-24a60 — worktree-merge cards on the activity feed.
+        // Card layout (top → bottom):
+        //   row1:  ● method-badge ........................ HH:MM AM/PM
+        //   headline: commit-message subject (full-width)
+        //   subtitle: commit body capped to ~150 chars
+        //   footer:  ⤷ session-link  [Diff →]   N files +A −R
+        // Negative assertions: bead-card chrome (priority badge, scores,
+        // time-breakdown bar, Trace link, duration timer, generic
+        // tl-title-block) must NOT appear on worktree-merge cards.
         var wtCardFf = document.querySelector('[data-testid="tl-card-worktree-merge-wt-feedfacecafe"]');
         var wtCardCp = document.querySelector('[data-testid="tl-card-worktree-merge-wt-aaaabbbbcccc"]');
         var wtCardCm = document.querySelector('[data-testid="tl-card-worktree-merge-wt-1111222233aa"]');
@@ -2175,50 +2226,135 @@ ACTIVITY_PAGE_CHECKS = """(async () => {
         r.wt_cp_card_visible = !!wtCardCp && wtCardCp.offsetParent !== null;
         r.wt_cm_card_visible = !!wtCardCm && wtCardCm.offsetParent !== null;
 
-        function _wtTitle(card) {
-            var t = card ? card.querySelector('.tl-title-block') : null;
+        function _wtHeadline(card) {
+            var t = card ? card.querySelector('.tl-wt-headline') : null;
+            return t ? t.textContent.trim() : '';
+        }
+        function _wtSubtitle(card) {
+            var t = card ? card.querySelector('.tl-wt-subtitle') : null;
             return t ? t.textContent.trim() : '';
         }
         function _wtBadge(card) {
             var b = card ? card.querySelector('.tl-method-badge') : null;
             return b ? b.textContent.trim() : '';
         }
-        r.wt_ff_title = _wtTitle(wtCardFf);
-        r.wt_cp_title = _wtTitle(wtCardCp);
-        r.wt_cm_title = _wtTitle(wtCardCm);
-        r.wt_ff_title_contains_worktree = r.wt_ff_title.indexOf('Worktree merge') !== -1;
-        r.wt_ff_title_contains_from_auto = r.wt_ff_title.indexOf('from auto-') !== -1;
-        // Empty container_name → bare "Worktree merge" with no "from".
-        r.wt_cp_title_is_bare = r.wt_cp_title === 'Worktree merge';
-        r.wt_cm_title_contains_from_auto = r.wt_cm_title.indexOf('from auto-') !== -1;
+        function _wtSessionLink(card) {
+            return card ? card.querySelector('.tl-wt-session-link') : null;
+        }
+        function _wtDiffBtn(card) {
+            return card ? card.querySelector('.tl-wt-diff-btn') : null;
+        }
+        function _wtStatsText(card) {
+            var s = card ? card.querySelector('.tl-wt-stats') : null;
+            return s ? s.textContent.replace(/\\s+/g, ' ').trim() : '';
+        }
+        // Headline = first line of commit_message (no synthetic prefix).
+        r.wt_ff_headline = _wtHeadline(wtCardFf);
+        r.wt_cp_headline = _wtHeadline(wtCardCp);
+        r.wt_cm_headline = _wtHeadline(wtCardCm);
+        r.wt_ff_headline_is_subject = r.wt_ff_headline === 'Land worktree dashboard polish';
+        r.wt_cp_headline_is_subject = r.wt_cp_headline === 'Pick a stray fix';
+        r.wt_cm_headline_is_subject = r.wt_cm_headline === 'Pick the second commit';
+        // Subtitle is the body, capped at ~150 chars when collapsed. ff
+        // has a body; cherry-pick is subject-only so subtitle is hidden.
+        r.wt_ff_subtitle = _wtSubtitle(wtCardFf);
+        r.wt_cp_has_subtitle = !!(wtCardCp && wtCardCp.querySelector('.tl-wt-subtitle'));
+        r.wt_ff_subtitle_present = r.wt_ff_subtitle.length > 0;
+        r.wt_cm_subtitle = _wtSubtitle(wtCardCm);
+        // Body too long for subtitle cap → subtitle ends with the
+        // ellipsis truncation marker.
+        r.wt_cm_subtitle_truncated = r.wt_cm_subtitle.endsWith('…');
 
         r.wt_ff_method_badge = _wtBadge(wtCardFf);
         r.wt_cp_method_badge = _wtBadge(wtCardCp);
         r.wt_cm_method_badge = _wtBadge(wtCardCm);
 
-        // Lines/files chips are part of the existing tl-bottom block,
-        // which renders when _hasBottom is true (lines_added != null).
-        function _hasLineChips(card) {
-            if (!card) return false;
-            return !!(card.querySelector('.tl-diff-add') || card.querySelector('.tl-diff-del'));
-        }
-        r.wt_ff_has_line_chips = _hasLineChips(wtCardFf);
-        r.wt_cp_has_line_chips = _hasLineChips(wtCardCp);
-        r.wt_cm_has_line_chips = _hasLineChips(wtCardCm);
+        // Footer: session link visible iff container_name populated.
+        var ffSessLink = _wtSessionLink(wtCardFf);
+        var cpSessLink = _wtSessionLink(wtCardCp);
+        var cmSessLink = _wtSessionLink(wtCardCm);
+        r.wt_ff_session_link_href = ffSessLink ? ffSessLink.getAttribute('href') : null;
+        r.wt_cp_session_link_present = !!cpSessLink;
+        r.wt_cm_session_link_href = cmSessLink ? cmSessLink.getAttribute('href') : null;
+        // Diff button always renders.
+        r.wt_ff_diff_btn_present = !!_wtDiffBtn(wtCardFf);
+        r.wt_cp_diff_btn_present = !!_wtDiffBtn(wtCardCp);
+        r.wt_cm_diff_btn_present = !!_wtDiffBtn(wtCardCm);
+        // Stats: '<files> files +A −R'
+        r.wt_ff_stats_text = _wtStatsText(wtCardFf);
+        r.wt_cp_stats_text = _wtStatsText(wtCardCp);
+        r.wt_cm_stats_text = _wtStatsText(wtCardCm);
 
-        // Negative assertions: worktree-merge cards must NOT carry
-        // bead-only chrome.
+        // Negative chrome: worktree-merge cards must NOT carry any of
+        // the bead/agentic/librarian slots. The variant uses its own
+        // headline div (tl-wt-headline); the bead-card tl-title-block
+        // must NOT appear at all on these cards.
         function _hasBeadChrome(card) {
-            if (!card) return {scores: false, time: false, lib: false};
+            if (!card) return {scores: false, time: false, lib: false, prio: false, trace: false, dur: false, gentitle: false, exp: false};
             return {
                 scores: !!card.querySelector('.tl-card-slot-stars'),
                 time: !!card.querySelector('.tl-stacked-bar'),
                 lib: !!card.querySelector('.tl-review-detail'),
+                prio: !!card.querySelector('.tl-ft-p1, .tl-ft-p2, .tl-ft-p3, .tl-ft-p0'),
+                trace: !!card.querySelector('a.tl-exp-link[href*="/dispatch/trace/"]'),
+                dur: !!card.querySelector('.tl-icon-time'),
+                gentitle: !!card.querySelector('.tl-title-block'),
+                exp: !!card.querySelector('.tl-exp-detail'),
             };
         }
         r.wt_ff_chrome = _hasBeadChrome(wtCardFf);
         r.wt_cp_chrome = _hasBeadChrome(wtCardCp);
         r.wt_cm_chrome = _hasBeadChrome(wtCardCm);
+
+        // Expand/collapse: clicking the cm card should toggle _open and
+        // expand the subtitle to the longer body view; the truncation
+        // hint must appear (body is > 500 chars). Clicking again
+        // collapses.
+        if (wtCardCm && data) {
+            // Find the entry by run_id and toggle directly via Alpine.
+            var cmEntry = (data.entries || []).find(function(en){ return en.run_id === 'wt-1111222233aa'; });
+            r.wt_cm_initially_collapsed = cmEntry ? cmEntry._open === false : null;
+            if (cmEntry) cmEntry._open = true;
+            await tick();
+            r.wt_cm_expand_hint_visible = !!document.querySelector('[data-testid="tl-wt-truncation-hint-wt-1111222233aa"]');
+            // Expanded subtitle's text length is bounded; even with a
+            // 5KB body, the rendered subtitle stays under ~520 chars.
+            var cmSubExpanded = wtCardCm.querySelector('.tl-wt-subtitle');
+            r.wt_cm_expanded_subtitle_len = cmSubExpanded ? cmSubExpanded.textContent.length : 0;
+            r.wt_cm_expanded_subtitle_capped = r.wt_cm_expanded_subtitle_len > 0
+                && r.wt_cm_expanded_subtitle_len <= 520;
+            // Collapse back.
+            cmEntry._open = false;
+            await tick();
+            r.wt_cm_after_collapse_hint_gone = !document.querySelector('[data-testid="tl-wt-truncation-hint-wt-1111222233aa"]');
+        }
+
+        // Diff overlay open/close. Click the Diff button on the ff card
+        // → modal appears, fetches commit-detail, renders patch. Esc
+        // dismisses; underlying activity tab + scroll are preserved.
+        var ffDiffBtn = _wtDiffBtn(wtCardFf);
+        if (ffDiffBtn) {
+            ffDiffBtn.click();
+            await tick();
+            // Allow fetch + Alpine to settle.
+            await waitFor(function(){
+                var ov = document.querySelector('[data-testid="tl-diff-overlay"]');
+                return !!ov && !!ov.querySelector('[data-testid="tl-diff-overlay-patch"]');
+            }, 3000);
+            var overlay = document.querySelector('[data-testid="tl-diff-overlay"]');
+            r.diff_overlay_open = !!overlay;
+            r.diff_overlay_has_patch = !!(overlay && overlay.querySelector('[data-testid="tl-diff-overlay-patch"]'));
+            var patchEl = overlay && overlay.querySelector('[data-testid="tl-diff-overlay-patch"]');
+            r.diff_overlay_patch_text = patchEl ? patchEl.textContent.slice(0, 80) : '';
+            // Close via Escape — dispatch on window so the .window
+            // modifier on the overlay's @keydown.escape handler picks
+            // it up (document-level dispatch is silently ignored).
+            window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+            await tick();
+            r.diff_overlay_closed_after_esc = !document.querySelector('[data-testid="tl-diff-overlay"]');
+            // Tab selection preserved (we never clicked Attention).
+            r.tab_after_overlay_close = data ? data.tab : '';
+        }
 
         return JSON.stringify(r);
     } catch (e) {
@@ -3086,36 +3222,49 @@ class TestActivitySurfaceBehavior:
             assert c.get("no_jinja"), f"Raw template syntax visible on {c.get('page_path')}"
 
     def test_worktree_merge_cards_render_on_feed(self):
-        """Bead auto-ecmss: kind='worktree-merge' rows surface on /activity.
+        """Bead auto-24a60: kind='worktree-merge' cards on /activity.
 
-        Matrix coverage (one assertion per row of the bead's state matrix):
-          * ff + populated container_name → title "Worktree merge — from auto-XXXXX",
-            method badge 'ff'
-          * cherry-pick + NULL container_name → title bare "Worktree merge"
-            (no "from" suffix), method badge 'cherry-pick'
-          * commit-merge + populated container_name → method badge
-            'commit-merge', title contains "from auto-"
-        Negative chrome: no scores section, no time-breakdown bar, no
-        librarian section on any of the three.
+        Card layout (replaces auto-ecmss's bead-card reuse):
+            ●  cherry-pick                        HH:MM AM/PM
+            commit-message subject (full-width headline)
+            commit-message body (italic subtitle, ~150 char cap)
+            ⤷ session-link    [Diff →]    N files +A −R
+
+        Matrix coverage:
+          * ff + populated container_name → headline = subject, subtitle
+            = body, session-link href = /session/auto-AAAAA, method badge
+            'ff'
+          * cherry-pick + NULL container_name → headline = subject, no
+            subtitle (subject-only commit), no session link, method badge
+            'cherry-pick'
+          * commit-merge + huge body → headline = subject, subtitle
+            ends with truncation ellipsis, method badge 'commit-merge'
         """
         c = self._timeline
         assert c.get("wt_ff_card_visible"), "ff worktree-merge card not visible"
         assert c.get("wt_cp_card_visible"), "cherry-pick worktree-merge card not visible"
         assert c.get("wt_cm_card_visible"), "commit-merge worktree-merge card not visible"
 
-        # Title — populated source session.
-        assert c.get("wt_ff_title_contains_worktree"), (
-            f"ff title missing 'Worktree merge': {c.get('wt_ff_title')!r}"
+        # Headline = first line of commit_message (no synthetic prefix).
+        assert c.get("wt_ff_headline_is_subject"), (
+            f"ff headline not commit subject: {c.get('wt_ff_headline')!r}"
         )
-        assert c.get("wt_ff_title_contains_from_auto"), (
-            f"ff title missing 'from auto-': {c.get('wt_ff_title')!r}"
+        assert c.get("wt_cp_headline_is_subject"), (
+            f"cherry-pick headline not commit subject: {c.get('wt_cp_headline')!r}"
         )
-        assert c.get("wt_cm_title_contains_from_auto"), (
-            f"commit-merge title missing 'from auto-': {c.get('wt_cm_title')!r}"
+        assert c.get("wt_cm_headline_is_subject"), (
+            f"commit-merge headline not commit subject: {c.get('wt_cm_headline')!r}"
         )
-        # Title — empty container_name falls back to bare "Worktree merge".
-        assert c.get("wt_cp_title_is_bare"), (
-            f"cherry-pick title not bare 'Worktree merge': {c.get('wt_cp_title')!r}"
+
+        # Subtitle: body present iff commit has a body. Subject-only
+        # commits hide the subtitle row entirely.
+        assert c.get("wt_ff_subtitle_present"), "ff card missing body subtitle"
+        assert not c.get("wt_cp_has_subtitle"), (
+            "cherry-pick card has subtitle but commit is subject-only"
+        )
+        # Long-body commit collapses to ~150 chars in the default view.
+        assert c.get("wt_cm_subtitle_truncated"), (
+            f"commit-merge subtitle should be truncated: {c.get('wt_cm_subtitle')!r}"
         )
 
         # Method badge text matches each row's reason.
@@ -3123,23 +3272,88 @@ class TestActivitySurfaceBehavior:
         assert c.get("wt_cp_method_badge") == "cherry-pick", c.get("wt_cp_method_badge")
         assert c.get("wt_cm_method_badge") == "commit-merge", c.get("wt_cm_method_badge")
 
-        # Lines+/-/files chips render when lines fields are populated.
-        assert c.get("wt_ff_has_line_chips"), "ff card missing diff chips"
-        assert c.get("wt_cm_has_line_chips"), "commit-merge card missing diff chips"
-        # Cherry-pick has only +1 -0, but the +1 chip should still render.
-        assert c.get("wt_cp_has_line_chips"), "cherry-pick card missing diff chips"
+        # Footer: session link target.
+        assert c.get("wt_ff_session_link_href") == "/session/auto-AAAAA", (
+            f"ff session link href: {c.get('wt_ff_session_link_href')!r}"
+        )
+        assert c.get("wt_cm_session_link_href") == "/session/auto-YYYYY", (
+            f"commit-merge session link href: {c.get('wt_cm_session_link_href')!r}"
+        )
+        # Empty container_name → no session link rendered.
+        assert not c.get("wt_cp_session_link_present"), (
+            "cherry-pick card has session link but container_name was NULL"
+        )
 
-        # Negative chrome: scores stars, time bar, and librarian section
-        # are unique to bead/agentic rows — none should appear on a
-        # worktree-merge card.
+        # Diff button always renders.
+        assert c.get("wt_ff_diff_btn_present"), "ff card missing Diff button"
+        assert c.get("wt_cp_diff_btn_present"), "cherry-pick card missing Diff button"
+        assert c.get("wt_cm_diff_btn_present"), "commit-merge card missing Diff button"
+
+        # Stats: '<files> files +A −R'
+        assert "2 files" in (c.get("wt_ff_stats_text") or ""), (
+            f"ff stats missing files count: {c.get('wt_ff_stats_text')!r}"
+        )
+        assert "+12" in (c.get("wt_ff_stats_text") or ""), (
+            f"ff stats missing +12: {c.get('wt_ff_stats_text')!r}"
+        )
+
+        # Negative chrome: bead-card slots must NOT render for any
+        # worktree-merge card. Per auto-24a60: no priority badge, no
+        # scores, no time-breakdown bar, no Trace link, no duration
+        # timer, no generic title-block, no expanded-detail section.
         for label, chrome in (
             ("ff", c.get("wt_ff_chrome") or {}),
             ("cherry-pick", c.get("wt_cp_chrome") or {}),
             ("commit-merge", c.get("wt_cm_chrome") or {}),
         ):
-            assert not chrome.get("scores"), f"{label} card unexpectedly has scores section"
-            assert not chrome.get("time"), f"{label} card unexpectedly has time-breakdown bar"
-            assert not chrome.get("lib"), f"{label} card unexpectedly has librarian section"
+            assert not chrome.get("scores"), f"{label}: scores section present"
+            assert not chrome.get("time"), f"{label}: time-breakdown bar present"
+            assert not chrome.get("lib"), f"{label}: librarian section present"
+            assert not chrome.get("prio"), f"{label}: priority badge present"
+            assert not chrome.get("trace"), f"{label}: Trace link present"
+            assert not chrome.get("dur"), f"{label}: duration timer present"
+            assert not chrome.get("gentitle"), f"{label}: generic tl-title-block present"
+            assert not chrome.get("exp"), f"{label}: tl-exp-detail block present"
+
+    def test_worktree_merge_card_expand_caps_body(self):
+        """auto-24a60: expanding a worktree-merge card grows the subtitle
+        to a longer body view but never beyond ~500 chars; the
+        '…full body in diff' truncation hint appears, and collapsing
+        the card removes it.
+        """
+        c = self._timeline
+        assert c.get("wt_cm_initially_collapsed"), (
+            "commit-merge card should start collapsed"
+        )
+        assert c.get("wt_cm_expand_hint_visible"), (
+            "expand hint missing on long-body card"
+        )
+        assert c.get("wt_cm_expanded_subtitle_capped"), (
+            f"expanded subtitle too long ({c.get('wt_cm_expanded_subtitle_len')} chars) — "
+            "should stay under ~520"
+        )
+        assert c.get("wt_cm_after_collapse_hint_gone"), (
+            "expand hint still visible after collapse"
+        )
+
+    def test_worktree_merge_card_diff_overlay(self):
+        """auto-24a60: clicking [Diff →] opens a modal with the commit's
+        diff fetched lazily from /api/dispatch/runs/<id>/commit-detail.
+        Esc dismisses; underlying activity tab stays selected.
+        """
+        c = self._timeline
+        assert c.get("diff_overlay_open"), "Diff overlay did not open after click"
+        assert c.get("diff_overlay_has_patch"), "Diff overlay missing patch content"
+        assert "diff --git" in (c.get("diff_overlay_patch_text") or ""), (
+            f"Diff overlay patch text unexpected: {c.get('diff_overlay_patch_text')!r}"
+        )
+        assert c.get("diff_overlay_closed_after_esc"), (
+            "Diff overlay still open after Escape"
+        )
+        # Underlying tab unchanged (no history push, no nav).
+        assert c.get("tab_after_overlay_close") == "feed", (
+            f"Tab changed after overlay close: {c.get('tab_after_overlay_close')!r}"
+        )
 
 
 ACTIVITY_ATTENTION_CHECKS = """(async () => {
