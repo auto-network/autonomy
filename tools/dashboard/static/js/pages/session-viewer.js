@@ -1078,7 +1078,8 @@
           if (tmux) form.append('tmux_session', tmux);
           var self = this;
           (function(attId) {
-            fetch('/api/upload', { method: 'POST', body: form })
+            var doFetch = (window.Autonomy && window.Autonomy.fetch) || fetch;
+            doFetch('/api/upload', { method: 'POST', body: form })
               .then(function(r) { return r.json(); })
               .then(function(data) {
                 if (data.ok) {
