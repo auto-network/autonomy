@@ -94,7 +94,11 @@ function _withOrgHeader(opts) {
   if (!org) return opts || undefined;
   const init = Object.assign({}, opts || {});
   const headers = new Headers(init.headers || {});
-  headers.set('X-Graph-Org', org);
+  // Caller-supplied X-Graph-Org wins. The shell/plugin default is just
+  // that — a default for callers that don't specify. Cross-org reads
+  // (e.g. Schema.prototype.all({headers: {'X-Graph-Org': org}}) from
+  // agent-actions.js) need their own org to land on the wire intact.
+  if (!headers.has('X-Graph-Org')) headers.set('X-Graph-Org', org);
   init.headers = headers;
   return init;
 }

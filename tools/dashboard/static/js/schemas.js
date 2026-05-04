@@ -44,6 +44,16 @@
   }
 
   // ── Generic read paths ──────────────────────────────────────
+  //
+  // ``opts.headers`` (object) on either ``read`` or ``all`` is forwarded
+  // verbatim to the underlying fetch. The canonical use is the
+  // ``X-Graph-Org`` cross-org passthrough: a consumer rendering content
+  // owned by a non-default org needs to read that org's Settings without
+  // switching the page-wide org context, and the only knob the substrate
+  // exposes for that is the per-request header. Callers without a header
+  // requirement omit ``opts.headers`` and the underlying fetch goes out
+  // with the default options object — no ``headers`` key, fully
+  // backwards-compatible with the pre-headers shape.
 
   Schema.prototype.read = async function(key, opts) {
     if (typeof key !== 'string' || !key) {
@@ -55,7 +65,9 @@
     if (opts.target_revision) {
       url += '?target_revision=' + encodeURIComponent(opts.target_revision);
     }
-    var res = await _fetch(url, { credentials: 'same-origin' });
+    var fetchOpts = { credentials: 'same-origin' };
+    if (opts.headers) fetchOpts.headers = opts.headers;
+    var res = await _fetch(url, fetchOpts);
     if (!res.ok) return null;
     var body = await res.json().catch(function() { return null; });
     return body || null;
@@ -67,7 +79,9 @@
     if (opts.target_revision) {
       url += '?target_revision=' + encodeURIComponent(opts.target_revision);
     }
-    var res = await _fetch(url, { credentials: 'same-origin' });
+    var fetchOpts = { credentials: 'same-origin' };
+    if (opts.headers) fetchOpts.headers = opts.headers;
+    var res = await _fetch(url, fetchOpts);
     if (!res.ok) return [];
     var body = await res.json().catch(function() { return {}; });
     return Array.isArray(body.members) ? body.members : [];
