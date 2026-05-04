@@ -4285,21 +4285,31 @@ def cmd_turn_correction_suggest(args):
     computes the target ``message_id`` and raw-text ``sha256`` server-side,
     and persists the sparse overlay row.
     """
-    if args.stdin and args.corrected_text is not None:
+    stdin_compat = getattr(args, "content_stdin", None)
+    read_from_stdin = args.stdin or stdin_compat == "-"
+    corrected_from_flag = stdin_compat if stdin_compat not in (None, "-") else None
+
+    provided_sources = sum(
+        value is not None
+        for value in (args.corrected_text, corrected_from_flag)
+    ) + int(read_from_stdin)
+    if provided_sources > 1:
         print(
             "turn-correction suggest: pass corrected text either as a positional"
-            " argument or via --stdin, not both",
+            " argument, via --stdin, or via -c/--content-stdin, not multiple ways",
             file=sys.stderr,
         )
         sys.exit(2)
-    if args.stdin:
+    if read_from_stdin:
         corrected = sys.stdin.read()
+    elif corrected_from_flag is not None:
+        corrected = corrected_from_flag
     elif args.corrected_text is not None:
         corrected = args.corrected_text
     else:
         print(
             "turn-correction suggest: corrected text is required"
-            " (positional argument or --stdin)",
+            " (positional argument, --stdin, or -c -)",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -5083,6 +5093,13 @@ def main():
     p_tc_suggest.add_argument(
         "--stdin", action="store_true",
         help="Read corrected text from stdin instead of argv",
+    )
+    p_tc_suggest.add_argument(
+        "-c", "--content-stdin",
+        nargs="?",
+        const="-",
+        default=None,
+        help="Compatibility alias: use '-c -' to read corrected text from stdin",
     )
     p_tc_suggest.add_argument(
         "--json", dest="json_output", action="store_true",
