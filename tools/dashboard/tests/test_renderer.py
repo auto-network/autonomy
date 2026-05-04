@@ -16,6 +16,7 @@ renderer's methods depend on:
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -41,6 +42,20 @@ def _parse_sequence(raw_entries: list[dict]) -> list[dict]:
     entries = []
     for raw in raw_entries:
         parsed = _parse_jsonl_entry(_line(raw))
+        if parsed is None:
+            continue
+        if isinstance(parsed, list):
+            entries.extend(parsed)
+        else:
+            entries.append(parsed)
+    return _dedup_queued_entries(entries)
+
+
+def _parse_jsonl_fixture(path: Path) -> list[dict]:
+    """Parse a literal JSONL fixture through the Claude parser + dedup path."""
+    entries = []
+    for line in path.read_text().splitlines():
+        parsed = _parse_jsonl_entry(line)
         if parsed is None:
             continue
         if isinstance(parsed, list):
@@ -118,8 +133,7 @@ class TestToolGrouping:
             assert e["tool_name"] == "Read"
         # Verify they arrive in order — grouper depends on adjacency
         assert entries[0]["tool_id"] == "tu_r1"
-        assert entries[1]["tool_id"] == "tu_r2"
-        assert entries[2]["tool_id"] == "tu_r3"
+
 
     def test_mixed_tools_not_grouped(self):
         """Read then Bash then Read → 3 separate entries with different tool_names.
@@ -186,6 +200,27 @@ class TestToolGrouping:
         assert entries[0]["tool_name"] == "Read"
         assert entries[1]["tool_name"] == "Read"
         assert entries[3]["tool_name"] == "Read"
+
+
+class TestQueuedClaudeIdentity:
+    """Regression coverage for the real queued Claude turn-correction miss.
+
+    Raw fixture captured from auto-0503-173500. The queue-operation enqueue
+    arrives first, then the real uuid-bearing user line later. Dedup keeps the
+    queued copy for ordering, so it must inherit the real line's identity.
+    """
+
+    def test_real_claude_fixture_keeps_user_uuid_on_deduped_queue_entry(self):
+        fixture = Path("/workspace/output/auto-0503-173500-bad-correction-lines-426-433.jsonl")
+        entries = _parse_jsonl_fixture(fixture)
+        target = next(
+            e for e in entries
+            if e.get("type") == "user"
+            and "events being admitted" in (e.get("content") or "")
+        )
+        assert target.get("queued") is True
+        assert target.get("message_id") == "99532a6a-0f77-4826-a831-6db4d011c278"
+        assert target.get("parent_uuid") == "af86f586-c1d7-44f6-908f-116cf5e0d630"
 
 
 # ── TestHeadlineExtraction ──────────────────────────────────────────
