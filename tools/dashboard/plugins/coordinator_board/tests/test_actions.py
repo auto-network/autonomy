@@ -7,9 +7,9 @@ What we verify here:
 
 * Each ``coordinator-decision`` ``kind`` produces the synthesized text
   the design's operator protocol calls for.
-* ``operator-message`` resolves the live coordinator-role session and
-  passes the body verbatim.
-* ``operator-message`` with no coordinator session resolved logs +
+* ``operator-message`` resolves the bound coordinator session from
+  ``dashboard.coordinator`` and passes the body verbatim.
+* ``operator-message`` with no coordinator binding resolved logs +
   drops the row (no exception, no ``session_send`` call).
 * Importing the actions module registers all seven handlers in
   ``settings_mediator.REGISTRY`` with the correct predicates and
@@ -35,6 +35,7 @@ from tools.dashboard.settings_mediator import (
 from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS, register_schema, SettingSchema
 
 
+COORDINATOR_SET_ID = "dashboard.coordinator"
 COORDINATOR_DECISION_SET_ID = "dashboard.coordinator-decision"
 OPERATOR_MESSAGE_SET_ID = "dashboard.operator-message-to-coordinator"
 
@@ -89,21 +90,15 @@ def graph_db_env(tmp_path, monkeypatch):
 def services_capture():
     """Stub :class:`Services` recording every ``session_send`` call."""
     sent: list[tuple[str, str]] = []
-    role_lookup: dict[str, str | None] = {}
 
     async def _send(session: str, text: str) -> None:
         sent.append((session, text))
 
-    async def _find(role: str) -> str | None:
-        return role_lookup.get(role)
-
     svc = Services(
         session_send=_send,
-        find_session_by_role=_find,
         log=logging.getLogger("settings_mediator.test"),
     )
     svc._sent = sent
-    svc._role_lookup = role_lookup
     return svc
 
 
@@ -222,28 +217,39 @@ async def test_refresh_request_synthesizes_text(services_capture):
 
 
 @pytest.mark.asyncio
-async def test_operator_message_routes_to_coordinator(services_capture):
-    """Resolves the live coordinator-role session, sends body verbatim."""
+async def test_operator_message_routes_to_coordinator(
+    graph_db_env, services_capture,
+):
+    """Resolves the bound coordinator session, sends body verbatim."""
     from tools.dashboard.plugins.coordinator_board.entrypoints import actions
 
-    services_capture._role_lookup["coordinator"] = "auto-coord-9"
+    _register_permissive_schemas()
+
     row = _make_row(
         {"text": "ack — sequencing approved", "sentAt": None},
         set_id=OPERATOR_MESSAGE_SET_ID,
     )
-    await actions.operator_message(row, services_capture)
+    from tools.graph import ops
+    ops.add_setting(
+        COORDINATOR_SET_ID, 1, "default",
+        {"session_id": "auto-coord-9"},
+    )
 
+    await actions.operator_message(row, services_capture)
     assert services_capture._sent == [
         ("auto-coord-9", "ack — sequencing approved"),
     ]
 
 
 @pytest.mark.asyncio
-async def test_operator_message_drops_when_no_coordinator(services_capture, caplog):
-    """``find_session_by_role`` returns None → log + drop, no send."""
+async def test_operator_message_drops_when_no_coordinator(
+    graph_db_env, services_capture, caplog,
+):
+    """No binding resolved → log + drop, no send."""
     from tools.dashboard.plugins.coordinator_board.entrypoints import actions
 
-    # No coordinator role registered → find_session_by_role returns None.
+    _register_permissive_schemas()
+
     row = _make_row(
         {"text": "still no one home", "sentAt": None},
         set_id=OPERATOR_MESSAGE_SET_ID,
@@ -253,9 +259,9 @@ async def test_operator_message_drops_when_no_coordinator(services_capture, capl
         await actions.operator_message(row, services_capture)
 
     assert services_capture._sent == [], (
-        "no coordinator session resolved → handler must not call session_send"
+        "no coordinator binding resolved → handler must not call session_send"
     )
-    assert any("no coordinator-role session resolved" in r.getMessage()
+    assert any("no dashboard.coordinator session resolved" in r.getMessage()
                for r in caplog.records), (
         f"expected warning log, got: {[r.getMessage() for r in caplog.records]}"
     )
@@ -374,10 +380,15 @@ def _register_permissive_schemas() -> None:
         set_id = COORDINATOR_DECISION_SET_ID
         schema_revision = 1
 
+    class _CoordinatorV1(SettingSchema):
+        set_id = COORDINATOR_SET_ID
+        schema_revision = 1
+
     class _OperatorMsgV1(SettingSchema):
         set_id = OPERATOR_MESSAGE_SET_ID
         schema_revision = 1
 
+    register_schema(COORDINATOR_SET_ID, 1, _CoordinatorV1)
     register_schema(COORDINATOR_DECISION_SET_ID, 1, _DecisionV1)
     register_schema(OPERATOR_MESSAGE_SET_ID, 1, _OperatorMsgV1)
 
@@ -451,10 +462,39 @@ async def test_iterate_once_idempotent_on_repoll(
 
 
 @pytest.mark.asyncio
+async def test_iterate_once_operator_message_routes_to_bound_coordinator(
+    graph_db_env, services_capture,
+):
+    """Acceptance — operator-message uses ``dashboard.coordinator``."""
+    import importlib
+    from tools.dashboard.plugins.coordinator_board.entrypoints import actions
+    importlib.reload(actions)
+
+    _register_permissive_schemas()
+
+    from tools.graph import ops
+    ops.add_setting(
+        COORDINATOR_SET_ID, 1, "default",
+        {"session_id": "auto-bound-coord"},
+    )
+    ops.add_setting(
+        OPERATOR_MESSAGE_SET_ID, 1,
+        "default",
+        {"text": "are you there", "sentAt": None},
+    )
+
+    await iterate_once(services_capture)
+
+    assert services_capture._sent == [
+        ("auto-bound-coord", "are you there"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_iterate_once_operator_message_no_coordinator_drops(
     graph_db_env, services_capture,
 ):
-    """Acceptance #5 — operator-message row with no coordinator session
+    """Acceptance #5 — operator-message row with no coordinator binding
     leaves a marker (so it isn't retried) but never raises."""
     import importlib
     from tools.dashboard.plugins.coordinator_board.entrypoints import actions
@@ -469,9 +509,8 @@ async def test_iterate_once_operator_message_no_coordinator_drops(
         {"text": "are you there", "sentAt": None},
     )
 
-    # No coordinator role configured in the stub → find returns None.
     await iterate_once(services_capture)
 
     assert services_capture._sent == [], (
-        "with no coordinator-role session, handler must not call session_send"
+        "with no dashboard.coordinator binding, handler must not call session_send"
     )

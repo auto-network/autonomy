@@ -90,10 +90,7 @@ def services():
     async def _send(session, text):
         sent.append((session, text))
 
-    async def _find(role):
-        return None
-
-    return Services(session_send=_send, find_session_by_role=_find)
+    return Services(session_send=_send)
 
 
 def _wire_bus_to_settings_ops(bus: EventBus):

@@ -9,9 +9,9 @@ in one of the two work-queue Settings owned by the coordinator board:
   request, refresh request). One handler per ``kind`` synthesizes the
   text the coordinator session receives via tmux.
 * ``dashboard.operator-message-to-coordinator`` — operator → coordinator
-  free text. The handler resolves the live coordinator-role session via
-  :func:`Services.find_session_by_role` and forwards the body verbatim.
-  No coordinator session resolved → log + drop.
+  free text. The handler resolves the bound session from the
+  ``dashboard.coordinator`` singleton Setting and forwards the body
+  verbatim. No binding resolved → log + drop.
 
 Module-level ``register_action_decorator`` calls fire at import time —
 the plugin loader imports this module via ``entrypoints.actions`` in
@@ -22,11 +22,36 @@ substrate concerns; the handlers themselves are stateless one-liners.
 """
 from __future__ import annotations
 
+import json
+
 from tools.dashboard.settings_mediator import register_action_decorator
+from tools.graph import settings_ops
 
 
+COORDINATOR_SET_ID = "dashboard.coordinator"
 COORDINATOR_DECISION_SET_ID = "dashboard.coordinator-decision"
 OPERATOR_MESSAGE_SET_ID = "dashboard.operator-message-to-coordinator"
+COORDINATOR_ORG = "autonomy"
+
+
+def _bound_coordinator_session() -> str | None:
+    binding = settings_ops.resolve_set_key(
+        COORDINATOR_SET_ID,
+        "default",
+        org=COORDINATOR_ORG,
+        peers=[],
+    )
+    if not binding:
+        return None
+    payload = binding.get("payload")
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    if not isinstance(payload, dict):
+        payload = {}
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    return None
 
 
 # ── coordinator-decision handlers ────────────────────────────────────
@@ -110,10 +135,10 @@ async def refresh_request(row, svc):
     name="coordinator_board.operator_message",
 )
 async def operator_message(row, svc):
-    target = await svc.find_session_by_role("coordinator")
+    target = _bound_coordinator_session()
     if not target:
         svc.log.warning(
-            "coordinator_board.operator_message: no coordinator-role "
+            "coordinator_board.operator_message: no dashboard.coordinator "
             "session resolved; dropping row %s",
             row.id,
         )

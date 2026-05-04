@@ -9,7 +9,7 @@ Covers:
 * :class:`CrosstalkService.send` — inner ``send_fn`` is invoked once
   with the right (target, envelope) pair.
 * :func:`deliver_ping` direct invocation — routes by explicit
-  ``to_participant_id`` and never consults ``find_session_by_role``.
+  ``to_participant_id`` and never consults session-role lookup.
 * End-to-end through ``iterate_once``: writing a SurfacePing row fires
   the handler exactly once with the expected envelope; multiple in-flight
   rows deliver independently; missing target session is a no-op (no
@@ -85,9 +85,9 @@ def _isolate_action_registry():
 def services_capture():
     """Stub :class:`Services` recording every CrosstalkService call.
 
-    ``find_session_by_role`` raises if ever invoked — the whole point of
-    substrate.C is that pings route by explicit ``to_participant_id``,
-    not by role lookup. Acceptance #1 + the role-filter pitfall
+    The whole point of substrate.C is that pings route by explicit
+    ``to_participant_id``, not by role lookup. Acceptance #1 + the
+    role-filter pitfall
     (``graph://1ba4d2e0-c5f``) ride on this guarantee.
     """
     sent: list[tuple[str, str, dict]] = []
@@ -102,15 +102,8 @@ def services_capture():
             "not session_send"
         )
 
-    async def _find(role):
-        raise AssertionError(
-            "deliver_ping must NOT consult find_session_by_role "
-            "(see graph://1ba4d2e0-c5f)"
-        )
-
     svc = Services(
         session_send=_session_send,
-        find_session_by_role=_find,
         log=logging.getLogger("settings_mediator.test_surface"),
         crosstalk=_Recorder(),
     )
@@ -252,9 +245,8 @@ async def test_crosstalk_service_invokes_send_fn_once():
 async def test_deliver_ping_routes_by_explicit_target(services_capture):
     """Acceptance #1 — handler delivers via ``services.crosstalk.send``.
 
-    The fixture's ``find_session_by_role`` raises if called; reaching
-    the recorder proves the handler ignored role-lookup entirely (per
-    pitfall ``graph://1ba4d2e0-c5f``).
+    Reaching the recorder proves the handler ignored role-lookup
+    entirely (per pitfall ``graph://1ba4d2e0-c5f``).
     """
     row = _make_row(_ping_payload())
     await deliver_ping(row, services_capture)
@@ -395,7 +387,6 @@ async def test_e2e_unmatched_target_does_not_raise(
 
     svc = Services(
         session_send=lambda *a, **kw: None,  # not used
-        find_session_by_role=lambda *a, **kw: None,  # not used
         log=logging.getLogger("settings_mediator.test_surface"),
         crosstalk=CrosstalkService(send_fn=_send_fn),
     )

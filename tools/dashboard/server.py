@@ -12199,27 +12199,6 @@ async def _settings_mediator_session_send(session: str, text: str) -> None:
     await tmux_send(session, text)
 
 
-async def _settings_mediator_find_session_by_role(role: str) -> str | None:
-    """``Services.find_session_by_role`` — first live session with *role*.
-
-    Wraps ``session_monitor.get_registry()`` so action handlers don't
-    need to know about the registry shape. Returns the tmux name of the
-    first live row whose ``role`` matches, or ``None``.
-    """
-    target = (role or "").strip()
-    if not target:
-        return None
-    for entry in session_monitor.get_registry():
-        if (entry.get("role") or "").strip() != target:
-            continue
-        if not entry.get("is_live", True):
-            continue
-        tmux = (entry.get("tmux_name") or "").strip()
-        if tmux:
-            return tmux
-    return None
-
-
 def _build_settings_mediator_services():
     """Construct the substrate's :class:`Services` for the running process."""
     from tools.dashboard.settings_mediator import Services
@@ -12227,7 +12206,6 @@ def _build_settings_mediator_services():
     from tools.dashboard.tmux_send import tmux_send
     return Services(
         session_send=_settings_mediator_session_send,
-        find_session_by_role=_settings_mediator_find_session_by_role,
         log=logging.getLogger("settings_mediator"),
         crosstalk=CrosstalkService(send_fn=tmux_send),
     )
@@ -12359,9 +12337,9 @@ async def _on_shutdown():
         logger.exception("settings_ops.set_emit_hook(None) failed; continuing")
     # Drain settings-mediator BEFORE cancelling the dispatcher tasks so
     # any in-flight action handler that calls back into the dashboard
-    # (tmux_send, find_session_by_role) still has those primitives
-    # available. The loop's stop() awaits the in-flight tick — handlers
-    # complete naturally instead of being cancelled mid-call.
+    # (tmux_send / crosstalk) still has those primitives available. The
+    # loop's stop() awaits the in-flight tick — handlers complete
+    # naturally instead of being cancelled mid-call.
     if _settings_mediator_started:
         try:
             from tools.dashboard import settings_mediator
