@@ -129,7 +129,7 @@ async def test_thumb_yes_synthesizes_text(services_capture):
     })
     await actions.thumb_yes(row, services_capture)
 
-    assert services_capture._sent == [("auto-foo", "Operator: thumb yes on t1.")]
+    assert services_capture._sent == [("auto-foo", "COORDINATOR: Operator: thumb yes on t1.")]
 
 
 @pytest.mark.asyncio
@@ -143,7 +143,7 @@ async def test_thumb_no_synthesizes_text(services_capture):
     })
     await actions.thumb_no(row, services_capture)
 
-    assert services_capture._sent == [("auto-bar", "Operator: thumb no on t2.")]
+    assert services_capture._sent == [("auto-bar", "COORDINATOR: Operator: thumb no on t2.")]
 
 
 @pytest.mark.asyncio
@@ -159,13 +159,13 @@ async def test_choice_synthesizes_text(services_capture):
     await actions.choice(row, services_capture)
 
     assert services_capture._sent == [
-        ("auto-baz", "Operator chose: ship it on t3."),
+        ("auto-baz", "COORDINATOR: Operator chose: ship it on t3."),
     ]
 
 
 @pytest.mark.asyncio
 async def test_custom_passes_through_verbatim(services_capture):
-    """``custom`` is operator free text — no synthesis, body unmodified."""
+    """``custom`` keeps the body text but adds the board prefix."""
     from tools.dashboard.plugins.coordinator_board.entrypoints import actions
 
     row = _make_row({
@@ -177,7 +177,7 @@ async def test_custom_passes_through_verbatim(services_capture):
     await actions.custom_reply(row, services_capture)
 
     assert services_capture._sent == [
-        ("auto-quux", "hold off until Friday — legal still reviewing"),
+        ("auto-quux", "COORDINATOR: hold off until Friday — legal still reviewing"),
     ]
 
 
@@ -193,7 +193,7 @@ async def test_sitrep_request_synthesizes_text(services_capture):
     await actions.sitrep_request(row, services_capture)
 
     assert services_capture._sent == [
-        ("auto-foo", "Operator requests a sitrep on t5."),
+        ("auto-foo", "COORDINATOR: Operator requests a sitrep on t5."),
     ]
 
 
@@ -209,7 +209,7 @@ async def test_refresh_request_synthesizes_text(services_capture):
     await actions.refresh_request(row, services_capture)
 
     assert services_capture._sent == [
-        ("auto-foo", "Operator requests a refresh on t6."),
+        ("auto-foo", "COORDINATOR: Operator requests a refresh on t6."),
     ]
 
 
@@ -220,7 +220,7 @@ async def test_refresh_request_synthesizes_text(services_capture):
 async def test_operator_message_routes_to_coordinator(
     graph_db_env, services_capture,
 ):
-    """Resolves the bound coordinator session, sends body verbatim."""
+    """Resolves the bound coordinator session and adds the board prefix."""
     from tools.dashboard.plugins.coordinator_board.entrypoints import actions
 
     _register_permissive_schemas()
@@ -237,7 +237,7 @@ async def test_operator_message_routes_to_coordinator(
 
     await actions.operator_message(row, services_capture)
     assert services_capture._sent == [
-        ("auto-coord-9", "ack — sequencing approved"),
+        ("auto-coord-9", "COORDINATOR: ack — sequencing approved"),
     ]
 
 
@@ -422,7 +422,7 @@ async def test_iterate_once_dispatches_thumb_yes_end_to_end(
     await iterate_once(services_capture)
 
     assert services_capture._sent == [
-        ("auto-foo", "Operator: thumb yes on t1."),
+        ("auto-foo", "COORDINATOR: Operator: thumb yes on t1."),
     ], f"expected one session_send; got {services_capture._sent}"
 
 
@@ -452,7 +452,7 @@ async def test_iterate_once_idempotent_on_repoll(
     await iterate_once(services_capture)
     assert len(services_capture._sent) == 1
     assert services_capture._sent[0] == (
-        "auto-target", "Operator chose: approve on tile-7.",
+        "auto-target", "COORDINATOR: Operator chose: approve on tile-7.",
     )
 
     await iterate_once(services_capture)
@@ -486,7 +486,7 @@ async def test_iterate_once_operator_message_routes_to_bound_coordinator(
     await iterate_once(services_capture)
 
     assert services_capture._sent == [
-        ("auto-bound-coord", "are you there"),
+        ("auto-bound-coord", "COORDINATOR: are you there"),
     ]
 
 
