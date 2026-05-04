@@ -186,6 +186,30 @@ class TestDedupQueuedEntries:
         result = self._dedup(entries)
         assert len(result) == 1
 
+    def test_queued_user_keeps_real_identity_from_duplicate(self):
+        """If the kept queued placeholder is deduped against a later real
+        user turn, it must inherit that turn's stable identity.
+
+        Claude queue-operation rows arrive without a uuid, while the later
+        real user row carries the top-level ``uuid`` that turn-correction
+        matching needs. Preserve queued ordering, but merge the real
+        ``message_id`` / ``parent_uuid`` onto the kept entry.
+        """
+        entries = [
+            {"type": "user", "content": "queued msg", "queued": True},
+            {
+                "type": "user",
+                "content": "queued msg",
+                "message_id": "user-123",
+                "parent_uuid": "parent-456",
+            },
+        ]
+        result = self._dedup(entries)
+        assert len(result) == 1
+        assert result[0]["queued"] is True
+        assert result[0]["message_id"] == "user-123"
+        assert result[0]["parent_uuid"] == "parent-456"
+
     def test_different_content_not_deduped(self):
         """A queued entry followed by a different user entry: both kept."""
         entries = [

@@ -1124,16 +1124,30 @@ def enrich_claude_entries(entries: list[dict], session_dir: Path | None = None) 
 def dedup_claude_entries(entries: list[dict]) -> list[dict]:
     result = []
     last_enqueue_content = None
+    last_enqueue_index: int | None = None
     for entry in entries:
         if entry.get("queued"):
             last_enqueue_content = entry.get("content", "").strip()
+            last_enqueue_index = len(result)
             result.append(entry)
         elif (
             entry.get("type") in ("user", "crosstalk")
             and last_enqueue_content
             and entry.get("content", "").strip() == last_enqueue_content
         ):
+            if (
+                last_enqueue_index is not None
+                and 0 <= last_enqueue_index < len(result)
+            ):
+                kept = result[last_enqueue_index]
+                for src_key, dst_key in (
+                    ("message_id", "message_id"),
+                    ("parent_uuid", "parent_uuid"),
+                ):
+                    if entry.get(src_key) and not kept.get(dst_key):
+                        kept[dst_key] = entry[src_key]
             last_enqueue_content = None
+            last_enqueue_index = None
         else:
             result.append(entry)
     return result
