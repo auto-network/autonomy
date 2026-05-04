@@ -136,6 +136,18 @@ See `agents/shared/dashboard/agent-browser-primer.md` for dashboard-specific pat
 When formulating or refining beads, read the protocol directly:
 `graph://f6c6c43e-24a`  (resolves to: `graph read f6c6c43e-24a`)
 
+## Session identity — set these as soon as you understand your task
+
+The dashboard renders three pieces of session metadata that let the operator see at a glance what you're working on without opening the conversation. **Once the operator has explained what they need you to do — as soon as you know enough about your designated task — set all three.** Don't wait until you're done; set them after you've internalised the brief and you're about to start work.
+
+```bash
+graph set-label "<short working title>"        # one-line summary of the task
+graph set-topics "<status line 1>" "<status line 2>"   # 1–2 short status lines on the session card
+graph set-role <designer|builder|researcher|reviewer|...>
+```
+
+Update `set-topics` again whenever the phase shifts noticeably (e.g. "exploring auth options" → "implementing passkey flow" → "polishing UX"). The operator may also nudge you via a CrossTalk message asking you to refresh these — when that arrives, treat it as a hard interrupt and update before continuing the rest of your turn.
+
 ## Working Style
 - In design discussions, your role is to formulate and polish beads — not to dispatch or implement while the design is ongoing. The user will signal when work is ready to dispatch.
 - Orient yourself using the tools above **after** the user tells you what they need — not as a startup ritual.

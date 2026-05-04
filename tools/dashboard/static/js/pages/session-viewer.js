@@ -214,6 +214,41 @@
       showTerminal: false,
       _termInstance: null,   // result of window.mountTerminal(), or null
 
+      // Identity-refresh nudge: drawer button state machine. 'idle' →
+      // 'sending' (POST in flight) → 'sent' (CrossTalk delivered, waiting
+      // for the agent to react). When the agent writes set-label or
+      // set-topics, the resulting tmux_sessions row update flips _label
+      // / topics, the x-if condition on the button collapses, and the
+      // button disappears entirely. Reset to 'idle' if the request fails.
+      identityRefreshState: 'idle',
+      _identityRefreshClearTimer: null,
+      async requestIdentityRefresh() {
+        if (this.identityRefreshState !== 'idle' || !this._tmuxSession) return;
+        this.identityRefreshState = 'sending';
+        try {
+          const resp = await fetch(
+            '/api/session/' + encodeURIComponent(this._tmuxSession) + '/request-identity-refresh',
+            { method: 'POST' },
+          );
+          if (!resp.ok) {
+            const body = await resp.json().catch(() => ({}));
+            throw new Error(body.error || ('status ' + resp.status));
+          }
+          this.identityRefreshState = 'sent';
+          // If the agent never reacts, recover the button after 60s so
+          // the operator can resend rather than being stuck in 'sent'.
+          if (this._identityRefreshClearTimer) clearTimeout(this._identityRefreshClearTimer);
+          this._identityRefreshClearTimer = window.setTimeout(() => {
+            if (this.identityRefreshState === 'sent') this.identityRefreshState = 'idle';
+          }, 60000);
+        } catch (err) {
+          this.identityRefreshState = 'idle';
+          if (typeof window.showToast === 'function') {
+            window.showToast('Identity refresh failed: ' + (err.message || err), 'error');
+          }
+        }
+      },
+
       // Viewer-attachment lightbox: when src is set, the overlay shows the
       // full-resolution image; clicking the backdrop or pressing ESC closes.
       lightboxSrc: '',

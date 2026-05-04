@@ -6839,6 +6839,36 @@ async def api_worktree_sync_base(request):
     return JSONResponse({"ok": True, "state": _worktree_state_json(row)})
 
 
+async def api_session_request_identity_refresh(request):
+    """POST /api/session/{tmux_name}/request-identity-refresh
+
+    Operator nudges the session to re-set its working title, topics,
+    and role via CrossTalk. The drawer surfaces this as a button when
+    one of the three is empty — agents sometimes forget to update them
+    after the operator briefs them on a task. The primer reminds the
+    agent to do this proactively, this is the operator's escape hatch
+    for when they didn't.
+    """
+    tmux_name = request.path_params["tmux_name"]
+    message = (
+        "Operator is asking you to update your session identity so the "
+        "dashboard shows what you're working on:\n"
+        "\n"
+        "  graph set-label \"<short working title>\"\n"
+        "  graph set-topics \"<status line 1>\" \"<status line 2>\"\n"
+        "  graph set-role <designer|builder|researcher|reviewer|...>\n"
+        "\n"
+        "Set whichever are missing or stale based on the current task. "
+        "Two short topic lines are usually enough — one for what you're "
+        "doing right now, one for the bead/scope it ties back to."
+    )
+    try:
+        await _send_dashboard_ui_crosstalk(tmux_name, message)
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    return JSONResponse({"ok": True, "session": tmux_name})
+
+
 async def api_worktree_request_rebase(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
@@ -12012,6 +12042,7 @@ routes = [
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
     Route("/api/session/{tmux_name}/output/{path:path}", api_session_output, methods=["GET"]),
+    Route("/api/session/{tmux_name}/request-identity-refresh", api_session_request_identity_refresh, methods=["POST"]),
     Route("/api/session/{tmux_name}/interrupt", api_session_interrupt, methods=["POST"]),
     Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
     Route("/api/session/{tmux_name}/topics", api_session_topics, methods=["PUT"]),
