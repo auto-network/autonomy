@@ -10,28 +10,23 @@ Covers:
   with the right (target, envelope) pair.
 * :func:`deliver_ping` direct invocation — routes by explicit
   ``to_participant_id`` and never consults session-role lookup.
-* End-to-end through ``iterate_once``: writing a SurfacePing row fires
-  the handler exactly once with the expected envelope; multiple in-flight
-  rows deliver independently; missing target session is a no-op (no
-  exception propagates from ``CrosstalkService.send``).
+* End-to-end through the registry's dispatch path: a synthesized
+  ``setting.changed`` event resolves the row and fires the handler
+  exactly once with the expected envelope.
 * Registration contract: importing the module wires the handler into
-  ``settings_mediator.REGISTRY`` keyed on ``dashboard.surface.ping``.
+  the registry keyed on ``dashboard.surface.ping``.
 """
 from __future__ import annotations
 
 import importlib
 import logging
-import time
 from uuid import uuid4
 
 import pytest
 
 from tools.dashboard import settings_mediator
-from tools.dashboard.settings_mediator import (
-    Row,
-    Services,
-    iterate_once,
-)
+from tools.dashboard.settings_mediator import Row, Services
+from tools.dashboard.settings_mediator.loop import _HANDLERS, _dispatch_event
 from tools.dashboard import surface_actions
 from tools.dashboard.surface_actions import (
     CrosstalkService,
@@ -279,7 +274,7 @@ async def test_deliver_ping_independent_targets(services_capture):
     assert services_capture._sent[1][2]["attrs"]["position"] == "tile:tile-b"
 
 
-# ── End-to-end through iterate_once ──────────────────────────────────
+# ── End-to-end through the registry's dispatch path ──────────────────
 
 
 @pytest.fixture
@@ -300,38 +295,44 @@ def surface_schema_registered():
 
 
 def _add_ping_row(payload: dict, *, key: str | None = None) -> str:
-    return settings_ops.add_setting(
-        SURFACE_PING_SET_ID,
-        SCHEMA_REVISION,
-        key or str(uuid4()),
-        payload,
+    key = key or str(uuid4())
+    sid = settings_ops.add_setting(
+        SURFACE_PING_SET_ID, SCHEMA_REVISION, key, payload,
     )
+    return key
+
+
+def _ping_event(key: str) -> dict:
+    return {
+        "set_id": SURFACE_PING_SET_ID,
+        "schema_revision": SCHEMA_REVISION,
+        "key": key,
+        "org": None,
+        "publication_state": "raw",
+        "deprecated": False,
+        "operation": "write",
+    }
 
 
 @pytest.mark.asyncio
 async def test_e2e_surface_ping_row_dispatches_handler(
     graph_db_env, surface_schema_registered, services_capture,
 ):
-    """Acceptance #5 — write SurfacePing → CrossTalk send fires once."""
+    """Acceptance #5 — write SurfacePing + setting.changed → CrossTalk send."""
     # Importing the module registers ``surface.ping.deliver``. The
     # autouse fixture cleared the registry, so re-execute the module
     # to re-register the handler under the cleared slate.
     importlib.reload(surface_actions)
 
     payload = _ping_payload(to_participant_id="auto-recipient")
-    sid = _add_ping_row(payload)
-
-    await iterate_once(services_capture)
+    key = _add_ping_row(payload)
+    await _dispatch_event(_ping_event(key), services_capture)
 
     assert len(services_capture._sent) == 1
     target, kind, body = services_capture._sent[0]
     assert target == "auto-recipient"
     assert kind == "surface-ping"
     assert body == format_ping(payload)
-
-    # Idempotency — the marker prevents a second dispatch on re-poll.
-    await iterate_once(services_capture)
-    assert len(services_capture._sent) == 1
 
 
 @pytest.mark.asyncio
@@ -345,14 +346,12 @@ async def test_e2e_multiple_pings_dispatch_independently(
     p2 = _ping_payload(to_participant_id="auto-B", position_value="t-b")
     p3 = _ping_payload(to_participant_id="auto-A", position_value="t-c")
 
-    _add_ping_row(p1)
-    # Force a strictly larger created_at on the next inserts so the
-    # mediator's (created_at, id) ordering is well-defined.
-    time.sleep(1.1)
-    _add_ping_row(p2)
-    _add_ping_row(p3)
+    k1 = _add_ping_row(p1)
+    k2 = _add_ping_row(p2)
+    k3 = _add_ping_row(p3)
 
-    await iterate_once(services_capture)
+    for k in (k1, k2, k3):
+        await _dispatch_event(_ping_event(k), services_capture)
 
     targets = [t for (t, _k, _b) in services_capture._sent]
     positions = [
@@ -374,8 +373,7 @@ async def test_e2e_unmatched_target_does_not_raise(
     ``tmux_send`` is fire-and-forget and its underlying ``subprocess.run``
     calls don't ``check=True`` on the tmux exit code. Simulating the
     same contract here: the inner ``send_fn`` returns normally even when
-    no session exists. The handler must not raise either way; the row
-    persists in the SurfacePing log so observability is preserved.
+    no session exists. The handler must not raise either way.
     """
     importlib.reload(surface_actions)
 
@@ -391,16 +389,10 @@ async def test_e2e_unmatched_target_does_not_raise(
         crosstalk=CrosstalkService(send_fn=_send_fn),
     )
 
-    _add_ping_row(_ping_payload(to_participant_id="not-a-real-session"))
-
-    # No assertion needed beyond "this completes without raising" —
-    # iterate_once swallowing the handler exception would also produce
-    # a 'failed' marker; we additionally verify no marker errors below.
-    await iterate_once(svc)
+    key = _add_ping_row(_ping_payload(to_participant_id="not-a-real-session"))
+    await _dispatch_event(_ping_event(key), svc)
 
     assert delivered == ["not-a-real-session"]
-    # And the loop's heartbeat records a successful invocation, not
-    # a failure.
     health = settings_mediator.HEALTH
     assert "surface.ping.deliver" in health.last_handler_succeeded_at
     assert "surface.ping.deliver" not in health.last_handler_error
@@ -410,18 +402,13 @@ async def test_e2e_unmatched_target_does_not_raise(
 
 
 def test_importing_module_registers_handler():
-    """Acceptance #4 — module import wires the handler into REGISTRY."""
+    """Acceptance #4 — module import wires the handler into the registry."""
     importlib.reload(surface_actions)
 
-    actions = [
-        a for a in settings_mediator.REGISTRY
-        if a.set_id == SURFACE_PING_SET_ID
-    ]
+    actions = _HANDLERS.get(SURFACE_PING_SET_ID, [])
     assert len(actions) == 1, (
         f"expected exactly one handler on {SURFACE_PING_SET_ID}; "
         f"got {[a.name for a in actions]}"
     )
     entry = actions[0]
     assert entry.name == "surface.ping.deliver"
-    # Substrate.C delivers every ping unconditionally — no predicate.
-    assert entry.predicate is None

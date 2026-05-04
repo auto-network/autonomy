@@ -285,7 +285,8 @@ def _resolve_entrypoints(
         if ep.actions:
             # Bare module paths — importing fires register_action(...) at
             # module top-level. We don't keep handles to the imported
-            # modules; the side effect lives in settings_mediator.REGISTRY.
+            # modules; the side effect lives in settings_mediator's
+            # internal handler registry.
             #
             # Bind ``_loading_plugin_org`` for the duration of the import
             # so each register_action call inside the plugin module

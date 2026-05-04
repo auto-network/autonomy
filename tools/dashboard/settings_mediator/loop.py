@@ -1,58 +1,36 @@
-"""Async dispatch loop for the settings-mediator substrate.
+"""Settings-mediator: thin handler registry over the in-process EventBus.
 
-The loop polls each registered ``set_id`` every ``poll_seconds``, walks
-new rows in ``(created_at, id)`` order, and invokes registered handlers
-once per (row, handler). Cursor + marker Settings provide
-restart-resume and per-row idempotency.
+A registered action is a coroutine ``(row, services) -> None``. The loop
+subscribes to the dashboard's ``EventBus``, filters to ``setting.changed``
+events for registered ``set_id``s, resolves the row from
+``settings_ops.read_set``, and fans out to every matching handler.
 
-Exposed:
+The substrate is at-most-once across process restart: events fired while
+the dashboard is down are lost. Every current handler is a tmux /
+CrossTalk send — operator-visible, idempotent in practice — so the
+trade-off is "worst case the operator sees a duplicate prompt."
 
-* :func:`start_action_loop` — schedule the loop on the running event
-  loop. Idempotent.
-* :func:`stop_action_loop` — flag stop, await the in-flight tick to
-  finish naturally (graceful drain).
-* :func:`iterate_once` — single-pass driver. Tests use this to step the
-  loop deterministically without sleeping.
-
-Reads/writes go through :mod:`tools.graph.settings_ops` for cursor /
-marker storage and :func:`settings_ops.read_set` for member discovery.
-The loop tolerates per-action failures (marker records ``failed``, no
-auto-retry) and per-set read failures (logs and retries on next tick;
-cursor never advances past unread rows).
+Cursor / marker / predicate / 30s watchdog scaffolding (~700 LOC) was
+collapsed away in bead auto-rc27t. The audit (this session) showed those
+were defending against drop modes that don't exist for an in-process
+consumer: bus subscriber queues are unbounded, the mediator and
+dashboard share a process, and the chronological replay buffer is for
+SSE clients reconnecting over the network — not in-process consumers.
 """
 from __future__ import annotations
 
 import asyncio
 import contextvars
-import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
-from uuid import uuid4
 
-from tools.graph import schemas, settings_ops
+from tools.graph import settings_ops
 from tools.graph.settings_ops import ResolvedSetting
-
-from .schemas import (
-    CURSOR_SET_ID,
-    CURSOR_REVISION,
-    STATE_SET_ID,
-    STATE_REVISION,
-)
 
 
 logger = logging.getLogger("settings_mediator")
-
-
-# Fallback watchdog interval. The primary wakeup path is the EventBus
-# ``setting.changed`` subscription; this timer covers missed events on
-# bus reconnect, in-process coalescing, or subscriber-disconnect windows
-# during shutdown. 30s gives a comfortable safety margin (6× the prior
-# 5s poll cadence) without being so slow as to feel broken on the
-# fail-over path. See bead auto-5mz65 § "Watchdog interval".
-DEFAULT_POLL_SECONDS = 30.0
 
 
 # ── Row / Services / RegisteredAction ────────────────────────────────
@@ -60,14 +38,11 @@ DEFAULT_POLL_SECONDS = 30.0
 
 @dataclass
 class Row:
-    """A single Setting row passed to action handlers and predicates.
+    """A single Setting row passed to action handlers.
 
-    The dataclass exposes typed metadata (``id``, ``set_id``, ``key``,
-    ``created_at``, ``updated_at``) plus the parsed ``payload`` dict.
     Mapping-style access (``row['kind']`` / ``'kind' in row`` /
-    ``row.get('kind')``) reads from ``payload`` so predicates can be
-    written as ``lambda row: row['kind'] == 'foo'`` against the payload
-    body.
+    ``row.get('kind')``) reads from ``payload`` so handlers can read
+    payload fields without unwrapping.
     """
     id: str
     set_id: str
@@ -116,28 +91,24 @@ class Services:
 
 @dataclass
 class RegisteredAction:
-    """One entry in the action registry.
+    """One entry in the handler registry.
 
-    ``org`` is the install scope this handler reads from / writes its
-    cursor + markers in. The plugin loader sets it via the
-    :data:`_loading_plugin_org` contextvar at import time so handlers
-    declared inside an ``entrypoints.actions`` module see their owning
-    plugin's ``manifest.effective_org``. Direct ``register_action``
-    callers outside the loader (legacy + tests) leave it ``None`` and
-    fall through to the scopeless DB.
+    ``org`` is the install scope this handler reads from. The plugin
+    loader sets it via the :data:`_loading_plugin_org` contextvar at
+    import time so handlers declared inside an ``entrypoints.actions``
+    module see their owning plugin's ``manifest.effective_org``. Direct
+    ``register_action`` callers outside the loader leave it ``None``
+    (scopeless — fires on every org).
     """
     set_id: str
-    fn: Callable[[Row, Services], Awaitable[None]]
     name: str
-    predicate: Callable[[Row], bool] | None = None
+    fn: Callable[[Row, Services], Awaitable[None]]
     org: str | None = None
 
 
 # ── Module-level state ───────────────────────────────────────────────
 
-# Sticky across the process: register_action calls populate REGISTRY at
-# import time of plugin code; start_action_loop owns the asyncio.Task.
-REGISTRY: list[RegisteredAction] = []
+_HANDLERS: dict[str, list[RegisteredAction]] = {}
 
 # Active during a plugin's ``entrypoints.actions`` import: the loader
 # binds this to ``manifest.effective_org`` so every register_action call
@@ -149,7 +120,6 @@ _loading_plugin_org: contextvars.ContextVar[str | None] = contextvars.ContextVar
 
 _loop_task: asyncio.Task | None = None
 _stop_event: asyncio.Event | None = None
-_iterating_lock: asyncio.Lock | None = None
 
 
 # ── Heartbeat ────────────────────────────────────────────────────────
@@ -159,79 +129,57 @@ _iterating_lock: asyncio.Lock | None = None
 class MediatorHealth:
     """Heartbeat surface mutated by the loop on every documented seam.
 
-    Read on demand by ``GET /api/diag/settings_mediator``. Per-tick
-    log lines are explicitly out of scope; this is the on-demand
-    alternative — no log noise, but enough state to answer
-    "is the loop alive?" / "did this handler fire?" / "what cursor is
-    each set on?" when the mediator looks wedged.
-
-    Mutated on the loop hot path. The dict fields are pre-allocated
-    once and reused — no per-tick dict allocation.
+    Read on demand by ``GET /api/diag/settings_mediator``. Per-tick log
+    lines are explicitly out of scope; this is the on-demand alternative
+    — no log noise, but enough state to answer "is the loop alive?" /
+    "did this handler fire?" when the mediator looks wedged.
     """
     last_tick_at: float = 0.0
-    last_event_received_at: float | None = None
-    last_event_received_set_id: str | None = None
     events_received_count: int = 0
-    last_watchdog_tick_at: float | None = None
     last_handler_fired_at: dict[str, float] = field(default_factory=dict)
     last_handler_succeeded_at: dict[str, float] = field(default_factory=dict)
     last_handler_error: dict[str, str] = field(default_factory=dict)
     handlers_fired_count: dict[str, int] = field(default_factory=dict)
-    cursor_positions: dict[str, str] = field(default_factory=dict)
     loop_started_at: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Snapshot the heartbeat as a JSON-friendly dict.
 
         Includes a derived ``last_tick_age_s`` so callers can spot a
-        stale loop without computing it themselves (per the spec's
-        "loop is stuck if older than a few seconds" use case).
+        stale loop without computing it themselves.
         """
         now = time.time()
         last_tick = self.last_tick_at or None
+        registered = [
+            {"set_id": a.set_id, "name": a.name}
+            for actions in _HANDLERS.values()
+            for a in actions
+        ]
         return {
             "loop_started_at": self.loop_started_at,
             "last_tick_at": last_tick,
             "last_tick_age_s": (now - last_tick) if last_tick else None,
-            "last_event_received_at": self.last_event_received_at,
-            "last_event_received_set_id": self.last_event_received_set_id,
             "events_received_count": self.events_received_count,
-            "last_watchdog_tick_at": self.last_watchdog_tick_at,
             "last_handler_fired_at": dict(self.last_handler_fired_at),
-            "last_handler_succeeded_at": dict(
-                self.last_handler_succeeded_at
-            ),
+            "last_handler_succeeded_at": dict(self.last_handler_succeeded_at),
             "last_handler_error": dict(self.last_handler_error),
             "handlers_fired_count": dict(self.handlers_fired_count),
-            "cursor_positions": dict(self.cursor_positions),
-            "registered_actions": [
-                {"set_id": a.set_id, "name": a.name} for a in REGISTRY
-            ],
+            "registered_actions": registered,
             "now": now,
         }
 
 
-# Module-scope singleton. The diag endpoint imports this directly.
 HEALTH = MediatorHealth()
 
 
 def reset_health() -> None:
-    """Test helper — clear all heartbeat state in place.
-
-    Mutates the existing :data:`HEALTH` singleton rather than rebinding
-    so external imports (``from .loop import HEALTH``) keep observing
-    the live object.
-    """
+    """Test helper — clear all heartbeat state in place."""
     HEALTH.last_tick_at = 0.0
-    HEALTH.last_event_received_at = None
-    HEALTH.last_event_received_set_id = None
     HEALTH.events_received_count = 0
-    HEALTH.last_watchdog_tick_at = None
     HEALTH.last_handler_fired_at.clear()
     HEALTH.last_handler_succeeded_at.clear()
     HEALTH.last_handler_error.clear()
     HEALTH.handlers_fired_count.clear()
-    HEALTH.cursor_positions.clear()
     HEALTH.loop_started_at = None
 
 
@@ -242,24 +190,25 @@ def register_action(
     set_id: str,
     fn: Callable[[Row, Services], Awaitable[None]],
     *,
-    predicate: Callable[[Row], bool] | None = None,
     name: str | None = None,
+    org: str | None = None,
 ) -> None:
-    """Register an action handler for new rows in *set_id*.
+    """Register *fn* as a handler for ``setting.changed`` on *set_id*.
 
-    *predicate* filters rows before invoking *fn*; if absent, every new
-    row is dispatched. *name* defaults to ``fn.__qualname__`` and shows
-    up in idempotency markers + logs — choose distinct names if a
-    plugin registers multiple handlers against the same ``set_id``.
+    *name* defaults to ``fn.__qualname__`` and shows up in heartbeat
+    logs — distinct names matter when a single ``set_id`` carries
+    multiple handlers (e.g. predicate-routed coordinator-board kinds).
+    *org* defaults to the value of :data:`_loading_plugin_org`, set by
+    the plugin loader during plugin-actions import.
     """
     resolved_name = name or getattr(fn, "__qualname__", None) or repr(fn)
-    REGISTRY.append(
+    resolved_org = org if org is not None else _loading_plugin_org.get()
+    _HANDLERS.setdefault(set_id, []).append(
         RegisteredAction(
             set_id=set_id,
-            fn=fn,
             name=resolved_name,
-            predicate=predicate,
-            org=_loading_plugin_org.get(),
+            fn=fn,
+            org=resolved_org,
         )
     )
 
@@ -269,11 +218,16 @@ def register_action_decorator(
     *,
     predicate: Callable[[Row], bool] | None = None,
     name: str | None = None,
+    org: str | None = None,
 ) -> Callable[
     [Callable[[Row, Services], Awaitable[None]]],
     Callable[[Row, Services], Awaitable[None]],
 ]:
     """Decorator sugar over :func:`register_action`.
+
+    *predicate* is wrapped INSIDE the registered handler instead of
+    being evaluated by the substrate — the public decorator signature
+    is unchanged so existing handlers don't need migration.
 
     .. code-block:: python
 
@@ -282,169 +236,27 @@ def register_action_decorator(
         async def my_handler(row, svc): ...
     """
     def _wrap(fn: Callable[[Row, Services], Awaitable[None]]):
-        register_action(set_id, fn, predicate=predicate, name=name)
+        if predicate is None:
+            register_action(set_id, fn, name=name, org=org)
+            return fn
+        async def _filtered(row: Row, svc: Services) -> None:
+            if not predicate(row):
+                return
+            await fn(row, svc)
+        # Preserve the original handler's qualname for the registry
+        # entry so health snapshots show the operator-meaningful name.
+        _filtered.__qualname__ = getattr(fn, "__qualname__", _filtered.__qualname__)
+        register_action(set_id, _filtered, name=name, org=org)
         return fn
     return _wrap
 
 
 def clear_registry() -> None:
     """Test helper — reset the in-process registry."""
-    REGISTRY.clear()
+    _HANDLERS.clear()
 
 
-# ── Cursor + marker persistence ──────────────────────────────────────
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _read_cursor(
-    set_id: str, *, org: str | None = None,
-) -> tuple[str, str] | None:
-    """Return ``(lastSeenAt, lastRowId)`` or ``None`` if no cursor stored.
-
-    Reads the latest base member of ``dashboard.action-registry-cursor#1``
-    keyed by *set_id* in *org*'s DB. ``read_set`` already returns one row
-    per key (latest by precedence/created_at), so we just look up the key.
-
-    ``peers=[]`` keeps the read local: cursors are per-org process state,
-    never cross-org content, and a peer's cursor must not steer this org's
-    loop. Without this, a sibling org's canonical-state cursor row would
-    leak in via :func:`tools.graph.cross_org.resolve_peers`.
-    """
-    members = settings_ops.read_set(CURSOR_SET_ID, org=org, peers=[])
-    for m in members.members:
-        if m.key == set_id:
-            payload = m.payload if isinstance(m.payload, dict) else {}
-            last_row = payload.get("lastRowId") or ""
-            last_seen = payload.get("lastSeenAt") or ""
-            if last_row and last_seen:
-                return last_seen, last_row
-            return None
-    return None
-
-
-def _write_cursor(
-    set_id: str, last_row_id: str, last_seen_at: str,
-    *, org: str | None = None,
-) -> None:
-    """Upsert the cursor for *set_id* directly via SQL in *org*'s DB.
-
-    We bypass ``add_setting`` to avoid bloat: cursor advancement happens
-    once per processed row and we only ever care about the latest value.
-    A direct UPDATE-or-INSERT keyed on (set_id, key) keeps one row
-    per cursor for the lifetime of the substrate.
-    """
-    payload = {"lastRowId": last_row_id, "lastSeenAt": last_seen_at}
-    serialized = json.dumps(payload, sort_keys=True)
-    now = _now_iso()
-    expires_at = schemas.cache_expires_at(
-        CURSOR_SET_ID, int(CURSOR_REVISION), now,
-    )
-    db = settings_ops._open(org)
-    try:
-        row = db.conn.execute(
-            "SELECT id FROM settings WHERE set_id = ? AND key = ? "
-            "  AND supersedes IS NULL AND excludes IS NULL",
-            (CURSOR_SET_ID, set_id),
-        ).fetchone()
-        if row is not None:
-            db.conn.execute(
-                "UPDATE settings SET payload = ?, updated_at = ?, "
-                "expires_at = ? WHERE id = ?",
-                (serialized, now, expires_at, row["id"]),
-            )
-        else:
-            db.conn.execute(
-                "INSERT INTO settings(id, set_id, schema_revision, key, "
-                "payload, publication_state, created_at, updated_at, "
-                "expires_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
-                (str(uuid4()), CURSOR_SET_ID, int(CURSOR_REVISION),
-                 set_id, serialized, "canonical", now, now, expires_at),
-            )
-        db.conn.commit()
-    finally:
-        db.close()
-
-
-def _marker_key(set_id: str, row_id: str, action_name: str) -> str:
-    return f"{set_id}:{row_id}:{action_name}"
-
-
-def _marker_exists(marker_key: str, *, org: str | None = None) -> bool:
-    """Return True if a state marker for *marker_key* already exists.
-
-    A direct SQL probe keeps the per-row hot path cheap — we don't need
-    the resolved-set machinery, just an indexed lookup.
-    """
-    db = settings_ops._open(org)
-    try:
-        row = db.conn.execute(
-            "SELECT 1 FROM settings WHERE set_id = ? AND key = ? "
-            "  AND supersedes IS NULL AND excludes IS NULL "
-            "  LIMIT 1",
-            (STATE_SET_ID, marker_key),
-        ).fetchone()
-        return row is not None
-    finally:
-        db.close()
-
-
-def _write_marker(
-    marker_key: str,
-    *,
-    status: str,
-    error: str | None = None,
-    org: str | None = None,
-) -> None:
-    """Insert (or replace) the marker for *marker_key* in *org*'s DB.
-
-    Idempotency relies on a single base row per ``(set_id, key)`` pair,
-    so we upsert just like the cursor. ``status='filtered'`` is used
-    when a predicate rejected the row — the marker still lands so the
-    loop doesn't re-evaluate the predicate every tick.
-    """
-    payload: dict[str, Any] = {
-        "processedAt": _now_iso(),
-        "status": status,
-    }
-    if error is not None:
-        payload["error"] = error
-    serialized = json.dumps(payload, sort_keys=True)
-    now = _now_iso()
-    expires_at = schemas.cache_expires_at(
-        STATE_SET_ID, int(STATE_REVISION), now,
-    )
-    db = settings_ops._open(org)
-    try:
-        existing = db.conn.execute(
-            "SELECT id FROM settings WHERE set_id = ? AND key = ? "
-            "  AND supersedes IS NULL AND excludes IS NULL",
-            (STATE_SET_ID, marker_key),
-        ).fetchone()
-        if existing is not None:
-            db.conn.execute(
-                "UPDATE settings SET payload = ?, updated_at = ?, "
-                "expires_at = ? WHERE id = ?",
-                (serialized, now, expires_at, existing["id"]),
-            )
-        else:
-            db.conn.execute(
-                "INSERT INTO settings(id, set_id, schema_revision, key, "
-                "payload, publication_state, created_at, updated_at, "
-                "expires_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
-                (str(uuid4()), STATE_SET_ID, int(STATE_REVISION),
-                 marker_key, serialized, "canonical", now, now, expires_at),
-            )
-        db.conn.commit()
-    finally:
-        db.close()
-
-
-# ── Member iteration ─────────────────────────────────────────────────
+# ── Row resolution ───────────────────────────────────────────────────
 
 
 def _resolved_to_row(m: ResolvedSetting) -> Row:
@@ -459,375 +271,159 @@ def _resolved_to_row(m: ResolvedSetting) -> Row:
     )
 
 
-def _members_since(
-    set_id: str,
-    cursor: tuple[str, str] | None,
-    *,
-    org: str | None = None,
-) -> list[ResolvedSetting]:
-    """Return resolved members of *set_id* strictly after *cursor*.
+def _resolve_row_or_none(set_id: str, key: str, org: str | None) -> Row | None:
+    """Return the resolved Row for ``(set_id, key)`` in *org* or None.
 
-    ``read_set`` deduplicates by key (one base row per key per the
-    resolution algorithm), which is exactly what action handlers expect:
-    the substrate fires once per logical Setting member. Sort order is
-    ``(created_at, id)`` so re-polls produce a stable sequence.
-
-    ``peers=[]`` scopes the read to *org* alone — cross-org event
-    routing is explicitly out of scope (a handler registered for org X
-    must not fire on rows that exist only in org Y, even if both orgs
-    share the same ``set_id``).
+    ``peers=[]`` keeps the read scoped to *org* alone. None is returned
+    when the row was deleted between commit and event delivery, or when
+    the event represents a delete operation — handlers don't fire on
+    deletes (matches the pre-collapse mediator's behavior).
     """
     members = settings_ops.read_set(set_id, org=org, peers=[])
-    rows = sorted(
-        members.members,
-        key=lambda m: (m.created_at or "", m.id),
-    )
-    if cursor is None:
-        return rows
-    last_seen_at, last_row_id = cursor
-    cutoff = (last_seen_at, last_row_id)
-    return [m for m in rows if (m.created_at or "", m.id) > cutoff]
+    for m in members.members:
+        if m.key == key:
+            return _resolved_to_row(m)
+    return None
 
 
-# ── Loop body ────────────────────────────────────────────────────────
+# ── Event dispatch ───────────────────────────────────────────────────
 
 
-async def iterate_once(services: Services) -> None:
-    """Walk each registered ``(set_id, org)`` once, dispatching new rows.
+async def _dispatch_event(data: Any, services: Services) -> None:
+    """Fan a single ``setting.changed`` payload out to every matching handler.
 
-    Public so tests can drive the loop deterministically without
-    sleeping. Production callers go through :func:`start_action_loop`.
+    Extracted from :func:`_loop_main` so tests can exercise the dispatch
+    surface without spinning the asyncio loop. Handler exceptions are
+    logged and swallowed so a sibling handler's failure cannot block
+    other handlers on the same event.
     """
-    # Heartbeat: stamp every iteration. The diag endpoint reads this
-    # to answer "is the loop alive?" — a stale value indicates wedge.
-    HEALTH.last_tick_at = time.time()
-
-    # Group actions by (set_id, org) so each org-scoped read happens
-    # exactly once per tick. The plugin loader stamps ``org`` from
-    # ``manifest.effective_org`` at registration; legacy callers that
-    # bypass the loader register at ``org=None`` and read scopeless.
-    # Multi-handler fan-out within a (set_id, org) bucket runs in
-    # registration order; one failure does not block siblings.
-    by_set: dict[tuple[str, str | None], list[RegisteredAction]] = {}
-    for action in REGISTRY:
-        by_set.setdefault((action.set_id, action.org), []).append(action)
-
-    for (set_id, org), actions in by_set.items():
-        cursor_key = f"{set_id}@{org or '-'}"
-        try:
-            cursor = _read_cursor(set_id, org=org)
-            new_rows = _members_since(set_id, cursor, org=org)
-        except Exception:
-            logger.exception(
-                "[settings_mediator] read failure for set_id=%s org=%s; "
-                "will retry on next tick",
-                set_id, org,
-            )
+    if not isinstance(data, dict):
+        return
+    set_id = data.get("set_id")
+    if not set_id:
+        return
+    actions = _HANDLERS.get(set_id)
+    if not actions:
+        return
+    org_filter = data.get("org")
+    key = data.get("key")
+    row: Row | None = None
+    row_resolved = False
+    for action in actions:
+        if action.org is not None and action.org != org_filter:
             continue
-
-        for resolved in new_rows:
-            row = _resolved_to_row(resolved)
-            for action in actions:
-                marker = _marker_key(set_id, resolved.id, action.name)
-                try:
-                    if _marker_exists(marker, org=org):
-                        continue
-                except Exception:
-                    logger.exception(
-                        "[settings_mediator] marker-read failed for %s "
-                        "(org=%s); skipping this handler this tick",
-                        marker, org,
-                    )
-                    continue
-
-                if action.predicate is not None:
-                    try:
-                        accepted = bool(action.predicate(row))
-                    except Exception as exc:
-                        logger.exception(
-                            "[settings_mediator] predicate raised for "
-                            "set=%s org=%s action=%s row=%s",
-                            set_id, org, action.name, resolved.id,
-                        )
-                        _safe_write_marker(
-                            marker, status="failed",
-                            error=f"predicate: {type(exc).__name__}: {exc}",
-                            org=org,
-                        )
-                        continue
-                    if not accepted:
-                        _safe_write_marker(
-                            marker, status="filtered", org=org,
-                        )
-                        continue
-
-                # Heartbeat: stamp fired-at + bump count BEFORE invoking
-                # so a hung handler is observable from the diag endpoint
-                # (fired with no matching succeeded → handler is stuck).
-                fire_ts = time.time()
-                HEALTH.last_handler_fired_at[action.name] = fire_ts
-                HEALTH.handlers_fired_count[action.name] = (
-                    HEALTH.handlers_fired_count.get(action.name, 0) + 1
-                )
-                try:
-                    await action.fn(row, services)
-                    HEALTH.last_handler_succeeded_at[action.name] = (
-                        time.time()
-                    )
-                    _safe_write_marker(marker, status="ok", org=org)
-                except Exception as exc:
-                    HEALTH.last_handler_error[action.name] = (
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                    logger.exception(
-                        "[settings_mediator] handler %s raised on "
-                        "set=%s org=%s row=%s",
-                        action.name, set_id, org, resolved.id,
-                    )
-                    _safe_write_marker(
-                        marker, status="failed",
-                        error=f"{type(exc).__name__}: {exc}",
-                        org=org,
-                    )
-
-            # Cursor advances only after every registered handler has
-            # been considered — keeps multi-handler fan-out atomic per
-            # row, so a process crash mid-fan-out re-invokes only the
-            # missing handlers (each guarded by its own marker).
+        if not row_resolved:
             try:
-                _write_cursor(
-                    set_id, resolved.id, resolved.created_at or "",
-                    org=org,
-                )
-                HEALTH.cursor_positions[cursor_key] = (
-                    f"{resolved.created_at or ''}:{resolved.id}"
+                row = await asyncio.to_thread(
+                    _resolve_row_or_none, set_id, key, org_filter,
                 )
             except Exception:
                 logger.exception(
-                    "[settings_mediator] cursor write failed for "
-                    "set=%s org=%s row=%s; will retry next tick",
-                    set_id, org, resolved.id,
+                    "settings_mediator: row resolve failed for "
+                    "set=%s key=%s org=%s",
+                    set_id, key, org_filter,
                 )
-                # Don't try further rows in this (set, org) — the next
-                # tick will re-evaluate from the still-old cursor and
-                # marker checks will skip already-processed (row,
-                # handler) pairs.
-                break
-
-
-def _safe_write_marker(
-    marker: str,
-    *,
-    status: str,
-    error: str | None = None,
-    org: str | None = None,
-) -> None:
-    """Best-effort marker write — surface logger noise but never raise."""
-    try:
-        _write_marker(marker, status=status, error=error, org=org)
-    except Exception:
-        logger.exception(
-            "[settings_mediator] marker write failed for %s "
-            "(status=%s)", marker, status,
+                return
+            row_resolved = True
+        if row is None:
+            # Row was deleted between commit and event delivery (or the
+            # event represents a delete operation). Match the pre-collapse
+            # mediator: deletes don't fire handlers.
+            return
+        fire_ts = time.time()
+        HEALTH.last_handler_fired_at[action.name] = fire_ts
+        HEALTH.handlers_fired_count[action.name] = (
+            HEALTH.handlers_fired_count.get(action.name, 0) + 1
         )
-
-
-async def _bus_demuxer(
-    bus_queue: asyncio.Queue,
-    wakeup_event: asyncio.Event,
-    stop_event: asyncio.Event,
-) -> None:
-    """Read the EventBus subscription queue and trigger ``wakeup_event``.
-
-    Filters incoming ``setting.changed`` events by ``set_id`` against
-    the live :data:`REGISTRY` so unrelated traffic doesn't wake the
-    loop. The bus replays cached topic state on subscribe with
-    ``seq=0`` — those replays are not "new events", so we skip them
-    and rely on the loop's startup tick + fallback watchdog instead.
-
-    Cancellation (driven by the loop's ``finally`` block at shutdown)
-    surfaces as :class:`asyncio.CancelledError` from
-    ``bus_queue.get()`` and exits the task cleanly.
-    """
-    while not stop_event.is_set():
         try:
-            entry = await bus_queue.get()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "[settings_mediator] bus queue read failed; "
-                "demuxer will continue"
+            await action.fn(row, services)
+            HEALTH.last_handler_succeeded_at[action.name] = time.time()
+        except Exception as exc:
+            HEALTH.last_handler_error[action.name] = (
+                f"{type(exc).__name__}: {exc}"
             )
-            await asyncio.sleep(0.05)
-            continue
-        try:
-            topic, data, seq = entry
-        except (TypeError, ValueError):
-            continue
-        if topic != "setting.changed":
-            continue
-        if seq == 0:
-            # Cached-state replay on subscribe — not a new event.
-            continue
-        if not isinstance(data, dict):
-            continue
-        set_id = data.get("set_id")
-        if not set_id:
-            continue
-        if any(a.set_id == set_id for a in REGISTRY):
-            # Heartbeat: stamp event-arm reception so the diag endpoint
-            # can confirm the bus has ever delivered an event for a
-            # registered set (vs. the watchdog being the only wakeup).
-            HEALTH.last_event_received_at = time.time()
-            HEALTH.last_event_received_set_id = set_id
-            HEALTH.events_received_count += 1
-            wakeup_event.set()
+            logger.exception(
+                "settings_mediator: handler %s raised on set=%s key=%s",
+                action.name, set_id, key,
+            )
 
 
 async def _loop_main(
     services: Services,
-    fallback_seconds: float,
     stop_event: asyncio.Event,
-    iterating_lock: asyncio.Lock,
-    event_bus: Any | None,
+    event_bus: Any,
 ) -> None:
-    """Tick until *stop_event* is set; drain in-flight tick on shutdown.
+    """Subscribe to the bus and dispatch ``setting.changed`` events.
 
-    Wakeup signals (descending priority):
-
-    * ``stop_event`` — bounded shutdown.
-    * ``wakeup_event`` — set by :func:`_bus_demuxer` when a relevant
-      ``setting.changed`` arrives. Primary wakeup path.
-    * ``fallback_seconds`` watchdog — wakes ``iterate_once`` for all
-      registered sets unconditionally. Covers missed events on bus
-      reconnect or in-process coalescing; never the primary path.
-
-    The lock is held across the entire iteration so
-    :func:`stop_action_loop` can await it and observe the tick is fully
-    drained before returning.
+    The 1-second ``wait_for`` timeout is a polling-shutdown shape, not a
+    polling-for-events shape — it only exists so ``stop_event`` can fire
+    promptly during shutdown. Real events arrive on the bus queue with
+    no polling delay.
     """
-    wakeup_event = asyncio.Event()
-    bus_queue: asyncio.Queue | None = None
-    demuxer_task: asyncio.Task | None = None
-    if event_bus is not None:
-        try:
-            bus_queue = event_bus.subscribe()
-            demuxer_task = asyncio.create_task(
-                _bus_demuxer(bus_queue, wakeup_event, stop_event),
-                name="settings_mediator.demuxer",
-            )
-        except Exception:
-            logger.exception(
-                "[settings_mediator] event_bus.subscribe() failed; "
-                "falling back to watchdog-only wakeup"
-            )
-            bus_queue = None
-            demuxer_task = None
-
+    queue = event_bus.subscribe()
     HEALTH.loop_started_at = time.time()
     logger.info(
-        "[settings_mediator] loop started — %d action(s) registered, "
-        "fallback=%.1fs%s",
-        len(REGISTRY),
-        fallback_seconds,
-        " (event-driven)" if demuxer_task is not None else " (poll-only)",
+        "settings_mediator: loop started — %d set(s) registered",
+        len(_HANDLERS),
     )
     try:
         while not stop_event.is_set():
-            async with iterating_lock:
-                try:
-                    await iterate_once(services)
-                except Exception:
-                    logger.exception(
-                        "[settings_mediator] iterate_once raised; "
-                        "swallowing and continuing"
-                    )
-            if stop_event.is_set():
-                break
-            # Wait for: stop OR a relevant setting.changed wakeup OR the
-            # fallback watchdog timeout. Whichever fires first wins.
-            wakeup_task = asyncio.create_task(wakeup_event.wait())
-            stop_task = asyncio.create_task(stop_event.wait())
             try:
-                done, pending = await asyncio.wait(
-                    {wakeup_task, stop_task},
-                    timeout=fallback_seconds,
-                    return_when=asyncio.FIRST_COMPLETED,
+                topic, data, seq = await asyncio.wait_for(
+                    queue.get(), timeout=1.0,
                 )
-            finally:
-                for t in (wakeup_task, stop_task):
-                    if not t.done():
-                        t.cancel()
-            if not done:
-                # Timeout fired with neither wakeup nor stop set —
-                # the next iterate_once is fallback-watchdog driven.
-                HEALTH.last_watchdog_tick_at = time.time()
-            wakeup_event.clear()
+            except asyncio.TimeoutError:
+                HEALTH.last_tick_at = time.time()
+                continue
+            HEALTH.last_tick_at = time.time()
+            if topic != "setting.changed":
+                continue
+            if seq == 0:
+                # Cached-state replay on subscribe — not a new event.
+                continue
+            HEALTH.events_received_count += 1
+            await _dispatch_event(data, services)
     finally:
-        if demuxer_task is not None:
-            demuxer_task.cancel()
-            try:
-                await demuxer_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        if bus_queue is not None and event_bus is not None:
-            try:
-                event_bus.unsubscribe(bus_queue)
-            except Exception:
-                logger.exception(
-                    "[settings_mediator] event_bus.unsubscribe() failed; "
-                    "continuing shutdown"
-                )
-        logger.info("[settings_mediator] loop stopped")
+        try:
+            event_bus.unsubscribe(queue)
+        except Exception:
+            logger.exception("settings_mediator: unsubscribe failed")
+        logger.info("settings_mediator: loop stopped")
 
 
 def start_action_loop(
     services: Services,
     *,
-    poll_seconds: float = DEFAULT_POLL_SECONDS,
-    event_bus: Any | None = None,
+    event_bus: Any,
 ) -> asyncio.Task:
     """Start the dispatch loop on the running event loop.
-
-    Wakeup is event-driven when ``event_bus`` is provided: the loop
-    subscribes to it at start, demuxes ``setting.changed`` events for
-    registered ``set_id``s, and ticks immediately on receipt. The
-    ``poll_seconds`` argument is the fallback watchdog interval (kept
-    under that name for compatibility with existing tests that pass
-    sub-second values for fast iteration).
 
     Idempotent: a second call while the loop is already running is a
     logged no-op and returns the existing task.
     """
-    global _loop_task, _stop_event, _iterating_lock
+    global _loop_task, _stop_event
     if _loop_task is not None and not _loop_task.done():
         logger.warning(
-            "[settings_mediator] start_action_loop() called while loop "
+            "settings_mediator: start_action_loop() called while loop "
             "already running; returning existing task"
         )
         return _loop_task
     _stop_event = asyncio.Event()
-    _iterating_lock = asyncio.Lock()
     _loop_task = asyncio.create_task(
-        _loop_main(
-            services, poll_seconds, _stop_event, _iterating_lock, event_bus,
-        ),
+        _loop_main(services, _stop_event, event_bus),
         name="settings_mediator.loop",
     )
     return _loop_task
 
 
 async def stop_action_loop(*, drain_timeout: float = 30.0) -> None:
-    """Signal stop; await the in-flight tick to finish naturally.
+    """Signal stop and await the loop task.
 
-    Per acceptance #7 we don't ``cancel()`` the loop — we let it
-    observe the stop flag at the next tick boundary so any handler
-    currently awaiting completes. ``drain_timeout`` is a backstop:
-    if a handler hangs, we cancel after the deadline so shutdown
-    doesn't block forever.
+    The loop observes ``stop_event`` at the next 1s wakeup boundary so
+    any handler currently awaiting completes naturally. ``drain_timeout``
+    cancels the task if a handler hangs past the deadline.
     """
-    global _loop_task, _stop_event, _iterating_lock
+    global _loop_task, _stop_event
     task = _loop_task
     stop = _stop_event
     if task is None or stop is None:
@@ -837,7 +433,7 @@ async def stop_action_loop(*, drain_timeout: float = 30.0) -> None:
         await asyncio.wait_for(task, timeout=drain_timeout)
     except asyncio.TimeoutError:
         logger.warning(
-            "[settings_mediator] drain timeout (%.1fs) exceeded; "
+            "settings_mediator: drain timeout (%.1fs) exceeded; "
             "cancelling loop task", drain_timeout,
         )
         task.cancel()
@@ -850,4 +446,3 @@ async def stop_action_loop(*, drain_timeout: float = 30.0) -> None:
     finally:
         _loop_task = None
         _stop_event = None
-        _iterating_lock = None
