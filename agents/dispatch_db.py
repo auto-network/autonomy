@@ -503,6 +503,7 @@ def record_worktree_merge_run(
     container_name: str | None,
     reason: str,
     target_repo: str | None = None,
+    completed_at: datetime | None = None,
 ) -> str | None:
     """Insert a ``kind='worktree-merge'`` row for a host-side merge.
 
@@ -521,12 +522,18 @@ def record_worktree_merge_run(
     ``reason`` is the merge method string: ``'ff'``, ``'commit-merge'``,
     or ``'cherry-pick'``. Score / time-breakdown / agentic / librarian
     columns stay NULL — worktree merges have no agent decision payload.
+
+    ``completed_at`` defaults to ``datetime.now(timezone.utc)`` (the
+    live-merge case). The historical-backfill CLI passes the commit's
+    committer time so the timeline row lands at the original merge
+    moment instead of the moment the backfill ran (auto-imr2q).
     """
     if not commit_hash:
         return None
 
     run_id = f"wt-{commit_hash[:12]}"
-    now_dt = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    moment = completed_at if completed_at is not None else datetime.now(timezone.utc)
+    moment_str = moment.strftime("%Y-%m-%d %H:%M:%S")
 
     lines_added, lines_removed, files_changed = _git_diff_stats_range(
         target_repo or str(REPO_ROOT), commit_hash,
@@ -560,7 +567,7 @@ def record_worktree_merge_run(
             )
             """,
             (
-                run_id, now_dt, now_dt,
+                run_id, moment_str, moment_str,
                 reason,
                 commit_hash, full_message, branch or None, branch_base or None,
                 container_name or None,
