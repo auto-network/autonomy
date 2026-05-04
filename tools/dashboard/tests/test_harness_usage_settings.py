@@ -349,3 +349,164 @@ def test_publish_harness_usage_snapshot_skips_when_operator_is_idle(monkeypatch)
     server._harness_usage_last_refresh_context.clear()
 
     server._publish_harness_usage_snapshot()
+
+
+def _claude_bundle(fingerprint: str, *, expires_at_ms: int | None) -> dict:
+    return {
+        "source_kind": "credentials_json",
+        "path": f"/fake/{fingerprint}/.credentials.json",
+        "access_token": f"access-{fingerprint}",
+        "refresh_token": f"refresh-{fingerprint}",
+        "fingerprint": fingerprint,
+        "subscription_type": "max",
+        "rate_limit_tier": "default_scale_tier",
+        "expires_at_ms": expires_at_ms,
+    }
+
+
+_CLAUDE_USAGE_BODY = {
+    "five_hour": {"utilization": 12.0, "resets_at": "2026-05-04T20:00:00+00:00"},
+    "seven_day": {"utilization": 40.0, "resets_at": "2026-05-10T20:00:00+00:00"},
+}
+
+
+def test_collect_claude_usage_uses_first_live_bundle_then_stops(monkeypatch):
+    # Two live bundles for the same account → only ONE /usage call,
+    # one org row, no acct rows.
+    bundles = [
+        _claude_bundle("fp-A", expires_at_ms=2_000_000_000_000),
+        _claude_bundle("fp-B", expires_at_ms=2_000_000_000_000),
+    ]
+    rows = [
+        {"tmux_name": f"claude-{i}", "harness": "claude"}
+        for i in range(len(bundles))
+    ]
+
+    monkeypatch.setattr(
+        server,
+        "_resolve_claude_credential_bundle",
+        lambda row: bundles[int(row["tmux_name"].split("-")[1])],
+    )
+    fetch_calls: list[str] = []
+
+    def _fake_fetch(token):
+        fetch_calls.append(token)
+        return _CLAUDE_USAGE_BODY, {"anthropic-organization-id": "org-uuid-XYZ"}
+
+    monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
+
+    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
+
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0] == "access-fp-A"
+    keys = [k for k, _ in payloads]
+    assert keys == ["claude:org:org-uuid-XYZ"]
+
+
+def test_collect_claude_usage_skips_expired_bundles_silently(monkeypatch):
+    # First bundle is expired → skipped (no acct row written), second is
+    # used. Net: one org row, no acct rows for the expired fingerprint.
+    bundles = [
+        _claude_bundle("fp-EXPIRED", expires_at_ms=1),
+        _claude_bundle("fp-LIVE", expires_at_ms=2_000_000_000_000),
+    ]
+    rows = [
+        {"tmux_name": f"claude-{i}", "harness": "claude"}
+        for i in range(len(bundles))
+    ]
+    monkeypatch.setattr(
+        server,
+        "_resolve_claude_credential_bundle",
+        lambda row: bundles[int(row["tmux_name"].split("-")[1])],
+    )
+
+    fetch_tokens: list[str] = []
+
+    def _fake_fetch(token):
+        fetch_tokens.append(token)
+        return _CLAUDE_USAGE_BODY, {"anthropic-organization-id": "org-uuid-XYZ"}
+
+    monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
+
+    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
+
+    assert fetch_tokens == ["access-fp-LIVE"]
+    keys = [k for k, _ in payloads]
+    assert keys == ["claude:org:org-uuid-XYZ"]
+    assert not any(k.startswith("claude:acct:") for k in keys)
+
+
+def test_collect_claude_usage_writes_nothing_when_all_bundles_expired(monkeypatch):
+    bundles = [_claude_bundle("fp-A", expires_at_ms=1)]
+    rows = [{"tmux_name": "claude-0", "harness": "claude"}]
+    monkeypatch.setattr(
+        server, "_resolve_claude_credential_bundle", lambda row: bundles[0],
+    )
+    monkeypatch.setattr(
+        server,
+        "_fetch_claude_oauth_usage",
+        lambda token: (_ for _ in ()).throw(AssertionError("must not call OAuth")),
+    )
+
+    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
+
+    # No row written: prior org row keeps its last-known-good telemetry.
+    assert payloads == []
+
+
+def test_collect_claude_usage_swallows_oauth_errors_without_acct_row(monkeypatch):
+    bundles = [_claude_bundle("fp-A", expires_at_ms=2_000_000_000_000)]
+    rows = [{"tmux_name": "claude-0", "harness": "claude"}]
+    monkeypatch.setattr(
+        server, "_resolve_claude_credential_bundle", lambda row: bundles[0],
+    )
+
+    def _boom(token):
+        raise RuntimeError("Claude usage API returned HTTP 401")
+
+    monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _boom)
+
+    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
+
+    assert payloads == []
+
+
+def test_collect_claude_usage_writes_unresolved_only_when_no_bundle_resolves(monkeypatch):
+    rows = [{"tmux_name": "claude-0", "harness": "claude"}]
+    monkeypatch.setattr(server, "_resolve_claude_credential_bundle", lambda row: None)
+    monkeypatch.setattr(
+        server,
+        "_fetch_claude_oauth_usage",
+        lambda token: (_ for _ in ()).throw(AssertionError("must not call OAuth")),
+    )
+
+    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
+
+    keys = [k for k, _ in payloads]
+    assert keys == ["claude:unresolved"]
+
+
+def test_collect_claude_usage_does_not_write_unresolved_when_bundle_succeeds(monkeypatch):
+    # Mix: one row resolves to a live bundle, one row doesn't. Successful
+    # /usage call covers the account; unresolved row is suppressed.
+    bundle = _claude_bundle("fp-LIVE", expires_at_ms=2_000_000_000_000)
+    rows = [
+        {"tmux_name": "claude-resolves", "harness": "claude"},
+        {"tmux_name": "claude-no-creds", "harness": "claude"},
+    ]
+    monkeypatch.setattr(
+        server,
+        "_resolve_claude_credential_bundle",
+        lambda row: bundle if row["tmux_name"] == "claude-resolves" else None,
+    )
+    monkeypatch.setattr(
+        server,
+        "_fetch_claude_oauth_usage",
+        lambda token: (_CLAUDE_USAGE_BODY, {"anthropic-organization-id": "org-uuid-XYZ"}),
+    )
+
+    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
+
+    keys = [k for k, _ in payloads]
+    assert keys == ["claude:org:org-uuid-XYZ"]
+    assert "claude:unresolved" not in keys
