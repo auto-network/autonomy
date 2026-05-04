@@ -8472,43 +8472,26 @@ def _collect_claude_usage_payloads(
 
     payloads: dict[str, dict[str, Any]] = {}
     now_ms = int(time.time() * 1000)
+
+    # One Claude account = one org-keyed row. Try live bundles in order
+    # and stop on the first successful /usage call — the response carries
+    # the org-id that all bundles for the same account collapse into. We
+    # deliberately skip expired bundles and swallow per-bundle errors:
+    # writing per-fingerprint acct rows would create a zombie row every
+    # time the host rotates its OAuth refresh token, since the fingerprint
+    # is derived from that token.
     for bundle in bundles.values():
-        fallback_identity_id = f"acct:{bundle['fingerprint']}"
-        fallback_key = _harness_usage_settings.make_harness_usage_key(
-            "claude", fallback_identity_id,
-        )
         expires_at_ms = bundle.get("expires_at_ms")
         if isinstance(expires_at_ms, int) and expires_at_ms <= now_ms:
-            payloads[fallback_key] = _harness_usage_settings.make_unavailable_usage_payload(
-                harness="claude",
-                identity_id=fallback_identity_id,
-                identity_label=_harness_usage_settings.short_identity_label(
-                    "acct", bundle["fingerprint"],
-                ),
-                source="oauth_usage",
-                note="Credential copy expired; restart the session to refresh the token",
-                updated_at=updated_at,
-                plan_type=bundle.get("subscription_type"),
-                tier=bundle.get("rate_limit_tier"),
-            )
             continue
-
         try:
             usage_body, response_headers = _fetch_claude_oauth_usage(
                 bundle["access_token"],
             )
-        except Exception as exc:
-            payloads[fallback_key] = _harness_usage_settings.make_unavailable_usage_payload(
-                harness="claude",
-                identity_id=fallback_identity_id,
-                identity_label=_harness_usage_settings.short_identity_label(
-                    "acct", bundle["fingerprint"],
-                ),
-                source="oauth_usage",
-                note=str(exc),
-                updated_at=updated_at,
-                plan_type=bundle.get("subscription_type"),
-                tier=bundle.get("rate_limit_tier"),
+        except Exception:
+            logger.exception(
+                "claude harness usage: /usage call failed (bundle %s)",
+                bundle["fingerprint"],
             )
             continue
 
@@ -8524,8 +8507,13 @@ def _collect_claude_usage_payloads(
                 "claude", payload["identity_id"],
             )
         ] = payload
+        break
 
-    if unresolved:
+    # Only surface the "unresolved" indicator when no bundle was reachable
+    # at all. If bundles existed but failed/expired, leave the prior org
+    # row alone — it carries the last-known-good telemetry until the next
+    # successful poll.
+    if unresolved and not payloads:
         unresolved_id = "unresolved"
         payloads[
             _harness_usage_settings.make_harness_usage_key("claude", unresolved_id)
