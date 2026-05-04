@@ -34,11 +34,19 @@ def _isolate_schema_registry():
 
 @pytest.fixture
 def stub_org_schema():
+    """Register a permissive ``autonomy.org#1`` stub for CLI tests.
+
+    Auto-registration via ``__init_subclass__`` collides with the
+    production class; drop it first. The autouse ``_isolate_registry``
+    fixture restores production after the test.
+    """
+    from tools.graph.schemas.registry import unregister_schema
+    unregister_schema("autonomy.org", 1)
+
     class OrgV1(schemas.SettingSchema):
         set_id = "autonomy.org"
         schema_revision = 1
 
-    schemas.register_schema("autonomy.org", 1, OrgV1)
     return OrgV1
 
 
