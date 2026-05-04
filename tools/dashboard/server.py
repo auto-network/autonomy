@@ -131,6 +131,10 @@ from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 # starts inside the lifespan hook.
 from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
 from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
+from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
+from tools.graph import settings_ops  # noqa: E402
+
+import uuid  # noqa: E402
 
 # Activity tab notifications substrate (bead auto-5u8zb) — imported
 # eagerly so the four ``dashboard.activity.*`` SettingSchema classes
@@ -5466,13 +5470,29 @@ async def api_upload(request):
     # Sanitize filename — strip path separators, limit length
     filename = re.sub(r"[^\w.\-]", "_", filename)[:200] or "upload"
 
-    # Target directory: optional `path` param, default data/uploads
+    # Pick destination: explicit ``path`` override, the session's
+    # run-dir ``.uploads/`` subdir, or the shared no-session fallback.
     target_dir_param = (form.get("path") or "").strip()
+    tmux_session = (form.get("tmux_session") or "").strip()
     if target_dir_param:
         # Resolve relative to repo root, prevent path traversal
         target_dir = (_REPO_ROOT / target_dir_param).resolve()
         if not str(target_dir).startswith(str(_REPO_ROOT)):
             return JSONResponse({"error": "invalid path"}, status_code=400)
+    elif tmux_session:
+        if not _TMUX_NAME_RE.match(tmux_session):
+            return JSONResponse({"error": "invalid tmux_session"}, status_code=400)
+        run_dirs = sorted(
+            (p for p in AGENT_RUNS_DIR.glob(f"{tmux_session}-*") if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ) if AGENT_RUNS_DIR.exists() else []
+        if not run_dirs:
+            return JSONResponse(
+                {"error": f"no run dir for session {tmux_session!r}"},
+                status_code=404,
+            )
+        target_dir = run_dirs[0] / ".uploads"
     else:
         target_dir = _REPO_ROOT / "data" / "uploads"
 
@@ -5494,20 +5514,57 @@ async def api_upload(request):
     host_path = str(dest)
     agent_path = host_path
 
-    tmux_session = (form.get("tmux_session") or "").strip()
     if tmux_session:
-        inspect = subprocess.run(
-            ["docker", "inspect", "-f", "{{.State.Running}}", tmux_session],
-            capture_output=True, text=True,
-        )
-        if inspect.returncode == 0 and inspect.stdout.strip() == "true":
-            container_path = f"/tmp/{dest.name}"
-            cp = subprocess.run(
-                ["docker", "cp", host_path, f"{tmux_session}:{container_path}"],
+        try:
+            inspect = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", tmux_session],
                 capture_output=True, text=True,
             )
-            if cp.returncode == 0:
+        except (FileNotFoundError, OSError):
+            # docker binary missing (test env / mock dashboard outside the
+            # Docker host). Skip the cp side-effect; the substrate-write
+            # below still records the upload so the viewer test path works.
+            inspect = None
+        if inspect and inspect.returncode == 0 and inspect.stdout.strip() == "true":
+            container_path = f"/tmp/{dest.name}"
+            try:
+                cp = subprocess.run(
+                    ["docker", "cp", host_path, f"{tmux_session}:{container_path}"],
+                    capture_output=True, text=True,
+                )
+            except (FileNotFoundError, OSError):
+                cp = None
+            if cp and cp.returncode == 0:
                 agent_path = container_path
+
+    # Substrate-native upload event: when the upload landed under the
+    # session's run dir (the standard tmux_session path), write one
+    # SessionUploadV1 row per upload so the session viewer can render
+    # a viewer_attachment tile inline. The viewer subscribes via
+    # Schema.of(SESSION_UPLOAD_SET_ID).onChange and merges the row in
+    # at this exact timestamp; persistence falls out of the substrate.
+    if tmux_session and AGENT_RUNS_DIR in dest.parents:
+        rel_path_parts = dest.relative_to(_REPO_ROOT).parts
+        # rel_path under run dir: e.g. ".uploads/foo.png". Skip the
+        # "data/agent-runs/<run>/" prefix.
+        if len(rel_path_parts) > 3:
+            rel_path = "/".join(rel_path_parts[3:])
+            settings_ops.add_setting(
+                _session_upload.SESSION_UPLOAD_SET_ID,
+                _session_upload.SCHEMA_REVISION,
+                str(uuid.uuid4()),
+                {
+                    "target_session": tmux_session,
+                    "filename": dest.name,
+                    "rel_path": rel_path,
+                    "mime": (mimetypes.guess_type(dest.name)[0]
+                             or "application/octet-stream"),
+                    "size": len(contents),
+                    "timestamp": datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%S.%f"
+                    )[:-3] + "Z",
+                },
+            )
 
     return JSONResponse({"ok": True, "path": agent_path, "host_path": host_path, "filename": dest.name})
 

@@ -262,10 +262,17 @@ window.appendSessionEntries = function(store, data, provenance) {
 
   if (!data.entries || data.entries.length === 0) return 0;
 
+  var pa = store._pendingAttachments;
   var added = 0;
   for (var i = 0; i < data.entries.length; i++) {
     var entry = data.entries[i];
+    while (pa && pa.length && (pa[0].timestamp || '') <= (entry.timestamp || '')) {
+      if (_appendUniqueEntry(store, pa.shift())) added++;
+    }
     if (_appendUniqueEntry(store, entry)) added++;
+  }
+  while (pa && pa.length) {
+    if (_appendUniqueEntry(store, pa.shift())) added++;
   }
   if (added > 0) {
     if (provenance === 'fetch') {
