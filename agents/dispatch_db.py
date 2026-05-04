@@ -11,7 +11,7 @@ import json
 import os
 import sqlite3
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -503,6 +503,7 @@ def record_worktree_merge_run(
     container_name: str | None,
     reason: str,
     target_repo: str | None = None,
+    duration_secs: int = 0,
 ) -> str | None:
     """Insert a ``kind='worktree-merge'`` row for a host-side merge.
 
@@ -521,12 +522,25 @@ def record_worktree_merge_run(
     ``reason`` is the merge method string: ``'ff'``, ``'commit-merge'``,
     or ``'cherry-pick'``. Score / time-breakdown / agentic / librarian
     columns stay NULL — worktree merges have no agent decision payload.
+
+    ``duration_secs`` is the wall-clock cost of the merge as measured by
+    the caller (``agents.workspace_manager`` wraps the ff/cherry-pick
+    work in ``time.monotonic()``). When non-zero, ``started_at`` is
+    backed off from ``completed_at`` so the columns describe the actual
+    bracket. Sub-second merges round to 0 — that's fine; the ``30s+
+    rebase costs`` use case bead auto-614q7 cares about lives well above
+    the rounding boundary.
     """
     if not commit_hash:
         return None
 
     run_id = f"wt-{commit_hash[:12]}"
-    now_dt = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(timezone.utc)
+    completed_at = now.strftime("%Y-%m-%d %H:%M:%S")
+    safe_duration = max(0, int(duration_secs))
+    started_at = (
+        now - timedelta(seconds=safe_duration)
+    ).strftime("%Y-%m-%d %H:%M:%S")
 
     lines_added, lines_removed, files_changed = _git_diff_stats_range(
         target_repo or str(REPO_ROOT), commit_hash,
@@ -551,7 +565,7 @@ def record_worktree_merge_run(
                 lines_added, lines_removed, files_changed,
                 output_dir, kind
             ) VALUES (
-                ?, NULL, ?, ?, 0,
+                ?, NULL, ?, ?, ?,
                 'DONE', ?,
                 ?, ?, ?, ?,
                 ?,
@@ -560,7 +574,7 @@ def record_worktree_merge_run(
             )
             """,
             (
-                run_id, now_dt, now_dt,
+                run_id, started_at, completed_at, safe_duration,
                 reason,
                 commit_hash, full_message, branch or None, branch_base or None,
                 container_name or None,

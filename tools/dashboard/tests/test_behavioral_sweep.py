@@ -413,9 +413,12 @@ SWEEP_TIMELINE_WORKTREE_MERGE = [
         "status": "DONE",
         "kind": "worktree-merge",
         "reason": "ff",
-        "started_at": "2026-03-25T11:00:00Z",
-        "completed_at": "2026-03-25T11:00:01Z",
-        "duration_secs": 0,
+        # auto-614q7: this row exercises the "writer measured a real
+        # duration" path. The duration label rendered alongside the
+        # method badge formats this as ``42s``.
+        "started_at": "2026-03-25T10:59:18Z",
+        "completed_at": "2026-03-25T11:00:00Z",
+        "duration_secs": 42,
         "commit_hash": "feedfacecafebabe",
         # auto-24a60: commit_message stores the full message (subject +
         # body) so the activity-feed card can render the body as a
@@ -2390,6 +2393,17 @@ ACTIVITY_PAGE_CHECKS = """(async () => {
         r.wt_cp_method_badge = _wtBadge(wtCardCp);
         r.wt_cm_method_badge = _wtBadge(wtCardCm);
 
+        // auto-614q7: real merge duration rendered alongside the method
+        // badge when the writer measured >0s. ff fixture carries
+        // duration_secs=42 → renders as "42s"; cp/cm carry 0 → no label.
+        function _wtDurationText(card, runId) {
+            var d = card ? card.querySelector('[data-testid="tl-wt-duration-' + runId + '"]') : null;
+            return d ? d.textContent.trim() : '';
+        }
+        r.wt_ff_duration_text = _wtDurationText(wtCardFf, 'wt-feedfacecafe');
+        r.wt_cp_duration_present = !!(wtCardCp && wtCardCp.querySelector('[data-testid="tl-wt-duration-wt-aaaabbbbcccc"]'));
+        r.wt_cm_duration_present = !!(wtCardCm && wtCardCm.querySelector('[data-testid="tl-wt-duration-wt-1111222233aa"]'));
+
         // Footer: session link visible iff container_name populated.
         var ffSessLink = _wtSessionLink(wtCardFf);
         var cpSessLink = _wtSessionLink(wtCardCp);
@@ -3435,6 +3449,29 @@ class TestActivitySurfaceBehavior:
             assert not chrome.get("dur"), f"{label}: duration timer present"
             assert not chrome.get("gentitle"), f"{label}: generic tl-title-block present"
             assert not chrome.get("exp"), f"{label}: tl-exp-detail block present"
+
+    def test_worktree_merge_card_renders_real_duration_alongside_method_badge(self):
+        """Bead auto-614q7: worktree-merge cards surface the writer's
+        measured ``duration_secs`` as a small label sitting next to the
+        method badge on row 1. Hidden when the writer measured 0s so
+        instant ff merges keep a clean header.
+
+        Matrix coverage:
+          * ff fixture has ``duration_secs=42`` → label reads ``42s``
+          * cherry-pick + commit-merge fixtures have ``duration_secs=0``
+            → no label rendered
+        """
+        c = self._timeline
+        assert c.get("wt_ff_duration_text") == "42s", (
+            f"ff card expected '42s' duration label, got "
+            f"{c.get('wt_ff_duration_text')!r}"
+        )
+        assert not c.get("wt_cp_duration_present"), (
+            "cherry-pick card has duration label but writer measured 0s"
+        )
+        assert not c.get("wt_cm_duration_present"), (
+            "commit-merge card has duration label but writer measured 0s"
+        )
 
     def test_worktree_merge_card_expand_caps_body(self):
         """auto-24a60: expanding a worktree-merge card grows the subtitle

@@ -197,6 +197,15 @@
               <span class="tl-method-badge"
                     :data-testid="'tl-wt-method-badge-' + e.run_id"
                     x-text="e.reason || ''"></span>
+              <!-- auto-614q7: real merge duration sits alongside the method
+                   badge. Hidden when the writer measured 0s so instant
+                   merges keep a clean row. -->
+              <template x-if="e._wtDurationFmt">
+                <span class="tl-wt-duration"
+                      :data-testid="'tl-wt-duration-' + e.run_id"
+                      title="Merge wall-clock"
+                      x-text="e._wtDurationFmt"></span>
+              </template>
               <template x-if="e.journal_entry && e.journal_entry.source_id">
                 <a :href="'/activity#journal-' + e.journal_entry.source_id"
                    @click.stop

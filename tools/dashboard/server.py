@@ -6775,6 +6775,15 @@ async def _record_worktree_merge_timeline(
     swallowed so the merge response stays ``ok: True``.
     """
     commit_sha = result.get("commit", "") or ""
+    # auto-614q7: ``agents.workspace_manager`` measures the merge wall-clock
+    # and stuffs ``duration_secs`` into the result dict. Best-effort coerce
+    # to int — older callers / shimmed test stubs may omit the key, in which
+    # case we fall back to 0 (the prior placeholder value).
+    raw_duration = result.get("duration_secs")
+    try:
+        duration_secs = int(raw_duration) if raw_duration is not None else 0
+    except (TypeError, ValueError):
+        duration_secs = 0
     try:
         await asyncio.to_thread(
             record_worktree_merge_run,
@@ -6785,6 +6794,7 @@ async def _record_worktree_merge_timeline(
             container_name=session_name,
             reason=reason,
             target_repo=result.get("target_repo") or None,
+            duration_secs=duration_secs,
         )
     except Exception:  # noqa: BLE001 — observability must not break merges
         logger.exception(
