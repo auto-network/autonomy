@@ -172,6 +172,23 @@ def _seed_actions(org_db: Path) -> None:
                 "writes": ["bead.comment", "bead.labels"],
             },
         ),
+        (
+            "bead.ask-question",
+            {
+                "asset_type": "bead",
+                "label": "Ask a Question",
+                "icon": "?",
+                "model": "claude-haiku-4-5-20251001",
+                "prompt_template": (
+                    "Bead: {asset[id]}\n"
+                    "Question: {custom_input}\n"
+                    "Primer:\n{asset[primer]}\n"
+                ),
+                "estimated_seconds": 60,
+                "writes": ["bead.comment"],
+                "input_prompt": "What do you want to ask about this bead?",
+            },
+        ),
     ]
     db = GraphDB(org_db)
     try:
@@ -999,6 +1016,136 @@ async def test_live_active_resolves_agentic_target_title(
     assert row.get("target_org") == "autonomy"
     assert row.get("member_key") == "note.update-summary"
     assert row.get("dispatched_by_session") == "dashboard"
+
+
+# ── ``custom_input`` / ``input_prompt`` (auto-0tkwj) ───────
+
+
+def test_dispatch_custom_input_renders_into_template(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    """An action whose template uses ``{custom_input}`` must receive the
+    operator-typed value verbatim in the rendered prompt.
+    """
+    bead = {
+        "id": "auto-bead-ask-1",
+        "title": "Bead with question",
+        "status": "open",
+        "priority": 1,
+        "description": "Something to ask about.",
+        "design": "",
+        "acceptance_criteria": "",
+        "notes": "",
+    }
+    _patch_bead_runtime(monkeypatch, bead)
+
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "bead.ask-question",
+        "asset_id": bead["id"],
+        "custom_input": "Why does this dispatch use Haiku?",
+    })
+    assert r.status_code == 201, r.json()
+
+    prompt = patch_launch_session[-1]["kwargs"]["prompt"]
+    assert "Question: Why does this dispatch use Haiku?" in prompt
+    assert f"Bead: {bead['id']}" in prompt
+
+
+def test_dispatch_input_prompt_rejects_missing_custom_input(
+    client, per_org_universe, monkeypatch,
+):
+    """An action with ``input_prompt`` set must 400 when the request omits
+    ``custom_input`` (or sends an empty/whitespace string).
+    """
+    bead = {
+        "id": "auto-bead-ask-2",
+        "title": "x",
+        "status": "open",
+        "priority": 1,
+        "description": "",
+        "design": "",
+        "acceptance_criteria": "",
+        "notes": "",
+    }
+    _patch_bead_runtime(monkeypatch, bead)
+
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "bead.ask-question",
+        "asset_id": bead["id"],
+        # custom_input omitted entirely
+    })
+    assert r.status_code == 400, r.json()
+    assert "input" in r.json().get("error", "").lower()
+
+    r2 = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "bead.ask-question",
+        "asset_id": bead["id"],
+        "custom_input": "   \n  \t",  # whitespace-only is also rejected
+    })
+    assert r2.status_code == 400, r2.json()
+
+
+def test_dispatch_custom_input_ignored_for_non_input_prompt_actions(
+    client, per_org_universe, patch_launch_session,
+):
+    """Actions without ``input_prompt`` (dry-run, send-to, etc.) must
+    accept and silently ignore a stray ``custom_input`` field — the
+    feature is back-compat-safe.
+    """
+    asset_id = "abcdef34-3434-3434-3434-343434343434"
+    _insert_note_source(org="autonomy", source_id=asset_id, title="t")
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.update-summary",
+        "asset_id": asset_id,
+        "custom_input": "this should be ignored — template doesn't reference it",
+    })
+    assert r.status_code == 201, r.json()
+
+
+def test_dispatch_template_validates_custom_input_placeholder(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    """A template that references ``{custom_input}`` must validate against
+    the placeholder allowlist (i.e. must not be rejected as an unknown
+    root) — the bead.ask-question prompt depends on this.
+    """
+    bead = {
+        "id": "auto-bead-ask-validate",
+        "title": "x",
+        "status": "open",
+        "priority": 1,
+        "description": "",
+        "design": "",
+        "acceptance_criteria": "",
+        "notes": "",
+    }
+    _patch_bead_runtime(monkeypatch, bead)
+
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "bead.ask-question",
+        "asset_id": bead["id"],
+        "custom_input": "What is this bead's design rationale?",
+    })
+    # 201 implies the strict template validator accepted ``{custom_input}``.
+    # Pre-fix this would have been a 500 with "undefined placeholder".
+    assert r.status_code == 201, r.json()
+
+
+def test_render_rejects_unknown_template_root():
+    """Direct exercise of the placeholder allowlist: a template that
+    references a non-allowed root (e.g. ``{wrong_root}``) must still
+    fail render. Guarantees the allowlist gain didn't open a hole.
+    """
+    from tools.dashboard.server import _render_agent_action_prompt
+
+    with pytest.raises(ValueError, match="undefined placeholder"):
+        _render_agent_action_prompt(
+            "Hello {wrong_root}",
+            page_context={"asset": {"id": "x"}},
+            dispatched_by_session="dashboard",
+            member_key="x.y",
+            custom_input="",
+        )
 
 
 # ── Helpers ────────────────────────────────────────────────
