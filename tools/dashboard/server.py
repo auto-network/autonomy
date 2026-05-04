@@ -157,13 +157,11 @@ from tools.graph import surface as _surface  # noqa: E402, F401
 from tools.dashboard import surface_actions as _surface_actions  # noqa: E402, F401
 
 # Notifications-tab refresh-request → CrossTalk source-session ping
-# (bead auto-r92kc). Imported eagerly so the dispatcher module is
-# loaded before ``_on_startup`` calls
-# :func:`notifications_actions.start_notifications_dispatcher`. The
-# dispatcher subscribes directly to the EventBus' ``setting.changed``
-# channel — it does NOT use the settings_mediator (which would miss
-# ``upsert_by_key`` UPDATEs that bump ``target_revision`` on the same
-# row id; see the module docstring for the rationale).
+# (beads auto-r92kc → auto-tdlhq). Imported eagerly so the
+# ``@register_action_decorator`` runs at module-load time, registering
+# the handler on the settings_mediator's registry before
+# :func:`settings_mediator.start_action_loop` begins ticking. No
+# lifespan plumbing — registration is the only side effect of import.
 from tools.dashboard import notifications_actions as _notifications_actions  # noqa: E402, F401
 
 # Settings Nexus plugin schemas (bead auto-ct3ey) — imported eagerly so
@@ -12191,7 +12189,6 @@ _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
 _settings_mediator_started: bool = False
-_notifications_dispatcher_started: bool = False
 
 # Task* tile enricher — per-session taskId → subject/status map. Populated by
 # the session monitor tailer as it walks JSONL entries; also used by the HTTP
@@ -12298,7 +12295,7 @@ async def _on_startup():
     # registered handlers on new rows. Mock-mode dashboards skip this —
     # the loop reads through ``settings_ops`` against the real graph DB,
     # which is unavailable in fixture-driven runs.
-    global _settings_mediator_started, _notifications_dispatcher_started
+    global _settings_mediator_started
     try:
         from tools.dashboard import settings_mediator
         settings_mediator.start_action_loop(
@@ -12311,29 +12308,10 @@ async def _on_startup():
             "settings_mediator.start_action_loop() failed; "
             "continuing without action dispatch"
         )
-    # Notifications-tab refresh-request → CrossTalk dispatcher
-    # (bead auto-r92kc). Subscribes to the same EventBus the
-    # settings_mediator listens on but pumps every ASK_REFRESH
-    # ``setting.changed`` event directly — including
-    # ``upsert_by_key`` UPDATEs that bump ``target_revision`` on a
-    # row the mediator's cursor has already advanced past.
-    try:
-        from tools.dashboard import notifications_actions
-        from tools.dashboard.tmux_send import tmux_send
-        notifications_actions.start_notifications_dispatcher(
-            send_fn=tmux_send, bus=event_bus,
-        )
-        _notifications_dispatcher_started = True
-    except Exception:
-        logger.exception(
-            "notifications_actions.start_notifications_dispatcher() "
-            "failed; continuing without ask-refresh source pings"
-        )
 
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
     global _harness_usage_poller_task, _settings_mediator_started
-    global _notifications_dispatcher_started
     # Clear the emit hook so a subsequent process / test reload doesn't
     # leak a stale binding into a swapped module-level event_bus.
     try:
@@ -12353,18 +12331,6 @@ async def _on_shutdown():
         except Exception:
             logger.exception("error during settings_mediator.stop_action_loop()")
         _settings_mediator_started = False
-    if _notifications_dispatcher_started:
-        try:
-            from tools.dashboard import notifications_actions
-            await notifications_actions.stop_notifications_dispatcher(
-                bus=event_bus,
-            )
-        except Exception:
-            logger.exception(
-                "error during notifications_actions."
-                "stop_notifications_dispatcher()"
-            )
-        _notifications_dispatcher_started = False
     tasks = [
         t for t in (
             _dispatch_watcher_task,
