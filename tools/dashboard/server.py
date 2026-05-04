@@ -10813,6 +10813,10 @@ _AGENT_ACTION_PLACEHOLDER_ROOTS = (
     "tags",
     "dispatched_by_session",
     "member_key",
+    # ``input_prompt``-declaring actions interpolate the operator's typed
+    # answer here (auto-0tkwj). Always-bound; empty string when the action
+    # has no ``input_prompt``.
+    "custom_input",
 )
 
 
@@ -10825,6 +10829,7 @@ def _template_field_root(field_name: str) -> str:
 def _render_agent_action_prompt(
     template: str, *, page_context: dict,
     dispatched_by_session: str, member_key: str,
+    custom_input: str = "",
     run_id: str | None = None,
 ) -> str:
     """Render ``template`` against ``page_context`` via ``str.format``.
@@ -10879,6 +10884,7 @@ def _render_agent_action_prompt(
     fmt_ctx = dict(page_context)
     fmt_ctx["dispatched_by_session"] = dispatched_by_session
     fmt_ctx["member_key"] = member_key
+    fmt_ctx["custom_input"] = custom_input
     try:
         return template.format(**fmt_ctx)
     except KeyError as e:  # defense-in-depth — static check above should have caught this
@@ -10927,6 +10933,11 @@ async def api_agent_action_dispatch(request):
     # user input (not data the server already has), so it travels on
     # the wire. Empty string ⇒ no custom message in the primer body.
     custom_message = str(body.get("custom_message") or "")
+    # Optional operator-typed input for ``input_prompt``-declaring actions
+    # (schema #2). When the action's payload sets ``input_prompt``, the
+    # dashboard pops a modal and forwards the operator's text here; the
+    # prompt template then interpolates it via ``{custom_input}``.
+    custom_input = str(body.get("custom_input") or "")
     # Browser-initiated dispatches have no specific operator session id.
     # Use a stable sentinel so dispatch_runs.dispatched_by_session is
     # never NULL and the agent's prompt has something to render.
@@ -10971,6 +10982,14 @@ async def api_agent_action_dispatch(request):
                 },
                 status_code=404,
             )
+        # Schema #2 ``input_prompt`` contract — same shape as the live
+        # branch so the L2.B sweep can assert the modal-required path.
+        if str(payload.get("input_prompt") or "").strip():
+            if not custom_input.strip():
+                return JSONResponse(
+                    {"error": "this action requires input but none was provided"},
+                    status_code=400,
+                )
         if bool(payload.get("universal")) and member_key == "session.send-to":
             if not target_session_name:
                 return JSONResponse(
@@ -10997,6 +11016,7 @@ async def api_agent_action_dispatch(request):
         return JSONResponse({
             "ok": True,
             "agentic_source_id": f"mock-{member_key}-{asset_id[:8]}",
+            "custom_input": custom_input,
         })
 
     # ── Step 1: resolve the target asset and its owning org ──────
@@ -11044,6 +11064,18 @@ async def api_agent_action_dispatch(request):
             },
             status_code=404,
         )
+
+    # ── Step 2b: enforce ``input_prompt`` contract ───────────────
+    # Schema #2 actions can declare ``input_prompt``; when present, the
+    # dashboard must pop a modal and forward ``custom_input``. A request
+    # that omits or empties it is malformed — fail fast so the agent
+    # never sees an unsubstituted ``{custom_input}`` in its prompt.
+    if str(payload.get("input_prompt") or "").strip():
+        if not custom_input.strip():
+            return JSONResponse(
+                {"error": "this action requires input but none was provided"},
+                status_code=400,
+            )
 
     # ── Step 3: idempotency window check ─────────────────────────
     idem_key = _agent_action_idempotency_key(
@@ -11161,6 +11193,7 @@ async def api_agent_action_dispatch(request):
             page_context=rendered_context,
             dispatched_by_session=dispatched_by_session or "",
             member_key=member_key,
+            custom_input=custom_input,
         )
     except ValueError as render_err:
         return JSONResponse(

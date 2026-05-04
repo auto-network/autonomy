@@ -1263,6 +1263,32 @@ SWEEP_AGENT_ACTIONS = [
         "writes": ["comment"],
         "prompt_template": "Review this note for factual accuracy.",
     }},
+    # auto-0tkwj — bead-typed action with input_prompt set, exercising
+    # the operator-input modal flow.
+    {"key": "bead.ask-question", "payload": {
+        "asset_type": "bead",
+        "label": "Ask a Question",
+        "icon": "?",
+        "model": "claude-haiku-4-5-20251001",
+        "estimated_seconds": 60,
+        "writes": ["bead.comment"],
+        "input_prompt": "What do you want to ask about this bead?",
+        "prompt_template": (
+            "Question: {custom_input}\n"
+            "Bead: {asset[id]}\n"
+        ),
+    }},
+    # auto-0tkwj regression — a second bead action without input_prompt
+    # so the L2.B test can assert it bypasses the modal entirely.
+    {"key": "bead.dry-run-implement", "payload": {
+        "asset_type": "bead",
+        "label": "Dry-Run Implement",
+        "icon": "⚙",
+        "model": "claude-haiku-4-5-20251001",
+        "estimated_seconds": 20,
+        "writes": ["bead.comment", "bead.labels"],
+        "prompt_template": "Audit {asset[id]}.",
+    }},
 ]
 
 # ── Harness usage fixture (bead auto-t0auy) ──────────────────────────
@@ -6777,6 +6803,301 @@ class TestAgentActionsDropdownLiveRefresh:
         )
         assert "note.live-refresh-probe" in (c.get("keys") or []), (
             f"New member missing from refreshed dropdown, keys={c.get('keys')}"
+        )
+
+
+# ── Operator-input modal (auto-0tkwj) ────────────────────────────────
+#
+# Drives the bead.ask-question dropdown row through every state in the
+# spec's matrix:
+#   1. Default — modal absent / hidden
+#   2. Open + empty — Dispatch disabled, textarea autofocused
+#   3. Open + filled — Dispatch enabled
+#   4. Escape — modal closes, no fetch fired
+#   5. Submit — fetch fires with custom_input non-empty, modal closes
+#   6. Regression — clicking dry-run-implement (no input_prompt) bypasses
+#      the modal and dispatches directly.
+
+ASK_QUESTION_MODAL_CHECKS = """(async () => {
+  const r = {};
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+  const waitFor = async (predicate, timeoutMs = 1500, intervalMs = 25) => {
+    const deadline = performance.now() + timeoutMs;
+    while (performance.now() < deadline) {
+      const v = predicate();
+      if (v) return v;
+      await new Promise(res => setTimeout(res, intervalMs));
+    }
+    return predicate() || null;
+  };
+  const isShown = (el) => !!(el && getComputedStyle(el).display !== 'none');
+
+  // Spy on fetch so we can prove dispatchMember posts at the right time
+  // — and only when expected. The Send-To dropdown test pins this same
+  // pattern (Round 5 regression: handler short-circuits but modal closes).
+  const origFetch = window.fetch;
+  let dispatchCalls = [];
+  window.fetch = function (url, opts) {
+    if (typeof url === 'string' && url.indexOf('/api/agent-actions/dispatch') !== -1) {
+      dispatchCalls.push({ url: url, body: opts && opts.body });
+    }
+    return origFetch.apply(this, arguments);
+  };
+
+  try {
+    const root = await waitFor(() => {
+      const el = document.querySelector('.agent-actions-root');
+      if (!el || typeof Alpine === 'undefined') return null;
+      const scope = Alpine.$data(el);
+      return scope && scope.visible !== undefined ? el : null;
+    });
+    r.root_in_dom = !!root;
+    const scope = root ? Alpine.$data(root) : null;
+
+    const btn = document.querySelector('[data-testid=agent-actions-button]');
+    r.btn_visible = !!(btn && getComputedStyle(btn).display !== 'none');
+
+    // ── State 1: modal not in flow before any click ──
+    const modalPre = document.querySelector('[data-testid=action-input-modal]');
+    r.modal_hidden_at_start = !modalPre || !isShown(modalPre);
+
+    // Open the panel and click the ask-question item.
+    if (btn) btn.click();
+    await waitFor(() => {
+      const p = document.querySelector('[data-testid=agent-actions-panel]');
+      return p && isShown(p) ? p : null;
+    });
+
+    const askItem = document.querySelector(
+      '[data-testid="agent-action-item-bead.ask-question"]'
+    );
+    r.ask_item_present = !!askItem;
+    r.ask_item_visible = !!(askItem && askItem.offsetParent !== null);
+    if (askItem) askItem.click();
+
+    // ── State 2: modal opens with empty input + disabled Dispatch ──
+    const modal = await waitFor(() => {
+      const m = document.querySelector('[data-testid=action-input-modal]');
+      return m && isShown(m) ? m : null;
+    });
+    r.modal_opens = !!modal;
+    const ta = modal ? modal.querySelector('textarea') : null;
+    r.textarea_present = !!ta;
+    // Autofocus is requested via setTimeout(0); wait until it lands so
+    // we don't race the assertion.
+    await waitFor(() => document.activeElement === ta, 500);
+    r.textarea_autofocused = document.activeElement === ta;
+    const dispatchBtn = modal
+      ? modal.querySelector('[data-testid=action-input-dispatch]')
+      : null;
+    r.dispatch_disabled_when_empty = !!(dispatchBtn && dispatchBtn.disabled);
+
+    // ── State 3: typing enables Dispatch ──
+    if (ta && scope) {
+      scope.inputModalText = 'Why does this dispatch use Haiku?';
+    }
+    await waitFor(() => dispatchBtn && !dispatchBtn.disabled, 500);
+    r.dispatch_enabled_when_filled = !!(dispatchBtn && !dispatchBtn.disabled);
+
+    // ── State 4: Escape closes without dispatching ──
+    const callsBeforeEscape = dispatchCalls.length;
+    if (modal) {
+      modal.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape', bubbles: true,
+      }));
+    }
+    await waitFor(() => !isShown(modal), 800);
+    r.modal_closed_after_escape = !isShown(modal);
+    r.no_dispatch_on_escape = dispatchCalls.length === callsBeforeEscape;
+
+    // ── State 5: Reopen, type, click Dispatch — fetch fires, modal closes ──
+    if (btn) btn.click();
+    await waitFor(() => {
+      const p = document.querySelector('[data-testid=agent-actions-panel]');
+      return p && isShown(p) ? p : null;
+    });
+    const askItem2 = document.querySelector(
+      '[data-testid="agent-action-item-bead.ask-question"]'
+    );
+    if (askItem2) askItem2.click();
+    const modal2 = await waitFor(() => {
+      const m = document.querySelector('[data-testid=action-input-modal]');
+      return m && isShown(m) ? m : null;
+    });
+    if (scope) scope.inputModalText = 'What is this bead\\'s design rationale?';
+    await sleep(20);
+    const dispatchBtn2 = modal2
+      ? modal2.querySelector('[data-testid=action-input-dispatch]')
+      : null;
+    if (dispatchBtn2) dispatchBtn2.click();
+    await waitFor(
+      () => dispatchCalls.length > callsBeforeEscape,
+      1500,
+    );
+    r.dispatch_fired_on_submit = dispatchCalls.length > callsBeforeEscape;
+    const submitCall = dispatchCalls[dispatchCalls.length - 1] || null;
+    if (submitCall && submitCall.body) {
+      try {
+        const parsed = JSON.parse(submitCall.body);
+        r.submit_member_key = parsed.member_key || '';
+        r.submit_custom_input = parsed.custom_input || '';
+      } catch (e) {
+        r.submit_member_key = '';
+        r.submit_custom_input = '';
+      }
+    }
+    await waitFor(() => !isShown(modal2), 1500);
+    r.modal_closed_after_submit = !isShown(modal2);
+
+    // ── State 6: Dry-run-implement bypasses the modal entirely ──
+    const callsBeforeDryRun = dispatchCalls.length;
+    if (btn) btn.click();
+    await waitFor(() => {
+      const p = document.querySelector('[data-testid=agent-actions-panel]');
+      return p && isShown(p) ? p : null;
+    });
+    const dryItem = document.querySelector(
+      '[data-testid="agent-action-item-bead.dry-run-implement"]'
+    );
+    r.dry_item_present = !!dryItem;
+    if (dryItem) dryItem.click();
+    // Direct-dispatch: fetch fires immediately. No modal opens.
+    await waitFor(
+      () => dispatchCalls.length > callsBeforeDryRun,
+      1500,
+    );
+    const modalDuringDry = document.querySelector('[data-testid=action-input-modal]');
+    r.dry_run_did_not_open_modal = !modalDuringDry || !isShown(modalDuringDry);
+    r.dry_run_dispatch_fired = dispatchCalls.length > callsBeforeDryRun;
+    const dryCall = dispatchCalls[dispatchCalls.length - 1] || null;
+    if (dryCall && dryCall.body) {
+      try {
+        const parsed = JSON.parse(dryCall.body);
+        r.dry_run_member_key = parsed.member_key || '';
+        r.dry_run_has_custom_input = (parsed.custom_input || '') !== '';
+      } catch (e) {
+        r.dry_run_member_key = '';
+        r.dry_run_has_custom_input = false;
+      }
+    }
+  } finally {
+    window.fetch = origFetch;
+  }
+  return JSON.stringify(r);
+})()"""
+
+
+class TestAskQuestionActionBehavior:
+    """Operator-input modal flow for ``bead.ask-question`` (auto-0tkwj).
+
+    Drives the modal through its full state matrix on /bead/auto-sweep-b1
+    (autonomy org, has the seeded ``bead.ask-question`` action with
+    ``input_prompt`` set). Asserts:
+
+    * the dropdown row is visible on a bead detail page;
+    * clicking it opens the input modal with autofocused textarea +
+      disabled Dispatch button;
+    * typing enables Dispatch;
+    * Escape closes the modal without firing a dispatch POST;
+    * Submit fires exactly one POST with ``custom_input`` non-empty and
+      then closes the modal;
+    * actions without ``input_prompt`` (``bead.dry-run-implement``)
+      bypass the modal and direct-dispatch as before — no regression.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            "/bead/auto-sweep-b1",
+            ASK_QUESTION_MODAL_CHECKS,
+            wait_ms=1500,
+        )
+        request.cls._checks = result
+
+    def test_dropdown_button_visible_on_bead_page(self):
+        c = self._checks
+        assert c.get("root_in_dom"), "agent-actions root must mount on bead pages"
+        assert c.get("btn_visible"), (
+            "Actions button must be visible on the bead detail page "
+            "(the autonomy fixture seeds at least one bead-typed action)"
+        )
+
+    def test_ask_question_action_visible_in_dropdown(self):
+        c = self._checks
+        assert c.get("ask_item_present"), (
+            "bead.ask-question dropdown row must render on the bead page"
+        )
+        assert c.get("ask_item_visible"), (
+            "bead.ask-question row must be visible (offsetParent !== null)"
+        )
+
+    def test_modal_hidden_before_click(self):
+        c = self._checks
+        assert c.get("modal_hidden_at_start"), (
+            "action-input-modal must be hidden in the default page state"
+        )
+
+    def test_modal_opens_with_disabled_dispatch_and_autofocus(self):
+        c = self._checks
+        assert c.get("modal_opens"), (
+            "Clicking the action must open the action-input-modal"
+        )
+        assert c.get("textarea_present"), "Modal must contain a textarea"
+        assert c.get("textarea_autofocused"), (
+            "Textarea must autofocus when the modal opens"
+        )
+        assert c.get("dispatch_disabled_when_empty"), (
+            "Dispatch button must be disabled while the textarea is empty"
+        )
+
+    def test_dispatch_enables_when_textarea_filled(self):
+        c = self._checks
+        assert c.get("dispatch_enabled_when_filled"), (
+            "Dispatch button must enable once the textarea has text"
+        )
+
+    def test_escape_closes_modal_without_dispatching(self):
+        c = self._checks
+        assert c.get("modal_closed_after_escape"), (
+            "Escape key must close the input modal"
+        )
+        assert c.get("no_dispatch_on_escape"), (
+            "Closing via Escape must NOT fire a dispatch POST"
+        )
+
+    def test_submit_dispatches_with_custom_input(self):
+        c = self._checks
+        assert c.get("dispatch_fired_on_submit"), (
+            "Clicking Dispatch must POST to /api/agent-actions/dispatch"
+        )
+        assert c.get("submit_member_key") == "bead.ask-question", (
+            f"Dispatch must carry member_key=bead.ask-question, "
+            f"got {c.get('submit_member_key')!r}"
+        )
+        assert c.get("submit_custom_input"), (
+            "Dispatch payload must include non-empty custom_input"
+        )
+        assert c.get("modal_closed_after_submit"), (
+            "Modal must close after a successful Dispatch"
+        )
+
+    def test_dry_run_bypasses_input_modal(self):
+        c = self._checks
+        assert c.get("dry_item_present"), (
+            "bead.dry-run-implement row must also render in the dropdown"
+        )
+        assert c.get("dry_run_did_not_open_modal"), (
+            "Actions without input_prompt must NOT open the input modal"
+        )
+        assert c.get("dry_run_dispatch_fired"), (
+            "bead.dry-run-implement must direct-dispatch without operator input"
+        )
+        assert c.get("dry_run_member_key") == "bead.dry-run-implement", (
+            f"Direct dispatch must carry member_key=bead.dry-run-implement, "
+            f"got {c.get('dry_run_member_key')!r}"
+        )
+        assert c.get("dry_run_has_custom_input") is False, (
+            "Direct dispatch payload must not carry a custom_input field"
         )
 
 
