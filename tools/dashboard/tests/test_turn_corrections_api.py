@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import pytest
 from starlette.testclient import TestClient
 
@@ -678,6 +679,63 @@ def test_turn_correction_metrics_accepts_long_dictation_cleanup():
     assert metrics["char_similarity"] >= 0.80
 
 
+def test_turn_correction_metrics_accepts_very_long_prose_cleanup():
+    from tools.dashboard.session_monitor import _turn_correction_metrics
+
+    raw = (
+        "We have a session viewer, which knows how to show the log of an agent session run and "
+        "the session viewer is based on the Jason L log file that Claude or Kodex generates and "
+        "there’s a whole pipeline that tells those files and watches that data and categorize an "
+        "analyzes and enhances that data and then passes it up to the user interface to display "
+        "in the session viewer\n\n"
+        "The session viewers is also complicated because it can do live detailing and it’s all "
+        "event based and it’s reactive and the tiles are dynamic and they can be dynamically "
+        "updated while the log is running.  But it also has a mode where it just views a "
+        "completed session and it’s not interactive.\n\n"
+        "Totally separate from the session viewer we also have the concept of the graph. The "
+        "graph is the central knowledge base of the entire system, and we ingest all of the "
+        "sessions into the graph.  These are representative sources in the graph so the graph "
+        "as a sources table and each session is a different source in the graph and then we "
+        "ingest each of the user messages and each of the agents responses. And those are "
+        "stored in the graph we don’t store the tool use in the graph cause it’s too noisy, "
+        "but we have agent message and user message.\n\n"
+        "And then there’s a screen on the dashboard which we call the source viewer, which is "
+        "really essentially the session viewer\n\n"
+        "And so the graphs session viewer is separate from like the real time interactive "
+        "session viewer control.\n\n"
+        "The graphs source viewer is just meant for digging through past sessions. You would "
+        "never use it to view a currently live session."
+    )
+    corrected = (
+        "We have a session viewer which knows how to show the log of an agent session run, and "
+        "the session viewer is based on the JSONL log file that Claude or Codex generates. "
+        "There's a whole pipeline that tails those files and watches that data and categorizes "
+        "and analyzes and enhances that data, and then passes it up to the user interface to "
+        "display in the session viewer.\n\n"
+        "The session viewer is also complicated because it can do live tailing and it's all "
+        "event-based and it's reactive and the tiles are dynamic and they can be dynamically "
+        "updated while the log is running. But it also has a mode where it just views a "
+        "completed session and it's not interactive.\n\n"
+        "Totally separate from the session viewer, we also have the concept of the graph. The "
+        "graph is the central knowledge base of the entire system, and we ingest all of the "
+        "sessions into the graph. These are represented as sources in the graph, so the graph "
+        "has a sources table and each session is a different source in the graph, and then we "
+        "ingest each of the user messages and each of the agent's responses. Those are stored "
+        "in the graph. We don't store the tool use in the graph because it's too noisy, but we "
+        "have agent message and user message.\n\n"
+        "And then there's a screen on the dashboard which we call the source viewer, which is "
+        "essentially the session viewer.\n\n"
+        "So the graph's source viewer is separate from the real-time interactive session viewer "
+        "control.\n\n"
+        "The graph's source viewer is just meant for digging through past sessions. You would "
+        "never use it to view a currently live session."
+    )
+
+    metrics = _turn_correction_metrics(raw, corrected)
+    assert metrics["acceptable"] is True
+    assert metrics["char_similarity"] >= 0.90
+
+
 def test_turn_correction_metrics_rejects_unrelated_message():
     from tools.dashboard.session_monitor import _turn_correction_metrics
 
@@ -1290,3 +1348,99 @@ def test_resolve_session_workspace_unresolvable_returns_none(
     monkeypatch.setattr(_ws, "load_workspaces", fake_load)
     out = _server._resolve_session_workspace(TMUX_NAME, SESSION_UUID)
     assert out is None
+
+
+def test_session_monitor_persists_very_long_first_message_cleanup(test_app):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+
+    raw = (
+        "We have a session viewer, which knows how to show the log of an agent session run and "
+        "the session viewer is based on the Jason L log file that Claude or Kodex generates and "
+        "there’s a whole pipeline that tells those files and watches that data and categorize an "
+        "analyzes and enhances that data and then passes it up to the user interface to display "
+        "in the session viewer\n\n"
+        "The session viewers is also complicated because it can do live detailing and it’s all "
+        "event based and it’s reactive and the tiles are dynamic and they can be dynamically "
+        "updated while the log is running.  But it also has a mode where it just views a "
+        "completed session and it’s not interactive.\n\n"
+        "Totally separate from the session viewer we also have the concept of the graph. The "
+        "graph is the central knowledge base of the entire system, and we ingest all of the "
+        "sessions into the graph.  These are representative sources in the graph so the graph "
+        "as a sources table and each session is a different source in the graph and then we "
+        "ingest each of the user messages and each of the agents responses. And those are "
+        "stored in the graph we don’t store the tool use in the graph cause it’s too noisy, "
+        "but we have agent message and user message.\n\n"
+        "And then there’s a screen on the dashboard which we call the source viewer, which is "
+        "really essentially the session viewer\n\n"
+        "And so the graphs session viewer is separate from like the real time interactive "
+        "session viewer control.\n\n"
+        "The graphs source viewer is just meant for digging through past sessions. You would "
+        "never use it to view a currently live session."
+    )
+    corrected = (
+        "We have a session viewer which knows how to show the log of an agent session run, and "
+        "the session viewer is based on the JSONL log file that Claude or Codex generates. "
+        "There's a whole pipeline that tails those files and watches that data and categorizes "
+        "and analyzes and enhances that data, and then passes it up to the user interface to "
+        "display in the session viewer.\n\n"
+        "The session viewer is also complicated because it can do live tailing and it's all "
+        "event-based and it's reactive and the tiles are dynamic and they can be dynamically "
+        "updated while the log is running. But it also has a mode where it just views a "
+        "completed session and it's not interactive.\n\n"
+        "Totally separate from the session viewer, we also have the concept of the graph. The "
+        "graph is the central knowledge base of the entire system, and we ingest all of the "
+        "sessions into the graph. These are represented as sources in the graph, so the graph "
+        "has a sources table and each session is a different source in the graph, and then we "
+        "ingest each of the user messages and each of the agent's responses. Those are stored "
+        "in the graph. We don't store the tool use in the graph because it's too noisy, but we "
+        "have agent message and user message.\n\n"
+        "And then there's a screen on the dashboard which we call the source viewer, which is "
+        "essentially the session viewer.\n\n"
+        "So the graph's source viewer is separate from the real-time interactive session viewer "
+        "control.\n\n"
+        "The graph's source viewer is just meant for digging through past sessions. You would "
+        "never use it to view a currently live session."
+    )
+
+    SessionMonitor._persist_turn_corrections(row, ts, [
+        {
+            "type": "user",
+            "content": raw,
+            "message_id": "msg-target",
+            "timestamp": "2026-05-04T02:18:24.446Z",
+        },
+    ])
+    SessionMonitor._persist_turn_corrections(row, ts, [{
+        "type": "turn_correction",
+        "corrected_text": corrected,
+        "timestamp": "2026-05-04T02:18:40.941Z",
+    }])
+
+    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-target")
+    assert stored is not None
+    assert stored["corrected_text"] == corrected
+
+
+def test_session_monitor_logs_info_when_no_candidate_accepted(test_app, caplog):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
+    ts = _TailState()
+
+    SessionMonitor._persist_turn_corrections(row, ts, [{
+        "type": "user",
+        "content": "Proceed",
+        "message_id": "msg-1",
+        "timestamp": "2026-05-04T02:18:24.446Z",
+    }])
+    with caplog.at_level(logging.INFO):
+        SessionMonitor._persist_turn_corrections(row, ts, [{
+            "type": "turn_correction",
+            "corrected_text": "This is a completely unrelated long correction that should never match Proceed.",
+            "timestamp": "2026-05-04T02:18:40.941Z",
+        }])
+
+    assert "session_monitor: turn_correction skipped" in caplog.text
