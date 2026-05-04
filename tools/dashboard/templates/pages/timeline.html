@@ -176,11 +176,87 @@
       <div
         x-show="!e._hiddenByParent"
         class="tl-card"
-        :class="{'tl-card-lib': e._isLibrarian, 'open': e._open}"
+        :class="{'tl-card-lib': e._isLibrarian, 'tl-card-wt': e._isWorktreeMerge, 'open': e._open}"
         :data-testid="e._isWorktreeMerge ? ('tl-card-worktree-merge-' + e.run_id) : null"
         @click="e._open = !e._open"
       >
 
+        <!-- ── auto-24a60: worktree-merge card variant ───────────────
+             Worktree-merge rows render a purpose-built card — bead-card
+             slots like priority badge, scores, time-breakdown bar, and
+             Trace link don't apply. Layout:
+               [● method-badge ......................... HH:MM AM/PM]
+               commit headline (full-width, never truncated)
+               commit body (italic, ~150 char default / ~500 expanded)
+               ⤷ session-link  [Diff →]      N files +A −R
+        -->
+        <template x-if="e._isWorktreeMerge">
+          <div class="tl-wt-card">
+            <div class="tl-row1 tl-wt-row1">
+              <span class="tl-dot" :class="e._dotCls"></span>
+              <span class="tl-method-badge"
+                    :data-testid="'tl-wt-method-badge-' + e.run_id"
+                    x-text="e.reason || ''"></span>
+              <template x-if="e.journal_entry && e.journal_entry.source_id">
+                <a :href="'/activity#journal-' + e.journal_entry.source_id"
+                   @click.stop
+                   :title="'Journal: ' + (e.journal_entry.compact || '')"
+                   :data-testid="'activity-feed-journal-badge-' + e.run_id"
+                   class="tl-lib-icon"
+                   style="margin-left:auto; text-decoration:none; cursor:pointer;">📔</a>
+              </template>
+              <span class="tl-ts" x-text="e._ts"
+                    :style="(e.journal_entry && e.journal_entry.source_id) ? '' : 'margin-left:auto'"></span>
+            </div>
+
+            <div class="tl-wt-headline"
+                 :data-testid="'tl-wt-headline-' + e.run_id"
+                 x-text="e._wtHeadline || '(no commit message)'"></div>
+
+            <template x-if="e._wtBody">
+              <div class="tl-wt-subtitle"
+                   :data-testid="'tl-wt-subtitle-' + e.run_id"
+                   x-text="e._open ? e._wtBodyExpanded : e._wtSubtitle"></div>
+            </template>
+            <template x-if="e._wtBody && e._open && e._wtBodyTruncated">
+              <div class="tl-wt-truncation-hint"
+                   :data-testid="'tl-wt-truncation-hint-' + e.run_id">…full body in diff</div>
+            </template>
+
+            <div class="tl-wt-footer">
+              <template x-if="e.container_name">
+                <a class="tl-wt-session-link"
+                   :href="'/session/' + e.container_name"
+                   :data-testid="'tl-wt-session-link-' + e.run_id"
+                   @click.stop>
+                  <span aria-hidden="true">⤷</span>
+                  <span x-text="e.container_name"></span>
+                </a>
+              </template>
+              <button type="button"
+                      class="tl-wt-diff-btn"
+                      :data-testid="'tl-wt-diff-btn-' + e.run_id"
+                      @click.stop="openDiffOverlay(e)">Diff →</button>
+              <span class="tl-wt-stats">
+                <template x-if="e.files_changed != null">
+                  <span class="tl-wt-files" x-text="e.files_changed + ' files'"></span>
+                </template>
+                <template x-if="e.lines_added != null">
+                  <span class="tl-diff-add" x-text="'+' + e.lines_added"></span>
+                </template>
+                <template x-if="e.lines_removed != null">
+                  <span class="tl-diff-del" x-text="'−' + e.lines_removed"></span>
+                </template>
+              </span>
+            </div>
+          </div>
+        </template>
+
+      <!-- ── Bead / agentic / librarian card chrome ───────────────────
+           Worktree-merge rows render via the variant block above; the
+           rest of this card body is gated off for them. -->
+      <template x-if="!e._isWorktreeMerge">
+        <div>
         <!-- Row 1: dot/icon · (bead-id / action) · time
              Title moved to its own row below so it never has to share
              horizontal space with the right-aligned metadata. Mirrors
@@ -190,15 +266,13 @@
           <span x-show="e._isLibrarian" class="tl-lib-icon" style="display:none">📚</span>
           <!-- Agentic: lightning icon -->
           <span x-show="e._isAgentic" class="tl-lib-icon" style="display:none">⚡</span>
-          <!-- Bead dispatch / worktree merge: status dot (green for DONE merges) -->
+          <!-- Bead dispatch: status dot (green for DONE) -->
           <span x-show="!e._isLibrarian && !e._isAgentic" class="tl-dot" :class="e._dotCls"></span>
 
           <!-- Bead dispatch: show bead id inline -->
-          <span x-show="!e._isLibrarian && !e._isAgentic && !e._isWorktreeMerge && e.bead_id" class="tl-bead-id" x-text="e.bead_id" style="display:none"></span>
+          <span x-show="!e._isLibrarian && !e._isAgentic && e.bead_id" class="tl-bead-id" x-text="e.bead_id" style="display:none"></span>
           <!-- Agentic: show action label inline (e.g. "Update Title & Summary") -->
           <span x-show="e._isAgentic && e.action_label" class="tl-bead-id" x-text="e.action_label" style="display:none"></span>
-          <!-- Worktree merge: method badge ('ff' / 'commit-merge' / 'cherry-pick') -->
-          <span x-show="e._isWorktreeMerge" class="tl-method-badge" x-text="e.reason || ''" style="display:none"></span>
           <!-- auto-wvdhs: 📔 badge — present iff the agent wrote a journal
                entry during wrap-up. Anchors to /activity#journal-<id> on
                the Attention tab so a click jumps straight to the entry. -->
@@ -217,22 +291,12 @@
         <div class="tl-title-row">
           <span
             class="tl-title-block"
-            x-text="e._isWorktreeMerge ? e._wtMergeTitle : (e._isLibrarian ? e._libTitle : (e.title || e.bead_id || '(no title)'))"
+            x-text="e._isLibrarian ? e._libTitle : (e.title || e.bead_id || '(no title)')"
           ></span>
         </div>
 
-        <!-- Row 2 (worktree merge): commit subject + short SHA, no priority badge -->
-        <div class="tl-row2" x-show="e._isWorktreeMerge" style="display:none">
-          <div class="tl-reason" x-text="e.commit_message || ''"></div>
-          <div class="tl-row2-badges">
-            <template x-if="e.commit_hash">
-              <span class="tl-ft tl-ft-done" x-text="(e.commit_hash || '').slice(0,7)"></span>
-            </template>
-          </div>
-        </div>
-
         <!-- Row 2 (dispatch): reason + priority/status badges -->
-        <div class="tl-row2" x-show="!e._isLibrarian && !e._isWorktreeMerge">
+        <div class="tl-row2" x-show="!e._isLibrarian">
           <div
             class="tl-reason"
             :style="e._open ? 'white-space: normal; overflow: visible; text-overflow: clip;' : ''"
@@ -551,9 +615,90 @@
           </div>
         </template>
 
+        </div>
+      </template>
+      <!-- /bead/agentic/librarian card chrome -->
+
       </div>
     </template>
   </div>
+
+  <!-- ── auto-24a60: worktree-merge Diff overlay ─────────────────────
+       Centered modal, semi-transparent backdrop, fixed positioning so
+       it floats above the activity feed. Esc/click-outside/close button
+       all dismiss via closeDiffOverlay(); the underlying /activity
+       scroll position + tab selection are preserved (no history push).
+  -->
+  <template x-if="diffOverlay.open">
+    <div class="tl-diff-overlay-backdrop"
+         data-testid="tl-diff-overlay"
+         @click.self="closeDiffOverlay()"
+         @keydown.escape.window="closeDiffOverlay()">
+      <div class="tl-diff-overlay-modal" role="dialog" aria-modal="true">
+        <div class="tl-diff-overlay-header">
+          <div class="tl-diff-overlay-title">
+            <template x-if="diffOverlay.data && diffOverlay.data.subject">
+              <span x-text="diffOverlay.data.subject"></span>
+            </template>
+            <template x-if="!(diffOverlay.data && diffOverlay.data.subject)">
+              <span class="tl-diff-overlay-loading-text">Commit diff</span>
+            </template>
+          </div>
+          <button type="button"
+                  class="tl-diff-overlay-close"
+                  data-testid="tl-diff-overlay-close"
+                  aria-label="Close diff overlay"
+                  @click="closeDiffOverlay()">×</button>
+        </div>
+        <div class="tl-diff-overlay-body">
+          <template x-if="diffOverlay.loading">
+            <div class="tl-diff-overlay-loading"
+                 data-testid="tl-diff-overlay-loading">Loading commit diff…</div>
+          </template>
+          <template x-if="diffOverlay.error">
+            <div class="tl-diff-overlay-error"
+                 data-testid="tl-diff-overlay-error">
+              <div class="tl-diff-overlay-error-msg">Failed to load diff: <span x-text="diffOverlay.error"></span></div>
+              <a class="tl-diff-overlay-error-link"
+                 :href="diffOverlay.fallbackHref">Open commit on /worktrees →</a>
+            </div>
+          </template>
+          <template x-if="!diffOverlay.loading && !diffOverlay.error && diffOverlay.data">
+            <div class="tl-diff-overlay-content">
+              <template x-if="(diffOverlay.data.body || '').trim()">
+                <div class="tl-diff-overlay-commit-body" x-text="diffOverlay.data.body"></div>
+              </template>
+              <template x-if="diffOverlay.data.files && diffOverlay.data.files.length">
+                <div class="tl-diff-overlay-files">
+                  <div class="tl-diff-overlay-stats">
+                    <span x-text="(diffOverlay.data.stats && diffOverlay.data.stats.files != null ? diffOverlay.data.stats.files : diffOverlay.data.files.length) + ' files'"></span>
+                    <span class="tl-diff-add" x-text="'+' + (diffOverlay.data.stats && diffOverlay.data.stats.additions != null ? diffOverlay.data.stats.additions : 0)"></span>
+                    <span class="tl-diff-del" x-text="'−' + (diffOverlay.data.stats && diffOverlay.data.stats.deletions != null ? diffOverlay.data.stats.deletions : 0)"></span>
+                  </div>
+                  <ul class="tl-diff-overlay-file-list">
+                    <template x-for="file in diffOverlay.data.files" :key="file.path">
+                      <li class="tl-diff-overlay-file">
+                        <span class="tl-diff-overlay-file-status" x-text="file.status"></span>
+                        <span class="tl-diff-overlay-file-path" x-text="file.path"></span>
+                        <span class="tl-diff-add" x-text="'+' + (file.additions || 0)"></span>
+                        <span class="tl-diff-del" x-text="'−' + (file.deletions || 0)"></span>
+                      </li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+              <template x-if="diffOverlay.data.patch">
+                <pre class="tl-diff-overlay-patch"
+                     data-testid="tl-diff-overlay-patch"
+                     x-text="diffOverlay.data.patch"></pre>
+              </template>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+  </template>
+
   </div>
   <!-- /Feed tab body -->
 

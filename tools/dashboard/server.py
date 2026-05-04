@@ -61,6 +61,7 @@ from agents.workspace_manager import (
     WorkspaceError,
     cleanup_session_worktree,
     cleanup_session_worktrees,
+    get_repo_commit_detail,
     get_session_worktree_commit_detail,
     get_session_worktree_dirty_detail,
     get_session_worktree_integrated_diff,
@@ -1818,6 +1819,62 @@ async def api_timeline(request):
             pass  # fall back to bead_id as title
 
     return JSONResponse(entries)
+
+
+async def api_dispatch_run_commit_detail(request):
+    """Return commit detail (subject, body, files, patch) for a dispatch run.
+
+    Powers the auto-24a60 worktree-merge card's Diff overlay on the
+    Activity feed. The card stores the merged commit SHA in
+    ``dispatch_runs.commit_hash``; this endpoint reads the commit from
+    the main repo (where the merge result lives on master) and returns
+    the same JSON shape as ``/api/worktrees/{session}/{repo}/commits/{sha}``
+    so the overlay can render its file list + patch the same way.
+
+    Scoped to ``kind='worktree-merge'`` rows. Bead/agentic rows have
+    their own trace surface (``/dispatch/trace/<run_id>``); routing them
+    here would only confuse the diff renderer.
+    """
+    run_id = request.path_params["run_id"]
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        commit = dao_dispatch.get_dispatch_run_commit_detail(run_id)
+        if not commit:
+            return JSONResponse(
+                {"error": "commit detail not found for run"}, status_code=404,
+            )
+        return JSONResponse(commit)
+
+    conn = _timeline_conn()
+    try:
+        row = conn.execute(
+            "SELECT id, kind, commit_hash FROM dispatch_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return JSONResponse({"error": "run not found"}, status_code=404)
+    kind = row["kind"] or "bead"
+    if kind != "worktree-merge":
+        return JSONResponse(
+            {"error": "commit-detail is only available for worktree-merge runs"},
+            status_code=400,
+        )
+    sha = row["commit_hash"] or ""
+    if not sha:
+        return JSONResponse(
+            {"error": "run has no commit_hash"}, status_code=404,
+        )
+
+    try:
+        commit = await asyncio.to_thread(
+            get_repo_commit_detail, _REPO_ROOT, sha,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+
+    return JSONResponse(_worktree_commit_json(commit, include_patch=True))
 
 
 async def api_timeline_stats(request):
@@ -11859,6 +11916,7 @@ routes = [
     Route("/api/dispatch/status", api_dispatch_status),
     Route("/api/dispatch/approved", api_dispatch_approved),
     Route("/api/dispatch/runs", api_dispatch_runs),
+    Route("/api/dispatch/runs/{run_id}/commit-detail", api_dispatch_run_commit_detail),
     Route("/api/dispatch/reset/{bead_id}", api_dispatch_reset, methods=["POST"]),
     Route("/api/dispatch/wait/{bead_id}", api_dispatch_wait),
     Route("/api/dispatch/trace/{run}", api_dispatch_trace),

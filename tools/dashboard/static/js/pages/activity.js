@@ -293,14 +293,50 @@
     const isAgentic = e.kind === 'agentic';
     // auto-ecmss: worktree merges performed via the /worktrees dashboard
     // UI write a kind='worktree-merge' row to dispatch_runs so they show
-    // up here. The card reuses the existing tl-card chrome (green dot
-    // for DONE, lines/files chips) plus a small method badge.
+    // up here. auto-24a60 redesigns the card: drop the synthetic
+    // "Worktree merge — from X" title; render the commit headline +
+    // body (parsed from commit_message) instead.
     const isWorktreeMerge = e.kind === 'worktree-merge';
-    let wtMergeTitle = '';
+    let wtHeadline = '';
+    let wtBody = '';
+    let wtSubtitle = '';
+    let wtBodyExpanded = '';
+    let wtBodyTruncated = false;
     if (isWorktreeMerge) {
-      const src = e.container_name || '';
-      wtMergeTitle = src ? ('Worktree merge — from ' + src) : 'Worktree merge';
+      const msg = e.commit_message || '';
+      const lines = msg.split('\n');
+      wtHeadline = (lines[0] || '').trim();
+      // Body starts after the first blank line; if the message is a
+      // single line (subject only — most ff merges) the body is empty
+      // and the subtitle stays hidden.
+      const blankIdx = lines.findIndex((line, i) => i > 0 && line.trim() === '');
+      if (blankIdx >= 0) {
+        wtBody = lines.slice(blankIdx + 1).join('\n').trim();
+      } else if (lines.length > 1) {
+        // No explicit blank-line break (rare; non-conventional commits)
+        // — treat everything after the headline as body.
+        wtBody = lines.slice(1).join('\n').trim();
+      }
+      const SUBTITLE_CAP = 150;
+      const EXPANDED_CAP = 500;
+      if (wtBody.length > SUBTITLE_CAP) {
+        wtSubtitle = wtBody.slice(0, SUBTITLE_CAP).trimEnd() + '…';
+      } else {
+        wtSubtitle = wtBody;
+      }
+      if (wtBody.length > EXPANDED_CAP) {
+        wtBodyExpanded = wtBody.slice(0, EXPANDED_CAP).trimEnd() + '…';
+        wtBodyTruncated = true;
+      } else {
+        wtBodyExpanded = wtBody;
+      }
     }
+    // Per the auto-24a60 spec, worktree-merge cards never render the
+    // duration timer (started_at == completed_at on the substrate row),
+    // priority badge, scores, time-breakdown bar, or Trace link. Force
+    // hasBottom off so the bead-card bottom block is skipped entirely;
+    // the new card lays out its own footer (session · Diff · stats).
+    const wtHasBottom = isWorktreeMerge ? false : hasBottom;
 
     let reviewItems = null;
     const rev = e.librarian_review;
@@ -327,7 +363,7 @@
       _starsClarity: starsClarity,
       _starsConfidence: starsConfidence,
       _hasBreakdown: hasBreakdown,
-      _hasBottom: hasBottom,
+      _hasBottom: wtHasBottom,
       _barR: barR,
       _barC: barC,
       _barD: barD,
@@ -335,7 +371,11 @@
       _isLibrarian: isLibrarian,
       _isAgentic: isAgentic,
       _isWorktreeMerge: isWorktreeMerge,
-      _wtMergeTitle: wtMergeTitle,
+      _wtHeadline: wtHeadline,
+      _wtBody: wtBody,
+      _wtSubtitle: wtSubtitle,
+      _wtBodyExpanded: wtBodyExpanded,
+      _wtBodyTruncated: wtBodyTruncated,
       _libTitle: libTitle,
       _tokenFmt: tokenFmt,
       _reviewCollapsed: _reviewCollapsedLabel(e.librarian_review),
@@ -426,6 +466,22 @@
       refreshTargets: {},
       localRefreshPending: {},
       voterId: _resolveOperatorId(),
+      // ── auto-24a60: worktree-merge Diff overlay ────────────────
+      // Centered modal opened from a worktree-merge card's [Diff →]
+      // button. Lazy-fetches /api/dispatch/runs/<run_id>/commit-detail
+      // (subject, body, files, patch) and renders inline. Closing the
+      // overlay does NOT navigate or push history — the underlying
+      // /activity scroll position + tab selection survive intact.
+      diffOverlay: {
+        open: false,
+        runId: null,
+        loading: false,
+        error: null,
+        data: null,
+        // _fallbackHref points at /worktrees when commit-detail fetch
+        // fails — operator-recoverable rather than a dead-end modal.
+        fallbackHref: '/worktrees',
+      },
       _AskSchema: null,
       _VoteSchema: null,
       _RefreshSchema: null,
@@ -464,6 +520,48 @@
 
       setAttentionZoom(mode) {
         this.attentionZoom = mode;
+      },
+
+      // ── auto-24a60: worktree-merge Diff overlay ──────────────────
+      async openDiffOverlay(entry) {
+        if (!entry || !entry.run_id) return;
+        const runId = entry.run_id;
+        this.diffOverlay = {
+          open: true,
+          runId: runId,
+          loading: true,
+          error: null,
+          data: null,
+          fallbackHref: '/worktrees',
+        };
+        try {
+          const resp = await fetch('/api/dispatch/runs/' + encodeURIComponent(runId) + '/commit-detail');
+          if (!resp.ok) {
+            const body = await resp.text().catch(() => '');
+            throw new Error('commit-detail HTTP ' + resp.status + (body ? ': ' + body.slice(0, 200) : ''));
+          }
+          const data = await resp.json();
+          // Preserve current overlay identity — operator may have
+          // closed the modal and opened a different one mid-flight.
+          if (this.diffOverlay.runId !== runId) return;
+          this.diffOverlay.data = data;
+          this.diffOverlay.loading = false;
+        } catch (err) {
+          if (this.diffOverlay.runId !== runId) return;
+          this.diffOverlay.loading = false;
+          this.diffOverlay.error = (err && err.message) || String(err);
+        }
+      },
+
+      closeDiffOverlay() {
+        this.diffOverlay = {
+          open: false,
+          runId: null,
+          loading: false,
+          error: null,
+          data: null,
+          fallbackHref: '/worktrees',
+        };
       },
 
       formatAttentionTimeRange(entry) {
