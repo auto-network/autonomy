@@ -10,5 +10,11 @@ from tools.graph.checks.force_host import (
     find_violations_in_repo,
     find_violations_in_source,
 )
+from tools.graph.checks import settings_request_org
 
-__all__ = ["Violation", "find_violations_in_repo", "find_violations_in_source"]
+__all__ = [
+    "Violation",
+    "find_violations_in_repo",
+    "find_violations_in_source",
+    "settings_request_org",
+]
