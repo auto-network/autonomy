@@ -29,6 +29,8 @@
 }
 
 .tc-marker {
+  all: unset;
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -44,9 +46,10 @@
   line-height: 1;
   flex-shrink: 0;
   cursor: pointer;
-  appearance: none;
   font-family: inherit;
   transition: border-color 180ms ease, background 180ms ease, color 180ms ease;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
 }
 
 .tc-marker:hover {
