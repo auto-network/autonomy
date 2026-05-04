@@ -10358,18 +10358,18 @@ class TestCoordinatorBoardParityV2:
                         "asks": "fyi",
                     },
                     state="raw",
-                )
+                 org=settings_ops.CALLER_ORG)
                 # Coordinator promotes a canonical override at the same key.
                 settings_ops.override_setting(
                     raw_id,
                     {"thing": "Coordinator's editorial framing"},
                     state="canonical",
-                )
+                 org=settings_ops.CALLER_ORG)
 
                 # Read at v2; the override should win.
                 result = settings_ops.read_set(
                     COORD_TILE_SET_ID, target_revision=2,
-                )
+                 org=settings_ops.CALLER_ORG)
                 resolved = result.to_dict().get("auto-peer-curation")
                 assert resolved is not None, (
                     f"key did not resolve at all; members={result.members!r}"
@@ -10415,7 +10415,7 @@ class TestCoordinatorBoardParityV2:
                         "asks": "fyi",
                         "detail": "v1 detail string",
                     },
-                )
+                 org=settings_ops.CALLER_ORG)
                 settings_ops.add_setting(
                     COORD_THREAD_SET_ID, 1, "auto-coord-1:auto-peer-A",
                     {
@@ -10424,7 +10424,7 @@ class TestCoordinatorBoardParityV2:
                         "status": "shipping",
                         "lead": "v1 thread",
                     },
-                )
+                 org=settings_ops.CALLER_ORG)
 
                 reports = coord_migrate.migrate_legacy_tile_thread_keys(
                     db_path,
@@ -10446,7 +10446,7 @@ class TestCoordinatorBoardParityV2:
                 # detail shape (string upconverted to {context, choices}).
                 tile_result = settings_ops.read_set(
                     COORD_TILE_SET_ID, target_revision=2,
-                )
+                 org=settings_ops.CALLER_ORG)
                 tile_keys = [m.key for m in tile_result.members]
                 assert tile_keys == ["auto-peer-A"], (
                     f"Tile keys not rewritten to bare peer; got {tile_keys}"
@@ -10462,7 +10462,7 @@ class TestCoordinatorBoardParityV2:
 
                 thread_result = settings_ops.read_set(
                     COORD_THREAD_SET_ID, target_revision=2,
-                )
+                 org=settings_ops.CALLER_ORG)
                 thread_keys = [m.key for m in thread_result.members]
                 assert thread_keys == ["auto-peer-A"], (
                     f"Thread keys not rewritten to bare peer; got {thread_keys}"

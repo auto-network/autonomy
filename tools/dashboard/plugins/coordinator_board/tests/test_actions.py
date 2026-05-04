@@ -228,6 +228,7 @@ async def test_operator_message_routes_to_coordinator(
     ops.add_setting(
         COORDINATOR_SET_ID, 1, "default",
         {"session_id": "auto-coord-9"},
+        org=ops.CALLER_ORG,
     )
 
     await actions.operator_message(row, services_capture)
@@ -378,6 +379,7 @@ async def test_dispatch_thumb_yes_end_to_end(
             "tile_id": "t1",
             "target_session": "auto-foo",
         },
+        org=ops.CALLER_ORG,
     )
 
     await _dispatch_event(_decision_event(key), services_capture)
@@ -408,6 +410,7 @@ async def test_dispatch_only_matching_predicate_handler_fires(
             "choice": "approve",
             "target_session": "auto-target",
         },
+        org=ops.CALLER_ORG,
     )
 
     await _dispatch_event(_decision_event(key), services_capture)
@@ -432,11 +435,13 @@ async def test_dispatch_operator_message_routes_to_bound_coordinator(
     ops.add_setting(
         COORDINATOR_SET_ID, 1, "default",
         {"session_id": "auto-bound-coord"},
+        org=ops.CALLER_ORG,
     )
     ops.add_setting(
         OPERATOR_MESSAGE_SET_ID, 1,
         "default",
         {"text": "are you there", "sentAt": None},
+        org=ops.CALLER_ORG,
     )
 
     await _dispatch_event(_operator_message_event("default"), services_capture)
@@ -462,6 +467,7 @@ async def test_dispatch_operator_message_no_coordinator_drops(
         OPERATOR_MESSAGE_SET_ID, 1,
         "default",
         {"text": "are you there", "sentAt": None},
+        org=ops.CALLER_ORG,
     )
 
     await _dispatch_event(_operator_message_event("default"), services_capture)

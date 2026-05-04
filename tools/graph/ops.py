@@ -41,6 +41,7 @@ from .cross_org import (
     run_across_orgs,
 )
 from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
+    CALLER_ORG,
     ResolvedSetting,
     SetMembers,
     MigrationReport,
@@ -51,6 +52,7 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
     promote_setting,
     deprecate_setting,
     remove_setting,
+    remove_settings_by_key_prefix,
     list_set_ids,
     get_setting,
     read_set,

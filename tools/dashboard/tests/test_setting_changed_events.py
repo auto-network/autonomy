@@ -125,7 +125,7 @@ def test_write_setting_with_state_canonical_emits_state(
 
 
 def test_override_setting_emits_event(graph_db_env, example_schema, client, fresh_bus):
-    base = ops.add_setting("autonomy.test.events", 1, "k", {"a": 1, "b": 2})
+    base = ops.add_setting("autonomy.test.events", 1, "k", {"a": 1, "b": 2}, org=ops.CALLER_ORG)
     fresh_bus._buffer.clear()
     fresh_bus._buffer_bytes = 0
 
@@ -141,7 +141,7 @@ def test_override_setting_emits_event(graph_db_env, example_schema, client, fres
 
 
 def test_exclude_setting_emits_event(graph_db_env, example_schema, client, fresh_bus):
-    base = ops.add_setting("autonomy.test.events", 1, "k", {"x": 1}, state="canonical")
+    base = ops.add_setting("autonomy.test.events", 1, "k", {"x": 1}, state="canonical", org=ops.CALLER_ORG)
     fresh_bus._buffer.clear()
     fresh_bus._buffer_bytes = 0
 
@@ -155,7 +155,7 @@ def test_exclude_setting_emits_event(graph_db_env, example_schema, client, fresh
 
 
 def test_promote_setting_emits_event(graph_db_env, example_schema, client, fresh_bus):
-    sid = ops.add_setting("autonomy.test.events", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.events", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     fresh_bus._buffer.clear()
     fresh_bus._buffer_bytes = 0
 
@@ -172,7 +172,7 @@ def test_promote_setting_emits_event(graph_db_env, example_schema, client, fresh
 
 
 def test_deprecate_setting_emits_event(graph_db_env, example_schema, client, fresh_bus):
-    sid = ops.add_setting("autonomy.test.events", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.events", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     fresh_bus._buffer.clear()
     fresh_bus._buffer_bytes = 0
 
@@ -187,7 +187,7 @@ def test_deprecate_setting_emits_event(graph_db_env, example_schema, client, fre
 
 
 def test_delete_setting_emits_event(graph_db_env, example_schema, client, fresh_bus):
-    sid = ops.add_setting("autonomy.test.events", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.events", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     fresh_bus._buffer.clear()
     fresh_bus._buffer_bytes = 0
 
@@ -218,9 +218,9 @@ def test_migrate_setting_set_emits_event_per_member(
         "autonomy.test.migrate", 2, V2,
         upconvert_from_prev=lambda p: {**p, "v2": True},
     )
-    ops.add_setting("autonomy.test.migrate", 1, "a", {"x": 1})
-    ops.add_setting("autonomy.test.migrate", 1, "b", {"x": 2})
-    ops.add_setting("autonomy.test.migrate", 1, "c", {"x": 3})
+    ops.add_setting("autonomy.test.migrate", 1, "a", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.migrate", 1, "b", {"x": 2}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.migrate", 1, "c", {"x": 3}, org=ops.CALLER_ORG)
     fresh_bus._buffer.clear()
     fresh_bus._buffer_bytes = 0
 
@@ -254,7 +254,7 @@ def test_migrate_dry_run_does_not_emit(graph_db_env, client, fresh_bus):
         "autonomy.test.migrate", 2, V2,
         upconvert_from_prev=lambda p: {**p, "v2": True},
     )
-    ops.add_setting("autonomy.test.migrate", 1, "a", {"x": 1})
+    ops.add_setting("autonomy.test.migrate", 1, "a", {"x": 1}, org=ops.CALLER_ORG)
     fresh_bus._buffer.clear()
     fresh_bus._buffer_bytes = 0
 

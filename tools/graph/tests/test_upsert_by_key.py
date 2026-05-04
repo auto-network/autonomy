@@ -179,7 +179,7 @@ def test_upsert_inserts_when_no_row_exists(graph_db_env, upsert_schema):
 
     sid = settings_ops.upsert_by_key(
         set_id, 1, "alpha", {"name": "first", "note": "hello"},
-    )
+     org=settings_ops.CALLER_ORG)
 
     rows = _all_base_rows(set_id, "alpha")
     assert len(rows) == 1
@@ -190,7 +190,7 @@ def test_upsert_inserts_when_no_row_exists(graph_db_env, upsert_schema):
 
 def test_upsert_returns_string_setting_id(graph_db_env, upsert_schema):
     set_id, _ = upsert_schema
-    sid = settings_ops.upsert_by_key(set_id, 1, "k", {"name": "x"})
+    sid = settings_ops.upsert_by_key(set_id, 1, "k", {"name": "x"}, org=settings_ops.CALLER_ORG)
     assert isinstance(sid, str)
     assert len(sid) >= 32  # uuid4-ish
 
@@ -199,7 +199,7 @@ def test_upsert_respects_state_kwarg(graph_db_env, upsert_schema):
     set_id, _ = upsert_schema
     sid = settings_ops.upsert_by_key(
         set_id, 1, "k", {"name": "x"}, state="published",
-    )
+     org=settings_ops.CALLER_ORG)
     rows = _all_base_rows(set_id, "k")
     assert rows[0]["publication_state"] == "published"
     assert rows[0]["id"] == sid
@@ -210,7 +210,7 @@ def test_upsert_rejects_unknown_state(graph_db_env, upsert_schema):
     with pytest.raises(ValueError):
         settings_ops.upsert_by_key(
             set_id, 1, "k", {"name": "x"}, state="bogus",
-        )
+         org=settings_ops.CALLER_ORG)
 
 
 # ── Acceptance #3: update-in-place path ──────────────────────
@@ -221,10 +221,10 @@ def test_upsert_updates_in_place_preserving_id(graph_db_env, upsert_schema):
 
     sid_first = settings_ops.upsert_by_key(
         set_id, 1, "alpha", {"name": "first"},
-    )
+     org=settings_ops.CALLER_ORG)
     sid_second = settings_ops.upsert_by_key(
         set_id, 1, "alpha", {"name": "second", "note": "updated"},
-    )
+     org=settings_ops.CALLER_ORG)
 
     assert sid_second == sid_first
     rows = _all_base_rows(set_id, "alpha")
@@ -240,10 +240,10 @@ def test_upsert_updates_publication_state_on_existing_row(
 ):
     """``state=`` on the second call rewrites the row's publication state."""
     set_id, _ = upsert_schema
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "x"}, state="raw")
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "x"}, state="raw", org=settings_ops.CALLER_ORG)
     settings_ops.upsert_by_key(
         set_id, 1, "k", {"name": "x"}, state="curated",
-    )
+     org=settings_ops.CALLER_ORG)
     rows = _all_base_rows(set_id, "k")
     assert len(rows) == 1
     assert rows[0]["publication_state"] == "curated"
@@ -262,9 +262,9 @@ def test_upsert_updates_updated_at_on_each_call(
     ])
     monkeypatch.setattr(settings_ops, "_now_iso", lambda: next(timestamps))
 
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v1"})
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v2"})
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v3"})
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v1"}, org=settings_ops.CALLER_ORG)
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v2"}, org=settings_ops.CALLER_ORG)
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v3"}, org=settings_ops.CALLER_ORG)
 
     rows = _all_base_rows(set_id, "k")
     assert len(rows) == 1
@@ -275,8 +275,8 @@ def test_upsert_updates_updated_at_on_each_call(
 def test_upsert_keys_are_independent(graph_db_env, upsert_schema):
     """Two different keys produce two different rows with distinct ids."""
     set_id, _ = upsert_schema
-    a_id = settings_ops.upsert_by_key(set_id, 1, "alpha", {"name": "a"})
-    b_id = settings_ops.upsert_by_key(set_id, 1, "beta", {"name": "b"})
+    a_id = settings_ops.upsert_by_key(set_id, 1, "alpha", {"name": "a"}, org=settings_ops.CALLER_ORG)
+    b_id = settings_ops.upsert_by_key(set_id, 1, "beta", {"name": "b"}, org=settings_ops.CALLER_ORG)
     assert a_id != b_id
     assert len(_all_base_rows(set_id, "alpha")) == 1
     assert len(_all_base_rows(set_id, "beta")) == 1
@@ -292,7 +292,7 @@ def test_upsert_stamps_expires_at_for_cache_schema(
     monkeypatch.setattr(
         settings_ops, "_now_iso", lambda: "2026-05-01T00:00:00Z",
     )
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "x"})
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "x"}, org=settings_ops.CALLER_ORG)
     rows = _all_base_rows(set_id, "k")
     assert rows[0]["expires_at"] == "2026-05-01T00:01:00Z"
 
@@ -308,8 +308,8 @@ def test_upsert_restamps_expires_at_on_update(
     ])
     monkeypatch.setattr(settings_ops, "_now_iso", lambda: next(times))
 
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v1"})
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v2"})
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v1"}, org=settings_ops.CALLER_ORG)
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v2"}, org=settings_ops.CALLER_ORG)
 
     rows = _all_base_rows(set_id, "k")
     assert len(rows) == 1
@@ -322,7 +322,7 @@ def test_upsert_leaves_expires_at_null_for_non_cache_schema(
     graph_db_env, upsert_schema,
 ):
     set_id, _ = upsert_schema
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "x"})
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "x"}, org=settings_ops.CALLER_ORG)
     rows = _all_base_rows(set_id, "k")
     assert rows[0]["expires_at"] is None
 
@@ -334,7 +334,7 @@ def test_emit_hook_fires_once_on_insert(
     graph_db_env, upsert_schema, hook_recorder,
 ):
     set_id, _ = upsert_schema
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "x"})
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "x"}, org=settings_ops.CALLER_ORG)
     assert len(hook_recorder) == 1
     call = hook_recorder[0]
     assert call["operation"] == "write"
@@ -348,8 +348,8 @@ def test_emit_hook_fires_once_on_update(
     graph_db_env, upsert_schema, hook_recorder,
 ):
     set_id, _ = upsert_schema
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v1"})
-    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v2"})
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v1"}, org=settings_ops.CALLER_ORG)
+    settings_ops.upsert_by_key(set_id, 1, "k", {"name": "v2"}, org=settings_ops.CALLER_ORG)
     # Two upserts → exactly two hook calls (no double-fire on update,
     # no missing-fire on insert).
     assert len(hook_recorder) == 2
@@ -366,7 +366,7 @@ def test_emit_hook_swallows_exceptions(graph_db_env, upsert_schema):
         sid = settings_ops.upsert_by_key(
             set_id=upsert_schema[0], schema_revision=1, key="k",
             payload={"name": "x"},
-        )
+         org=settings_ops.CALLER_ORG)
     finally:
         settings_ops.set_emit_hook(None)
     assert len(_all_base_rows(upsert_schema[0], "k")) == 1
@@ -392,13 +392,13 @@ def test_upsert_picks_newest_when_legacy_duplicates_exist(
     )
     older_id = settings_ops.add_setting(
         set_id, 1, "k", {"name": "older"},
-    )
+     org=settings_ops.CALLER_ORG)
     monkeypatch.setattr(
         settings_ops, "_now_iso", lambda: "2026-05-01T09:00:00Z",
     )
     newer_id = settings_ops.add_setting(
         set_id, 1, "k", {"name": "newer"},
-    )
+     org=settings_ops.CALLER_ORG)
 
     assert older_id != newer_id
     monkeypatch.setattr(
@@ -406,7 +406,7 @@ def test_upsert_picks_newest_when_legacy_duplicates_exist(
     )
     sid = settings_ops.upsert_by_key(
         set_id, 1, "k", {"name": "post-upsert"},
-    )
+     org=settings_ops.CALLER_ORG)
 
     # Newest-wins: the upsert updates ``newer_id`` in place; ``older_id``
     # is left untouched (still discoverable by raw SELECT, still
@@ -428,12 +428,12 @@ def test_upsert_ignores_override_and_exclude_rows(
     """
     set_id, _ = upsert_schema
 
-    base_id = settings_ops.add_setting(set_id, 1, "k", {"name": "base"})
+    base_id = settings_ops.add_setting(set_id, 1, "k", {"name": "base"}, org=settings_ops.CALLER_ORG)
     # Override + exclude. exclude_setting raises if the target schema
     # isn't keyed-per-entity-friendly; override is simpler.
-    settings_ops.override_setting(base_id, {"note": "patched"})
+    settings_ops.override_setting(base_id, {"note": "patched"}, org=settings_ops.CALLER_ORG)
 
-    sid = settings_ops.upsert_by_key(set_id, 1, "k", {"name": "rewritten"})
+    sid = settings_ops.upsert_by_key(set_id, 1, "k", {"name": "rewritten"}, org=settings_ops.CALLER_ORG)
     assert sid == base_id
     rows = _all_base_rows(set_id, "k")
     assert len(rows) == 1
@@ -451,7 +451,7 @@ def test_upsert_validates_payload_before_writing(
     with pytest.raises(SchemaValidationError):
         settings_ops.upsert_by_key(
             set_id, 1, "k", {"unknown": "field"},
-        )
+         org=settings_ops.CALLER_ORG)
     assert _all_base_rows(set_id, "k") == []
 
 
@@ -461,7 +461,7 @@ def test_upsert_raises_for_unknown_schema(graph_db_env):
     with pytest.raises(SchemaValidationError):
         settings_ops.upsert_by_key(
             "x.never_registered", 1, "k", {"name": "x"},
-        )
+         org=settings_ops.CALLER_ORG)
 
 
 def test_upsert_validation_failure_does_not_fire_hook(
@@ -470,7 +470,7 @@ def test_upsert_validation_failure_does_not_fire_hook(
     """Pre-write validation failure must NOT fire the post-commit hook."""
     set_id, _ = upsert_schema
     with pytest.raises(SchemaValidationError):
-        settings_ops.upsert_by_key(set_id, 1, "k", {"unknown": True})
+        settings_ops.upsert_by_key(set_id, 1, "k", {"unknown": True}, org=settings_ops.CALLER_ORG)
     assert hook_recorder == []
 
 
@@ -481,9 +481,9 @@ def test_upsert_validation_on_update_keeps_old_payload(
     row — validation runs before SELECT/UPDATE.
     """
     set_id, _ = upsert_schema
-    sid = settings_ops.upsert_by_key(set_id, 1, "k", {"name": "good"})
+    sid = settings_ops.upsert_by_key(set_id, 1, "k", {"name": "good"}, org=settings_ops.CALLER_ORG)
     with pytest.raises(SchemaValidationError):
-        settings_ops.upsert_by_key(set_id, 1, "k", {"unknown": "field"})
+        settings_ops.upsert_by_key(set_id, 1, "k", {"unknown": "field"}, org=settings_ops.CALLER_ORG)
     rows = _all_base_rows(set_id, "k")
     assert rows[0]["id"] == sid
     assert json.loads(rows[0]["payload"]) == {"name": "good"}
@@ -511,7 +511,7 @@ def test_upsert_concurrent_writers_produce_one_final_row(
             barrier.wait(timeout=5)
             sid = settings_ops.upsert_by_key(
                 set_id, 1, "race-key", {"name": f"writer-{i}"},
-            )
+             org=settings_ops.CALLER_ORG)
             with results_lock:
                 results.append(sid)
         except BaseException as e:  # noqa: BLE001 — re-surfaced below

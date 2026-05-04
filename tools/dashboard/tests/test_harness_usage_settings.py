@@ -127,7 +127,7 @@ def test_harness_usage_setting_visible_via_api(graph_db_env, test_client):
         hus.HARNESS_USAGE_SCHEMA_REVISION,
         hus.make_harness_usage_key("codex", "default"),
         payload,
-    )
+     org=ops.CALLER_ORG)
 
     resp = test_client.get(f"/api/graph/settings/{hus.HARNESS_USAGE_SET_ID}")
 
@@ -160,13 +160,13 @@ def test_upsert_by_key_updates_existing_setting_in_place(graph_db_env):
         hus.HARNESS_USAGE_SCHEMA_REVISION,
         key,
         payload,
-    )
+     org=ops.CALLER_ORG)
     second = ops.upsert_by_key(
         hus.HARNESS_USAGE_SET_ID,
         hus.HARNESS_USAGE_SCHEMA_REVISION,
         key,
         {**payload, "updated_at": "2026-05-02T04:17:20.630Z"},
-    )
+     org=ops.CALLER_ORG)
 
     assert first == second
     assert _count_setting_rows(graph_db_env, hus.HARNESS_USAGE_SET_ID, key) == 1
@@ -193,7 +193,7 @@ def test_upsert_by_key_replaces_payload_in_place(graph_db_env):
         hus.HARNESS_USAGE_SCHEMA_REVISION,
         key,
         payload,
-    )
+     org=ops.CALLER_ORG)
     ops.upsert_by_key(
         hus.HARNESS_USAGE_SET_ID,
         hus.HARNESS_USAGE_SCHEMA_REVISION,
@@ -209,10 +209,10 @@ def test_upsert_by_key_replaces_payload_in_place(graph_db_env):
                 },
             },
         },
-    )
+     org=ops.CALLER_ORG)
 
     assert _count_setting_rows(graph_db_env, hus.HARNESS_USAGE_SET_ID, key) == 1
-    members = ops.read_set(hus.HARNESS_USAGE_SET_ID)
+    members = ops.read_set(hus.HARNESS_USAGE_SET_ID, org=ops.CALLER_ORG)
     assert members.members[0].payload["windows"]["short"]["used_percent"] == 9.0
 
 
@@ -235,7 +235,7 @@ def test_publish_codex_harness_usage_setting_writes_directly(graph_db_env):
     wrote = session_monitor._publish_codex_harness_usage_setting(row, state)
 
     assert wrote is True
-    members = ops.read_set(hus.HARNESS_USAGE_SET_ID)
+    members = ops.read_set(hus.HARNESS_USAGE_SET_ID, org=ops.CALLER_ORG)
     assert len(members.members) == 1
     assert members.members[0].key == "codex:default"
     assert members.members[0].payload["windows"]["short"]["used_percent"] == 4.0

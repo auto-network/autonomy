@@ -66,7 +66,11 @@ def _load_contract(name: str, version: int, *, org: str | None) -> dict:
 
 
 def cmd_skilltext(args: Any) -> None:
-    contract = _load_contract(args.contract, int(args.version), org=getattr(args, "org", None))
+    from . import ops
+    contract = _load_contract(
+        args.contract, int(args.version),
+        org=getattr(args, "org", None) or ops.CALLER_ORG,
+    )
     provider = _load_provider_manifest(getattr(args, "provider_manifest", None))
     if args.kind == "skill":
         out = capability_skilltext.render_skill_md(contract, provider=provider)

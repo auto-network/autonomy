@@ -99,38 +99,38 @@ def test_ops_no_longer_accepts_caller_org(fn_name):
 
 
 def test_read_set_prefix_filters_by_colon_boundary(graph_db_env, open_schema):
-    ops.add_setting("autonomy.test.v2", 1, "enterprise-ng:alpha", {"x": 1})
-    ops.add_setting("autonomy.test.v2", 1, "enterprise-ng:beta", {"x": 2})
-    ops.add_setting("autonomy.test.v2", 1, "enterprise-v5:gamma", {"x": 3})
+    ops.add_setting("autonomy.test.v2", 1, "enterprise-ng:alpha", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.v2", 1, "enterprise-ng:beta", {"x": 2}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.v2", 1, "enterprise-v5:gamma", {"x": 3}, org=ops.CALLER_ORG)
 
-    got = ops.read_set("autonomy.test.v2", prefix="enterprise-ng")
+    got = ops.read_set("autonomy.test.v2", prefix="enterprise-ng", org=ops.CALLER_ORG)
     keys = {m.key for m in got.members}
     assert keys == {"enterprise-ng:alpha", "enterprise-ng:beta"}
 
 
 def test_read_set_prefix_matches_only_colon_boundary(graph_db_env, open_schema):
     """``prefix="enterprise-ng"`` must not match ``enterprise-ng-alt:...``."""
-    ops.add_setting("autonomy.test.v2", 1, "enterprise-ng:a", {"x": 1})
-    ops.add_setting("autonomy.test.v2", 1, "enterprise-ng-alt:b", {"x": 2})
+    ops.add_setting("autonomy.test.v2", 1, "enterprise-ng:a", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.v2", 1, "enterprise-ng-alt:b", {"x": 2}, org=ops.CALLER_ORG)
 
-    got = ops.read_set("autonomy.test.v2", prefix="enterprise-ng")
+    got = ops.read_set("autonomy.test.v2", prefix="enterprise-ng", org=ops.CALLER_ORG)
     keys = {m.key for m in got.members}
     assert keys == {"enterprise-ng:a"}
 
 
 def test_read_set_prefix_escapes_sql_wildcards(graph_db_env, open_schema):
     """A literal ``%`` in the prefix must not act as a wildcard."""
-    ops.add_setting("autonomy.test.v2", 1, "100%:real", {"x": 1})
-    ops.add_setting("autonomy.test.v2", 1, "100-other:fake", {"x": 2})
+    ops.add_setting("autonomy.test.v2", 1, "100%:real", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.v2", 1, "100-other:fake", {"x": 2}, org=ops.CALLER_ORG)
 
-    got = ops.read_set("autonomy.test.v2", prefix="100%")
+    got = ops.read_set("autonomy.test.v2", prefix="100%", org=ops.CALLER_ORG)
     keys = {m.key for m in got.members}
     assert keys == {"100%:real"}
 
 
 def test_read_set_prefix_no_results(graph_db_env, open_schema):
-    ops.add_setting("autonomy.test.v2", 1, "foo:bar", {"x": 1})
-    got = ops.read_set("autonomy.test.v2", prefix="nothing")
+    ops.add_setting("autonomy.test.v2", 1, "foo:bar", {"x": 1}, org=ops.CALLER_ORG)
+    got = ops.read_set("autonomy.test.v2", prefix="nothing", org=ops.CALLER_ORG)
     assert list(got.members) == []
 
 
@@ -138,9 +138,9 @@ def test_read_set_prefix_no_results(graph_db_env, open_schema):
 
 
 def test_set_members_to_dict_maps_key_to_resolved(graph_db_env, open_schema):
-    ops.add_setting("autonomy.test.v2", 1, "a", {"v": 1})
-    ops.add_setting("autonomy.test.v2", 1, "b", {"v": 2})
-    sm = ops.read_set("autonomy.test.v2")
+    ops.add_setting("autonomy.test.v2", 1, "a", {"v": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.v2", 1, "b", {"v": 2}, org=ops.CALLER_ORG)
+    sm = ops.read_set("autonomy.test.v2", org=ops.CALLER_ORG)
     mapping = sm.to_dict()
     assert set(mapping.keys()) == {"a", "b"}
     for key, rs in mapping.items():
@@ -149,17 +149,17 @@ def test_set_members_to_dict_maps_key_to_resolved(graph_db_env, open_schema):
 
 
 def test_set_members_is_iterable_and_sized(graph_db_env, open_schema):
-    ops.add_setting("autonomy.test.v2", 1, "a", {"v": 1})
-    ops.add_setting("autonomy.test.v2", 1, "b", {"v": 2})
-    sm = ops.read_set("autonomy.test.v2")
+    ops.add_setting("autonomy.test.v2", 1, "a", {"v": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.v2", 1, "b", {"v": 2}, org=ops.CALLER_ORG)
+    sm = ops.read_set("autonomy.test.v2", org=ops.CALLER_ORG)
     assert len(sm) == 2
     assert {m.key for m in sm} == {"a", "b"}
 
 
 def test_set_members_as_payload_is_json_serializable(graph_db_env, open_schema):
     """The dashboard API uses :meth:`as_payload` for ``JSONResponse``."""
-    ops.add_setting("autonomy.test.v2", 1, "a", {"v": 1})
-    sm = ops.read_set("autonomy.test.v2")
+    ops.add_setting("autonomy.test.v2", 1, "a", {"v": 1}, org=ops.CALLER_ORG)
+    sm = ops.read_set("autonomy.test.v2", org=ops.CALLER_ORG)
     payload = sm.as_payload()
     assert set(payload.keys()) == {"members", "dropped"}
     assert isinstance(payload["members"], list)
@@ -175,8 +175,8 @@ class _TestPayload(BaseModel):
 
 
 def test_read_set_model_returns_typed_payloads(graph_db_env, open_schema):
-    ops.add_setting("autonomy.test.v2", 1, "a", {"name": "alpha", "value": 7})
-    sm = ops.read_set("autonomy.test.v2", model=_TestPayload)
+    ops.add_setting("autonomy.test.v2", 1, "a", {"name": "alpha", "value": 7}, org=ops.CALLER_ORG)
+    sm = ops.read_set("autonomy.test.v2", model=_TestPayload, org=ops.CALLER_ORG)
     assert len(sm.members) == 1
     m = sm.members[0]
     assert isinstance(m.payload, _TestPayload)
@@ -185,12 +185,12 @@ def test_read_set_model_returns_typed_payloads(graph_db_env, open_schema):
 
 
 def test_read_set_model_drops_invalid_rows(graph_db_env, open_schema, caplog):
-    ops.add_setting("autonomy.test.v2", 1, "good", {"name": "ok", "value": 1})
-    ops.add_setting("autonomy.test.v2", 1, "bad-missing", {"name": "nope"})
-    ops.add_setting("autonomy.test.v2", 1, "bad-negative", {"name": "neg", "value": -5})
+    ops.add_setting("autonomy.test.v2", 1, "good", {"name": "ok", "value": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.v2", 1, "bad-missing", {"name": "nope"}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.v2", 1, "bad-negative", {"name": "neg", "value": -5}, org=ops.CALLER_ORG)
 
     with caplog.at_level(logging.WARNING, logger="tools.graph.settings_ops"):
-        sm = ops.read_set("autonomy.test.v2", model=_TestPayload)
+        sm = ops.read_set("autonomy.test.v2", model=_TestPayload, org=ops.CALLER_ORG)
 
     surviving_keys = {m.key for m in sm.members}
     assert surviving_keys == {"good"}
@@ -202,24 +202,24 @@ def test_read_set_model_drops_invalid_rows(graph_db_env, open_schema, caplog):
 def test_get_setting_model_returns_typed_payload(graph_db_env, open_schema):
     sid = ops.add_setting(
         "autonomy.test.v2", 1, "k", {"name": "alpha", "value": 1},
-    )
-    rs = ops.get_setting(sid, model=_TestPayload)
+     org=ops.CALLER_ORG)
+    rs = ops.get_setting(sid, model=_TestPayload, org=ops.CALLER_ORG)
     assert rs is not None
     assert isinstance(rs.payload, _TestPayload)
     assert rs.payload.name == "alpha"
 
 
 def test_get_setting_model_returns_none_on_invalid(graph_db_env, open_schema, caplog):
-    sid = ops.add_setting("autonomy.test.v2", 1, "k", {"name": "x"})
+    sid = ops.add_setting("autonomy.test.v2", 1, "k", {"name": "x"}, org=ops.CALLER_ORG)
     with caplog.at_level(logging.WARNING, logger="tools.graph.settings_ops"):
-        assert ops.get_setting(sid, model=_TestPayload) is None
+        assert ops.get_setting(sid, model=_TestPayload, org=ops.CALLER_ORG) is None
     assert "payload validation failed" in caplog.text
 
 
 def test_read_set_without_model_keeps_payload_as_dict(graph_db_env, open_schema):
     """Callers that skip ``model=`` get ``dict`` payloads (back-compat)."""
-    ops.add_setting("autonomy.test.v2", 1, "k", {"v": 1})
-    sm = ops.read_set("autonomy.test.v2")
+    ops.add_setting("autonomy.test.v2", 1, "k", {"v": 1}, org=ops.CALLER_ORG)
+    sm = ops.read_set("autonomy.test.v2", org=ops.CALLER_ORG)
     assert isinstance(sm.members[0].payload, dict)
 
 

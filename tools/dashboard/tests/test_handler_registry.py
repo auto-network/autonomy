@@ -208,7 +208,7 @@ async def test_loop_invokes_all_handlers_for_matching_set_id(
     register_action(TEST_SET_ID, h1, name="h1")
     register_action(TEST_SET_ID, h2, name="h2")
 
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1})
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1}, org=ops.CALLER_ORG)
     await _dispatch_event(_event(key="k1"), services)
 
     assert invocations == ["h1", "h2"]
@@ -258,7 +258,7 @@ async def test_loop_invokes_scopeless_handler_for_any_org(
 
     register_action(TEST_SET_ID, h, name="scopeless", org=None)
 
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "any-org", {"origin": "test"})
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "any-org", {"origin": "test"}, org=ops.CALLER_ORG)
     await _dispatch_event(_event(key="any-org", org="autonomy"), services)
     await _dispatch_event(_event(key="any-org", org="personal"), services)
 
@@ -281,7 +281,7 @@ async def test_handler_exception_does_not_block_siblings(
     register_action(TEST_SET_ID, raises, name="raises")
     register_action(TEST_SET_ID, runs_after, name="runs_after")
 
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1})
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1}, org=ops.CALLER_ORG)
     await _dispatch_event(_event(key="k1"), services)
 
     assert fired_after_raise.is_set()
@@ -299,7 +299,7 @@ async def test_handler_exception_logged_and_swallowed_with_health_recorded(
 
     register_action(TEST_SET_ID, boom, name="boom-handler")
 
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1})
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1}, org=ops.CALLER_ORG)
     with caplog.at_level(logging.ERROR, logger="settings_mediator"):
         await _dispatch_event(_event(key="k1"), services)
 
@@ -346,8 +346,8 @@ async def test_predicate_filter_skips_handler_when_predicate_returns_false(
     async def h(row, svc):
         invocations.append(row["kind"])
 
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "match", {"kind": "yes"})
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "mismatch", {"kind": "no"})
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "match", {"kind": "yes"}, org=ops.CALLER_ORG)
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "mismatch", {"kind": "no"}, org=ops.CALLER_ORG)
 
     await _dispatch_event(_event(key="match"), services)
     await _dispatch_event(_event(key="mismatch"), services)
@@ -387,7 +387,7 @@ async def test_two_plugins_registering_same_set_id_both_fire(
     finally:
         _loading_plugin_org.reset(token)
 
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1})
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1}, org=ops.CALLER_ORG)
     await _dispatch_event(_event(key="k1", org="autonomy"), services)
 
     assert invocations == ["a", "b"]
@@ -428,7 +428,7 @@ async def test_health_fields_populated_on_event_arrival(
 
     register_action(TEST_SET_ID, h, name="counted")
 
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1})
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1}, org=ops.CALLER_ORG)
     await _dispatch_event(_event(key="k1"), services)
 
     assert HEALTH.handlers_fired_count.get("counted") == 1
@@ -450,7 +450,7 @@ async def test_health_to_dict_exposes_documented_fields(
     async def h(row, svc): ...
     register_action(TEST_SET_ID, h, name="diag-handler")
 
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1})
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1}, org=ops.CALLER_ORG)
     await _dispatch_event(_event(key="k1"), services)
 
     snap = HEALTH.to_dict()
@@ -507,7 +507,7 @@ async def test_loop_dispatches_on_real_bus_event(
     start_action_loop(services, event_bus=bus)
     try:
         await asyncio.sleep(0.05)
-        ops.add_setting(TEST_SET_ID, TEST_REVISION, "bus-key", {"x": 1})
+        ops.add_setting(TEST_SET_ID, TEST_REVISION, "bus-key", {"x": 1}, org=ops.CALLER_ORG)
         await asyncio.wait_for(fired.wait(), timeout=2.0)
     finally:
         await stop_action_loop()

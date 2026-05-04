@@ -195,10 +195,10 @@ def test_add_and_read_round_trip(graph_db_env):
         SET_ID, SCHEMA_REVISION,
         "enterprise-ng",
         {"aggressiveness": "aggressive", "enabled": True},
-    )
+     org=ops.CALLER_ORG)
     assert sid
 
-    members = ops.read_set(SET_ID)
+    members = ops.read_set(SET_ID, org=ops.CALLER_ORG)
     assert len(members.members) == 1
     member = members.members[0]
     assert member.id == sid
@@ -213,22 +213,22 @@ def test_upsert_by_key_replaces_existing_row(graph_db_env):
     sid_a = ops.upsert_by_key(
         SET_ID, SCHEMA_REVISION, "enterprise-ng",
         {"aggressiveness": "balanced"},
-    )
+     org=ops.CALLER_ORG)
     sid_b = ops.upsert_by_key(
         SET_ID, SCHEMA_REVISION, "enterprise-ng",
         {"aggressiveness": "off"},
-    )
+     org=ops.CALLER_ORG)
     assert sid_a == sid_b
-    members = ops.read_set(SET_ID)
+    members = ops.read_set(SET_ID, org=ops.CALLER_ORG)
     assert len(members.members) == 1
     assert members.members[0].payload == {"aggressiveness": "off"}
 
 
 def test_multiple_workspaces_are_independent(graph_db_env):
     """Each workspace gets its own Setting row, keyed by workspace.id."""
-    ops.upsert_by_key(SET_ID, SCHEMA_REVISION, "ws-a", {"enabled": True})
-    ops.upsert_by_key(SET_ID, SCHEMA_REVISION, "ws-b", {"enabled": False})
-    members = ops.read_set(SET_ID)
+    ops.upsert_by_key(SET_ID, SCHEMA_REVISION, "ws-a", {"enabled": True}, org=ops.CALLER_ORG)
+    ops.upsert_by_key(SET_ID, SCHEMA_REVISION, "ws-b", {"enabled": False}, org=ops.CALLER_ORG)
+    members = ops.read_set(SET_ID, org=ops.CALLER_ORG)
     by_key = {m.key: m.payload for m in members.members}
     assert by_key == {
         "ws-a": {"enabled": True},
@@ -241,4 +241,4 @@ def test_add_setting_rejects_invalid_payload(graph_db_env):
     with pytest.raises(SchemaValidationError):
         ops.add_setting(
             SET_ID, SCHEMA_REVISION, "ws", {"aggressiveness": "yolo"},
-        )
+         org=ops.CALLER_ORG)

@@ -105,7 +105,7 @@ def test_load_mounts_filters_by_workspace_prefix(graph_db_env):
             "required": True,
         },
         state="raw",
-    )
+     org=ops.CALLER_ORG)
     ops.add_setting(
         MOUNT_SET_ID, 1,
         key="enterprise-ng:harness",
@@ -116,7 +116,7 @@ def test_load_mounts_filters_by_workspace_prefix(graph_db_env):
             "required": False,
         },
         state="raw",
-    )
+     org=ops.CALLER_ORG)
     ops.add_setting(
         MOUNT_SET_ID, 1,
         key="other-workspace:fixture",
@@ -126,7 +126,7 @@ def test_load_mounts_filters_by_workspace_prefix(graph_db_env):
             "required": True,
         },
         state="raw",
-    )
+     org=ops.CALLER_ORG)
 
     mounts = load_mounts("enterprise-ng")
     assert set(mounts.keys()) == {

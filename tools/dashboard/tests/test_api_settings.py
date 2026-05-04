@@ -78,7 +78,7 @@ def test_get_settings_list_empty(graph_db_env, example_schema, client):
 
 
 def test_get_settings_list_with_rows(graph_db_env, example_schema, client):
-    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.get("/api/graph/settings/autonomy.test.api")
     assert r.status_code == 200
     body = r.json()
@@ -88,7 +88,7 @@ def test_get_settings_list_with_rows(graph_db_env, example_schema, client):
 
 
 def test_get_setting_by_key(graph_db_env, example_schema, client):
-    ops.add_setting("autonomy.test.api", 1, "alpha", {"x": 1})
+    ops.add_setting("autonomy.test.api", 1, "alpha", {"x": 1}, org=ops.CALLER_ORG)
     r = client.get("/api/graph/settings/autonomy.test.api/alpha")
     assert r.status_code == 200
     assert r.json()["key"] == "alpha"
@@ -100,7 +100,7 @@ def test_get_setting_by_key_404(graph_db_env, example_schema, client):
 
 
 def test_get_setting_by_id(graph_db_env, example_schema, client):
-    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.get(f"/api/graph/setting/{sid}")
     assert r.status_code == 200
     assert r.json()["id"] == sid
@@ -112,7 +112,7 @@ def test_get_setting_by_id_404(graph_db_env, example_schema, client):
 
 
 def test_get_set_ids(graph_db_env, example_schema, client):
-    ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.get("/api/graph/sets")
     assert r.status_code == 200
     body = r.json()
@@ -121,8 +121,8 @@ def test_get_set_ids(graph_db_env, example_schema, client):
 
 
 def test_get_set_ids_summary(graph_db_env, example_schema, client):
-    base = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
-    ops.override_setting(base, {"label": "edited"})
+    base = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
+    ops.override_setting(base, {"label": "edited"}, org=ops.CALLER_ORG)
     r = client.get("/api/graph/sets?summary=1")
     assert r.status_code == 200
     body = r.json()
@@ -155,7 +155,7 @@ def test_get_settings_target_revision(graph_db_env, client):
     schemas.register_schema("autonomy.test.api", 2, V2,
                             upconvert_from_prev=lambda p: {**p, "v2": True})
 
-    ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.get("/api/graph/settings/autonomy.test.api?target_revision=2")
     assert r.status_code == 200
     member = r.json()["members"][0]
@@ -172,8 +172,8 @@ def test_get_settings_min_revision(graph_db_env, client):
         schema_revision = 2
     schemas.register_schema("autonomy.test.api", 1, V1)
     schemas.register_schema("autonomy.test.api", 2, V2)
-    ops.add_setting("autonomy.test.api", 1, "k1", {"x": 1})
-    ops.add_setting("autonomy.test.api", 2, "k2", {"x": 2})
+    ops.add_setting("autonomy.test.api", 1, "k1", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.api", 2, "k2", {"x": 2}, org=ops.CALLER_ORG)
     r = client.get("/api/graph/settings/autonomy.test.api?min_revision=2")
     assert r.status_code == 200
     body = r.json()
@@ -200,7 +200,7 @@ def test_post_setting_creates(graph_db_env, example_schema, client):
     })
     assert r.status_code == 201
     sid = r.json()["id"]
-    got = ops.get_setting(sid)
+    got = ops.get_setting(sid, org=ops.CALLER_ORG)
     assert got is not None and got.payload == {"x": 1}
 
 
@@ -228,12 +228,12 @@ def test_post_setting_validation_failure_structured_400(graph_db_env, strict_sch
 
 
 def test_post_override(graph_db_env, example_schema, client):
-    base = ops.add_setting("autonomy.test.api", 1, "k", {"a": 1, "b": 2})
+    base = ops.add_setting("autonomy.test.api", 1, "k", {"a": 1, "b": 2}, org=ops.CALLER_ORG)
     r = client.post(f"/api/graph/setting/{base}/override", json={
         "payload": {"b": 99},
     })
     assert r.status_code == 201
-    members = ops.read_set("autonomy.test.api").members
+    members = ops.read_set("autonomy.test.api", org=ops.CALLER_ORG).members
     assert members[0].payload == {"a": 1, "b": 99}
 
 
@@ -245,48 +245,48 @@ def test_post_override_missing_target_404(graph_db_env, example_schema, client):
 
 def test_post_exclude(graph_db_env, example_schema, client):
     base = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1},
-                           state="canonical")
+                           state="canonical", org=ops.CALLER_ORG)
     r = client.post(f"/api/graph/setting/{base}/exclude", json={})
     assert r.status_code == 201
-    assert ops.read_set("autonomy.test.api").members == []
+    assert ops.read_set("autonomy.test.api", org=ops.CALLER_ORG).members == []
 
 
 def test_post_promote(graph_db_env, example_schema, client):
-    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.post(f"/api/graph/setting/{sid}/promote", json={"to_state": "canonical"})
     assert r.status_code == 200
-    assert ops.get_setting(sid).state == "canonical"
+    assert ops.get_setting(sid, org=ops.CALLER_ORG).state == "canonical"
 
 
 def test_post_promote_invalid_state_400(graph_db_env, example_schema, client):
-    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.post(f"/api/graph/setting/{sid}/promote", json={"to_state": "garbage"})
     assert r.status_code == 400
 
 
 def test_post_promote_missing_to_state_400(graph_db_env, example_schema, client):
-    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.post(f"/api/graph/setting/{sid}/promote", json={})
     assert r.status_code == 400
 
 
 def test_post_deprecate(graph_db_env, example_schema, client):
-    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.post(f"/api/graph/setting/{sid}/deprecate", json={})
     assert r.status_code == 200
-    assert ops.get_setting(sid).deprecated is True
+    assert ops.get_setting(sid, org=ops.CALLER_ORG).deprecated is True
 
 
 def test_delete_setting(graph_db_env, example_schema, client):
-    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.delete(f"/api/graph/setting/{sid}")
     assert r.status_code == 200
-    assert ops.get_setting(sid) is None
+    assert ops.get_setting(sid, org=ops.CALLER_ORG) is None
 
 
 def test_delete_canonical_blocked_400(graph_db_env, example_schema, client):
     sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1},
-                           state="canonical")
+                           state="canonical", org=ops.CALLER_ORG)
     r = client.delete(f"/api/graph/setting/{sid}")
     assert r.status_code == 400
 
@@ -295,14 +295,14 @@ def test_delete_canonical_blocked_400(graph_db_env, example_schema, client):
 
 
 def test_setting_resolve_unique_prefix(graph_db_env, example_schema, client):
-    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.get(f"/api/graph/setting-resolve/{sid[:8]}")
     assert r.status_code == 200
     assert r.json()["id"] == sid
 
 
 def test_setting_resolve_full_id(graph_db_env, example_schema, client):
-    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.get(f"/api/graph/setting-resolve/{sid}")
     assert r.status_code == 200
     assert r.json()["id"] == sid
@@ -319,8 +319,8 @@ def test_setting_resolve_409_ambiguous(graph_db_env, example_schema, client, mon
               "abcd5678-bbbb-bbbb-bbbb-000000000002"]
     counter = iter(forced)
     monkeypatch.setattr(so, "uuid4", lambda: next(counter))
-    ops.add_setting("autonomy.test.api", 1, "k1", {"x": 1})
-    ops.add_setting("autonomy.test.api", 1, "k2", {"x": 2})
+    ops.add_setting("autonomy.test.api", 1, "k1", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.api", 1, "k2", {"x": 2}, org=ops.CALLER_ORG)
     r = client.get("/api/graph/setting-resolve/abcd5678")
     assert r.status_code == 409
     candidates = r.json()["candidates"]
@@ -330,8 +330,8 @@ def test_setting_resolve_409_ambiguous(graph_db_env, example_schema, client, mon
 def test_settings_chain_returns_layers(graph_db_env, example_schema, client):
     base = ops.add_setting(
         "autonomy.test.api", 1, "k", {"name": "B", "v": 1}, state="canonical",
-    )
-    ov = ops.override_setting(base, {"name": "O"})
+     org=ops.CALLER_ORG)
+    ov = ops.override_setting(base, {"name": "O"}, org=ops.CALLER_ORG)
     r = client.get("/api/graph/settings/autonomy.test.api/k/chain")
     assert r.status_code == 200
     body = r.json()
@@ -355,8 +355,8 @@ def test_diag_settings_counts_direct_and_http_traffic(
     graph_db_env, example_schema, client,
 ):
     settings_ops.reset_settings_api_stats()
-    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
-    assert ops.get_setting(sid) is not None
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
+    assert ops.get_setting(sid, org=ops.CALLER_ORG) is not None
 
     r = client.get("/api/graph/settings/autonomy.test.api")
     assert r.status_code == 200
@@ -398,7 +398,7 @@ def test_diag_settings_counts_errors(graph_db_env, example_schema, client):
     with pytest.raises(LookupError):
         ops.promote_setting(
             "00000000-0000-0000-0000-000000000000", "canonical",
-        )
+         org=ops.CALLER_ORG)
 
     diag = client.get("/api/diag/settings")
     assert diag.status_code == 200
@@ -441,8 +441,8 @@ def test_diag_settings_sets_summary_and_detail(
     graph_db_env, example_schema, client,
 ):
     settings_ops.reset_settings_api_stats()
-    base = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1})
-    ops.override_setting(base, {"label": "edited"})
+    base = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
+    ops.override_setting(base, {"label": "edited"}, org=ops.CALLER_ORG)
     r = client.get("/api/graph/settings/autonomy.test.api")
     assert r.status_code == 200
 
