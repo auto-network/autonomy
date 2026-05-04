@@ -429,7 +429,12 @@ def _turn_correction_metrics(raw_text: str, corrected_text: str) -> dict[str, An
     delete_chars = sum(len(f["text"]) for f in fragments if f["kind"] == "delete")
     insert_chars = sum(len(f["text"]) for f in fragments if f["kind"] == "insert")
     edit_fragments = sum(1 for f in fragments if f["kind"] != "same")
-    char_similarity = SequenceMatcher(None, raw_text.lower(), corrected_text.lower()).ratio()
+    char_similarity = SequenceMatcher(
+        None,
+        raw_text.lower(),
+        corrected_text.lower(),
+        autojunk=False,
+    ).ratio()
     total_len = max(len(raw_text) + len(corrected_text), 1)
     edit_chars = delete_chars + insert_chars
     edit_ratio = edit_chars / total_len
@@ -2141,6 +2146,13 @@ class SessionMonitor:
                     debug_payload,
                 )
                 if candidate is None:
+                    logger.info(
+                        "session_monitor: turn_correction skipped session=%s recent_user_count=%d corrected_preview=%r debug=%s",
+                        session_uuid,
+                        len(ts.recent_user_turns),
+                        corrected[:160],
+                        debug_payload,
+                    )
                     continue
                 target = candidate["message_id"]
                 sha = _sha256_text(candidate["content"])
