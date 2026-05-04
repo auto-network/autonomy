@@ -97,25 +97,26 @@
                               :title="isShowingRawCorrection(resolveEntry(dEntry)) ? 'Show corrected text' : 'Show original text'"
                               :aria-pressed="isShowingRawCorrection(resolveEntry(dEntry)) ? 'true' : 'false'"
                               @click.stop="toggleAcceptedCorrectionPreview(resolveEntry(dEntry))">
-                        <svg class="tc-marker-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                          <template x-if="!isShowingRawCorrection(resolveEntry(dEntry))">
-                            <g>
-                              <path d="M5 1.75h4.5l2.75 2.75v6.75A2 2 0 0 1 10.25 13H5.75a2 2 0 0 1-2-2v-7.25a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-                              <path d="M9.5 1.75V4.5h2.75" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-                              <path d="m5.9 8.35 1.15 1.15 2.95-2.95" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-                            </g>
-                          </template>
-                          <template x-if="isShowingRawCorrection(resolveEntry(dEntry))">
-                            <g>
-                              <path d="M5 1.75h4.5l2.75 2.75v6.75A2 2 0 0 1 10.25 13H5.75a2 2 0 0 1-2-2v-7.25a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-                              <path d="M9.5 1.75V4.5h2.75" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-                              <path d="M5.75 10.75 10.5 6" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
-                              <path d="M5.75 6 10.5 10.75" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
-                            </g>
-                          </template>
+                        <svg x-show="!isShowingRawCorrection(resolveEntry(dEntry))"
+                             class="tc-marker-icon"
+                             viewBox="0 0 16 16"
+                             fill="none"
+                             aria-hidden="true">
+                          <path d="M5 1.75h4.5l2.75 2.75v6.75A2 2 0 0 1 10.25 13H5.75a2 2 0 0 1-2-2v-7.25a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                          <path d="M9.5 1.75V4.5h2.75" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                          <path d="m5.9 8.35 1.15 1.15 2.95-2.95" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
                         </svg>
-                        <span class="hidden md:inline"
-                              x-text="isShowingRawCorrection(resolveEntry(dEntry)) ? 'original' : 'accepted'"></span>
+                        <svg x-show="isShowingRawCorrection(resolveEntry(dEntry))"
+                             class="tc-marker-icon"
+                             viewBox="0 0 16 16"
+                             fill="none"
+                             aria-hidden="true">
+                          <path d="M5 1.75h4.5l2.75 2.75v6.75A2 2 0 0 1 10.25 13H5.75a2 2 0 0 1-2-2v-7.25a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                          <path d="M9.5 1.75V4.5h2.75" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                          <path d="M5.75 10.75 10.5 6" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
+                          <path d="M5.75 6 10.5 10.75" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
+                        </svg>
+                        <span x-text="isShowingRawCorrection(resolveEntry(dEntry)) ? 'original' : 'accepted'"></span>
                       </button>
                     </template>
                     <span class="sc-timestamp" x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
