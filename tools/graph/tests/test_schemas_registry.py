@@ -215,3 +215,271 @@ def test_auto_register_inherited_set_id_does_not_register_subclass():
     # auto-registration was skipped because it didn't declare its own
     # set_id/schema_revision.
     assert schemas.get_schema("auto.var", 1) is Parent
+
+
+# ── @action / @on_kind marker decorators ─────────────────────
+
+
+@pytest.fixture
+def _isolate_action_registry():
+    """Snapshot + restore the settings-mediator handler registry.
+
+    ``__init_subclass__`` action discovery registers entries in the
+    substrate's ``_HANDLERS`` dict via ``register_action_decorator``;
+    tests need their entries to land + be cleaned up without affecting
+    sibling tests.
+    """
+    from tools.dashboard.settings_mediator.loop import _HANDLERS
+    snap = {k: list(v) for k, v in _HANDLERS.items()}
+    try:
+        yield _HANDLERS
+    finally:
+        _HANDLERS.clear()
+        for k, v in snap.items():
+            _HANDLERS[k] = list(v)
+
+
+def test_action_marker_registers_default_handler(_isolate_action_registry):
+    """A schema with ``@action async def deliver(row, svc)`` registers a
+    default action under ``f"{cls.__name__}.deliver"`` with no predicate
+    on the schema's ``set_id``."""
+    handlers = _isolate_action_registry
+
+    class WidgetV1(schemas.SettingSchema):
+        set_id = "act.widget"
+        schema_revision = 1
+
+        @schemas.action
+        async def deliver(row, svc):
+            pass
+
+    actions = handlers.get("act.widget", [])
+    assert len(actions) == 1
+    assert actions[0].name == "WidgetV1.deliver"
+    # Default action: dispatch fires on every row (no predicate filter).
+    assert actions[0].fn is WidgetV1.deliver
+
+
+@pytest.mark.asyncio
+async def test_on_kind_marker_registers_predicate_per_kind(
+    _isolate_action_registry,
+):
+    """A schema with multiple ``@on_kind("...")`` methods registers one
+    predicate-filtered action per kind, each firing only when
+    ``row.get("kind")`` matches its declared kind."""
+    handlers = _isolate_action_registry
+    fired: list[tuple[str, str]] = []
+
+    class DecisionV1(schemas.SettingSchema):
+        set_id = "act.decision"
+        schema_revision = 1
+
+        @schemas.on_kind("thumb_yes")
+        async def thumb_yes(row, svc):
+            fired.append(("thumb_yes", row["tile_id"]))
+
+        @schemas.on_kind("thumb_no")
+        async def thumb_no(row, svc):
+            fired.append(("thumb_no", row["tile_id"]))
+
+        @schemas.on_kind("choice")
+        async def choice(row, svc):
+            fired.append(("choice", row["choice"]))
+
+    actions = handlers.get("act.decision", [])
+    assert len(actions) == 3
+    names = {a.name for a in actions}
+    assert names == {
+        "DecisionV1.thumb_yes",
+        "DecisionV1.thumb_no",
+        "DecisionV1.choice",
+    }
+
+    from tools.dashboard.settings_mediator.loop import Row
+
+    def _row(payload: dict) -> Row:
+        return Row(
+            id="r", set_id="act.decision", key="k",
+            payload=payload, created_at="", updated_at="",
+        )
+
+    # Each registered handler is wrapped in a predicate. A row whose
+    # ``kind`` doesn't match a given handler should be skipped by that
+    # handler — only the matching one fires.
+    for action in actions:
+        await action.fn(_row({"kind": "thumb_yes", "tile_id": "t1"}), None)
+    assert fired == [("thumb_yes", "t1")]
+    fired.clear()
+
+    for action in actions:
+        await action.fn(_row({
+            "kind": "choice", "tile_id": "t2", "choice": "yep",
+        }), None)
+    assert fired == [("choice", "yep")]
+
+
+def test_marker_on_non_callable_silently_ignored(_isolate_action_registry):
+    """Marker attributes on non-callable values are silently skipped — only
+    callable methods register as actions."""
+    handlers = _isolate_action_registry
+
+    class _Sentinel:
+        """Class-attribute shim that accepts arbitrary attribute writes."""
+
+    sentinel = _Sentinel()
+    sentinel._is_substrate_action = True  # type: ignore[attr-defined]
+    sentinel_kind = _Sentinel()
+    sentinel_kind._action_kind = "ignored_kind"  # type: ignore[attr-defined]
+
+    class DodgyV1(schemas.SettingSchema):
+        set_id = "act.dodgy"
+        schema_revision = 1
+
+        # Markers stamped on non-callable instances must not register —
+        # discovery filters by ``callable(value)`` first.
+        not_a_method = sentinel
+        also_not = sentinel_kind
+
+        @schemas.action
+        async def deliver(row, svc):
+            pass
+
+    actions = handlers.get("act.dodgy", [])
+    assert len(actions) == 1, (
+        f"only the callable-marked method should register; got {[a.name for a in actions]}"
+    )
+    assert actions[0].name == "DodgyV1.deliver"
+
+
+@pytest.mark.asyncio
+async def test_on_kind_migration_parity_with_free_function_form(
+    _isolate_action_registry,
+):
+    """Migration test: rewriting the coordinator-board free-function
+    handlers as ``@on_kind`` methods on a single schema produces the same
+    set of registered actions (count + dispatch behavior) the existing
+    ``@register_action_decorator`` form produces.
+
+    This mirrors the six handlers currently in
+    ``tools.dashboard.plugins.coordinator_board.entrypoints.actions``
+    (``thumb_yes``, ``thumb_no``, ``choice``, ``custom_reply``,
+    ``sitrep_request``, ``refresh_request``) on a per-test schema so
+    we can observe registration + dispatch end-to-end without reloading
+    the production module.
+    """
+    handlers = _isolate_action_registry
+    sent: list[tuple[str, str]] = []
+
+    class _SvcStub:
+        async def session_send(self, target: str, text: str) -> None:
+            sent.append((target, text))
+
+    svc = _SvcStub()
+
+    class CoordinatorDecisionTestV1(schemas.SettingSchema):
+        set_id = "act.coord-decision"
+        schema_revision = 1
+
+        @schemas.on_kind("thumb_yes")
+        async def thumb_yes(row, svc):
+            await svc.session_send(
+                row["target_session"],
+                f"COORDINATOR: Operator: thumb yes on {row['tile_id']}.",
+            )
+
+        @schemas.on_kind("thumb_no")
+        async def thumb_no(row, svc):
+            await svc.session_send(
+                row["target_session"],
+                f"COORDINATOR: Operator: thumb no on {row['tile_id']}.",
+            )
+
+        @schemas.on_kind("choice")
+        async def choice(row, svc):
+            await svc.session_send(
+                row["target_session"],
+                f"COORDINATOR: Operator chose: {row['choice']} on {row['tile_id']}.",
+            )
+
+        @schemas.on_kind("custom")
+        async def custom_reply(row, svc):
+            await svc.session_send(
+                row["target_session"],
+                f"COORDINATOR: {row['choice']}",
+            )
+
+        @schemas.on_kind("sitrep_request")
+        async def sitrep_request(row, svc):
+            await svc.session_send(
+                row["target_session"],
+                f"COORDINATOR: Operator requests a sitrep on {row['tile_id']}.",
+            )
+
+        @schemas.on_kind("refresh_request")
+        async def refresh_request(row, svc):
+            await svc.session_send(
+                row["target_session"],
+                f"COORDINATOR: Operator requests a refresh on {row['tile_id']}.",
+            )
+
+    actions = handlers.get("act.coord-decision", [])
+    # Same count as the production free-function form (six decision kinds).
+    assert len(actions) == 6
+    expected_names = {
+        "CoordinatorDecisionTestV1.thumb_yes",
+        "CoordinatorDecisionTestV1.thumb_no",
+        "CoordinatorDecisionTestV1.choice",
+        "CoordinatorDecisionTestV1.custom_reply",
+        "CoordinatorDecisionTestV1.sitrep_request",
+        "CoordinatorDecisionTestV1.refresh_request",
+    }
+    assert {a.name for a in actions} == expected_names
+
+    from tools.dashboard.settings_mediator.loop import Row
+
+    def _row(payload: dict) -> Row:
+        return Row(
+            id="r", set_id="act.coord-decision", key="k",
+            payload=payload, created_at="", updated_at="",
+        )
+
+    # Dispatch behavior parity: each kind triggers exactly its handler's
+    # synthesized text. We invoke every registered action against a row
+    # carrying that ``kind`` and verify only the matching handler fires.
+    cases = [
+        (
+            {"kind": "thumb_yes", "tile_id": "t1", "target_session": "auto-foo"},
+            ("auto-foo", "COORDINATOR: Operator: thumb yes on t1."),
+        ),
+        (
+            {"kind": "thumb_no", "tile_id": "t2", "target_session": "auto-bar"},
+            ("auto-bar", "COORDINATOR: Operator: thumb no on t2."),
+        ),
+        (
+            {"kind": "choice", "tile_id": "t3", "choice": "ship it",
+             "target_session": "auto-baz"},
+            ("auto-baz", "COORDINATOR: Operator chose: ship it on t3."),
+        ),
+        (
+            {"kind": "custom", "tile_id": "t4", "choice": "hold off",
+             "target_session": "auto-quux"},
+            ("auto-quux", "COORDINATOR: hold off"),
+        ),
+        (
+            {"kind": "sitrep_request", "tile_id": "t5",
+             "target_session": "auto-foo"},
+            ("auto-foo", "COORDINATOR: Operator requests a sitrep on t5."),
+        ),
+        (
+            {"kind": "refresh_request", "tile_id": "t6",
+             "target_session": "auto-foo"},
+            ("auto-foo", "COORDINATOR: Operator requests a refresh on t6."),
+        ),
+    ]
+    for payload, expected in cases:
+        sent.clear()
+        for action in actions:
+            await action.fn(_row(payload), svc)
+        assert sent == [expected], (
+            f"kind={payload['kind']}: expected one fire {expected}, got {sent}"
+        )

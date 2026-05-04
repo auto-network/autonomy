@@ -346,6 +346,106 @@ def _register_variant(cls: type) -> None:
     cls._variant_slug = slug
 
 
+# ── Mediator-action marker decorators ────────────────────────
+#
+# Substrate consumers wire mediator actions today via
+# ``@register_action_decorator(SET_ID, predicate=..., name=...)`` applied
+# to a free function in a separate ``_actions.py`` module. The marker
+# decorators below let the action live INSIDE the schema class so the
+# schema-action relationship is visible from the schema's own definition,
+# without repeating the ``set_id`` string at every handler.
+#
+#     @keyed_per_entity
+#     class WidgetV1(SettingSchema):
+#         set_id = "dashboard.widget"
+#         schema_revision = 1
+#
+#         @action
+#         async def deliver(row, svc): ...
+#
+#         @on_kind("ping")
+#         async def ping(row, svc): ...
+#
+# ``__init_subclass__`` walks the class body, finds methods bearing the
+# ``_is_substrate_action`` / ``_action_kind`` markers, and registers
+# each via ``register_action_decorator`` under the schema's ``set_id``.
+# Default-action methods register with ``predicate=None``;
+# ``@on_kind`` methods register with a closure predicate
+# ``lambda r: r.get("kind") == kind``. Existing free-function consumers
+# of ``@register_action_decorator`` continue to work unchanged — the
+# markers are an additional path, not a replacement.
+
+
+def action(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Marker decorator: the schema's default mediator-action handler.
+
+    Stamps ``_is_substrate_action = True`` on *fn*. Discovery in
+    :meth:`SettingSchema.__init_subclass__` registers each marked method
+    via ``register_action_decorator(cls.set_id, name=f"{cls.__name__}.{method}")``
+    with no predicate — the handler fires on every ``setting.changed``
+    event for the schema's ``set_id``.
+    """
+    fn._is_substrate_action = True
+    return fn
+
+
+def on_kind(kind: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Marker decorator factory: the action for one ``kind`` variant.
+
+    Always parameterized: ``@on_kind("thumb_yes")``. Stamps
+    ``_action_kind`` on the decorated function; discovery wraps the
+    handler in a ``row.get("kind") == kind`` predicate so multiple kinds
+    can coexist on the same ``set_id`` without the substrate seeing them
+    fire on every event.
+    """
+    def _wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
+        fn._action_kind = kind
+        return fn
+    return _wrap
+
+
+def _discover_actions(cls: type) -> None:
+    """Find ``@action`` / ``@on_kind`` marked methods in ``cls.__dict__``
+    and register each via the settings-mediator substrate.
+
+    Only ``cls.__dict__`` is scanned — inherited methods are not
+    re-registered when a subclass is defined. Non-callable values
+    bearing a marker (defensive: someone tags a dataclass field by
+    hand) are silently skipped.
+
+    The substrate import is lazy so ``tools.graph.schemas`` doesn't pull
+    ``tools.dashboard.settings_mediator`` until a schema actually has
+    marked methods to register. Schemas that ship in
+    ``tools/graph/schemas/*`` carry no markers today, so the lazy import
+    only fires when plugin schemas (already inside
+    ``tools.dashboard.*``) are imported.
+    """
+    set_id = cls.__dict__.get("set_id") or getattr(cls, "set_id", None)
+    if not set_id:
+        return
+    marks: list[tuple[str, Callable[..., Any], str | None]] = []
+    for attr_name, value in list(cls.__dict__.items()):
+        if not callable(value):
+            continue
+        if getattr(value, "_is_substrate_action", False):
+            marks.append((attr_name, value, None))
+        elif hasattr(value, "_action_kind"):
+            marks.append((attr_name, value, getattr(value, "_action_kind")))
+    if not marks:
+        return
+    from tools.dashboard.settings_mediator import register_action_decorator
+    for method_name, fn, kind in marks:
+        registered_name = f"{cls.__name__}.{method_name}"
+        if kind is None:
+            register_action_decorator(set_id, name=registered_name)(fn)
+        else:
+            register_action_decorator(
+                set_id,
+                predicate=(lambda r, k=kind: r.get("kind") == k),
+                name=registered_name,
+            )(fn)
+
+
 def _auto_register_schema(cls: type) -> None:
     """Auto-register *cls* in the schema registry when it declares both
     ``set_id`` and ``schema_revision`` in its own ``__dict__``.
@@ -491,6 +591,7 @@ class SettingSchema:
                 cls._field_metadata = merged
             _register_variant(cls)
             _auto_register_schema(cls)
+            _discover_actions(cls)
             return
         # Annotations may be strings under ``from __future__ import
         # annotations``. Resolve them in the defining module's namespace
@@ -539,6 +640,7 @@ class SettingSchema:
             cls._field_metadata = merged
         _register_variant(cls)
         _auto_register_schema(cls)
+        _discover_actions(cls)
 
     @classmethod
     def validate(cls, payload: dict) -> None:
