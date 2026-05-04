@@ -670,6 +670,189 @@ def test_capability_env_resolves_host_binding_from_environ(
     assert "GH_TOKEN=ghp_from_host_env" in envs
 
 
+# ── auto-10lsv: multi-token Claude auth ─────────────────────────────
+
+
+class TestListClaudeTokenFiles:
+    def test_returns_only_setup_token_files(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
+        (tmp_path / ".setup-token").write_text("default-tok")
+        (tmp_path / ".setup-token.primary").write_text("primary-tok")
+        (tmp_path / ".credentials.json").write_text("{}")
+        (tmp_path / "unrelated.txt").write_text("nope")
+
+        files = session_launcher.list_claude_token_files()
+        names = [p.name for p in files]
+        assert names == [".setup-token", ".setup-token.primary"]
+
+    def test_missing_dir_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path / "nope"))
+        assert session_launcher.list_claude_token_files() == []
+
+    def test_alias_for_token_file(self, tmp_path):
+        assert session_launcher.alias_for_token_file(
+            tmp_path / ".setup-token",
+        ) == "default"
+        assert session_launcher.alias_for_token_file(
+            tmp_path / ".setup-token.primary",
+        ) == "primary"
+
+
+class TestResolveCredentials:
+    def test_env_var_wins_and_emits_no_alias(self, tmp_path, monkeypatch):
+        """Acceptance criterion #4: CLAUDE_CODE_OAUTH_TOKEN compat path preserved."""
+        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
+        (tmp_path / ".setup-token").write_text("file-tok")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-tok-xyz")
+
+        creds = session_launcher._resolve_credentials()
+        assert creds == {"type": "token", "token": "env-tok-xyz"}
+        assert "alias" not in creds
+
+    def test_falls_through_to_credentials_json_when_no_setup_tokens(
+        self, tmp_path, monkeypatch,
+    ):
+        """Acceptance criterion #5: legacy creds_file path preserved."""
+        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        creds_file = tmp_path / ".credentials.json"
+        creds_file.write_text('{"claudeAiOauth": {"accessToken": "x"}}')
+
+        creds = session_launcher._resolve_credentials()
+
+        assert creds == {"type": "creds_file", "path": str(creds_file)}
+
+    def test_returns_none_when_nothing_found(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        assert session_launcher._resolve_credentials() is None
+
+    def test_picks_token_file_and_emits_alias(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        (tmp_path / ".setup-token").write_text("default-tok\n")
+
+        # No usage rows yet (first launch / empty graph) → returns alias.
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
+
+        creds = session_launcher._resolve_credentials()
+        assert creds == {
+            "type": "token", "token": "default-tok", "alias": "default",
+        }
+
+    def test_prefer_alias_wins_when_file_exists(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        (tmp_path / ".setup-token").write_text("default-tok")
+        (tmp_path / ".setup-token.primary").write_text("primary-tok")
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
+
+        creds = session_launcher._resolve_credentials(prefer_alias="primary")
+        assert creds["alias"] == "primary"
+        assert creds["token"] == "primary-tok"
+
+    def test_prefer_unknown_alias_falls_through_to_selection(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        (tmp_path / ".setup-token").write_text("default-tok")
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
+
+        # Unknown alias does not block the launch — the selector picks the
+        # default file as the next-best option.
+        creds = session_launcher._resolve_credentials(prefer_alias="ghost")
+        assert creds["alias"] == "default"
+
+    def test_picks_least_used_token_by_short_window_headroom(
+        self, tmp_path, monkeypatch,
+    ):
+        """Acceptance criterion #3: launcher picks low-utilization token."""
+        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        (tmp_path / ".setup-token").write_text("default-tok")
+        (tmp_path / ".setup-token.primary").write_text("primary-tok")
+
+        usage_rows = [
+            # default at 80% short → 20% headroom
+            {
+                "harness": "claude", "alias": "default",
+                "windows": {"short": {"used_percent": 80.0}, "long": {}},
+            },
+            # primary at 5% short → 95% headroom (winner)
+            {
+                "harness": "claude", "alias": "primary",
+                "windows": {"short": {"used_percent": 5.0}, "long": {}},
+            },
+        ]
+        monkeypatch.setattr(
+            session_launcher, "_claude_usage_rows", lambda: usage_rows,
+        )
+
+        creds = session_launcher._resolve_credentials()
+        assert creds["alias"] == "primary"
+
+    def test_first_launch_token_ranks_above_already_seen(
+        self, tmp_path, monkeypatch,
+    ):
+        """Brand-new tokens (no usage row) outrank ones with telemetry so
+        they get exercised before refreshing existing rows."""
+        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        (tmp_path / ".setup-token").write_text("default-tok")
+        (tmp_path / ".setup-token.fresh").write_text("fresh-tok")
+
+        usage_rows = [
+            # default has telemetry: 0% used → 100% headroom (high but
+            # finite).
+            {
+                "harness": "claude", "alias": "default",
+                "windows": {"short": {"used_percent": 0.0}, "long": {}},
+            },
+            # fresh has no row → ranks at top per the selector contract.
+        ]
+        monkeypatch.setattr(
+            session_launcher, "_claude_usage_rows", lambda: usage_rows,
+        )
+
+        creds = session_launcher._resolve_credentials()
+        assert creds["alias"] == "fresh"
+
+
+def test_meta_doc_records_claude_token_alias(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch,
+):
+    """auto-10lsv: launcher writes the chosen alias into .session_meta.json
+    so the dashboard can surface it on registration."""
+    monkeypatch.setattr(
+        session_launcher,
+        "_resolve_credentials",
+        lambda: {"type": "token", "token": "tok-xyz", "alias": "primary"},
+    )
+    run_dir = tmp_path / "run"
+    _run(output_dir=str(run_dir))
+
+    meta = json.loads((run_dir / "sessions" / ".session_meta.json").read_text())
+    assert meta["claude_token_alias"] == "primary"
+
+
+def test_meta_doc_omits_alias_when_none(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch,
+):
+    """No alias on the creds dict (env-var path or creds_file) → no
+    ``claude_token_alias`` key in the meta doc."""
+    monkeypatch.setattr(
+        session_launcher,
+        "_resolve_credentials",
+        lambda: {"type": "token", "token": "tok-xyz"},
+    )
+    run_dir = tmp_path / "run"
+    _run(output_dir=str(run_dir))
+
+    meta = json.loads((run_dir / "sessions" / ".session_meta.json").read_text())
+    assert "claude_token_alias" not in meta
+
+
 def test_no_hardcoded_license_mount(tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch):
     """The ad-hoc /home/jeremy/workspace/license.yaml overlay must be gone.
 

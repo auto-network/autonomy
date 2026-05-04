@@ -8454,31 +8454,57 @@ def _collect_codex_usage_payloads(
     )]
 
 
+def _claude_token_row_key(identity_id: str, alias: str | None) -> str:
+    """Compose a unique row key per (Anthropic org, token alias).
+
+    Tokens that point at the same Anthropic org would otherwise collapse
+    onto a single ``claude:org:<uuid>`` row, with the alias field racing
+    between the two pollers. Suffixing the alias keeps each
+    ``.setup-token.<alias>`` file's telemetry on its own row so the
+    dashboard can render both.
+    """
+    base = _harness_usage_settings.make_harness_usage_key("claude", identity_id)
+    if alias:
+        return f"{base}:{alias}"
+    return base
+
+
 def _collect_claude_usage_payloads(
     rows: list[dict[str, Any]],
     updated_at: str,
 ) -> list[tuple[str, dict[str, Any]]]:
-    bundles: dict[str, dict[str, Any]] = {}
-    unresolved = False
+    """Build harness-usage payloads for every host-side Claude token file.
 
-    for row in rows:
-        bundle = _resolve_claude_credential_bundle(row)
-        if bundle is None:
-            unresolved = True
-            continue
-        bundles.setdefault(bundle["fingerprint"], bundle)
+    auto-10lsv: refactored from the live-session walk to direct token
+    enumeration. Each ``~/.claude/.setup-token*`` produces one row,
+    keyed ``claude:org:<uuid>:<alias>`` with the org id from the /usage
+    response header and the operator-facing alias from the filename.
+    The host-session resolution-dir dependency is gone — the dashboard
+    works correctly even when ``tmux_sessions.resolution_dir`` is null.
+
+    The ``rows`` parameter is retained for symmetry with
+    ``_collect_codex_usage_payloads`` (the publisher dispatches on
+    harness) but is intentionally unused here; sessions no longer
+    contribute Claude usage telemetry.
+    """
+    del rows  # Claude usage is enumerated directly from token files now.
+
+    from agents.session_launcher import (
+        alias_for_token_file,
+        list_claude_token_files,
+    )
 
     payloads: dict[str, dict[str, Any]] = {}
     now_ms = int(time.time() * 1000)
+    token_files = list_claude_token_files()
+    if not token_files:
+        return []
 
-    # One Claude account = one org-keyed row. Try live bundles in order
-    # and stop on the first successful /usage call — the response carries
-    # the org-id that all bundles for the same account collapse into. We
-    # deliberately skip expired bundles and swallow per-bundle errors:
-    # writing per-fingerprint acct rows would create a zombie row every
-    # time the host rotates its OAuth refresh token, since the fingerprint
-    # is derived from that token.
-    for bundle in bundles.values():
+    for token_file in token_files:
+        alias = alias_for_token_file(token_file)
+        bundle = _harness_usage_settings.load_claude_credential_bundle(token_file)
+        if bundle is None:
+            continue
         expires_at_ms = bundle.get("expires_at_ms")
         if isinstance(expires_at_ms, int) and expires_at_ms <= now_ms:
             continue
@@ -8488,53 +8514,26 @@ def _collect_claude_usage_payloads(
             )
         except Exception:
             logger.exception(
-                "claude harness usage: /usage call failed (bundle %s)",
-                bundle["fingerprint"],
+                "claude harness usage: /usage call failed for token %r",
+                alias,
             )
             continue
 
         org_id = response_headers.get("anthropic-organization-id")
+        if not org_id:
+            # No org id = no canonical identity. Skip rather than write a
+            # row keyed off the alias alone; the next poll cycle retries.
+            continue
         payload = _harness_usage_settings.normalize_claude_usage_payload(
             bundle=bundle,
             usage_body=usage_body,
             org_id=org_id,
             updated_at=updated_at,
+            alias=alias,
         )
-        payloads[
-            _harness_usage_settings.make_harness_usage_key(
-                "claude", payload["identity_id"],
-            )
-        ] = payload
-        break
-
-    # Only surface the "unresolved" indicator when no bundle was reachable
-    # at all. If bundles existed but failed/expired, leave the prior org
-    # row alone — it carries the last-known-good telemetry until the next
-    # successful poll.
-    if unresolved and not payloads:
-        unresolved_id = "unresolved"
-        payloads[
-            _harness_usage_settings.make_harness_usage_key("claude", unresolved_id)
-        ] = _harness_usage_settings.make_unavailable_usage_payload(
-            harness="claude",
-            identity_id=unresolved_id,
-            identity_label="unresolved",
-            source="oauth_usage",
-            note="Active Claude credentials are not accessible in this dashboard container",
-            updated_at=updated_at,
-        )
+        payloads[_claude_token_row_key(payload["identity_id"], alias)] = payload
 
     return sorted(payloads.items(), key=lambda item: item[0])
-
-
-def _resolve_claude_credential_bundle(row: dict[str, Any]) -> dict[str, Any] | None:
-    for path in _harness_usage_settings.candidate_claude_credential_paths(row):
-        if not path.exists():
-            continue
-        bundle = _harness_usage_settings.load_claude_credential_bundle(path)
-        if bundle is not None:
-            return bundle
-    return None
 
 
 def _fetch_claude_oauth_usage(
