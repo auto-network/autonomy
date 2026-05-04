@@ -1064,6 +1064,37 @@ SWEEP_LEGACY_ATT_ID = "ff000000-0000-0000-0000-000000000006"
 SWEEP_NO_ALT_ATT_ID = "aa100000-0000-0000-0000-000000000007"
 SWEEP_LEGACY_NOTE_ID = "bb100000-0000-0000-0000-000000000008"
 
+# Mixed-role chat session for TestSourceViewerRoleRendering (auto-pluod).
+# Backed by ``read_source_full`` shape: each entry carries ``role`` (no
+# ``entry_type``). Roles cover the three production cases the chat layout
+# needs to discriminate: thoughts (role=user), derivations with default
+# attribution (role=assistant), and derivations attributed to a model
+# (role=<model-string>) — the model string must still render as ASSISTANT.
+SWEEP_CHAT_SOURCE_ID = "cc100000-0000-0000-0000-000000000009"
+SWEEP_CHAT_SOURCE = {
+    "id": SWEEP_CHAT_SOURCE_ID,
+    "title": "Mixed-role chat session",
+    "type": "session",
+    "project": "autonomy",
+    "created_at": "2026-04-30T12:00:00Z",
+    "metadata": "{}",
+    "content": "Chat session with mixed user/assistant roles",
+    "entries": [
+        {"turn_number": 1, "role": "user",
+         "content": "ROLE_TEST_USER_TURN_ONE",
+         "created_at": "2026-04-30T12:00:00Z"},
+        {"turn_number": 2, "role": "assistant",
+         "content": "ROLE_TEST_ASSISTANT_TURN_TWO",
+         "created_at": "2026-04-30T12:00:01Z"},
+        {"turn_number": 3, "role": "user",
+         "content": "ROLE_TEST_USER_TURN_THREE",
+         "created_at": "2026-04-30T12:00:02Z"},
+        {"turn_number": 4, "role": "claude-opus-4-7",
+         "content": "ROLE_TEST_MODEL_TURN_FOUR",
+         "created_at": "2026-04-30T12:00:03Z"},
+    ],
+}
+
 # Fixtures for TestAgentActionsDropdown (auto-aia85). Two notes — one in
 # the autonomy org (which has the seeded action set) and one in an org
 # with no seeded actions. The dropdown must render for the first and
@@ -1226,6 +1257,7 @@ SWEEP_GRAPH_SOURCES = {
     SWEEP_AGENT_ACTIONS_AUTONOMY_NOTE_ID: SWEEP_AGENT_ACTIONS_SOURCE_AUTONOMY,
     SWEEP_AGENT_ACTIONS_EMPTY_NOTE_ID: SWEEP_AGENT_ACTIONS_SOURCE_EMPTY_ORG,
     SWEEP_AGENTIC_SOURCE_ID: SWEEP_AGENTIC_GRAPH_SOURCE,
+    SWEEP_CHAT_SOURCE_ID: SWEEP_CHAT_SOURCE,
 }
 
 SWEEP_GRAPH_ATTACHMENTS = {
@@ -5974,6 +6006,98 @@ class TestRichContentNarrowViewport:
         """User can scroll horizontally to see the full diagram at narrow width."""
         assert self._checks.get("is_scrollable"), \
             "Diagram is not scrollable at narrow viewport — content is clipped"
+
+
+# ── Source page: chat layout role rendering (auto-pluod) ─────────────
+#
+# Pre-fix: source.html discriminated on ``e.entry_type === 'thought'``,
+# which is undefined for entries returned by ``read_source_full``. Every
+# entry fell through to the ``ASSISTANT`` branch — including user turns.
+#
+# Post-fix: discriminator is ``e.role === 'user'``. This sweep asserts
+# that user/assistant labels render correctly for a fixture covering all
+# three role-string shapes the API can emit (``user`` / ``assistant`` /
+# ``<model-string>``).
+
+ROLE_RENDERING_CHECKS = """
+    // Each chat entry is an absolute-positioned 'turn-N' node. Walk them in
+    // turn-number order and capture the role label + content text so the
+    // test asserts the per-entry mapping, not just "USER appears somewhere".
+    var turns = document.querySelectorAll('[id^="turn-"]');
+    r.turn_count = turns.length;
+    r.labels_by_turn = {};
+    r.content_by_turn = {};
+    for (var i = 0; i < turns.length; i++) {
+        var node = turns[i];
+        var idMatch = (node.id || '').match(/^turn-(\\d+)$/);
+        if (!idMatch) continue;
+        var turnNum = idMatch[1];
+        var labelEl = node.querySelector('span.text-xs.font-semibold');
+        r.labels_by_turn[turnNum] = labelEl ? labelEl.textContent.trim() : '';
+        r.content_by_turn[turnNum] = (node.textContent || '');
+    }
+    // Aggregate visible-label counts so the headline assertion is one int.
+    var labels = Object.values(r.labels_by_turn);
+    r.user_label_count = labels.filter(function(l) { return l === 'USER'; }).length;
+    r.assistant_label_count = labels.filter(function(l) { return l === 'ASSISTANT'; }).length;
+"""
+
+
+class TestSourceViewerRoleRendering:
+    """Chat-layout entries render USER vs ASSISTANT per ``role`` (auto-pluod).
+
+    Regression guard: pre-fix the template discriminated on a missing
+    ``entry_type`` field, so every entry rendered as ASSISTANT. The
+    fixture covers the three role-string shapes the API can emit:
+
+    - turn 1: ``role='user'``                → USER
+    - turn 2: ``role='assistant'``           → ASSISTANT
+    - turn 3: ``role='user'``                → USER
+    - turn 4: ``role='claude-opus-4-7'``     → ASSISTANT (model strings
+      come from ``COALESCE(model, 'assistant')`` in ``read_source_full``)
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_check(
+            f"/graph/{SWEEP_CHAT_SOURCE_ID[:12]}",
+            ROLE_RENDERING_CHECKS,
+            wait_ms=1000,
+        )
+        request.cls._checks = result
+
+    def test_all_fixture_turns_rendered(self):
+        """All four fixture entries render as chat turns."""
+        assert self._checks.get("turn_count") == 4, (
+            f"Expected 4 chat turns, got {self._checks.get('turn_count')!r} — "
+            "isChat layout may not be active for type='session'"
+        )
+
+    def test_user_label_visible(self):
+        """At least one entry renders the visible 'USER' label."""
+        assert self._checks.get("user_label_count", 0) >= 1, (
+            "No entry renders the 'USER' label — pre-fix regression "
+            "(discriminator ignored e.role and labelled every entry "
+            f"ASSISTANT). Labels seen: {self._checks.get('labels_by_turn')!r}"
+        )
+
+    def test_assistant_label_visible(self):
+        """At least one entry renders the visible 'ASSISTANT' label."""
+        assert self._checks.get("assistant_label_count", 0) >= 1, (
+            "No entry renders the 'ASSISTANT' label. "
+            f"Labels seen: {self._checks.get('labels_by_turn')!r}"
+        )
+
+    def test_label_matches_fixture_role_per_turn(self):
+        """Each rendered turn's label matches the fixture's role for that turn."""
+        labels = self._checks.get("labels_by_turn") or {}
+        expected = {"1": "USER", "2": "ASSISTANT", "3": "USER", "4": "ASSISTANT"}
+        for turn_num, want in expected.items():
+            got = labels.get(turn_num)
+            assert got == want, (
+                f"turn-{turn_num}: expected label {want!r}, got {got!r} "
+                f"(full labels map: {labels!r})"
+            )
 
 
 # ── Agent-actions dropdown JS check bundle ──────────────────────────
