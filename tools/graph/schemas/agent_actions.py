@@ -1,10 +1,18 @@
-"""``dashboard.agent-actions#1`` — per-(org, asset_type) agentic action registry.
+"""``dashboard.agent-actions#2`` — per-(org, asset_type) agentic action registry.
 
 Each Setting member declares one action available in the dashboard's
 agentic-actions dropdown for the asset's owning org. The dropdown is
 strictly own-org-of-asset: an action defined in anchore.db only renders
 on anchore notes; cross-org adoption is via canonical promotion of the
 member into the receiving org's DB.
+
+Revision history:
+
+* ``#1`` — initial shape.
+* ``#2`` — adds optional ``input_prompt``: when set, the dashboard pops
+  a small input modal seeded with this label before dispatching, and
+  the operator's input lands as ``custom_input`` on the dispatch payload
+  (available as ``{custom_input}`` inside the action's ``prompt_template``).
 """
 
 from __future__ import annotations
@@ -15,7 +23,7 @@ from .registry import SchemaValidationError, SettingSchema, register_schema
 
 
 AGENT_ACTIONS_SET_ID = "dashboard.agent-actions"
-AGENT_ACTIONS_REVISION = 1
+AGENT_ACTIONS_REVISION = 2
 
 VALID_ASSET_TYPES = (
     "note", "bead", "session", "agent-run", "conversation",
@@ -38,18 +46,25 @@ SYNOPSIS = {
 _ALLOWED_FIELDS = {
     "asset_type", "label", "icon", "model", "prompt_template",
     "estimated_seconds", "writes", "universal", "workspace",
-    "card_summary",
+    "card_summary", "input_prompt",
 }
 
 _CARD_SUMMARY_FORMATS = ("text", "badge", "stars", "code")
 
 
-class AgentActionV1(SettingSchema):
-    """Shape of a ``dashboard.agent-actions#1`` member payload.
+class AgentActionV2(SettingSchema):
+    """Shape of a ``dashboard.agent-actions#2`` member payload.
 
     Required: ``asset_type``, ``label``.
     Required-unless-universal: ``model``, ``prompt_template``.
-    Optional: ``icon``, ``estimated_seconds``, ``writes``, ``universal``.
+    Optional: ``icon``, ``estimated_seconds``, ``writes``, ``universal``,
+    ``workspace``, ``card_summary``, ``input_prompt``.
+
+    ``input_prompt`` (added in #2) makes the action operator-input-aware:
+    when set, the dashboard renders an input modal seeded with this label
+    and forwards the operator's text as ``custom_input`` on the dispatch
+    payload, which the prompt template can interpolate via
+    ``{custom_input}``.
     """
 
     set_id = AGENT_ACTIONS_SET_ID
@@ -118,6 +133,16 @@ class AgentActionV1(SettingSchema):
             ),
             "element": {"type": "object"},
         },
+        "input_prompt": {
+            "type": "string",
+            "description": (
+                "When present, the dashboard pops an input modal seeded "
+                "with this label before dispatching the action. The "
+                "operator's input lands as ``custom_input`` on the "
+                "dispatch payload and is available as ``{custom_input}`` "
+                "inside the action's prompt_template."
+            ),
+        },
     }
 
     @classmethod
@@ -150,7 +175,8 @@ class AgentActionV1(SettingSchema):
                         f"{cls.__name__}: non-universal members require {key!r}"
                     )
 
-        for key in ("icon", "model", "prompt_template", "workspace"):
+        for key in ("icon", "model", "prompt_template", "workspace",
+                    "input_prompt"):
             if key in payload and payload[key] is not None:
                 if not isinstance(payload[key], str):
                     raise SchemaValidationError(
@@ -214,4 +240,46 @@ class AgentActionV1(SettingSchema):
             )
 
 
-register_schema(AGENT_ACTIONS_SET_ID, AGENT_ACTIONS_REVISION, AgentActionV1)
+class AgentActionV1(SettingSchema):
+    """Legacy ``dashboard.agent-actions#1`` shape — identical to ``#2``
+    minus the optional ``input_prompt`` field.
+
+    Kept registered so stored rows at revision 1 still resolve to a known
+    schema; new writes should target ``#2``. The ``#1 → #2`` upconverter
+    is the identity (omitted ``input_prompt`` is just absent), so a
+    ``graph set migrate dashboard.agent-actions --target 2`` rewrites
+    every legacy row at the new revision without changing payloads.
+    """
+
+    set_id = AGENT_ACTIONS_SET_ID
+    schema_revision = 1
+
+    _field_metadata: dict[str, dict] = {
+        k: v for k, v in AgentActionV2._field_metadata.items()
+        if k != "input_prompt"
+    }
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if isinstance(payload, dict) and "input_prompt" in payload:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'input_prompt' was added in #2; reject "
+                "at #1 so storage stamps the right revision"
+            )
+        AgentActionV2.validate(payload)
+
+
+def _upconvert_v1_to_v2(payload: dict) -> dict:
+    """Identity upconvert: ``#1`` payloads pass through unchanged.
+
+    ``input_prompt`` is optional in ``#2``, so a ``#1`` row without it is
+    already a valid ``#2`` payload.
+    """
+    return dict(payload)
+
+
+register_schema(AGENT_ACTIONS_SET_ID, 1, AgentActionV1)
+register_schema(
+    AGENT_ACTIONS_SET_ID, AGENT_ACTIONS_REVISION, AgentActionV2,
+    upconvert_from_prev=_upconvert_v1_to_v2,
+)

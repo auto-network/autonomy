@@ -154,6 +154,13 @@
       visible: false,
       panelOpen: false,
       modalOpen: false,
+      // Operator-input modal state (auto-0tkwj). Shown for actions whose
+      // payload declares ``input_prompt``. The action being prompted for
+      // is held in ``inputModalMember`` so submit can re-dispatch with
+      // the right member_key.
+      inputModalOpen: false,
+      inputModalMember: null,
+      inputModalText: '',
       members: [],
       asset: { id: '', type: '' },
       org: '',
@@ -246,18 +253,28 @@
           await this.openSendToModal();
           return;
         }
+        // Schema #2 (auto-0tkwj): actions with ``input_prompt`` open a
+        // small input modal first. Submit re-enters this method with
+        // the operator's text via ``submitInputModal``.
+        var inputPrompt = member.payload && member.payload.input_prompt;
+        if (typeof inputPrompt === 'string' && inputPrompt.trim()) {
+          this.openInputModal(member);
+          return;
+        }
+        await this._postDispatch(member, {});
+      },
+
+      // Internal: actually POST to /api/agent-actions/dispatch. Shared
+      // path between direct dispatch and input-modal submit so the
+      // success/error/toast behaviour stays in one place.
+      async _postDispatch(member, extras) {
         this.pendingDispatch = true;
         this.lastError = '';
         try {
-          // Minimal payload: the server resolves title / org / type /
-          // url / etc. from the asset's source row. Sending DOM-scraped
-          // values from the page would round-trip data the server
-          // already owns and risks UI fallbacks (e.g. ``"Source: <id>"``
-          // page-title placeholder) leaking into the agent's prompt.
-          var body = {
+          var body = Object.assign({
             asset_id: this.asset.id,
             member_key: member.key,
-          };
+          }, extras || {});
           var resp = await fetch('/api/agent-actions/dispatch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -265,21 +282,57 @@
           });
           if (!resp.ok) {
             this.lastError = 'Dispatch failed (' + resp.status + ')';
-            return;
+            return false;
           }
           await resp.json();
-          // No redirect. The operator stays on the asset page so the
-          // metadata change (title/short_description/keywords) becomes
-          // visible inline as the agent finishes — no need to bounce
-          // them to the agent's own session row, which is mostly empty
-          // metadata. ``/dispatch`` and ``/timeline`` remain reachable
-          // if they want to watch the run.
           this.lastDispatchLabel = (member.payload && member.payload.label) || member.key || '';
           var self = this;
           setTimeout(function () { self.lastDispatchLabel = ''; }, 4000);
+          return true;
         } finally {
           this.pendingDispatch = false;
         }
+      },
+
+      // ── Operator-input modal (auto-0tkwj) ──
+      openInputModal(member) {
+        this.inputModalMember = member;
+        this.inputModalText = '';
+        this.inputModalOpen = true;
+        this.lastError = '';
+        // Autofocus after Alpine has flipped x-show. ``requestAnimationFrame``
+        // runs after the layout pass so the textarea is in the flow and
+        // focus() can land. Falling back to setTimeout with a small delay
+        // covers headless harnesses that no-op on rAF.
+        var self = this;
+        var doFocus = function () {
+          var ta = document.querySelector(
+            '[data-testid=action-input-modal] textarea'
+          );
+          if (ta) ta.focus();
+        };
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(doFocus);
+        }
+        setTimeout(doFocus, 30);
+      },
+
+      closeInputModal() {
+        this.inputModalOpen = false;
+        this.inputModalMember = null;
+        this.inputModalText = '';
+      },
+
+      inputModalCanSubmit() {
+        return !!(this.inputModalText && this.inputModalText.trim());
+      },
+
+      async submitInputModal() {
+        if (!this.inputModalCanSubmit()) return;
+        var member = this.inputModalMember;
+        var text = this.inputModalText.trim();
+        var ok = await this._postDispatch(member, { custom_input: text });
+        if (ok) this.closeInputModal();
       },
 
       async openSendToModal() {
