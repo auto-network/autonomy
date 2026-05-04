@@ -163,6 +163,33 @@
                      x-text="shortDescription"></div>
               </template>
 
+              <!-- Row 2.75: chat metadata strip (turns · range · duration · tokens) -->
+              <template x-if="hasMeta">
+                <div data-testid="sv-meta-strip" class="flex items-center gap-1.5 flex-wrap" style="margin-top:1px">
+                  <template x-if="turnsCount">
+                    <span data-testid="sv-meta-turns" style="font-size:11px; color:#94a3b8; font-family:ui-monospace,monospace" x-text="turnsCount === 1 ? '1 turn' : turnsCount + ' turns'"></span>
+                  </template>
+                  <template x-if="turnsCount && timeRangeFormatted">
+                    <span style="color:#334155; font-size:10px">&middot;</span>
+                  </template>
+                  <template x-if="timeRangeFormatted">
+                    <span data-testid="sv-meta-time-range" style="font-size:11px; color:#94a3b8; font-family:ui-monospace,monospace" x-text="timeRangeFormatted"></span>
+                  </template>
+                  <template x-if="(turnsCount || timeRangeFormatted) && durationFormatted">
+                    <span style="color:#334155; font-size:10px">&middot;</span>
+                  </template>
+                  <template x-if="durationFormatted">
+                    <span data-testid="sv-meta-duration" style="font-size:11px; color:#94a3b8; font-family:ui-monospace,monospace" x-text="durationFormatted"></span>
+                  </template>
+                  <template x-if="(turnsCount || timeRangeFormatted || durationFormatted) && tokensFormatted">
+                    <span style="color:#334155; font-size:10px">&middot;</span>
+                  </template>
+                  <template x-if="tokensFormatted">
+                    <span data-testid="sv-meta-tokens" style="font-size:11px; color:#94a3b8; font-family:ui-monospace,monospace" x-text="tokensFormatted"></span>
+                  </template>
+                </div>
+              </template>
+
               <!-- Row 3: metadata (conditional) -->
               <template x-if="authorOrMeta">
                 <div class="flex items-center gap-1.5 flex-wrap" style="margin-top:1px">
