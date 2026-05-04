@@ -811,6 +811,20 @@ def get_session(tmux_name: str) -> dict | None:
     return dict(row) if row else None
 
 
+def is_session_live(tmux_name: str) -> bool:
+    """Return True iff a row exists for ``tmux_name`` and is_live=1.
+
+    Used by the targeted dashboard-approval nag (auto-rh2r5) to decide
+    whether the authoring session is still alive to receive the message.
+    Missing rows and dead rows both return False.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT is_live FROM tmux_sessions WHERE tmux_name=?", (tmux_name,)
+    ).fetchone()
+    return bool(row and row["is_live"])
+
+
 def get_tailable_sessions() -> list[dict]:
     """Return live sessions that have a jsonl_path set (ready for tailing)."""
     conn = get_conn()

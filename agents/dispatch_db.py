@@ -257,6 +257,13 @@ def insert_launch_run(
     or ``agentic``. Reads coalesce NULL → ``bead`` for backwards compat.
     ``agentic_source_id`` is set only for ``kind='agentic'`` rows; it
     points at the graph ``sources`` row that owns the action's identity.
+
+    Snappier launch broadcast (auto-rh2r5): emit ``dispatch`` on the
+    EventBus immediately after the insert so any in-process subscriber
+    (the dashboard's ``_dispatch_watcher`` is the safety-net poller, not
+    the only path) sees the new RUNNING row in <1s instead of waiting on
+    the 5s poll cadence. Best-effort — broadcast failures must not cause
+    the insert to roll back or surface to callers.
     """
     started_dt = datetime.fromtimestamp(started_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if started_at else None
 
@@ -282,6 +289,57 @@ def insert_launch_run(
         conn.commit()
     finally:
         conn.close()
+
+    _broadcast_launch_event(
+        run_id=run_id,
+        bead_id=bead_id,
+        kind=kind,
+        librarian_type=librarian_type,
+        container_name=container_name,
+        image=image,
+    )
+
+
+def _broadcast_launch_event(
+    *,
+    run_id: str,
+    bead_id: str,
+    kind: str,
+    librarian_type: str | None,
+    container_name: str,
+    image: str,
+) -> None:
+    """Emit a ``dispatch`` EventBus broadcast announcing a RUNNING insert.
+
+    Kept as a separate function so tests can spy on it in isolation. The
+    broadcast is best-effort: any import or runtime failure is swallowed
+    so a launch-time hiccup never surfaces to the dispatcher caller.
+    Each launch is unique, so dedup is disabled — back-to-back launches
+    of distinct runs must not be coalesced by the bus.
+    """
+    try:
+        from tools.dashboard.event_bus import event_bus
+    except Exception:
+        return
+    try:
+        event_bus.broadcast_sync(
+            "dispatch",
+            {
+                "event": "launch",
+                "run_id": run_id,
+                "bead_id": bead_id or None,
+                "kind": kind,
+                "librarian_type": librarian_type,
+                "container_name": container_name or None,
+                "image": image or None,
+            },
+            dedup=False,
+        )
+    except Exception:
+        # Never let a broadcast hiccup affect the insert that already
+        # succeeded — the watcher will still pick the row up on its
+        # 5s safety-net poll.
+        pass
 
 
 def insert_run(
