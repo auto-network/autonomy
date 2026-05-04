@@ -215,3 +215,88 @@ def test_auto_register_inherited_set_id_does_not_register_subclass():
     # auto-registration was skipped because it didn't declare its own
     # set_id/schema_revision.
     assert schemas.get_schema("auto.var", 1) is Parent
+
+
+# ── set_id_suffix composition (auto-uqdkk) ────────────────────
+
+
+def test_set_id_suffix_three_level_composition():
+    """A 3-level ``set_id_suffix`` chain composes left-to-right, with each
+    level appending one dotted leaf to the running prefix written by the
+    previous level."""
+
+    class Parent(schemas.SettingSchema):
+        set_id = "compose.root"
+
+    class Child(Parent):
+        set_id_suffix = "a"
+
+    class Grandchild(Child):
+        set_id_suffix = "b"
+
+    assert Parent.set_id == "compose.root"
+    assert Child.set_id == "compose.root.a"
+    assert Grandchild.set_id == "compose.root.a.b"
+    # The composed value lives in the subclass's own __dict__ so that
+    # descendants find it via their MRO walk.
+    assert Child.__dict__["set_id"] == "compose.root.a"
+    assert Grandchild.__dict__["set_id"] == "compose.root.a.b"
+
+
+def test_set_id_suffix_without_namespace_ancestor_raises():
+    """Declaring ``set_id_suffix`` without an ancestor that provides a
+    namespace ``set_id`` raises ``TypeError`` at class definition."""
+
+    with pytest.raises(TypeError, match="set_id_suffix"):
+        class Orphan(schemas.SettingSchema):  # noqa: F841
+            set_id_suffix = "lost"
+            schema_revision = 1
+
+
+def test_collision_on_duplicate_composition_raises():
+    """Two registered subclasses that compose to the same ``(set_id,
+    schema_revision)`` raise ``TypeError`` at the second class definition."""
+
+    class Parent(schemas.SettingSchema):
+        set_id = "collide.root"
+
+    class A(Parent):  # noqa: F841 — registers compose.root.x#1 to A
+        set_id_suffix = "x"
+        schema_revision = 1
+
+    with pytest.raises(TypeError, match="collision|already registered"):
+        class B(Parent):  # noqa: F841
+            set_id_suffix = "x"
+            schema_revision = 1
+
+
+def test_prefix_matching_finds_namespace_descendants():
+    """``list_registered_set_ids()`` plus a prefix filter surfaces every
+    schema descended from an intermediate namespace — the substrate-level
+    "all descendants of <namespace>" query."""
+
+    class Root(schemas.SettingSchema):
+        set_id = "prefix.root"
+
+    class Middle(Root):
+        # No schema_revision — namespace intermediate, doesn't itself
+        # register, but its composed set_id provides the prefix for
+        # descendants below.
+        set_id_suffix = "ns"
+
+    class Leaf1(Middle):  # noqa: F841
+        set_id_suffix = "x"
+        schema_revision = 1
+
+    class Leaf2(Middle):  # noqa: F841
+        set_id_suffix = "y"
+        schema_revision = 1
+
+    descendants = [
+        s for s in schemas.list_registered_set_ids()
+        if s.startswith("prefix.root.ns.")
+    ]
+    assert "prefix.root.ns.x" in descendants
+    assert "prefix.root.ns.y" in descendants
+    # The intermediate namespace itself didn't register.
+    assert "prefix.root.ns" not in schemas.list_registered_set_ids()

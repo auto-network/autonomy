@@ -34,13 +34,21 @@ def _isolate_schema_registry():
 
 @pytest.fixture
 def stub_org_schema():
-    """Register a permissive ``autonomy.org#1`` schema so seeds succeed."""
+    """Register a permissive ``autonomy.org#1`` schema so seeds succeed.
+
+    The production ``autonomy.org#1`` carries strict validation that would
+    reject the bootstrap test fixtures' minimal payloads. Auto-registration
+    via ``__init_subclass__`` collides with the existing production class,
+    so we drop the production registration first; the autouse
+    ``_isolate_registry`` fixture restores it after the test.
+    """
+    from tools.graph.schemas.registry import unregister_schema
+    unregister_schema("autonomy.org", 1)
 
     class OrgV1(schemas.SettingSchema):
         set_id = "autonomy.org"
         schema_revision = 1
 
-    schemas.register_schema("autonomy.org", 1, OrgV1)
     return OrgV1
 
 

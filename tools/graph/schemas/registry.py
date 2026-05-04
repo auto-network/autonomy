@@ -19,6 +19,35 @@ their hand-curated synopsis surfacing as ``autonomy.schema.synopsis#1``.
 ``flush_schema_meta(db)`` performs the upsert; ``GraphDB._init_schema``
 calls it once per writable connection. The flush is idempotent — payload
 match is a no-op.
+
+Suffix composition (auto-uqdkk): a subclass may declare
+``set_id_suffix = "leaf"`` to inherit its parent's ``set_id`` as a
+namespace prefix, composing ``parent.set_id + "." + suffix`` at class-
+definition time and writing the result back into ``cls.__dict__``. The
+namespace hierarchy lives in the inheritance graph rather than in
+hand-typed dotted strings; substrate-level prefix matching covers
+"all descendants of <namespace>". Three gotchas to keep in mind:
+
+1. **Suffix-less concrete subclass silently inherits the parent's
+   set_id.** A subclass that declares ``schema_revision`` but no
+   ``set_id_suffix`` (and no own ``set_id``) does not auto-register —
+   its ``set_id`` is inherited via attribute lookup, not present in its
+   own ``__dict__``, so the inherited-attrs guard skips it. Either
+   declare ``set_id_suffix`` (composed leaf) or an explicit ``set_id``
+   (override the namespace).
+
+2. **Diamond inheritance picks the leftmost branch's namespace.** With
+   ``class C(A, B)`` where both ``A.set_id`` and ``B.set_id`` are set,
+   the MRO walk takes ``A.set_id`` as the prefix — so
+   ``C.set_id_suffix = "c"`` composes to ``"a.c"``, not ``"b.c"``.
+   Mixin reorderings change which branch wins.
+
+3. **Suffix renames ripple into descendants.** The composed ``set_id``
+   is written back to ``cls.__dict__`` at class-definition time, so
+   renaming a parent's ``set_id_suffix`` (or its ``set_id``) requires
+   re-creating descendant classes for the new prefix to flow through.
+   In practice that's just a process restart, but registry callers
+   that cache classes across reloads must clear and re-register.
 """
 
 from __future__ import annotations
@@ -346,6 +375,43 @@ def _register_variant(cls: type) -> None:
     cls._variant_slug = slug
 
 
+def _compose_set_id_from_suffix(cls: type) -> None:
+    """Compose ``cls.set_id`` from ``cls.set_id_suffix`` plus an ancestor's
+    namespace ``set_id``.
+
+    A subclass declaring its own ``set_id_suffix`` (and not its own
+    ``set_id``) inherits the namespace from the nearest MRO ancestor whose
+    ``__dict__`` carries a non-empty ``set_id``. The composed value is
+    ``"<prefix>.<suffix>"`` and is written into ``cls.__dict__`` so
+    descendants find it via their own MRO walk — composition is path-
+    dependent, with each level appending one suffix to the running prefix.
+
+    Skips silently when *cls* doesn't declare its own ``set_id_suffix``,
+    or when *cls* declares its own ``set_id`` (explicit override wins).
+
+    Raises ``TypeError`` when ``set_id_suffix`` is declared but no ancestor
+    provides a namespace ``set_id``.
+    """
+    suffix = cls.__dict__.get("set_id_suffix")
+    if not suffix:
+        return
+    if cls.__dict__.get("set_id"):
+        return
+    prefix: str | None = None
+    for ancestor in cls.__mro__[1:]:
+        own = ancestor.__dict__.get("set_id")
+        if own:
+            prefix = own
+            break
+    if prefix is None:
+        raise TypeError(
+            f"{cls.__qualname__}: set_id_suffix={suffix!r} declared but no "
+            "ancestor provides a namespace set_id; declare set_id on a "
+            "parent before composing suffixes from descendants."
+        )
+    cls.set_id = f"{prefix}.{suffix}"
+
+
 def _auto_register_schema(cls: type) -> None:
     """Auto-register *cls* in the schema registry when it declares both
     ``set_id`` and ``schema_revision`` in its own ``__dict__``.
@@ -434,6 +500,12 @@ class SettingSchema:
     set_id: str = ""
     schema_revision: int = 0
 
+    # Optional namespace leaf — when set on a subclass (and ``set_id`` is
+    # not), :func:`_compose_set_id_from_suffix` composes the subclass's
+    # ``set_id`` as ``parent_namespace + "." + set_id_suffix`` at class-
+    # definition time. See module docstring for the three gotchas.
+    set_id_suffix: str = ""
+
     # Field metadata: ``{field_name: {description, type, required,
     # enum, default, element, ...}}``. Source of truth for
     # introspection (``graph set schema/example/find``) and the lazy
@@ -489,6 +561,7 @@ class SettingSchema:
                 merged = dict(inherited)
                 merged.update(explicit)
                 cls._field_metadata = merged
+            _compose_set_id_from_suffix(cls)
             _register_variant(cls)
             _auto_register_schema(cls)
             return
@@ -537,6 +610,7 @@ class SettingSchema:
             merged.update(explicit)
             merged.update(derived)
             cls._field_metadata = merged
+        _compose_set_id_from_suffix(cls)
         _register_variant(cls)
         _auto_register_schema(cls)
 
@@ -648,8 +722,21 @@ def register_schema(
     If *upconvert_from_prev* is given, also register the ``rev-1 -> rev``
     hop so consumers asking for ``target_revision = revision`` can accept
     older stored rows.
+
+    Raises ``TypeError`` when a *different* class is already registered at
+    the same ``(set_id, revision)`` — the most likely trigger is two
+    subclasses composing to the same key via ``set_id_suffix``. Re-
+    registering the *same* class object is idempotent (so an explicit
+    ``register_schema`` call after auto-registration is a no-op).
     """
     key = schema_key(set_id, revision)
+    existing = SCHEMAS.get(key)
+    if existing is not None and existing is not model_cls:
+        raise TypeError(
+            f"schema collision at {key}: already registered to "
+            f"{existing.__qualname__}, refusing to overwrite with "
+            f"{model_cls.__qualname__}"
+        )
     SCHEMAS[key] = model_cls
     if upconvert_from_prev is not None:
         register_upconverter(set_id, revision - 1, revision, upconvert_from_prev)
