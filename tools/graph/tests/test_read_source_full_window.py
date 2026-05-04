@@ -79,6 +79,70 @@ def test_read_source_full_default_returns_from_turn_1(graph_db_env):
     assert result["truncated"] is True
 
 
+def test_read_source_full_default_carries_entry_created_at(graph_db_env):
+    """Default full-source path must surface entry ``created_at`` for
+    every thought and derivation — the source-viewer header metadata
+    strip needs per-entry timestamps to render time range and duration.
+
+    Pre-fix: ``db.get_source_content`` (used on the default path)
+    omitted ``created_at`` from its SELECT, so every entry came back
+    with ``created_at=None`` and the strip silently degraded. The
+    ``around_turn`` and ``tail_n`` paths already selected the column,
+    so context-mode views worked.
+
+    Discovered during validation of auto-ptptn (header metadata strip).
+    """
+    db = GraphDB(str(graph_db_env))
+    src = Source(
+        type="session",
+        platform="claude-code",
+        project="autonomy",
+        title="timestamped session",
+        file_path="session:timestamped",
+        metadata={"author": "test"},
+    )
+    db.insert_source(src)
+    db.insert_thought(Thought(
+        source_id=src.id,
+        content="user opener",
+        role="user",
+        turn_number=1,
+        created_at="2026-04-01T10:00:00Z",
+    ))
+    db.insert_derivation(Derivation(
+        source_id=src.id,
+        content="assistant reply",
+        model="claude-opus",
+        turn_number=2,
+        created_at="2026-04-01T10:05:30Z",
+    ))
+    db.insert_thought(Thought(
+        source_id=src.id,
+        content="user follow-up",
+        role="user",
+        turn_number=3,
+        created_at="2026-04-01T10:12:00Z",
+    ))
+    db.conn.commit()
+    db.close()
+
+    result = ops.read_source_full(src.id)
+    assert result is not None
+    entries = result["entries"]
+    assert len(entries) == 3
+    # Every entry must carry a non-null timestamp on the default path.
+    timestamps = [e.get("created_at") for e in entries]
+    assert all(ts is not None and ts != "" for ts in timestamps), (
+        f"expected created_at for every entry, got {timestamps!r}"
+    )
+    # Both thought and derivation rows are covered (UNION ALL branches).
+    assert timestamps == [
+        "2026-04-01T10:00:00Z",
+        "2026-04-01T10:05:30Z",
+        "2026-04-01T10:12:00Z",
+    ]
+
+
 def test_read_source_full_with_around_turn_returns_window(graph_db_env):
     """With ``around_turn=N, window=W``, return entries with
     ``turn_number BETWEEN N - W AND N + W`` regardless of ``max_chars``."""

@@ -1665,10 +1665,12 @@ class GraphDB:
     def get_source_content(self, source_id: str) -> list[dict]:
         """Get all thoughts and derivations for a source, ordered by turn number."""
         rows = self.conn.execute(
-            """SELECT id, content, role, turn_number, message_id, metadata, 'thought' as entry_type
+            """SELECT id, content, role, turn_number, message_id, metadata, created_at,
+                      'thought' as entry_type
                FROM thoughts WHERE source_id = ?
                UNION ALL
-               SELECT id, content, model as role, turn_number, message_id, metadata, 'derivation' as entry_type
+               SELECT id, content, model as role, turn_number, message_id, metadata, created_at,
+                      'derivation' as entry_type
                FROM derivations WHERE source_id = ?
                ORDER BY turn_number""",
             (source_id, source_id),
