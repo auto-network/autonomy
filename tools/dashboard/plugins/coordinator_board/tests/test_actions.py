@@ -1,8 +1,8 @@
 """Tests for the coordinator-board action handlers (bead auto-e5vus).
 
 The handlers themselves are stateless one-liners — the bulk of the work
-(idempotency, restart-resume, predicate filtering) lives in the
-settings-mediator substrate, covered by ``test_settings_mediator.py``.
+(predicate routing, fan-out, exception isolation) lives in the
+settings-mediator substrate, covered by ``test_handler_registry.py``.
 What we verify here:
 
 * Each ``coordinator-decision`` ``kind`` produces the synthesized text
@@ -11,27 +11,22 @@ What we verify here:
   ``dashboard.coordinator`` and passes the body verbatim.
 * ``operator-message`` with no coordinator binding resolved logs +
   drops the row (no exception, no ``session_send`` call).
-* Importing the actions module registers all seven handlers in
-  ``settings_mediator.REGISTRY`` with the correct predicates and
-  set_ids — the manifest's import-side-effect contract.
-* End-to-end through ``iterate_once``: writing a decision row dispatches
-  exactly the matching handler, and re-iterating is a no-op (substrate
-  idempotency).
+* Importing the actions module registers all seven handlers under the
+  expected ``set_id``s — the manifest's import-side-effect contract.
+* End-to-end through the substrate's dispatch path: a synthesized
+  ``setting.changed`` event resolves the matching row and fires only
+  the handler whose wrapped predicate accepts the row's ``kind``.
 """
 from __future__ import annotations
 
 import logging
-import time
 from unittest.mock import MagicMock
 
 import pytest
 
 from tools.dashboard import settings_mediator
-from tools.dashboard.settings_mediator import (
-    Row,
-    Services,
-    iterate_once,
-)
+from tools.dashboard.settings_mediator import Row, Services
+from tools.dashboard.settings_mediator.loop import _HANDLERS, _dispatch_event
 from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS, register_schema, SettingSchema
 
 
@@ -271,28 +266,23 @@ async def test_operator_message_drops_when_no_coordinator(
 
 
 def test_importing_actions_module_registers_all_handlers():
-    """The module's ``register_action_decorator`` calls populate REGISTRY.
+    """The module's ``register_action_decorator`` calls populate the registry.
 
     Seven handlers total: six on the decision set (one per ``kind``)
-    plus one on the operator-message set. Each decision handler carries
-    a predicate; the operator-message handler does not.
+    plus one on the operator-message set. Predicates are wrapped INSIDE
+    the registered handler now (bead auto-rc27t), so we no longer
+    inspect them via ``RegisteredAction.predicate`` — instead the
+    end-to-end dispatch tests below verify only the matching ``kind``
+    triggers its handler.
     """
     # Force a fresh import so registration fires under the cleared
     # registry (the autouse fixture clears between tests, but the module
-    # is import-cached after the first test). We re-run the registration
-    # by importing the module's symbols and calling them through the
-    # registry directly — but the cleanest way is to re-execute the
-    # module.
+    # is import-cached after the first test).
     import importlib
     from tools.dashboard.plugins.coordinator_board.entrypoints import actions
     importlib.reload(actions)
 
-    by_set: dict[str, list] = {}
-    for entry in settings_mediator.REGISTRY:
-        by_set.setdefault(entry.set_id, []).append(entry)
-
-    # Decision set: six predicate-gated handlers.
-    decision_actions = by_set.get(COORDINATOR_DECISION_SET_ID, [])
+    decision_actions = _HANDLERS.get(COORDINATOR_DECISION_SET_ID, [])
     assert len(decision_actions) == 6, (
         f"expected 6 decision handlers; got {len(decision_actions)}: "
         f"{[a.name for a in decision_actions]}"
@@ -306,66 +296,13 @@ def test_importing_actions_module_registers_all_handlers():
         "coordinator_board.sitrep_request",
         "coordinator_board.refresh_request",
     }
-    for entry in decision_actions:
-        assert entry.predicate is not None, (
-            f"decision handler {entry.name!r} must have a predicate"
-        )
 
-    # Operator-message set: one unfiltered handler.
-    op_actions = by_set.get(OPERATOR_MESSAGE_SET_ID, [])
+    op_actions = _HANDLERS.get(OPERATOR_MESSAGE_SET_ID, [])
     assert len(op_actions) == 1
     assert op_actions[0].name == "coordinator_board.operator_message"
-    assert op_actions[0].predicate is None
 
 
-def test_predicates_route_decision_kinds_to_their_handlers():
-    """Each decision handler's predicate matches its ``kind`` and rejects others."""
-    import importlib
-    from tools.dashboard.plugins.coordinator_board.entrypoints import actions
-    importlib.reload(actions)
-
-    by_name = {a.name: a for a in settings_mediator.REGISTRY
-               if a.set_id == COORDINATOR_DECISION_SET_ID}
-
-    cases = {
-        "coordinator_board.thumb_yes": "thumb_yes",
-        "coordinator_board.thumb_no": "thumb_no",
-        "coordinator_board.choice": "choice",
-        "coordinator_board.custom_reply": "custom",
-        "coordinator_board.sitrep_request": "sitrep_request",
-        "coordinator_board.refresh_request": "refresh_request",
-    }
-    for handler_name, expected_kind in cases.items():
-        action = by_name[handler_name]
-        # Matches its own kind.
-        match_row = _make_row({
-            "kind": expected_kind,
-            "tile_id": "t",
-            "target_session": "auto-x",
-            "choice": "c",
-        })
-        assert action.predicate(match_row), (
-            f"predicate for {handler_name!r} should accept kind={expected_kind!r}"
-        )
-        # Rejects every other kind in the table.
-        for other_kind in set(cases.values()) - {expected_kind}:
-            other_row = _make_row({
-                "kind": other_kind,
-                "tile_id": "t",
-                "target_session": "auto-x",
-                "choice": "c",
-            })
-            assert not action.predicate(other_row), (
-                f"predicate for {handler_name!r} should reject "
-                f"kind={other_kind!r}"
-            )
-        # Predicates are payload-shape tolerant — missing kind reads as
-        # absent, not an exception.
-        empty_row = _make_row({})
-        assert not action.predicate(empty_row)
-
-
-# ── End-to-end via iterate_once ──────────────────────────────────────
+# ── End-to-end via the substrate's dispatch path ─────────────────────
 
 
 def _register_permissive_schemas() -> None:
@@ -393,14 +330,38 @@ def _register_permissive_schemas() -> None:
     register_schema(OPERATOR_MESSAGE_SET_ID, 1, _OperatorMsgV1)
 
 
+def _decision_event(key: str) -> dict:
+    return {
+        "set_id": COORDINATOR_DECISION_SET_ID,
+        "schema_revision": 1,
+        "key": key,
+        "org": None,
+        "publication_state": "raw",
+        "deprecated": False,
+        "operation": "write",
+    }
+
+
+def _operator_message_event(key: str) -> dict:
+    return {
+        "set_id": OPERATOR_MESSAGE_SET_ID,
+        "schema_revision": 1,
+        "key": key,
+        "org": None,
+        "publication_state": "raw",
+        "deprecated": False,
+        "operation": "write",
+    }
+
+
 @pytest.mark.asyncio
-async def test_iterate_once_dispatches_thumb_yes_end_to_end(
+async def test_dispatch_thumb_yes_end_to_end(
     graph_db_env, services_capture,
 ):
-    """Acceptance #1 — writing a decision row produces a session_send.
+    """Acceptance #1 — writing a decision row + setting.changed produces a session_send.
 
-    Drives the substrate's ``iterate_once`` so we cover registration +
-    set membership + predicate match + handler invocation in one go.
+    Covers registration + set membership + predicate match + handler
+    invocation in one path through the new dispatcher.
     """
     import importlib
     from tools.dashboard.plugins.coordinator_board.entrypoints import actions
@@ -409,9 +370,9 @@ async def test_iterate_once_dispatches_thumb_yes_end_to_end(
     _register_permissive_schemas()
 
     from tools.graph import ops
+    key = "thumb-yes-1"
     ops.add_setting(
-        COORDINATOR_DECISION_SET_ID, 1,
-        f"k-{int(time.time_ns())}",
+        COORDINATOR_DECISION_SET_ID, 1, key,
         {
             "kind": "thumb_yes",
             "tile_id": "t1",
@@ -419,7 +380,7 @@ async def test_iterate_once_dispatches_thumb_yes_end_to_end(
         },
     )
 
-    await iterate_once(services_capture)
+    await _dispatch_event(_decision_event(key), services_capture)
 
     assert services_capture._sent == [
         ("auto-foo", "COORDINATOR: Operator: thumb yes on t1."),
@@ -427,10 +388,10 @@ async def test_iterate_once_dispatches_thumb_yes_end_to_end(
 
 
 @pytest.mark.asyncio
-async def test_iterate_once_idempotent_on_repoll(
+async def test_dispatch_only_matching_predicate_handler_fires(
     graph_db_env, services_capture,
 ):
-    """Acceptance #4 — re-iterating produces NO second send (substrate idempotency)."""
+    """A ``choice``-kind row triggers only the choice handler, not thumb_yes."""
     import importlib
     from tools.dashboard.plugins.coordinator_board.entrypoints import actions
     importlib.reload(actions)
@@ -438,9 +399,9 @@ async def test_iterate_once_idempotent_on_repoll(
     _register_permissive_schemas()
 
     from tools.graph import ops
+    key = "choice-1"
     ops.add_setting(
-        COORDINATOR_DECISION_SET_ID, 1,
-        f"k-{int(time.time_ns())}",
+        COORDINATOR_DECISION_SET_ID, 1, key,
         {
             "kind": "choice",
             "tile_id": "tile-7",
@@ -449,23 +410,18 @@ async def test_iterate_once_idempotent_on_repoll(
         },
     )
 
-    await iterate_once(services_capture)
-    assert len(services_capture._sent) == 1
-    assert services_capture._sent[0] == (
-        "auto-target", "COORDINATOR: Operator chose: approve on tile-7.",
-    )
+    await _dispatch_event(_decision_event(key), services_capture)
 
-    await iterate_once(services_capture)
-    assert len(services_capture._sent) == 1, (
-        "re-poll must not re-dispatch the same row"
-    )
+    assert services_capture._sent == [
+        ("auto-target", "COORDINATOR: Operator chose: approve on tile-7."),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_iterate_once_operator_message_routes_to_bound_coordinator(
+async def test_dispatch_operator_message_routes_to_bound_coordinator(
     graph_db_env, services_capture,
 ):
-    """Acceptance — operator-message uses ``dashboard.coordinator``."""
+    """``operator-message`` uses ``dashboard.coordinator``."""
     import importlib
     from tools.dashboard.plugins.coordinator_board.entrypoints import actions
     importlib.reload(actions)
@@ -483,7 +439,7 @@ async def test_iterate_once_operator_message_routes_to_bound_coordinator(
         {"text": "are you there", "sentAt": None},
     )
 
-    await iterate_once(services_capture)
+    await _dispatch_event(_operator_message_event("default"), services_capture)
 
     assert services_capture._sent == [
         ("auto-bound-coord", "COORDINATOR: are you there"),
@@ -491,11 +447,10 @@ async def test_iterate_once_operator_message_routes_to_bound_coordinator(
 
 
 @pytest.mark.asyncio
-async def test_iterate_once_operator_message_no_coordinator_drops(
+async def test_dispatch_operator_message_no_coordinator_drops(
     graph_db_env, services_capture,
 ):
-    """Acceptance #5 — operator-message row with no coordinator binding
-    leaves a marker (so it isn't retried) but never raises."""
+    """Acceptance #5 — operator-message with no coordinator binding never raises."""
     import importlib
     from tools.dashboard.plugins.coordinator_board.entrypoints import actions
     importlib.reload(actions)
@@ -509,7 +464,7 @@ async def test_iterate_once_operator_message_no_coordinator_drops(
         {"text": "are you there", "sentAt": None},
     )
 
-    await iterate_once(services_capture)
+    await _dispatch_event(_operator_message_event("default"), services_capture)
 
     assert services_capture._sent == [], (
         "with no dashboard.coordinator binding, handler must not call session_send"

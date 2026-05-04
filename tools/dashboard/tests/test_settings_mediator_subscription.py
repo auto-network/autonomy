@@ -1,12 +1,13 @@
-"""Mediator wakeup tests — event-driven primary path + watchdog fallback.
+"""Mediator wakeup tests — event-driven dispatch via the in-process EventBus.
 
-Acceptance for bead auto-5mz65:
+After bead auto-rc27t collapsed the mediator into a thin handler
+registry, the subscription path is the only path: every
+``setting.changed`` event triggers an immediate dispatch, no polling
+fallback. These tests cover what survives:
 
-* (#3) With one registered action, writing a row to its set produces a
-  handler invocation in under 1 second (down from the prior 5s poll).
-* (#4) When the EventBus subscription is unavailable, a write still
-  surfaces via the fallback watchdog within ~30s (configurable for
-  test speed).
+* A write produces a handler invocation in well under a second.
+* Events for unrelated set_ids do not invoke any registered handler.
+* Stop releases the bus subscription cleanly.
 """
 from __future__ import annotations
 
@@ -30,9 +31,6 @@ from tools.dashboard.settings_mediator import (
 
 TEST_SET_ID = "dashboard.test.subscription-fixture"
 TEST_REVISION = 1
-
-
-# ── Fixtures ─────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -94,15 +92,14 @@ def services():
 
 
 def _wire_bus_to_settings_ops(bus: EventBus):
-    """Register an emit hook that broadcasts on the supplied bus.
+    """Mirror ``server._settings_emit_hook`` against *bus*.
 
-    Mirrors the dashboard's ``_settings_emit_hook`` so this test
-    exercises the real wakeup path (settings_ops.add_setting →
-    EventBus.broadcast_sync → mediator demuxer → wakeup_event).
+    Tests use this so the real wakeup path (settings_ops.add_setting →
+    EventBus.broadcast_sync → mediator subscriber → handler) is what's
+    being exercised.
     """
-
     def hook(*, operation, snapshot, org):
-        payload = {
+        bus.broadcast_sync("setting.changed", {
             "set_id": snapshot["set_id"],
             "schema_revision": snapshot["schema_revision"],
             "key": snapshot["key"],
@@ -110,24 +107,15 @@ def _wire_bus_to_settings_ops(bus: EventBus):
             "publication_state": snapshot["publication_state"],
             "deprecated": snapshot["deprecated"],
             "operation": operation,
-        }
-        bus.broadcast_sync("setting.changed", payload, dedup=False)
-
+        }, dedup=False)
     settings_ops.set_emit_hook(hook)
-
-
-# ── Acceptance #3 — sub-second event-driven wakeup ───────
 
 
 @pytest.mark.asyncio
 async def test_event_driven_wakeup_under_one_second(
     graph_db_env, fixture_schema, services,
 ):
-    """Acceptance #3 — write → handler invocation in < 1s.
-
-    Watchdog is set to 30s (production default), so the 1s ceiling
-    only succeeds via the event-driven wakeup path.
-    """
+    """A write triggers handler invocation well under a second."""
     bus = EventBus()
     _wire_bus_to_settings_ops(bus)
 
@@ -140,13 +128,9 @@ async def test_event_driven_wakeup_under_one_second(
 
     register_action(TEST_SET_ID, handler, name="ev-driven")
 
-    # Production-grade watchdog (30s) — only the bus path can satisfy
-    # the 1s ceiling.
-    start_action_loop(services, poll_seconds=30.0, event_bus=bus)
+    start_action_loop(services, event_bus=bus)
     try:
-        # Wait for the loop's first tick to settle so the wait is
-        # genuinely on the bus wakeup, not the initial tick.
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.05)
         write_at = time.monotonic()
         ops.add_setting(TEST_SET_ID, TEST_REVISION, "ev-key", {"x": 1})
         await asyncio.wait_for(handler_invoked.wait(), timeout=2.0)
@@ -160,26 +144,23 @@ async def test_event_driven_wakeup_under_one_second(
 
 
 @pytest.mark.asyncio
-async def test_event_driven_wakeup_filters_unrelated_set_ids(
+async def test_event_for_unrelated_set_id_does_not_invoke_handler(
     graph_db_env, fixture_schema, services,
 ):
-    """Events for unrelated set_ids must not cause spurious wakeups
-    that wake iterate_once unnecessarily.
-
-    We register no action for the test set, broadcast a setting.changed
-    for a *different* set_id, and confirm iterate_once is not invoked
-    above the watchdog cadence.
-    """
+    """Events whose set_id isn't registered must not reach our handler."""
     bus = EventBus()
     _wire_bus_to_settings_ops(bus)
 
-    register_action(TEST_SET_ID, _noop_handler, name="filter-test")
+    fired = asyncio.Event()
 
-    # Watchdog is generous; we'll stop before it fires.
-    start_action_loop(services, poll_seconds=10.0, event_bus=bus)
+    async def handler(row, svc):
+        fired.set()
+
+    register_action(TEST_SET_ID, handler, name="filter-test")
+
+    start_action_loop(services, event_bus=bus)
     try:
-        await asyncio.sleep(0.15)
-        # Unrelated set — registry has no action for it.
+        await asyncio.sleep(0.05)
         bus.broadcast_sync("setting.changed", {
             "set_id": "dashboard.test.unrelated",
             "schema_revision": 1,
@@ -189,104 +170,27 @@ async def test_event_driven_wakeup_filters_unrelated_set_ids(
             "deprecated": False,
             "operation": "write",
         }, dedup=False)
-        await asyncio.sleep(0.25)
-        # No row was added for TEST_SET_ID, so no handler call should
-        # have happened. The wakeup must have been suppressed by the
-        # demuxer's set_id filter — otherwise iterate_once would have
-        # run an extra time, which is harmless but observable.
-        # We confirm by inspecting the registry list (still single).
-        from tools.dashboard.settings_mediator.loop import REGISTRY
-        assert len(REGISTRY) == 1
+        await asyncio.sleep(0.15)
+        assert not fired.is_set()
     finally:
         await stop_action_loop()
-
-
-async def _noop_handler(row, svc):
-    pass
-
-
-# ── Acceptance #4 — fallback watchdog when bus is dead ───
-
-
-@pytest.mark.asyncio
-async def test_fallback_watchdog_when_no_event_bus(
-    graph_db_env, fixture_schema, services,
-):
-    """Acceptance #4 — bus disconnected, fallback timer covers it.
-
-    Simulates "EventBus subscriber for the mediator unavailable" by
-    starting the loop without an ``event_bus``. The handler should
-    still fire on the next watchdog tick.
-    """
-    invoked = asyncio.Event()
-
-    async def handler(row, svc):
-        invoked.set()
-
-    register_action(TEST_SET_ID, handler, name="watchdog")
-
-    # Tight watchdog so the test is fast (production default is 30s).
-    start_action_loop(services, poll_seconds=0.4, event_bus=None)
-    try:
-        await asyncio.sleep(0.05)
-        ops.add_setting(TEST_SET_ID, TEST_REVISION, "wd-key", {"x": 1})
-        # Allow up to ~3 watchdog cycles (worst case 1.2s + jitter).
-        await asyncio.wait_for(invoked.wait(), timeout=2.0)
-    finally:
-        await stop_action_loop()
-
-
-@pytest.mark.asyncio
-async def test_fallback_watchdog_on_simulated_bus_failure(
-    graph_db_env, fixture_schema, services,
-):
-    """Even when an event_bus is plumbed, a write whose emit doesn't
-    reach the bus surfaces via the watchdog.
-
-    We pass an event_bus to start_action_loop but bypass it on the
-    write path (no settings_ops emit hook installed → no broadcast →
-    demuxer never wakes). The watchdog must still pick up the new row.
-    """
-    bus = EventBus()
-    # Deliberately do NOT call _wire_bus_to_settings_ops — emits won't
-    # reach this bus. This models "EventBus subscriber for the mediator
-    # disconnected" from acceptance #4.
-    invoked = asyncio.Event()
-
-    async def handler(row, svc):
-        invoked.set()
-
-    register_action(TEST_SET_ID, handler, name="bus-fail")
-
-    start_action_loop(services, poll_seconds=0.4, event_bus=bus)
-    try:
-        await asyncio.sleep(0.05)
-        ops.add_setting(TEST_SET_ID, TEST_REVISION, "bf-key", {"x": 1})
-        await asyncio.wait_for(invoked.wait(), timeout=2.0)
-    finally:
-        await stop_action_loop()
-
-
-# ── Subscriber lifecycle (clean teardown) ────────────────
 
 
 @pytest.mark.asyncio
 async def test_loop_unsubscribes_on_stop(
     graph_db_env, fixture_schema, services,
 ):
-    """The mediator releases its bus subscription on shutdown.
-
-    Otherwise repeated start/stop cycles (e.g. uvicorn --reload during
-    development) would leak subscriber queues into the bus on every
-    restart.
-    """
+    """Stopping the loop releases the bus subscription queue."""
     bus = EventBus()
-    register_action(TEST_SET_ID, _noop_handler, name="lifecycle")
-    start_action_loop(services, poll_seconds=10.0, event_bus=bus)
+
+    async def handler(row, svc):
+        pass
+
+    register_action(TEST_SET_ID, handler, name="lifecycle")
+    start_action_loop(services, event_bus=bus)
     try:
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)
         assert bus.subscribers_count() == 1
     finally:
         await stop_action_loop()
-    # Demuxer task cancelled, queue unsubscribed.
     assert bus.subscribers_count() == 0
