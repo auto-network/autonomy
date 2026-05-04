@@ -95,12 +95,9 @@
 
   async function fetchActionsForOrg(org) {
     if (!org) return [];
-    var headers = { 'X-Graph-Org': org };
     try {
-      var resp = await fetch('/api/graph/settings/' + SET_ID, { headers: headers });
-      if (!resp.ok) return [];
-      var body = await resp.json();
-      return (body && body.members) || [];
+      var proxy = await Schema.of(SET_ID);
+      return await proxy.all({ headers: { 'X-Graph-Org': org } });
     } catch (e) {
       return [];
     }
