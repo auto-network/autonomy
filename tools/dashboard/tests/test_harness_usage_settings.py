@@ -53,28 +53,27 @@ def test_load_claude_credential_bundle_from_credentials_json(tmp_path):
     assert bundle["subscription_type"] == "max"
     assert bundle["rate_limit_tier"] == "default_scale_tier"
     assert bundle["expires_at_ms"] == 1777766417068
-    assert bundle["fingerprint"] == hus.fingerprint_secret(
-        "sk-ant-oat01-refresh-token-value",
-    )
+    # auto-10lsv: fingerprint dropped — identity is now keyed by org uuid
+    # plus the operator-facing alias from the filename, not a hash of the
+    # refresh token.
+    assert "fingerprint" not in bundle
 
 
-def test_candidate_claude_credential_paths_walks_up_to_run_dir(tmp_path):
-    run_dir = tmp_path / "agent-run"
-    resolution_dir = run_dir / "sessions" / "uuid-1234"
-    resolution_dir.mkdir(parents=True)
-    row = {"resolution_dir": str(resolution_dir)}
+def test_load_claude_credential_bundle_from_setup_token_file(tmp_path):
+    primary = tmp_path / ".setup-token.primary"
+    primary.write_text("sk-ant-oat01-primary-token\n")
 
-    candidates = hus.candidate_claude_credential_paths(row)
+    bundle = hus.load_claude_credential_bundle(primary)
 
-    assert run_dir / ".credentials.json" in candidates
-    assert run_dir / ".setup-token" in candidates
-    assert resolution_dir / ".credentials.json" in candidates
+    assert bundle is not None
+    assert bundle["source_kind"] == "setup_token"
+    assert bundle["access_token"] == "sk-ant-oat01-primary-token"
+    assert "fingerprint" not in bundle
 
 
 def test_normalize_claude_usage_payload_uses_org_identity():
     payload = hus.normalize_claude_usage_payload(
         bundle={
-            "fingerprint": "abc123def456",
             "subscription_type": "max",
             "rate_limit_tier": "default_scale_tier",
         },
@@ -90,11 +89,13 @@ def test_normalize_claude_usage_payload_uses_org_identity():
         },
         org_id="478d4828-69e3-4aec-837d-ab25b5c799c4",
         updated_at="2026-05-02T19:03:00Z",
+        alias="primary",
     )
 
     assert payload["identity_id"] == "org:478d4828-69e3-4aec-837d-ab25b5c799c4"
     assert payload["identity_label"] == "org 478d4828"
     assert payload["account_id"] == "478d4828-69e3-4aec-837d-ab25b5c799c4"
+    assert payload["alias"] == "primary"
     assert payload["windows"]["short"]["used_percent"] == 78.0
     assert payload["windows"]["short"]["window_minutes"] == 300
     assert payload["windows"]["short"]["resets_at"] == 1777754400
@@ -351,162 +352,217 @@ def test_publish_harness_usage_snapshot_skips_when_operator_is_idle(monkeypatch)
     server._publish_harness_usage_snapshot()
 
 
-def _claude_bundle(fingerprint: str, *, expires_at_ms: int | None) -> dict:
-    return {
-        "source_kind": "credentials_json",
-        "path": f"/fake/{fingerprint}/.credentials.json",
-        "access_token": f"access-{fingerprint}",
-        "refresh_token": f"refresh-{fingerprint}",
-        "fingerprint": fingerprint,
-        "subscription_type": "max",
-        "rate_limit_tier": "default_scale_tier",
-        "expires_at_ms": expires_at_ms,
-    }
-
-
 _CLAUDE_USAGE_BODY = {
     "five_hour": {"utilization": 12.0, "resets_at": "2026-05-04T20:00:00+00:00"},
     "seven_day": {"utilization": 40.0, "resets_at": "2026-05-10T20:00:00+00:00"},
 }
 
 
-def test_collect_claude_usage_uses_first_live_bundle_then_stops(monkeypatch):
-    # Two live bundles for the same account → only ONE /usage call,
-    # one org row, no acct rows.
-    bundles = [
-        _claude_bundle("fp-A", expires_at_ms=2_000_000_000_000),
-        _claude_bundle("fp-B", expires_at_ms=2_000_000_000_000),
-    ]
-    rows = [
-        {"tmux_name": f"claude-{i}", "harness": "claude"}
-        for i in range(len(bundles))
-    ]
+def _seed_token_files(creds_dir, monkeypatch, files: dict[str, str]) -> None:
+    """Drop ``.setup-token*`` files into ``creds_dir`` and point the
+    launcher at it. ``files`` maps filename → token text."""
+    creds_dir.mkdir(parents=True, exist_ok=True)
+    for name, body in files.items():
+        (creds_dir / name).write_text(body)
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(creds_dir))
 
-    monkeypatch.setattr(
-        server,
-        "_resolve_claude_credential_bundle",
-        lambda row: bundles[int(row["tmux_name"].split("-")[1])],
-    )
+
+def test_collect_claude_usage_writes_one_row_per_token_file(tmp_path, monkeypatch):
+    """auto-10lsv: each ``.setup-token*`` produces its own row, keyed by
+    org+alias. Different orgs → distinct ``claude:org:<uuid>:<alias>`` keys."""
+    _seed_token_files(tmp_path, monkeypatch, {
+        ".setup-token": "tok-default",
+        ".setup-token.primary": "tok-primary",
+    })
+
     fetch_calls: list[str] = []
 
     def _fake_fetch(token):
         fetch_calls.append(token)
-        return _CLAUDE_USAGE_BODY, {"anthropic-organization-id": "org-uuid-XYZ"}
+        # Distinct org per token so the rows don't collapse onto each
+        # other — matches the operator's "two different accounts" case.
+        org = "org-DEFAULT" if token == "tok-default" else "org-PRIMARY"
+        return _CLAUDE_USAGE_BODY, {"anthropic-organization-id": org}
 
     monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
 
-    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
+    payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
 
-    assert len(fetch_calls) == 1
-    assert fetch_calls[0] == "access-fp-A"
+    assert sorted(fetch_calls) == ["tok-default", "tok-primary"]
     keys = [k for k, _ in payloads]
-    assert keys == ["claude:org:org-uuid-XYZ"]
+    assert keys == sorted([
+        "claude:org:org-DEFAULT:default",
+        "claude:org:org-PRIMARY:primary",
+    ])
+    by_alias = {p["alias"]: p for _, p in payloads}
+    assert by_alias["default"]["account_id"] == "org-DEFAULT"
+    assert by_alias["primary"]["account_id"] == "org-PRIMARY"
 
 
-def test_collect_claude_usage_skips_expired_bundles_silently(monkeypatch):
-    # First bundle is expired → skipped (no acct row written), second is
-    # used. Net: one org row, no acct rows for the expired fingerprint.
-    bundles = [
-        _claude_bundle("fp-EXPIRED", expires_at_ms=1),
-        _claude_bundle("fp-LIVE", expires_at_ms=2_000_000_000_000),
-    ]
-    rows = [
-        {"tmux_name": f"claude-{i}", "harness": "claude"}
-        for i in range(len(bundles))
-    ]
+def test_collect_claude_usage_returns_nothing_when_no_token_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))  # exists but empty
     monkeypatch.setattr(
         server,
-        "_resolve_claude_credential_bundle",
-        lambda row: bundles[int(row["tmux_name"].split("-")[1])],
+        "_fetch_claude_oauth_usage",
+        lambda token: (_ for _ in ()).throw(AssertionError("must not call OAuth")),
     )
 
-    fetch_tokens: list[str] = []
+    payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
+
+    assert payloads == []
+
+
+def test_collect_claude_usage_swallows_oauth_errors_per_token(tmp_path, monkeypatch):
+    """One token's /usage call exploding doesn't suppress the other token's row."""
+    _seed_token_files(tmp_path, monkeypatch, {
+        ".setup-token": "tok-default",
+        ".setup-token.primary": "tok-primary",
+    })
 
     def _fake_fetch(token):
-        fetch_tokens.append(token)
-        return _CLAUDE_USAGE_BODY, {"anthropic-organization-id": "org-uuid-XYZ"}
+        if token == "tok-default":
+            raise RuntimeError("Claude usage API returned HTTP 401")
+        return _CLAUDE_USAGE_BODY, {"anthropic-organization-id": "org-uuid-PRIMARY"}
 
     monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
 
-    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
+    payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
 
-    assert fetch_tokens == ["access-fp-LIVE"]
     keys = [k for k, _ in payloads]
-    assert keys == ["claude:org:org-uuid-XYZ"]
-    assert not any(k.startswith("claude:acct:") for k in keys)
+    assert keys == ["claude:org:org-uuid-PRIMARY:primary"]
 
 
-def test_collect_claude_usage_writes_nothing_when_all_bundles_expired(monkeypatch):
-    bundles = [_claude_bundle("fp-A", expires_at_ms=1)]
-    rows = [{"tmux_name": "claude-0", "harness": "claude"}]
+def test_collect_claude_usage_skips_when_org_header_missing(tmp_path, monkeypatch):
+    """No org id in /usage response → no row (org id is required)."""
+    _seed_token_files(tmp_path, monkeypatch, {".setup-token": "tok-default"})
     monkeypatch.setattr(
-        server, "_resolve_claude_credential_bundle", lambda row: bundles[0],
-    )
-    monkeypatch.setattr(
-        server,
-        "_fetch_claude_oauth_usage",
-        lambda token: (_ for _ in ()).throw(AssertionError("must not call OAuth")),
+        server, "_fetch_claude_oauth_usage", lambda token: (_CLAUDE_USAGE_BODY, {}),
     )
 
-    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
-
-    # No row written: prior org row keeps its last-known-good telemetry.
-    assert payloads == []
-
-
-def test_collect_claude_usage_swallows_oauth_errors_without_acct_row(monkeypatch):
-    bundles = [_claude_bundle("fp-A", expires_at_ms=2_000_000_000_000)]
-    rows = [{"tmux_name": "claude-0", "harness": "claude"}]
-    monkeypatch.setattr(
-        server, "_resolve_claude_credential_bundle", lambda row: bundles[0],
-    )
-
-    def _boom(token):
-        raise RuntimeError("Claude usage API returned HTTP 401")
-
-    monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _boom)
-
-    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
+    payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
 
     assert payloads == []
 
 
-def test_collect_claude_usage_writes_unresolved_only_when_no_bundle_resolves(monkeypatch):
-    rows = [{"tmux_name": "claude-0", "harness": "claude"}]
-    monkeypatch.setattr(server, "_resolve_claude_credential_bundle", lambda row: None)
+def test_collect_claude_usage_no_walk_up_dependency(tmp_path, monkeypatch):
+    """Acceptance criterion #6: poller works regardless of session resolution_dir.
+
+    With two ``.setup-token*`` files on disk and zero live sessions on the
+    dashboard (rows=[]), the poller still produces telemetry."""
+    _seed_token_files(tmp_path, monkeypatch, {
+        ".setup-token": "tok-default",
+    })
     monkeypatch.setattr(
         server,
         "_fetch_claude_oauth_usage",
-        lambda token: (_ for _ in ()).throw(AssertionError("must not call OAuth")),
+        lambda token: (_CLAUDE_USAGE_BODY, {"anthropic-organization-id": "org-X"}),
     )
 
-    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
+    payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
 
     keys = [k for k, _ in payloads]
-    assert keys == ["claude:unresolved"]
+    assert keys == ["claude:org:org-X:default"]
 
 
-def test_collect_claude_usage_does_not_write_unresolved_when_bundle_succeeds(monkeypatch):
-    # Mix: one row resolves to a live bundle, one row doesn't. Successful
-    # /usage call covers the account; unresolved row is suppressed.
-    bundle = _claude_bundle("fp-LIVE", expires_at_ms=2_000_000_000_000)
-    rows = [
-        {"tmux_name": "claude-resolves", "harness": "claude"},
-        {"tmux_name": "claude-no-creds", "harness": "claude"},
-    ]
-    monkeypatch.setattr(
-        server,
-        "_resolve_claude_credential_bundle",
-        lambda row: bundle if row["tmux_name"] == "claude-resolves" else None,
+# ── auto-10lsv: declarative schema migration ───────────────────
+
+
+def test_schema_migration_declarative_field_metadata():
+    """Acceptance criterion #2: ``graph set schema dashboard.harness.usage``
+    prints the declared field set with descriptions."""
+    schema = hus.DashboardHarnessUsageV1
+    meta = schema._field_metadata
+    # The full set of declared fields (no quietly-inherited ``set_id``
+    # / ``schema_revision`` leakage).
+    expected_fields = {
+        "harness", "identity_id", "identity_label", "alias", "account_id",
+        "status", "source", "updated_at", "plan_type", "tier", "limit_id",
+        "limit_name", "rate_limit_reached_type", "note", "windows",
+    }
+    assert set(meta.keys()) == expected_fields
+    # Required fields carry descriptions.
+    assert meta["harness"]["required"] is True
+    assert meta["harness"]["enum"] == ["claude", "codex"]
+    assert "Harness this row reports for" in meta["harness"]["description"]
+    # ``alias`` is optional with a None default so the launcher can omit it
+    # for legacy compat paths.
+    assert meta["alias"].get("required") is not True
+    assert meta["alias"]["type"] == "string"
+    # The exported JSON schema carries the same shape.
+    exported = schema.export_json_schema()
+    assert exported["set_id"] == hus.HARNESS_USAGE_SET_ID
+    assert "alias" in exported["properties"]
+    assert exported["properties"]["alias"]["description"]
+
+
+def test_schema_migration_accepts_alias_field():
+    """Acceptance criterion #7 (positive): payload with alias='primary' validates."""
+    payload = hus.normalize_claude_usage_payload(
+        bundle={"subscription_type": "max"},
+        usage_body=_CLAUDE_USAGE_BODY,
+        org_id="org-uuid-XYZ",
+        updated_at="2026-05-04T13:00:00Z",
+        alias="primary",
     )
-    monkeypatch.setattr(
-        server,
-        "_fetch_claude_oauth_usage",
-        lambda token: (_CLAUDE_USAGE_BODY, {"anthropic-organization-id": "org-uuid-XYZ"}),
+    # No exception → schema accepts the new field.
+    hus.DashboardHarnessUsageV1.validate(payload)
+    assert payload["alias"] == "primary"
+
+
+def test_schema_migration_rejects_unknown_field():
+    """Acceptance criterion #7 (negative): unknown field → SchemaValidationError."""
+    from tools.graph.schemas.registry import SchemaValidationError
+
+    payload = hus.normalize_claude_usage_payload(
+        bundle={"subscription_type": "max"},
+        usage_body=_CLAUDE_USAGE_BODY,
+        org_id="org-uuid-XYZ",
+        updated_at="2026-05-04T13:00:00Z",
+        alias="primary",
     )
+    payload["unknown_field"] = "boom"
+    with pytest.raises(SchemaValidationError):
+        hus.DashboardHarnessUsageV1.validate(payload)
 
-    payloads = server._collect_claude_usage_payloads(rows, "2026-05-04T13:00:00Z")
 
-    keys = [k for k, _ in payloads]
-    assert keys == ["claude:org:org-uuid-XYZ"]
-    assert "claude:unresolved" not in keys
+def test_schema_migration_rejects_missing_required_field():
+    from tools.graph.schemas.registry import SchemaValidationError
+
+    payload = hus.normalize_claude_usage_payload(
+        bundle={"subscription_type": "max"},
+        usage_body=_CLAUDE_USAGE_BODY,
+        org_id="org-uuid-XYZ",
+        updated_at="2026-05-04T13:00:00Z",
+    )
+    del payload["harness"]
+    with pytest.raises(SchemaValidationError):
+        hus.DashboardHarnessUsageV1.validate(payload)
+
+
+def test_schema_migration_rejects_invalid_enum_value():
+    from tools.graph.schemas.registry import SchemaValidationError
+
+    payload = hus.normalize_claude_usage_payload(
+        bundle={"subscription_type": "max"},
+        usage_body=_CLAUDE_USAGE_BODY,
+        org_id="org-uuid-XYZ",
+        updated_at="2026-05-04T13:00:00Z",
+    )
+    payload["harness"] = "definitely-not-a-real-harness"
+    with pytest.raises(SchemaValidationError):
+        hus.DashboardHarnessUsageV1.validate(payload)
+
+
+def test_schema_migration_preserves_existing_window_substructure():
+    from tools.graph.schemas.registry import SchemaValidationError
+
+    payload = hus.normalize_claude_usage_payload(
+        bundle={"subscription_type": "max"},
+        usage_body=_CLAUDE_USAGE_BODY,
+        org_id="org-uuid-XYZ",
+        updated_at="2026-05-04T13:00:00Z",
+    )
+    payload["windows"]["short"]["unexpected_subfield"] = "boom"
+    with pytest.raises(SchemaValidationError):
+        hus.DashboardHarnessUsageV1.validate(payload)
+

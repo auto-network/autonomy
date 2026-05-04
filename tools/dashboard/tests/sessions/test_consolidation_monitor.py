@@ -347,3 +347,69 @@ class TestHistoricalDispatchBackfill:
         ).fetchone()
         conn.close()
         assert count == 1, f"Backfill is not idempotent — got {count} rows"
+
+
+# ── auto-10lsv: register_session reads claude_token_alias from meta ───
+
+
+class TestRegisterSessionPropagatesClaudeTokenAlias:
+    """register_session must surface the launcher's chosen Claude token alias.
+
+    The launcher stamps ``claude_token_alias`` into ``.session_meta.json``;
+    register_session reads it back when given a ``run_dir`` and writes it
+    to ``tmux_sessions.claude_token_alias`` so the dashboard's session
+    drawer can paint it next to harness/model.
+    """
+
+    @pytest.mark.asyncio
+    async def test_register_session_writes_claude_token_alias_from_meta(
+        self, monitor_env,
+    ):
+        tmp_path, db_path, sm_mod = monitor_env
+        run_dir = tmp_path / "agent-runs" / "auto-token-alias-1"
+        sess_dir = run_dir / "sessions"
+        sess_dir.mkdir(parents=True)
+        jsonl = sess_dir / "run.jsonl"
+        jsonl.write_text("")
+        (sess_dir / ".session_meta.json").write_text(json.dumps({
+            "type": "dispatch",
+            "container_name": "auto-token-alias-1",
+            "harness": "claude",
+            "claude_token_alias": "primary",
+        }))
+
+        mon = sm_mod.SessionMonitor()
+        await mon.register_session(
+            tmux_name="auto-token-alias-1",
+            type="dispatch",
+            jsonl_path=jsonl,
+            run_dir=run_dir,
+        )
+
+        row = _fetch_row(db_path, "auto-token-alias-1")
+        assert row is not None
+        assert row["claude_token_alias"] == "primary"
+
+    @pytest.mark.asyncio
+    async def test_register_session_no_alias_when_meta_missing(
+        self, monitor_env,
+    ):
+        tmp_path, db_path, sm_mod = monitor_env
+        run_dir = tmp_path / "agent-runs" / "auto-token-alias-2"
+        sess_dir = run_dir / "sessions"
+        sess_dir.mkdir(parents=True)
+        jsonl = sess_dir / "run.jsonl"
+        jsonl.write_text("")
+        # No .session_meta.json
+
+        mon = sm_mod.SessionMonitor()
+        await mon.register_session(
+            tmux_name="auto-token-alias-2",
+            type="dispatch",
+            jsonl_path=jsonl,
+            run_dir=run_dir,
+        )
+
+        row = _fetch_row(db_path, "auto-token-alias-2")
+        assert row is not None
+        assert row["claude_token_alias"] is None
