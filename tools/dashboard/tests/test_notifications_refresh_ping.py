@@ -38,6 +38,8 @@ from tools.dashboard.notifications_actions import (
 from tools.dashboard.settings_mediator import Row, Services
 from tools.dashboard.settings_mediator.loop import _HANDLERS, _dispatch_event
 from tools.graph import settings_ops
+from tools.graph import db as graph_db_mod
+from tools.graph.db import GraphDB
 from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS
 
 
@@ -323,6 +325,168 @@ async def test_refresh_ping_invoked_on_every_setting_changed_event(
     revs = [body["attrs"]["target_revision"]
             for (_t, _k, body) in services_capture._sent]
     assert revs == ["2", "3"]
+
+
+# ── Cross-org SessionAsk lookup isolation (auto-dcegc) ───────────────
+
+
+@pytest.fixture
+def orgs_root(tmp_path, monkeypatch):
+    """Pin per-org DB layout to a tmp orgs dir; clear ``GRAPH_DB``.
+
+    Required for cross-org tests — ``GRAPH_DB`` collapses every read
+    onto one DB regardless of the ``org=`` argument, defeating the
+    isolation we're trying to verify.
+    """
+    root = tmp_path / "orgs"
+    legacy = tmp_path / "legacy.db"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", legacy)
+    GraphDB.close_all_pooled()
+    try:
+        yield root
+    finally:
+        GraphDB.close_all_pooled()
+
+
+@pytest.mark.asyncio
+async def test_refresh_ping_in_one_org_does_not_read_session_ask_from_another(
+    orgs_root, notifications_schemas_registered, services_capture,
+):
+    """A refresh row originating from org A must resolve its SessionAsk
+    against org A's DB — not the scopeless DB and not a peer org's DB.
+
+    Pre-fix the handler hardcoded ``org=None`` in
+    :func:`notifications_actions._resolve_session_ask`, so a refresh
+    fired in org A would read the SessionAsk row from the personal /
+    scopeless DB instead. That is benign in the current single-org
+    deployment, but silently mis-routes any future cross-org
+    refresh-ping flow. This test pins the contract: the lookup follows
+    the row's org.
+
+    The two SessionAsk rows below share an ``ask_id`` but live in
+    distinct org DBs — the handler MUST surface the org-A copy when
+    invoked with a Row carrying ``org="alpha"``, not the scopeless one.
+    """
+    GraphDB.create_org_db("alpha").close()
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    # Same ask_id in two different DBs — only the org-A read should win.
+    settings_ops.upsert_by_key(
+        ns.SESSION_ASK_SET_ID, ns.SCHEMA_REVISION, "auto-shared",
+        {
+            "session_id": "auto-shared",
+            "text": "ALPHA_ORG_TEXT",
+            "revision_seq": 1,
+            "created_at": "2026-05-04T12:00:00Z",
+        },
+        org="alpha",
+    )
+    settings_ops.upsert_by_key(
+        ns.SESSION_ASK_SET_ID, ns.SCHEMA_REVISION, "auto-shared",
+        {
+            "session_id": "auto-shared",
+            "text": "SCOPELESS_LEAK_TEXT",
+            "revision_seq": 1,
+            "created_at": "2026-05-04T12:00:00Z",
+        },
+        org=None,
+    )
+
+    payload = {
+        "ask_id": "auto-shared",
+        "requested_at": "2026-05-04T12:05:00Z",
+        "requested_by": "operator-alpha",
+        "target_revision": 1,
+    }
+    row = Row(
+        id=str(uuid4()),
+        set_id=ns.ASK_REFRESH_SET_ID,
+        key="auto-shared",
+        payload=payload,
+        created_at="2026-05-04T12:05:00Z",
+        updated_at="2026-05-04T12:05:00Z",
+        org="alpha",
+    )
+
+    await deliver_refresh_ping(row, services_capture)
+
+    assert len(services_capture._sent) == 1
+    body = services_capture._sent[0][2]
+    assert "ALPHA_ORG_TEXT" in body["text"]
+    assert "SCOPELESS_LEAK_TEXT" not in body["text"], (
+        "refresh ping leaked SessionAsk text from the scopeless DB into "
+        "an org-scoped envelope — the lookup must follow row.org"
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_ping_in_one_org_does_not_read_peer_org_session_ask(
+    orgs_root, notifications_schemas_registered, services_capture,
+):
+    """An org-A refresh must not fall through to a peer org's SessionAsk.
+
+    Cross-org peer reads land via the explicit ``peers=`` plumbing on
+    :func:`settings_ops.read_set` (peer-public-surface only). The
+    refresh-ping handler passes ``peers=[]`` to keep follow-on lookups
+    scoped to the row's org — verify that here by writing two
+    same-key SessionAsk rows in disjoint org DBs and asserting the
+    org-A read does not surface the org-B copy.
+    """
+    GraphDB.create_org_db("alpha").close()
+    GraphDB.create_org_db("beta").close()
+    # personal.db is consulted by peer-subscription discovery; create it
+    # so the cross-org subscription path is fully wired even though
+    # peers=[] short-circuits it.
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    settings_ops.upsert_by_key(
+        ns.SESSION_ASK_SET_ID, ns.SCHEMA_REVISION, "auto-shared",
+        {
+            "session_id": "auto-shared",
+            "text": "ALPHA_ORG_TEXT",
+            "revision_seq": 1,
+            "created_at": "2026-05-04T12:00:00Z",
+        },
+        org="alpha",
+    )
+    settings_ops.upsert_by_key(
+        ns.SESSION_ASK_SET_ID, ns.SCHEMA_REVISION, "auto-shared",
+        {
+            "session_id": "auto-shared",
+            "text": "BETA_ORG_TEXT",
+            "revision_seq": 1,
+            "created_at": "2026-05-04T12:00:00Z",
+        },
+        org="beta",
+    )
+
+    payload = {
+        "ask_id": "auto-shared",
+        "requested_at": "2026-05-04T12:05:00Z",
+        "requested_by": "operator-alpha",
+        "target_revision": 1,
+    }
+    row = Row(
+        id=str(uuid4()),
+        set_id=ns.ASK_REFRESH_SET_ID,
+        key="auto-shared",
+        payload=payload,
+        created_at="2026-05-04T12:05:00Z",
+        updated_at="2026-05-04T12:05:00Z",
+        org="alpha",
+    )
+
+    await deliver_refresh_ping(row, services_capture)
+
+    assert len(services_capture._sent) == 1
+    body = services_capture._sent[0][2]
+    assert "ALPHA_ORG_TEXT" in body["text"]
+    assert "BETA_ORG_TEXT" not in body["text"], (
+        "org-A refresh must not pick up org-B's SessionAsk text"
+    )
 
 
 # ── Registration contracts ───────────────────────────────────────────
