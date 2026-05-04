@@ -553,7 +553,11 @@ def _auto_provenance(db, title: str = ""):
     and picks the turn with the highest match score (minimum 2 words).
     Falls back to MAX(turn) when no title match is found.
     """
-    subprocess.run(["graph", "sessions", "--all"], capture_output=True, timeout=30)
+    # In-process refresh — avoids spawning a subprocess that would inherit the
+    # default HTTP client and re-route through the dashboard for ~7-13s. The
+    # helper no-ops in HttpClient mode (callers gate this function to host
+    # mode, so refresh always happens locally).
+    _auto_ingest(db)
     source = _resolve_current_source(db)
     if not source:
         return None, None
@@ -1953,8 +1957,9 @@ def cmd_bead(args):
     db = GraphDB(args.db)
     from .models import Edge
 
-    # First, refresh the graph to capture latest turns
-    subprocess.run(["graph", "sessions", "--all"], capture_output=True, timeout=30)
+    # Refresh the graph to capture latest turns. In-process so we don't pay the
+    # ~7-13s a fresh `graph` subprocess would spend on an HTTP round trip.
+    _auto_ingest(db)
 
     # Read description from stdin if -d -
     desc = args.desc
