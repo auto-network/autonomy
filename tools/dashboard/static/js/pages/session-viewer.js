@@ -255,7 +255,8 @@
       },
 
       // Viewer-attachment lightbox: when src is set, the overlay shows the
-      // full-resolution image; clicking the backdrop or pressing ESC closes.
+      // full-resolution image; any tap or ESC closes. Pinch-zoom is
+      // a multi-touch gesture that doesn't fire click, so it stays.
       lightboxSrc: '',
       lightboxAlt: '',
       _lightboxPrevViewport: null,

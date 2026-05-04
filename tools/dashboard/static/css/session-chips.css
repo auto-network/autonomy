@@ -513,21 +513,5 @@
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
-  cursor: default;
+  cursor: zoom-out;
 }
-
-.sc-va-lightbox-close {
-  position: absolute;
-  top: 12px;
-  right: 16px;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border: 0;
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
-  font-size: 24px;
-  line-height: 1;
-  cursor: pointer;
-}
-.sc-va-lightbox-close:hover { background: rgba(255, 255, 255, 0.2); }
