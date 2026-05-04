@@ -164,6 +164,13 @@ from tools.dashboard import surface_actions as _surface_actions  # noqa: E402, F
 # lifespan plumbing — registration is the only side effect of import.
 from tools.dashboard import notifications_actions as _notifications_actions  # noqa: E402, F401
 
+# CrosstalkDirective family base (bead auto-ixzdz) — imported eagerly so
+# the ``dashboard.session.crosstalk`` namespace root is established and
+# any concrete subclass (request-rebase, request-identity-refresh, …)
+# composing under it via ``set_id_suffix`` registers before
+# ``flush_schema_meta`` runs on the first writable GraphDB connection.
+from tools.dashboard import crosstalk_directive as _crosstalk_directive  # noqa: E402, F401
+
 # Settings Nexus plugin schemas (bead auto-ct3ey) — imported eagerly so
 # ``dashboard.nexus.scene#1`` + ``dashboard.nexus.tile#1`` are in the
 # registry before ``flush_schema_meta`` runs on the first writable
