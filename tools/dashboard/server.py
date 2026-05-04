@@ -5564,6 +5564,7 @@ async def api_upload(request):
                         "%Y-%m-%dT%H:%M:%S.%f"
                     )[:-3] + "Z",
                 },
+                org=_caller_org(request),
             )
 
     return JSONResponse({"ok": True, "path": agent_path, "host_path": host_path, "filename": dest.name})
