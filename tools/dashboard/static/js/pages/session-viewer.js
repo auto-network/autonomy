@@ -1058,7 +1058,10 @@
           var file = fileList[fi];
           var id = ++this._nextAttachId;
           var isImage = file.type.startsWith('image/');
-          var att = { id: id, name: file.name, isImage: isImage, dataUrl: null, path: null };
+          var att = {
+            id: id, name: file.name, isImage: isImage, dataUrl: null,
+            path: null, rel_path: null, mime: null, size: null,
+          };
           this.attachments.push(att);
 
           if (isImage) {
@@ -1085,7 +1088,13 @@
               .then(function(data) {
                 if (data.ok) {
                   var found = self.attachments.find(function(a) { return a.id === attId; });
-                  if (found) found.path = data.path;
+                  if (found) {
+                    var meta = (data.files && data.files[0]) || data;
+                    found.path = meta.path;
+                    found.rel_path = meta.rel_path || '';
+                    found.mime = meta.mime || '';
+                    found.size = meta.size || 0;
+                  }
                 } else {
                   console.warn('[sessionViewer] upload error:', data.error);
                 }
@@ -1151,6 +1160,30 @@
             if (!data.ok) {
               console.warn('[sessionViewer] send error:', data.error);
               return;
+            }
+          }
+
+          // Substrate write fires *here* — on send commit — so the
+          // viewer tile only appears for attachments the operator
+          // actually sent. Removing a file from the preview before
+          // sending leaves nothing in the timeline.
+          if (this._uploadProxy && tmux) {
+            var ts = new Date().toISOString();
+            for (var si = 0; si < this.attachments.length; si++) {
+              var sa = this.attachments[si];
+              if (!sa.rel_path) continue;
+              try {
+                await this._uploadProxy.append({
+                  target_session: tmux,
+                  filename: sa.name,
+                  rel_path: sa.rel_path,
+                  mime: sa.mime || '',
+                  size: sa.size || 0,
+                  timestamp: ts,
+                });
+              } catch (err) {
+                console.warn('[sessionViewer] upload row write failed:', err);
+              }
             }
           }
 

@@ -134,8 +134,6 @@ from tools.dashboard import harness_usage_settings as _harness_usage_settings  #
 from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
 from tools.graph import settings_ops  # noqa: E402
 
-import uuid  # noqa: E402
-
 # Activity tab notifications substrate (bead auto-5u8zb) — imported
 # eagerly so the four ``dashboard.activity.*`` SettingSchema classes
 # (ask, ask_vote, ask_refresh, operator_dismissed) are in the registry
@@ -5549,30 +5547,20 @@ async def api_upload(request):
                 if cp and cp.returncode == 0:
                     agent_path = container_path
 
+        rel_path = ""
         if tmux_session and AGENT_RUNS_DIR in dest.parents:
             rel_path_parts = dest.relative_to(_REPO_ROOT).parts
             if len(rel_path_parts) > 3:
                 rel_path = "/".join(rel_path_parts[3:])
-                settings_ops.add_setting(
-                    _session_upload.SESSION_UPLOAD_SET_ID,
-                    _session_upload.SCHEMA_REVISION,
-                    str(uuid.uuid4()),
-                    {
-                        "target_session": tmux_session,
-                        "filename": dest.name,
-                        "rel_path": rel_path,
-                        "mime": (mimetypes.guess_type(dest.name)[0]
-                                 or "application/octet-stream"),
-                        "size": len(contents),
-                        "timestamp": datetime.now(timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%S.%f"
-                        )[:-3] + "Z",
-                    },
-                    org=_caller_org(request),
-                )
 
         results.append({
-            "path": agent_path, "host_path": host_path, "filename": dest.name,
+            "path": agent_path,
+            "host_path": host_path,
+            "filename": dest.name,
+            "rel_path": rel_path,
+            "mime": (mimetypes.guess_type(dest.name)[0]
+                     or "application/octet-stream"),
+            "size": len(contents),
         })
 
     # Top-level path/host_path/filename keep the first file so existing
