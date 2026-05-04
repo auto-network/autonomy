@@ -132,6 +132,7 @@ from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
 from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
 from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
+from tools.dashboard import worktree_directives as _worktree_directives  # noqa: E402, F401
 from tools.graph import settings_ops  # noqa: E402
 
 # Activity tab notifications substrate (bead auto-5u8zb) — imported

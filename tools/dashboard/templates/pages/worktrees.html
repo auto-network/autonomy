@@ -779,11 +779,27 @@
                     <template x-if="canRequestRebase(selectedCommit)">
                       <button type="button"
                               class="h-11 rounded-2xl border border-indigo-500/30 px-4 text-sm font-semibold text-indigo-200 transition hover:bg-indigo-500/10 disabled:cursor-wait disabled:opacity-50"
-                              :disabled="rebaseRequesting"
+                              :disabled="rebaseRequesting
+                                || rebaseStatusFor(selectedCommit.row) === 'awaiting'
+                                || rebaseStatusFor(selectedCommit.row) === 'in_progress'"
                               @click="requestRebase(selectedCommit.row)"
                               data-testid="worktree-request-rebase-button">
-                        <span x-show="!rebaseRequesting">Request Rebase</span>
-                        <span x-show="rebaseRequesting">Requesting...</span>
+                        <template x-if="rebaseStatusFor(selectedCommit.row) === 'in_progress'">
+                          <span class="inline-flex items-center gap-2">
+                            <span class="h-4 w-4 animate-spin rounded-full border-2 border-indigo-200/30 border-t-indigo-200"></span>
+                            <span>Rebasing…</span>
+                          </span>
+                        </template>
+                        <template x-if="rebaseStatusFor(selectedCommit.row) === 'awaiting' || (rebaseRequesting && rebaseStatusFor(selectedCommit.row) !== 'in_progress')">
+                          <span>Awaiting agent…</span>
+                        </template>
+                        <template x-if="rebaseStatusFor(selectedCommit.row) === 'failed'">
+                          <span>Rebase failed — retry</span>
+                        </template>
+                        <template x-if="!rebaseRequesting
+                                && !rebaseStatusFor(selectedCommit.row)">
+                          <span>Request Rebase</span>
+                        </template>
                       </button>
                     </template>
                     <button type="button"
