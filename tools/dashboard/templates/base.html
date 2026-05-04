@@ -1417,7 +1417,7 @@
       <div id="agent-actions-slot" class="flex items-center gap-2 ml-auto">
 
         <!-- Agentic actions dropdown (auto-pqgrl) -->
-        <div class="agent-actions-root" x-data="agentActionsComponent()" x-init="init()" @keydown.escape.window="closePanel(); closeSendToModal()">
+        <div class="agent-actions-root" x-data="agentActionsComponent()" x-init="init()" @keydown.escape.window="closePanel(); closeSendToModal(); closeInputModal()">
           <button type="button"
                   class="actions-btn"
                   data-testid="agent-actions-button"
@@ -1512,6 +1512,38 @@
               </div>
               <div class="send-to-modal-actions">
                 <button type="button" class="send-to-modal-btn cancel" @click="closeSendToModal()">Cancel</button>
+              </div>
+              <div class="agent-actions-error" x-show="lastError" x-text="lastError"></div>
+            </div>
+          </div>
+
+          <!-- Operator-input modal (auto-0tkwj) — opens for actions whose
+               payload declares ``input_prompt``. Mirrors the Send-To modal
+               styling exactly; substitutes a textarea for the session list. -->
+          <div class="send-to-modal-backdrop"
+               data-testid="action-input-modal"
+               x-show="inputModalOpen"
+               x-cloak
+               @click.self="closeInputModal()">
+            <div class="send-to-modal" @click.stop>
+              <div class="send-to-modal-title"
+                   x-text="(inputModalMember && inputModalMember.payload && inputModalMember.payload.label) || 'Action'"></div>
+              <div class="send-to-modal-subtitle"
+                   x-text="(inputModalMember && inputModalMember.payload && inputModalMember.payload.input_prompt) || ''"></div>
+              <textarea class="action-input-textarea"
+                        data-testid="action-input-textarea"
+                        x-model="inputModalText"
+                        rows="6"
+                        @keydown.escape.stop="closeInputModal()"></textarea>
+              <div class="send-to-modal-actions">
+                <button type="button"
+                        class="send-to-modal-btn cancel"
+                        @click="closeInputModal()">Cancel</button>
+                <button type="button"
+                        class="send-to-modal-btn confirm"
+                        data-testid="action-input-dispatch"
+                        :disabled="!inputModalCanSubmit() || pendingDispatch"
+                        @click="submitInputModal()">Dispatch</button>
               </div>
               <div class="agent-actions-error" x-show="lastError" x-text="lastError"></div>
             </div>
