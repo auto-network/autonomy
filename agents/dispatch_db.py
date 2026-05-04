@@ -399,6 +399,117 @@ def insert_run(
         conn.close()
 
 
+def _git_diff_stats_range(
+    target_repo: str, commit_hash: str,
+) -> tuple[int | None, int | None, int | None]:
+    """Compute lines_added, lines_removed, files_changed for a single commit.
+
+    Used by ``record_worktree_merge_run`` to populate stat columns for a
+    merged commit; mirrors the ``--numstat`` parsing in
+    :func:`_git_diff_stats` but ranges over ``<sha>^..<sha>`` so the
+    result reflects only the merged commit.
+    """
+    if not commit_hash or not target_repo:
+        return None, None, None
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--numstat", f"{commit_hash}^..{commit_hash}"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(target_repo),
+        )
+        if result.returncode != 0:
+            return None, None, None
+
+        added = 0
+        removed = 0
+        files = 0
+        for line in result.stdout.strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                files += 1
+                if parts[0] != "-":
+                    added += int(parts[0])
+                if parts[1] != "-":
+                    removed += int(parts[1])
+        return added, removed, files
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        return None, None, None
+
+
+def record_worktree_merge_run(
+    *,
+    commit_hash: str,
+    commit_message: str,
+    branch: str | None,
+    branch_base: str | None,
+    container_name: str | None,
+    reason: str,
+    target_repo: str | None = None,
+) -> str | None:
+    """Insert a ``kind='worktree-merge'`` row for a host-side merge.
+
+    Worktree merges performed via the ``/worktrees`` dashboard UI bypass
+    the dispatcher's bead lifecycle, so they don't otherwise leave a row
+    on the Activity timeline. This helper writes a lean ``DONE`` row so
+    the timeline picks them up alongside dispatched bead runs.
+
+    The row id is deterministic (``wt-{commit_hash[:12]}``) so concurrent
+    callers race-safe via ``INSERT OR IGNORE``: the second insert is a
+    no-op rather than an error or a duplicate row. Returns the run_id on
+    success (whether newly inserted or already present) or ``None`` if
+    ``commit_hash`` was empty (defensive — the caller should never pass
+    a blank SHA, but we'd rather drop a row than crash a merge handler).
+
+    ``reason`` is the merge method string: ``'ff'``, ``'commit-merge'``,
+    or ``'cherry-pick'``. Score / time-breakdown / agentic / librarian
+    columns stay NULL — worktree merges have no agent decision payload.
+    """
+    if not commit_hash:
+        return None
+
+    run_id = f"wt-{commit_hash[:12]}"
+    now_dt = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    lines_added, lines_removed, files_changed = _git_diff_stats_range(
+        target_repo or str(REPO_ROOT), commit_hash,
+    )
+
+    subject = (commit_message or "").splitlines()[0] if commit_message else ""
+
+    conn = _get_conn()
+    try:
+        conn.execute(
+            """\
+            INSERT OR IGNORE INTO dispatch_runs (
+                id, bead_id, started_at, completed_at, duration_secs,
+                status, reason,
+                commit_hash, commit_message, branch, branch_base,
+                container_name,
+                lines_added, lines_removed, files_changed,
+                output_dir, kind
+            ) VALUES (
+                ?, NULL, ?, ?, 0,
+                'DONE', ?,
+                ?, ?, ?, ?,
+                ?,
+                ?, ?, ?,
+                '', 'worktree-merge'
+            )
+            """,
+            (
+                run_id, now_dt, now_dt,
+                reason,
+                commit_hash, subject, branch or None, branch_base or None,
+                container_name or None,
+                lines_added, lines_removed, files_changed,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return run_id
+
+
 def _row_to_dict(row: sqlite3.Row) -> dict:
     """Convert a sqlite3.Row to a plain dict."""
     return {k: row[k] for k in row.keys()}

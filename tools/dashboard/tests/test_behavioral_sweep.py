@@ -401,7 +401,71 @@ SWEEP_RUNS = [
 
 # ── Timeline data ────────────────────────────────────────────────────
 
-SWEEP_TIMELINE_ENTRIES = SWEEP_RUNS  # timeline uses same shape as runs
+# Bead auto-ecmss: worktree-merge timeline rows (kind='worktree-merge')
+# exercise the title-fallback (populated container_name vs NULL) and the
+# three method-badge variants that L2.B asserts on.
+SWEEP_TIMELINE_WORKTREE_MERGE = [
+    {
+        "id": "wt-feedfacecafe",
+        "run_id": "wt-feedfacecafe",
+        "bead_id": None,
+        "status": "DONE",
+        "kind": "worktree-merge",
+        "reason": "ff",
+        "started_at": "2026-03-25T11:00:00Z",
+        "completed_at": "2026-03-25T11:00:01Z",
+        "duration_secs": 0,
+        "commit_hash": "feedfacecafebabe",
+        "commit_message": "Land worktree dashboard polish",
+        "branch": "session/auto-AAAAA",
+        "container_name": "auto-AAAAA",
+        "lines_added": 12,
+        "lines_removed": 3,
+        "files_changed": 2,
+        "title": "",
+    },
+    {
+        "id": "wt-aaaabbbbcccc",
+        "run_id": "wt-aaaabbbbcccc",
+        "bead_id": None,
+        "status": "DONE",
+        "kind": "worktree-merge",
+        "reason": "cherry-pick",
+        "started_at": "2026-03-25T11:01:00Z",
+        "completed_at": "2026-03-25T11:01:01Z",
+        "duration_secs": 0,
+        "commit_hash": "aaaabbbbccccdddd",
+        "commit_message": "Pick a stray fix",
+        "branch": None,
+        # No source session attribution — title falls back to bare "Worktree merge"
+        "container_name": None,
+        "lines_added": 1,
+        "lines_removed": 0,
+        "files_changed": 1,
+        "title": "",
+    },
+    {
+        "id": "wt-1111222233aa",
+        "run_id": "wt-1111222233aa",
+        "bead_id": None,
+        "status": "DONE",
+        "kind": "worktree-merge",
+        "reason": "commit-merge",
+        "started_at": "2026-03-25T11:02:00Z",
+        "completed_at": "2026-03-25T11:02:01Z",
+        "duration_secs": 0,
+        "commit_hash": "1111222233334444",
+        "commit_message": "Pick the second commit",
+        "branch": "session/auto-YYYYY",
+        "container_name": "auto-YYYYY",
+        "lines_added": 4,
+        "lines_removed": 4,
+        "files_changed": 1,
+        "title": "",
+    },
+]
+
+SWEEP_TIMELINE_ENTRIES = SWEEP_RUNS + SWEEP_TIMELINE_WORKTREE_MERGE
 
 SWEEP_TIMELINE_STATS = {
     "completed_count": 5,
@@ -2096,6 +2160,66 @@ ACTIVITY_PAGE_CHECKS = """(async () => {
         }
 
         r.no_jinja = bodyText.indexOf('{{') === -1 && bodyText.indexOf('{%') === -1;
+
+        // Bead auto-ecmss: worktree-merge cards land on the timeline
+        // alongside dispatched bead runs. Assertions cover the state
+        // matrix: container_name='auto-XXXXX' (title contains "from
+        // auto-"), container_name=NULL (title is bare "Worktree merge"),
+        // and all three reason variants ('ff', 'cherry-pick',
+        // 'commit-merge'). Negative assertions confirm bead-only
+        // sections (scores, time-breakdown, librarian) don't appear.
+        var wtCardFf = document.querySelector('[data-testid="tl-card-worktree-merge-wt-feedfacecafe"]');
+        var wtCardCp = document.querySelector('[data-testid="tl-card-worktree-merge-wt-aaaabbbbcccc"]');
+        var wtCardCm = document.querySelector('[data-testid="tl-card-worktree-merge-wt-1111222233aa"]');
+        r.wt_ff_card_visible = !!wtCardFf && wtCardFf.offsetParent !== null;
+        r.wt_cp_card_visible = !!wtCardCp && wtCardCp.offsetParent !== null;
+        r.wt_cm_card_visible = !!wtCardCm && wtCardCm.offsetParent !== null;
+
+        function _wtTitle(card) {
+            var t = card ? card.querySelector('.tl-title-block') : null;
+            return t ? t.textContent.trim() : '';
+        }
+        function _wtBadge(card) {
+            var b = card ? card.querySelector('.tl-method-badge') : null;
+            return b ? b.textContent.trim() : '';
+        }
+        r.wt_ff_title = _wtTitle(wtCardFf);
+        r.wt_cp_title = _wtTitle(wtCardCp);
+        r.wt_cm_title = _wtTitle(wtCardCm);
+        r.wt_ff_title_contains_worktree = r.wt_ff_title.indexOf('Worktree merge') !== -1;
+        r.wt_ff_title_contains_from_auto = r.wt_ff_title.indexOf('from auto-') !== -1;
+        // Empty container_name → bare "Worktree merge" with no "from".
+        r.wt_cp_title_is_bare = r.wt_cp_title === 'Worktree merge';
+        r.wt_cm_title_contains_from_auto = r.wt_cm_title.indexOf('from auto-') !== -1;
+
+        r.wt_ff_method_badge = _wtBadge(wtCardFf);
+        r.wt_cp_method_badge = _wtBadge(wtCardCp);
+        r.wt_cm_method_badge = _wtBadge(wtCardCm);
+
+        // Lines/files chips are part of the existing tl-bottom block,
+        // which renders when _hasBottom is true (lines_added != null).
+        function _hasLineChips(card) {
+            if (!card) return false;
+            return !!(card.querySelector('.tl-diff-add') || card.querySelector('.tl-diff-del'));
+        }
+        r.wt_ff_has_line_chips = _hasLineChips(wtCardFf);
+        r.wt_cp_has_line_chips = _hasLineChips(wtCardCp);
+        r.wt_cm_has_line_chips = _hasLineChips(wtCardCm);
+
+        // Negative assertions: worktree-merge cards must NOT carry
+        // bead-only chrome.
+        function _hasBeadChrome(card) {
+            if (!card) return {scores: false, time: false, lib: false};
+            return {
+                scores: !!card.querySelector('.tl-card-slot-stars'),
+                time: !!card.querySelector('.tl-stacked-bar'),
+                lib: !!card.querySelector('.tl-review-detail'),
+            };
+        }
+        r.wt_ff_chrome = _hasBeadChrome(wtCardFf);
+        r.wt_cp_chrome = _hasBeadChrome(wtCardCp);
+        r.wt_cm_chrome = _hasBeadChrome(wtCardCm);
+
         return JSON.stringify(r);
     } catch (e) {
         return JSON.stringify({error: e.message, stack: e.stack});
@@ -2960,6 +3084,62 @@ class TestActivitySurfaceBehavior:
         """No raw Jinja template syntax is visible on either route."""
         for c in (self._timeline, self._activity):
             assert c.get("no_jinja"), f"Raw template syntax visible on {c.get('page_path')}"
+
+    def test_worktree_merge_cards_render_on_feed(self):
+        """Bead auto-ecmss: kind='worktree-merge' rows surface on /activity.
+
+        Matrix coverage (one assertion per row of the bead's state matrix):
+          * ff + populated container_name → title "Worktree merge — from auto-XXXXX",
+            method badge 'ff'
+          * cherry-pick + NULL container_name → title bare "Worktree merge"
+            (no "from" suffix), method badge 'cherry-pick'
+          * commit-merge + populated container_name → method badge
+            'commit-merge', title contains "from auto-"
+        Negative chrome: no scores section, no time-breakdown bar, no
+        librarian section on any of the three.
+        """
+        c = self._timeline
+        assert c.get("wt_ff_card_visible"), "ff worktree-merge card not visible"
+        assert c.get("wt_cp_card_visible"), "cherry-pick worktree-merge card not visible"
+        assert c.get("wt_cm_card_visible"), "commit-merge worktree-merge card not visible"
+
+        # Title — populated source session.
+        assert c.get("wt_ff_title_contains_worktree"), (
+            f"ff title missing 'Worktree merge': {c.get('wt_ff_title')!r}"
+        )
+        assert c.get("wt_ff_title_contains_from_auto"), (
+            f"ff title missing 'from auto-': {c.get('wt_ff_title')!r}"
+        )
+        assert c.get("wt_cm_title_contains_from_auto"), (
+            f"commit-merge title missing 'from auto-': {c.get('wt_cm_title')!r}"
+        )
+        # Title — empty container_name falls back to bare "Worktree merge".
+        assert c.get("wt_cp_title_is_bare"), (
+            f"cherry-pick title not bare 'Worktree merge': {c.get('wt_cp_title')!r}"
+        )
+
+        # Method badge text matches each row's reason.
+        assert c.get("wt_ff_method_badge") == "ff", c.get("wt_ff_method_badge")
+        assert c.get("wt_cp_method_badge") == "cherry-pick", c.get("wt_cp_method_badge")
+        assert c.get("wt_cm_method_badge") == "commit-merge", c.get("wt_cm_method_badge")
+
+        # Lines+/-/files chips render when lines fields are populated.
+        assert c.get("wt_ff_has_line_chips"), "ff card missing diff chips"
+        assert c.get("wt_cm_has_line_chips"), "commit-merge card missing diff chips"
+        # Cherry-pick has only +1 -0, but the +1 chip should still render.
+        assert c.get("wt_cp_has_line_chips"), "cherry-pick card missing diff chips"
+
+        # Negative chrome: scores stars, time bar, and librarian section
+        # are unique to bead/agentic rows — none should appear on a
+        # worktree-merge card.
+        for label, chrome in (
+            ("ff", c.get("wt_ff_chrome") or {}),
+            ("cherry-pick", c.get("wt_cp_chrome") or {}),
+            ("commit-merge", c.get("wt_cm_chrome") or {}),
+        ):
+            assert not chrome.get("scores"), f"{label} card unexpectedly has scores section"
+            assert not chrome.get("time"), f"{label} card unexpectedly has time-breakdown bar"
+            assert not chrome.get("lib"), f"{label} card unexpectedly has librarian section"
 
 
 ACTIVITY_ATTENTION_CHECKS = """(async () => {

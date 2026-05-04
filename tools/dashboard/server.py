@@ -47,6 +47,7 @@ from agents.dispatch_db import (
     list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH,
     clear_paused, is_paused, get_pause_reason,
     get_consecutive_failures, reset_circuit_breaker,
+    record_worktree_merge_run,
 )
 from agents.session_launcher import launch_session
 from agents import workspace_settings
@@ -1301,6 +1302,13 @@ def _row_to_timeline_entry(row: sqlite3.Row) -> dict:
         "duration_secs": row["duration_secs"],
         "commit_hash": row["commit_hash"] or "",
         "commit_message": row["commit_message"] or "",
+        # auto-ecmss: branch + container_name surface the source worktree
+        # for ``kind='worktree-merge'`` rows (used by the timeline title
+        # "Worktree merge — from auto-XXXXX"). Bead/agentic rows
+        # populate these too, but the timeline doesn't read them — so
+        # this is additive, not a behavior change for existing cards.
+        "branch": row["branch"] or "",
+        "container_name": row["container_name"] or "",
         "lines_added": row["lines_added"],
         "lines_removed": row["lines_removed"],
         "files_changed": row["files_changed"],
@@ -6528,6 +6536,38 @@ def _resolve_binding_diff_shas(
     chosen = reviews[0] or {}
     return chosen.get("base_sha") or None, chosen.get("head_sha") or None
 
+async def _record_worktree_merge_timeline(
+    *,
+    session_name: str,
+    branch: str | None,
+    result: dict,
+    reason: str,
+) -> None:
+    """Best-effort write of a ``kind='worktree-merge'`` row to dispatch_runs.
+
+    The merge already succeeded by the time this is called — the row is
+    observability, not correctness. Any writer failure is logged and
+    swallowed so the merge response stays ``ok: True``.
+    """
+    commit_sha = result.get("commit", "") or ""
+    try:
+        await asyncio.to_thread(
+            record_worktree_merge_run,
+            commit_hash=commit_sha,
+            commit_message=result.get("message", "") or "",
+            branch=branch or f"session/{session_name}",
+            branch_base=result.get("target_branch") or None,
+            container_name=session_name,
+            reason=reason,
+            target_repo=result.get("target_repo") or None,
+        )
+    except Exception:  # noqa: BLE001 — observability must not break merges
+        logger.exception(
+            "worktree-merge timeline write failed for %s commit=%s reason=%s",
+            session_name, commit_sha, reason,
+        )
+
+
 async def api_worktree_commit_merge(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
@@ -6562,6 +6602,12 @@ async def api_worktree_commit_merge(request):
         commit_sha=result.get("commit", ""),
         commit_message=result.get("message", ""),
         kind="commit",
+    )
+    await _record_worktree_merge_timeline(
+        session_name=session_name,
+        branch=None,
+        result=result,
+        reason="commit-merge",
     )
     return JSONResponse({
         "ok": True,
@@ -6600,6 +6646,12 @@ async def api_worktree_merge(request):
         commit_sha=result.get("commit", ""),
         commit_message=result.get("message", ""),
         kind="ff",
+    )
+    await _record_worktree_merge_timeline(
+        session_name=session_name,
+        branch=getattr(row, "branch", None),
+        result=result,
+        reason="ff",
     )
     return JSONResponse({
         "ok": True,
@@ -6643,6 +6695,12 @@ async def api_worktree_cherry_pick(request):
         commit_sha=result.get("commit", ""),
         commit_message=result.get("message", ""),
         kind="cherry-pick",
+    )
+    await _record_worktree_merge_timeline(
+        session_name=session_name,
+        branch=getattr(row, "branch", None),
+        result=result,
+        reason="cherry-pick",
     )
     return JSONResponse({
         "ok": True,
