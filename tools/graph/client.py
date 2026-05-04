@@ -1012,18 +1012,33 @@ def _dict_to_resolved_setting(d: dict):
 # ── Dispatcher ──────────────────────────────────────────────────
 
 
-def get_client():
-    """Return the right graph client for the current environment.
+# Module-level switch flipped by the CLI's ``--force-host`` flag (see
+# :mod:`tools.graph.cli` ``main()``). Disaster-recovery escape hatch: when
+# ``True``, :func:`get_client` returns the in-process ``ops`` module instead
+# of an HttpClient, bypassing the dashboard entirely.
+#
+# Direct ``ops.*`` writes do NOT fire ``setting.changed`` events because the
+# emit hook is only registered inside the dashboard process. See the
+# settings-write contract note: graph://90e6fe6d-89c. Tests opt in to direct
+# mode via the ``_isolate_graph_env`` autouse fixture in
+# ``tools/graph/tests/conftest.py``.
+_FORCE_HOST_DIRECT = False
 
-    Container (GRAPH_API set) → :class:`HttpClient` over HTTPS.
-    Host                          → the :mod:`ops` module itself; it
-                                    duck-types as a client since every
-                                    method HttpClient exposes is already
-                                    a top-level `ops.X` function with
-                                    the same name and signature.
+
+def get_client():
+    """Return the graph client. Defaults to :class:`HttpClient` against the
+    dashboard so writes fire ``setting.changed`` events through the registered
+    emit hook (which only exists inside the dashboard process).
+
+    ``GRAPH_API`` overrides the base URL (default ``https://localhost:8080``).
+    ``_FORCE_HOST_DIRECT = True`` (set by the CLI's ``--force-host`` flag)
+    bypasses the dashboard and returns the in-process ``ops`` module —
+    disaster-recovery only, since direct writes produce no event.
+
+    Settings-write contract: graph://90e6fe6d-89c.
     """
-    api = os.environ.get("GRAPH_API")
-    if api:
-        return HttpClient(api)
-    from . import ops
-    return ops
+    if _FORCE_HOST_DIRECT:
+        from . import ops
+        return ops
+    api = os.environ.get("GRAPH_API") or "https://localhost:8080"
+    return HttpClient(api)

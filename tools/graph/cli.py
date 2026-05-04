@@ -221,6 +221,7 @@ from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_a
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_stats, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
 from .worktree_cmd import cmd_worktree_default, cmd_worktree_list, cmd_worktree_prune
+from . import client as _client_mod
 from .client import get_client, HttpClient
 
 
@@ -4425,6 +4426,15 @@ def main():
         description="Autonomy Knowledge Graph CLI",
     )
     parser.add_argument("--db", type=Path, default=_get_db_path(), help="Database path")
+    parser.add_argument(
+        "--force-host",
+        dest="force_host",
+        action="store_true",
+        help="Bypass the dashboard API and write directly to the local SQLite "
+             "graph DB. Disaster recovery only: setting.changed events DO NOT "
+             "fire and no registered handlers will react. Use only when the "
+             "dashboard is unavailable. Contract: graph://90e6fe6d-89c.",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -5132,6 +5142,17 @@ def main():
     p_cache_gc.set_defaults(func=cmd_cache_gc)
 
     args = parser.parse_args()
+
+    # Flip the client dispatcher BEFORE any subcommand runs. ``--force-host``
+    # is the disaster-recovery escape hatch: it bypasses the dashboard and
+    # writes straight to SQLite, accepting that setting.changed events do
+    # NOT fire (no handlers will react). See the settings-write contract.
+    #
+    # Only flip when the flag is explicitly passed so the test suite's
+    # conftest pin (``_FORCE_HOST_DIRECT = True`` for host-mode tests) is
+    # not silently reset to False on every ``cli.main()`` invocation.
+    if getattr(args, "force_host", False):
+        _client_mod._FORCE_HOST_DIRECT = True
 
     # Apply scope from environment
     _apply_scope(args)
