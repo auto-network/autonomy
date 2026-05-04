@@ -232,11 +232,11 @@ When formulating or refining beads, read the protocol directly:
 
 ## Turn Corrections — closing perception gaps on user messages
 
-This is **not** a grammar pass on the user. The goal is to reduce
-**perception gaps**: moments where a user message arrives garbled —
-voice-dictation slips, transcription errors, missing words, half-typed
-phrases, or ambiguity that forces you to guess — and your reply would
-otherwise act on a misread of what they actually meant.
+This is **not** copyediting. It is shared-understanding hygiene. Use it
+when a quick rewrite would make the user's meaning easier to act on or
+keep a better transcript of what they meant: dictation slips, missing
+words, wrong technical terms, half-typed phrases, or ambiguity that
+would otherwise push you into a guess.
 
 `aggressiveness={{ turn_correction.aggressiveness }}`{% if turn_correction.persist_accepts_to_graph %} · accepted corrections persist to the graph{% endif %}
 
@@ -249,29 +249,22 @@ The command shape (v1 contract):
 {{ turn_correction.command }}
 ```
 
-`corrected_text` is the **complete corrected replacement message**, not
-a span or a diff. Pass `--stdin` for long corrections. Do **not** supply
-`target_message_id` or `original_sha256` — the session side derives both
-internally when it attaches the suggestion to the most likely nearby
-user turn.
+`corrected_text` is the **full replacement message**. Pass `--stdin` for
+long corrections. Do **not** supply `target_message_id` or
+`original_sha256` — the session side resolves them.
 
 Workflow, end to end:
 
-1. Inspect the garbled user message.
-2. Form a full corrected replacement string in your head.
-3. Emit `graph turn-correction suggest ... --json` immediately
-   (`--stdin` for long corrections), in the same turn — one shot, no
-   confirmation prompt to the operator.
-4. The session side attaches the suggestion to the most likely nearby
-   user turn and derives the guard hash on its own.
-5. The viewer renders the suggestion as a pending overlay; the
-   operator may accept (the corrected text becomes the effective
-   message body) or dismiss (the raw message stands).
-6. Do **not** talk about the correction. Just issue it and keep
+1. Read the message and decide the full corrected replacement.
+2. Emit `graph turn-correction suggest ... --json` immediately in the
+   same turn (`--stdin` if long).
+3. The session attaches it to the most likely nearby user turn and
+   shows an accept/dismiss overlay.
+4. Do **not** talk about the correction. Just issue it and keep
    working if the path forward is still clear.
-7. Only stop and acknowledge the correction explicitly when the meaning
-   is too uncertain to proceed; in that case, use it as a clarification
-   proposal, e.g. `Is this what you meant?`
+5. Only stop and acknowledge it when the meaning is too uncertain to
+   proceed; in that case, use it as a clarification proposal, e.g.
+   `Is this what you meant?`
 
 Worked example — operator just sent "wat are the implickatons of teh new auth fix", you respond in the same turn with:
 
@@ -286,9 +279,8 @@ graph turn-correction suggest \
 Then continue your normal reply against the corrected reading. If the
 operator dismisses the suggestion, your reply still stands; the
 correction is purely additive. Use this for communication, not just
-transcription: when the message is ambiguous, the correction can make
-your best reading visible so the operator can accept it, reject it, or
-clarify what they actually meant.
+transcription: it makes your best reading visible before a misread turns
+into a bad reply or a bad log.
 {% else %}
 Turn-correction guidance is **disabled** for this workspace
 (`enabled=false`). Do not emit `graph turn-correction suggest` unless
