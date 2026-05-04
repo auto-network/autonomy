@@ -1712,6 +1712,41 @@ def _collect_live_stats(agent: RunningAgent) -> None:
 # ── Session ingestion ───────────────────────────────────────────
 
 
+def _ingest_session_safe(
+    agent: RunningAgent,
+    result: DispatchResult,
+    effective_status: str,
+) -> None:
+    """Run :func:`_ingest_session` as a non-raising post-decision step.
+
+    By the time this is called, ``process_decision`` has already settled
+    bead state (closed DONE, reopened on FAILED, etc.) and any merge has
+    landed on master/hostsync. A downstream collection failure must not
+    flip that state — it's a librarian-side issue, not implementation
+    failure.
+
+    This guards against the auto-qjme3 contradiction: ``graph sessions
+    --all`` timed out *after* commit 4d9fb0c had already landed, the
+    enclosing ``except`` in :func:`poll_and_collect` then called
+    ``release_bead("FAILED")`` which reopened the merged bead.
+
+    On failure the warning is logged and appended to the bead so it
+    surfaces as a separate signal from the landed implementation status.
+    """
+    try:
+        _ingest_session(result)
+    except Exception as e:
+        warning = f"post-land ingest warning ({type(e).__name__}): {str(e)[:200]}"
+        print(
+            f"  WARN ingest for {agent.bead_id} (status={effective_status}): {warning}",
+            file=sys.stderr,
+        )
+        try:
+            run_bd(["update", agent.bead_id, "--append-notes", warning])
+        except Exception:
+            pass
+
+
 def _ingest_session(result: DispatchResult) -> None:
     """Ingest agent session into the knowledge graph and link to bead."""
     ingest_proc = subprocess.run(
@@ -2053,31 +2088,12 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             Path(agent.output_dir).name if agent.output_dir else agent.bead_id
         )
         print(f"  Collecting: {agent.bead_id} (container: {agent.container_name})")
+
+        # ── Phase 1: pre-decision. A failure here means we never landed,
+        # so reopening the bead as FAILED is correct. ────────────────────
         try:
             result = collect_results(agent, exit_code)
             effective_status = process_decision(result)
-            _notify_dispatch_nag(agent, effective_status, result)
-            # Track consecutive merge failures across beads for auto-pause
-            _update_merge_failure_counter(effective_status, result)
-            _record_run(agent, result, effective_status=effective_status)
-            _ingest_session(result)
-            # Enqueue review_report job after a successful DONE dispatch (best-effort)
-            if effective_status == "DONE":
-                try:
-                    run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
-                    report_path = str(Path(agent.output_dir) / "experience_report.md")
-                    decision_path = str(Path(agent.output_dir) / "decision.json")
-                    payload = json.dumps({
-                        "bead_id": agent.bead_id,
-                        "report_path": report_path,
-                        "decision_path": decision_path,
-                        "run_id": run_id,
-                    })
-                    job_id = enqueue_job("review_report", payload=payload)
-                    print(f"  Enqueued review_report job {job_id[:8]} for {agent.bead_id}")
-                except Exception as eq_err:
-                    print(f"  WARNING: enqueue review_report failed for {agent.bead_id}: {eq_err}",
-                          file=sys.stderr)
         except Exception as e:
             error_msg = f"Collection error: {type(e).__name__}: {e}"
             print(f"  ERROR collecting {agent.bead_id}: {error_msg}")
@@ -2088,6 +2104,36 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
                 bead_id=agent.bead_id, exit_code=exit_code, error=error_msg),
                 effective_status="FAILED")
             cleanup_worktree(agent.worktree_path)
+            continue
+
+        # ── Phase 2: post-decision. ``process_decision`` has already
+        # settled bead state (closed DONE on a landed merge, reopened
+        # otherwise) and resolved the worktree. A failure here must NOT
+        # call ``release_bead("FAILED")`` — that's how auto-qjme3 got
+        # reopened after commit 4d9fb0c had already landed on master.
+        # Wrap each side-effect so a librarian-side hiccup surfaces as
+        # a warning, not as implementation failure. ──────────────────────
+        _notify_dispatch_nag(agent, effective_status, result)
+        _update_merge_failure_counter(effective_status, result)
+        _record_run(agent, result, effective_status=effective_status)
+        _ingest_session_safe(agent, result, effective_status)
+        # Enqueue review_report job after a successful DONE dispatch (best-effort)
+        if effective_status == "DONE":
+            try:
+                run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+                report_path = str(Path(agent.output_dir) / "experience_report.md")
+                decision_path = str(Path(agent.output_dir) / "decision.json")
+                payload = json.dumps({
+                    "bead_id": agent.bead_id,
+                    "report_path": report_path,
+                    "decision_path": decision_path,
+                    "run_id": run_id,
+                })
+                job_id = enqueue_job("review_report", payload=payload)
+                print(f"  Enqueued review_report job {job_id[:8]} for {agent.bead_id}")
+            except Exception as eq_err:
+                print(f"  WARNING: enqueue review_report failed for {agent.bead_id}: {eq_err}",
+                      file=sys.stderr)
 
     # Handle timed-out agents — kill, then try to recover results
     for agent, stale_secs in timed_out:
