@@ -331,6 +331,22 @@ window.ensureSessionMessages = function() {
     }
   });
 
+  window.registerHandler('session:turn_corrections', function(data) {
+    var id = data && data.session_id;
+    if (!id) return;
+
+    var sessions = Alpine.store('sessions');
+    var store = sessions[id];
+    if (!store) return;
+
+    var correction = data && data.correction;
+    if (!correction || !correction.target_message_id) return;
+
+    store._turnCorrections = store._turnCorrections || {};
+    store._turnCorrections[correction.target_message_id] = correction;
+    store._lastRenderTs = Date.now();
+  });
+
   window.registerHandler('session:registry', function(registrySessions) {
     var activeIds = {};
     for (var i = 0; i < registrySessions.length; i++) {

@@ -185,6 +185,7 @@
       // ({status, original_sha256, corrected_text, ...}). Renderer
       // helpers in SessionRenderer read this to overlay user tiles.
       _corrections: {},
+      _correctionDisplayMode: {},
       _correctionRefreshTimer: null,
       _correctionHydrateToken: 0,
 
@@ -1323,9 +1324,18 @@
             if (row && row.target_message_id) map[row.target_message_id] = row;
           }
           this._corrections = map;
+          var ss = window.getSessionStore(this.sessionKey);
+          if (ss) ss._turnCorrections = Object.assign({}, map);
         } catch (e) {
           // best-effort
         }
+      },
+
+      _syncCorrectionsFromStore() {
+        if (!this.sessionKey) return;
+        var ss = window.getSessionStore(this.sessionKey);
+        if (!ss || !ss._turnCorrections) return;
+        this._corrections = Object.assign({}, ss._turnCorrections);
       },
 
       async acceptCorrection(entry) {
@@ -1338,8 +1348,10 @@
 
       async _transitionCorrection(entry, action, terminalStatus) {
         if (!entry || !entry.message_id) return;
+        this._syncCorrectionsFromStore();
         var c = this._corrections[entry.message_id];
         if (!c) return;
+        var ss = window.getSessionStore(this.sessionKey);
         // Optimistic UI: flip the local state immediately so the tile
         // reacts without a round-trip; the network call confirms.
         var prev = c.status;
@@ -1347,6 +1359,11 @@
         this._corrections = Object.assign({}, this._corrections, {
           [entry.message_id]: next,
         });
+        if (ss) {
+          ss._turnCorrections = Object.assign({}, ss._turnCorrections || {}, {
+            [entry.message_id]: next,
+          });
+        }
         try {
           var url = '/api/session/' + encodeURIComponent(this.sessionKey)
             + '/turn-corrections/' + encodeURIComponent(entry.message_id)
@@ -1357,11 +1374,20 @@
             body: JSON.stringify({ original_sha256: c.original_sha256 || '' }),
           });
           if (!res.ok) {
+            if (res.status === 409) {
+              await this._hydrateCorrections({ fresh: true });
+              return;
+            }
             // Roll back on failure so the operator can retry.
             var rollback = Object.assign({}, c, { status: prev });
             this._corrections = Object.assign({}, this._corrections, {
               [entry.message_id]: rollback,
             });
+            if (ss) {
+              ss._turnCorrections = Object.assign({}, ss._turnCorrections || {}, {
+                [entry.message_id]: rollback,
+              });
+            }
             return;
           }
           var body = await res.json();
@@ -1370,12 +1396,22 @@
             this._corrections = Object.assign({}, this._corrections, {
               [entry.message_id]: serverRow,
             });
+            if (ss) {
+              ss._turnCorrections = Object.assign({}, ss._turnCorrections || {}, {
+                [entry.message_id]: serverRow,
+              });
+            }
           }
         } catch (e) {
           var rollback = Object.assign({}, c, { status: prev });
           this._corrections = Object.assign({}, this._corrections, {
             [entry.message_id]: rollback,
           });
+          if (ss) {
+            ss._turnCorrections = Object.assign({}, ss._turnCorrections || {}, {
+              [entry.message_id]: rollback,
+            });
+          }
         }
       },
 

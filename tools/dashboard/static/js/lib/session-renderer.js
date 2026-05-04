@@ -651,9 +651,31 @@
       return '';
     },
 
+    isShowingRawCorrection(entry) {
+      if (!entry || !entry.message_id) return false;
+      var modes = this._correctionDisplayMode || {};
+      return modes[entry.message_id] === 'raw';
+    },
+
+    toggleAcceptedCorrectionPreview(entry) {
+      if (!entry || !entry.message_id) return;
+      var c = this._correctionFor(entry);
+      if (!c || c.status !== 'accepted') return;
+      var modes = Object.assign({}, this._correctionDisplayMode || {});
+      if (modes[entry.message_id] === 'raw') {
+        delete modes[entry.message_id];
+      } else {
+        modes[entry.message_id] = 'raw';
+      }
+      this._correctionDisplayMode = modes;
+    },
+
     correctionDisplayText(entry) {
       var c = this._correctionFor(entry);
-      if (c && c.status === 'accepted') return c.corrected_text || '';
+      if (c && c.status === 'accepted') {
+        if (this.isShowingRawCorrection(entry)) return entry.content || '';
+        return c.corrected_text || '';
+      }
       return entry.content || '';
     },
 

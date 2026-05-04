@@ -31,6 +31,7 @@ const vm = require('vm');
 
 const REPO_ROOT = process.env.REPO_ROOT || path.resolve(__dirname, '../../..');
 const STORE_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-store.js');
+const RENDERER_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-renderer.js');
 const VIEWER_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/pages/session-viewer.js');
 
 function flush() {
@@ -141,6 +142,7 @@ function makeHarness(fetchHandlers) {
     'setTimeout(window.ensureSessionMessages, 0);'
   );
   vm.runInContext(storeSrc, sandbox, { filename: 'session-store.js' });
+  vm.runInContext(fs.readFileSync(RENDERER_JS, 'utf8'), sandbox, { filename: 'session-renderer.js' });
   vm.runInContext(fs.readFileSync(VIEWER_JS, 'utf8'), sandbox, { filename: 'session-viewer.js' });
 
   for (const cb of (docListeners['alpine:init'] || [])) cb();
@@ -434,6 +436,83 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
       correctionCallsAfterRetry.length >= callsBeforeRetry + 2,
       'new correction events should trigger an immediate refresh and one delayed retry'
     );
+
+    viewer.destroy();
+  });
+
+  it('rehydrates to terminal state when a stale second viewer gets a 409 on accept', async () => {
+    let correctionState = 'pending';
+    const h = makeHarness({
+      '/api/session/auto-test/turn-corrections': () => ({
+        ok: true,
+        json: () => Promise.resolve({
+          corrections: [{
+            target_message_id: 'msg-1',
+            status: correctionState,
+            original_sha256: 'sha-1',
+            corrected_text: 'fixed',
+          }],
+        }),
+      }),
+      '/api/session/auto-test/turn-corrections/msg-1/accept': () => ({
+        ok: false,
+        status: 409,
+        json: () => Promise.resolve({
+          error: 'correction already terminal',
+          correction: {
+            target_message_id: 'msg-1',
+            status: 'accepted',
+            original_sha256: 'sha-1',
+            corrected_text: 'fixed',
+          },
+        }),
+      }),
+    });
+
+    const viewer = h.makeViewer();
+    viewer.sessionKey = 'auto-test';
+    await viewer._hydrateCorrections({ fresh: true });
+    assert.equal(viewer._corrections['msg-1'].status, 'pending');
+
+    correctionState = 'accepted';
+    await viewer.acceptCorrection({ message_id: 'msg-1' });
+
+    assert.equal(
+      viewer._corrections['msg-1'].status,
+      'accepted',
+      'stale viewer should rehydrate to the terminal state instead of snapping back to pending'
+    );
+
+    viewer.destroy();
+  });
+
+  it('accepted marker toggles between corrected and original text locally', async () => {
+    const h = makeHarness({});
+    const viewer = h.makeViewer();
+    const entry = {
+      type: 'user',
+      message_id: 'msg-accepted',
+      content: 'raw original text',
+    };
+
+    viewer._corrections = {
+      'msg-accepted': {
+        target_message_id: 'msg-accepted',
+        status: 'accepted',
+        corrected_text: 'corrected display text',
+      },
+    };
+
+    assert.equal(viewer.correctionDisplayText(entry), 'corrected display text');
+    assert.equal(viewer.isShowingRawCorrection(entry), false);
+
+    viewer.toggleAcceptedCorrectionPreview(entry);
+    assert.equal(viewer.isShowingRawCorrection(entry), true);
+    assert.equal(viewer.correctionDisplayText(entry), 'raw original text');
+
+    viewer.toggleAcceptedCorrectionPreview(entry);
+    assert.equal(viewer.isShowingRawCorrection(entry), false);
+    assert.equal(viewer.correctionDisplayText(entry), 'corrected display text');
 
     viewer.destroy();
   });

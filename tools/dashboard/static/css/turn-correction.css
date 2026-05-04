@@ -43,6 +43,26 @@
   text-transform: uppercase;
   line-height: 1;
   flex-shrink: 0;
+  cursor: pointer;
+  appearance: none;
+  font-family: inherit;
+  transition: border-color 180ms ease, background 180ms ease, color 180ms ease;
+}
+
+.tc-marker:hover {
+  border-color: rgba(110, 231, 183, 0.34);
+  background: rgba(16, 185, 129, 0.14);
+}
+
+.tc-marker-raw {
+  border-color: rgba(248, 113, 113, 0.24);
+  background: rgba(127, 29, 29, 0.18);
+  color: #fca5a5;
+}
+
+.tc-marker-raw:hover {
+  border-color: rgba(248, 113, 113, 0.38);
+  background: rgba(127, 29, 29, 0.26);
 }
 
 .tc-marker-icon {
@@ -87,7 +107,7 @@
 .tc-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
   flex-shrink: 0;
 }
 
