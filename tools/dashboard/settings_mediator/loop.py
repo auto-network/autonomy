@@ -43,6 +43,13 @@ class Row:
     Mapping-style access (``row['kind']`` / ``'kind' in row`` /
     ``row.get('kind')``) reads from ``payload`` so handlers can read
     payload fields without unwrapping.
+
+    ``org`` is the originating DB's org slug (``None`` for the scopeless
+    DB). Handlers that perform a follow-on Settings lookup keyed by data
+    in the row payload (e.g. refresh-ping resolving a SessionAsk by
+    ``ask_id``) must thread this through the lookup so the dependent
+    read stays scoped to the same org as the triggering event — see
+    auto-dcegc.
     """
     id: str
     set_id: str
@@ -50,6 +57,7 @@ class Row:
     payload: dict
     created_at: str
     updated_at: str
+    org: str | None = None
 
     def __getitem__(self, k: str) -> Any:
         return self.payload[k]
@@ -268,6 +276,7 @@ def _resolved_to_row(m: ResolvedSetting) -> Row:
         payload=dict(payload),
         created_at=m.created_at or "",
         updated_at=m.updated_at or "",
+        org=m.org,
     )
 
 
