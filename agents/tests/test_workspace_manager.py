@@ -1106,6 +1106,12 @@ def test_merge_session_worktree_fast_forwards_matching_checkout(tmp_path, monkey
     assert result["commit"] == worktree_head
     assert result["message"] == "ff-only merge"
     assert result["target_repo"] == str(target_repo)
+    # auto-614q7: the helper wraps the merge work in time.monotonic() so
+    # ``duration_secs`` is a real (non-negative integer) wall-clock
+    # measurement, not the placeholder zero the writer used to use. Tiny
+    # local merges still round to 0 — that's the expected lower bound.
+    assert isinstance(result["duration_secs"], int)
+    assert result["duration_secs"] >= 0
     clone_head = subprocess.run(
         ["git", "-C", str(clone), "rev-parse", f"refs/heads/{result['target_branch']}"],
         capture_output=True, text=True, check=True,
@@ -1218,6 +1224,11 @@ def test_merge_session_worktree_commit_fast_forwards_to_selected_commit(tmp_path
     assert target_head == first_sha
     assert result["commit"] == first_sha
     assert result["message"] == "first commit"
+    # auto-614q7: helper measures merge wall-clock and returns a real
+    # ``duration_secs`` int (>= 0). The bracket covers the operator-
+    # perceived merge cost — fetch + ff/update-ref + clone sync.
+    assert isinstance(result["duration_secs"], int)
+    assert result["duration_secs"] >= 0
     assert (target_repo / "first.txt").exists()
     assert not (target_repo / "second.txt").exists()
     clone_head = subprocess.run(

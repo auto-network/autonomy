@@ -37,6 +37,7 @@ import logging
 import re
 import shutil
 import subprocess
+import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1595,6 +1596,10 @@ def merge_session_worktree(
     worktrees_dir: Path = WORKTREES_DIR,
 ) -> dict[str, str]:
     """Fast-forward a local checkout from a session worktree's branch."""
+    # auto-614q7: bracket the merge work end-to-end so the timeline writer
+    # gets a real ``duration_secs`` (operator-perceived merge cost — fetch
+    # + ff/update-ref + clone sync). Sub-second merges still round to 0.
+    t0 = time.monotonic()
     worktree = worktrees_dir / session_name / repo_name
     if not worktree.exists() or not worktree.is_dir():
         raise WorkspaceError(f"worktree not found: {worktree}")
@@ -1668,6 +1673,7 @@ def merge_session_worktree(
         "message": message,
         "target_repo": str(target_repo),
         "target_branch": target_branch,
+        "duration_secs": int(round(time.monotonic() - t0)),
     }
 
 
@@ -1687,6 +1693,9 @@ def cherry_pick_session_worktree(
     possible if state changed between dry-run and apply), the in-progress
     cherry-pick is aborted so the host repo is left in its prior state.
     """
+    # auto-614q7: see merge_session_worktree() — wall-clock the whole
+    # operation so the timeline row gets a real ``duration_secs``.
+    t0 = time.monotonic()
     worktree = worktrees_dir / session_name / repo_name
     if not worktree.exists() or not worktree.is_dir():
         raise WorkspaceError(f"worktree not found: {worktree}")
@@ -1777,6 +1786,7 @@ def cherry_pick_session_worktree(
         "message": message,
         "target_repo": str(target_repo),
         "target_branch": target_branch,
+        "duration_secs": int(round(time.monotonic() - t0)),
     }
 
 
@@ -2150,6 +2160,8 @@ def merge_session_worktree_commit(
     worktrees_dir: Path = WORKTREES_DIR,
 ) -> dict[str, str]:
     """Fast-forward the local checkout to a selected session commit."""
+    # auto-614q7: bracket the operation for real ``duration_secs``.
+    t0 = time.monotonic()
     worktree, clone, branch = _session_worktree_context(
         session_name,
         repo_name,
@@ -2220,4 +2232,5 @@ def merge_session_worktree_commit(
         "message": message,
         "target_repo": str(target_repo),
         "target_branch": target_branch,
+        "duration_secs": int(round(time.monotonic() - t0)),
     }

@@ -302,6 +302,13 @@
     let wtSubtitle = '';
     let wtBodyExpanded = '';
     let wtBodyTruncated = false;
+    // auto-614q7: surface real merge duration alongside the method badge
+    // when the writer measured >0s. Sub-second merges round to 0 — keep
+    // the slot empty there so the row 1 stays clean.
+    let wtDurationFmt = '';
+    if (isWorktreeMerge && typeof e.duration_secs === 'number' && e.duration_secs > 0) {
+      wtDurationFmt = _fmtDuration(e.duration_secs);
+    }
     if (isWorktreeMerge) {
       const msg = e.commit_message || '';
       const lines = msg.split('\n');
@@ -376,6 +383,7 @@
       _wtSubtitle: wtSubtitle,
       _wtBodyExpanded: wtBodyExpanded,
       _wtBodyTruncated: wtBodyTruncated,
+      _wtDurationFmt: wtDurationFmt,
       _libTitle: libTitle,
       _tokenFmt: tokenFmt,
       _reviewCollapsed: _reviewCollapsedLabel(e.librarian_review),
