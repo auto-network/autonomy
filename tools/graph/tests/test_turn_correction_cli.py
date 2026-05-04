@@ -97,6 +97,20 @@ def test_suggest_long_stdin_payload_supported():
     assert "target_message_id" not in payload
 
 
+def test_suggest_long_stdin_payload_supported_via_content_alias():
+    long_text = "\n\n".join(f"Paragraph {i}: " + ("x" * 200) for i in range(8))
+    rc, out, err = _run_cli(
+        [
+            "turn-correction", "suggest",
+            "-c", "-", "--json",
+        ],
+        stdin_text=long_text,
+    )
+    assert rc == 0, err
+    payload = json.loads(out.strip())
+    assert payload["corrected_text"] == long_text
+
+
 def test_suggest_stdin_preserves_trailing_newline():
     """``corrected_text`` is the canonical replacement; we don't strip it."""
     rc, out, err = _run_cli(
@@ -134,6 +148,19 @@ def test_suggest_rejects_both_argv_and_stdin():
     )
     assert rc != 0
     assert "stdin" in err.lower()
+
+
+def test_suggest_rejects_multiple_input_forms():
+    rc, _, err = _run_cli(
+        [
+            "turn-correction", "suggest",
+            "from-argv",
+            "-c", "-", "--json",
+        ],
+        stdin_text="from-stdin",
+    )
+    assert rc != 0
+    assert "multiple ways" in err.lower()
 
 
 def test_suggest_rejects_invalid_mode():
