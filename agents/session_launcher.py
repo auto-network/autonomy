@@ -261,28 +261,193 @@ def _capability_env(capabilities) -> dict[str, str]:
 
 # ── Credential Resolution ─────────────────────────────────────────────────────
 
-def _resolve_credentials() -> dict | None:
-    """Resolve Claude credentials from env, setup-token, or credentials file.
+
+CLAUDE_TOKEN_FILE_PREFIX = ".setup-token"
+CLAUDE_DEFAULT_ALIAS = "default"
+
+
+def _claude_credentials_dir() -> Path:
+    return Path(
+        os.environ.get(
+            "CLAUDE_CREDENTIALS_DIR", str(Path.home() / ".claude"),
+        )
+    )
+
+
+def list_claude_token_files() -> list[Path]:
+    """Return every ``~/.claude/.setup-token*`` file on the host, sorted.
+
+    Each file is one Claude account: ``.setup-token`` is the default
+    account (alias ``"default"``); ``.setup-token.<alias>`` carries the
+    suffix as its alias. Operators add accounts by saving a fresh
+    setup-token from the Anthropic console under a new suffix; ``rm``
+    removes one. ``ls`` is the registry — no separate config file.
+
+    Honors ``CLAUDE_CREDENTIALS_DIR`` for tests. Missing dirs return ``[]``.
+    """
+    creds_dir = _claude_credentials_dir()
+    if not creds_dir.is_dir():
+        return []
+    return sorted(
+        p for p in creds_dir.iterdir()
+        if p.is_file() and p.name.startswith(CLAUDE_TOKEN_FILE_PREFIX)
+    )
+
+
+def alias_for_token_file(p: Path) -> str:
+    """Map a ``.setup-token*`` filename to its operator-facing alias.
+
+    ``.setup-token`` → ``"default"``; ``.setup-token.primary`` →
+    ``"primary"``. Mirror of the convention enforced by
+    :func:`list_claude_token_files`.
+    """
+    if p.name == CLAUDE_TOKEN_FILE_PREFIX:
+        return CLAUDE_DEFAULT_ALIAS
+    return p.name.removeprefix(CLAUDE_TOKEN_FILE_PREFIX + ".")
+
+
+def _read_token_file(p: Path) -> str | None:
+    try:
+        token = p.read_text().strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def _claude_usage_rows() -> list[dict]:
+    """Return live ``dashboard.harness.usage`` rows for Claude.
+
+    Best-effort — failures (DB unavailable, settings substrate missing,
+    etc.) collapse to ``[]`` so token selection falls back to alphabetical
+    order rather than crashing the launch path.
+    """
+    try:
+        from tools.graph import settings_ops
+        from tools.dashboard import harness_usage_settings as hus
+    except Exception:
+        return []
+    try:
+        members = settings_ops.read_set(
+            hus.HARNESS_USAGE_SET_ID, org=settings_ops.CALLER_ORG,
+        )
+    except Exception:
+        return []
+    payloads: list[dict] = []
+    for member in members.members:
+        payload = member.payload
+        if not isinstance(payload, dict):
+            continue
+        if (payload.get("harness") or "").lower() != "claude":
+            continue
+        payloads.append(payload)
+    return payloads
+
+
+def _token_headroom_score(payload: dict) -> tuple[float, float]:
+    """Return ``(short_headroom, long_headroom)`` for sort ranking.
+
+    Higher headroom = more capacity remaining = pick first. Missing or
+    malformed values collapse to 0 so a row with no telemetry sorts
+    BELOW a row with valid <100% utilization but ABOVE one at 100%.
+    """
+    windows = payload.get("windows") if isinstance(payload, dict) else None
+    if not isinstance(windows, dict):
+        return (0.0, 0.0)
+    short = windows.get("short") if isinstance(windows.get("short"), dict) else {}
+    long_ = windows.get("long") if isinstance(windows.get("long"), dict) else {}
+
+    def _headroom(window: dict) -> float:
+        used = window.get("used_percent")
+        if not isinstance(used, (int, float)):
+            return 0.0
+        return max(0.0, 100.0 - float(used))
+
+    return (_headroom(short), _headroom(long_))
+
+
+def _select_token_alias(
+    files: list[Path], *, prefer_alias: str | None,
+) -> Path | None:
+    """Choose which ``.setup-token*`` file to use for a launch.
+
+    Selection rule (graph note: see bead description):
+
+    * Caller-supplied ``prefer_alias`` wins when the file exists.
+    * Otherwise rank by ``dashboard.harness.usage`` headroom — highest
+      ``(100 - short.used_percent)`` first, ties broken by long-window
+      headroom. Tokens with no usage row yet (first launch) rank at top
+      so brand-new accounts get used.
+    * Within ranks, alphabetical alias order is the final tiebreak so
+      the same-utilization case is deterministic across launches.
+    """
+    if not files:
+        return None
+    if prefer_alias:
+        for p in files:
+            if alias_for_token_file(p) == prefer_alias:
+                return p
+        # Unknown alias falls through to rate-limit selection rather
+        # than failing — the operator's intent is a hint, not a hard
+        # constraint, and a typo shouldn't block dispatch.
+
+    rows_by_alias: dict[str, dict] = {}
+    for payload in _claude_usage_rows():
+        alias = payload.get("alias")
+        if isinstance(alias, str) and alias:
+            rows_by_alias[alias] = payload
+
+    def _rank(p: Path) -> tuple[float, float, str, str]:
+        alias = alias_for_token_file(p)
+        payload = rows_by_alias.get(alias)
+        if payload is None:
+            # First-launch / no telemetry yet: rank at top so brand-new
+            # tokens get exercised before ones we've already seen.
+            return (1e9, 1e9, "0", alias)
+        short, long_ = _token_headroom_score(payload)
+        return (short, long_, "1", alias)
+
+    ranked = sorted(files, key=_rank, reverse=True)
+    return ranked[0]
+
+
+def _resolve_credentials(
+    *, prefer_alias: str | None = None,
+) -> dict | None:
+    """Resolve Claude credentials from env, setup-token files, or credentials file.
 
     Returns a dict with 'type' key:
-      {"type": "token", "token": "..."}
+      {"type": "token", "token": "...", "alias": "default" | "primary" | ...}
       {"type": "creds_file", "path": "/path/to/.credentials.json"}
     Returns None if no credentials found.
+
+    Selection order:
+      1. ``CLAUDE_CODE_OAUTH_TOKEN`` env var → returned without an alias
+         (legacy compat path; carrier of caller intent).
+      2. Multi-file enumeration of ``~/.claude/.setup-token*``. When
+         multiple files exist, ``prefer_alias`` wins; otherwise pick by
+         rate-limit headroom from the live ``dashboard.harness.usage``
+         rows (see :func:`_select_token_alias`).
+      3. ``~/.claude/.credentials.json`` (legacy creds-file path) when no
+         setup-token files exist.
     """
-    creds_dir = Path(os.environ.get("CLAUDE_CREDENTIALS_DIR", str(Path.home() / ".claude")))
-    setup_token_file = creds_dir / ".setup-token"
-    creds_file = creds_dir / ".credentials.json"
+    creds_dir = _claude_credentials_dir()
 
     oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-    if not oauth_token and setup_token_file.exists():
-        try:
-            oauth_token = setup_token_file.read_text().strip()
-        except OSError:
-            pass
-
     if oauth_token:
         return {"type": "token", "token": oauth_token}
 
+    files = list_claude_token_files()
+    chosen = _select_token_alias(files, prefer_alias=prefer_alias)
+    if chosen is not None:
+        token = _read_token_file(chosen)
+        if token:
+            return {
+                "type": "token",
+                "token": token,
+                "alias": alias_for_token_file(chosen),
+            }
+
+    creds_file = creds_dir / ".credentials.json"
     if creds_file.exists():
         return {"type": "creds_file", "path": str(creds_file)}
 
@@ -501,6 +666,11 @@ def launch_session(
             "launched_at": datetime.now(timezone.utc).isoformat(),
             "harness": harness,
         }
+        if creds is not None and creds.get("alias"):
+            # Operator-facing token alias for triage. The dashboard reads
+            # this back when the session is registered so the drawer can
+            # show "which Anthropic account is this session burning".
+            meta_doc["claude_token_alias"] = creds["alias"]
         if metadata:
             meta_doc.update(metadata)
             if "graph_org" not in meta_doc:

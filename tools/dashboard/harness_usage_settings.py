@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from tools.graph.schemas.registry import (
     SchemaValidationError,
     SettingSchema,
     cache,
+    field,
+    keyed_per_entity,
 )
 
 
@@ -36,82 +37,157 @@ SYNOPSIS = {
         "codex usage",
         "footer tiles",
         "auth identity",
+        "claude token alias",
     ],
     "related_set_ids": [],
 }
 
 
-_VALID_HARNESSES = {"claude", "codex"}
-_VALID_STATUSES = {"ok", "unavailable"}
-_OPTIONAL_STRINGS = {
-    "account_id",
-    "plan_type",
-    "tier",
-    "limit_id",
-    "limit_name",
-    "rate_limit_reached_type",
-    "note",
-}
-_WINDOW_KEYS = {"short", "long"}
+_VALID_HARNESSES = ("claude", "codex")
+_VALID_STATUSES = ("ok", "unavailable")
+_VALID_SOURCES = ("oauth_usage", "transcript")
 
 
 @cache(ttl=HARNESS_USAGE_CACHE_TTL)
+@keyed_per_entity
 class DashboardHarnessUsageV1(SettingSchema):
-    """Per-auth-identity harness usage row."""
+    """Per-auth-identity harness usage row.
+
+    Auto-10lsv migrated this schema from imperative ``validate()`` checks
+    to declarative typed-field annotations. Field metadata now drives
+    ``graph set schema`` introspection, ``graph set example`` stub
+    payloads, and the substrate's unknown-field check; ``validate()``
+    keeps a slim residual check for the per-window substructure that
+    typed annotations can't express.
+    """
 
     set_id = HARNESS_USAGE_SET_ID
     schema_revision = HARNESS_USAGE_SCHEMA_REVISION
 
+    harness: str = field(
+        required=True,
+        enum=list(_VALID_HARNESSES),
+        description="Harness this row reports for.",
+    )
+    identity_id: str = field(
+        required=True,
+        description="Stable per-account id (e.g. 'org:<uuid>').",
+    )
+    identity_label: str = field(
+        required=True,
+        description="Auto-derived short label for footer rendering.",
+    )
+    alias: str | None = field(
+        default=None,
+        description=(
+            "Operator-controlled token alias (e.g. 'primary'); the suffix "
+            "of ~/.claude/.setup-token.<alias> for the file that produced "
+            "this row. None for non-token paths (transcript, env override)."
+        ),
+    )
+    account_id: str | None = field(
+        default=None,
+        description="Anthropic org UUID (Claude only).",
+    )
+    status: str = field(
+        required=True,
+        enum=list(_VALID_STATUSES),
+        description="'ok' when telemetry is fresh; 'unavailable' otherwise.",
+    )
+    source: str = field(
+        required=True,
+        enum=list(_VALID_SOURCES),
+        description="Data origin: 'oauth_usage' for Claude /usage; 'transcript' for Codex.",
+    )
+    updated_at: str = field(
+        required=True,
+        description="ISO-8601 timestamp the publisher stamped at write time.",
+    )
+    plan_type: str | None = field(default=None)
+    tier: str | None = field(default=None)
+    limit_id: str | None = field(default=None)
+    limit_name: str | None = field(default=None)
+    rate_limit_reached_type: str | None = field(default=None)
+    note: str | None = field(default=None)
+    windows: dict = field(
+        default_factory=dict,
+        description=(
+            "{short, long} → {used_percent, window_minutes, resets_at}. "
+            "Empty dict when status='unavailable'."
+        ),
+    )
+
     @classmethod
     def validate(cls, payload: Any) -> None:
+        """Substructure validator for the typed-field-derived schema.
+
+        Typed annotations cover field types, required-ness, enums, and
+        unknown-field rejection (via the ``_field_metadata`` set used
+        below). The window dict still needs hand-rolled substructure
+        checks because the declarative form can't express element shape
+        for nested dicts — kept here as the smallest possible residual
+        override.
+        """
         if not isinstance(payload, dict):
             raise SchemaValidationError(
                 f"{cls.__name__}: payload must be a dict, "
                 f"got {type(payload).__name__}"
             )
 
-        required = {
-            "harness",
-            "identity_id",
-            "identity_label",
-            "status",
-            "source",
-            "updated_at",
-            "windows",
-        }
-        missing = sorted(required - set(payload))
-        if missing:
-            raise SchemaValidationError(
-                f"{cls.__name__}: missing required field(s): {missing}"
-            )
-
-        harness = payload.get("harness")
-        if harness not in _VALID_HARNESSES:
-            raise SchemaValidationError(
-                f"{cls.__name__}: harness must be one of "
-                f"{sorted(_VALID_HARNESSES)}, got {harness!r}"
-            )
-
-        for key in ("identity_id", "identity_label", "source", "updated_at"):
-            value = payload.get(key)
-            if not isinstance(value, str) or not value.strip():
+        for required_field, meta in cls._field_metadata.items():
+            if not meta.get("required"):
+                continue
+            value = payload.get(required_field)
+            if value is None:
                 raise SchemaValidationError(
-                    f"{cls.__name__}: {key!r} must be a non-empty string"
+                    f"{cls.__name__}: missing required field "
+                    f"{required_field!r}"
+                )
+            if meta.get("type") == "string" and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {required_field!r} must be a "
+                    f"non-empty string"
                 )
 
-        status = payload.get("status")
-        if status not in _VALID_STATUSES:
-            raise SchemaValidationError(
-                f"{cls.__name__}: status must be one of "
-                f"{sorted(_VALID_STATUSES)}, got {status!r}"
-            )
+        for enum_field, meta in cls._field_metadata.items():
+            allowed = meta.get("enum")
+            if not allowed:
+                continue
+            if enum_field not in payload:
+                continue
+            value = payload[enum_field]
+            if value is None and not meta.get("required"):
+                continue
+            if value not in allowed:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {enum_field!r} must be one of "
+                    f"{list(allowed)}, got {value!r}"
+                )
+
+        # Optional string-typed fields may be string OR null.
+        for opt_field, meta in cls._field_metadata.items():
+            if meta.get("required"):
+                continue
+            if meta.get("type") != "string":
+                continue
+            if opt_field not in payload:
+                continue
+            value = payload[opt_field]
+            if value is not None and not isinstance(value, str):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {opt_field!r} must be a string or null"
+                )
 
         windows = payload.get("windows")
+        if windows is None:
+            windows = {}
         if not isinstance(windows, dict):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'windows' must be a dict"
             )
-        extra_windows = sorted(set(windows) - _WINDOW_KEYS)
+        extra_windows = sorted(set(windows) - {"short", "long"})
         if extra_windows:
             raise SchemaValidationError(
                 f"{cls.__name__}: unknown window key(s): {extra_windows}"
@@ -119,16 +195,7 @@ class DashboardHarnessUsageV1(SettingSchema):
         for window_name, window in windows.items():
             _validate_window(cls.__name__, window_name, window)
 
-        for key in _OPTIONAL_STRINGS:
-            if key in payload and payload[key] is not None \
-                    and not isinstance(payload[key], str):
-                raise SchemaValidationError(
-                    f"{cls.__name__}: {key!r} must be a string or null"
-                )
-
-        extra = set(payload) - (
-            required | _OPTIONAL_STRINGS
-        )
+        extra = set(payload) - set(cls._field_metadata)
         if extra:
             raise SchemaValidationError(
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"
@@ -163,12 +230,6 @@ def _validate_window(schema_name: str, window_name: str, window: Any) -> None:
         )
 
 
-def fingerprint_secret(secret: str) -> str:
-    """Stable, non-reversible short fingerprint for credential identity."""
-
-    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:12]
-
-
 def make_harness_usage_key(harness: str, identity_id: str) -> str:
     return f"{(harness or '').strip().lower()}:{(identity_id or '').strip()}"
 
@@ -193,7 +254,13 @@ def iso_to_epoch_seconds(value: Any) -> int | None:
 
 
 def load_claude_credential_bundle(path: str | Path) -> dict[str, Any] | None:
-    """Load a Claude OAuth credential bundle from a copied run-dir file."""
+    """Load a Claude OAuth credential bundle from a setup-token or creds file.
+
+    auto-10lsv: dropped the legacy ``fingerprint`` output; identity is now
+    keyed by Anthropic org UUID (from the /usage response header) plus the
+    operator-facing token alias. Old callers that read ``fingerprint`` are
+    gone; the bundle dict no longer carries that field.
+    """
 
     p = Path(path)
     try:
@@ -201,7 +268,7 @@ def load_claude_credential_bundle(path: str | Path) -> dict[str, Any] | None:
     except OSError:
         return None
 
-    if p.name == ".setup-token":
+    if p.name.startswith(".setup-token"):
         token = raw.strip()
         if not token:
             return None
@@ -210,7 +277,6 @@ def load_claude_credential_bundle(path: str | Path) -> dict[str, Any] | None:
             "path": str(p),
             "access_token": token,
             "refresh_token": None,
-            "fingerprint": fingerprint_secret(token),
             "subscription_type": None,
             "rate_limit_tier": None,
             "expires_at_ms": None,
@@ -235,54 +301,17 @@ def load_claude_credential_bundle(path: str | Path) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         expires_at_ms = None
 
-    fingerprint_basis = refresh_token if isinstance(refresh_token, str) and refresh_token else access_token
     return {
         "source_kind": "credentials_json",
         "path": str(p),
         "access_token": access_token,
         "refresh_token": refresh_token if isinstance(refresh_token, str) and refresh_token else None,
-        "fingerprint": fingerprint_secret(fingerprint_basis),
         "subscription_type": oauth.get("subscriptionType")
         if isinstance(oauth.get("subscriptionType"), str) else None,
         "rate_limit_tier": oauth.get("rateLimitTier")
         if isinstance(oauth.get("rateLimitTier"), str) else None,
         "expires_at_ms": expires_at_ms,
     }
-
-
-def candidate_claude_credential_paths(row: dict[str, Any]) -> list[Path]:
-    """Best-effort credential locations for a live Claude session row."""
-
-    roots: list[Path] = []
-    resolution_dir = row.get("resolution_dir")
-    if isinstance(resolution_dir, str) and resolution_dir.strip():
-        roots.append(Path(resolution_dir))
-
-    jsonl_path = row.get("jsonl_path")
-    if isinstance(jsonl_path, str) and jsonl_path.strip():
-        roots.append(Path(jsonl_path).parent)
-
-    seen: set[str] = set()
-    out: list[Path] = []
-    for root in roots:
-        for parent in _walk_roots(root):
-            for name in (".credentials.json", ".setup-token"):
-                candidate = parent / name
-                marker = str(candidate)
-                if marker in seen:
-                    continue
-                seen.add(marker)
-                out.append(candidate)
-    return out
-
-
-def _walk_roots(root: Path) -> Iterable[Path]:
-    current = root
-    for _ in range(4):
-        yield current
-        if current.parent == current:
-            break
-        current = current.parent
 
 
 def normalize_codex_usage_payload(
@@ -318,13 +347,22 @@ def normalize_claude_usage_payload(
     usage_body: dict[str, Any],
     org_id: str | None,
     updated_at: str,
+    alias: str | None = None,
 ) -> dict[str, Any]:
-    identity = _resolve_claude_identity(bundle, org_id)
+    """Build a Claude harness-usage row payload.
+
+    ``alias`` is the operator-facing token alias (the ``.setup-token.<alias>``
+    suffix that produced this bundle, or ``"default"`` for the bare file).
+    Stamped onto every row so the dashboard can map an org row back to the
+    file the operator can edit.
+    """
+    identity = _resolve_claude_identity(org_id)
     return _build_usage_payload(
         harness="claude",
         identity_id=identity["identity_id"],
         identity_label=identity["identity_label"],
         account_id=identity["account_id"],
+        alias=alias,
         status="ok",
         source="oauth_usage",
         updated_at=updated_at,
@@ -348,12 +386,14 @@ def make_unavailable_usage_payload(
     account_id: str | None = None,
     plan_type: str | None = None,
     tier: str | None = None,
+    alias: str | None = None,
 ) -> dict[str, Any]:
     return _build_usage_payload(
         harness=harness,
         identity_id=identity_id,
         identity_label=identity_label,
         account_id=account_id,
+        alias=alias,
         status="unavailable",
         source=source,
         updated_at=updated_at,
@@ -374,6 +414,7 @@ def _build_usage_payload(
     updated_at: str,
     windows: dict[str, dict[str, int | float | None]],
     account_id: str | None = None,
+    alias: str | None = None,
     plan_type: str | None = None,
     tier: str | None = None,
     limit_id: str | None = None,
@@ -385,6 +426,7 @@ def _build_usage_payload(
         "harness": harness,
         "identity_id": identity_id,
         "identity_label": identity_label,
+        "alias": alias,
         "account_id": account_id,
         "status": status,
         "source": source,
@@ -399,21 +441,26 @@ def _build_usage_payload(
     }
 
 
-def _resolve_claude_identity(
-    bundle: dict[str, Any],
-    org_id: str | None,
-) -> dict[str, str | None]:
-    if org_id:
-        return {
-            "identity_id": f"org:{org_id}",
-            "identity_label": short_identity_label("org", org_id),
-            "account_id": org_id,
-        }
-    fingerprint = str(bundle["fingerprint"])
+def _resolve_claude_identity(org_id: str | None) -> dict[str, str | None]:
+    """Build identity fields for a Claude row.
+
+    Pre-auto-10lsv this had a fingerprint fallback for the
+    ``acct:<fp>`` case. After 28a1b56 (zombie-row cleanup) we never
+    write acct rows — every successful poll has an org id from the
+    /usage response header, and unsuccessful polls write nothing.
+    Callers that want a placeholder row (no live token) use
+    :func:`make_unavailable_usage_payload` directly with
+    ``identity_id="unresolved"``.
+    """
+    if not org_id:
+        raise ValueError(
+            "Claude harness usage requires an org_id; the /usage response "
+            "header carries one on every successful poll."
+        )
     return {
-        "identity_id": f"acct:{fingerprint}",
-        "identity_label": short_identity_label("acct", fingerprint),
-        "account_id": None,
+        "identity_id": f"org:{org_id}",
+        "identity_label": short_identity_label("org", org_id),
+        "account_id": org_id,
     }
 
 
