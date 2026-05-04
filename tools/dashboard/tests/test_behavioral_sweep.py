@@ -1885,6 +1885,75 @@ def _reset_sweep_state(sweep_server: dict) -> None:
     time.sleep(0.4)
 
 
+def _hard_reset_sweep(sweep_server: dict) -> None:
+    """auto-pepqk — hard restart the mock server AND the agent-browser
+    session so the last few classes in the sweep run against fresh
+    processes.
+
+    By the time the sweep reaches ``TestSessionHarnessBadge`` and
+    ``TestCoordinatorBoardParityV2`` (~290 tests in), a soft reset
+    (``_reset_sweep_state``) is not enough: ``_http_get`` to
+    ``/api/dao/active_sessions`` blocks past its 5s socket timeout
+    and Alpine roots stop reflecting the freshly-seeded fixture.
+    Two failure modes accumulate behind the module-scoped fixtures:
+
+      * The agent-browser daemon's Chromium tab has hundreds of
+        SPA-navigation transitions, lingering Alpine listeners, and a
+        long-lived ``EventSource`` whose replay-on-reconnect cache has
+        grown across every prior broadcast.
+      * The mock uvicorn process holds the matching long-lived SSE
+        subscriber queue, plus an EventBus ring buffer + ``_last``
+        cache that has accumulated state across every prior test.
+
+    The bead's option (b) is to ``close_browser``/``open_browser`` at
+    the class boundary; option (a) is to give each class a fresh
+    server. Doing both is the smallest robust change — neither alone
+    closes the loop because the ``_http_get`` timeouts are server-side
+    while the "seeded data did not render" assertions are browser-side.
+
+    Replace the existing ``sweep_server`` dict's contents in-place so
+    subsequent tests in the class (and follow-up classes that share
+    the module fixture) pick up the new ``url`` / ``port`` /
+    ``fixture_path`` / ``events_path`` / ``proc`` automatically. The
+    new server reuses the same per-worker port — uvicorn opens its
+    socket with ``SO_REUSEADDR``, so the rebind succeeds even if the
+    OS hasn't finished tearing down the prior listener.
+    """
+    close_browser()
+    stop_mock_server(sweep_server)
+
+    # The previous uvicorn snapshotted its EventBus state to
+    # ``DASHBOARD_EVENT_BUS_STATE`` on shutdown — drop it so the new
+    # process boots with an empty bus instead of restoring the
+    # accumulated topic cache + ring buffer the bead is trying to
+    # walk away from.
+    tmp_path = Path(sweep_server["fixture_path"]).parent
+    state_file = tmp_path / "event_bus.state"
+    if state_file.exists():
+        state_file.unlink()
+
+    new_state = start_mock_server(
+        _build_fixture(), tmp_path, port=sweep_server["port"],
+    )
+    sweep_server.clear()
+    sweep_server.update(new_state)
+
+    open_browser(sweep_server["url"] + "/sessions")
+
+    # Match the module-scoped browser fixture: seed the dispatch +
+    # nav SSE topics so the new page's ``_sseCache`` has the same
+    # shape it would after a fresh module mount. The mock event
+    # watcher polls every 0.5s, so wait long enough for both the
+    # broadcast and Alpine's first render pass.
+    events_path = sweep_server["events_path"]
+    with open(events_path, "a") as f:
+        f.write(json.dumps({"topic": "dispatch", "data": DISPATCH_SSE_DATA}) + "\n")
+        f.write(json.dumps({"topic": "nav", "data": {
+            "open_beads": 3, "running_agents": 1, "approved_waiting": 1,
+        }}) + "\n")
+    time.sleep(1.5)
+
+
 # ── Sessions page JS check bundle ────────────────────────────────────
 
 SESSIONS_PAGE_CHECKS = """
@@ -10579,13 +10648,16 @@ class TestSessionHarnessBadge:
 
     @pytest.fixture(scope="class", autouse=True)
     def checks(self, browser, sweep_server, request):
-        # auto-wquxx — earlier classes in the sweep mutate the module
-        # fixture file (plugin enables, coordinator-canvas seeds,
-        # custom ``_orgs`` buckets) and the page's Alpine root
-        # (``data.active = []`` etc. in ACTIVITY_PAGE_CHECKS).
-        # Reset both before this class's checks run so /sessions
-        # reflects the canonical fixture rows.
-        _reset_sweep_state(sweep_server)
+        # auto-pepqk — by this point in the sweep (~290 tests in) the
+        # module-scoped agent-browser tab + uvicorn process have
+        # accumulated enough SSE subscriber + Alpine + EventBus state
+        # that ``_http_get`` to ``/api/dao/active_sessions`` blocks
+        # past 5s and the page's session cards stop rendering the
+        # freshly-seeded rows. ``_reset_sweep_state`` (auto-wquxx)
+        # rewrites the fixture but leaves the underlying processes
+        # in place, which is not enough — restart both before this
+        # class's checks run.
+        _hard_reset_sweep(sweep_server)
         result = _navigate_and_check("/sessions", HARNESS_API_BADGE_CHECKS, wait_ms=1500)
         request.cls._checks = result
 
@@ -10877,16 +10949,14 @@ class TestCoordinatorBoardParityV2:
 
     @pytest.fixture(scope="class", autouse=True)
     def _reset_class_state(self, sweep_server):
-        # auto-wquxx — earlier classes (the activity sweep, the plugin
-        # / coordinator-board classes) leave fixture-file rows and
-        # Alpine component state in a polluted shape. SPA ``navigateTo``
-        # reuses already-initialized Alpine roots, so the function-scoped
-        # ``_seed_full_board`` below cannot reach the rendered DOM
-        # without first dropping that pollution. Rewrite the fixture
-        # file from canonical defaults + park the SPA on ``/`` once at
-        # the class boundary so the next ``navigateTo('/coordinator')``
-        # forces ``Alpine.destroyTree`` + ``Alpine.initTree``.
-        _reset_sweep_state(sweep_server)
+        # auto-pepqk — soft reset (auto-wquxx ``_reset_sweep_state``)
+        # is not enough by this point in the sweep: the mock server's
+        # EventBus + the agent-browser Chromium tab have both degraded
+        # past the point where Alpine's coordinator root reliably
+        # picks up the function-scoped ``_seed_full_board`` rewrites.
+        # Tear both down and rebuild on a fresh process pair before
+        # any test in this class runs.
+        _hard_reset_sweep(sweep_server)
 
     @pytest.fixture(scope="function", autouse=True)
     def _seed_full_board(self, sweep_server, _reset_class_state):
