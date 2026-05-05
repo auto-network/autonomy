@@ -90,8 +90,15 @@ const META = {
     meta('dashboard.operator-message-to-coordinator', 1, 'singleton', 'fixed:default'),
   'dashboard.coordinator-tile#2':
     meta('dashboard.coordinator-tile', 2, 'keyed_per_entity', 'natural'),
+  // Forward-compat: auto-fwwfu bumps tile/thread to #3 when ageMin is
+  // dropped. Keep the presence driver accepting both revs so the slice
+  // stays valid regardless of merge order.
+  'dashboard.coordinator-tile#3':
+    meta('dashboard.coordinator-tile', 3, 'keyed_per_entity', 'natural'),
   'dashboard.coordinator-thread#2':
     meta('dashboard.coordinator-thread', 2, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-thread#3':
+    meta('dashboard.coordinator-thread', 3, 'keyed_per_entity', 'natural'),
   'dashboard.coordinator-decision#1':
     meta('dashboard.coordinator-decision', 1, 'append_only_log', 'uuid_v4'),
   'dashboard.coordinator-sprint#1':
