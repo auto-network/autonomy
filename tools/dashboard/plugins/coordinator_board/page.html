@@ -551,7 +551,10 @@
                per-tile refresh button on the right. -->
           <div class="flex items-center justify-between gap-3">
             <p class="text-[11px] text-slate-500 tabular-nums">
-              <span x-text="ageStr(t.ageMin)"></span>
+              <span data-testid="coord-tile-relative-time"
+                    :data-tile-session="t.session"
+                    :title="t.updatedAt || ''"
+                    x-text="relativeTime(t.updatedAt)"></span>
               <span class="text-slate-600">·</span>
               <span x-text="t.updateKind === 'discovery' ? 'discovery' : 'on refresh'"></span>
             </p>
@@ -615,7 +618,10 @@
 
     <header class="flex items-baseline justify-between gap-3">
       <h1 class="text-xl md:text-2xl font-semibold tracking-tight">Tracking</h1>
-      <span class="text-xs text-slate-500 tabular-nums" x-text="data.snapshotTime"></span>
+      <span data-testid="coord-snapshot-time"
+            class="text-xs text-slate-500 tabular-nums"
+            :title="data.snapshotTimeRaw || ''"
+            x-text="data.snapshotTime"></span>
     </header>
 
     <!-- Headline metrics — at-a-glance, operator-focused -->
@@ -628,7 +634,9 @@
         <p class="text-[11px] uppercase tracking-wider text-slate-400 mt-1 leading-tight">need<br>your call</p>
       </div>
       <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-3 md:p-4 text-center">
-        <p class="text-2xl md:text-3xl font-semibold text-slate-100 tabular-nums" x-text="pendingCommitCount"></p>
+        <p data-testid="coord-pending-commits"
+           class="text-2xl md:text-3xl font-semibold text-slate-100 tabular-nums"
+           x-text="pendingCommitCount"></p>
         <p class="text-[11px] uppercase tracking-wider text-slate-400 mt-1 leading-tight">pending<br>commits</p>
       </div>
       <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-3 md:p-4 text-center">
@@ -685,8 +693,11 @@
                 <span class="text-slate-400" x-text="t.totalTurns + ' turns'"></span>
               </p>
             </div>
-            <span class="text-[11px] tabular-nums text-slate-400 shrink-0 mt-0.5"
-                  x-text="ageStr(t.ageMin)"></span>
+            <span data-testid="coord-thread-relative-time"
+                  :data-thread-session="t.session"
+                  :title="t.updatedAt || ''"
+                  class="text-[11px] tabular-nums text-slate-400 shrink-0 mt-0.5"
+                  x-text="relativeTime(t.updatedAt)"></span>
           </div>
 
           <p class="text-[15px] text-slate-100 leading-snug" x-text="t.lead"></p>
@@ -826,7 +837,11 @@
               <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-medium"
                     :class="sprintStatusBadge(s.status)"
                     x-text="s.status"></span>
-              <span class="text-[11px] tabular-nums text-slate-400" x-text="ageStr(s.ageMin)"></span>
+              <span data-testid="coord-sprint-relative-time"
+                    :data-sprint-id="s.id"
+                    :title="s.updatedAt || ''"
+                    class="text-[11px] tabular-nums text-slate-400"
+                    x-text="relativeTime(s.updatedAt)"></span>
             </div>
           </div>
 

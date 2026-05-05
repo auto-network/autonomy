@@ -106,14 +106,14 @@ const META = {
     meta('dashboard.coordinator-canvas', 1, 'keyed_per_entity', 'natural'),
   'dashboard.operator-message-to-coordinator#1':
     meta('dashboard.operator-message-to-coordinator', 1, 'singleton', 'fixed:default'),
-  'dashboard.coordinator-tile#2':
-    meta('dashboard.coordinator-tile', 2, 'keyed_per_entity', 'natural'),
-  'dashboard.coordinator-thread#2':
-    meta('dashboard.coordinator-thread', 2, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-tile#3':
+    meta('dashboard.coordinator-tile', 3, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-thread#3':
+    meta('dashboard.coordinator-thread', 3, 'keyed_per_entity', 'natural'),
   'dashboard.coordinator-decision#1':
     meta('dashboard.coordinator-decision', 1, 'append_only_log', 'uuid_v4'),
-  'dashboard.coordinator-sprint#1':
-    meta('dashboard.coordinator-sprint', 1, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-sprint#2':
+    meta('dashboard.coordinator-sprint', 2, 'keyed_per_entity', 'natural'),
   'dashboard.coordinator-bead#1':
     meta('dashboard.coordinator-bead', 1, 'keyed_per_entity', 'natural'),
   'dashboard.coordinator-convergent-decision#1':
