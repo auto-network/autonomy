@@ -313,21 +313,42 @@
   }
 </style>
 
-  <!-- TABS -->
+  <!-- TABS + PRESENCE STACK -->
   <nav class="sticky top-0 z-20 -mx-3 md:-mx-6 px-3 md:px-6 py-2 bg-slate-950/95 backdrop-blur border-b border-slate-800/50">
-    <div class="flex gap-1.5 text-xs md:text-sm">
-      <template x-for="t in tabs" :key="t.key">
-        <button
-          data-testid="coord-tab"
-          :data-tab-key="t.key"
-          @click="tab = t.key"
-          :class="tab === t.key
-            ? 'bg-violet-500/20 text-violet-100 ring-1 ring-violet-400/40'
-            : 'bg-slate-900/60 text-slate-400 hover:bg-slate-800/60'"
-          class="flex-1 px-2.5 py-2 rounded-lg font-medium transition-colors text-center min-w-0">
-          <span class="block truncate" x-text="t.label"></span>
-        </button>
-      </template>
+    <div class="flex items-center gap-3">
+      <div class="flex gap-1.5 text-xs md:text-sm flex-1 min-w-0">
+        <template x-for="t in tabs" :key="t.key">
+          <button
+            data-testid="coord-tab"
+            :data-tab-key="t.key"
+            @click="tab = t.key"
+            :class="tab === t.key
+              ? 'bg-violet-500/20 text-violet-100 ring-1 ring-violet-400/40'
+              : 'bg-slate-900/60 text-slate-400 hover:bg-slate-800/60'"
+            class="flex-1 px-2.5 py-2 rounded-lg font-medium transition-colors text-center min-w-0">
+            <span class="block truncate" x-text="t.label"></span>
+          </button>
+        </template>
+      </div>
+      <!-- Presence panel — substrate.B SurfacePresence rows for this
+           surface. Each avatar is a 24px circle filled with
+           ``Presence.participantColor()`` so operator and agents agree
+           on the hue. Uses the shared ``.nx-avatar-stack`` rules from
+           ``static/css/surface-presence.css`` — no per-plugin styling. -->
+      <div class="flex items-center gap-2 shrink-0" data-testid="coord-presence-panel">
+        <div class="nx-avatar-stack" style="--nx-stack-cap: 5;" data-testid="coord-presence-stack">
+          <template x-for="p in (participants || [])" :key="p.participant_id">
+            <span class="nx-avatar"
+                  :style="'background:' + participantColor(p.participant_id)"
+                  :title="p.participant_label + ' — ' + (p.intent || p.state)"
+                  :data-testid="'coord-presence-avatar-' + p.participant_id"
+                  x-text="participantInitial(p)"></span>
+          </template>
+        </div>
+        <span class="text-[11px] text-slate-500"
+              x-show="!participants || participants.length === 0"
+              data-testid="coord-presence-empty">no one here yet</span>
+      </div>
     </div>
   </nav>
 
@@ -449,6 +470,19 @@
                     </span>
                   </template>
                   <span>· <span x-text="t.role"></span></span>
+                  <!-- Updater attribution (substrate.B) — colored dot +
+                       label drawn from the live participant when the
+                       session is online, otherwise from the tile's own
+                       payload + a deterministic ``participantColor`` hue. -->
+                  <span class="inline-flex items-center gap-1"
+                        data-testid="coord-tile-updater"
+                        :data-tile-session="t.session"
+                        :data-updater-live="updaterFor(t).live ? 'true' : 'false'">
+                    <span>·</span>
+                    <span class="inline-block w-2 h-2 rounded-full"
+                          :style="'background:' + updaterFor(t).color"></span>
+                    <span class="text-slate-400" x-text="updaterFor(t).label"></span>
+                  </span>
                 </p>
               </div>
               <div class="flex items-center gap-2 shrink-0">
@@ -683,6 +717,18 @@
                 <span>· <span x-text="t.role"></span></span>
                 <span>·</span>
                 <span class="text-slate-400" x-text="t.totalTurns + ' turns'"></span>
+                <!-- Updater attribution (substrate.B) — same shape as tile
+                     header; live participant label when present, deterministic
+                     fallback when offline. -->
+                <span class="inline-flex items-center gap-1"
+                      data-testid="coord-thread-updater"
+                      :data-thread-session="t.session"
+                      :data-updater-live="updaterFor(t).live ? 'true' : 'false'">
+                  <span>·</span>
+                  <span class="inline-block w-2 h-2 rounded-full"
+                        :style="'background:' + updaterFor(t).color"></span>
+                  <span class="text-slate-400" x-text="updaterFor(t).label"></span>
+                </span>
               </p>
             </div>
             <span class="text-[11px] tabular-nums text-slate-400 shrink-0 mt-0.5"
