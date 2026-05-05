@@ -115,11 +115,11 @@ class TestCoordinatorPresenceIntegration:
 
     def test_page_js_wraps_state_with_presence_alpine(self):
         js = (PLUGIN_DIR / "page.js").read_text()
-        assert "_coordPresenceRuntime.alpine" in js
+        assert "_presenceRuntime.alpine" in js
         assert "_SURFACE_ID = 'coordinator-board'" in js
-        assert "_syncPresencePosition" in js
         assert "participantColor" in js
-        assert "participantLabel" in js
+        assert "participantForSession" in js
+        assert "updaterFor" in js
 
     def test_page_html_renders_presence_panel_and_attribution(self):
         html = (PLUGIN_DIR / "page.html").read_text()
@@ -127,8 +127,10 @@ class TestCoordinatorPresenceIntegration:
         assert 'data-testid="coord-presence-stack"' in html
         assert "coord-presence-avatar-" in html
         assert "participantColor(p.participant_id)" in html
-        assert "participantLabel(t.session, t.label)" in html
-        assert "participantInitialFor(t.session, t.label)" in html
+        assert "participantInitial(p)" in html
+        assert 'data-testid="coord-tile-updater"' in html
+        assert 'data-testid="coord-thread-updater"' in html
+        assert "updaterFor(t).label" in html
 
 
 # ── Setting schemas ──────────────────────────────────────────────────
@@ -443,20 +445,22 @@ class TestPageJsHelpers:
             "hasOnTileThumbNo: typeof c.onTileThumbNo === 'function', "
             "hasOnTileSitrep: typeof c.onTileSitrep === 'function', "
             "hasOnTileRefresh: typeof c.onTileRefresh === 'function', "
-            "hasSwitchTab: typeof c.switchTab === 'function', "
             "hasRenderInlineLinks: typeof c.renderInlineLinks === 'function', "
             "hasStatusBadge: typeof c.statusBadge === 'function', "
-            "hasParticipantLabel: typeof c.participantLabel === 'function', "
-            "hasParticipantInitialFor: typeof c.participantInitialFor === 'function', "
+            "hasParticipantColor: typeof c.participantColor === 'function', "
+            "hasParticipantInitial: typeof c.participantInitial === 'function', "
+            "hasParticipantForSession: typeof c.participantForSession === 'function', "
+            "hasUpdaterFor: typeof c.updaterFor === 'function', "
             "hasAgeStr: typeof c.ageStr === 'function' };"
         )
         assert out["tab"] == "primary"
         for k in (
             "hasInit", "hasLoadBoard", "hasOnOperatorMessage",
             "hasOnTileThumbYes", "hasOnTileThumbNo",
-            "hasOnTileSitrep", "hasOnTileRefresh", "hasSwitchTab",
+            "hasOnTileSitrep", "hasOnTileRefresh",
             "hasRenderInlineLinks", "hasStatusBadge",
-            "hasParticipantLabel", "hasParticipantInitialFor",
+            "hasParticipantColor", "hasParticipantInitial",
+            "hasParticipantForSession", "hasUpdaterFor",
             "hasAgeStr",
         ):
             assert out[k] is True, f"missing factory method: {k}"
@@ -543,40 +547,23 @@ class TestPageJsHelpers:
         assert out["refresh"] == "requested refresh"
         assert out["empty"] == ""
 
-    def test_surface_participants_sort_and_overflow(self):
+    def test_participant_for_session_returns_live_row(self):
         out = self._eval(
             "c.participants = ["
             "  { participant_id: 'agent-b', participant_kind: 'agent', participant_label: 'Bravo' },"
             "  { participant_id: 'operator-1', participant_kind: 'operator', participant_label: 'Operator' },"
-            "  { participant_id: 'agent-a', participant_kind: 'agent', participant_label: 'Alpha' },"
-            "  { participant_id: 'agent-c', participant_kind: 'agent', participant_label: 'Charlie' },"
-            "  { participant_id: 'agent-d', participant_kind: 'agent', participant_label: 'Delta' },"
-            "  { participant_id: 'agent-e', participant_kind: 'agent', participant_label: 'Echo' }"
+            "  { participant_id: 'agent-a', participant_kind: 'agent', participant_label: 'Alpha' }"
             "];"
             "return { "
-            "  ordered: c.surfaceParticipants.map(p => p.participant_id), "
-            "  visible: c.visibleParticipants.map(p => p.participant_id), "
-            "  overflow: c.overflowParticipantCount "
+            "  live: c.participantForSession('agent-a'), "
+            "  missing: c.participantForSession('missing') "
             "};"
         )
-        assert out["ordered"] == [
-            "operator-1",
-            "agent-a",
-            "agent-b",
-            "agent-c",
-            "agent-d",
-            "agent-e",
-        ]
-        assert out["visible"] == [
-            "operator-1",
-            "agent-a",
-            "agent-b",
-            "agent-c",
-            "agent-d",
-        ]
-        assert out["overflow"] == 1
+        assert out["live"]["participant_id"] == "agent-a"
+        assert out["live"]["participant_label"] == "Alpha"
+        assert out["missing"] is None
 
-    def test_participant_label_and_title_prefer_live_row(self):
+    def test_updater_for_prefers_live_label(self):
         out = self._eval(
             "c.participants = ["
             "  { participant_id: 'auto-live', participant_kind: 'agent', "
@@ -584,33 +571,34 @@ class TestPageJsHelpers:
             "    intent: 'Reviewing tracking' }"
             "];"
             "return { "
-            "  liveLabel: c.participantLabel('auto-live', 'Fallback'), "
-            "  missingLabel: c.participantLabel('auto-missing', 'Fallback'), "
-            "  liveTitle: c.participantTitle('auto-live', 'Fallback'), "
-            "  missingTitle: c.participantTitle('auto-missing', 'Fallback') "
+            "  live: c.updaterFor({ session: 'auto-live', label: 'Fallback' }), "
+            "  missing: c.updaterFor({ session: 'auto-missing', label: 'Fallback' }) "
             "};"
         )
-        assert out["liveLabel"] == "Live Agent"
-        assert out["missingLabel"] == "Fallback"
-        assert out["liveTitle"] == "Live Agent — Reviewing tracking"
-        assert out["missingTitle"] == "Last update from Fallback"
+        assert out["live"]["label"] == "Live Agent"
+        assert out["live"]["live"] is True
+        assert out["missing"]["label"] == "Fallback"
+        assert out["missing"]["live"] is False
 
     def test_offline_writer_fallback_keeps_deterministic_color(self):
         out = self._eval(
             "return { "
-            "  label: c.participantLabel('auto-offline', 'Offline Writer'), "
-            "  initial: c.participantInitialFor('auto-offline', 'Offline Writer'), "
-            "  color: c.participantColor('auto-offline') "
+            "  updater: c.updaterFor({ session: 'auto-offline', label: 'Offline Writer' }), "
+            "  color: c.participantColor('auto-offline'), "
+            "  initial: c.participantInitial({ participant_label: 'Offline Writer' }) "
             "};"
         )
-        assert out["label"] == "Offline Writer"
+        assert out["updater"]["label"] == "Offline Writer"
+        assert out["updater"]["live"] is False
         assert out["initial"] == "O"
         assert out["color"].startswith("hsl(")
         assert out["color"].endswith("70% 60%)")
+        assert out["updater"]["color"] == out["color"]
 
-    def test_switch_tab_updates_active_zone(self):
+    def test_tabs_metadata_exposes_tracking_label(self):
         out = self._eval(
-            "c.switchTab('tracking'); return { tab: c.tab, label: c.tabLabel(c.tab) };"
+            "c.tab = 'tracking'; "
+            "return { tab: c.tab, label: (c.tabs.find(t => t.key === c.tab) || {}).label };"
         )
         assert out["tab"] == "tracking"
         assert out["label"] == "Tracking"
