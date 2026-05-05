@@ -25,11 +25,30 @@
 //   writes:
 //     POST /api/graph/setting   (operator-message + decision rows)
 //
-// Tile + thread are bound at revision 2 (bead auto-1aef5 keyshape) via
-// the ``{set_id, revision}`` entry form on Schema.alpine — peers
-// self-publish under their own session id and the page reads at v2.
-const TILE_SCHEMA_REVISION = 2;
-const THREAD_SCHEMA_REVISION = 2;
+// Tile + thread bumped to revision 3 (bead auto-fwwfu — drop ``ageMin``
+// from the payload; relative-time labels derive from
+// ``member.updated_at``). Sprint bumped to revision 2 for the same
+// reason. Prior revisions stay registered for the migration window.
+const TILE_SCHEMA_REVISION = 3;
+const THREAD_SCHEMA_REVISION = 3;
+const SPRINT_SCHEMA_REVISION = 2;
+
+function relativeTime(isoString) {
+  if (!isoString) return '';
+  const d = new Date(isoString);
+  if (isNaN(d.getTime())) return '';
+  const diffMs = Date.now() - d.getTime();
+  if (diffMs < 60_000) return 'just now';
+  const m = Math.floor(diffMs / 60_000);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  const mm = m - h * 60;
+  if (h < 24) return mm > 0 ? `${h}h ${mm}m ago` : `${h}h ago`;
+  return d.toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
 
 const _schemaRuntime = (typeof window !== 'undefined' && window.Schema)
   ? window.Schema
@@ -79,6 +98,8 @@ function coordinatorBoard() {
     // ─────── Data ───────
     data: {
       snapshotTime: '',
+      snapshotTimeRaw: '',
+      pendingCommitCount: 0,
       broadcastPlaceholder: 'Message me…',
       // ``chosenReply`` carries the most-recent verbatim quick-reply
       // pick. The picked pill flips to a chosen state and stays until
@@ -118,12 +139,18 @@ function coordinatorBoard() {
 
     async loadBoard() {
       // Parallel fetches — each set is independent. Tile + thread reads
-      // are revision-2-aware: ``target_revision=2`` so any v1 rows
-      // resolve through the registered upconvert chain.
+      // are revision-3-aware (sprint at revision 2): ``target_revision``
+      // resolves any prior-revision rows through the registered upconvert
+      // chain. The 11th fetch — ``/api/worktrees`` — drives the
+      // Tracking-tab PENDING COMMITS counter (see ``pendingCommitCount``).
+      const wt = fetch('/api/worktrees', { credentials: 'same-origin' })
+        .then(r => r.ok ? r.json() : [])
+        .catch(() => []);
       const [
         coordinator,
         canvas, op, tiles, threads, decisions,
         sprints, beads, convergent, followups, docs,
+        worktrees,
       ] = await Promise.all([
         this.Coordinator.read('default'),
         this.Canvas.all(),
@@ -131,11 +158,12 @@ function coordinatorBoard() {
         this.Tile.all({ target_revision: TILE_SCHEMA_REVISION }),
         this.Thread.all({ target_revision: THREAD_SCHEMA_REVISION }),
         this.Decision.all(),
-        this.Sprint.all(),
+        this.Sprint.all({ target_revision: SPRINT_SCHEMA_REVISION }),
         this.Bead.all(),
         this.ConvergentDecision.all(),
         this.OpenFollowup.all(),
         this.Docs.all(),
+        wt,
       ]);
 
       this._coordSession = this._normalizeCoordinator(coordinator);
@@ -154,10 +182,28 @@ function coordinatorBoard() {
         .map(m => this._normalizeOpenFollowup(m))
         .filter(t => t);
       this.data.docs = this._normalizeDocs(this._latest(docs));
-      this.data.snapshotTime = new Date().toLocaleString(undefined, {
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit',
-      });
+      // /api/worktrees returns a bare list of WorktreeState rows; PENDING
+      // COMMITS = sum of ``commits_ahead`` across rows. Defensive coerce
+      // — a transient error path could plausibly return a non-list.
+      const wtRows = Array.isArray(worktrees) ? worktrees : [];
+      this.data.pendingCommitCount = wtRows.reduce(
+        (acc, r) => acc + Number((r && r.commits_ahead) || 0),
+        0,
+      );
+      // Snapshot time = relative-time of the freshest member loaded
+      // across every set. ``member.updated_at || member.created_at``
+      // matches ``_memberTime``'s contract.
+      const allMembers = [
+        latestCanvas, this._latest(op), ...(tiles || []), ...(threads || []),
+        ...(decisions || []), ...(sprints || []), ...(beads || []),
+        ...(convergent || []), ...(followups || []), this._latest(docs),
+      ];
+      const newest = allMembers.reduce((acc, m) => {
+        const ts = (m && (m.updated_at || m.created_at)) || '';
+        return ts > acc ? ts : acc;
+      }, '');
+      this.data.snapshotTimeRaw = newest;
+      this.data.snapshotTime = relativeTime(newest);
       // Reset only the in-flight 'pending' marker; 'requested' must
       // persist after a canvas-wide refresh write so the operator's
       // tap is reflected even though loadBoard typically completes
@@ -213,7 +259,7 @@ function coordinatorBoard() {
     },
 
     async _refreshSprints() {
-      const members = await this.Sprint.all();
+      const members = await this.Sprint.all({ target_revision: SPRINT_SCHEMA_REVISION });
       this.data.sprints = (members || []).map(m => this._normalizeSprint(m));
     },
 
@@ -329,7 +375,7 @@ function coordinatorBoard() {
         label: p.label || session,
         thing: p.thing || '',
         asks: p.asks || 'fyi',
-        ageMin: typeof p.ageMin === 'number' ? p.ageMin : 0,
+        updatedAt: this._memberTime(member),
         updateKind: p.updateKind || 'refresh',
         detail,
         // Per-tile UI state (not persisted in the Setting payload).
@@ -355,7 +401,7 @@ function coordinatorBoard() {
         status: p.status || 'paused',
         lead: p.lead || '',
         bullets: Array.isArray(p.bullets) ? p.bullets : [],
-        ageMin: typeof p.ageMin === 'number' ? p.ageMin : 0,
+        updatedAt: this._memberTime(member),
         totalTurns: typeof p.totalTurns === 'number' ? p.totalTurns : 0,
         needs: p.needs || '',
       };
@@ -368,7 +414,7 @@ function coordinatorBoard() {
         id: key,
         title: p.title || '',
         status: p.status || 'active',
-        ageMin: typeof p.ageMin === 'number' ? p.ageMin : 0,
+        updatedAt: this._memberTime(member),
         participants: Array.isArray(p.participants) ? p.participants : [],
         commitCount: typeof p.commitCount === 'number' ? p.commitCount : 0,
         beadCount: typeof p.beadCount === 'number' ? p.beadCount : 0,
@@ -428,15 +474,17 @@ function coordinatorBoard() {
     get sortedThreads() {
       const arr = [...this.data.threads];
       const statusOrder = { blocked: 0, investigating: 1, shipping: 2, researching: 3, designing: 4, paused: 5, compacted: 6 };
+      // Recency tie-break: newer ``updated_at`` (later ISO) ranks first.
+      const newerFirst = (a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '');
       switch (this.sortKey) {
         case 'urgent': return arr.sort((a, b) => {
           if (!!a.needs !== !!b.needs) return a.needs ? -1 : 1;
           const sa = statusOrder[a.status] ?? 99;
           const sb = statusOrder[b.status] ?? 99;
           if (sa !== sb) return sa - sb;
-          return a.ageMin - b.ageMin;
+          return newerFirst(a, b);
         });
-        case 'recent': return arr.sort((a, b) => a.ageMin - b.ageMin);
+        case 'recent': return arr.sort(newerFirst);
         case 'turns':  return arr.sort((a, b) => b.totalTurns - a.totalTurns);
         case 'name':   return arr.sort((a, b) => a.session.localeCompare(b.session));
       }
@@ -450,7 +498,7 @@ function coordinatorBoard() {
         const sa = order[a.status] ?? 99;
         const sb = order[b.status] ?? 99;
         if (sa !== sb) return sa - sb;
-        return a.ageMin - b.ageMin;
+        return (b.updatedAt || '').localeCompare(a.updatedAt || '');
       });
     },
 
@@ -779,7 +827,7 @@ function coordinatorBoard() {
         Tile:               { set_id: 'dashboard.coordinator-tile',   revision: TILE_SCHEMA_REVISION },
         Thread:             { set_id: 'dashboard.coordinator-thread', revision: THREAD_SCHEMA_REVISION },
         Decision:           'dashboard.coordinator-decision',
-        Sprint:             'dashboard.coordinator-sprint',
+        Sprint:             { set_id: 'dashboard.coordinator-sprint', revision: SPRINT_SCHEMA_REVISION },
         Bead:               'dashboard.coordinator-bead',
         ConvergentDecision: 'dashboard.coordinator-convergent-decision',
         OpenFollowup:       'dashboard.coordinator-open-followup',

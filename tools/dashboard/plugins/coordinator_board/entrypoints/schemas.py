@@ -84,11 +84,21 @@ COORDINATOR_CONVERGENT_DECISION_SET_ID = (
 COORDINATOR_OPEN_FOLLOWUP_SET_ID = "dashboard.coordinator-open-followup"
 COORDINATOR_DOCS_SET_ID = "dashboard.coordinator-docs"
 
-# Most schemas live at revision 1. Tile + thread bumped to revision 2 by
-# bead auto-1aef5 (peer-session-only keying — see module docstring).
+# Most schemas live at revision 1. Tile + thread were bumped to revision 2
+# by bead auto-1aef5 (peer-session-only keying); bead auto-fwwfu bumps tile
+# and thread to revision 3 and sprint to revision 2 — both drop ``ageMin``
+# from the payload (page derives relative time from ``member.updated_at``).
+# Prior revisions stay registered for the migration window.
 SCHEMA_REVISION = 1
-TILE_SCHEMA_REVISION = 2
-THREAD_SCHEMA_REVISION = 2
+TILE_SCHEMA_REVISION = 3
+THREAD_SCHEMA_REVISION = 3
+SPRINT_SCHEMA_REVISION = 2
+
+# The now-prior revisions for tile + thread + sprint, preserved for
+# the upconvert chain and the ``drop_legacy_age_min`` migration helper.
+TILE_PRIOR_AGE_MIN_REVISION = 2
+THREAD_PRIOR_AGE_MIN_REVISION = 2
+SPRINT_PRIOR_AGE_MIN_REVISION = 1
 
 
 VALID_TILE_ASKS = ("yes_no", "decide", "merge", "approve", "fyi")
@@ -369,10 +379,13 @@ class CoordinatorTileV2(SettingSchema):
     - ``detail`` is an object ``{context, choices[]}`` instead of a
       bare string. The detail panel renders ``context`` + a list of
       ``choices`` operator can pick from.
+
+    Retained for the v2→v3 upconvert chain (bead auto-fwwfu drops
+    ``ageMin``). Use :class:`CoordinatorTileV3` for new writes.
     """
 
     set_id = COORDINATOR_TILE_SET_ID
-    schema_revision = TILE_SCHEMA_REVISION
+    schema_revision = TILE_PRIOR_AGE_MIN_REVISION
 
     label: str = field(required=True, description="Tile label (peer's working title)")
     role: str = field(required=True, description="Peer's session role")
@@ -440,6 +453,101 @@ class CoordinatorTileV2(SettingSchema):
             out.pop("detail", None)
         elif isinstance(detail, str):
             out["detail"] = {"context": detail, "choices": []}
+        return out
+
+
+# ── Tile (v3 — drops ``ageMin``; relative time derived from member.updated_at) ──
+
+
+@keyed_per_entity
+class CoordinatorTileV3(SettingSchema):
+    """Per-peer-session tile, ``ageMin``-free. Key: ``<peer-session>``.
+
+    Differences from v2:
+    - ``ageMin`` is gone. The page derives the per-tile "Nm ago" label
+      from ``member.updated_at`` via the ``relativeTime`` helper, so the
+      stored payload no longer carries a stale stamp the writer has to
+      keep refreshing.
+    """
+
+    set_id = COORDINATOR_TILE_SET_ID
+    schema_revision = TILE_SCHEMA_REVISION
+
+    label: str = field(required=True, description="Tile label (peer's working title)")
+    role: str = field(required=True, description="Peer's session role")
+    thing: str = field(required=True,
+                       description="Editorial summary of what the peer is doing")
+    asks: str = field(required=True, enum=list(VALID_TILE_ASKS),
+                      description="What the tile is asking the operator for")
+    updateKind: str = field(required=False, enum=list(VALID_TILE_UPDATE_KINDS),
+                            description="Refresh vs discovery update")
+    detail: dict = field(
+        required=False,
+        description=(
+            "Optional structured detail; renders the expanded panel. "
+            "``context`` carries longer-form prose; ``choices`` is a "
+            "list of resolution-choice strings the operator can tap."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        for required in ("label", "role", "thing", "asks"):
+            v = payload.get(required)
+            if not isinstance(v, str) or not v:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: missing or empty required field {required!r}"
+                )
+        if payload["asks"] not in VALID_TILE_ASKS:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'asks' must be one of {VALID_TILE_ASKS}, "
+                f"got {payload['asks']!r}"
+            )
+        if "updateKind" in payload \
+                and payload["updateKind"] not in VALID_TILE_UPDATE_KINDS:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'updateKind' must be one of "
+                f"{VALID_TILE_UPDATE_KINDS}"
+            )
+        if "detail" in payload and payload["detail"] is not None:
+            d = payload["detail"]
+            if not isinstance(d, dict):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: 'detail' must be an object or null"
+                )
+            if "context" in d and d["context"] is not None \
+                    and not isinstance(d["context"], str):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: 'detail.context' must be a string or null"
+                )
+            if "choices" in d:
+                ch = d["choices"]
+                if not isinstance(ch, list) \
+                        or not all(isinstance(c, str) for c in ch):
+                    raise SchemaValidationError(
+                        f"{cls.__name__}: 'detail.choices' must be a list of strings"
+                    )
+            extra = set(d) - {"context", "choices"}
+            if extra:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: unknown 'detail' field(s): {sorted(extra)}"
+                )
+        extra = set(payload) - set(cls._field_metadata)
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        """Drop ``ageMin`` — v3 derives it from ``member.updated_at``."""
+        out = dict(payload)
+        out.pop("ageMin", None)
         return out
 
 
@@ -536,10 +644,13 @@ class CoordinatorThreadV2(SettingSchema):
     Same payload shape as v1; only the keyshape changed (peers
     self-publish under their own session id; coordinator curates
     via the publication-state machine).
+
+    Retained for the v2→v3 upconvert chain (bead auto-fwwfu drops
+    ``ageMin``). Use :class:`CoordinatorThreadV3` for new writes.
     """
 
     set_id = COORDINATOR_THREAD_SET_ID
-    schema_revision = THREAD_SCHEMA_REVISION
+    schema_revision = THREAD_PRIOR_AGE_MIN_REVISION
 
     label: str = field(required=True, description="Thread label (working title)")
     role: str = field(required=True,
@@ -580,6 +691,91 @@ class CoordinatorThreadV2(SettingSchema):
     def upconvert_from_prev(cls, payload: dict) -> dict:
         """Pass through — the payload shape is identical between v1 and v2."""
         return dict(payload)
+
+
+# ── Thread (v3 — drops ``ageMin``) ───────────────────────────────────
+
+
+@keyed_per_entity
+class CoordinatorThreadV3(SettingSchema):
+    """Per-peer-session thread, ``ageMin``-free. Key: ``<peer-session>``.
+
+    Differences from v2: ``ageMin`` is gone. The page derives "Nm ago"
+    from ``member.updated_at`` via ``relativeTime``.
+    """
+
+    set_id = COORDINATOR_THREAD_SET_ID
+    schema_revision = THREAD_SCHEMA_REVISION
+
+    label: str = field(required=True, description="Thread label (working title)")
+    role: str = field(required=True,
+                      description="Session role driving the thread")
+    status: str = field(required=True, enum=list(VALID_THREAD_STATUSES),
+                        description="Thread status; drives the badge")
+    lead: str = field(required=True,
+                      description="Editorial lead (one-sentence summary)")
+    bullets: list = field(
+        required=False, element=str,
+        description="Supporting bullets shown beneath the lead",
+    )
+    totalTurns: int = field(
+        required=False, description="Total turn count for the thread",
+    )
+    needs: str = field(
+        required=False,
+        description=(
+            "When set, the thread is asking the operator for "
+            "something specific — surfaced as a callout"
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        for required in ("label", "role", "status", "lead"):
+            v = payload.get(required)
+            if not isinstance(v, str) or not v:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: missing or empty required field {required!r}"
+                )
+        if payload["status"] not in VALID_THREAD_STATUSES:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'status' must be one of "
+                f"{VALID_THREAD_STATUSES}, got {payload['status']!r}"
+            )
+        if "bullets" in payload:
+            bullets = payload["bullets"]
+            if not isinstance(bullets, list) \
+                    or not all(isinstance(b, str) for b in bullets):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: 'bullets' must be a list of strings"
+                )
+        if "totalTurns" in payload \
+                and not isinstance(payload["totalTurns"], (int, float)):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'totalTurns' must be a number"
+            )
+        if "needs" in payload and payload["needs"] is not None \
+                and not isinstance(payload["needs"], str):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'needs' must be a string or null"
+            )
+        extra = set(payload) - set(cls._field_metadata)
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        """Drop ``ageMin`` — v3 derives it from ``member.updated_at``."""
+        out = dict(payload)
+        out.pop("ageMin", None)
+        return out
 
 
 # ── Decision (append-only event log; variants per kind) ──────────────
@@ -712,10 +908,13 @@ class CoordinatorSprintV1(SettingSchema):
 
     Sprints are inherently cross-session arcs that no single peer sees
     the full shape of; coordinator is the only writer.
+
+    Retained for the v1→v2 upconvert chain (bead auto-fwwfu drops
+    ``ageMin``). Use :class:`CoordinatorSprintV2` for new writes.
     """
 
     set_id = COORDINATOR_SPRINT_SET_ID
-    schema_revision = SCHEMA_REVISION
+    schema_revision = SPRINT_PRIOR_AGE_MIN_REVISION
 
     title: str = field(required=True, description="Editorial sprint headline")
     status: str = field(required=True, enum=list(VALID_SPRINT_STATUSES),
@@ -799,6 +998,109 @@ class CoordinatorSprintV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"
             )
+
+
+# ── Sprint (v2 — drops ``ageMin``) ───────────────────────────────────
+
+
+@keyed_per_entity
+class CoordinatorSprintV2(SettingSchema):
+    """Per-sprint-id editorial card, ``ageMin``-free. Key: ``<sprint-id>``.
+
+    Differences from v1: ``ageMin`` is gone. The page derives "Nm ago"
+    from ``member.updated_at`` via ``relativeTime``.
+    """
+
+    set_id = COORDINATOR_SPRINT_SET_ID
+    schema_revision = SPRINT_SCHEMA_REVISION
+
+    title: str = field(required=True, description="Editorial sprint headline")
+    status: str = field(required=True, enum=list(VALID_SPRINT_STATUSES),
+                        description="Sprint status; drives the badge")
+    participants: list = field(
+        required=False, element=str,
+        description="Sessions involved in this sprint",
+    )
+    commitCount: int = field(
+        required=False,
+        description="Commit count surfaced in the meta-row",
+    )
+    beadCount: int = field(
+        required=False,
+        description="Bead count surfaced in the meta-row",
+    )
+    arc: str = field(
+        required=False,
+        description=(
+            "Editorial 1–2 sentence arc; supports inline "
+            "``[label](href)`` markdown links"
+        ),
+    )
+    shipped: list = field(
+        required=False, element=str,
+        description="Landed work lines (with optional inline links)",
+    )
+    inFlight: list = field(
+        required=False, element=str, description="Active work lines",
+    )
+    needs: str = field(
+        required=False,
+        description=(
+            "What would keep this sprint from falling by the "
+            "wayside; surfaced as an amber callout"
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        for required in ("title", "status"):
+            v = payload.get(required)
+            if not isinstance(v, str) or not v:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: missing or empty required field {required!r}"
+                )
+        if payload["status"] not in VALID_SPRINT_STATUSES:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'status' must be one of "
+                f"{VALID_SPRINT_STATUSES}, got {payload['status']!r}"
+            )
+        for num_field in ("commitCount", "beadCount"):
+            if num_field in payload \
+                    and not isinstance(payload[num_field], (int, float)):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {num_field!r} must be a number"
+                )
+        for list_field in ("participants", "shipped", "inFlight"):
+            if list_field in payload:
+                v = payload[list_field]
+                if not isinstance(v, list) \
+                        or not all(isinstance(s, str) for s in v):
+                    raise SchemaValidationError(
+                        f"{cls.__name__}: {list_field!r} must be a list of strings"
+                    )
+        for str_field in ("arc", "needs"):
+            if str_field in payload and payload[str_field] is not None \
+                    and not isinstance(payload[str_field], str):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {str_field!r} must be a string or null"
+                )
+        extra = set(payload) - set(cls._field_metadata)
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        """Drop ``ageMin`` — v2 derives it from ``member.updated_at``."""
+        out = dict(payload)
+        out.pop("ageMin", None)
+        return out
 
 
 # ── Bead (coordinator-curated landing/closing summary) ───────────────

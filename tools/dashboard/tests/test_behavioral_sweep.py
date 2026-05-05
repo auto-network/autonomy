@@ -11572,3 +11572,328 @@ class TestCoordinatorBoardParityV2:
                     os.environ.pop("GRAPH_DB", None)
                 else:
                     os.environ["GRAPH_DB"] = old_db
+
+
+# ── Coordinator-board relative-time + pending-commit count (auto-fwwfu) ──
+
+
+def _seed_coord_setting_member_with_ts(
+    fixture_path: str, set_id: str, key: str,
+    payload: dict, *, updated_at: str | None = None,
+    created_at: str | None = None,
+) -> None:
+    """Seed a coordinator-board Setting member with explicit timestamps.
+
+    The mock dao surfaces ``updated_at`` / ``created_at`` verbatim from the
+    fixture file, so the page's ``relativeTime(member.updated_at)`` derives
+    from whatever we set here. Used by the relative-time tests below to
+    pin per-tile / per-thread / per-sprint label rendering.
+    """
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    block = data.setdefault("settings", {})
+    set_block = block.setdefault(set_id, {})
+    if isinstance(set_block, list):
+        set_block = {"_all": list(set_block)}
+        block[set_id] = set_block
+    all_list = set_block.setdefault("_all", [])
+    all_list[:] = [m for m in all_list if m.get("key") != key]
+    member: dict = {"key": key, "payload": payload}
+    if updated_at is not None:
+        member["updated_at"] = updated_at
+    if created_at is not None:
+        member["created_at"] = created_at
+    all_list.append(member)
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _set_fixture_worktrees(fixture_path: str, rows: list[dict] | None) -> None:
+    """Replace (or clear) the ``worktrees`` block of the mock fixture.
+
+    The mock dao's ``get_worktrees`` reads ``data["worktrees"]`` directly,
+    fills in defaults via ``WORKTREE_ROW_DEFAULTS``, and returns the list.
+    ``rows=None`` removes the block (so the page sees a default empty list);
+    ``rows=[]`` writes an explicit empty list.
+    """
+    path = Path(fixture_path)
+    data = json.loads(path.read_text())
+    if rows is None:
+        data.pop("worktrees", None)
+    else:
+        data["worktrees"] = rows
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _iso_seconds_ago(seconds: int) -> str:
+    """Return an ISO-8601 timestamp ``seconds`` seconds before now (UTC)."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    return (_dt.now(_tz.utc) - _td(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class TestCoordinatorBoardRelativeTimeAndPendingCommits:
+    """L2.B sweep for bead auto-fwwfu.
+
+    Asserts:
+    1. Per-tile labels read 'just now' / 'Nm ago' / 'Nh Mm ago' / localized
+       date string depending on the freshness of ``member.updated_at``.
+    2. Top-of-canvas snapshotTime reflects the freshest member loaded
+       across all 10 parallel-fetched sets.
+    3. Tracking-tab PENDING COMMITS counter equals
+       ``sum(r.commits_ahead for r in /api/worktrees)``.
+    4. Empty / 4xx / 5xx ``/api/worktrees`` paths leave the counter at 0
+       and do not propagate a JS error.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def _reset_class_state(self, sweep_server):
+        # Match the auto-pepqk pattern from earlier coord-board parity
+        # classes — by this point in the sweep the agent-browser tab and
+        # mock uvicorn process are degraded enough that a soft reset
+        # isn't enough.
+        _hard_reset_sweep(sweep_server)
+
+    @pytest.fixture(scope="function", autouse=True)
+    def _seed_full_board(self, sweep_server, _reset_class_state):
+        fp = sweep_server["fixture_path"]
+        _set_coord_plugin_enabled(fp, True)
+        _set_coord_canvas(fp, {
+            "ageMin": 1,
+            "question": COORD_BOARD_QUESTION,
+            "context": "[auto-3nill](/bead/auto-3nill) blocks the P0 start.",
+            "quickReplies": list(COORD_BOARD_QUICK_REPLIES),
+        })
+        _clear_coord_operator_message(fp)
+        for sid in (COORD_TILE_SET_ID, COORD_THREAD_SET_ID,
+                    COORD_DECISION_SET_ID, COORD_SPRINT_SET_ID,
+                    COORD_BEAD_SET_ID, COORD_CONVERGENT_SET_ID,
+                    COORD_OPEN_FOLLOWUP_SET_ID, COORD_DOCS_SET_ID):
+            _clear_coord_set(fp, sid)
+        _set_fixture_worktrees(fp, None)
+        # Seed a placeholder tile (no ``updated_at``) so
+        # ``_coord_load_board_with_wait`` (which requires tiles>=1)
+        # returns true. Tests that focus on the worktree counter or the
+        # sprint card don't otherwise need a tile present.
+        _seed_coord_setting_member(
+            fp, COORD_TILE_SET_ID, "auto-placeholder",
+            self._tile_payload(label="Placeholder"),
+        )
+        yield
+        _set_coord_plugin_enabled(fp, None)
+        _set_coord_canvas(fp, None)
+        _clear_coord_operator_message(fp)
+        for sid in (COORD_TILE_SET_ID, COORD_THREAD_SET_ID,
+                    COORD_DECISION_SET_ID, COORD_SPRINT_SET_ID,
+                    COORD_BEAD_SET_ID, COORD_CONVERGENT_SET_ID,
+                    COORD_OPEN_FOLLOWUP_SET_ID, COORD_DOCS_SET_ID):
+            _clear_coord_set(fp, sid)
+        _set_fixture_worktrees(fp, None)
+
+    def _tile_payload(self, **overrides) -> dict:
+        base = {
+            "label": "Tile",
+            "role": "implementer",
+            "thing": "x",
+            "asks": "fyi",
+        }
+        base.update(overrides)
+        return base
+
+    def test_per_tile_labels_render_relative_time_from_updated_at(
+        self, browser, sweep_server,
+    ):
+        """Acceptance #3 — tile labels reflect ``relativeTime(updatedAt)``.
+
+        Three seeded tiles with ``updated_at`` at T-25s / T-5m30s / T-90m30s
+        — the small offsets buffer ~30s of py↔browser drift below each
+        threshold so the rendered labels stabilize at 'just now' / '5m ago'
+        / '1h 30m ago'.
+        """
+        fp = sweep_server["fixture_path"]
+        _seed_coord_setting_member_with_ts(
+            fp, COORD_TILE_SET_ID, "auto-fresh",
+            self._tile_payload(label="Fresh tile"),
+            updated_at=_iso_seconds_ago(25),
+        )
+        _seed_coord_setting_member_with_ts(
+            fp, COORD_TILE_SET_ID, "auto-five-min",
+            self._tile_payload(label="5m tile"),
+            updated_at=_iso_seconds_ago(5 * 60 + 30),
+        )
+        _seed_coord_setting_member_with_ts(
+            fp, COORD_TILE_SET_ID, "auto-ninety-min",
+            self._tile_payload(label="1h30m tile"),
+            updated_at=_iso_seconds_ago(90 * 60 + 30),
+        )
+
+        if not _coord_load_board_with_wait():
+            pytest.skip("Coordinator board did not finish loading seeded data.")
+
+        labels = _ab_eval_batch(
+            "var spans = document.querySelectorAll('[data-testid=\"coord-tile-relative-time\"]'); "
+            "var out = {}; "
+            "Array.from(spans).forEach(function(s) { "
+            "  out[s.dataset.tileSession] = s.textContent.trim(); "
+            "}); "
+            "return out;"
+        )
+        assert isinstance(labels, dict), labels
+        assert labels.get("auto-fresh") == "just now", labels
+        assert labels.get("auto-five-min") == "5m ago", labels
+        assert labels.get("auto-ninety-min") == "1h 30m ago", labels
+
+    def test_old_sprint_label_renders_localized_date(
+        self, browser, sweep_server,
+    ):
+        """Acceptance #3 (>24h branch) — a sprint at ``T-26h`` falls
+        through ``relativeTime``'s 24h threshold and renders a localized
+        date string (text length > 5, contains a digit AND the year).
+        """
+        from datetime import datetime as _dt, timezone as _tz
+        fp = sweep_server["fixture_path"]
+        _seed_coord_setting_member_with_ts(
+            fp, COORD_SPRINT_SET_ID, "sprint-old",
+            {"title": "Old sprint", "status": "active"},
+            updated_at=_iso_seconds_ago(26 * 60 * 60),
+        )
+        if not _coord_load_board_with_wait():
+            pytest.skip("Coordinator board did not finish loading seeded data.")
+        # Switch to the Sprints tab so the sprint card mounts.
+        _ab_eval_batch(
+            "var root = document.querySelector('[data-testid=\"coordinator-fragment-root\"]'); "
+            "Alpine.$data(root).tab = 'sprints'; return null;"
+        )
+        time.sleep(0.5)
+
+        label = _ab_eval_batch(
+            "var span = document.querySelector('[data-testid=\"coord-sprint-relative-time\"]'); "
+            "return span ? span.textContent.trim() : '';"
+        )
+        assert isinstance(label, str) and len(label) > 5, label
+        assert any(c.isdigit() for c in label), label
+        # Locale rendering varies, but the year always appears as a 4-digit
+        # token somewhere in the wide-time format. Allow last year too in
+        # case the test happens to run within ~26h of a New Year boundary.
+        year = str(_dt.now(_tz.utc).year)
+        last_year = str(_dt.now(_tz.utc).year - 1)
+        assert year in label or last_year in label, label
+
+    def test_snapshot_time_reads_relative_time_of_newest_member(
+        self, browser, sweep_server,
+    ):
+        """Acceptance #4 — top-of-canvas snapshotTime tracks the
+        freshest member loaded across all 10 sets.
+        """
+        fp = sweep_server["fixture_path"]
+        # Seed an old tile + a newest-thread to prove snapshotTime
+        # reflects the thread (not the tile or the canvas).
+        _seed_coord_setting_member_with_ts(
+            fp, COORD_TILE_SET_ID, "auto-old-tile",
+            self._tile_payload(label="Old"),
+            updated_at=_iso_seconds_ago(60 * 60),  # 1h
+        )
+        _seed_coord_setting_member_with_ts(
+            fp, COORD_THREAD_SET_ID, "auto-newest-thread",
+            {
+                "label": "Newest", "role": "pair",
+                "status": "blocked", "lead": "x",
+            },
+            # T-2m30s: floor(150/60) = 2, so '2m ago' regardless of small drift.
+            updated_at=_iso_seconds_ago(150),
+        )
+        if not _coord_load_board_with_wait():
+            pytest.skip("Coordinator board did not finish loading seeded data.")
+        _ab_eval_batch(
+            "var root = document.querySelector('[data-testid=\"coordinator-fragment-root\"]'); "
+            "Alpine.$data(root).tab = 'tracking'; return null;"
+        )
+        time.sleep(0.5)
+
+        result = _ab_eval_batch(
+            "var s = document.querySelector('[data-testid=\"coord-snapshot-time\"]'); "
+            "var raw = s ? s.getAttribute('title') : ''; "
+            "var text = s ? s.textContent.trim() : ''; "
+            "return { raw: raw, text: text };"
+        )
+        assert isinstance(result, dict), result
+        assert result["text"] == "2m ago", result
+
+    def test_pending_commits_sums_commits_ahead_across_worktrees(
+        self, browser, sweep_server,
+    ):
+        """Acceptance #5 — counter reads ``sum(commits_ahead)``."""
+        fp = sweep_server["fixture_path"]
+        _set_fixture_worktrees(fp, [
+            {"session_name": "auto-a", "commits_ahead": 3, "branch": "b1"},
+            {"session_name": "auto-b", "commits_ahead": 0, "branch": "b2"},
+            {"session_name": "auto-c", "commits_ahead": 7, "branch": "b3"},
+            {"session_name": "auto-d", "commits_ahead": 2, "branch": "b4"},
+        ])
+        if not _coord_load_board_with_wait():
+            pytest.skip("Coordinator board did not finish loading seeded data.")
+        _ab_eval_batch(
+            "var root = document.querySelector('[data-testid=\"coordinator-fragment-root\"]'); "
+            "Alpine.$data(root).tab = 'tracking'; return null;"
+        )
+        time.sleep(0.5)
+        text = _ab_eval_batch(
+            "var el = document.querySelector('[data-testid=\"coord-pending-commits\"]'); "
+            "return el ? el.textContent.trim() : '';"
+        )
+        assert text == "12", f"Expected '12', got {text!r}"
+
+    def test_pending_commits_reads_zero_for_empty_worktrees(
+        self, browser, sweep_server,
+    ):
+        """Acceptance #5 — counter reads ``0`` when no worktrees."""
+        fp = sweep_server["fixture_path"]
+        _set_fixture_worktrees(fp, [])
+        if not _coord_load_board_with_wait():
+            pytest.skip("Coordinator board did not finish loading seeded data.")
+        _ab_eval_batch(
+            "var root = document.querySelector('[data-testid=\"coordinator-fragment-root\"]'); "
+            "Alpine.$data(root).tab = 'tracking'; return null;"
+        )
+        time.sleep(0.5)
+        text = _ab_eval_batch(
+            "var el = document.querySelector('[data-testid=\"coord-pending-commits\"]'); "
+            "return el ? el.textContent.trim() : '';"
+        )
+        assert text == "0", f"Expected '0', got {text!r}"
+
+    def test_pending_commits_reads_zero_on_http_error_no_throw(
+        self, browser, sweep_server,
+    ):
+        """Acceptance #5 — counter reads ``0`` on /api/worktrees HTTP 500
+        and the JS error path does not propagate.
+        """
+        if not _coord_load_board_with_wait():
+            pytest.skip("Coordinator board did not finish loading seeded data.")
+        # Override window.fetch in-page so /api/worktrees returns 500;
+        # then re-run loadBoard and capture state. We track window.onerror
+        # directly to assert no uncaught exception propagated.
+        result = _ab_eval_batch(
+            "var root = document.querySelector('[data-testid=\"coordinator-fragment-root\"]'); "
+            "var c = Alpine.$data(root); "
+            "window._coordOnError = false; "
+            "var origOnError = window.onerror; "
+            "window.onerror = function() { window._coordOnError = true; return false; }; "
+            "var origFetch = window.fetch; "
+            "window.fetch = function(path, opts) { "
+            "  if (path === '/api/worktrees') { "
+            "    return Promise.resolve({ ok: false, status: 500, "
+            "      json: function() { return Promise.resolve({}); } }); "
+            "  } "
+            "  return origFetch.call(this, path, opts); "
+            "}; "
+            "return c.loadBoard().then(function() { "
+            "  return { count: c.data.pendingCommitCount, errored: window._coordOnError }; "
+            "}).then(function(r) { "
+            "  window.fetch = origFetch; "
+            "  window.onerror = origOnError; "
+            "  return r; "
+            "});"
+        )
+        assert isinstance(result, dict), result
+        assert result["count"] == 0, result
+        assert result["errored"] is False, result
+
