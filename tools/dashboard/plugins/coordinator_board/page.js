@@ -9,6 +9,15 @@
 // ten Settings sets the page reads + the three the page writes are
 // declared as named entries, with tile/thread bound at revision 2.
 //
+// Bead auto-9eypf wraps the factory output with ``Presence.alpine()``
+// so this surface joins the SurfacePresence substrate (substrate.B).
+// Operator + agents render in the top-right participant stack, and
+// each tile/thread header surfaces inline updater attribution that
+// resolves the live participant label when the peer session is
+// publishing presence rows + falls back to the row's own ``label``
+// (and a deterministic ``Presence.participantColor()`` hue) when it
+// isn't. Surface id is the stable string ``coordinator-board``.
+//
 //   reads + setting.changed subscribes:
 //     dashboard.coordinator
 //     dashboard.coordinator-canvas
@@ -53,6 +62,19 @@ function relativeTime(isoString) {
 const _schemaRuntime = (typeof window !== 'undefined' && window.Schema)
   ? window.Schema
   : (typeof require === 'function' ? require('../../static/js/schemas.js') : null);
+
+// Surface presence library (substrate.B). Same dual-export sniff as
+// the nexus plugin uses — ``window.Presence`` is set by
+// ``static/js/surface-presence.js`` in the browser; node tests
+// ``require`` it directly so the helpers resolve in both worlds.
+const _presenceRuntime = (typeof window !== 'undefined' && window.Presence)
+  ? window.Presence
+  : (typeof require === 'function' ? require('../../static/js/surface-presence.js') : null);
+
+// Surface id this plugin claims for SurfacePresence / SurfacePing rows.
+// Stable across the /coordinator path so any session landing on the
+// coordinator-board joins the same multiplayer surface.
+const _SURFACE_ID = 'coordinator-board';
 
 function _cssEscape(s) {
   return (window.CSS && window.CSS.escape)
@@ -816,10 +838,78 @@ function coordinatorBoard() {
       const m = min % 60;
       return m ? `${h}h ${m}m ago` : `${h}h ago`;
     },
+
+    // ─────── Surface presence helpers (substrate.B view layer) ───────
+    //
+    // The participant stack and per-tile / per-thread updater
+    // attribution both resolve a session id (the tile/thread key after
+    // the v2 keyshape rewrite — ``<peer-session>``) against the live
+    // ``participants`` array hydrated by ``Presence.alpine()``. When
+    // the session is offline, fall back to the deterministic hue from
+    // ``Presence.participantColor()`` and the tile/thread's own
+    // ``label`` field — so attribution still renders cleanly when the
+    // updater is no longer publishing presence rows.
+
+    participantColor(participantId) {
+      if (_presenceRuntime && typeof _presenceRuntime.participantColor === 'function') {
+        return _presenceRuntime.participantColor(participantId);
+      }
+      return 'hsl(0 70% 60%)';
+    },
+
+    participantInitial(p) {
+      const label = (p && (p.participant_label || p.participant_id)) || '?';
+      return String(label).trim().charAt(0).toUpperCase() || '?';
+    },
+
+    participantForSession(sessionId) {
+      if (!sessionId || !Array.isArray(this.participants)) return null;
+      for (const p of this.participants) {
+        if (p && p.participant_id === sessionId) return p;
+      }
+      return null;
+    },
+
+    // ``updaterFor`` collapses the live-participant lookup + offline
+    // fallback into a single object the template can read without
+    // branching: ``{label, color, live}``. Tiles and threads both pass
+    // their own session + label so the fallback path renders the same
+    // shape regardless of which surface the row originated from.
+    updaterFor(item) {
+      if (!item) return { label: '', color: this.participantColor(''), live: false };
+      const sessionId = item.session || '';
+      const live = this.participantForSession(sessionId);
+      if (live) {
+        return {
+          label: live.participant_label || live.participant_id || sessionId,
+          color: this.participantColor(live.participant_id || sessionId),
+          live: true,
+        };
+      }
+      return {
+        label: item.label || sessionId,
+        color: this.participantColor(sessionId),
+        live: false,
+      };
+    },
   };
 
+  // Compose Presence.alpine then Schema.alpine. Init order is
+  // outer-first per the wrapper contract: Schema.alpine attaches the
+  // schema proxies, then calls the Presence-wrapped init (presence
+  // proxies + participants load + heartbeat), then calls the original
+  // coordinator-board init (loadBoard + setting.changed subscribe).
+  // This means by the time the page renders, ``this.participants`` is
+  // already hydrated alongside the canvas / tiles / threads.
+  let composed = state;
+  if (_presenceRuntime && typeof _presenceRuntime.alpine === 'function') {
+    composed = _presenceRuntime.alpine({
+      surfaceId: _SURFACE_ID,
+    }, state);
+  }
+
   if (_schemaRuntime && typeof _schemaRuntime.alpine === 'function') {
-    return _schemaRuntime.alpine(state, {
+    return _schemaRuntime.alpine(composed, {
       schemas: {
         Coordinator:        'dashboard.coordinator',
         Canvas:             'dashboard.coordinator-canvas',
@@ -835,7 +925,7 @@ function coordinatorBoard() {
       },
     });
   }
-  return state;
+  return composed;
 }
 
 if (typeof window !== 'undefined') {
