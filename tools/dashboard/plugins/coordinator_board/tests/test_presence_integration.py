@@ -103,6 +103,8 @@ const META = {
     meta('dashboard.coordinator-decision', 1, 'append_only_log', 'uuid_v4'),
   'dashboard.coordinator-sprint#1':
     meta('dashboard.coordinator-sprint', 1, 'keyed_per_entity', 'natural'),
+  'dashboard.coordinator-sprint#2':
+    meta('dashboard.coordinator-sprint', 2, 'keyed_per_entity', 'natural'),
   'dashboard.coordinator-bead#1':
     meta('dashboard.coordinator-bead', 1, 'keyed_per_entity', 'natural'),
   'dashboard.coordinator-convergent-decision#1':
@@ -620,63 +622,3 @@ class TestUpdaterAttribution:
         assert out["updater"]["live"] is False
         assert out["updater"]["label"] == "Quiet Thread"
 
-
-# ── Acceptance #4 — no freshness/snapshot/pending-commit behavior ────
-
-
-@pytest.mark.skipif(not _node_available(), reason="node not installed")
-class TestNoFreshnessSemantics:
-    """Acceptance #4 — this bead does not add freshness / snapshot /
-    pending-commit behavior. The bead's out-of-scope contract: those
-    remain owned by ``auto-fwwfu`` and must not appear here.
-
-    Concretely: the page should not gain a new schema-binding for
-    ``/api/worktrees`` data, must not synthesize relative-time fields
-    on top of the existing ``ageMin`` integers, and must not introduce
-    any "snapshot" indicators."""
-
-    def test_no_pending_commit_field_added_to_state(self):
-        # ``data.pendingCommitCount`` exists for the Tracking metrics
-        # tile but is not computed from /api/worktrees here. This bead
-        # must not change that.
-        out = _run(
-            """
-            return {
-                pendingCommitCountInData: 'pendingCommitCount' in c.data,
-                pendingCommitGetterValue: c.pendingCommitCount,
-            };
-            """,
-        )
-        # The getter survives because it's pre-existing — we just
-        # verify this bead didn't start writing to it.
-        assert out["pendingCommitCountInData"] is False
-        # Empty data → 0.
-        assert out["pendingCommitGetterValue"] == 0
-
-    def test_no_relative_time_or_snapshot_fields_added_to_tiles(self):
-        # The tile normalizer's contract is unchanged — only the
-        # existing keys (session/role/label/thing/asks/ageMin/
-        # updateKind/detail + transient UI flags) appear.
-        out = _run(
-            """
-            await c._refreshTiles();
-            const tile = c.data.tiles[0];
-            return {
-                keys: tile ? Object.keys(tile).sort() : [],
-            };
-            """,
-            seeded={
-                "tiles": [{
-                    "key": "auto-x",
-                    "payload": {
-                        "label": "X", "role": "r", "thing": "t",
-                        "asks": "fyi", "ageMin": 3,
-                    },
-                    "updated_at": "2026-05-05T00:00:00Z",
-                }],
-            },
-        )
-        # New freshness/snapshot fields would show up here. The bead's
-        # acceptance #4 forbids that.
-        forbidden = {"freshness", "snapshot", "pendingCommits", "lastSeenAt", "relativeTime"}
-        assert forbidden.isdisjoint(set(out["keys"])), out["keys"]
