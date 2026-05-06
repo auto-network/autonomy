@@ -9816,12 +9816,15 @@ async def api_graph_search(request):
     ssi_param = request.query_params.get("session_source_ids")
     session_source_ids = [s for s in ssi_param.split(",") if s] if ssi_param else None
     session_author_pattern = request.query_params.get("session_author_pattern")
+    type_param = request.query_params.get("source_type")
+    source_type = [t for t in type_param.split(",") if t] if type_param else None
     results = graph_ops.search(
         q, org=org, peers=peers, only_org=only_org,
         limit=limit, project=project, or_mode=or_mode, tag=tag,
         states=states, include_raw=include_raw,
         session_source_ids=session_source_ids,
         session_author_pattern=session_author_pattern,
+        source_type=source_type,
     )
     return JSONResponse(results)
 

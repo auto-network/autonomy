@@ -15,6 +15,7 @@ This is an open-ended interactive session. There is no bead, no task directive, 
 
 ```bash
 graph search "query"                  # FTS search (--or for ANY term)
+graph search "query" --type session   # scope by source kind (session/note/bead/…)
 graph search "query" --project jira   # scoped to a project
 graph attention --last 20             # human focus trail
 graph read <src_id|tmux_name> --max-chars 3000  # read a full source
@@ -30,6 +31,7 @@ graph dispatch runs                   # running/queued agent activity
 graph wait <bead-id>                 # block until bead completes (background it in your shell)
 graph context <src_id|tmux_name> last    # latest turns (no turn number needed)
 graph sessions --status                  # live session table (SOURCE column gives the id)
+graph sessions --status --topics         # same, with topic lines under each row
 graph sessions --since 12h --status      # post-mortem: include dead sessions active in the last 12h
 graph notes --since 1h                   # recent notes by time
 graph crosstalk --since 1h               # recent CrossTalk messages

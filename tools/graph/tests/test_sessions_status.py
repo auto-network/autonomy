@@ -269,3 +269,87 @@ def test_print_session_header_chip_silent_when_no_match(tmp_path, monkeypatch, c
     note = {"id": "f" * 20, "type": "note"}
     cli._print_session_header_chip(note)
     assert capsys.readouterr().out == ""
+
+
+def _make_db_with_topics(tmp_path: Path) -> Path:
+    """Status DB seeded with a topics JSON column on one row."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    db_path = data_dir / "dashboard.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE tmux_sessions (
+            tmux_name       TEXT PRIMARY KEY,
+            graph_source_id TEXT,
+            topics          TEXT DEFAULT '[]',
+            created_at      REAL NOT NULL,
+            is_live         INTEGER DEFAULT 1,
+            last_activity   REAL,
+            last_message    TEXT DEFAULT '',
+            entry_count     INTEGER DEFAULT 0,
+            context_tokens  INTEGER DEFAULT 0,
+            label           TEXT DEFAULT '',
+            activity_state  TEXT DEFAULT 'idle'
+        )
+        """
+    )
+    now = time.time()
+    rows = [
+        ("auto-busy", "abcdef0123456789cafe",
+         '["wiring tmux name resolver", "tests passing"]',
+         now - 30, 1, now - 30, "hi", 10, 4200, "drift label", "busy"),
+        ("auto-empty", "1234567890abcafe1234",
+         "[]",
+         now - 120, 1, now - 120, "hi", 5, 800, "no topics", "idle"),
+    ]
+    conn.executemany(
+        "INSERT INTO tmux_sessions (tmux_name,graph_source_id,topics,created_at,"
+        "is_live,last_activity,last_message,entry_count,context_tokens,label,activity_state)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_status_topics_flag_off_by_default(tmp_path, monkeypatch, capsys):
+    """Topics never appear without --topics."""
+    _make_db_with_topics(tmp_path)
+    from tools.graph import cli
+    (tmp_path / "tools" / "graph").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cli, "__file__", str(tmp_path / "tools" / "graph" / "cli.py"))
+
+    cli._print_session_status()
+    out = capsys.readouterr().out
+    assert "wiring tmux name resolver" not in out
+
+
+def test_status_topics_flag_renders_topic_lines(tmp_path, monkeypatch, capsys):
+    """--topics appends one ⤷-prefixed line per topic under the row."""
+    _make_db_with_topics(tmp_path)
+    from tools.graph import cli
+    (tmp_path / "tools" / "graph").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cli, "__file__", str(tmp_path / "tools" / "graph" / "cli.py"))
+
+    cli._print_session_status(show_topics=True)
+    out = capsys.readouterr().out
+    assert "⤷ wiring tmux name resolver" in out
+    assert "⤷ tests passing" in out
+    # The empty-topics row should still render but produce no topic lines.
+    busy_lines = [l for l in out.splitlines() if "auto-busy" in l]
+    empty_lines = [l for l in out.splitlines() if "auto-empty" in l]
+    assert busy_lines and empty_lines
+
+
+def test_row_topic_lines_handles_bad_input():
+    """Defensive parsing — bad JSON / non-list / null all return []."""
+    from tools.graph import cli
+    assert cli._row_topic_lines({"topics": None}) == []
+    assert cli._row_topic_lines({"topics": ""}) == []
+    assert cli._row_topic_lines({"topics": "not json"}) == []
+    assert cli._row_topic_lines({"topics": '"a string"'}) == []  # not a list
+    assert cli._row_topic_lines({"topics": '["one", "  ", "two"]'}) == ["one", "two"]
+    # Already-parsed list (mock DAO shape)
+    assert cli._row_topic_lines({"topics": ["x", "y"]}) == ["x", "y"]

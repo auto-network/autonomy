@@ -297,6 +297,11 @@ def cmd_search(args):
             session_ids, author_pattern = _current_session_context(db)
         finally:
             db.close()
+    type_arg = getattr(args, "source_type", None)
+    source_type = (
+        [t.strip() for t in type_arg.split(",") if t.strip()]
+        if type_arg else None
+    )
     results = get_client().search(
         args.query,
         limit=args.limit,
@@ -309,6 +314,7 @@ def cmd_search(args):
         peers=peers,
         session_source_ids=session_ids,
         session_author_pattern=author_pattern,
+        source_type=source_type,
     )
 
     if args.json:
@@ -1571,8 +1577,13 @@ def cmd_seed(args):
     db.close()
 
 
-def _render_session_status_rows(rows: list[dict], since: str | None = None) -> None:
-    """Render compact session-status rows for local or API-backed callers."""
+def _render_session_status_rows(rows: list[dict], since: str | None = None,
+                                 show_topics: bool = False) -> None:
+    """Render compact session-status rows for local or API-backed callers.
+
+    ``show_topics=True`` appends each session's topic lines (set via
+    ``graph set-topics``) under its row, indented to align with LABEL.
+    """
     from datetime import datetime
 
     if not rows:
@@ -1581,6 +1592,8 @@ def _render_session_status_rows(rows: list[dict], since: str | None = None) -> N
 
     print(f"{'TMUX':<28} {'STATE':<8} {'LAST':<14} {'TOKENS':>7} {'SOURCE':<12} {'LABEL'}")
     print("\u2500" * 100)
+    # Indent for topic continuation lines aligns with the LABEL column.
+    topic_indent = " " * (28 + 1 + 8 + 1 + 14 + 1 + 7 + 1 + 12 + 1)
     for row in rows:
         tmux = str(row.get("tmux_name") or "")[:27]
         if row.get("is_live") == 0:
@@ -1598,6 +1611,37 @@ def _render_session_status_rows(rows: list[dict], since: str | None = None) -> N
         src = str(row.get("graph_source_id") or "")[:12] or "\u2014"
         label = str(row.get("label") or "")[:40].replace("\n", " ")
         print(f"{tmux:<28} {state:<8} {last:<14} {ctx_str:>7} {src:<12} {label}")
+        if show_topics:
+            for topic in _row_topic_lines(row):
+                print(f"{topic_indent}\u2937 {topic}")
+
+
+def _row_topic_lines(row: dict) -> list[str]:
+    """Return the topic lines for a status row.
+
+    Topics are stored as a JSON list in ``tmux_sessions.topics``; the
+    dashboard API returns the same column verbatim. Parses defensively
+    and trims to the same width as LABEL so a long topic line cannot
+    blow up the table layout.
+    """
+    raw = row.get("topics")
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+    else:
+        parsed = raw
+    if not isinstance(parsed, list):
+        return []
+    out: list[str] = []
+    for item in parsed:
+        text = str(item or "").strip().replace("\n", " ")
+        if text:
+            out.append(text[:60])
+    return out
 
 
 def _load_local_session_status_rows(since: str | None = None) -> list[dict]:
@@ -1631,15 +1675,19 @@ def _load_local_session_status_rows(since: str | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _print_session_status(since: str | None = None):
+def _print_session_status(since: str | None = None, show_topics: bool = False):
     """Print compact status table of sessions from dashboard.db."""
-    _render_session_status_rows(_load_local_session_status_rows(since), since=since)
+    _render_session_status_rows(
+        _load_local_session_status_rows(since),
+        since=since, show_topics=show_topics,
+    )
 
 
 def cmd_sessions(args):
     """Ingest Claude Code sessions."""
     if args.status:
         since = getattr(args, "since", None)
+        show_topics = bool(getattr(args, "topics", False))
         client = get_client()
         if isinstance(client, HttpClient):
             try:
@@ -1647,9 +1695,9 @@ def cmd_sessions(args):
             except ValueError as e:
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(1)
-            _render_session_status_rows(rows, since=since)
+            _render_session_status_rows(rows, since=since, show_topics=show_topics)
         else:
-            _print_session_status(since=since)
+            _print_session_status(since=since, show_topics=show_topics)
         return
     client = get_client()
     if isinstance(client, HttpClient):
@@ -4611,6 +4659,8 @@ def main():
     p.add_argument("--width", "-w", type=int, default=500, help="Max chars per result (default 500)")
     p.add_argument("--or", dest="or_mode", action="store_true", help="Join terms with OR instead of AND")
     p.add_argument("--tag", help="Filter results to sources with this tag")
+    p.add_argument("--type", "-t", dest="source_type",
+                   help="Filter by source kind (comma-separated: session, note, bead, …); composes with --project / --tag / --state")
     p.add_argument("--state", help="Filter by publication_state (comma-separated: raw,curated,published,canonical)")
     p.add_argument("--include", choices=["raw"], help="Include additional state categories (use 'raw' to surface raw sources from other sessions)")
     p.add_argument(
@@ -4741,6 +4791,8 @@ def main():
     p.add_argument("--force", action="store_true", help="Re-ingest existing sessions")
     p.add_argument("--status", action="store_true", help="Show session status table from dashboard.db (live-only unless --since)")
     p.add_argument("--since", help="With --status: include dead+live sessions active in the last duration (e.g. 10m, 2h, 12h, 3d)")
+    p.add_argument("--topics", "-T", action="store_true",
+                   help="With --status: append the session's topic lines under each row (set via graph set-topics)")
     p.set_defaults(func=cmd_sessions)
 
     # ingest-session

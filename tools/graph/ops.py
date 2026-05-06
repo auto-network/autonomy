@@ -294,6 +294,7 @@ def search(
     excluded_source_types: list[str] | None = None,
     order: str = "relevance",
     session_type: list[str] | None = None,
+    source_type: list[str] | None = None,
 ) -> list[dict]:
     """Full-text search across the graph with cross-org RRF merge.
 
@@ -334,7 +335,7 @@ def search(
                 q, limit=limit, project=project, or_mode=or_mode, tag=tag,
                 states=states, include_raw=include_raw,
                 excluded_source_types=excluded_source_types,
-                order=order, session_type=session_type,
+                order=order, session_type=session_type, source_type=source_type,
             )
             for r in rows:
                 r["org"] = slug
@@ -364,7 +365,7 @@ def search(
                     session_source_ids=session_source_ids,
                     session_author_pattern=session_author_pattern,
                     excluded_source_types=excluded_source_types,
-                    order=order, session_type=session_type,
+                    order=order, session_type=session_type, source_type=source_type,
                 )
             finally:
                 db.close()
@@ -379,7 +380,7 @@ def search(
             q, limit=limit, project=project, or_mode=or_mode, tag=tag,
             states=list(PEER_VISIBLE_STATES), include_raw=False,
             excluded_source_types=excluded_source_types,
-            order=order, session_type=session_type,
+            order=order, session_type=session_type, source_type=source_type,
         )
         for r in rows:
             r.setdefault("org", only_org)
@@ -394,7 +395,7 @@ def search(
             session_source_ids=session_source_ids,
             session_author_pattern=session_author_pattern,
             excluded_source_types=excluded_source_types,
-            order=order, session_type=session_type,
+            order=order, session_type=session_type, source_type=source_type,
         )
 
     def fetch_peer(db: GraphDB, _slug: str) -> list[dict]:
@@ -402,7 +403,7 @@ def search(
             q, limit=limit, project=project, or_mode=or_mode, tag=tag,
             states=list(PEER_VISIBLE_STATES), include_raw=False,
             excluded_source_types=excluded_source_types,
-            order=order, session_type=session_type,
+            order=order, session_type=session_type, source_type=source_type,
         )
 
     org_lists = run_across_orgs(

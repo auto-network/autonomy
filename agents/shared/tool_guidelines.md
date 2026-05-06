@@ -13,6 +13,7 @@ commits after you exit.
 ```
 graph search "query"              # Full-text search (use --or for OR mode)
 graph search "query" --or         # Match ANY term instead of all
+graph search "query" --type X     # Scope by source kind (session/note/bead/…); composes with --project / --tag / --state
 graph read <src_id|tmux_name>     # Read full source content (tmux names like auto-* auto-resolve)
 graph read <src_id> --max-chars N # Read with character limit
 graph read <src_id> --save <path> # Export raw content to file for editing

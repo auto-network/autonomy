@@ -1062,7 +1062,8 @@ class GraphDB:
                session_author_pattern: str | None = None,
                excluded_source_types: list[str] | None = None,
                order: str = "relevance",
-               session_type: list[str] | None = None) -> list[dict]:
+               session_type: list[str] | None = None,
+               source_type: list[str] | None = None) -> list[dict]:
         """Full-text search across thoughts and derivations. Optionally filter by project.
 
         If *query* looks like a hex source ID (6+ hex chars), resolves it
@@ -1118,13 +1119,28 @@ class GraphDB:
         excl_clause, excl_params = self._build_excluded_types_clause(excluded_source_types)
         st_clause, st_params = self._build_session_type_clause(session_type)
 
+        # source_type semantics mirror session_type:
+        #   None  → no filter (every kind competes)
+        #   []    → contradiction (no rows) — explicit empty list never
+        #           silently widens to "all"
+        #   [...] → s.type IN (...)
+        type_clause = ""
+        type_params: list = []
+        if source_type is not None:
+            if not source_type:
+                type_clause = " AND 0"
+            else:
+                placeholders = ",".join("?" * len(source_type))
+                type_clause = f" AND s.type IN ({placeholders})"
+                type_params = list(source_type)
+
         project_clause = " AND s.project = ?" if project else ""
         project_params: list = [project] if project else []
         common_filters = (
-            project_clause + tag_clause + state_clause + excl_clause + st_clause
+            project_clause + tag_clause + state_clause + excl_clause + st_clause + type_clause
         )
         common_params: list = (
-            project_params + tag_params + state_params + excl_params + st_params
+            project_params + tag_params + state_params + excl_params + st_params + type_params
         )
 
         # ── Phase 1: collect hit-rows per FTS table ─────────────────────

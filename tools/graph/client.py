@@ -199,7 +199,7 @@ class HttpClient:
         self, q, *, org=None, peers=None, only_org=None, limit=25,
         project=None, or_mode=False, tag=None, states=None,
         include_raw=False, session_source_ids=None,
-        session_author_pattern=None,
+        session_author_pattern=None, source_type=None,
     ):
         params: dict[str, Any] = {"q": q, "limit": str(limit)}
         if project:
@@ -220,6 +220,8 @@ class HttpClient:
             params["session_source_ids"] = ",".join(session_source_ids)
         if session_author_pattern:
             params["session_author_pattern"] = session_author_pattern
+        if source_type:
+            params["source_type"] = ",".join(source_type)
         result = self._get("/api/graph/search", params, org=org)
         return result if isinstance(result, list) else []
 
