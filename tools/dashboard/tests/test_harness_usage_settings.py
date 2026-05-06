@@ -337,16 +337,16 @@ def test_publish_harness_usage_snapshot_runs_claude_every_tick(monkeypatch):
     assert writes == ["claude:org:org-X", "claude:org:org-X"]
 
 
-def test_operator_is_idle_delegates_to_presence(monkeypatch):
+def test_operator_is_idle_delegates_to_operator_activity(monkeypatch):
     calls = []
 
-    class _FakePresence:
+    class _FakeOperatorActivity:
         @staticmethod
         def is_idle(*, threshold):
             calls.append(threshold)
             return True
 
-    monkeypatch.setattr("tools.graph.surface.Presence", _FakePresence)
+    monkeypatch.setattr("tools.graph.surface.OperatorActivity", _FakeOperatorActivity)
 
     assert server.operator_is_idle(threshold_minutes=15) is True
     assert len(calls) == 1

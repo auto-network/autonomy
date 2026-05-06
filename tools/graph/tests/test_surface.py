@@ -8,8 +8,8 @@ Bead: ``auto-i3tki``. Covers:
   starts heartbeat thread, joins on exit, writes final row,
 * heartbeat thread cleanup on exit (no leaked thread),
 * :meth:`Presence.participant_color` determinism + format,
-* :meth:`Presence.is_idle` / :meth:`Presence.last_user_input` read
-  the singleton OperatorActivity row.
+* :meth:`OperatorActivity.is_idle` / :meth:`OperatorActivity.last_user_input`
+  read the singleton OperatorActivity row.
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from tools.graph.surface import (
     SCHEMA_REVISION,
     SURFACE_PING_SET_ID,
     SURFACE_PRESENCE_SET_ID,
+    OperatorActivity,
     OperatorActivityV1,
     Presence,
     SurfacePingV1,
@@ -479,39 +480,39 @@ def _iso(dt: datetime) -> str:
 
 def test_is_idle_no_row_returns_true(graph_db_env):
     """Acceptance #2: missing row → idle."""
-    assert Presence.is_idle() is True
+    assert OperatorActivity.is_idle() is True
 
 
 def test_is_idle_recent_input_returns_false(graph_db_env):
     """A user input within the threshold = not idle."""
     now = datetime.now(timezone.utc)
     _write_operator_activity(_iso(now - timedelta(seconds=30)))
-    assert Presence.is_idle(threshold=timedelta(minutes=5)) is False
+    assert OperatorActivity.is_idle(threshold=timedelta(minutes=5)) is False
 
 
 def test_is_idle_stale_input_returns_true(graph_db_env):
     """Last input older than threshold = idle."""
     now = datetime.now(timezone.utc)
     _write_operator_activity(_iso(now - timedelta(hours=2)))
-    assert Presence.is_idle(threshold=timedelta(minutes=30)) is True
+    assert OperatorActivity.is_idle(threshold=timedelta(minutes=30)) is True
 
 
 def test_is_idle_empty_last_input_returns_true(graph_db_env):
     """A row with empty ``last_input_at`` reads as idle."""
     _write_operator_activity("")
-    assert Presence.is_idle() is True
+    assert OperatorActivity.is_idle() is True
 
 
 def test_last_user_input_no_row_returns_none(graph_db_env):
     """No activity row → no last input."""
-    assert Presence.last_user_input() is None
+    assert OperatorActivity.last_user_input() is None
 
 
 def test_last_user_input_returns_parsed_datetime(graph_db_env):
     """The ISO timestamp comes back as a tz-aware datetime."""
     when = datetime.now(timezone.utc).replace(microsecond=0)
     _write_operator_activity(_iso(when))
-    got = Presence.last_user_input()
+    got = OperatorActivity.last_user_input()
     assert got is not None
     assert got.tzinfo is not None
     assert int(got.timestamp()) == int(when.timestamp())
@@ -520,7 +521,7 @@ def test_last_user_input_returns_parsed_datetime(graph_db_env):
 def test_last_user_input_unparseable_returns_none(graph_db_env):
     """A garbled timestamp on the row should not crash callers."""
     _write_operator_activity("not-an-iso-string")
-    assert Presence.last_user_input() is None
+    assert OperatorActivity.last_user_input() is None
 
 
 # ── Color helper ─────────────────────────────────────────────

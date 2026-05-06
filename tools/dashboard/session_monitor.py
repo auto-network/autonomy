@@ -1626,7 +1626,7 @@ class SessionMonitor:
         activity_state = _apply_activity_entries(ts, new_entries)
         update_activity_state(tmux_name, activity_state)
 
-        # Singleton OperatorActivity row that backs ``Presence.is_idle()``.
+        # Singleton OperatorActivity row that backs ``OperatorActivity.is_idle()``.
         # Fire-and-forget on a thread so the SSE broadcast below is never
         # gated on graph-DB I/O. Only one write per batch is needed; the
         # singleton row only cares about the most recent operator-input

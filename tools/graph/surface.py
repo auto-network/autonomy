@@ -12,8 +12,8 @@ Once the substrate ships these primitives, every plugin gets:
 
 Live behind the API today:
 
-* :meth:`Presence.is_idle`, :meth:`Presence.last_user_input` — read the
-  singleton ``dashboard.operator.activity#1`` row written by
+* :meth:`OperatorActivity.is_idle`, :meth:`OperatorActivity.last_user_input`
+  — read the singleton ``dashboard.operator.activity#1`` row written by
   ``tools/dashboard/session_monitor.py`` whenever any session parses a
   ``user`` or ``crosstalk`` turn. ``is_idle`` treats a missing row as
   idle; ``last_user_input`` returns ``None`` in that case.
@@ -555,7 +555,34 @@ class Presence:
             org=self.org,
         )
 
-    # ── Static helpers — backed by OperatorActivity row ─────────
+    @staticmethod
+    def participant_color(participant_id: str) -> str:
+        """Deterministic color for a participant id.
+
+        Same id always returns the same color across all sessions and
+        viewers. Lives view-side per pitfall ``graph://73af2694-562``;
+        surfaced here for Python parity with the JS helper.
+        """
+        h = sum(
+            ord(c) * 31 ** i for i, c in enumerate(participant_id)
+        ) & 0xFFFFFFFF
+        return f"hsl({h % 360} 70% 60%)"
+
+
+# ── OperatorActivity helpers — singleton-row readers ────────
+
+
+class OperatorActivity:
+    """Static readers for the singleton ``dashboard.operator.activity`` row.
+
+    Answers "did the operator say anything anywhere in the last N
+    minutes?" — independent of any specific session or surface. The
+    singleton row is written by ``tools/dashboard/session_monitor.py``
+    whenever any session parses a ``user`` or ``crosstalk`` turn.
+
+    Distinct from :class:`Presence`, which tracks per-(surface,
+    participant) multiplayer state.
+    """
 
     @staticmethod
     def is_idle(
@@ -565,7 +592,7 @@ class Presence:
 
         Treats 'no row yet' as idle (True).
         """
-        last = Presence.last_user_input()
+        last = OperatorActivity.last_user_input()
         if last is None:
             return True
         return (datetime.now(timezone.utc) - last) > threshold
@@ -593,19 +620,6 @@ class Presence:
             )
         except ValueError:
             return None
-
-    @staticmethod
-    def participant_color(participant_id: str) -> str:
-        """Deterministic color for a participant id.
-
-        Same id always returns the same color across all sessions and
-        viewers. Lives view-side per pitfall ``graph://73af2694-562``;
-        surfaced here for Python parity with the JS helper.
-        """
-        h = sum(
-            ord(c) * 31 ** i for i, c in enumerate(participant_id)
-        ) & 0xFFFFFFFF
-        return f"hsl({h % 360} 70% 60%)"
 
 
 # Schemas auto-register via ``SettingSchema.__init_subclass__``.

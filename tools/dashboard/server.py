@@ -8357,9 +8357,9 @@ def _should_run_harness_usage_poller() -> bool:
 
 
 def operator_is_idle(*, threshold_minutes: int = 15) -> bool:
-    from tools.graph.surface import Presence
+    from tools.graph.surface import OperatorActivity
 
-    return Presence.is_idle(threshold=timedelta(minutes=threshold_minutes))
+    return OperatorActivity.is_idle(threshold=timedelta(minutes=threshold_minutes))
 
 
 def _now_iso() -> str:

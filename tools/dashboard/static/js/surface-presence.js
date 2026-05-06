@@ -29,20 +29,27 @@
 //   this.setPresenceState(state, p) — switch ``present`` / ``working``
 //                                     and update position/intent
 //
-// Static helpers (substrate.B ships stubs; substrate.D will make
-// them real). Each is async so the eventual real signature (server
-// read) is the contract consumers code against today:
+// View-side participant color helper (lives on Presence):
 //
-//   await Presence.isIdle(id, {minutes: 30})        — bool   (stub: false)
-//   await Presence.lastUserInput(id)                 — Date|null (stub: null)
-//   await Presence.activeWithin(id, {hours: 1})      — bool   (stub: true)
-//   await Presence.inputsLastHour(id)                — number (stub: 0)
 //   Presence.participantColor(participantId)         — string ("hsl(...)")
 //
 // ``participantColor`` lives view-side per pitfall
 // ``graph://73af2694-562``. Mirrors the Python helper in
 // ``tools/graph/surface.py`` so plugin Python and the JS view layer
 // agree on a participant's hue.
+//
+// Singleton operator-activity helpers (substrate.B ships stubs;
+// substrate.D will make them real) live on a separate
+// ``OperatorActivity`` global. They read the
+// ``dashboard.operator.activity`` singleton row — "did the operator
+// type anywhere recently?" — and have nothing to do with multiplayer
+// surface presence. Each is async so the eventual real signature
+// (server read) is the contract consumers code against today:
+//
+//   await OperatorActivity.isIdle({minutes: 30})    — bool   (stub: false)
+//   await OperatorActivity.lastUserInput()           — Date|null (stub: null)
+//   await OperatorActivity.activeWithin({hours: 1})  — bool   (stub: true)
+//   await OperatorActivity.inputsLastHour()          — number (stub: 0)
 //
 // Bead: substrate.B (auto-7t98r). Signpost: graph://dff97eec-c59.
 
@@ -119,26 +126,28 @@
     return 'hsl(' + (unsigned % 360) + ' 70% 60%)';
   }
 
-  // ── Static "participant activity" stubs (substrate.D real) ──
+  // ── Singleton operator-activity stubs (substrate.D real) ───
   //
-  // Async to match the eventual real signatures (server reads).
-  // Stubs match the Python defaults so consumers that gate work on
-  // ``!isIdle(...)`` keep behaving as they do today, then improve
-  // automatically when substrate.D ships.
+  // These read the ``dashboard.operator.activity`` singleton row —
+  // "did the operator type anywhere recently?" — so they take no
+  // participant id. Async to match the eventual real signatures
+  // (server reads). Stubs match the Python defaults so consumers that
+  // gate work on ``!isIdle(...)`` keep behaving as they do today,
+  // then improve automatically when substrate.D ships.
 
-  async function isIdle(/* participantId, opts */) {
+  async function isIdle(/* opts */) {
     return false;
   }
 
-  async function lastUserInput(/* participantId */) {
+  async function lastUserInput() {
     return null;
   }
 
-  async function activeWithin(/* participantId, opts */) {
+  async function activeWithin(/* opts */) {
     return true;
   }
 
-  async function inputsLastHour(/* participantId */) {
+  async function inputsLastHour() {
     return 0;
   }
 
@@ -454,19 +463,24 @@
 
   var PresenceNS = {
     alpine: alpine,
-    isIdle: isIdle,
-    lastUserInput: lastUserInput,
-    activeWithin: activeWithin,
-    inputsLastHour: inputsLastHour,
     participantColor: participantColor,
     SURFACE_PRESENCE_SET_ID: SURFACE_PRESENCE_SET_ID,
     SURFACE_PING_SET_ID: SURFACE_PING_SET_ID,
     SCHEMA_REVISION: SCHEMA_REVISION,
   };
 
+  var OperatorActivityNS = {
+    isIdle: isIdle,
+    lastUserInput: lastUserInput,
+    activeWithin: activeWithin,
+    inputsLastHour: inputsLastHour,
+  };
+
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = PresenceNS;
+    module.exports.OperatorActivity = OperatorActivityNS;
   } else if (typeof window !== 'undefined') {
     window.Presence = PresenceNS;
+    window.OperatorActivity = OperatorActivityNS;
   }
 })();

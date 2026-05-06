@@ -4,8 +4,8 @@
 // Exercises:
 //   * ``Presence.participantColor`` — deterministic HSL hash, parity
 //     with ``tools/graph/surface.py::Presence.participant_color``.
-//   * ``Presence.isIdle`` / ``lastUserInput`` / ``activeWithin`` /
-//     ``inputsLastHour`` — substrate.D stubs.
+//   * ``OperatorActivity.isIdle`` / ``lastUserInput`` / ``activeWithin``
+//     / ``inputsLastHour`` — substrate.D stubs (singleton row, no id).
 //   * ``Presence.alpine`` — wrapping shape, init() pre-fetch +
 //     proxy attachment, pingAgent + acknowledgePing wire-format.
 //
@@ -15,6 +15,7 @@ const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const Schema = require('../static/js/schemas.js');
 const Presence = require('../static/js/surface-presence.js');
+const { OperatorActivity } = Presence;
 
 
 // ── Test fixtures ──────────────────────────────────────────────
@@ -154,22 +155,22 @@ describe('Presence.participantColor', () => {
 
 // ── Static stubs (substrate.D will make them real) ────────────
 
-describe('Presence.isIdle / lastUserInput / activeWithin / inputsLastHour stubs', () => {
+describe('OperatorActivity.isIdle / lastUserInput / activeWithin / inputsLastHour stubs', () => {
   it('isIdle returns false (consumers default to "not idle" until D ships)', async () => {
-    assert.equal(await Presence.isIdle('any-id', { minutes: 30 }), false);
-    assert.equal(await Presence.isIdle('any-id'), false);
+    assert.equal(await OperatorActivity.isIdle({ minutes: 30 }), false);
+    assert.equal(await OperatorActivity.isIdle(), false);
   });
 
   it('lastUserInput returns null', async () => {
-    assert.equal(await Presence.lastUserInput('any-id'), null);
+    assert.equal(await OperatorActivity.lastUserInput(), null);
   });
 
   it('activeWithin returns true (consumers default to "active" until D ships)', async () => {
-    assert.equal(await Presence.activeWithin('any-id', { hours: 1 }), true);
+    assert.equal(await OperatorActivity.activeWithin({ hours: 1 }), true);
   });
 
   it('inputsLastHour returns 0', async () => {
-    assert.equal(await Presence.inputsLastHour('any-id'), 0);
+    assert.equal(await OperatorActivity.inputsLastHour(), 0);
   });
 });
 

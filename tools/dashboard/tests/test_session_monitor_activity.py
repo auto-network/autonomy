@@ -3,7 +3,7 @@
 Covers ``_record_operator_input``, the singleton-row write that
 ``SessionMonitor._process_tail_entries`` schedules when any session
 parses a ``user`` or ``crosstalk`` entry. The row backs
-``Presence.is_idle()``.
+``OperatorActivity.is_idle()``.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from tools.dashboard.session_monitor import (
 from tools.graph import settings_ops
 from tools.graph.surface import (
     OPERATOR_ACTIVITY_SET_ID,
-    Presence,
+    OperatorActivity,
 )
 
 
@@ -67,8 +67,8 @@ def test_subsequent_record_overwrites(graph_db_env):
     _record_operator_input(_iso(earlier))
     _record_operator_input(_iso(later))
 
-    # Presence.last_user_input reads the most recent row.
-    got = Presence.last_user_input()
+    # OperatorActivity.last_user_input reads the most recent row.
+    got = OperatorActivity.last_user_input()
     assert got is not None
     assert int(got.timestamp()) == int(later.timestamp())
 
@@ -131,29 +131,29 @@ def test_operator_input_types_covers_user_and_crosstalk():
     assert "assistant_text" not in _OPERATOR_INPUT_TYPES
 
 
-# ── Presence helpers reflect the writes ──────────────────────
+# ── OperatorActivity helpers reflect the writes ──────────────
 
 
-def test_presence_is_idle_no_row_returns_true(graph_db_env):
-    assert Presence.is_idle() is True
+def test_operator_activity_is_idle_no_row_returns_true(graph_db_env):
+    assert OperatorActivity.is_idle() is True
 
 
-def test_presence_is_idle_recent_input_returns_false(graph_db_env):
+def test_operator_activity_is_idle_recent_input_returns_false(graph_db_env):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     _record_operator_input(_iso(now))
-    assert Presence.is_idle(threshold=timedelta(minutes=5)) is False
+    assert OperatorActivity.is_idle(threshold=timedelta(minutes=5)) is False
 
 
-def test_presence_is_idle_stale_input_returns_true(graph_db_env):
+def test_operator_activity_is_idle_stale_input_returns_true(graph_db_env):
     long_ago = datetime.now(timezone.utc) - timedelta(hours=2)
     _record_operator_input(_iso(long_ago))
-    assert Presence.is_idle(threshold=timedelta(minutes=30)) is True
+    assert OperatorActivity.is_idle(threshold=timedelta(minutes=30)) is True
 
 
-def test_presence_last_user_input_returns_parsed_datetime(graph_db_env):
+def test_operator_activity_last_user_input_returns_parsed_datetime(graph_db_env):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     _record_operator_input(_iso(now))
-    got = Presence.last_user_input()
+    got = OperatorActivity.last_user_input()
     assert got is not None
     assert got.tzinfo is not None
     assert int(got.timestamp()) == int(now.timestamp())
