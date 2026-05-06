@@ -76,13 +76,14 @@ def generate_pkce_pair() -> tuple[str, str]:
 # ── HTTP helpers ─────────────────────────────────────────────
 
 
-def _post_form(url: str, data: dict[str, str]) -> dict[str, Any]:
-    """POST form-encoded ``data`` to ``url`` and return the JSON body.
+def _post_json(url: str, data: dict[str, Any]) -> dict[str, Any]:
+    """POST JSON ``data`` to ``url`` and return the parsed JSON body.
 
     Surfaces non-2xx with a clean :class:`OAuthError`. Used for the
-    authorization-code → token exchange and the refresh-token grant.
-    We rely on urllib (stdlib) so the OAuth path works in any environment
-    without optional deps.
+    authorization-code → token exchange (the refresh-token grant has its
+    own helper inside the dashboard's refresh poller). Anthropic's token
+    endpoint expects ``application/json`` for both grant flows — see the
+    Claude binary 2.1.128 ``Tp8`` (token exchange) helper.
 
     Every call logs intent (grant_type) before the request, then either
     success (HTTP code, duration) or failure (HTTP code + sanitized
@@ -90,13 +91,13 @@ def _post_form(url: str, data: dict[str, str]) -> dict[str, Any]:
     visibility. Token values are never logged.
     """
     grant_type = data.get("grant_type", "<unknown>")
-    encoded = urllib.parse.urlencode(data).encode("ascii")
+    encoded = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=encoded,
         headers={
             "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type": "application/json",
         },
         method="POST",
     )
@@ -227,8 +228,16 @@ def build_authorize_url(
     redirect_uri: str,
     state: str | None = None,
 ) -> str:
-    """Compose the operator-facing authorize URL with PKCE params."""
+    """Compose the operator-facing authorize URL with PKCE params.
+
+    The leading ``code=true`` parameter mirrors what the Claude CLI
+    itself appends in :func:`buildAuthUrl` (binary 2.1.128). It's
+    required for both the loopback and manual redirect flows; without
+    it the authorize endpoint rejects the request with "Invalid request
+    format". Order matches the binary so any future log diffs line up.
+    """
     params = {
+        "code": "true",
         "client_id": CLIENT_ID,
         "response_type": "code",
         "scope": scope,
@@ -302,15 +311,24 @@ def exchange_code_for_token(
     code: str,
     code_verifier: str,
     redirect_uri: str,
+    state: str | None = None,
 ) -> TokenResponse:
-    """Exchange an authorization code for an access/refresh token bundle."""
-    body = _post_form(TOKEN_URL, {
+    """Exchange an authorization code for an access/refresh token bundle.
+
+    Body shape matches Claude CLI's ``Tp8`` helper (binary 2.1.128):
+    JSON-encoded with ``state`` echoed back so Anthropic can verify the
+    exchange came from the same flow that initiated the authorize.
+    """
+    payload: dict[str, Any] = {
         "grant_type": "authorization_code",
         "code": code,
-        "code_verifier": code_verifier,
-        "client_id": CLIENT_ID,
         "redirect_uri": redirect_uri,
-    })
+        "client_id": CLIENT_ID,
+        "code_verifier": code_verifier,
+    }
+    if state is not None:
+        payload["state"] = state
+    body = _post_json(TOKEN_URL, payload)
     parsed = parse_token_response(body)
     logger.info(
         "oauth: code-exchange resolved org=%s account=%s scope=%r",
@@ -361,7 +379,7 @@ class _CodeCaptureHandler(http.server.BaseHTTPRequestHandler):
 
     # Filled in via attribute injection by :class:`OAuthFlow`.
     captured: dict[str, str] = {}
-    expected_path: str = "/cb"
+    expected_path: str = "/callback"
 
     def do_GET(self) -> None:  # noqa: N802 — http.server protocol name
         parsed = urllib.parse.urlparse(self.path)
@@ -431,7 +449,7 @@ def run_loopback_capture(
     handler_cls = type(
         "_CaptureHandler",
         (_CodeCaptureHandler,),
-        {"captured": {}, "expected_path": "/cb"},
+        {"captured": {}, "expected_path": "/callback"},
     )
     server = http.server.HTTPServer(("127.0.0.1", port), handler_cls)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -510,7 +528,7 @@ def run_oauth_flow(
         open_browser = webbrowser.open
     code_verifier, code_challenge = generate_pkce_pair()
     port = pick_ephemeral_port()
-    redirect_uri = f"http://localhost:{port}/cb"
+    redirect_uri = f"http://localhost:{port}/callback"
     state = secrets.token_urlsafe(16)
     logger.info("oauth: starting flow scope=%r redirect_uri=%s", scope, redirect_uri)
     authorize_url = build_authorize_url(
@@ -535,5 +553,6 @@ def run_oauth_flow(
         code=capture.code,
         code_verifier=code_verifier,
         redirect_uri=redirect_uri,
+        state=state,
     )
     return FlowResult(token=token, redirect_uri=redirect_uri)

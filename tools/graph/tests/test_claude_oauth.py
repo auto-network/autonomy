@@ -71,18 +71,19 @@ def test_build_authorize_url_consumer_scopes():
     url = build_authorize_url(
         scope=CONSUMER_SCOPES,
         code_challenge="abc-challenge",
-        redirect_uri="http://localhost:5555/cb",
+        redirect_uri="http://localhost:5555/callback",
         state="state-123",
     )
     parsed = urllib.parse.urlparse(url)
     assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == AUTHORIZE_URL
     params = urllib.parse.parse_qs(parsed.query)
+    assert params["code"] == ["true"]
     assert params["client_id"] == [CLIENT_ID]
     assert params["response_type"] == ["code"]
     assert params["scope"] == [CONSUMER_SCOPES]
     assert params["code_challenge"] == ["abc-challenge"]
     assert params["code_challenge_method"] == ["S256"]
-    assert params["redirect_uri"] == ["http://localhost:5555/cb"]
+    assert params["redirect_uri"] == ["http://localhost:5555/callback"]
     assert params["state"] == ["state-123"]
 
 
@@ -90,9 +91,10 @@ def test_build_authorize_url_console_scopes():
     url = build_authorize_url(
         scope=CONSOLE_SCOPES,
         code_challenge="ch",
-        redirect_uri="http://localhost:5555/cb",
+        redirect_uri="http://localhost:5555/callback",
     )
     params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    assert params["code"] == ["true"]
     assert params["scope"] == [CONSOLE_SCOPES]
     assert "state" not in params
 
@@ -170,18 +172,20 @@ def test_exchange_code_for_token_posts_form_to_token_endpoint():
         result = exchange_code_for_token(
             code="auth-code-123",
             code_verifier="verifier-xyz",
-            redirect_uri="http://localhost:5555/cb",
+            redirect_uri="http://localhost:5555/callback",
+            state="state-abc",
         )
 
     assert captured["url"] == TOKEN_URL
     assert captured["method"] == "POST"
-    body_params = urllib.parse.parse_qs(captured["body"])
-    assert body_params["grant_type"] == ["authorization_code"]
-    assert body_params["code"] == ["auth-code-123"]
-    assert body_params["code_verifier"] == ["verifier-xyz"]
-    assert body_params["client_id"] == [CLIENT_ID]
-    assert body_params["redirect_uri"] == ["http://localhost:5555/cb"]
-    assert captured["headers"]["content-type"] == "application/x-www-form-urlencoded"
+    body_params = json.loads(captured["body"])
+    assert body_params["grant_type"] == "authorization_code"
+    assert body_params["code"] == "auth-code-123"
+    assert body_params["code_verifier"] == "verifier-xyz"
+    assert body_params["client_id"] == CLIENT_ID
+    assert body_params["redirect_uri"] == "http://localhost:5555/callback"
+    assert body_params["state"] == "state-abc"
+    assert captured["headers"]["content-type"] == "application/json"
     assert result.access_token == "at-abc"
 
 
@@ -197,7 +201,7 @@ def test_exchange_code_for_token_surfaces_http_error():
     with patch("urllib.request.urlopen", fake_urlopen):
         with pytest.raises(OAuthError) as exc:
             exchange_code_for_token(
-                code="x", code_verifier="y", redirect_uri="http://localhost:5555/cb",
+                code="x", code_verifier="y", redirect_uri="http://localhost:5555/callback",
             )
     assert "400" in str(exc.value)
     assert "bad code" in str(exc.value)
