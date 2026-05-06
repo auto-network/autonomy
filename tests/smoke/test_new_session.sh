@@ -7,6 +7,13 @@ FAIL=0
 PORT=9092
 FIXTURE=/tmp/test_new_session_fixture.json
 EVENTS=/tmp/test_new_session_events.jsonl
+LOCK=/tmp/dashboard-agent-browser-smoke.lock
+
+# agent-browser exposes a shared daemon/session, so concurrent smoke
+# scripts can close or repoint each other's page underneath the checks.
+# Serialize the whole script when multiple smokes are launched together.
+exec 9>"$LOCK"
+flock 9
 
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }

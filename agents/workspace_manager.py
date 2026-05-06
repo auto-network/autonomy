@@ -146,19 +146,12 @@ def ensure_managed_clone(url: str, *, repos_dir: Path = REPOS_DIR) -> Path:
     if clone_path.exists():
         logger.info("workspace: fetching %s", clone_path)
         _run_git(["fetch", "origin", "--prune"], cwd=clone_path)
-        # Advance the local integration-branch ref to match origin's tip so
-        # `git log <branch>` from inside session worktrees doesn't show a
-        # stale base. The fetch above only writes refs/remotes/origin/<branch>;
-        # without this update-ref, refs/heads/<branch> stays frozen at
-        # whatever it was on first clone (operator pain — see auto-0428-131200's
-        # 12-day-stale-main report).
+        # Refresh the local integration branch when it is merely stale behind
+        # origin, but preserve any local-only commits operators may have
+        # staged onto the managed clone as the current base.
         default = _repo_default_branch(clone_path)
         if default:
-            _git_output(
-                ["update-ref", f"refs/heads/{default}", f"refs/remotes/origin/{default}"],
-                clone_path,
-                timeout=15,
-            )
+            _refresh_local_branch_from_remote(clone_path, default)
     else:
         logger.info("workspace: cloning %s → %s", url, clone_path)
         clone_path.parent.mkdir(parents=True, exist_ok=True)
@@ -566,6 +559,47 @@ def _repo_default_branch(repo: Path) -> str | None:
     return None
 
 
+def _refresh_local_branch_from_remote(repo: Path, branch: str) -> None:
+    """Fast-forward ``refs/heads/<branch>`` from origin when safe.
+
+    Managed clones can carry local-only integration commits that should win as
+    the launch base for reused worktrees and read-only mounts. Preserve those
+    commits; only rewrite the local branch ref when it is missing or is merely
+    behind the fetched remote-tracking branch.
+    """
+    local_ref = f"refs/heads/{branch}"
+    remote_ref = f"refs/remotes/origin/{branch}"
+    local_ok = _git_output(["rev-parse", "--verify", local_ref], repo, timeout=15)[0] == 0
+    remote_ok = _git_output(["rev-parse", "--verify", remote_ref], repo, timeout=15)[0] == 0
+    if not remote_ok:
+        return
+    if not local_ok:
+        _git_output(["update-ref", local_ref, remote_ref], repo, timeout=15)
+        return
+
+    local_head = _git_output(["rev-parse", "--verify", local_ref], repo, timeout=15)[1].strip()
+    remote_head = _git_output(["rev-parse", "--verify", remote_ref], repo, timeout=15)[1].strip()
+    if not local_head or not remote_head or local_head == remote_head:
+        return
+
+    rc, _, _ = _git_output(
+        ["merge-base", "--is-ancestor", local_ref, remote_ref],
+        repo,
+        timeout=15,
+    )
+    if rc == 0:
+        _git_output(["update-ref", local_ref, remote_ref], repo, timeout=15)
+        return
+
+    logger.info(
+        "workspace: preserving local %s in %s (local=%s remote=%s)",
+        branch,
+        repo,
+        local_head,
+        remote_head,
+    )
+
+
 def _repo_integration_base_ref(repo: Path) -> str:
     """Return the best base ref for fresh worktrees and cleanup checks.
 
@@ -731,6 +765,19 @@ def _worktree_dirty_files(worktree: Path) -> list[GitFileChange] | None:
         if path:
             files.append(GitFileChange(status=status, path=path))
     return files
+
+
+def _worktree_has_any_dirty_files(worktree: Path) -> bool:
+    """Return True when any tracked or untracked path is present.
+
+    This is the user-facing notion of "dirty" used by the dashboard state and
+    rebase detail payloads. Blocking merge/rebase safety checks still use the
+    tracked-only helper below.
+    """
+    dirty_files = _worktree_dirty_files(worktree)
+    if dirty_files is None:
+        return True
+    return bool(dirty_files)
 
 
 def _worktree_dirty_numstats(worktree: Path) -> dict[str, tuple[int, int]]:
@@ -1115,14 +1162,11 @@ def scan_all_worktrees(
             clone_stale = _worktree_clone_stale(repo_dir.name, clone)
             dirty_files_or_none = _worktree_dirty_files(repo_dir)
             dirty_files = dirty_files_or_none or []
-            # Tracked-only dirty: untracked '??' entries do not block rebase /
-            # merge / cherry-pick and conflating them produces misleading
-            # "stash or commit uncommitted changes" tooltips on worktrees that
-            # only have leftover runtime artifacts.
-            tracked_dirty = [f for f in dirty_files if f.status != "??"]
-            # Preserve the previous safety behavior: if git status fails,
-            # treat the worktree as dirty even though paths are unavailable.
-            is_dirty = True if dirty_files_or_none is None else bool(tracked_dirty)
+            # Surface any untracked artifacts in the dashboard's dirty-state
+            # badge, but keep tracked-only safety checks in
+            # ``_worktree_has_uncommitted_changes`` for operations that need
+            # to know whether git itself would block.
+            is_dirty = True if dirty_files_or_none is None else bool(dirty_files)
             commits = _worktree_commits(repo_dir, repo_dir.name, base_ref=base_ref)
             commits_ahead = _worktree_commits_ahead(repo_dir, base_ref=base_ref)
             rebase_required = _worktree_rebase_required(
@@ -1970,7 +2014,7 @@ def get_session_worktree_rebase_info(
         pending[0],
     )
     info["commit"] = pending[0]
-    info["is_dirty"] = _worktree_has_uncommitted_changes(worktree)
+    info["is_dirty"] = _worktree_has_any_dirty_files(worktree)
     return info
 
 

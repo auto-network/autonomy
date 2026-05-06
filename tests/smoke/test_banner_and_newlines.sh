@@ -7,6 +7,12 @@ FAIL=0
 PORT=9091
 FIXTURE=/tmp/test_fixtures.json
 EVENTS=/tmp/test_events.jsonl
+LOCK=/tmp/dashboard-agent-browser-smoke.lock
+
+# agent-browser is shared process-wide; without a lock, concurrent
+# smoke runs race on open/close/eval calls and produce false failures.
+exec 9>"$LOCK"
+flock 9
 
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }

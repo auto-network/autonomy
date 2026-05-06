@@ -8194,7 +8194,10 @@ SEARCH_SORT_CHIP_CHECKS = """(async () => {
   var capturedURLs = [];
   var origFetch = window.fetch;
   window.fetch = function(url, opts) {
-    capturedURLs.push(String(url));
+    var text = String(url);
+    if (text.indexOf('/api/search') !== -1) {
+      capturedURLs.push(text);
+    }
     // Mirror what the mock /api/search would return for ?q=pillsweep
     // under recency. Mock server's _group_search_results re-sorts by
     // source_created_at when order=recent, so the most-recent row
@@ -8248,6 +8251,10 @@ class TestSearchSortChip:
 
     @pytest.fixture(scope="class", autouse=True)
     def checks(self, browser, request):
+        # ``navigateTo`` short-circuits identical paths, so bounce away
+        # from the previous search-page class first to force a fresh
+        # Alpine mount before we capture the next sort-driven refetch.
+        _navigate_and_check("/sessions", "", wait_ms=600)
         result = _navigate_and_eval_async(
             "/search?q=pillsweep",
             SEARCH_SORT_CHIP_CHECKS,
@@ -9283,13 +9290,12 @@ class TestAgenticDispatchObservability:
         """Direct unit-style test: undefined placeholder → ValueError."""
         from tools.dashboard.server import _render_agent_action_prompt
         bad_template = (
-            "Hello {asset_id}, missing {bogus_field}"
+            "Hello {asset[id]}, missing {bogus_field}"
         )
         with pytest.raises(ValueError, match="bogus_field"):
             _render_agent_action_prompt(
                 bad_template,
-                asset_id="x",
-                page_context={},
+                page_context={"asset": {"id": "x"}},
                 dispatched_by_session="",
                 member_key="k",
             )
@@ -9298,15 +9304,17 @@ class TestAgenticDispatchObservability:
         """Known placeholders render without error and substitute values."""
         from tools.dashboard.server import _render_agent_action_prompt
         good_template = (
-            "asset={asset_id} title={asset_title} "
-            "short={asset_short_description}"
+            "asset={asset[id]} title={asset[title]} "
+            "short={asset[short_description]}"
         )
         out = _render_agent_action_prompt(
             good_template,
-            asset_id="abc-123",
             page_context={
-                "asset_title": "Hello",
-                "asset_short_description": "A short blurb",
+                "asset": {
+                    "id": "abc-123",
+                    "title": "Hello",
+                    "short_description": "A short blurb",
+                },
             },
             dispatched_by_session="auto-test",
             member_key="note.update-summary",
@@ -9325,7 +9333,7 @@ PLUGIN_DORMANT_CHECKS = """
     r.plugin_slot_present = !!slot;
     r.plugin_slot_child_count = slot ? slot.children.length : -1;
     var legacy = ['beads', 'dispatch', 'sessions', 'worktrees',
-                  'collab', 'streams', 'timeline', 'search'];
+                  'collab', 'streams', 'activity', 'search'];
     legacy.forEach(function(name) {
         r['has_' + name] = !!document.querySelector('[data-page="' + name + '"]');
     });
@@ -9459,7 +9467,7 @@ class TestPluginSubstrate:
         )
         # Legacy sidebar — every entry hand-coded in base.html still present.
         for legacy in ("beads", "dispatch", "sessions", "worktrees",
-                       "collab", "streams", "timeline", "search"):
+                       "collab", "streams", "activity", "search"):
             assert result.get(f"has_{legacy}"), (
                 f"Legacy nav link [data-page={legacy!r}] missing — "
                 f"substrate must not remove existing sidebar entries"
@@ -10266,6 +10274,15 @@ class TestCoordinatorBoardSettingsWiring:
     via the bead's decision.json.
     """
 
+    @pytest.fixture(scope="class", autouse=True)
+    def _reset_class_state(self, sweep_server):
+        # By this point in the sweep the shared mock server + browser
+        # pair can carry stale coordinator state across classes. Match
+        # the later coordinator sweeps and restart both once before the
+        # class runs so the seeded Settings rows render from a clean
+        # baseline.
+        _hard_reset_sweep(sweep_server)
+
     @pytest.fixture(scope="function", autouse=True)
     def _seed_full_board(self, sweep_server):
         fp = sweep_server["fixture_path"]
@@ -10328,8 +10345,11 @@ class TestCoordinatorBoardSettingsWiring:
 
     def test_seed_members_render_full_board(self, browser, sweep_server):
         """Acceptance #2 — all five seeded members surface on the page."""
-        _navigate_and_check("/sessions", "", wait_ms=600)
-        result = _navigate_and_check("/coordinator", """
+        assert _coord_load_board_with_wait(), (
+            "Coordinator board did not finish loading seeded data"
+        )
+        result = _ab_eval_batch("""
+            var r = {};
             r.canvas_text = (document.querySelector(
                 '[data-testid="coord-canvas-question"]'
             ) || {}).textContent || '';
@@ -10350,7 +10370,8 @@ class TestCoordinatorBoardSettingsWiring:
             r.decision_marks = Array.from(marks).map(function(m) {
                 return m.dataset.decisionTile + '|' + (m.textContent || '').trim();
             });
-        """, wait_ms=1500)
+            return r;
+        """)
 
         assert COORD_BOARD_QUESTION in (result.get("canvas_text") or ""), (
             f"Canvas question did not render; got {result.get('canvas_text')!r}"
@@ -10425,12 +10446,16 @@ class TestCoordinatorBoardSettingsWiring:
             })
             path.write_text(json.dumps(data, indent=2))
 
-            _navigate_and_check("/sessions", "", wait_ms=600)
-            result = _navigate_and_check("/coordinator", """
+            assert _coord_load_board_with_wait(require_pills=False), (
+                "Coordinator board did not finish loading seeded data"
+            )
+            result = _ab_eval_batch("""
+                var r = {};
                 r.canvas_text = (document.querySelector(
                     '[data-testid="coord-canvas-question"]'
                 ) || {}).textContent || '';
-            """, wait_ms=1500)
+                return r;
+            """)
         finally:
             data = json.loads(path.read_text())
             canvas_block = data.get("settings", {}).get(
@@ -10454,8 +10479,9 @@ class TestCoordinatorBoardSettingsWiring:
 
     def test_thumb_tap_writes_decision_setting(self, browser, sweep_server):
         """Acceptance #3 — tapping a thumb produces a decision member."""
-        _navigate_and_check("/sessions", "", wait_ms=600)
-        _navigate_and_check("/coordinator", "", wait_ms=1500)
+        assert _coord_load_board_with_wait(), (
+            "Coordinator board did not finish loading seeded data"
+        )
 
         baseline = len(_read_coord_set(
             sweep_server["fixture_path"], COORD_DECISION_SET_ID,
@@ -10502,8 +10528,9 @@ class TestCoordinatorBoardSettingsWiring:
 
     def test_composer_submit_writes_operator_message(self, browser, sweep_server):
         """Acceptance #4 — the composer write hits the substrate, not a facade."""
-        _navigate_and_check("/sessions", "", wait_ms=600)
-        _navigate_and_check("/coordinator", "", wait_ms=1500)
+        assert _coord_load_board_with_wait(), (
+            "Coordinator board did not finish loading seeded data"
+        )
 
         baseline_members = _read_coord_set(
             sweep_server["fixture_path"], COORD_OPERATOR_MSG_SET_ID,
@@ -10548,8 +10575,9 @@ class TestCoordinatorBoardSettingsWiring:
         """
         import urllib.request
 
-        _navigate_and_check("/sessions", "", wait_ms=600)
-        _navigate_and_check("/coordinator", "", wait_ms=1500)
+        assert _coord_load_board_with_wait(), (
+            "Coordinator board did not finish loading seeded data"
+        )
 
         # Confirm the seeded "thumb yes" mark is what's currently shown.
         before = _ab_eval_batch(
@@ -10888,7 +10916,12 @@ def _coord_skip_if_browser_stuck(timeout_s: float = 15.0) -> None:
         )
 
 
-def _coord_load_board_with_wait(timeout_s: float = 15.0) -> bool:
+def _coord_load_board_with_wait(
+    timeout_s: float = 15.0,
+    *,
+    require_pills: bool = True,
+    require_tiles: bool = True,
+) -> bool:
     """Bounce through /sessions then /coordinator and poll until the
     seeded data has actually rendered.
 
@@ -10917,14 +10950,12 @@ def _coord_load_board_with_wait(timeout_s: float = 15.0) -> bool:
     rebounced = False
     while time.monotonic() < deadline:
         result = _ab_eval_batch(probe_js)
-        # Require BOTH pills and tiles: the autouse fixture seeds both,
-        # and tests interrogate one or the other depending on focus.
-        # Returning early on just-pills was leading test_tile_thread_render
-        # (which probes tiles) to see an empty NodeList right after
-        # load_board completed.
-        if isinstance(result, dict) \
-                and result.get("pills", 0) >= 1 \
-                and result.get("tiles", 0) >= 1:
+        # Most coordinator sweeps seed both pills and tiles, but some
+        # probes intentionally override one surface while still
+        # expecting the other to be present.
+        has_pills = isinstance(result, dict) and result.get("pills", 0) >= 1
+        has_tiles = isinstance(result, dict) and result.get("tiles", 0) >= 1
+        if (not require_pills or has_pills) and (not require_tiles or has_tiles):
             return True
         if not rebounced and time.monotonic() - started > timeout_s / 2:
             # Halfway through budget without data: re-bounce in case
@@ -11896,4 +11927,3 @@ class TestCoordinatorBoardRelativeTimeAndPendingCommits:
         assert isinstance(result, dict), result
         assert result["count"] == 0, result
         assert result["errored"] is False, result
-

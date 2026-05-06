@@ -15,7 +15,6 @@ Uses Approach A: test the Python-side data that feeds the store via the
 """
 
 import json
-import os
 import sqlite3
 import time
 
@@ -76,14 +75,20 @@ def store_test_db(tmp_path):
 
 
 @pytest.fixture
-def store_test_client(store_test_db):
+def store_test_client(store_test_db, monkeypatch, tmp_path):
     """Boot dashboard with test DB and return a sync test client."""
-    os.environ["DASHBOARD_DB"] = store_test_db
     import importlib
     from unittest.mock import patch
 
+    monkeypatch.setenv("DASHBOARD_DB", store_test_db)
+    monkeypatch.setenv(
+        "DASHBOARD_EVENT_BUS_STATE",
+        str(tmp_path / "event_bus.state"),
+    )
     from tools.dashboard.dao import dashboard_db as db_mod
     importlib.reload(db_mod)
+    from tools.dashboard import session_monitor as session_monitor_mod
+    importlib.reload(session_monitor_mod)
     from tools.dashboard import server
     importlib.reload(server)
 

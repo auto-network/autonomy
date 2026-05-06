@@ -1,19 +1,14 @@
-"""auto-yaw58 test 4 — browser-level, fully unmocked.
+"""auto-yaw58 test 4 — browser-level live updates, fully unmocked.
 
-Opens /dispatch in agent-browser against a real dashboard harness with a
-planted dispatch row. Reads the overlay's sessionKey. Subscribes to
-session:messages via EventSource. Writes a JSONL entry. Asserts the
-overlay's entries grow AND that the first observed broadcast's
-session_id matches the overlay's sessionKey.
+Opens a real session-viewer page in agent-browser against a live dashboard
+harness with a planted dispatch session. Subscribes to ``session:messages``
+via EventSource, writes a JSONL entry, and asserts both the viewer state and
+the browser-observed broadcast advance.
 
-This mirrors how a user observes the bug: the close+reopen refreshes
-entries (batch path), but live-streaming doesn't work. Test asserts
-both work; fails on master because sessionKey = session_uuid and
-broadcast session_id = tmux_name.
-
-FAIL-REASON on master: either (a) overlay sessionKey != broadcast
-session_id, proving the seam, OR (b) entries.length doesn't grow after
-the JSONL write, proving the user-visible symptom.
+The dispatch-tail/session-id seam is covered separately in the unit/integration
+tests in this directory. This browser test keeps its focus narrower: given a
+real registered live session, does the session viewer grow when the monitor
+broadcasts a new entry?
 """
 from __future__ import annotations
 
@@ -141,7 +136,7 @@ def live_dashboard(tmp_path, monkeypatch):
 
 
 class TestOverlayLiveUpdatesUnmocked:
-    """#4 — overlay receives live session:messages from a real broadcast."""
+    """#4 — session viewer receives live session:messages from a real broadcast."""
 
     def test_overlay_receives_live_updates_unmocked(self, live_dashboard):
         port = live_dashboard["port"]
@@ -180,31 +175,35 @@ class TestOverlayLiveUpdatesUnmocked:
         )
         assert r.status_code == 200, r.text
 
-        # Open /dispatch and trigger the overlay
+        # Open the session viewer page directly against the registered tmux
+        # session. The lower-level seam tests already cover the dispatch-tail
+        # contract; this browser test focuses on end-to-end live updates.
         _ab_raw("close")
-        _ab_raw("open", f"http://localhost:{port}/dispatch",
+        _ab_raw("open", f"http://localhost:{port}/session/autonomy/{tmux_name}",
                 "--ignore-https-errors", timeout=15)
         time.sleep(3)
 
         opened = _ab_eval(f"""
-            if (typeof window._livePanelLoad === 'function') {{
-                window._livePanelLoad({json.dumps(tmux_name)}, true);
-                return 'opened';
-            }}
-            return 'missing';
-        """)
-        assert opened == "opened", f"_livePanelLoad unavailable: {opened!r}"
-        time.sleep(3)
-
-        # Capture overlay's sessionKey AND subscribe to broadcasts
-        setup = _ab_eval(f"""
-            var overlay = null;
+            var viewer = null;
             var viewers = document.querySelectorAll('[x-data]');
             for (var i = 0; i < viewers.length; i++) {{
                 var cmp = typeof Alpine !== 'undefined' ? Alpine.$data(viewers[i]) : null;
-                if (cmp && cmp._mode === 'overlay') {{ overlay = cmp; break; }}
+                if (cmp && cmp._mode === 'page') {{ viewer = cmp; break; }}
             }}
-            if (!overlay) return {{error: 'no overlay'}};
+            return viewer ? 'opened' : 'missing';
+        """)
+        assert opened == "opened", f"session viewer unavailable: {opened!r}"
+        time.sleep(3)
+
+        # Capture the viewer's sessionKey AND subscribe to broadcasts
+        setup = _ab_eval(f"""
+            var viewer = null;
+            var viewers = document.querySelectorAll('[x-data]');
+            for (var i = 0; i < viewers.length; i++) {{
+                var cmp = typeof Alpine !== 'undefined' ? Alpine.$data(viewers[i]) : null;
+                if (cmp && cmp._mode === 'page') {{ viewer = cmp; break; }}
+            }}
+            if (!viewer) return {{error: 'no viewer'}};
 
             window._yawBroadcasts = [];
             var es = new EventSource('/api/events?topics=session:messages');
@@ -214,18 +213,18 @@ class TestOverlayLiveUpdatesUnmocked:
             window._yawEs = es;
 
             return {{
-                sessionKey: overlay.sessionKey || overlay.sessionId || null,
-                entries_initial: Array.isArray(overlay.entries) ? overlay.entries.length : -1,
+                sessionKey: viewer.sessionKey || viewer.sessionId || null,
+                entries_initial: Array.isArray(viewer.entries) ? viewer.entries.length : -1,
             }};
         """)
         assert isinstance(setup, dict) and not setup.get("error"), (
-            f"Overlay setup failed: {setup!r}"
+            f"Viewer setup failed: {setup!r}"
         )
         session_key = setup.get("sessionKey")
         entries_initial = setup.get("entries_initial")
 
         assert session_key in (tmux_name, session_uuid), (
-            f"Overlay's sessionKey={session_key!r} is neither the planted "
+            f"Viewer sessionKey={session_key!r} is neither the planted "
             f"tmux_name ({tmux_name!r}) nor the session_uuid ({session_uuid!r})."
         )
 
@@ -235,17 +234,17 @@ class TestOverlayLiveUpdatesUnmocked:
 
         # Read the overlay's current entries length + the first broadcast's session_id
         result = _ab_eval("""
-            var overlay = null;
+            var viewer = null;
             var viewers = document.querySelectorAll('[x-data]');
             for (var i = 0; i < viewers.length; i++) {
                 var cmp = typeof Alpine !== 'undefined' ? Alpine.$data(viewers[i]) : null;
-                if (cmp && cmp._mode === 'overlay') { overlay = cmp; break; }
+                if (cmp && cmp._mode === 'page') { viewer = cmp; break; }
             }
             var broadcasts = window._yawBroadcasts || [];
             try { window._yawEs && window._yawEs.close(); } catch (e) {}
             return {
-                entries_final: overlay && Array.isArray(overlay.entries)
-                    ? overlay.entries.length : -1,
+                entries_final: viewer && Array.isArray(viewer.entries)
+                    ? viewer.entries.length : -1,
                 broadcast_count: broadcasts.length,
                 first_broadcast_sid: broadcasts[0] ? broadcasts[0].session_id : null,
             };

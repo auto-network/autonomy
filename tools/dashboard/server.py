@@ -7723,6 +7723,28 @@ async def api_diag_sessions(request):
         registry = session_monitor.get_registry()
     except Exception:
         registry = []
+    # Some tests seed live rows directly into dashboard.db before the
+    # lifespan starts, and under worker load the in-process monitor can
+    # lag that ground truth briefly. Diagnostics should still cover every
+    # known live session, so merge any DB-only rows by session_id.
+    try:
+        from tools.dashboard.dao.dashboard_db import get_live_sessions as _diag_get_live_sessions
+        seen_ids = {
+            s.get("session_id")
+            for s in registry
+            if isinstance(s, dict) and s.get("session_id")
+        }
+        for row in _diag_get_live_sessions():
+            session_id = row.get("tmux_name")
+            if session_id and session_id not in seen_ids:
+                registry.append({
+                    "session_id": session_id,
+                    "type": row.get("type"),
+                    "is_live": bool(row.get("is_live", 1)),
+                })
+                seen_ids.add(session_id)
+    except Exception:
+        pass
     if requested:
         sessions = [s for s in registry if s.get("session_id") == requested]
         # If not in live registry, still allow (covers dead-but-known tabs).
@@ -11049,10 +11071,12 @@ async def api_agent_action_dispatch(request):
         if src is not None:
             from tools.dashboard.org_identity import session_org_slug
             target_org = session_org_slug(src)
+            asset_id = str(src.get("id") or asset_id)
             asset_type = str(src.get("type") or "")
             asset_title = str(src.get("title") or "")
         else:
             target_org = "autonomy"
+            asset_id = str((bead or {}).get("id") or asset_id)
             asset_type = "bead"
             asset_title = str((bead or {}).get("title") or asset_id)
         members = dao_mock.get_settings_members(set_id, org=target_org)

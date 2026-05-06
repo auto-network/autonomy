@@ -543,7 +543,8 @@ class TestDiagEventBusSnapshot:
         from tools.dashboard.event_bus import EventBus
         new_bus = EventBus()
         assert new_bus.restore(path) is True
-        assert new_bus._seq == server_mod.event_bus._seq
+        assert new_bus._seq == body["seq"]
+        assert new_bus._seq == body["buffer_last_seq"]
         assert "test:snapshot" in new_bus._last
 
     def test_snapshot_does_not_overwrite_event_bus_state(self, diag_env):
