@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from tools.graph import ops as graph_ops
-from tools.graph.claude_oauth import CLIENT_ID, TOKEN_URL
+from tools.graph.claude_oauth import CLAUDE_USER_AGENT, CLIENT_ID, TOKEN_URL
 from tools.graph.schemas.claude_credentials import (
     CLAUDE_CREDENTIALS_REVISION,
     CLAUDE_CREDENTIALS_SET_ID,
@@ -122,6 +122,7 @@ def _post_refresh(refresh_token: str) -> tuple[int, dict[str, Any]]:
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
+            "User-Agent": CLAUDE_USER_AGENT,
         },
         method="POST",
     )
