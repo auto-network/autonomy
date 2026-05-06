@@ -767,19 +767,6 @@ def _worktree_dirty_files(worktree: Path) -> list[GitFileChange] | None:
     return files
 
 
-def _worktree_has_any_dirty_files(worktree: Path) -> bool:
-    """Return True when any tracked or untracked path is present.
-
-    This is the user-facing notion of "dirty" used by the dashboard state and
-    rebase detail payloads. Blocking merge/rebase safety checks still use the
-    tracked-only helper below.
-    """
-    dirty_files = _worktree_dirty_files(worktree)
-    if dirty_files is None:
-        return True
-    return bool(dirty_files)
-
-
 def _worktree_dirty_numstats(worktree: Path) -> dict[str, tuple[int, int]]:
     """Return numstat details for dirty tracked files relative to ``HEAD``."""
     rc, out, _ = _git_output(
@@ -1162,11 +1149,14 @@ def scan_all_worktrees(
             clone_stale = _worktree_clone_stale(repo_dir.name, clone)
             dirty_files_or_none = _worktree_dirty_files(repo_dir)
             dirty_files = dirty_files_or_none or []
-            # Surface any untracked artifacts in the dashboard's dirty-state
-            # badge, but keep tracked-only safety checks in
-            # ``_worktree_has_uncommitted_changes`` for operations that need
-            # to know whether git itself would block.
-            is_dirty = True if dirty_files_or_none is None else bool(dirty_files)
+            # Tracked-only dirty: untracked '??' entries do not block rebase /
+            # merge / cherry-pick and conflating them produces misleading
+            # "stash or commit uncommitted changes" tooltips on worktrees that
+            # only have leftover runtime artifacts.
+            tracked_dirty = [f for f in dirty_files if f.status != "??"]
+            # Preserve the previous safety behavior: if git status fails,
+            # treat the worktree as dirty even though paths are unavailable.
+            is_dirty = True if dirty_files_or_none is None else bool(tracked_dirty)
             commits = _worktree_commits(repo_dir, repo_dir.name, base_ref=base_ref)
             commits_ahead = _worktree_commits_ahead(repo_dir, base_ref=base_ref)
             rebase_required = _worktree_rebase_required(
@@ -2014,7 +2004,7 @@ def get_session_worktree_rebase_info(
         pending[0],
     )
     info["commit"] = pending[0]
-    info["is_dirty"] = _worktree_has_any_dirty_files(worktree)
+    info["is_dirty"] = _worktree_has_uncommitted_changes(worktree)
     return info
 
 

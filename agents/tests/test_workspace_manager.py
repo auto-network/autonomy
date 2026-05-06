@@ -1122,7 +1122,7 @@ def test_scan_all_worktrees_keeps_dirty_worktree_ff_eligible_when_commit_is_line
     row = next(item for item in rows if item.session_name == session and item.repo_name == "autonomy")
 
     assert row.commits_ahead == 1
-    assert row.is_dirty is True
+    assert row.is_dirty is False
     assert row.ff_eligible is True
     assert row.rebase_required is False
 
@@ -1145,7 +1145,7 @@ def test_scan_all_worktrees_lists_nested_untracked_files_individually(tmp_path, 
     )
 
     row = next(item for item in rows if item.session_name == session)
-    assert row.is_dirty is True
+    assert row.is_dirty is False
     assert sorted(file.path for file in row.dirty_files) == [
         "tools/dashboard/static/vendor/highlightjs/LICENSE",
         "tools/dashboard/static/vendor/highlightjs/github-dark.min.css",
@@ -1521,13 +1521,13 @@ def test_merge_session_worktree_commit_reports_rebase_required_details(tmp_path,
     row = next(item for item in rows if item.session_name == session and item.repo_name == "autonomy")
     assert row.rebase_required is True
     assert row.ff_eligible is False
-    assert row.is_dirty is True
+    assert row.is_dirty is False
     info = wm.get_session_worktree_rebase_info(session, "autonomy", worktrees_dir=worktrees_dir)
     assert info["target_branch"] in {"main", "master"}
     assert info["commits_behind"] == 1
     assert info["session_live"] is True
     assert info["commit"] == feature_sha
-    assert info["is_dirty"] is True
+    assert info["is_dirty"] is False
 
     with pytest.raises(wm.RebaseRequiredError) as excinfo:
         wm.merge_session_worktree_commit(
