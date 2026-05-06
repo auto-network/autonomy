@@ -789,6 +789,54 @@
 
   <!-- Notifications tab body -->
   <div x-show="tab === 'notifications'" data-testid="activity-notifications" style="display:none">
+    <!-- Zoom toolbar (compact / normal / expanded) — mirrors Attention -->
+    <template x-if="visibleAskCards().length > 0">
+      <div class="mb-4" data-testid="activity-notifications-zoom" role="toolbar" aria-label="Notifications zoom">
+        <div class="inline-flex gap-1 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1">
+          <template x-for="m in [
+            { id: 'compact',  title: 'Compact',  icon: 'compact'  },
+            { id: 'normal',   title: 'Normal',   icon: 'normal'   },
+            { id: 'expanded', title: 'Expanded', icon: 'expanded' },
+          ]" :key="m.id">
+            <button
+              type="button"
+              :data-testid="'activity-notifications-zoom-' + m.id"
+              :title="m.title"
+              :aria-label="m.title"
+              :aria-pressed="notificationsZoom === m.id ? 'true' : 'false'"
+              @click="setNotificationsZoom(m.id)"
+              :class="notificationsZoom === m.id
+                ? 'bg-indigo-600/20 text-indigo-300'
+                : 'text-gray-500 hover:text-gray-300'"
+              class="w-7 h-7 flex items-center justify-center rounded transition-colors"
+            >
+              <template x-if="m.icon === 'compact'">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <rect x="1" y="4" width="12" height="2.5" rx="1" fill="currentColor"/>
+                  <rect x="1" y="8" width="8" height="2.5" rx="1" fill="currentColor"/>
+                </svg>
+              </template>
+              <template x-if="m.icon === 'normal'">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <rect x="1" y="1.5" width="12" height="2.5" rx="1" fill="currentColor"/>
+                  <rect x="1" y="5.5" width="9" height="2.5" rx="1" fill="currentColor"/>
+                  <rect x="1" y="9.5" width="11" height="2.5" rx="1" fill="currentColor"/>
+                </svg>
+              </template>
+              <template x-if="m.icon === 'expanded'">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <rect x="1" y="0.5" width="12" height="2" rx="1" fill="currentColor"/>
+                  <rect x="1" y="3.5" width="9" height="2" rx="1" fill="currentColor"/>
+                  <rect x="1" y="6.5" width="11" height="2" rx="1" fill="currentColor"/>
+                  <rect x="1" y="9.5" width="7" height="2" rx="1" fill="currentColor"/>
+                </svg>
+              </template>
+            </button>
+          </template>
+        </div>
+      </div>
+    </template>
+
     <template x-if="visibleAskCards().length === 0">
       <div
         class="text-sm text-gray-500 text-center py-2"
@@ -802,7 +850,7 @@
         class="rounded-lg border border-gray-700 bg-gray-900/60 mb-3 overflow-hidden"
         :data-testid="'activity-ask-card-' + card.id"
       >
-        <!-- Header: source-session avatar + identity + recipient -->
+        <!-- Header: source-session avatar + clickable identity link -->
         <div class="px-4 py-2 border-b border-gray-700 flex items-center gap-2 text-xs font-mono text-gray-400">
           <span
             class="inline-block w-2.5 h-2.5 rounded-full"
@@ -810,20 +858,39 @@
             :data-testid="'activity-ask-avatar-' + card.id"
             :aria-label="'session ' + card.sessionId"
           ></span>
-          <span class="text-gray-300 truncate" x-text="card.sessionId"></span>
-          <span
-            class="ml-auto text-gray-500"
-            :data-testid="'activity-ask-recipient-' + card.id"
-            x-text="card._toLabel"
-          ></span>
+          <a
+            :href="'/session/' + card.sessionId"
+            class="text-gray-300 truncate hover:text-white hover:underline"
+            :title="'Open source session: ' + card.sessionId"
+            :data-testid="'activity-ask-session-link-' + card.id"
+            x-text="card.sessionId"
+          ></a>
         </div>
 
-        <!-- Body: markdown ask text -->
-        <div
-          class="px-4 py-3 text-sm text-gray-200 leading-relaxed"
-          :data-testid="'activity-ask-body-' + card.id"
-          x-markdown="card.text"
-        ></div>
+        <!-- Body: zoom-aware markdown render. compact is plain text
+             (no markdown — it's a single-line headline); normal and
+             expanded render as markdown like the Attention tab. -->
+        <template x-if="notificationsZoom === 'compact'">
+          <div
+            class="px-4 py-3 text-sm text-gray-300 leading-relaxed"
+            :data-testid="'activity-ask-body-compact-' + card.id"
+            x-text="askBody(card, 'compact')"
+          ></div>
+        </template>
+        <template x-if="notificationsZoom === 'normal'">
+          <div
+            class="px-4 py-3 text-sm text-gray-200 leading-relaxed"
+            :data-testid="'activity-ask-body-normal-' + card.id"
+            x-markdown="askBody(card, 'normal')"
+          ></div>
+        </template>
+        <template x-if="notificationsZoom === 'expanded'">
+          <div
+            class="px-4 py-3 text-sm text-gray-200 leading-relaxed"
+            :data-testid="'activity-ask-body-expanded-' + card.id"
+            x-markdown="askBody(card, 'expanded')"
+          ></div>
+        </template>
 
         <!-- Action row: 👍 👎 ✕ ↻ -->
         <div class="px-4 py-2 border-t border-gray-700 flex items-center gap-3">

@@ -4029,14 +4029,16 @@ ACTIVITY_NOTIFICATIONS_CHECKS = """(async () => {
 
         // Seed three asks via direct state mutation. Sort verifies
         // newest-first; ask 'b' has the latest created_at so it should
-        // be the first card rendered.
+        // be the first card rendered. v2-shaped: compact / normal /
+        // expanded body fields.
         data.asks = [
             {
                 id: 'set-a', key: 'a',
                 payload: {
                     session_id: 'auto-sessA',
-                    to_participant_id: 'operator-jeremy',
-                    text: 'Old **ask** with [auto-cqhx](/bead/auto-cqhx) ref',
+                    compact: 'Old ask',
+                    normal: 'Old **ask** with [auto-cqhx](/bead/auto-cqhx) ref',
+                    expanded: 'Old expanded body for ask a',
                     created_at: '2026-05-03T09:00:00Z',
                     revision_seq: 1,
                 },
@@ -4045,8 +4047,9 @@ ACTIVITY_NOTIFICATIONS_CHECKS = """(async () => {
                 id: 'set-b', key: 'b',
                 payload: {
                     session_id: 'auto-sessB',
-                    to_participant_id: '',
-                    text: 'Newer ambient ask body',
+                    compact: 'Newer ask',
+                    normal: 'Newer ask body',
+                    expanded: '',
                     created_at: '2026-05-03T10:30:00Z',
                     revision_seq: 2,
                 },
@@ -4055,8 +4058,9 @@ ACTIVITY_NOTIFICATIONS_CHECKS = """(async () => {
                 id: 'set-c', key: 'c',
                 payload: {
                     session_id: 'auto-sessC',
-                    to_participant_id: '',
-                    text: 'Middle ask',
+                    compact: 'Middle',
+                    normal: 'Middle ask',
+                    expanded: '',
                     created_at: '2026-05-03T10:00:00Z',
                     revision_seq: 1,
                 },
@@ -4089,18 +4093,44 @@ ACTIVITY_NOTIFICATIONS_CHECKS = """(async () => {
         r.first_card_id = cards.length > 0 ? cards[0].getAttribute('data-testid') : '';
         r.second_card_id = cards.length > 1 ? cards[1].getAttribute('data-testid') : '';
 
-        // Recipient label: 'a' is targeted, 'b' is ambient.
-        var aRecipient = document.querySelector('[data-testid="activity-ask-recipient-a"]');
-        var bRecipient = document.querySelector('[data-testid="activity-ask-recipient-b"]');
-        r.a_recipient = aRecipient ? aRecipient.textContent.trim() : '';
-        r.b_recipient = bRecipient ? bRecipient.textContent.trim() : '';
+        // Source-session link: header renders the session id as a
+        // clickable anchor pointing at /session/<id>.
+        var aSessionLink = document.querySelector('[data-testid="activity-ask-session-link-a"]');
+        r.a_session_link_present = !!aSessionLink;
+        r.a_session_link_text = aSessionLink ? aSessionLink.textContent.trim() : '';
+        r.a_session_link_href = aSessionLink ? aSessionLink.getAttribute('href') : '';
+        r.a_session_link_tag = aSessionLink ? aSessionLink.tagName.toLowerCase() : '';
+        // Vestigial recipient label is gone — no -recipient- testid in the DOM.
+        var aRecipientGone = !document.querySelector('[data-testid="activity-ask-recipient-a"]');
+        r.recipient_label_removed = aRecipientGone;
+        // Body label "ambient" must not leak into the rendered DOM.
+        var panelText = (document.querySelector('[data-testid="activity-notifications"]') || {}).textContent || '';
+        r.no_ambient_label_leak = panelText.indexOf('ambient') === -1;
 
         // Markdown rendering — **ask** becomes <strong>; bead-ref auto-link.
-        var aBody = document.querySelector('[data-testid="activity-ask-body-a"]');
+        // v2 zoom: default is 'normal' so the normal body element is the one
+        // we exercise here.
+        var aBody = document.querySelector('[data-testid="activity-ask-body-normal-a"]');
         r.body_uses_markdown = !!aBody && aBody.classList.contains('markdown-body');
         r.body_has_strong = !!aBody && !!aBody.querySelector('strong');
         var beadLink = aBody ? aBody.querySelector('a[href^="/bead/auto-"]') : null;
         r.body_bead_link = !!beadLink;
+
+        // Zoom toggle — switching to compact swaps which body element renders.
+        var compactZoomBtn = document.querySelector('[data-testid="activity-notifications-zoom-compact"]');
+        r.zoom_toolbar_present = !!compactZoomBtn;
+        if (compactZoomBtn) compactZoomBtn.click();
+        await tick();
+        var aBodyCompact = document.querySelector('[data-testid="activity-ask-body-compact-a"]');
+        var aBodyNormalGone = !document.querySelector('[data-testid="activity-ask-body-normal-a"]');
+        r.compact_body_present_after_zoom = !!aBodyCompact;
+        r.compact_body_text = aBodyCompact ? aBodyCompact.textContent.trim() : '';
+        r.normal_body_hidden_after_compact_zoom = aBodyNormalGone;
+        // Restore default 'normal' zoom so the rest of the sweep keeps
+        // exercising the markdown-body element.
+        var normalZoomBtn = document.querySelector('[data-testid="activity-notifications-zoom-normal"]');
+        if (normalZoomBtn) normalZoomBtn.click();
+        await tick();
 
         // Avatar — colored dot via participantColor (deterministic HSL).
         var aAvatar = document.querySelector('[data-testid="activity-ask-avatar-a"]');
@@ -4257,12 +4287,52 @@ class TestActivityNotificationsTabBehavior:
         assert c.get("second_card_id") == "activity-ask-card-c", \
             f"Expected second-newest ('c'), got {c.get('second_card_id')!r}"
 
-    def test_recipient_label_targeted_or_ambient(self):
+    def test_session_id_renders_as_link(self):
+        """Card header renders the source session id as a clickable
+        anchor pointing at /session/<sessionId>. The vestigial
+        recipient label and the literal "ambient" string are gone.
+        """
         c = self._timeline
-        assert c.get("a_recipient") == "→operator-jeremy", \
-            f"Expected targeted recipient, got {c.get('a_recipient')!r}"
-        assert c.get("b_recipient") == "ambient", \
-            f"Expected ambient label, got {c.get('b_recipient')!r}"
+        assert c.get("a_session_link_present"), \
+            "Source session id missing a clickable link element"
+        assert c.get("a_session_link_tag") == "a", (
+            f"Source session id should render as an <a>, got "
+            f"{c.get('a_session_link_tag')!r}"
+        )
+        assert c.get("a_session_link_text") == "auto-sessA", (
+            f"Link text should be the source session id, got "
+            f"{c.get('a_session_link_text')!r}"
+        )
+        assert c.get("a_session_link_href") == "/session/auto-sessA", (
+            f"Link href should target /session/<id>, got "
+            f"{c.get('a_session_link_href')!r}"
+        )
+        assert c.get("recipient_label_removed"), \
+            "Vestigial recipient label element should be removed from the card header"
+        assert c.get("no_ambient_label_leak"), (
+            "The literal word 'ambient' must not leak into the "
+            "Notifications panel — the field had no behavioral consumer"
+        )
+
+    def test_zoom_toolbar_swaps_body_element(self):
+        """Notifications panel exposes a compact / normal / expanded
+        zoom toolbar mirroring the Attention tab. Selecting
+        ``compact`` swaps which body element the card renders.
+        """
+        c = self._timeline
+        assert c.get("zoom_toolbar_present"), \
+            "Notifications zoom toolbar (compact/normal/expanded) missing"
+        assert c.get("compact_body_present_after_zoom"), (
+            "Selecting 'compact' should render the "
+            "activity-ask-body-compact-* element"
+        )
+        assert c.get("normal_body_hidden_after_compact_zoom"), (
+            "Selecting 'compact' should remove the normal body element"
+        )
+        assert c.get("compact_body_text") == "Old ask", (
+            f"Compact body should render the ``compact`` zoom field, "
+            f"got {c.get('compact_body_text')!r}"
+        )
 
     def test_body_renders_markdown(self):
         c = self._timeline

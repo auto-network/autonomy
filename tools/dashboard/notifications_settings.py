@@ -3,11 +3,16 @@
 Four schemas backing the Activity surface's Notifications tab — the
 "one-thought" coordinator-style asks panel:
 
-* ``dashboard.activity.ask#1`` — :class:`SessionAskV1`. One row per
+* ``dashboard.activity.ask#2`` — :class:`SessionAskV2`. One row per
   source session that currently has an outstanding ask for an
   operator. Caller key = ``session_id``; heartbeat-style rewrites
   must route through :func:`tools.graph.settings_ops.upsert_by_key`
-  so the row count stays at one per session.
+  so the row count stays at one per session. Body splits into
+  ``compact`` / ``normal`` / ``expanded`` zoom levels mirroring the
+  journal compression principle (graph://ffe38d0c-40b). The legacy
+  v1 schema (single ``text`` field, vestigial ``to_participant_id``)
+  remains registered so older rows continue to read; an upconverter
+  maps ``text → normal`` on the way through.
 * ``dashboard.activity.ask_vote#1`` — :class:`AskVoteV1`. One row per
   ``(ask_id, voter_id)`` pair. Shared (anyone can read the count); v1
   doesn't render counts inline. View-side aggregates from a member
@@ -62,11 +67,30 @@ ASK_VOTE_SET_ID = "dashboard.activity.ask_vote"
 ASK_REFRESH_SET_ID = "dashboard.activity.ask_refresh"
 OPERATOR_DISMISSED_SET_ID = "dashboard.activity.operator_dismissed"
 
+# Default revision for ask_vote / ask_refresh / operator_dismissed.
+# SessionAsk has its own latest revision — see SESSION_ASK_LATEST_REVISION.
 SCHEMA_REVISION = 1
 
-# Hard cap on SessionAskV1.text. ~2KB measured in UTF-8 bytes; 2048
-# accepts a full 2KB write, 2049 rejects. Tested at the boundaries.
+# SessionAsk latest revision. v2 introduces compact / normal / expanded
+# zoom fields and drops the vestigial v1 ``to_participant_id`` and the
+# single ``text`` body. Writers should target this revision; readers
+# get v2 payloads even when older v1 rows are still in storage (the
+# upconverter rewrites ``text → normal``).
+SESSION_ASK_LATEST_REVISION = 2
+
+# Hard cap on legacy SessionAskV1.text. ~2KB measured in UTF-8 bytes;
+# 2048 accepts a full 2KB write, 2049 rejects. Tested at the
+# boundaries.
 ASK_TEXT_MAX_BYTES = 2048
+
+# Per-zoom byte caps on SessionAskV2. Compact is intentionally short
+# (a one-line headline); normal carries the body the operator sees by
+# default; expanded supports a longer prose pass. Caps apply per
+# field; they are independent so a long expanded write does not
+# constrain compact / normal.
+ASK_COMPACT_MAX_BYTES = 256
+ASK_NORMAL_MAX_BYTES = 2048
+ASK_EXPANDED_MAX_BYTES = 8192
 
 
 VALID_VOTE_DIRECTIONS = ("up", "down")
@@ -78,7 +102,8 @@ VALID_VOTE_DIRECTIONS = ("up", "down")
 SYNOPSIS = {
     "summary": (
         "Activity tab notifications substrate: per-session asks "
-        "(dashboard.activity.ask), shared per-(ask, voter) votes "
+        "(dashboard.activity.ask) at v2 with compact / normal / "
+        "expanded zoom fields, shared per-(ask, voter) votes "
         "(dashboard.activity.ask_vote), per-ask refresh requests with "
         "revision_seq pinning (dashboard.activity.ask_refresh), and an "
         "operator-local dismissed-ids singleton "
@@ -87,6 +112,7 @@ SYNOPSIS = {
     ),
     "nouns": [
         "session ask", "activity ask", "notifications tab",
+        "ask zoom", "compact ask", "normal ask", "expanded ask",
         "ask vote", "vote count", "ask refresh", "refresh request",
         "operator dismissed", "muted asks", "inbox",
         "one-thought", "coordinator ask",
@@ -98,26 +124,21 @@ SYNOPSIS = {
 }
 
 
-# ── SessionAskV1 ─────────────────────────────────────────────
+# ── SessionAskV1 (legacy — back-compat reads only) ───────────
 
 
 @keyed_per_entity
 class SessionAskV1(SettingSchema):
-    """One row per source session with an outstanding operator-ask.
+    """Legacy session-ask schema. Writers should target v2.
 
-    Caller key = ``session_id``. Heartbeat-style rewrites must route
-    through :func:`tools.graph.settings_ops.upsert_by_key` so the row
-    count stays at one per session — multiple base rows for the same
-    session are a writer bug, not a presentation choice.
+    Stored rows from before the v2 cut still validate as v1 and are
+    upconverted on the read path by :meth:`SessionAskV2.upconvert_from_prev`
+    (``text`` → ``normal``; ``to_participant_id`` is dropped because
+    it had no behavioral consumer in the surface).
 
-    ``revision_seq`` is monotonic per session: the source bumps it
-    every time the ask body changes meaningfully. Operators trigger
-    refreshes by writing :class:`AskRefreshRequestV1` rows pinned to a
-    ``target_revision``; the source session "answers" by writing a
-    new ``SessionAskV1`` row with ``revision_seq > target_revision``.
-
-    ``to_participant_id`` is explicit-id targeting only (no role
-    lookup) — empty string means an ambient ask anyone can pick up.
+    The fields stay declared so existing rows don't trip the schema's
+    ``unknown field(s)`` guard. The class itself is no longer the write
+    target.
     """
 
     set_id = SESSION_ASK_SET_ID
@@ -133,15 +154,17 @@ class SessionAskV1(SettingSchema):
     to_participant_id: str = field(
         default="",
         description=(
-            "Explicit recipient participant id (e.g. operator id), or "
-            "empty string for an ambient ask. No role lookup logic."
+            "Vestigial. The surface never filtered or routed on this "
+            "field; v2 drops it entirely. Retained on v1 for read-side "
+            "back-compat with stored rows."
         ),
     )
     text: str = field(
         default="",
         description=(
-            "Ask body, capped at ~2KB (UTF-8 bytes). Oversized writes "
-            "are rejected by validate()."
+            "Legacy single-zoom body. v2 splits this into compact / "
+            "normal / expanded; the upconverter maps ``text`` to "
+            "``normal``."
         ),
     )
     created_at: str = field(
@@ -196,6 +219,155 @@ class SessionAskV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"
             )
+
+
+# ── SessionAskV2 (current — compact / normal / expanded zoom) ────
+
+
+@keyed_per_entity
+class SessionAskV2(SettingSchema):
+    """One row per source session with an outstanding operator-ask.
+
+    v2 splits the ask body into three zoom levels mirroring the
+    journal compression principle (graph://ffe38d0c-40b):
+
+    * ``compact``  — one-line headline, ~256B cap.
+    * ``normal``   — the body the Notifications tab renders by
+      default, ~2KB cap.
+    * ``expanded`` — longer prose for operators who zoom in, ~8KB cap.
+
+    Each level should stand alone — a reader who only sees ``compact``
+    must still understand the ask. The viewer picks one level based
+    on the operator's selected zoom; empty levels fall back to the
+    next-shallower populated one.
+
+    Caller key = ``session_id``. Heartbeat-style rewrites must route
+    through :func:`tools.graph.settings_ops.upsert_by_key` so the row
+    count stays at one per session — multiple base rows for the same
+    session are a writer bug, not a presentation choice.
+
+    ``revision_seq`` is monotonic per session: the source bumps it
+    every time the ask body changes meaningfully. Operators trigger
+    refreshes by writing :class:`AskRefreshRequestV1` rows pinned to a
+    ``target_revision``; the source session "answers" by writing a
+    new row with ``revision_seq > target_revision``.
+
+    Differences from v1:
+
+    * ``text`` removed — replaced by ``compact`` / ``normal`` /
+      ``expanded``. The upconverter maps the legacy ``text`` into
+      ``normal`` and leaves the others empty.
+    * ``to_participant_id`` removed entirely — the field had no
+      behavioral consumer on the activity surface. Retained on v1
+      for back-compat reads only.
+    """
+
+    set_id = SESSION_ASK_SET_ID
+    schema_revision = SESSION_ASK_LATEST_REVISION
+
+    session_id: str = field(
+        default="",
+        description=(
+            "Source session id. Matches the natural key for upsert "
+            "writes; one row per session by construction."
+        ),
+    )
+    compact: str = field(
+        default="",
+        description=(
+            "One-line headline. Capped at ~256 UTF-8 bytes. Should "
+            "stand alone — readers seeing only this level must still "
+            "understand the ask."
+        ),
+    )
+    normal: str = field(
+        default="",
+        description=(
+            "Default body shown on the Notifications tab. Markdown. "
+            "Capped at ~2KB UTF-8 bytes."
+        ),
+    )
+    expanded: str = field(
+        default="",
+        description=(
+            "Longer prose for operators who zoom in. Markdown. "
+            "Capped at ~8KB UTF-8 bytes."
+        ),
+    )
+    created_at: str = field(
+        default="",
+        description="ISO-8601 timestamp the ask was first written",
+    )
+    revision_seq: int = field(
+        default=0,
+        description=(
+            "Monotonic per-session revision counter. AskRefreshRequest "
+            "rows pin a target_revision; the requested state clears "
+            "only when this value surpasses the target."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        for str_field in (
+            "session_id", "compact", "normal", "expanded", "created_at",
+        ):
+            if str_field in payload \
+                    and not isinstance(payload[str_field], str):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {str_field!r} must be a string"
+                )
+        for zoom_field, cap in (
+            ("compact", ASK_COMPACT_MAX_BYTES),
+            ("normal", ASK_NORMAL_MAX_BYTES),
+            ("expanded", ASK_EXPANDED_MAX_BYTES),
+        ):
+            body = payload.get(zoom_field, "")
+            if isinstance(body, str):
+                byte_len = len(body.encode("utf-8"))
+                if byte_len > cap:
+                    raise SchemaValidationError(
+                        f"{cls.__name__}: {zoom_field!r} exceeds the "
+                        f"{cap}-byte cap ({byte_len} bytes)"
+                    )
+        if "revision_seq" in payload \
+                and not isinstance(payload["revision_seq"], int):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'revision_seq' must be an int"
+            )
+        # bool is a subclass of int — exclude it explicitly.
+        if isinstance(payload.get("revision_seq"), bool):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'revision_seq' must be an int, not bool"
+            )
+        extra = set(payload) - set(cls._field_metadata)
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        """Map a stored v1 ask into v2 shape.
+
+        * ``text`` → ``normal`` (best zoom guess for an unstructured body).
+        * ``to_participant_id`` is dropped silently.
+        * ``compact`` and ``expanded`` are left empty; the viewer's zoom
+          fallback keeps the card readable.
+        """
+        out: dict = {}
+        out["session_id"] = payload.get("session_id", "")
+        out["compact"] = ""
+        out["normal"] = payload.get("text", "") or ""
+        out["expanded"] = ""
+        out["created_at"] = payload.get("created_at", "")
+        out["revision_seq"] = payload.get("revision_seq", 0)
+        return out
 
 
 # ── AskVoteV1 ────────────────────────────────────────────────

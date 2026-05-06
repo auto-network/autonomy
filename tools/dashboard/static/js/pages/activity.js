@@ -453,18 +453,22 @@
       attentionEntries: [],
       // ── Notifications tab state (auto-6gv89) ───────────────────
       // ``asks``: members of dashboard.activity.ask, raw shape
-      //   { id, key, payload: {session_id, to_participant_id,
-      //                        text, created_at, revision_seq} }
+      //   v2: { id, key, payload: {session_id, compact, normal,
+      //                            expanded, created_at, revision_seq} }
+      //   v1 rows are upconverted on read (text → normal).
       // ``dismissedAskIds``: array of ask_ids the operator has muted
       //   (singleton row from dashboard.activity.operator_dismissed).
       // ``refreshTargets``: { ask_id: target_revision } from
       //   dashboard.activity.ask_refresh.
       // ``localRefreshPending``: { ask_id: true } during in-flight
       //   write — drives the 'pending' (spinner) visual state.
+      // ``notificationsZoom``: 'compact' | 'normal' | 'expanded' —
+      //   operator-local; mirrors attentionZoom on the Attention tab.
       asks: [],
       dismissedAskIds: [],
       refreshTargets: {},
       localRefreshPending: {},
+      notificationsZoom: 'normal',
       voterId: _resolveOperatorId(),
       // ── auto-24a60: worktree-merge Diff overlay ────────────────
       // Centered modal opened from a worktree-merge card's [Diff →]
@@ -789,9 +793,14 @@
       //
       // Each derived ask card contains:
       //   id              — ask_id (Setting key, == session_id)
-      //   payload         — raw schema payload (text, revision_seq, …)
+      //   payload         — raw schema payload (compact/normal/
+      //                     expanded body, revision_seq, …)
+      //   compact/normal/expanded — body fields per zoom level. v1
+      //                     rows upconvert through ``normal``; the
+      //                     legacy ``text`` field is read as a
+      //                     defensive fallback in case any row
+      //                     bypassed the upconverter.
       //   _color          — deterministic HSL via Presence.participantColor
-      //   _toLabel        — header recipient label ("ambient" or id)
       //   _refreshState   — 'idle' | 'pending' | 'requested', derived
       //                     from refreshTargets + localRefreshPending +
       //                     payload.revision_seq.
@@ -806,6 +815,22 @@
         return _participantColor(id);
       },
 
+      setNotificationsZoom(mode) {
+        this.notificationsZoom = mode;
+      },
+
+      askBody(card, zoom) {
+        if (!card) return '';
+        const z = zoom || this.notificationsZoom || 'normal';
+        if (z === 'compact') {
+          return card.compact || card.normal || card.expanded || '';
+        }
+        if (z === 'expanded') {
+          return card.expanded || card.normal || card.compact || '';
+        }
+        return card.normal || card.compact || card.expanded || '';
+      },
+
       askCards() {
         const cards = [];
         for (const m of (this.asks || [])) {
@@ -814,7 +839,6 @@
           const askId = m.key || payload.session_id || m.id || '';
           if (!askId) continue;
           const sessionId = payload.session_id || askId;
-          const toId = payload.to_participant_id || '';
           const targetRev = this.refreshTargets[askId];
           const curRev = (typeof payload.revision_seq === 'number') ? payload.revision_seq : 0;
           let refreshState = 'idle';
@@ -823,15 +847,21 @@
           } else if (targetRev != null && curRev <= targetRev) {
             refreshState = 'requested';
           }
+          // Body fields. v2 carries compact/normal/expanded directly;
+          // any row that bypassed the upconverter gets ``text`` aliased
+          // into ``normal`` defensively so the card still renders.
+          const compact = payload.compact || '';
+          const normal = payload.normal || payload.text || '';
+          const expanded = payload.expanded || '';
           cards.push({
             id: askId,
             sessionId: sessionId,
             payload: payload,
-            text: payload.text || '',
+            compact: compact,
+            normal: normal,
+            expanded: expanded,
             createdAt: payload.created_at || '',
             revisionSeq: curRev,
-            toId: toId,
-            _toLabel: toId ? ('→' + toId) : 'ambient',
             _color: _participantColor(sessionId),
             _refreshState: refreshState,
           });
