@@ -145,7 +145,8 @@ graph note "description of the pitfall" --tags pitfall,topic --project autonomy
 
 ### When updating a living note
 ```bash
-graph read <src_id> --all-comments           # current content + all comments
+graph read <src_id>                          # body + open comments (the default)
+graph read <src_id> --all-comments           # also include comments already integrated — needed for a synthesis pass
 # Write a clean new version synthesizing everything
 graph note update <src_id> -c - --integrate <cid1> --integrate <cid2> < /tmp/revised.txt
 ```
