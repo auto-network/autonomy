@@ -2583,7 +2583,8 @@ async def api_source_read(request):
 
 
 def _attach_source_org(result: dict | None) -> None:
-    """Attach resolved ``org`` to the nested ``source`` of a graph-read response.
+    """Attach resolved ``org`` (and tmux session, when applicable) to the
+    nested ``source`` of a graph-read response.
 
     ``graph read --json --first`` returns ``{source: {...}, entries: [...], ...}``.
     The mock DAO returns the source dict directly. Handle both shapes.
@@ -2596,6 +2597,37 @@ def _attach_source_org(result: dict | None) -> None:
         return
     if "org" not in src:
         src["org"] = resolve_org_identity(session_org_slug(src))
+    _attach_source_session_chip(src)
+
+
+def _attach_source_session_chip(src: dict) -> None:
+    """Attach ``tmux_session`` to a source dict for type=session entries.
+
+    The viewer (and ``graph read`` over the API) needs the tmux name to
+    show a session-name chip and a link back to ``/session/<tmux>``.
+    Looks up dashboard.db by graph_source_id, falling back to
+    metadata.session_uuid for sources the linker hasn't reconciled yet.
+    Silently skips on lookup error so the response still ships.
+    """
+    if not isinstance(src, dict) or src.get("type") != "session":
+        return
+    if "tmux_session" in src:
+        return
+    meta = src.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (ValueError, TypeError):
+            meta = {}
+    session_uuid = meta.get("session_uuid") or meta.get("session_id")
+    try:
+        tmux = dashboard_db.get_tmux_name_for_source(
+            src.get("id") or "", session_uuid=session_uuid,
+        )
+    except Exception:
+        tmux = None
+    if tmux:
+        src["tmux_session"] = tmux
 
 async def api_context(request):
     if os.environ.get("DASHBOARD_MOCK"):

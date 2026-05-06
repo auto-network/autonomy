@@ -200,3 +200,72 @@ def test_looks_like_tmux_name_heuristic():
     assert cli._looks_like_tmux_name("f6c6c43e-24a") is False  # short ID
     assert cli._looks_like_tmux_name("8cdc1d85") is False
     assert cli._looks_like_tmux_name("") is False
+
+
+def test_lookup_tmux_for_source_by_graph_id(tmp_path, monkeypatch):
+    """_lookup_tmux_for_source resolves session sources via graph_source_id."""
+    _make_db_with_source_ids(tmp_path)
+    from tools.graph import cli
+    (tmp_path / "tools" / "graph").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cli, "__file__", str(tmp_path / "tools" / "graph" / "cli.py"))
+
+    src = {"id": "abcdef0123456789cafe", "type": "session", "metadata": {}}
+    assert cli._lookup_tmux_for_source(src) == "auto-known"
+
+    # Non-session sources should return None even when an ID would match.
+    note = {"id": "abcdef0123456789cafe", "type": "note", "metadata": {}}
+    assert cli._lookup_tmux_for_source(note) is None
+
+
+def test_lookup_tmux_for_source_by_session_uuid(tmp_path, monkeypatch):
+    """Falls back to session_uuid when graph_source_id link hasn't landed yet."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    db_path = data_dir / "dashboard.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE tmux_sessions (
+            tmux_name       TEXT PRIMARY KEY,
+            session_uuid    TEXT,
+            graph_source_id TEXT,
+            created_at      REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO tmux_sessions (tmux_name,session_uuid,graph_source_id,created_at) VALUES (?,?,?,?)",
+        ("auto-pending-link", "deadbeef-uuid", None, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+    from tools.graph import cli
+    (tmp_path / "tools" / "graph").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cli, "__file__", str(tmp_path / "tools" / "graph" / "cli.py"))
+
+    src = {
+        "id": "fresh000000000000000",
+        "type": "session",
+        "metadata": {"session_uuid": "deadbeef-uuid"},
+    }
+    assert cli._lookup_tmux_for_source(src) == "auto-pending-link"
+
+
+def test_print_session_header_chip_uses_attached_field(tmp_path, monkeypatch, capsys):
+    """Chip prefers ``tmux_session`` already attached by the API."""
+    from tools.graph import cli
+    monkeypatch.setenv("GRAPH_API", "https://localhost:8080")
+    src = {"id": "x" * 20, "type": "session", "tmux_session": "auto-from-api"}
+    cli._print_session_header_chip(src)
+    out = capsys.readouterr().out
+    assert "Session: auto-from-api" in out
+    assert "Viewer: https://localhost:8080/session/auto-from-api" in out
+
+
+def test_print_session_header_chip_silent_when_no_match(tmp_path, monkeypatch, capsys):
+    """Non-session sources or missing tmux name produce no output."""
+    from tools.graph import cli
+    note = {"id": "f" * 20, "type": "note"}
+    cli._print_session_header_chip(note)
+    assert capsys.readouterr().out == ""
