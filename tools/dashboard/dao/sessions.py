@@ -123,11 +123,11 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
             # model is the most-recent assistant turn's model id.
             "harness": row.get("harness") or "claude",
             "model": row.get("model") or None,
-            # auto-10lsv: which Claude token alias produced this session.
-            # Operator triage only — surfaces in the session drawer next
-            # to harness/model. Null for codex sessions and pre-multi-
-            # token rows.
-            "claude_token_alias": row.get("claude_token_alias") or None,
+            # auto-ghhdg: harness-agnostic credential pointer (org UUID once
+            # bead 4 lands; alias string in the interim). Operator triage
+            # only — surfaces in the session drawer next to harness/model.
+            # Null for codex sessions and pre-multi-token rows.
+            "harness_token": row.get("harness_token") or None,
         }
         entry["org"] = resolve_session_org(entry)
         sessions.append(entry)
@@ -560,8 +560,9 @@ def get_recent_sessions(
             # consume them via a single DAO contract.
             row["harness"] = db_row.get("harness") or "claude"
             row["model"] = db_row.get("model") or None
-            # auto-10lsv: which Claude token alias produced this session.
-            row["claude_token_alias"] = db_row.get("claude_token_alias") or None
+            # auto-ghhdg: harness-agnostic credential pointer (org UUID
+            # once bead 4 lands).
+            row["harness_token"] = db_row.get("harness_token") or None
             # Prefer dashboard.db's last_activity (epoch float) for ordering
             # when newer than graph.db's last_activity_at (ISO).
             db_la = db_row.get("last_activity") or 0

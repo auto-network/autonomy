@@ -51,7 +51,7 @@ document.addEventListener('alpine:init', function() {
         // badge alongside role/type/org.
         if (s.harness) store.harness = s.harness;
         if (s.model !== undefined) store.model = s.model;
-        if (s.claude_token_alias !== undefined) store.claudeTokenAlias = s.claude_token_alias;
+        if (s.harness_token !== undefined) store.harnessToken = s.harness_token;
       }
     })
     .catch(function(e) { console.warn('[session-store] seed fetch error', e); });
@@ -89,7 +89,7 @@ window.getSessionStore = function(sessionId) {
       pendingToolIds: {},          // server-derived: tool_id -> true (set-like object)
       harness: '',                 // auto-ngis4: claude | codex | future
       model: null,                 // auto-ngis4: most-recent assistant-turn model id
-      claudeTokenAlias: null,      // auto-10lsv: which Claude token alias the launch picked
+      harnessToken: null,          // auto-ghhdg: harness-agnostic credential pointer (org UUID once bead 4 lands)
       loaded: false,
       _loading: false,   // true during initial fetch — buffers SSE
       _pendingSSE: [],
@@ -379,7 +379,7 @@ window.ensureSessionMessages = function() {
       // an "unknown" badge until a full page reload.
       if (s.harness) store.harness = s.harness;
       if (s.model !== undefined) store.model = s.model;
-      if (s.claude_token_alias !== undefined) store.claudeTokenAlias = s.claude_token_alias;
+      if (s.harness_token !== undefined) store.harnessToken = s.harness_token;
     }
     // Mark removed sessions as dead
     var allSessions = Alpine.store('sessions');
