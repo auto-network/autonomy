@@ -249,7 +249,7 @@ def _log_worktree_cleanup(tmux_name: str, result: CleanupResult) -> None:
 def _cleanup_worktrees_for_dead_session(tmux_name: str) -> None:
     """Thread-safe wrapper around cleanup_session_worktrees — never raises."""
     try:
-        result = cleanup_session_worktrees(tmux_name)
+        result = cleanup_session_worktrees(tmux_name, worktrees_dir=WORKTREES_DIR)
     except Exception:
         logger.exception("session_monitor: worktree cleanup raised for %s", tmux_name)
         return
@@ -259,7 +259,7 @@ def _cleanup_worktrees_for_dead_session(tmux_name: str) -> None:
 def _prune_orphan_worktrees_safely(live_session_names: list[str]) -> None:
     """Thread-safe wrapper around prune_orphan_worktrees — never raises."""
     try:
-        results = prune_orphan_worktrees(live_session_names)
+        results = prune_orphan_worktrees(live_session_names, worktrees_dir=WORKTREES_DIR)
     except Exception:
         logger.exception("session_monitor: orphan worktree prune raised")
         return
@@ -813,7 +813,7 @@ class SessionMonitor:
         self._todo_snapshot = None
         self._started = False
         self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
-        self._last_orphan_prune: float = 0.0    # timestamp of last worktree orphan prune
+        self._last_orphan_prune: float = time.time()  # defer first prune one full interval
         # inotify state — populated by _init_inotify()
         self._inotify: Any = None                        # INotify instance
         self._use_inotify: bool = False

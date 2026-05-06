@@ -37,6 +37,7 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,6 +56,13 @@ REPOS_DIR = DATA_DIR / "repos"
 WORKTREES_DIR = DATA_DIR / "worktrees"
 
 logger = logging.getLogger(__name__)
+
+
+def _refuse_pytest_against_real_worktrees(worktrees_dir: Path, op: str) -> None:
+    if worktrees_dir == WORKTREES_DIR and "pytest" in sys.modules:
+        raise RuntimeError(
+            f"refusing {op} against production WORKTREES_DIR while pytest is loaded"
+        )
 
 
 class WorkspaceError(RuntimeError):
@@ -1314,7 +1322,7 @@ def cleanup_session_worktrees(
     session_name: str,
     *,
     force: bool = False,
-    worktrees_dir: Path = WORKTREES_DIR,
+    worktrees_dir: Path,
 ) -> CleanupResult:
     """Remove worktrees and branch for ``session_name``.
 
@@ -1330,6 +1338,7 @@ def cleanup_session_worktrees(
     The containing ``{session_name}`` directory is removed once empty.
     Returns a :class:`CleanupResult` summarizing what was done.
     """
+    _refuse_pytest_against_real_worktrees(worktrees_dir, "cleanup_session_worktrees")
     result = CleanupResult()
     session_dir = worktrees_dir / session_name
     if not session_dir.exists():
@@ -1426,9 +1435,10 @@ def cleanup_session_worktree(
     repo_name: str,
     *,
     force: bool = False,
-    worktrees_dir: Path = WORKTREES_DIR,
+    worktrees_dir: Path,
 ) -> CleanupResult:
     """Remove one repo worktree for ``session_name`` while preserving others."""
+    _refuse_pytest_against_real_worktrees(worktrees_dir, "cleanup_session_worktree")
     result = CleanupResult()
     session_dir = worktrees_dir / session_name
     entry = session_dir / repo_name
@@ -1565,7 +1575,7 @@ def prune_orphan_worktrees(
     live_session_names: Iterable[str],
     *,
     force: bool = False,
-    worktrees_dir: Path = WORKTREES_DIR,
+    worktrees_dir: Path,
 ) -> dict[str, CleanupResult]:
     """Clean worktrees for sessions no longer in ``live_session_names``.
 
@@ -1573,6 +1583,7 @@ def prune_orphan_worktrees(
     each subdirectory whose name is not in ``live_session_names``.
     Returns a mapping of ``session_name → CleanupResult``.
     """
+    _refuse_pytest_against_real_worktrees(worktrees_dir, "prune_orphan_worktrees")
     if not worktrees_dir.exists():
         return {}
     live = set(live_session_names)

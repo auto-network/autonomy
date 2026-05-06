@@ -691,8 +691,9 @@ class TestWorktreeAPI:
         server, fake = _install_fake_monitor(monkeypatch, [_row()])
         called = {}
 
-        def fake_cleanup(session_name, *, force=False):
+        def fake_cleanup(session_name, *, force=False, worktrees_dir):
             called["args"] = (session_name, force)
+            called["worktrees_dir"] = worktrees_dir
             return CleanupResult(
                 removed=["/tmp/worktrees/auto-test/autonomy"],
                 preserved=[("/tmp/worktrees/auto-test/enterprise", "local commits")],
@@ -722,8 +723,9 @@ class TestWorktreeAPI:
         server, fake = _install_fake_monitor(monkeypatch, [_row(dirty=True)])
         called = {}
 
-        def fake_cleanup(session_name, repo_name, *, force=False):
+        def fake_cleanup(session_name, repo_name, *, force=False, worktrees_dir):
             called["args"] = (session_name, repo_name, force)
+            called["worktrees_dir"] = worktrees_dir
             return CleanupResult(
                 removed=["/tmp/worktrees/auto-test/autonomy"],
                 preserved=[],
@@ -747,7 +749,7 @@ class TestWorktreeAPI:
     def test_discard_endpoint_surfaces_live_worktree_rejection(self, test_client, monkeypatch):
         server, _fake = _install_fake_monitor(monkeypatch, [_row(dirty=True, live=True)])
 
-        def fake_cleanup(_session_name, _repo_name, *, force=False):
+        def fake_cleanup(_session_name, _repo_name, *, force=False, worktrees_dir):
             assert force is True
             raise WorkspaceError("cannot discard live worktree for session auto-test")
 

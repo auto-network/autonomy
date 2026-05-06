@@ -55,6 +55,7 @@ from agents.primer_renderer import render_workspace_primer
 from agents.workspace_manager import (
     GitFileChange,
     RebaseRequiredError,
+    WORKTREES_DIR,
     WorktreeCommit,
     WorktreeDirtyDetail,
     WorktreeState,
@@ -7100,6 +7101,7 @@ async def api_worktree_cleanup(request):
             cleanup_session_worktrees,
             session_name,
             force=force,
+            worktrees_dir=WORKTREES_DIR,
         )
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -7118,6 +7120,7 @@ async def api_worktree_discard(request):
             session_name,
             repo_name,
             force=True,
+            worktrees_dir=WORKTREES_DIR,
         )
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
