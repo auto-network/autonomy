@@ -702,15 +702,17 @@ def _format_source_time(source: dict) -> str:
 def _format_source_header(source: dict) -> str:
     """One-line header for ``graph read``.
 
-    Shape: ``{type} · {id12} · {time} [{org}] — {title}``. Time format
-    varies by source kind (see :func:`_format_source_time`). Org tag is
-    suppressed when redundant with project. Used by both the host and
-    API read paths so the two modes converge on the same shape.
+    Shape: ``{type} · {pub_state} · {id12} · {time} [{org}] — {title}``.
+    Pub-state is omitted when missing. Time format varies by source
+    kind (see :func:`_format_source_time`). Org tag is suppressed when
+    redundant with project. Used by both the host and API read paths
+    so the two modes converge on the same shape.
     """
     sid = (source.get("id") or "")[:12]
     stype = source.get("type") or "?"
     title = (source.get("title") or "?").replace("\n", " ").strip()
     when = _format_source_time(source)
+    pub_state = source.get("publication_state") or ""
 
     project = source.get("project") or ""
     org = source.get("org") or ""
@@ -720,7 +722,10 @@ def _format_source_header(source: dict) -> str:
     elif project:
         tag = f" [{project}]"
 
-    parts = [stype, sid]
+    parts = [stype]
+    if pub_state:
+        parts.append(pub_state)
+    parts.append(sid)
     if when:
         parts.append(when)
     head = " · ".join(parts) + tag
@@ -739,6 +744,39 @@ def _format_comment_byline(c: dict) -> str:
     parts.append(state)
     parts.append(cid)
     return " · ".join(p for p in parts if p)
+
+
+def _print_read_trailer(
+    source: dict,
+    *,
+    source_chars: int,
+    source_lines: int,
+    turn_count: int,
+    all_comments: list[dict],
+) -> None:
+    """Trailer line for ``graph read``.
+
+    The receipt at the bottom: full-source totals (not what the
+    rendered output happened to contain). When you don't see this
+    line, you didn't read to the end. When you do, the numbers tell
+    you what's in the source — so a partial read driven by
+    ``--max-chars`` / ``head`` / ``--all-comments`` filtering shows
+    you exactly what was missed.
+
+    * notes:    ``── 14,328 chars · 287 lines · 14 comments (2 open, 12 integrated) ──``
+    * sessions: ``── 142,318 chars · 2,840 lines · 89 turns ──``
+    * other:    ``── 14,328 chars · 287 lines ──``
+    """
+    stype = source.get("type") or ""
+    parts = [f"{source_chars:,} chars", f"{source_lines:,} lines"]
+    if stype == "note":
+        total = len(all_comments or [])
+        opn = sum(1 for c in (all_comments or []) if not c.get("integrated"))
+        integ = total - opn
+        parts.append(f"{total} comments ({opn} open, {integ} integrated)")
+    elif stype == "session" and turn_count:
+        parts.append(f"{turn_count} turns")
+    print(f"\n── {' · '.join(parts)} ──")
 
 
 def _print_comment_block(comments: list[dict]) -> None:
@@ -1171,6 +1209,16 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") 
     if is_note:
         _print_comment_block(comments)
 
+    _print_read_trailer(
+        source,
+        source_chars=int(payload.get("source_chars") or 0),
+        source_lines=int(payload.get("source_lines") or 0),
+        turn_count=int(payload.get("turn_count") or 0),
+        # Trailer always counts the full comment set, not the
+        # already-filtered render slice — that's the whole point.
+        all_comments=raw_comments,
+    )
+
 
 def _cmd_read_body(args, source, db, version_req, _json):
     """Inner body of :func:`cmd_read` — runs against the source's home-org DB."""
@@ -1371,6 +1419,36 @@ def _cmd_read_body(args, source, db, version_req, _json):
                             for c in child_comments:
                                 print(f"\n{_format_comment_byline(c)}")
                                 print(c["content"])
+
+    # Trailer: source-wide stats from the same DB the read pulled from.
+    # Always counts the full comment set so an --all-comments=False
+    # render still shows how many integrated ones were filtered.
+    stats_row = db.conn.execute(
+        """SELECT COALESCE(SUM(LENGTH(content)), 0) AS chars,
+                  COALESCE(SUM(LENGTH(content) - LENGTH(REPLACE(content, char(10), ''))), 0) AS newlines,
+                  COUNT(*) AS entry_count,
+                  COALESCE(MAX(turn_number), 0) AS max_turn
+           FROM (
+               SELECT content, turn_number FROM thoughts WHERE source_id = ?
+               UNION ALL
+               SELECT content, turn_number FROM derivations WHERE source_id = ?
+           )""",
+        (source["id"], source["id"]),
+    ).fetchone()
+    src_chars = int(stats_row["chars"] or 0)
+    src_lines = int(stats_row["newlines"] or 0) + int(stats_row["entry_count"] or 0)
+    turn_total = int(stats_row["max_turn"] or 0)
+    if source.get("type") == "note":
+        all_comments = db.get_comments(source["id"], include_integrated=True)
+    else:
+        all_comments = []
+    _print_read_trailer(
+        source,
+        source_chars=src_chars,
+        source_lines=src_lines,
+        turn_count=turn_total,
+        all_comments=all_comments,
+    )
 
 
 def cmd_sources(args):

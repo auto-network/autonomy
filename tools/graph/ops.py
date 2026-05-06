@@ -3359,11 +3359,54 @@ def read_source_full(
         })
         total_chars += len(c)
 
+    # Source-wide stats — independent of any windowing/truncation applied
+    # to ``entries`` above. These power the ``graph read`` trailer so a
+    # partial read still surfaces what the source actually contains
+    # (otherwise an agent that pipes through ``head`` or hits
+    # ``--max-chars`` can mistake "what fit in my view" for "what's
+    # there", which has cost real time in past sessions).
+    if origin and origin != caller:
+        stats_db = open_peer_db(origin)
+        stats_owned = False
+    else:
+        stats_db = _open(org)
+        stats_owned = True
+    try:
+        stats_row = stats_db.conn.execute(
+            """SELECT COALESCE(SUM(LENGTH(content)), 0) AS chars,
+                      COALESCE(SUM(LENGTH(content) - LENGTH(REPLACE(content, char(10), ''))), 0) AS newlines,
+                      COUNT(*) AS entry_count,
+                      COALESCE(MAX(turn_number), 0) AS max_turn
+               FROM (
+                   SELECT content, turn_number FROM thoughts WHERE source_id = ?
+                   UNION ALL
+                   SELECT content, turn_number FROM derivations WHERE source_id = ?
+               )""",
+            (source["id"], source["id"]),
+        ).fetchone()
+    finally:
+        if stats_owned:
+            stats_db.close()
+
+    source_chars = int(stats_row["chars"] or 0) if stats_row else 0
+    source_newlines = int(stats_row["newlines"] or 0) if stats_row else 0
+    entry_count = int(stats_row["entry_count"] or 0) if stats_row else 0
+    # Lines = total newlines + 1 per entry (each entry starts a new line).
+    source_lines = source_newlines + entry_count
+    # Turn count: highest turn number, since turns are 1-indexed. For
+    # non-session sources MAX(turn_number) typically equals 1, which is
+    # fine — the trailer only surfaces the count for session reads.
+    turn_count = int(stats_row["max_turn"] or 0) if stats_row else 0
+
     return {
         "source": source,
         "entries": out_entries,
         "truncated": truncated,
         "total_chars": total_chars,
+        "source_chars": source_chars,
+        "source_lines": source_lines,
+        "entry_count": entry_count,
+        "turn_count": turn_count,
         "comments": sorted(
             [dict(c) for c in comments_src] + extra_comments,
             key=lambda c: c.get("created_at") or "",
