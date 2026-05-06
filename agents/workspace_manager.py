@@ -1248,23 +1248,28 @@ def _cherry_pick_dry_run(
 
 
 def _worktree_has_commits_ahead_of_base(worktree: Path) -> bool:
-    """Return True if HEAD has commits not reachable from the current base ref.
+    """Return True if HEAD has commits whose patches are not on the base ref.
 
-    If the comparison can't be made (missing base ref), returns True so
-    we preserve by default.
+    Uses ``git cherry`` patch-id matching, mirroring the dashboard's
+    :func:`_worktree_commits_ahead`. Without this, a commit that has been
+    cherry-picked onto the base ref with a different SHA stays counted
+    forever — the original commit on the session branch is not reachable
+    from the cherry-picked SHA, so a raw ``rev-list --count base..HEAD``
+    keeps reporting it as ahead and ``cleanup_session_worktrees``
+    preserves the worktree past the point where its work has landed.
+
+    If the comparison can't be made (git error), returns True so we
+    preserve by default.
     """
     base_ref = _repo_integration_base_ref(worktree)
     rc, out, _ = _git_output(
-        ["rev-list", "--count", f"{base_ref}..HEAD"],
+        ["cherry", base_ref, "HEAD"],
         worktree,
         timeout=15,
     )
     if rc != 0:
         return True
-    try:
-        return int(out.strip() or "0") > 0
-    except ValueError:
-        return True
+    return any(line.startswith("+ ") for line in out.splitlines())
 
 
 def _delete_branch(clone: Path, branch: str) -> None:
