@@ -343,6 +343,68 @@ def test_status_topics_flag_renders_topic_lines(tmp_path, monkeypatch, capsys):
     assert busy_lines and empty_lines
 
 
+def test_format_source_header_uses_minute_for_notes():
+    from tools.graph import cli
+    note = {
+        "id": "abcdef0123456789cafe", "type": "note",
+        "title": "Some Note", "project": "autonomy", "org": "autonomy",
+        "created_at": "2026-05-06T17:31:42Z",
+    }
+    head = cli._format_source_header(note)
+    # Full minute-precision timestamp, not just YYYY-MM-DD.
+    assert "2026-05-06 17:31" in head
+    assert "Some Note" in head
+    # No bracketed-org duplicate of project.
+    assert head.count("autonomy") == 1
+
+
+def test_format_source_header_session_range_same_day():
+    from tools.graph import cli
+    sess = {
+        "id": "1234567890abcafe1234", "type": "session",
+        "title": "auto-0506-173131", "project": "autonomy", "org": "autonomy",
+        "created_at": "2026-05-06T17:31:00Z",
+        "metadata": {
+            "started_at": "2026-05-06T17:31:00Z",
+            "ended_at":   "2026-05-06T18:14:00Z",
+        },
+    }
+    head = cli._format_source_header(sess)
+    # Same-day collapses to start-date + start-min → end-min only.
+    assert "2026-05-06 17:31 → 18:14" in head, head
+    assert "auto-0506-173131" in head
+
+
+def test_format_source_header_session_range_multi_day():
+    from tools.graph import cli
+    sess = {
+        "id": "1234567890abcafe1234", "type": "session",
+        "title": "long session", "project": "autonomy", "org": "autonomy",
+        "created_at": "2026-05-06T17:31:00Z",
+        "metadata": {
+            "started_at": "2026-05-06T17:31:00Z",
+            "ended_at":   "2026-05-07T03:14:00Z",
+        },
+    }
+    head = cli._format_source_header(sess)
+    # Cross-day: full timestamp on each side.
+    assert "2026-05-06 17:31 → 2026-05-07 03:14" in head, head
+
+
+def test_format_source_header_session_falls_back_to_created_at():
+    """Sessions without started_at/ended_at metadata still get a header."""
+    from tools.graph import cli
+    sess = {
+        "id": "1234567890abcafe1234", "type": "session",
+        "title": "in-flight session", "project": "autonomy",
+        "created_at": "2026-05-06T17:31:00Z",
+        "metadata": {},
+    }
+    head = cli._format_source_header(sess)
+    assert "2026-05-06 17:31" in head
+    assert "→" not in head  # no range available
+
+
 def test_row_topic_lines_handles_bad_input():
     """Defensive parsing — bad JSON / non-list / null all return []."""
     from tools.graph import cli
