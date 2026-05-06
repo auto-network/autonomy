@@ -186,12 +186,13 @@ def test_suggest_rejects_out_of_range_confidence(bad):
 # ── non-JSON output (human-readable mode) ─────────────────────
 
 
-def test_suggest_default_emits_json_for_parser():
-    """Default output is JSON — that's the parser contract.
+def test_suggest_always_emits_json():
+    """Output is unconditionally JSON — there is no toggle.
 
-    The previous default was pretty-print, which silently no-op'd from
-    the parser's perspective. Flipped so agents that forget --json don't
-    get a misleading ✓ tick on output the parser can't see.
+    The previous design had a pretty-print default that silently no-op'd
+    from the parser's perspective. Agents would see ✓ and assume success
+    while no overlay ever rendered. Removed entirely; there is no
+    "make this command not work" mode.
     """
     rc, out, err = _run_cli([
         "turn-correction", "suggest",
@@ -201,15 +202,3 @@ def test_suggest_default_emits_json_for_parser():
     payload = json.loads(out.strip())
     assert payload["type"] == "turn_correction"
     assert payload["corrected_text"] == "fixed"
-
-
-def test_suggest_pretty_flag_prints_human_summary():
-    rc, out, err = _run_cli([
-        "turn-correction", "suggest", "--pretty",
-        "fixed",
-    ])
-    assert rc == 0, err
-    assert "Suggested turn correction" in out
-    # Pretty mode is for humans; it must not look like the parser contract.
-    with pytest.raises(json.JSONDecodeError):
-        json.loads(out.strip())
