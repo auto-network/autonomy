@@ -17,8 +17,9 @@ This is an open-ended interactive session. There is no bead, no task directive, 
 graph search "query"                  # FTS search (--or for ANY term)
 graph search "query" --project jira   # scoped to a project
 graph attention --last 20             # human focus trail
-graph read <src_id> --max-chars 3000  # read a full source
-graph context <src_id> <turn>         # turns around a search hit
+graph read <src_id|tmux_name> --max-chars 3000  # read a full source
+graph context <src_id|tmux_name> <turn>         # turns around a search hit
+graph tail <src_id|tmux_name> 20                # last N turns of a session
 graph sessions --all                  # ingest latest session data before searching
 graph note "text" --tags tag          # persist an insight or pitfall for future agents
 graph bead "title" --source <id>      # create a bead with provenance
@@ -27,8 +28,8 @@ graph dispatch approve <bead-id>      # approve bead(s) for dispatch (accepts mu
 graph dispatch status                 # compact one-liner
 graph dispatch runs                   # running/queued agent activity
 graph wait <bead-id>                 # block until bead completes (background it in your shell)
-graph context <src_id> last             # latest turns (no turn number needed)
-graph sessions --status                  # live session table from dashboard
+graph context <src_id|tmux_name> last    # latest turns (no turn number needed)
+graph sessions --status                  # live session table (SOURCE column gives the id)
 graph sessions --since 12h --status      # post-mortem: include dead sessions active in the last 12h
 graph notes --since 1h                   # recent notes by time
 graph crosstalk --since 1h               # recent CrossTalk messages

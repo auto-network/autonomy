@@ -542,6 +542,76 @@ def _resolve_current_source(db):
         return None
 
 
+_HEX_ID_CHARS = set("0123456789abcdef-")
+
+
+def _looks_like_tmux_name(value: str) -> bool:
+    """Heuristic: a graph source ID is hex+dashes; a tmux name has alpha chars
+    outside that set (e.g. 'auto-0506-001257', 'host-0506-095207').
+    """
+    if not value:
+        return False
+    return any(c not in _HEX_ID_CHARS for c in value.lower())
+
+
+def _resolve_tmux_name_to_source_id(tmux_name: str) -> str | None:
+    """Resolve a tmux session name to its graph_source_id.
+
+    Tries the local dashboard.db first (host mode); falls back to the dashboard
+    API (container mode). Returns None when no match or no graph_source_id has
+    been linked yet.
+    """
+    db_path = Path(__file__).parents[2] / "data" / "dashboard.db"
+    if db_path.exists() and db_path.stat().st_size > 0:
+        import sqlite3
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT graph_source_id FROM tmux_sessions WHERE tmux_name=?",
+                (tmux_name,),
+            ).fetchone()
+            conn.close()
+            if row and row["graph_source_id"]:
+                return row["graph_source_id"]
+        except sqlite3.Error:
+            pass
+
+    api_base = os.environ.get("GRAPH_API")
+    if not api_base:
+        return None
+    import ssl
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    url = f"{api_base}/api/session/{urllib.parse.quote(tmux_name)}"
+    try:
+        resp = urllib.request.urlopen(url, timeout=5, context=ctx)
+        data = json.loads(resp.read())
+        return data.get("graph_source_id") or None
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _maybe_resolve_session_arg(value: str) -> str | None:
+    """If *value* looks like a tmux name, return its graph_source_id (or None).
+
+    Returns None when the input is not a tmux-name shape — caller should then
+    treat it as a source-id prefix as before. Prints a one-line resolution
+    notice on success so the operator can see the mapping.
+    """
+    if not _looks_like_tmux_name(value):
+        return None
+    src_id = _resolve_tmux_name_to_source_id(value)
+    if src_id:
+        print(f"  Resolved tmux session: {value} → {src_id[:12]}", file=sys.stderr)
+        return src_id
+    return None
+
+
 _STOPWORDS = {"the", "a", "an", "is", "in", "on", "at", "to", "for", "of", "and", "or", "with", "from", "by", "not", "no"}
 
 
@@ -694,11 +764,21 @@ def _get_html_for_version(db, source_id, version):
 
 
 def cmd_read(args):
-    """Read full content of a source by ID or title search (cross-org aware)."""
+    """Read full content of a source by ID or title search (cross-org aware).
+
+    The first argument may be a graph source ID/prefix or a tmux session name
+    (e.g. ``auto-0506-001257``); tmux names are resolved against the dashboard
+    DB before the normal source lookup.
+    """
     import json as _json
 
     # Parse @N version suffix
     source_arg = args.source
+    resolved = _maybe_resolve_session_arg(source_arg.split("@", 1)[0])
+    if resolved:
+        suffix = source_arg[len(source_arg.split("@", 1)[0]):]
+        source_arg = resolved + suffix
+        args.source = source_arg
     version_req = None
     if "@" in source_arg:
         source_arg, version_part = source_arg.rsplit("@", 1)
@@ -1162,6 +1242,10 @@ def cmd_context(args):
     org = os.environ.get("GRAPH_ORG")
     client = get_client()
 
+    resolved = _maybe_resolve_session_arg(args.source)
+    if resolved:
+        args.source = resolved
+
     # Parse the turn argument: integer | "last" | "last:N"
     tail_n: int | None = None
     raw_turn = args.turn
@@ -1428,7 +1512,7 @@ def _render_session_status_rows(rows: list[dict], since: str | None = None) -> N
         print("No sessions found" if since is not None else "No live sessions")
         return
 
-    print(f"{'TMUX':<28} {'STATE':<8} {'LAST':<14} {'TOKENS':>7} {'LABEL'}")
+    print(f"{'TMUX':<28} {'STATE':<8} {'LAST':<14} {'TOKENS':>7} {'SOURCE':<12} {'LABEL'}")
     print("\u2500" * 100)
     for row in rows:
         tmux = str(row.get("tmux_name") or "")[:27]
@@ -1444,8 +1528,9 @@ def _render_session_status_rows(rows: list[dict], since: str | None = None) -> N
             last = ""
         ctx = int(row.get("context_tokens") or 0)
         ctx_str = f"{ctx // 1000}K" if ctx >= 1000 else str(ctx)
+        src = str(row.get("graph_source_id") or "")[:12] or "\u2014"
         label = str(row.get("label") or "")[:40].replace("\n", " ")
-        print(f"{tmux:<28} {state:<8} {last:<14} {ctx_str:>7} {label}")
+        print(f"{tmux:<28} {state:<8} {last:<14} {ctx_str:>7} {src:<12} {label}")
 
 
 def _load_local_session_status_rows(since: str | None = None) -> list[dict]:
@@ -4478,7 +4563,7 @@ def main():
 
     # read
     p = sub.add_parser("read", help="Read full content of a source")
-    p.add_argument("source", help="Source ID (or prefix) or title search term. Use @N for version, @ to list versions")
+    p.add_argument("source", help="Source ID (or prefix), tmux session name (auto-*/host-*), or title search term. Use @N for version, @ to list versions")
     p.add_argument("--first", action="store_true", help="Read first match if multiple")
     p.add_argument("--max-chars", type=int, default=0, help="Max chars per turn (0=unlimited)")
     p.add_argument("--json", action="store_true", help="Output as structured JSON (source + entries + edges)")
@@ -4516,7 +4601,7 @@ def main():
 
     # context
     p = sub.add_parser("context", help="Show turns around a search hit")
-    p.add_argument("source", help="Source ID or prefix")
+    p.add_argument("source", help="Source ID/prefix or tmux session name (auto-*/host-*)")
     p.add_argument(
         "turn",
         type=str,
@@ -4529,7 +4614,7 @@ def main():
 
     # tail
     p = sub.add_parser("tail", help="Read the last N turns of a source")
-    p.add_argument("source", help="Source ID or prefix")
+    p.add_argument("source", help="Source ID/prefix or tmux session name (auto-*/host-*)")
     p.add_argument("n", type=int, nargs="?", default=10,
                    help="Number of trailing turns to print (default 10)")
     p.add_argument("--max-chars", type=int, default=0,

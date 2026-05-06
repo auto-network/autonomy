@@ -13,17 +13,18 @@ commits after you exit.
 ```
 graph search "query"              # Full-text search (use --or for OR mode)
 graph search "query" --or         # Match ANY term instead of all
-graph read <src_id>               # Read full source content
+graph read <src_id|tmux_name>     # Read full source content (tmux names like auto-* auto-resolve)
 graph read <src_id> --max-chars N # Read with character limit
 graph read <src_id> --save <path> # Export raw content to file for editing
-graph context <src_id> <turn>     # Show turns around a search hit
+graph context <src_id|tmux_name> <turn>  # Show turns around a search hit
+graph tail <src_id|tmux_name> [N] # Last N turns of a session (default 10)
 graph sources                     # List sources (--project X --type Y)
 graph note "text" --tags x,y      # Drop a searchable trail marker
 graph link <bead> <src> -r rel    # Create provenance edge
 graph attention --last N          # Show recent human input
 graph ui-design "title" <dir>     # Create Design Studio design from HTML files + live-watch for changes
 graph dispatch approve <bead-id>  # Approve bead(s) for dispatch (accepts multiple IDs)
-graph context <src_id> last       # Latest turns of a source
+graph context <src_id|tmux_name> last  # Latest turns of a source
 graph notes --since 1h            # Recent notes (orientation)
 graph crosstalk --since 30m       # Recent CrossTalk messages
 graph crosstalk send <s> "msg"    # Send CrossTalk message (-c - for stdin)

@@ -119,5 +119,84 @@ def test_status_column_headers_match_spec(_fake_root, capsys):
     _fake_root._print_session_status()
     out = capsys.readouterr().out
     header = out.splitlines()[0]
-    for col in ("TMUX", "STATE", "LAST", "TOKENS", "LABEL"):
+    for col in ("TMUX", "STATE", "LAST", "TOKENS", "SOURCE", "LABEL"):
         assert col in header, f"missing column {col!r} in header: {header!r}"
+
+
+def _make_db_with_source_ids(tmp_path: Path) -> Path:
+    """Like _make_db but includes a graph_source_id column populated for one row."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    db_path = data_dir / "dashboard.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE tmux_sessions (
+            tmux_name       TEXT PRIMARY KEY,
+            graph_source_id TEXT,
+            created_at      REAL NOT NULL,
+            is_live         INTEGER DEFAULT 1,
+            last_activity   REAL,
+            last_message    TEXT DEFAULT '',
+            entry_count     INTEGER DEFAULT 0,
+            context_tokens  INTEGER DEFAULT 0,
+            label           TEXT DEFAULT '',
+            activity_state  TEXT DEFAULT 'idle'
+        )
+        """
+    )
+    now = time.time()
+    rows = [
+        ("auto-known", "abcdef0123456789cafe", now - 30, 1, now - 30,
+         "hello", 10, 4200, "linked", "busy"),
+        ("auto-unlinked", None, now - 120, 1, now - 120,
+         "hi", 5, 800, "no source", "idle"),
+    ]
+    conn.executemany(
+        "INSERT INTO tmux_sessions (tmux_name,graph_source_id,created_at,is_live,"
+        "last_activity,last_message,entry_count,context_tokens,label,activity_state)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_status_renders_source_id_column(tmp_path, monkeypatch, capsys):
+    """SOURCE column shows the linked graph_source_id (12-char prefix)."""
+    _make_db_with_source_ids(tmp_path)
+    from tools.graph import cli
+    (tmp_path / "tools" / "graph").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cli, "__file__", str(tmp_path / "tools" / "graph" / "cli.py"))
+
+    cli._print_session_status()
+    out = capsys.readouterr().out
+    linked = [line for line in out.splitlines() if line.startswith("auto-known")]
+    unlinked = [line for line in out.splitlines() if line.startswith("auto-unlinked")]
+    assert linked and "abcdef012345" in linked[0], linked
+    assert unlinked and "—" in unlinked[0], unlinked
+
+
+def test_resolve_tmux_name_lookup(tmp_path, monkeypatch):
+    """_resolve_tmux_name_to_source_id reads dashboard.db when present."""
+    _make_db_with_source_ids(tmp_path)
+    from tools.graph import cli
+    (tmp_path / "tools" / "graph").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cli, "__file__", str(tmp_path / "tools" / "graph" / "cli.py"))
+    monkeypatch.delenv("GRAPH_API", raising=False)
+
+    assert cli._resolve_tmux_name_to_source_id("auto-known") == "abcdef0123456789cafe"
+    assert cli._resolve_tmux_name_to_source_id("auto-unlinked") is None
+    assert cli._resolve_tmux_name_to_source_id("auto-missing") is None
+
+
+def test_looks_like_tmux_name_heuristic():
+    """Hex-only source-id prefixes do NOT trigger tmux lookup."""
+    from tools.graph import cli
+    assert cli._looks_like_tmux_name("auto-0506-001257") is True
+    assert cli._looks_like_tmux_name("host-0506-095207") is True
+    assert cli._looks_like_tmux_name("abcdef0123456789") is False  # hex-only
+    assert cli._looks_like_tmux_name("f6c6c43e-24a") is False  # short ID
+    assert cli._looks_like_tmux_name("8cdc1d85") is False
+    assert cli._looks_like_tmux_name("") is False

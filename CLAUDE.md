@@ -42,10 +42,11 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 |---------|------|---------|
 | `graph search "query"` | Full-text search (use `--or` for OR mode) | `graph search "CVSS fuzzing" --project enterprise-ng` |
 | `graph search "query" --or` | Match ANY term instead of all | `graph search "auth login session" --or` |
-| `graph read <src_id>` | Read full source content | `graph read dc4c73ee --max-chars 2000` |
+| `graph read <src_id\|tmux_name>` | Read full source content (tmux names like `auto-0506-001257` auto-resolve) | `graph read dc4c73ee --max-chars 2000` / `graph read auto-0506-001257` |
 | `graph read <src_id> --save <path>` | Export raw content to file for editing | `graph read abc123 --save /tmp/notes/abc123.md` |
-| `graph context <src_id> <turn>` | Show turns around a search hit | `graph context 8cdc1d85 286 --window 3` |
-| `graph context <src_id> last` | Show latest turns of a source | `graph context 8cdc1d85 last --window 5` |
+| `graph context <src_id\|tmux_name> <turn>` | Show turns around a search hit | `graph context 8cdc1d85 286 --window 3` |
+| `graph context <src_id\|tmux_name> last` | Show latest turns of a source | `graph context auto-0506-001257 last --window 5` |
+| `graph tail <src_id\|tmux_name> [N]` | Last N turns of a session (default 10) | `graph tail auto-0506-001257 20` |
 | `graph sources` | List sources | `graph sources --project jira --type docs` |
 | `graph sources --verbose` | List sources with file paths | `graph sources -v --limit 5` |
 | `graph projects` | Show all projects with source counts | |
@@ -65,7 +66,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph bead "title"` | Create bead with provenance link | `graph bead "Fix X" --source 8cdc1d85 --turns 286` |
 | `graph agent-runs` | Discover and ingest subagent traces | `graph agent-runs --list` |
 | `graph sessions --all` | Ingest latest session data (107ms) | Run before searching for recent content |
-| `graph sessions --status` | Compact session status table (live-only; add `--since` to include recent dead sessions) | `graph sessions --status --since 12h` |
+| `graph sessions --status` | Compact session status table with SOURCE column (live-only; add `--since` to include recent dead sessions). Pass the tmux name straight to `graph tail`/`context`/`read`. | `graph sessions --status --since 12h` |
 | `graph wait <bead-id>` | Block until a dispatched bead completes | `graph wait auto-x7wr --timeout 900` |
 | `graph dispatch` | Show running/queued dispatch state | `graph dispatch runs --failed` |
 | `graph dispatch status <bead-id>` | Post-dispatch detail: decision, experience, session links | `graph dispatch status auto-yz29` |
