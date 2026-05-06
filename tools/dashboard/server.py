@@ -7657,6 +7657,9 @@ def _diag_format_text_table(payload: dict) -> str:
         f"restores={len(bus.get('restore_history', []) or [])}"
     )
     lines = [header_glyph, header_main]
+    warnings = payload.get("warnings") or []
+    for warning in warnings:
+        lines.append(f"WARN: {warning}")
     for row in rows:
         sid = row.get("session_id", "?")
         f = row.get("file") or {}
@@ -7718,6 +7721,7 @@ async def api_diag_sessions(request):
     _diag_janitor_sweep()
 
     requested = request.query_params.get("session")
+    diag_warnings: list[str] = []
     # Resolve sessions the diag should cover.
     try:
         registry = session_monitor.get_registry()
@@ -7743,8 +7747,12 @@ async def api_diag_sessions(request):
                     "is_live": bool(row.get("is_live", 1)),
                 })
                 seen_ids.add(session_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.exception("diag: dashboard_db live-session fallback failed")
+        diag_warnings.append(
+            "dashboard_db live-session fallback failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
     if requested:
         sessions = [s for s in registry if s.get("session_id") == requested]
         # If not in live registry, still allow (covers dead-but-known tabs).
@@ -7899,6 +7907,7 @@ async def api_diag_sessions(request):
         "clients_responded": len(client_replies),
         "bus": bus_block,
         "rows": rows,
+        "warnings": diag_warnings,
     }
 
     # Best-effort cleanup — janitor handles the rest.

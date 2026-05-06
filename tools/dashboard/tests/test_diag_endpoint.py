@@ -223,6 +223,29 @@ class TestDiagSessionsBasics:
         assert "align" in text
         assert "auto-1" in text
 
+    def test_live_session_fallback_surfaces_warning_when_db_read_fails(self, diag_env):
+        server_mod, tmp_path, db_path = diag_env
+        from starlette.testclient import TestClient
+        from tools.dashboard.dao import dashboard_db as db_mod
+
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "auto-1.jsonl"
+        _write_entries(jsonl, _toolish_entries())
+        _insert_session(db_path, "auto-1", str(jsonl), file_offset=jsonl.stat().st_size)
+
+        _short_window(server_mod)
+        with patch.object(db_mod, "get_live_sessions", side_effect=RuntimeError("db fallback boom")):
+            with TestClient(server_mod.app) as client:
+                resp = client.get("/api/diag/sessions")
+                text_resp = client.get("/api/diag/sessions?format=text")
+
+        body = resp.json()
+        assert resp.status_code == 200
+        assert body["warnings"], "diag response should surface fallback failures"
+        assert "RuntimeError: db fallback boom" in body["warnings"][0]
+        assert "WARN: dashboard_db live-session fallback failed: RuntimeError: db fallback boom" in text_resp.text
+
 
 # ── POST /api/diag/client — aggregator routing ─────────────────────────
 
