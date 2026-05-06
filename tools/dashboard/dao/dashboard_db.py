@@ -211,7 +211,9 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN model TEXT DEFAULT NULL")
         _conn.commit()
-    # Migrate: harness_token column (auto-ghhdg — rename from claude_token_alias).
+    # Migrate: harness_token column (auto-ghhdg — rename from claude_token_alias;
+    # auto-08n3f — values switched from operator alias strings to Anthropic
+    # org UUIDs joined to ``dashboard.claude.credentials.alias`` for display).
     # Three cases:
     #   1. fresh DB → CREATE TABLE already added harness_token, nothing to do.
     #   2. legacy DB with claude_token_alias → RENAME COLUMN.

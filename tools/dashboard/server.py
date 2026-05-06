@@ -8358,13 +8358,36 @@ def _publish_harness_usage_snapshot() -> None:
         org=org,
         collector=_collect_codex_usage_payloads,
     )
-    _maybe_publish_harness_usage(
-        harness="claude",
-        rows=claude_rows,
-        updated_at=updated_at,
-        org=org,
-        collector=_collect_claude_usage_payloads,
+    # auto-08n3f: Claude usage is enumerated from substrate-stored
+    # credentials, not from live sessions, so the publisher runs every
+    # tick regardless of how many Claude sessions are alive. Codex still
+    # gates on live sessions because its telemetry is harvested from
+    # session transcripts.
+    _publish_claude_harness_usage_unconditional(
+        updated_at=updated_at, org=org,
     )
+
+
+def _publish_claude_harness_usage_unconditional(
+    *, updated_at: str, org: str,
+) -> None:
+    """Run the Claude harness-usage collector and persist every payload.
+
+    Bypasses the `rows`-based dedup in :func:`_maybe_publish_harness_usage`
+    because Claude usage no longer depends on live sessions — every
+    installed credentials row gets a tick whether or not anyone is
+    burning it. The collector itself decides whether each row writes
+    `ok` or `unavailable`.
+    """
+    payloads = _collect_claude_usage_payloads([], updated_at)
+    for key, payload in payloads:
+        graph_ops.upsert_by_key(
+            _harness_usage_settings.HARNESS_USAGE_SET_ID,
+            _harness_usage_settings.HARNESS_USAGE_SCHEMA_REVISION,
+            key,
+            payload,
+            org=org,
+        )
 
 
 def _maybe_publish_harness_usage(
@@ -8455,84 +8478,109 @@ def _collect_codex_usage_payloads(
     )]
 
 
-def _claude_token_row_key(identity_id: str, alias: str | None) -> str:
-    """Compose a unique row key per (Anthropic org, token alias).
-
-    Tokens that point at the same Anthropic org would otherwise collapse
-    onto a single ``claude:org:<uuid>`` row, with the alias field racing
-    between the two pollers. Suffixing the alias keeps each
-    ``.setup-token.<alias>`` file's telemetry on its own row so the
-    dashboard can render both.
-    """
-    base = _harness_usage_settings.make_harness_usage_key("claude", identity_id)
-    if alias:
-        return f"{base}:{alias}"
-    return base
-
-
 def _collect_claude_usage_payloads(
     rows: list[dict[str, Any]],
     updated_at: str,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Build harness-usage payloads for every host-side Claude token file.
+    """Build harness-usage payloads for every installed Claude credential.
 
-    auto-10lsv: refactored from the live-session walk to direct token
-    enumeration. Each ``~/.claude/.setup-token*`` produces one row,
-    keyed ``claude:org:<uuid>:<alias>`` with the org id from the /usage
-    response header and the operator-facing alias from the filename.
-    The host-session resolution-dir dependency is gone — the dashboard
-    works correctly even when ``tmux_sessions.resolution_dir`` is null.
+    auto-08n3f: enumerates ``dashboard.claude.credentials`` rows instead
+    of walking host ``~/.claude/.setup-token*`` files. Each row carries
+    a fresh ``access_token`` (the OAuth refresh poller — bead 3 — keeps
+    it ahead of the 8h Anthropic expiry); we use it as the Bearer for
+    GET ``/api/oauth/usage``. The harness-usage row is keyed by the
+    bare ``claude:org:<uuid>`` (no alias suffix), since the credentials
+    set is keyed-per-entity by org UUID and one row per org is the
+    natural shape. Alias is kept on the harness-usage payload as
+    informational so existing UI rendering paths still see it.
 
     The ``rows`` parameter is retained for symmetry with
     ``_collect_codex_usage_payloads`` (the publisher dispatches on
     harness) but is intentionally unused here; sessions no longer
     contribute Claude usage telemetry.
-    """
-    del rows  # Claude usage is enumerated directly from token files now.
 
-    from agents.session_launcher import (
-        alias_for_token_file,
-        list_claude_token_files,
+    On failure (HTTP 4xx / 5xx / network) we still write a row for the
+    org with ``status='unavailable'`` so the dashboard footer can show
+    "telemetry unavailable for <alias>" rather than silently dropping
+    the account — matches the codex-side pattern.
+    """
+    del rows  # Claude usage is enumerated from substrate credentials now.
+
+    from tools.graph import ops as graph_ops_local
+    from tools.graph.schemas.claude_credentials import (
+        CLAUDE_CREDENTIALS_SET_ID,
     )
 
     payloads: dict[str, dict[str, Any]] = {}
-    now_ms = int(time.time() * 1000)
-    token_files = list_claude_token_files()
-    if not token_files:
+    org = _harness_usage_org()
+    try:
+        members = graph_ops_local.read_set(CLAUDE_CREDENTIALS_SET_ID, org=org)
+    except Exception:
+        logger.exception(
+            "claude harness usage: read_set(%s) failed; tick aborted",
+            CLAUDE_CREDENTIALS_SET_ID,
+        )
+        return []
+    rows_iter = list(getattr(members, "members", []) or [])
+    if not rows_iter:
         return []
 
-    for token_file in token_files:
-        alias = alias_for_token_file(token_file)
-        bundle = _harness_usage_settings.load_claude_credential_bundle(token_file)
-        if bundle is None:
-            continue
-        expires_at_ms = bundle.get("expires_at_ms")
-        if isinstance(expires_at_ms, int) and expires_at_ms <= now_ms:
+    for member in rows_iter:
+        payload = member.payload if isinstance(member.payload, dict) else {}
+        org_uuid = member.key
+        alias = payload.get("alias") if isinstance(payload.get("alias"), str) else None
+        access_token = payload.get("access_token")
+        identity_id = f"org:{org_uuid}"
+        row_key = _harness_usage_settings.make_harness_usage_key(
+            "claude", identity_id,
+        )
+        if not isinstance(access_token, str) or not access_token:
+            payloads[row_key] = _harness_usage_settings.make_unavailable_usage_payload(
+                harness="claude",
+                identity_id=identity_id,
+                identity_label=_harness_usage_settings.short_identity_label(
+                    "org", org_uuid,
+                ),
+                source="oauth_usage",
+                note="credentials row missing access_token",
+                updated_at=updated_at,
+                account_id=org_uuid,
+                alias=alias,
+            )
             continue
         try:
-            usage_body, response_headers = _fetch_claude_oauth_usage(
-                bundle["access_token"],
-            )
-        except Exception:
+            usage_body, _headers = _fetch_claude_oauth_usage(access_token)
+        except Exception as exc:
             logger.exception(
-                "claude harness usage: /usage call failed for token %r",
-                alias,
+                "claude harness usage: /usage call failed for org=%s alias=%r",
+                org_uuid, alias,
+            )
+            payloads[row_key] = _harness_usage_settings.make_unavailable_usage_payload(
+                harness="claude",
+                identity_id=identity_id,
+                identity_label=_harness_usage_settings.short_identity_label(
+                    "org", org_uuid,
+                ),
+                source="oauth_usage",
+                note=f"/usage call failed: {type(exc).__name__}: {exc}"[:200],
+                updated_at=updated_at,
+                account_id=org_uuid,
+                alias=alias,
             )
             continue
-
-        org_id = response_headers.get("anthropic-organization-id")
-        if not org_id:
-            # No org id = no canonical identity. Skip rather than write a
-            # row keyed off the alias alone; the next poll cycle retries.
-            continue
-        payload = _harness_usage_settings.normalize_claude_usage_payload(
-            bundle=bundle,
+        # The credentials row is the source of truth for org identity now;
+        # we don't need the response header. Build the payload with the row's
+        # own org_uuid so failure rows and ok rows key consistently.
+        payloads[row_key] = _harness_usage_settings.normalize_claude_usage_payload(
+            bundle={
+                "subscription_type": None,
+                "rate_limit_tier": None,
+            },
             usage_body=usage_body,
-            org_id=org_id,
+            org_id=org_uuid,
             updated_at=updated_at,
             alias=alias,
         )
-        payloads[_claude_token_row_key(payload["identity_id"], alias)] = payload
 
     return sorted(payloads.items(), key=lambda item: item[0])
 

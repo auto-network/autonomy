@@ -32,45 +32,6 @@ def _count_setting_rows(db_path, set_id: str, key: str) -> int:
         conn.close()
 
 
-def test_load_claude_credential_bundle_from_credentials_json(tmp_path):
-    creds = tmp_path / ".credentials.json"
-    creds.write_text(json.dumps({
-        "claudeAiOauth": {
-            "accessToken": "sk-ant-oat01-access-token-value",
-            "refreshToken": "sk-ant-oat01-refresh-token-value",
-            "expiresAt": 1777766417068,
-            "subscriptionType": "max",
-            "rateLimitTier": "default_scale_tier",
-        },
-    }))
-
-    bundle = hus.load_claude_credential_bundle(creds)
-
-    assert bundle is not None
-    assert bundle["source_kind"] == "credentials_json"
-    assert bundle["access_token"] == "sk-ant-oat01-access-token-value"
-    assert bundle["refresh_token"] == "sk-ant-oat01-refresh-token-value"
-    assert bundle["subscription_type"] == "max"
-    assert bundle["rate_limit_tier"] == "default_scale_tier"
-    assert bundle["expires_at_ms"] == 1777766417068
-    # auto-10lsv: fingerprint dropped — identity is now keyed by org uuid
-    # plus the operator-facing alias from the filename, not a hash of the
-    # refresh token.
-    assert "fingerprint" not in bundle
-
-
-def test_load_claude_credential_bundle_from_setup_token_file(tmp_path):
-    primary = tmp_path / ".setup-token.primary"
-    primary.write_text("sk-ant-oat01-primary-token\n")
-
-    bundle = hus.load_claude_credential_bundle(primary)
-
-    assert bundle is not None
-    assert bundle["source_kind"] == "setup_token"
-    assert bundle["access_token"] == "sk-ant-oat01-primary-token"
-    assert "fingerprint" not in bundle
-
-
 def test_normalize_claude_usage_payload_uses_org_identity():
     payload = hus.normalize_claude_usage_payload(
         bundle={
@@ -279,10 +240,17 @@ def test_codex_harness_state_preserves_last_user_message_at():
     assert state["windows"]["short"]["used_percent"] == 4.0
 
 
-def test_publish_harness_usage_snapshot_skips_when_no_new_user_messages(monkeypatch):
+def test_publish_harness_usage_snapshot_skips_codex_when_no_new_user_messages(monkeypatch):
+    """Codex telemetry comes from session transcripts, so the publisher
+    dedups on (session signature × latest user message) — replaying the
+    same state twice produces one write.
+
+    auto-08n3f: Claude usage is now substrate-backed and runs every
+    tick unconditionally, so this dedup applies to codex only.
+    """
     rows = [{
-        "tmux_name": "claude-a",
-        "harness": "claude",
+        "tmux_name": "codex-a",
+        "harness": "codex",
         "harness_state": json.dumps({
             "last_user_message_at": "2026-05-02T21:00:00Z",
         }),
@@ -293,20 +261,64 @@ def test_publish_harness_usage_snapshot_skips_when_no_new_user_messages(monkeypa
     monkeypatch.setattr(
         server,
         "_collect_codex_usage_payloads",
+        lambda rows, updated_at: [(
+            "codex:default",
+            hus.make_unavailable_usage_payload(
+                harness="codex",
+                identity_id="default",
+                identity_label="default",
+                source="transcript",
+                note="test",
+                updated_at=updated_at,
+            ),
+        )],
+    )
+    monkeypatch.setattr(
+        server,
+        "_collect_claude_usage_payloads",
+        lambda rows, updated_at: [],
+    )
+    monkeypatch.setattr(
+        server.graph_ops,
+        "upsert_by_key",
+        lambda set_id, schema_revision, key, payload, org=None, state="raw": writes.append(key) or "sid",
+    )
+    monkeypatch.setattr(server, "operator_is_idle", lambda threshold_minutes=15: False)
+    server._harness_usage_last_refresh_context.clear()
+
+    server._publish_harness_usage_snapshot()
+    server._publish_harness_usage_snapshot()
+
+    assert writes == ["codex:default"]
+
+
+def test_publish_harness_usage_snapshot_runs_claude_every_tick(monkeypatch):
+    """auto-08n3f: Claude path is decoupled from live sessions, so it
+    runs every tick regardless of the session-signature dedup that
+    governs codex.
+    """
+    writes: list[str] = []
+
+    monkeypatch.setattr(server.dashboard_db, "get_live_sessions", lambda: [])
+    monkeypatch.setattr(
+        server,
+        "_collect_codex_usage_payloads",
         lambda rows, updated_at: [],
     )
     monkeypatch.setattr(
         server,
         "_collect_claude_usage_payloads",
         lambda rows, updated_at: [(
-            "claude:test",
+            "claude:org:org-X",
             hus.make_unavailable_usage_payload(
                 harness="claude",
-                identity_id="test",
-                identity_label="test",
+                identity_id="org:org-X",
+                identity_label="org X",
                 source="oauth_usage",
                 note="test",
                 updated_at=updated_at,
+                account_id="org-X",
+                alias="gmail",
             ),
         )],
     )
@@ -321,7 +333,8 @@ def test_publish_harness_usage_snapshot_skips_when_no_new_user_messages(monkeypa
     server._publish_harness_usage_snapshot()
     server._publish_harness_usage_snapshot()
 
-    assert writes == ["claude:test"]
+    # Two ticks → two writes. The substrate enumeration runs every tick.
+    assert writes == ["claude:org:org-X", "claude:org:org-X"]
 
 
 def test_operator_is_idle_delegates_to_presence(monkeypatch):
@@ -358,31 +371,50 @@ _CLAUDE_USAGE_BODY = {
 }
 
 
-def _seed_token_files(creds_dir, monkeypatch, files: dict[str, str]) -> None:
-    """Drop ``.setup-token*`` files into ``creds_dir`` and point the
-    launcher at it. ``files`` maps filename → token text."""
-    creds_dir.mkdir(parents=True, exist_ok=True)
-    for name, body in files.items():
-        (creds_dir / name).write_text(body)
-    monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(creds_dir))
+def _install_credentials(graph_db_env, *, alias: str, org_uuid: str,
+                         access_token: str = "fake-access") -> None:
+    """Install one ``dashboard.claude.credentials`` row directly via
+    ``ops.upsert_by_key`` so the substrate-backed collector can read it.
+
+    Mirrors what ``graph claude install`` writes after a real consumer
+    OAuth flow — the harness-usage poller doesn't care how the row got
+    there, only that it carries the rotating bundle.
+    """
+    from tools.graph.schemas.claude_credentials import (
+        CLAUDE_CREDENTIALS_REVISION,
+        CLAUDE_CREDENTIALS_SET_ID,
+    )
+    ops.upsert_by_key(
+        CLAUDE_CREDENTIALS_SET_ID,
+        CLAUDE_CREDENTIALS_REVISION,
+        org_uuid,
+        {
+            "alias": alias,
+            "organization_name": f"{alias}-org",
+            "account_email": f"{alias}@example.com",
+            "access_token": access_token,
+            "refresh_token": f"refresh-{alias}",
+            "expires_at_ms": 9999999999999,
+            "scopes": ["user:profile"],
+        },
+        org=ops.CALLER_ORG,
+    )
 
 
-def test_collect_claude_usage_writes_one_row_per_token_file(tmp_path, monkeypatch):
-    """auto-10lsv: each ``.setup-token*`` produces its own row, keyed by
-    org+alias. Different orgs → distinct ``claude:org:<uuid>:<alias>`` keys."""
-    _seed_token_files(tmp_path, monkeypatch, {
-        ".setup-token": "tok-default",
-        ".setup-token.primary": "tok-primary",
-    })
+def test_collect_claude_usage_writes_one_row_per_credential(graph_db_env, monkeypatch):
+    """auto-08n3f: substrate-backed enumeration. Each
+    ``dashboard.claude.credentials`` row produces one harness-usage row,
+    keyed by the bare ``claude:org:<uuid>`` (no alias suffix)."""
+    _install_credentials(graph_db_env, alias="default",
+                         org_uuid="org-DEFAULT", access_token="tok-default")
+    _install_credentials(graph_db_env, alias="primary",
+                         org_uuid="org-PRIMARY", access_token="tok-primary")
 
     fetch_calls: list[str] = []
 
     def _fake_fetch(token):
         fetch_calls.append(token)
-        # Distinct org per token so the rows don't collapse onto each
-        # other — matches the operator's "two different accounts" case.
-        org = "org-DEFAULT" if token == "tok-default" else "org-PRIMARY"
-        return _CLAUDE_USAGE_BODY, {"anthropic-organization-id": org}
+        return _CLAUDE_USAGE_BODY, {}
 
     monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
 
@@ -391,16 +423,17 @@ def test_collect_claude_usage_writes_one_row_per_token_file(tmp_path, monkeypatc
     assert sorted(fetch_calls) == ["tok-default", "tok-primary"]
     keys = [k for k, _ in payloads]
     assert keys == sorted([
-        "claude:org:org-DEFAULT:default",
-        "claude:org:org-PRIMARY:primary",
+        "claude:org:org-DEFAULT",
+        "claude:org:org-PRIMARY",
     ])
     by_alias = {p["alias"]: p for _, p in payloads}
     assert by_alias["default"]["account_id"] == "org-DEFAULT"
     assert by_alias["primary"]["account_id"] == "org-PRIMARY"
 
 
-def test_collect_claude_usage_returns_nothing_when_no_token_files(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))  # exists but empty
+def test_collect_claude_usage_returns_nothing_when_no_credentials(
+    graph_db_env, monkeypatch,
+):
     monkeypatch.setattr(
         server,
         "_fetch_claude_oauth_usage",
@@ -412,56 +445,53 @@ def test_collect_claude_usage_returns_nothing_when_no_token_files(tmp_path, monk
     assert payloads == []
 
 
-def test_collect_claude_usage_swallows_oauth_errors_per_token(tmp_path, monkeypatch):
-    """One token's /usage call exploding doesn't suppress the other token's row."""
-    _seed_token_files(tmp_path, monkeypatch, {
-        ".setup-token": "tok-default",
-        ".setup-token.primary": "tok-primary",
-    })
+def test_collect_claude_usage_writes_unavailable_on_failure(
+    graph_db_env, monkeypatch,
+):
+    """One credential's /usage call failing produces an
+    ``unavailable``-status row for that org while other credentials
+    still get an ``ok`` row."""
+    _install_credentials(graph_db_env, alias="default",
+                         org_uuid="org-DEFAULT", access_token="tok-default")
+    _install_credentials(graph_db_env, alias="primary",
+                         org_uuid="org-PRIMARY", access_token="tok-primary")
 
     def _fake_fetch(token):
         if token == "tok-default":
             raise RuntimeError("Claude usage API returned HTTP 401")
-        return _CLAUDE_USAGE_BODY, {"anthropic-organization-id": "org-uuid-PRIMARY"}
+        return _CLAUDE_USAGE_BODY, {}
 
     monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
 
-    payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
-
-    keys = [k for k, _ in payloads]
-    assert keys == ["claude:org:org-uuid-PRIMARY:primary"]
-
-
-def test_collect_claude_usage_skips_when_org_header_missing(tmp_path, monkeypatch):
-    """No org id in /usage response → no row (org id is required)."""
-    _seed_token_files(tmp_path, monkeypatch, {".setup-token": "tok-default"})
-    monkeypatch.setattr(
-        server, "_fetch_claude_oauth_usage", lambda token: (_CLAUDE_USAGE_BODY, {}),
+    payloads = dict(
+        server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z"),
     )
 
-    payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
+    assert set(payloads) == {"claude:org:org-DEFAULT", "claude:org:org-PRIMARY"}
+    assert payloads["claude:org:org-DEFAULT"]["status"] == "unavailable"
+    assert "HTTP 401" in (payloads["claude:org:org-DEFAULT"].get("note") or "")
+    assert payloads["claude:org:org-DEFAULT"]["account_id"] == "org-DEFAULT"
+    assert payloads["claude:org:org-PRIMARY"]["status"] == "ok"
 
-    assert payloads == []
 
+def test_collect_claude_usage_no_session_dependency(graph_db_env, monkeypatch):
+    """Acceptance criterion: poller works with zero live sessions.
 
-def test_collect_claude_usage_no_walk_up_dependency(tmp_path, monkeypatch):
-    """Acceptance criterion #6: poller works regardless of session resolution_dir.
-
-    With two ``.setup-token*`` files on disk and zero live sessions on the
-    dashboard (rows=[]), the poller still produces telemetry."""
-    _seed_token_files(tmp_path, monkeypatch, {
-        ".setup-token": "tok-default",
-    })
+    The substrate-backed enumeration is decoupled from
+    ``tmux_sessions`` entirely, so handing in ``rows=[]`` still
+    produces telemetry."""
+    _install_credentials(graph_db_env, alias="default",
+                         org_uuid="org-X", access_token="tok-default")
     monkeypatch.setattr(
         server,
         "_fetch_claude_oauth_usage",
-        lambda token: (_CLAUDE_USAGE_BODY, {"anthropic-organization-id": "org-X"}),
+        lambda token: (_CLAUDE_USAGE_BODY, {}),
     )
 
     payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
 
     keys = [k for k, _ in payloads]
-    assert keys == ["claude:org:org-X:default"]
+    assert keys == ["claude:org:org-X"]
 
 
 # ── auto-10lsv: declarative schema migration ───────────────────

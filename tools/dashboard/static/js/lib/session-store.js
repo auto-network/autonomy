@@ -52,6 +52,7 @@ document.addEventListener('alpine:init', function() {
         if (s.harness) store.harness = s.harness;
         if (s.model !== undefined) store.model = s.model;
         if (s.harness_token !== undefined) store.harnessToken = s.harness_token;
+        if (s.harness_token_alias !== undefined) store.harnessTokenAlias = s.harness_token_alias;
       }
     })
     .catch(function(e) { console.warn('[session-store] seed fetch error', e); });
@@ -89,7 +90,8 @@ window.getSessionStore = function(sessionId) {
       pendingToolIds: {},          // server-derived: tool_id -> true (set-like object)
       harness: '',                 // auto-ngis4: claude | codex | future
       model: null,                 // auto-ngis4: most-recent assistant-turn model id
-      harnessToken: null,          // auto-ghhdg: harness-agnostic credential pointer (org UUID once bead 4 lands)
+      harnessToken: null,          // auto-08n3f: Anthropic org UUID (substrate key on dashboard.claude.credentials)
+      harnessTokenAlias: null,     // auto-08n3f: friendly alias from dashboard.claude.credentials.alias (UI display)
       loaded: false,
       _loading: false,   // true during initial fetch — buffers SSE
       _pendingSSE: [],
@@ -380,6 +382,7 @@ window.ensureSessionMessages = function() {
       if (s.harness) store.harness = s.harness;
       if (s.model !== undefined) store.model = s.model;
       if (s.harness_token !== undefined) store.harnessToken = s.harness_token;
+      if (s.harness_token_alias !== undefined) store.harnessTokenAlias = s.harness_token_alias;
     }
     // Mark removed sessions as dead
     var allSessions = Alpine.store('sessions');
