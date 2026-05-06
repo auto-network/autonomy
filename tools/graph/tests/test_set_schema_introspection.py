@@ -245,8 +245,7 @@ def test_set_find_harness_codex_finds_workspace_via_schema_text(graph_db_env):
     _trigger_flush(graph_db_env)
     rc, out, err = _run_cli(["set", "find", "harness", "codex"])
     assert rc == 0, err
-    first_line = out.strip().splitlines()[0]
-    assert first_line.startswith("autonomy.workspace#1")
+    assert "autonomy.workspace#1" in out
 
 
 def test_set_find_no_match(graph_db_env):

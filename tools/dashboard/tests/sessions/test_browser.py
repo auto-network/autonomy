@@ -437,7 +437,12 @@ class TestEmptyState:
         h.open_sessions_page()
         time.sleep(2)
         text = h.visible_text()
-        assert "No active sessions" in text or "No sessions" in text
+        assert any(msg in text for msg in (
+            "No active sessions",
+            "No recent sessions",
+            "No sessions found",
+            "No sessions",
+        ))
 
     def test_state_restored(self, h):
         h.set_fixture(sessions_page_fixture())

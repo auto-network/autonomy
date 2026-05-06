@@ -343,6 +343,19 @@
           try {
             var res = await fetch('/api/dispatch/tail/' + encodeURIComponent(runDir) + '?after=0');
             if (!res.ok) {
+              try {
+                var detailRes = await fetch('/api/session/' + encodeURIComponent(runDir));
+                if (detailRes.ok) {
+                  var detail = await detailRes.json();
+                  await this.configure({
+                    sessionId: detail.session_id || runDir,
+                    project: detail.project || project,
+                    tmuxSession: detail.session_id || tmuxSession || runDir,
+                    _isLive: isLiveHint !== undefined ? !!isLiveHint : !!detail.is_live,
+                  });
+                  return;
+                }
+              } catch (fallbackErr) {}
               this.state = 'error';
               this.errorMsg = 'Failed to load dispatch run';
               return;
@@ -402,6 +415,19 @@
             this._refreshWorkspaceStatus();
             return;
           } catch (e) {
+            try {
+              var sessionDetailRes = await fetch('/api/session/' + encodeURIComponent(runDir));
+              if (sessionDetailRes.ok) {
+                var sessionDetail = await sessionDetailRes.json();
+                await this.configure({
+                  sessionId: sessionDetail.session_id || runDir,
+                  project: sessionDetail.project || project,
+                  tmuxSession: sessionDetail.session_id || tmuxSession || runDir,
+                  _isLive: isLiveHint !== undefined ? !!isLiveHint : !!sessionDetail.is_live,
+                });
+                return;
+              }
+            } catch (fallbackErr2) {}
             this.state = 'error';
             this.errorMsg = 'Failed to load: ' + (e.message || e);
             return;

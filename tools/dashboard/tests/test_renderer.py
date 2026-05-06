@@ -211,7 +211,11 @@ class TestQueuedClaudeIdentity:
     """
 
     def test_real_claude_fixture_keeps_user_uuid_on_deduped_queue_entry(self):
-        fixture = Path("/workspace/output/auto-0503-173500-bad-correction-lines-426-433.jsonl")
+        fixture = (
+            Path(__file__).resolve().parent
+            / "fixtures"
+            / "auto-0503-173500-bad-correction-lines-426-433.jsonl"
+        )
         entries = _parse_jsonl_fixture(fixture)
         target = next(
             e for e in entries

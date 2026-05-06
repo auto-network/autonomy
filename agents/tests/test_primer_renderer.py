@@ -469,8 +469,9 @@ def test_enabled_capability_renders_primer_section():
     assert "### autonomy/github — source_control@1" in out
     # Deterministic mount target announced to the agent.
     assert f"{CAPABILITIES_MOUNT_DIR}/autonomy-github" in out
-    # The shipped placeholder primer content shows up.
-    assert "GitHub capability — primer projection" in out
+    # The live capability primer content is embedded verbatim.
+    assert "## GitHub capability" in out
+    assert "`gh` is on PATH" in out
 
 
 def test_disabled_capability_does_not_render():

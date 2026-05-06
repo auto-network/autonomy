@@ -30,6 +30,8 @@ from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS, snake_case
 def _isolate_registry():
     schemas_snap = dict(SCHEMAS)
     upcon_snap = dict(UPCONVERTERS)
+    SCHEMAS.clear()
+    UPCONVERTERS.clear()
     try:
         yield
     finally:

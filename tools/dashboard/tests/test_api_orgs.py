@@ -35,11 +35,13 @@ def _isolate_schema_registry():
 
 @pytest.fixture
 def stub_org_schema():
+    from tools.graph.schemas.registry import unregister_schema
+    unregister_schema("autonomy.org", 1)
+
     class OrgV1(schemas.SettingSchema):
         set_id = "autonomy.org"
         schema_revision = 1
 
-    schemas.register_schema("autonomy.org", 1, OrgV1)
     return OrgV1
 
 
