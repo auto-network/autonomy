@@ -106,6 +106,10 @@ def _post_refresh(refresh_token: str) -> tuple[int, dict[str, Any]]:
     On a captured ``HTTPError`` we still parse the error body so the caller
     can read ``error`` / ``error_description`` for classification. Network
     errors propagate so the caller's ``except`` can route them as transient.
+
+    Logs the request boundary with HTTP code + duration on every call so
+    production traces can attribute each refresh to its outcome. The
+    refresh_token itself is never logged.
     """
     encoded = json.dumps({
         "grant_type": "refresh_token",
@@ -121,6 +125,8 @@ def _post_refresh(refresh_token: str) -> tuple[int, dict[str, Any]]:
         },
         method="POST",
     )
+    logger.info("claude credentials refresh: POST %s grant_type=refresh_token", TOKEN_URL)
+    started = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body_bytes = resp.read()
@@ -128,12 +134,26 @@ def _post_refresh(refresh_token: str) -> tuple[int, dict[str, Any]]:
     except urllib.error.HTTPError as exc:
         body_bytes = exc.read() or b""
         status = exc.code
+    elapsed_ms = (time.monotonic() - started) * 1000
     try:
         body = json.loads(body_bytes.decode("utf-8") or "{}")
     except (json.JSONDecodeError, UnicodeDecodeError):
         body = {}
     if not isinstance(body, dict):
         body = {}
+    if 200 <= status < 300:
+        logger.info(
+            "claude credentials refresh: POST %s OK HTTP %d in %.1fms expires_in=%s",
+            TOKEN_URL, status, elapsed_ms, body.get("expires_in"),
+        )
+    else:
+        err_code = body.get("error") or ""
+        err_desc = body.get("error_description") or ""
+        logger.error(
+            "claude credentials refresh: POST %s FAILED HTTP %d in %.1fms: %s",
+            TOKEN_URL, status, elapsed_ms,
+            err_desc or err_code or repr(body_bytes[:200]),
+        )
     return status, body
 
 
@@ -264,7 +284,20 @@ def refresh_credential_row(
     refresh_tok = payload.get("refresh_token")
     if not isinstance(refresh_tok, str) or not refresh_tok:
         return None
+    alias = payload.get("alias") or "?"
+    org_name = payload.get("organization_name") or row.key
+    expires_at = payload.get("expires_at_ms")
+    remaining_ms = (expires_at - now_ms) if isinstance(expires_at, int) else None
+    logger.info(
+        "claude credentials refresh: starting alias=%r org=%r org_uuid=%s remaining_ms=%s",
+        alias, org_name, row.key, remaining_ms,
+    )
     result = refresh_one(refresh_tok)
+    if result.kind == "ok":
+        logger.info(
+            "claude credentials refresh: alias=%r org_uuid=%s OK (new expires_in=%s)",
+            alias, row.key, result.expires_in,
+        )
     new_payload = _build_payload_after_refresh(
         base=payload, result=result, now_ms=now_ms, now_iso=now_iso,
     )
