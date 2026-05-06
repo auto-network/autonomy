@@ -133,6 +133,7 @@ from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E40
 from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
 from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
 from tools.dashboard import worktree_directives as _worktree_directives  # noqa: E402, F401
+from tools.dashboard import claude_credentials_refresh as _claude_credentials_refresh  # noqa: E402
 from tools.graph import settings_ops  # noqa: E402
 
 # Activity tab notifications substrate (bead auto-5u8zb) — imported
@@ -12358,6 +12359,7 @@ routes = [
 _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
+_claude_credentials_refresh_task: asyncio.Task | None = None
 _settings_mediator_started: bool = False
 
 # Task* tile enricher — per-session taskId → subject/status map. Populated by
@@ -12385,6 +12387,7 @@ def _build_settings_mediator_services():
 
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
+    global _claude_credentials_refresh_task
     # Re-arm the emit hook on every lifespan startup. Module import
     # already wires it (so ASGITransport-based tests that skip lifespan
     # still get function-level emits), but we re-arm here so that
@@ -12458,6 +12461,10 @@ async def _on_startup():
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     if _should_run_harness_usage_poller():
         _harness_usage_poller_task = asyncio.create_task(_harness_usage_poller())
+    if _claude_credentials_refresh.should_run_credentials_refresh_poller():
+        _claude_credentials_refresh_task = asyncio.create_task(
+            _claude_credentials_refresh.credentials_refresh_poller()
+        )
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
         _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
@@ -12481,7 +12488,8 @@ async def _on_startup():
 
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
-    global _harness_usage_poller_task, _settings_mediator_started
+    global _harness_usage_poller_task, _claude_credentials_refresh_task
+    global _settings_mediator_started
     # Clear the emit hook so a subsequent process / test reload doesn't
     # leak a stale binding into a swapped module-level event_bus.
     try:
@@ -12506,6 +12514,7 @@ async def _on_shutdown():
             _dispatch_watcher_task,
             _mock_event_watcher_task,
             _harness_usage_poller_task,
+            _claude_credentials_refresh_task,
         )
         if t and not t.done()
     ]
@@ -12516,6 +12525,7 @@ async def _on_shutdown():
     _dispatch_watcher_task = None
     _mock_event_watcher_task = None
     _harness_usage_poller_task = None
+    _claude_credentials_refresh_task = None
     try:
         await session_monitor.stop()
     except Exception:
