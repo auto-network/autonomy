@@ -4338,11 +4338,12 @@ def cmd_turn_correction_suggest(args):
     if args.confidence is not None:
         payload["confidence"] = args.confidence
 
-    if args.json_output:
-        # One JSON object on a single line so the session parser can scan
-        # tool_result content and upconvert without fuzzy matching.
-        print(json.dumps(payload))
-    else:
+    # Default to JSON: that's the only form the session parser upconverts.
+    # The previous default (pretty-print) silently no-op'd from the
+    # parser's perspective — agents would see "✓ Suggested turn
+    # correction" and assume success while no overlay ever rendered.
+    # `--pretty` opts back into the human form for interactive use.
+    if args.pretty_output:
         print("  ✓ Suggested turn correction")
         if args.mode:
             print(f"    mode: {args.mode}")
@@ -4350,6 +4351,10 @@ def cmd_turn_correction_suggest(args):
             print(f"    reason: {args.reason}")
         if args.confidence is not None:
             print(f"    confidence: {args.confidence}")
+    else:
+        # One JSON object on a single line so the session parser can scan
+        # tool_result content and upconvert without fuzzy matching.
+        print(json.dumps(payload))
 
 
 _SHARE_OUTPUT_ROOT = Path("/workspace/output")
@@ -5108,7 +5113,16 @@ def main():
     )
     p_tc_suggest.add_argument(
         "--json", dest="json_output", action="store_true",
-        help="Emit one JSON object for parser upconversion (the contract)",
+        help="(default) emit one JSON object for parser upconversion. "
+             "Kept as an explicit flag for back-compat; the JSON form is "
+             "now the default since it's the only output the session "
+             "parser will upconvert into a turn_correction event.",
+    )
+    p_tc_suggest.add_argument(
+        "--pretty", dest="pretty_output", action="store_true",
+        help="Emit a human-readable summary instead of JSON. The pretty "
+             "form will NOT be picked up by the session parser — use only "
+             "for interactive operator inspection.",
     )
     p_tc_suggest.set_defaults(func=cmd_turn_correction_suggest)
 
