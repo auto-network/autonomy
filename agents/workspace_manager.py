@@ -562,10 +562,12 @@ def _repo_default_branch(repo: Path) -> str | None:
 def _refresh_local_branch_from_remote(repo: Path, branch: str) -> None:
     """Fast-forward ``refs/heads/<branch>`` from origin when safe.
 
-    Managed clones can carry local-only integration commits that should win as
-    the launch base for reused worktrees and read-only mounts. Preserve those
-    commits; only rewrite the local branch ref when it is missing or is merely
-    behind the fetched remote-tracking branch.
+    Managed clones should normally track origin exactly. The only supported
+    case where the local integration branch may intentionally diverge is when
+    the dashboard explicitly synced it from another checkout (``base_source``
+    or the operator-triggered sync-base path). Preserve only that explicit
+    synced-source branch; otherwise rewrite local divergence back to origin so
+    stale accidental clone commits cannot pin future launches.
     """
     local_ref = f"refs/heads/{branch}"
     remote_ref = f"refs/remotes/origin/{branch}"
@@ -579,7 +581,12 @@ def _refresh_local_branch_from_remote(repo: Path, branch: str) -> None:
 
     local_head = _git_output(["rev-parse", "--verify", local_ref], repo, timeout=15)[1].strip()
     remote_head = _git_output(["rev-parse", "--verify", remote_ref], repo, timeout=15)[1].strip()
-    if not local_head or not remote_head or local_head == remote_head:
+    if not local_head or not remote_head:
+        return
+    sync_head = _managed_clone_synced_source_head(repo, branch)
+    if local_head == remote_head:
+        if sync_head:
+            _managed_clone_clear_synced_source_ref(repo, branch)
         return
 
     rc, _, _ = _git_output(
@@ -589,10 +596,23 @@ def _refresh_local_branch_from_remote(repo: Path, branch: str) -> None:
     )
     if rc == 0:
         _git_output(["update-ref", local_ref, remote_ref], repo, timeout=15)
+        _managed_clone_clear_synced_source_ref(repo, branch)
         return
 
+    if sync_head and sync_head == local_head:
+        logger.info(
+            "workspace: preserving explicitly synced local %s in %s (local=%s remote=%s)",
+            branch,
+            repo,
+            local_head,
+            remote_head,
+        )
+        return
+
+    _git_output(["update-ref", local_ref, remote_ref], repo, timeout=15)
+    _managed_clone_clear_synced_source_ref(repo, branch)
     logger.info(
-        "workspace: preserving local %s in %s (local=%s remote=%s)",
+        "workspace: reset divergent local %s in %s back to origin (local=%s remote=%s)",
         branch,
         repo,
         local_head,
@@ -604,7 +624,7 @@ def _repo_integration_base_ref(repo: Path) -> str:
     """Return the best base ref for fresh worktrees and cleanup checks.
 
     Preference order:
-    - local default branch when it contains local-only integration work
+    - local default branch when it was explicitly synced from another checkout
     - remote-tracking default branch when local is simply behind upstream
     - ``origin/HEAD`` as a final fallback
     """
@@ -618,9 +638,13 @@ def _repo_integration_base_ref(repo: Path) -> str:
             local_head = _git_output(["rev-parse", "--verify", local_ref], repo, timeout=15)[1].strip()
             remote_head = _git_output(["rev-parse", "--verify", remote_ref], repo, timeout=15)[1].strip()
             if local_head and remote_head and local_head != remote_head:
+                sync_head = _managed_clone_synced_source_head(repo, branch)
+                if sync_head and sync_head == local_head:
+                    return branch
                 rc, _, _ = _git_output(["merge-base", "--is-ancestor", local_ref, remote_ref], repo, timeout=15)
                 if rc == 0:
                     return f"origin/{branch}"
+                return f"origin/{branch}"
             return branch
         if local_ok:
             return branch
@@ -646,6 +670,33 @@ def _autonomy_target_branch_and_head() -> tuple[str | None, str | None]:
     return branch, _repo_branch_head(REPO_ROOT, branch)
 
 
+def _managed_clone_synced_source_ref(branch: str) -> str:
+    """Ref that records an explicit non-origin source for ``branch``."""
+    return f"refs/dashboard/synced-source/{branch}"
+
+
+def _managed_clone_synced_source_head(repo: Path, branch: str) -> str | None:
+    """Return the head SHA for the explicit synced-source marker, if any."""
+    rc, out, _ = _git_output(
+        ["rev-parse", "--verify", _managed_clone_synced_source_ref(branch)],
+        repo,
+        timeout=15,
+    )
+    if rc != 0:
+        return None
+    head = out.strip()
+    return head or None
+
+
+def _managed_clone_clear_synced_source_ref(repo: Path, branch: str) -> None:
+    """Drop the explicit synced-source marker when origin resumes ownership."""
+    _git_output(
+        ["update-ref", "-d", _managed_clone_synced_source_ref(branch)],
+        repo,
+        timeout=15,
+    )
+
+
 def _sync_managed_clone_branch_ref(clone: Path, source_repo: Path, branch: str) -> None:
     """Sync ``clone``'s local branch ref from ``source_repo`` using a temp ref.
 
@@ -660,6 +711,10 @@ def _sync_managed_clone_branch_ref(clone: Path, source_repo: Path, branch: str) 
         )
         _run_git(
             ["update-ref", f"refs/heads/{branch}", temp_ref],
+            cwd=clone,
+        )
+        _run_git(
+            ["update-ref", _managed_clone_synced_source_ref(branch), temp_ref],
             cwd=clone,
         )
     finally:
