@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from datetime import datetime, timezone
@@ -49,6 +50,9 @@ from .schemas.claude_setup_tokens import (
     CLAUDE_SETUP_TOKENS_REVISION,
     CLAUDE_SETUP_TOKENS_SET_ID,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── helpers ──────────────────────────────────────────────────
@@ -232,22 +236,33 @@ def _run_console_flow() -> FlowResult:
 
 def _do_install_full(args: argparse.Namespace) -> int:
     """Drive the full install: consumer flow + console flow + mint + writes."""
+    logger.info("claude install: starting full install alias=%r", args.alias)
     try:
         consumer = _run_consumer_flow()
     except OAuthError as e:
+        logger.error("claude install: consumer flow failed alias=%r: %s", args.alias, e)
         print(f"Error during consumer login: {e}", file=sys.stderr)
         return 1
 
     org_uuid = consumer.token.organization_uuid
+    logger.info(
+        "claude install: consumer flow OK alias=%r org=%s account=%s",
+        args.alias, org_uuid, consumer.token.account_email,
+    )
     _alias_collision_check(args.alias, org_uuid)
 
     try:
         console = _run_console_flow()
     except OAuthError as e:
+        logger.error("claude install: console flow failed alias=%r: %s", args.alias, e)
         print(f"Error during console login: {e}", file=sys.stderr)
         return 1
 
     if console.token.organization_uuid != org_uuid:
+        logger.error(
+            "claude install: same-org check failed — consumer org=%s console org=%s",
+            org_uuid, console.token.organization_uuid,
+        )
         print(
             "Error: you logged in as different accounts the second time "
             f"({consumer.token.account_email} vs "
@@ -255,12 +270,16 @@ def _do_install_full(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    logger.info("claude install: console flow OK alias=%r org=%s (same-org confirmed)",
+                args.alias, org_uuid)
 
     try:
         raw_key = mint_setup_token(
             console_access_token=console.token.access_token,
         )
     except OAuthError as e:
+        logger.error("claude install: mint failed alias=%r org=%s: %s",
+                     args.alias, org_uuid, e)
         print(f"Error minting setup token: {e}", file=sys.stderr)
         return 1
 
@@ -269,6 +288,10 @@ def _do_install_full(args: argparse.Namespace) -> int:
     )
     _write_credentials_row(org_uuid=org_uuid, payload=payload)
     _write_setup_token_row(org_uuid=org_uuid, raw_key=raw_key)
+    logger.info(
+        "claude install: substrate writes OK alias=%r org=%s (credentials + setup_tokens)",
+        args.alias, org_uuid,
+    )
 
     print(
         f"Installed Claude account: alias={args.alias!r} "
@@ -283,8 +306,13 @@ def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
     setup-token row in place. Used when the year-long token is about to
     expire or has been revoked.
     """
+    logger.info("claude install: --refresh-setup-token alias=%r", args.alias)
     existing = _credentials_by_alias(args.alias)
     if existing is None:
+        logger.error(
+            "claude install: --refresh-setup-token alias=%r — no existing credentials row",
+            args.alias,
+        )
         print(
             f"Error: --refresh-setup-token requires an existing install for "
             f"alias {args.alias!r}; run `graph claude install --alias "
@@ -296,9 +324,18 @@ def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
     try:
         console = _run_console_flow()
     except OAuthError as e:
+        logger.error(
+            "claude install: --refresh-setup-token alias=%r console flow failed: %s",
+            args.alias, e,
+        )
         print(f"Error during console login: {e}", file=sys.stderr)
         return 1
     if console.token.organization_uuid != expected_org_uuid:
+        logger.error(
+            "claude install: --refresh-setup-token alias=%r same-org check failed "
+            "(expected=%s console=%s)",
+            args.alias, expected_org_uuid, console.token.organization_uuid,
+        )
         print(
             f"Error: console login resolved to org "
             f"{console.token.organization_uuid!r}, but alias {args.alias!r} "
@@ -312,9 +349,17 @@ def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
             console_access_token=console.token.access_token,
         )
     except OAuthError as e:
+        logger.error(
+            "claude install: --refresh-setup-token alias=%r org=%s mint failed: %s",
+            args.alias, expected_org_uuid, e,
+        )
         print(f"Error minting setup token: {e}", file=sys.stderr)
         return 1
     _write_setup_token_row(org_uuid=expected_org_uuid, raw_key=raw_key)
+    logger.info(
+        "claude install: --refresh-setup-token alias=%r org=%s OK (setup_tokens row replaced)",
+        args.alias, expected_org_uuid,
+    )
     print(
         f"Refreshed setup token for alias={args.alias!r} "
         f"org={expected_org_uuid!r}"
@@ -490,9 +535,12 @@ def cmd_claude_remove(args: argparse.Namespace) -> None:
         if answer not in ("y", "yes"):
             print("Aborted.")
             return
+    logger.info("claude remove: deleting alias=%r org=%s", alias, org_uuid)
     try:
         ops.remove_setting(cred.id, org=ops.CALLER_ORG)
     except Exception as e:  # noqa: BLE001 — surface to operator
+        logger.error("claude remove: credentials row delete failed alias=%r org=%s: %s",
+                     alias, org_uuid, e)
         print(f"Error removing credentials row: {e}", file=sys.stderr)
         sys.exit(1)
     setup = _setup_token_by_org_uuid(org_uuid)
@@ -500,8 +548,11 @@ def cmd_claude_remove(args: argparse.Namespace) -> None:
         try:
             ops.remove_setting(setup.id, org=ops.CALLER_ORG)
         except Exception as e:  # noqa: BLE001
+            logger.error("claude remove: setup_token row delete failed alias=%r org=%s: %s",
+                         alias, org_uuid, e)
             print(f"Error removing setup-token row: {e}", file=sys.stderr)
             sys.exit(1)
+    logger.info("claude remove: alias=%r org=%s OK (both rows deleted)", alias, org_uuid)
     print(f"Removed Claude account: alias={alias!r}.")
 
 
