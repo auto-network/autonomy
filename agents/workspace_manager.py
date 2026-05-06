@@ -1759,41 +1759,96 @@ def cherry_pick_session_worktree(
             f"(currently on {head_branch.strip() or 'detached'!r})"
         )
 
+    # Auto-stash any uncommitted host edits so cherry-pick can apply.
+    # Host working trees are *live* (uvicorn --reload watches the same
+    # files), so leaving the operator with no remediation but "stash or
+    # commit before cherry-picking" silently regressed deployed
+    # behaviour every time someone had unsaved tweaks. We stash, run
+    # the cherry-pick, then pop — mirroring the recovery logic in
+    # ``agents/dispatcher.py:merge_branch`` so both paths handle dirty
+    # trees the same way. Untracked files don't count
+    # (``_worktree_has_uncommitted_changes`` already filters them).
+    stashed = False
     if _worktree_has_uncommitted_changes(target_repo):
-        raise WorkspaceError(
-            "host working tree has uncommitted tracked changes; "
-            "stash or commit before cherry-picking"
+        rc, _, stash_err = _git_output(
+            ["stash", "push", "-m",
+             f"dispatcher-auto-stash-cherry-pick-{session_name}"],
+            target_repo, timeout=15,
         )
+        if rc != 0:
+            raise WorkspaceError(
+                f"host working tree has uncommitted tracked changes and "
+                f"git stash failed: {stash_err.strip()}"
+            )
+        stashed = True
 
-    _run_git(["fetch", str(clone), branch], cwd=target_repo)
-    fetched_sha = _run_git(["rev-parse", "FETCH_HEAD"], cwd=target_repo).strip()
+    fetched_sha: str | None = None
+    cherry_landed = False
+    try:
+        _run_git(["fetch", str(clone), branch], cwd=target_repo)
+        fetched_sha = _run_git(
+            ["rev-parse", "FETCH_HEAD"], cwd=target_repo,
+        ).strip()
 
-    rc, cherry_out, cherry_err = _git_output(
-        ["cherry-pick", fetched_sha], target_repo, timeout=60,
-    )
-    if rc != 0:
-        # Apply failed despite clean dry-run — rare, but possible if the
-        # repo state shifted between probe and apply. Abort so the host
-        # tree returns to its prior state, then surface the error.
-        _git_output(["cherry-pick", "--abort"], target_repo, timeout=15)
-        raise WorkspaceError(
-            f"cherry-pick failed: {cherry_err.strip() or cherry_out.strip()}"
+        rc, cherry_out, cherry_err = _git_output(
+            ["cherry-pick", fetched_sha], target_repo, timeout=60,
         )
+        if rc != 0:
+            # Apply failed despite clean dry-run — rare, but possible
+            # if the repo state shifted between probe and apply. Abort
+            # so the host tree returns to its prior state, then surface
+            # the error. The ``finally`` below pops our stash, so the
+            # operator's edits are restored before the raise propagates.
+            _git_output(["cherry-pick", "--abort"], target_repo, timeout=15)
+            raise WorkspaceError(
+                f"cherry-pick failed: {cherry_err.strip() or cherry_out.strip()}"
+            )
+        cherry_landed = True
 
-    new_commit = _run_git(
-        ["rev-parse", "--verify", f"refs/heads/{target_branch}"], cwd=target_repo,
-    ).strip()
-    _sync_managed_clone_branch_ref(clone, target_repo, target_branch)
-    message = _run_git(
-        ["log", "-1", "--pretty=%s", new_commit], cwd=target_repo,
-    ).strip()
-    return {
-        "commit": new_commit,
-        "source_commit": sha,
-        "message": message,
-        "target_repo": str(target_repo),
-        "target_branch": target_branch,
-    }
+        new_commit = _run_git(
+            ["rev-parse", "--verify", f"refs/heads/{target_branch}"],
+            cwd=target_repo,
+        ).strip()
+        _sync_managed_clone_branch_ref(clone, target_repo, target_branch)
+        message = _run_git(
+            ["log", "-1", "--pretty=%s", new_commit], cwd=target_repo,
+        ).strip()
+        return {
+            "commit": new_commit,
+            "source_commit": sha,
+            "message": message,
+            "target_repo": str(target_repo),
+            "target_branch": target_branch,
+        }
+    finally:
+        # Restore the host's working-tree edits unconditionally so we
+        # don't quietly leave the host stripped across an error path.
+        if stashed:
+            rc, _, pop_err = _git_output(
+                ["stash", "pop"], target_repo, timeout=15,
+            )
+            if rc != 0 and cherry_landed:
+                # Pop conflicts with the just-cherry-picked commit. The
+                # host's local edits and the picked commit touch the
+                # same hunks. Revert the cherry-pick so the host's
+                # edits can be popped back; the operator must
+                # re-trigger after resolving.
+                _git_output(
+                    ["reset", "--hard", "HEAD~1"], target_repo, timeout=15,
+                )
+                _git_output(["stash", "pop"], target_repo, timeout=15)
+                raise WorkspaceError(
+                    f"STASH_POP_CONFLICT: cherry-pick of "
+                    f"{(fetched_sha or '?')[:8]} succeeded but host "
+                    f"edits conflict with the picked code. Reverted "
+                    f"cherry-pick to restore host state. Resolve the "
+                    f"host edits and re-trigger. ({pop_err.strip()})"
+                )
+            # If the cherry-pick had already raised (cherry_landed=False)
+            # and pop ALSO failed, we leave the stash in place. The
+            # cherry-pick error is already propagating; the stash sits
+            # in ``git stash list`` for the operator to recover
+            # manually. Don't shadow the original error from finally.
 
 
 def _session_worktree_path(
@@ -2217,23 +2272,63 @@ def merge_session_worktree_commit(
         )
 
     rc, head_branch, _ = _git_output(["symbolic-ref", "--quiet", "--short", "HEAD"], target_repo, timeout=15)
-    if rc == 0 and head_branch.strip() == target_branch:
-        _run_git(["merge", "--ff-only", resolved], cwd=target_repo)
-    else:
-        _run_git(
-            ["update-ref", f"refs/heads/{target_branch}", resolved, current_head],
-            cwd=target_repo,
+    # Same rationale as cherry_pick_session_worktree: auto-stash host
+    # edits so ff-merge doesn't fail on a dirty working tree, then pop
+    # back. ``update-ref`` is dirty-tree-safe so we only stash when
+    # we're actually going to call ``git merge``.
+    on_target_branch = rc == 0 and head_branch.strip() == target_branch
+    stashed = False
+    if on_target_branch and _worktree_has_uncommitted_changes(target_repo):
+        rc_stash, _, stash_err = _git_output(
+            ["stash", "push", "-m",
+             f"dispatcher-auto-stash-merge-{session_name}"],
+            target_repo, timeout=15,
         )
+        if rc_stash != 0:
+            raise WorkspaceError(
+                f"host working tree has uncommitted tracked changes and "
+                f"git stash failed: {stash_err.strip()}"
+            )
+        stashed = True
 
-    commit = _run_git(
-        ["rev-parse", "--verify", f"refs/heads/{target_branch}"],
-        cwd=target_repo,
-    ).strip()
-    _sync_managed_clone_branch_ref(clone, target_repo, target_branch)
-    message = _run_git(["log", "-1", "--pretty=%s", commit], cwd=target_repo).strip()
-    return {
-        "commit": commit,
-        "message": message,
-        "target_repo": str(target_repo),
-        "target_branch": target_branch,
-    }
+    merge_landed = False
+    try:
+        if on_target_branch:
+            _run_git(["merge", "--ff-only", resolved], cwd=target_repo)
+        else:
+            _run_git(
+                ["update-ref", f"refs/heads/{target_branch}", resolved, current_head],
+                cwd=target_repo,
+            )
+        merge_landed = True
+
+        commit = _run_git(
+            ["rev-parse", "--verify", f"refs/heads/{target_branch}"],
+            cwd=target_repo,
+        ).strip()
+        _sync_managed_clone_branch_ref(clone, target_repo, target_branch)
+        message = _run_git(
+            ["log", "-1", "--pretty=%s", commit], cwd=target_repo,
+        ).strip()
+        return {
+            "commit": commit,
+            "message": message,
+            "target_repo": str(target_repo),
+            "target_branch": target_branch,
+        }
+    finally:
+        if stashed:
+            rc_pop, _, pop_err = _git_output(
+                ["stash", "pop"], target_repo, timeout=15,
+            )
+            if rc_pop != 0 and merge_landed:
+                _git_output(
+                    ["reset", "--hard", "HEAD~1"], target_repo, timeout=15,
+                )
+                _git_output(["stash", "pop"], target_repo, timeout=15)
+                raise WorkspaceError(
+                    f"STASH_POP_CONFLICT: ff-merge to {resolved[:8]} "
+                    f"succeeded but host edits conflict with the merged "
+                    f"code. Reverted merge to restore host state. "
+                    f"({pop_err.strip()})"
+                )
