@@ -61,11 +61,13 @@ def _base_rows(set_id: str, key: str | None = None) -> list[dict]:
 # ── Acceptance #1: schemas register and round-trip ───────────
 
 
-def test_all_four_schemas_register():
+def test_all_schemas_register():
     """Every schema is in the registry under its declared set_id and
-    revision. Module-level ``register_schema`` calls run at import time.
+    revision. Module-level ``register_schema`` calls run at import
+    time. SessionAsk is registered at both v1 (legacy) and v2 (current).
     """
     assert get_schema(ns.SESSION_ASK_SET_ID, 1) is ns.SessionAskV1
+    assert get_schema(ns.SESSION_ASK_SET_ID, 2) is ns.SessionAskV2
     assert get_schema(ns.ASK_VOTE_SET_ID, 1) is ns.AskVoteV1
     assert get_schema(ns.ASK_REFRESH_SET_ID, 1) is ns.AskRefreshRequestV1
     assert (
@@ -75,8 +77,9 @@ def test_all_four_schemas_register():
 
 
 def test_decorator_metadata_is_set():
-    """Decorator-driven metadata: three keyed-per-entity, one singleton."""
+    """Decorator-driven metadata: four keyed-per-entity, one singleton."""
     assert ns.SessionAskV1._access_pattern == "keyed_per_entity"
+    assert ns.SessionAskV2._access_pattern == "keyed_per_entity"
     assert ns.AskVoteV1._access_pattern == "keyed_per_entity"
     assert ns.AskRefreshRequestV1._access_pattern == "keyed_per_entity"
     assert ns.OperatorDismissedAsksV1._access_pattern == "singleton"
@@ -403,54 +406,68 @@ def test_operator_dismissed_singleton_stays_one_row(graph_db_env):
     assert json.loads(rows[0]["payload"])["dismissed_ask_ids"] == ["b"]
 
 
-# ── Acceptance #6: explicit-id targeting only ───────────────
+# ── Acceptance #6: v2 drops the vestigial to_participant_id ─
 
 
-def test_explicit_id_targeting_only(graph_db_env):
-    """``to_participant_id`` accepts a literal participant id (or empty
-    string for an ambient ask). No role lookup, no ``"role:operator"``
-    indirection — that's the contract from the design note
-    (graph://75c03f1d-4cd) and pitfall graph://1ba4d2e0-c5f.
+def test_v2_does_not_carry_to_participant_id():
+    """v2 removes ``to_participant_id`` entirely — the field had no
+    behavioral consumer on the activity surface, only a misleading
+    UI label. Writers targeting v2 cannot include it; the schema
+    rejects it as an unknown field.
     """
-    # Explicit id → ok.
-    sid = settings_ops.upsert_by_key(
-        ns.SESSION_ASK_SET_ID, 1, "s-explicit",
-        {
-            "session_id": "s-explicit",
-            "to_participant_id": "operator-jeremy",
-            "text": "for jeremy specifically",
-            "revision_seq": 1,
-            "created_at": "2026-05-03T12:00:00Z",
-        },
-     org=settings_ops.CALLER_ORG)
-    rows = _base_rows(ns.SESSION_ASK_SET_ID, "s-explicit")
-    assert len(rows) == 1
-    payload = json.loads(rows[0]["payload"])
-    assert payload["to_participant_id"] == "operator-jeremy"
+    # The field is not declared on v2.
+    assert "to_participant_id" not in ns.SessionAskV2._field_metadata
+    # And v2 actively rejects it as an unknown field.
+    base = {
+        "session_id": "s",
+        "compact": "",
+        "normal": "hi",
+        "expanded": "",
+        "created_at": "2026-05-03T12:00:00Z",
+        "revision_seq": 0,
+    }
+    ns.SessionAskV2.validate(base)  # baseline passes
+    with pytest.raises(SchemaValidationError):
+        ns.SessionAskV2.validate(
+            {**base, "to_participant_id": "operator-jeremy"},
+        )
 
-    # Empty string → ambient (also ok).
-    settings_ops.upsert_by_key(
-        ns.SESSION_ASK_SET_ID, 1, "s-ambient",
-        {
-            "session_id": "s-ambient",
-            "to_participant_id": "",
-            "text": "anyone can pick this up",
-            "revision_seq": 1,
-            "created_at": "2026-05-03T12:00:00Z",
-        },
-     org=settings_ops.CALLER_ORG)
-
-    # The schema has ZERO logic that interprets "role:operator" or
-    # similar prefixes — it's a string field, no resolver. Pin that
-    # by inspecting the module: no role lookup function exists.
+    # The substrate has zero role-lookup helpers — the field's
+    # original premise (multi-recipient targeting) never had a
+    # consumer. Pin that by inspecting the module.
     role_lookup_attrs = [
         attr for attr in dir(ns)
         if "role" in attr.lower() and "lookup" in attr.lower()
     ]
     assert role_lookup_attrs == [], (
         "no role-lookup helper should exist on the notifications "
-        "module — targeting is explicit-id-only"
+        "module"
     )
+
+
+def test_v1_retains_to_participant_id_for_back_compat_reads(graph_db_env):
+    """v1 keeps the field declared so legacy stored rows still validate
+    on read. Writers shouldn't target v1; this is purely a
+    back-compat path until any v1 rows have been re-written.
+    """
+    settings_ops.upsert_by_key(
+        ns.SESSION_ASK_SET_ID, 1, "s-legacy",
+        {
+            "session_id": "s-legacy",
+            "to_participant_id": "operator-old",
+            "text": "legacy body",
+            "revision_seq": 1,
+            "created_at": "2026-05-03T12:00:00Z",
+        },
+        org=settings_ops.CALLER_ORG,
+    )
+    rows = _base_rows(ns.SESSION_ASK_SET_ID, "s-legacy")
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload"])
+    # The vestigial field round-trips on v1 — that's how stored rows
+    # don't trip the unknown-field guard. v2 readers see the field
+    # disappear via the upconverter; that's covered separately.
+    assert payload["to_participant_id"] == "operator-old"
 
 
 # ── Schema validation surface ───────────────────────────────
@@ -526,16 +543,17 @@ def test_unknown_fields_rejected():
 
 
 def test_export_json_schema_round_trip():
-    """All four schemas produce valid JSON-schema payloads with the
-    decorator-driven access_pattern populated.
+    """All schemas produce valid JSON-schema payloads with the
+    decorator-driven access_pattern populated. SessionAsk has both
+    v1 (legacy) and v2 (current) registered.
     """
     for cls in (
-        ns.SessionAskV1, ns.AskVoteV1,
+        ns.SessionAskV1, ns.SessionAskV2, ns.AskVoteV1,
         ns.AskRefreshRequestV1, ns.OperatorDismissedAsksV1,
     ):
         js = cls.export_json_schema()
         assert js["set_id"] == cls.set_id
-        assert js["schema_revision"] == 1
+        assert js["schema_revision"] == cls.schema_revision
         assert js["type"] == "object"
         assert isinstance(js["properties"], dict)
         assert js["access_pattern"] in (
@@ -548,7 +566,154 @@ def test_synopsis_present():
     syn = ns.SYNOPSIS
     assert "summary" in syn
     assert isinstance(syn["nouns"], list) and syn["nouns"]
-    # The synopsis names the four set_ids in the summary.
+    # The synopsis names the set_ids in the summary, and surfaces v2
+    # zoom vocabulary.
     summary = syn["summary"]
     assert "ask" in summary
     assert "operator" in summary
+    assert "compact" in summary
+    nouns_lower = " ".join(syn["nouns"]).lower()
+    assert "compact ask" in nouns_lower
+    assert "normal ask" in nouns_lower
+    assert "expanded ask" in nouns_lower
+
+
+# ── SessionAskV2 acceptance ────────────────────────────────────────
+
+
+def test_session_ask_v2_round_trip_via_upsert(graph_db_env):
+    """v2 writes carry compact / normal / expanded body fields; the
+    payload round-trips with no extras dropped or invented.
+    """
+    sid = settings_ops.upsert_by_key(
+        ns.SESSION_ASK_SET_ID, ns.SESSION_ASK_LATEST_REVISION, "session-v2",
+        {
+            "session_id": "session-v2",
+            "compact": "Ship migration?",
+            "normal": "Should I ship the migration?",
+            "expanded": "Long context on the migration plan…",
+            "created_at": "2026-05-06T12:00:00Z",
+            "revision_seq": 1,
+        },
+        org=settings_ops.CALLER_ORG,
+    )
+    rows = _base_rows(ns.SESSION_ASK_SET_ID, "session-v2")
+    assert len(rows) == 1
+    assert rows[0]["id"] == sid
+    payload = json.loads(rows[0]["payload"])
+    assert payload["compact"] == "Ship migration?"
+    assert payload["normal"] == "Should I ship the migration?"
+    assert payload["expanded"].startswith("Long context")
+    assert "to_participant_id" not in payload
+    assert "text" not in payload
+
+
+def test_session_ask_v2_per_zoom_size_caps():
+    """Each zoom field has its own byte cap. Caps are independent —
+    a 2KB normal write does not constrain a 256B compact write or
+    an 8KB expanded write.
+    """
+    base = {
+        "session_id": "s",
+        "compact": "",
+        "normal": "",
+        "expanded": "",
+        "created_at": "2026-05-06T12:00:00Z",
+        "revision_seq": 0,
+    }
+    # Compact: 256B cap.
+    ns.SessionAskV2.validate({**base, "compact": "x" * 256})
+    with pytest.raises(SchemaValidationError) as exc:
+        ns.SessionAskV2.validate({**base, "compact": "x" * 257})
+    assert "compact" in str(exc.value).lower()
+
+    # Normal: 2KB cap.
+    ns.SessionAskV2.validate({**base, "normal": "x" * 2048})
+    with pytest.raises(SchemaValidationError) as exc:
+        ns.SessionAskV2.validate({**base, "normal": "x" * 2049})
+    assert "normal" in str(exc.value).lower()
+
+    # Expanded: 8KB cap.
+    ns.SessionAskV2.validate({**base, "expanded": "x" * 8192})
+    with pytest.raises(SchemaValidationError) as exc:
+        ns.SessionAskV2.validate({**base, "expanded": "x" * 8193})
+    assert "expanded" in str(exc.value).lower()
+
+
+def test_session_ask_v2_revision_seq_must_be_int():
+    base = {
+        "session_id": "s",
+        "compact": "",
+        "normal": "hi",
+        "expanded": "",
+        "created_at": "2026-05-06T12:00:00Z",
+    }
+    ns.SessionAskV2.validate({**base, "revision_seq": 0})
+    ns.SessionAskV2.validate({**base, "revision_seq": 42})
+    with pytest.raises(SchemaValidationError):
+        ns.SessionAskV2.validate({**base, "revision_seq": "1"})
+    with pytest.raises(SchemaValidationError):
+        ns.SessionAskV2.validate({**base, "revision_seq": True})
+
+
+def test_session_ask_v2_unknown_field_rejected():
+    """v2 explicitly rejects ``text`` (the legacy single-zoom body) and
+    ``to_participant_id`` (the vestigial recipient label) so writers
+    can't accidentally send v1-shaped payloads against v2.
+    """
+    base = {
+        "session_id": "s",
+        "compact": "",
+        "normal": "hi",
+        "expanded": "",
+        "created_at": "2026-05-06T12:00:00Z",
+        "revision_seq": 0,
+    }
+    with pytest.raises(SchemaValidationError) as exc:
+        ns.SessionAskV2.validate({**base, "text": "legacy"})
+    assert "text" in str(exc.value)
+    with pytest.raises(SchemaValidationError) as exc:
+        ns.SessionAskV2.validate(
+            {**base, "to_participant_id": "operator-jeremy"},
+        )
+    assert "to_participant_id" in str(exc.value)
+
+
+def test_session_ask_v1_to_v2_upconverter_maps_text_to_normal():
+    """The upconverter declared on :class:`SessionAskV2` maps stored
+    v1 payloads into v2 shape: ``text`` becomes ``normal``;
+    ``to_participant_id`` is dropped silently.
+    """
+    v1_payload = {
+        "session_id": "s-legacy",
+        "to_participant_id": "operator-jeremy",
+        "text": "Should I ship?",
+        "created_at": "2026-05-06T12:00:00Z",
+        "revision_seq": 7,
+    }
+    out = ns.SessionAskV2.upconvert_from_prev(v1_payload)
+    assert out["session_id"] == "s-legacy"
+    assert out["normal"] == "Should I ship?"
+    assert out["compact"] == ""
+    assert out["expanded"] == ""
+    assert out["created_at"] == "2026-05-06T12:00:00Z"
+    assert out["revision_seq"] == 7
+    # Vestigial field is gone in v2.
+    assert "to_participant_id" not in out
+    # v1's single-zoom body is gone in v2.
+    assert "text" not in out
+    # And the upconverted payload validates clean.
+    ns.SessionAskV2.validate(out)
+
+
+def test_session_ask_v1_to_v2_upconverter_handles_missing_text():
+    """An old row written without a ``text`` field (rare but possible)
+    upconverts to a v2 row with ``normal=""`` rather than crashing.
+    """
+    v1_minimal = {
+        "session_id": "s-bare",
+        "revision_seq": 0,
+    }
+    out = ns.SessionAskV2.upconvert_from_prev(v1_minimal)
+    assert out["normal"] == ""
+    ns.SessionAskV2.validate(out)
