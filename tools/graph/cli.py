@@ -649,6 +649,115 @@ def _lookup_tmux_for_source(source: dict) -> str | None:
     return None
 
 
+def _fmt_ts(value: str | None, *, minute: bool = True) -> str:
+    """ISO-ish ``YYYY-MM-DD HH:MM`` (or ``YYYY-MM-DD`` when ``minute=False``).
+
+    Trims trailing ``Z``/microseconds/timezone tail, swaps ``T`` for a space
+    so the result reads naturally in a header. Returns ``""`` for falsy
+    or unparseable input — caller decides how to handle missing data.
+    """
+    if not value:
+        return ""
+    s = str(value).replace("T", " ")
+    return s[:16] if minute else s[:10]
+
+
+def _format_source_time(source: dict) -> str:
+    """Time slot for a source header.
+
+    * **note**: full ``YYYY-MM-DD HH:MM`` of ``created_at`` so the
+      header carries the same timestamp the dashboard shows next to the
+      title — useful when scanning many notes.
+    * **session**: ``start → end`` from ``metadata.started_at`` /
+      ``metadata.ended_at`` set by the ingester. Same-day ranges
+      collapse to ``YYYY-MM-DD HH:MM → HH:MM``. Falls back to
+      ``created_at`` only when the metadata fields aren't populated
+      (legacy or in-flight sessions).
+    * **anything else**: date only. Documents and beads don't have a
+      meaningful end-time and full-precision timestamps just add noise.
+    """
+    stype = source.get("type") or ""
+    meta = source.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (ValueError, TypeError):
+            meta = {}
+
+    if stype == "session":
+        start = _fmt_ts(meta.get("started_at")) or _fmt_ts(source.get("created_at"))
+        end = _fmt_ts(meta.get("ended_at"))
+        if start and end:
+            if start[:10] == end[:10]:
+                return f"{start} → {end[11:]}"
+            return f"{start} → {end}"
+        return start
+
+    if stype == "note":
+        return _fmt_ts(source.get("created_at"))
+
+    return _fmt_ts(source.get("created_at"), minute=False)
+
+
+def _format_source_header(source: dict) -> str:
+    """One-line header for ``graph read``.
+
+    Shape: ``{type} · {id12} · {time} [{org}] — {title}``. Time format
+    varies by source kind (see :func:`_format_source_time`). Org tag is
+    suppressed when redundant with project. Used by both the host and
+    API read paths so the two modes converge on the same shape.
+    """
+    sid = (source.get("id") or "")[:12]
+    stype = source.get("type") or "?"
+    title = (source.get("title") or "?").replace("\n", " ").strip()
+    when = _format_source_time(source)
+
+    project = source.get("project") or ""
+    org = source.get("org") or ""
+    tag = ""
+    if org and (not project or project != org):
+        tag = f" [{org}]"
+    elif project:
+        tag = f" [{project}]"
+
+    parts = [stype, sid]
+    if when:
+        parts.append(when)
+    head = " · ".join(parts) + tag
+    return f"{head} — {title}" if title else head
+
+
+def _format_comment_byline(c: dict) -> str:
+    """Short byline for one comment row."""
+    actor = c.get("actor", "?")
+    created = _fmt_ts(c.get("created_at"))
+    state = "integrated" if c.get("integrated") else "open"
+    cid = (c.get("id") or "")[:12]
+    parts = [actor]
+    if created:
+        parts.append(created)
+    parts.append(state)
+    parts.append(cid)
+    return " · ".join(p for p in parts if p)
+
+
+def _print_comment_block(comments: list[dict]) -> None:
+    """Render a comments section under a note body.
+
+    Single light separator, one byline per comment, content on the
+    following line. Caller has already filtered/included integrated
+    comments based on ``--all-comments``.
+    """
+    if not comments:
+        return
+    print(f"\n── Comments ({len(comments)}) ──")
+    for c in comments:
+        print(f"\n{_format_comment_byline(c)}")
+        body = c.get("content") or ""
+        if body:
+            print(body)
+
+
 def _print_session_header_chip(source: dict) -> None:
     """Render ``Session: <tmux>`` + ``Viewer: …/session/<tmux>`` lines for
     session-type sources, when a tmux name is known.
@@ -985,12 +1094,11 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") 
                 max_chars=args.max_chars,
             )
             return
-        proj = f" [{source.get('project')}]" if source.get("project") else ""
-        print(f"Source: {sid[:12]}  note{proj}  (version {version_req})")
-        print(f"Title:  {source.get('title', '?')}")
+        ver_source = dict(source)
         if ver.get("created_at"):
-            print(f"Date:   {ver['created_at'][:10]}")
-        print(f"{'─' * 72}")
+            ver_source["created_at"] = ver["created_at"]
+        head = _format_source_header(ver_source) + f" (version {version_req})"
+        print(head)
         content = ver.get("content") or ""
         if args.max_chars and len(content) > args.max_chars:
             content = content[: args.max_chars] + f"\n... [{len(content) - args.max_chars} chars truncated]"
@@ -1005,27 +1113,63 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") 
             max_chars=args.max_chars,
         )
         return
-    proj = f" [{source.get('project')}]" if source.get("project") else ""
-    org = source.get("org") or ""
-    # Dedupe — if project already matches org, skip the separate org tag.
-    org_tag = (
-        f" [{org}]" if org and (not proj or proj.strip(" []") != org) else ""
-    )
-    print(f"Source: {source.get('id', '')[:12]}  {source.get('type', '?')}{proj}{org_tag}")
-    print(f"Title:  {source.get('title', '?')}")
-    if source.get("created_at"):
-        print(f"Date:   {source['created_at'][:10]}")
+
+    # API path — comments come back on the payload from
+    # ``read_source_full``. Filter integrated unless --all-comments.
+    raw_comments = payload.get("comments") or []
+    include_integrated = bool(getattr(args, "all_comments", False))
+    if include_integrated:
+        comments = list(raw_comments)
+    else:
+        comments = [c for c in raw_comments if not c.get("integrated")]
+
+    if getattr(args, "json", False):
+        import json as _json
+        out = {
+            "source": {
+                "id": source.get("id"),
+                "type": source.get("type"),
+                "title": source.get("title"),
+                "project": source.get("project"),
+                "platform": source.get("platform"),
+                "created_at": source.get("created_at"),
+                "file_path": source.get("file_path"),
+                "metadata": source.get("metadata"),
+                "org": source.get("org"),
+                "tmux_session": source.get("tmux_session"),
+            },
+            "entries": entries,
+        }
+        if source.get("type") == "note":
+            out["comments"] = comments
+            vc = payload.get("version_count")
+            if vc is not None:
+                out["version_count"] = vc
+        print(_json.dumps(out, default=str))
+        return
+
+    print(_format_source_header(source))
     _print_session_header_chip(source)
-    print(f"{'─' * 72}")
+
+    is_note = source.get("type") == "note"
     for e in entries:
-        turn = e.get("turn_number", "?")
-        etype = e.get("entry_type", "?")
-        label = "USER" if etype == "thought" else "ASSISTANT"
         content = e.get("content") or ""
         if args.max_chars and len(content) > args.max_chars:
             content = content[: args.max_chars] + f"\n... [{len(content) - args.max_chars} chars truncated]"
-        print(f"\n## Turn {turn} — {label}")
-        print(content)
+        if is_note:
+            # Notes have one body row that's a schema artifact (turn=1,
+            # role=user). The "Turn 1 — USER" header is meaningless to a
+            # reader and burns tokens; just print the body.
+            print(f"\n{content}")
+        else:
+            turn = e.get("turn_number", "?")
+            etype = e.get("entry_type", "?")
+            label = "USER" if etype == "thought" else "ASSISTANT"
+            print(f"\nT{turn} · {label}")
+            print(content)
+
+    if is_note:
+        _print_comment_block(comments)
 
 
 def _cmd_read_body(args, source, db, version_req, _json):
@@ -1158,58 +1302,52 @@ def _cmd_read_body(args, source, db, version_req, _json):
         print(_json.dumps(output, default=str))
         return
 
-    # Text output (existing behavior)
-    proj = f" [{source['project']}]" if source.get('project') else ""
-    print(f"Source: {source['id'][:12]}  {source['type']}{proj}")
-    print(f"Title:  {source.get('title', '?')}")
-    print(f"Date:   {source.get('created_at', '?')[:10]}")
+    # Text output
+    print(_format_source_header(source))
     _print_session_header_chip(source)
-    if source.get("file_path"):
-        print(f"File:   {source['file_path']}")
-    # Show author for notes when it's not the default "user"
+    # Author for notes when it's something other than the default "user".
     if source.get("type") == "note":
         meta = source.get("metadata") or {}
         if isinstance(meta, str):
-            import json as _json2
             try:
-                meta = _json2.loads(meta)
-            except Exception:
+                meta = json.loads(meta)
+            except (ValueError, TypeError):
                 meta = {}
         author = meta.get("author", "")
         if author and author != "user":
-            print(f"Author: {author}")
-    print(f"{'─' * 72}")
+            print(f"author: {author}")
 
+    is_note = source.get("type") == "note"
     for e in entries:
         role = e.get("role", "?")
         turn = e.get("turn_number", "?")
         etype = e.get("entry_type", "?")
-        label = "USER" if etype == "thought" else f"ASSISTANT ({role})"
         content = e["content"]
 
-        # Resolve ![[id]] embeds in note content
-        if source.get("type") == "note":
+        # Resolve ![[id]] embeds in note content.
+        if is_note:
             content = _resolve_embeds_in_text(db, content)
 
         if args.max_chars and len(content) > args.max_chars:
             content = content[:args.max_chars] + f"\n... [{len(content) - args.max_chars} chars truncated]"
 
-        print(f"\n## Turn {turn} — {label}")
-        print(content)
+        if is_note:
+            print(f"\n{content}")
+        else:
+            label = "USER" if etype == "thought" else f"ASSISTANT ({role})"
+            print(f"\nT{turn} · {label}")
+            print(content)
 
     # Append comments for note sources
-    if source.get("type") == "note":
+    if is_note:
         include_integrated = getattr(args, 'all_comments', False)
         comments = db.get_comments(source["id"], include_integrated=include_integrated)
         if comments:
-            print(f"\n{'─' * 72}")
-            print(f"## Comments ({len(comments)})")
             for c in comments:
-                status = " [integrated]" if c["integrated"] else ""
-                print(f"\n**{c['actor']}** · {c['created_at'][:16]}{status}  (id:{c['id'][:12]})")
+                print(f"\n{_format_comment_byline(c)}")
                 print(c["content"])
 
-        # Cascade comments from embedded child notes (--all-comments)
+        # Cascade comments from embedded child notes (--all-comments).
         if include_integrated:
             import re as _re
             for e in entries:
@@ -1218,14 +1356,20 @@ def _cmd_read_body(args, source, db, version_req, _json):
                     resolved = _resolve_embed(db, eid)
                     if resolved and resolved[3]:  # has a source object
                         child_source = resolved[3]
-                        child_comments = db.get_comments(child_source["id"], include_integrated=include_integrated)
+                        child_comments = db.get_comments(
+                            child_source["id"],
+                            include_integrated=include_integrated,
+                        )
                         if child_comments:
-                            child_title = child_source.get("title", child_source["id"][:12])
-                            print(f"\n{'─' * 72}")
-                            print(f"## Comments on ![[{eid}]] — {child_title[:50]} ({len(child_comments)})")
+                            child_title = child_source.get(
+                                "title", child_source["id"][:12],
+                            )
+                            print(
+                                f"\n── Comments on ![[{eid}]] — "
+                                f"{child_title[:50]} ({len(child_comments)}) ──"
+                            )
                             for c in child_comments:
-                                status = " [integrated]" if c["integrated"] else ""
-                                print(f"\n**{c['actor']}** · {c['created_at'][:16]}{status}  (id:{c['id'][:12]})")
+                                print(f"\n{_format_comment_byline(c)}")
                                 print(c["content"])
 
 
@@ -4684,7 +4828,10 @@ def main():
     p.add_argument("--first", action="store_true", help="Read first match if multiple")
     p.add_argument("--max-chars", type=int, default=0, help="Max chars per turn (0=unlimited)")
     p.add_argument("--json", action="store_true", help="Output as structured JSON (source + entries + edges)")
-    p.add_argument("--all-comments", action="store_true", help="Include integrated comments")
+    p.add_argument("--all-comments", action="store_true",
+                   help="Also show comments already rolled into the note body "
+                        "(the default shows only open feedback). Rarely needed — "
+                        "useful for audit/history.")
     p.add_argument("--html", dest="html_output", action="store_true", help="Output raw HTML source for rich-content notes")
     p.add_argument("--save", metavar="PATH", help="Save raw content to file (no headers/JSON)")
     p.set_defaults(func=cmd_read)

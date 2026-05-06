@@ -1167,6 +1167,134 @@ def test_cmd_read_save_routes_through_api_and_writes_file(
     assert save_path.read_text() == "canonical signpost content"
 
 
+# ── Comment rendering on the API read path ───────────────────
+#
+# Regression context: a session burned ~100 turns trying to read
+# comments on three signpost notes via ``graph read --all-comments``.
+# Output never included the comment block, ``--json`` produced
+# terminal text not JSON, and a fallback to ``data/graph.db`` returned
+# 0 comments because ``GRAPH_API`` was set and the real DB lives
+# behind the dashboard. The contract we pin here on the API path
+# (mirroring the host path):
+#
+#   1. Default text render appends a "## Comments (N)" block with one
+#      entry per non-integrated comment.
+#   2. ``--all-comments`` includes integrated comments too, marking
+#      them ``[integrated]`` so the reader can tell them apart.
+#   3. ``--json`` emits a single JSON document (source / entries /
+#      comments / version_count) — not the human text view.
+
+
+@pytest.fixture
+def seeded_note_with_comments(orgs_root):
+    """Note with one unintegrated and one integrated comment."""
+    db = GraphDB.open_org_db("autonomy", mode="rw")
+    try:
+        sid = str(uuid.uuid4())
+        db.insert_source(Source(
+            id=sid, type="note", platform="local", project="autonomy",
+            title="Comment Render Note", file_path=f"note:{sid}",
+            metadata={"tags": ["signpost"], "author": "test"},
+            publication_state="canonical",
+        ))
+        db.insert_thought(Thought(
+            source_id=sid, content="body of the note",
+            role="user", turn_number=1, tags=[],
+        ))
+        db.insert_note_version(sid, 1, "body of the note")
+        db.insert_comment(sid, "first unintegrated thought", actor="reviewer-a")
+        it = db.insert_comment(sid, "earlier integrated thought", actor="reviewer-b")
+        db.integrate_comment(it["id"])
+        db.commit()
+    finally:
+        db.close()
+    GraphDB.close_all_pooled()
+    return sid
+
+
+def test_api_read_renders_unintegrated_comments_by_default(
+    api_client, forbid_cli_sqlite, seeded_note_with_comments, capsys, monkeypatch,
+):
+    """API path appends a Comments section for note sources. Without it
+    container-mode agents cannot see open feedback at all."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        source=seeded_note_with_comments, first=False, max_chars=0, json=False,
+        all_comments=False, html_output=False, save=None,
+    )
+    graph_cli.cmd_read(args)
+    out = capsys.readouterr().out
+    assert "── Comments" in out
+    assert "first unintegrated thought" in out
+    assert "reviewer-a" in out
+    # Integrated comment must NOT appear without --all-comments.
+    assert "earlier integrated thought" not in out
+
+
+def test_api_read_all_comments_includes_integrated(
+    api_client, forbid_cli_sqlite, seeded_note_with_comments, capsys, monkeypatch,
+):
+    """``--all-comments`` adds integrated comments and marks them so the
+    reader can tell open vs rolled-in feedback apart."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        source=seeded_note_with_comments, first=False, max_chars=0, json=False,
+        all_comments=True, html_output=False, save=None,
+    )
+    graph_cli.cmd_read(args)
+    out = capsys.readouterr().out
+    assert "first unintegrated thought" in out
+    assert "earlier integrated thought" in out
+    # The integrated comment's byline marks state as "integrated"; the
+    # open one as "open".
+    assert "· integrated ·" in out
+    assert "· open ·" in out
+
+
+def test_api_read_json_emits_structured_payload(
+    api_client, forbid_cli_sqlite, seeded_note_with_comments, capsys, monkeypatch,
+):
+    """``--json`` must emit a single JSON document, not the text view —
+    the auto-0506-173131 session went sideways partly because --json
+    was a silent no-op."""
+    import json as _json
+
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        source=seeded_note_with_comments, first=False, max_chars=0, json=True,
+        all_comments=False, html_output=False, save=None,
+    )
+    graph_cli.cmd_read(args)
+    out = capsys.readouterr().out.strip()
+    payload = _json.loads(out)  # would raise if --json fell through to text
+    assert isinstance(payload, dict)
+    assert payload["source"]["id"] == seeded_note_with_comments
+    assert payload["source"]["type"] == "note"
+    assert "entries" in payload
+    assert "comments" in payload  # present for note sources, even if empty
+    contents = [c.get("content") for c in payload["comments"]]
+    assert "first unintegrated thought" in contents
+    assert "earlier integrated thought" not in contents
+
+
+def test_api_read_json_with_all_comments_includes_integrated(
+    api_client, forbid_cli_sqlite, seeded_note_with_comments, capsys, monkeypatch,
+):
+    import json as _json
+
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        source=seeded_note_with_comments, first=False, max_chars=0, json=True,
+        all_comments=True, html_output=False, save=None,
+    )
+    graph_cli.cmd_read(args)
+    out = capsys.readouterr().out.strip()
+    payload = _json.loads(out)
+    contents = [c.get("content") for c in payload["comments"]]
+    assert "first unintegrated thought" in contents
+    assert "earlier integrated thought" in contents
+
+
 # ── Global-org default for scopeless reads (dashboard URLs) ───
 
 
