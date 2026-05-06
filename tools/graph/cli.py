@@ -5135,6 +5135,10 @@ def main():
     from .capability_cmd import attach_capability_subparser
     attach_capability_subparser(sub)
 
+    # claude — Claude account credentials surface (graph://73c4e9ef-bbc)
+    from .claude_cmd import attach_claude_subparser
+    attach_claude_subparser(sub)
+
     # maintenance — substrate housekeeping verbs (cache GC, etc.)
     p_maint = sub.add_parser(
         "maintenance",
