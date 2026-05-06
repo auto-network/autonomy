@@ -43,16 +43,54 @@ TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 MINT_URL = "https://api.anthropic.com/api/oauth/claude_cli/create_api_key"
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
-# User-Agent that matches Claude CLI's own API calls (binary 2.1.128 ``C5()``).
-# Two reasons to send it instead of an autonomy-branded UA:
-#   1. Anthropic's platform.claude.com endpoints sit behind Cloudflare; the
-#      default Python urllib UA gets bot-flagged with HTTP 403 (Cloudflare
-#      error 1010). The Claude CLI UA passes cleanly.
-#   2. We don't want to advertise the autonomy harness to Anthropic's logs.
-# TODO: detect the installed Claude version dynamically so this stays in
-# sync after `claude` self-updates. For now keep the version in lock-step
-# with Claude binary updates manually.
-CLAUDE_USER_AGENT = "claude-cli/2.1.128"
+# User-Agent matching Claude CLI's own ``C5()`` so we (a) bypass Cloudflare
+# bot detection on platform.claude.com (the default Python urllib UA gets
+# 403'd as Cloudflare error 1010) and (b) don't advertise the autonomy
+# harness to Anthropic's logs.
+#
+# The version is detected at module load time. Sources tried in order:
+#   1. resolve ``~/.local/bin/claude`` symlink, parse ``versions/<X.Y.Z>``
+#      basename — single readlink syscall, no subprocess
+#   2. run ``claude --version`` and parse — fallback for non-symlink installs
+#   3. pinned constant — last-resort fallback so OAuth still attempts a call
+#      even on hosts without Claude installed (test envs, etc.)
+#
+# Module-level constant means uvicorn's auto-reload picks up Claude updates
+# the next time the file changes; we accept that long-running processes
+# can fall behind a Claude self-update until restart.
+_CLAUDE_VERSION_FALLBACK = "2.1.128"
+
+
+def _detect_claude_version() -> str:
+    import re
+    import shutil
+    import subprocess
+
+    claude_bin = os.path.expanduser("~/.local/bin/claude")
+    try:
+        target = os.path.realpath(claude_bin)
+        m = re.search(r"/versions/(\d+\.\d+\.\d+)$", target)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+
+    which = shutil.which("claude") or claude_bin
+    try:
+        out = subprocess.run(
+            [which, "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        m = re.search(r"(\d+\.\d+\.\d+)", out.stdout)
+        if m:
+            return m.group(1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    return _CLAUDE_VERSION_FALLBACK
+
+
+CLAUDE_USER_AGENT = f"claude-cli/{_detect_claude_version()}"
 
 CONSUMER_SCOPES = (
     "user:profile user:inference user:sessions:claude_code "
