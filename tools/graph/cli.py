@@ -4338,23 +4338,10 @@ def cmd_turn_correction_suggest(args):
     if args.confidence is not None:
         payload["confidence"] = args.confidence
 
-    # Default to JSON: that's the only form the session parser upconverts.
-    # The previous default (pretty-print) silently no-op'd from the
-    # parser's perspective — agents would see "✓ Suggested turn
-    # correction" and assume success while no overlay ever rendered.
-    # `--pretty` opts back into the human form for interactive use.
-    if args.pretty_output:
-        print("  ✓ Suggested turn correction")
-        if args.mode:
-            print(f"    mode: {args.mode}")
-        if args.reason:
-            print(f"    reason: {args.reason}")
-        if args.confidence is not None:
-            print(f"    confidence: {args.confidence}")
-    else:
-        # One JSON object on a single line so the session parser can scan
-        # tool_result content and upconvert without fuzzy matching.
-        print(json.dumps(payload))
+    # One JSON object on a single line so the session parser can scan
+    # tool_result content and upconvert without fuzzy matching. There
+    # is no "pretty" alternative — see the argparse comment for why.
+    print(json.dumps(payload))
 
 
 _SHARE_OUTPUT_ROOT = Path("/workspace/output")
@@ -5111,18 +5098,17 @@ def main():
         default=None,
         help="Compatibility alias: use '-c -' to read corrected text from stdin",
     )
+    # Deliberately no --pretty / mode-switching flags. The output is
+    # always the JSON contract the session parser upconverts. A human-only
+    # "pretty" mode would just be a footgun: agents that forgot to opt-in
+    # would get a misleading ✓ tick on output the parser ignores.
+    #
+    # `--json` accepted as a silent no-op for back-compat with agents in
+    # the wild that still pass it explicitly. Hidden from help so new
+    # callers don't learn to repeat it.
     p_tc_suggest.add_argument(
         "--json", dest="json_output", action="store_true",
-        help="(default) emit one JSON object for parser upconversion. "
-             "Kept as an explicit flag for back-compat; the JSON form is "
-             "now the default since it's the only output the session "
-             "parser will upconvert into a turn_correction event.",
-    )
-    p_tc_suggest.add_argument(
-        "--pretty", dest="pretty_output", action="store_true",
-        help="Emit a human-readable summary instead of JSON. The pretty "
-             "form will NOT be picked up by the session parser — use only "
-             "for interactive operator inspection.",
+        help=argparse.SUPPRESS,
     )
     p_tc_suggest.set_defaults(func=cmd_turn_correction_suggest)
 
