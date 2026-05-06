@@ -42,6 +42,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 |---------|------|---------|
 | `graph search "query"` | Full-text search (use `--or` for OR mode) | `graph search "CVSS fuzzing" --project enterprise-ng` |
 | `graph search "query" --or` | Match ANY term instead of all | `graph search "auth login session" --or` |
+| `graph search "query" --type <kind>` | Scope by source kind (comma-separated: session, note, bead, …); composes with --project / --tag / --state | `graph search "terminate" --type session` |
 | `graph read <src_id\|tmux_name>` | Read full source content (tmux names like `auto-0506-001257` auto-resolve) | `graph read dc4c73ee --max-chars 2000` / `graph read auto-0506-001257` |
 | `graph read <src_id> --save <path>` | Export raw content to file for editing | `graph read abc123 --save /tmp/notes/abc123.md` |
 | `graph context <src_id\|tmux_name> <turn>` | Show turns around a search hit | `graph context 8cdc1d85 286 --window 3` |
@@ -67,6 +68,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph agent-runs` | Discover and ingest subagent traces | `graph agent-runs --list` |
 | `graph sessions --all` | Ingest latest session data (107ms) | Run before searching for recent content |
 | `graph sessions --status` | Compact session status table with SOURCE column (live-only; add `--since` to include recent dead sessions). Pass the tmux name straight to `graph tail`/`context`/`read`. | `graph sessions --status --since 12h` |
+| `graph sessions --status --topics` | Same table, with each session's topic lines (set via `graph set-topics`) appended under its row. Useful when LABEL has drifted and the actual work-in-progress is only visible in topics. | `graph sessions --status -T --since 6h` |
 | `graph wait <bead-id>` | Block until a dispatched bead completes | `graph wait auto-x7wr --timeout 900` |
 | `graph dispatch` | Show running/queued dispatch state | `graph dispatch runs --failed` |
 | `graph dispatch status <bead-id>` | Post-dispatch detail: decision, experience, session links | `graph dispatch status auto-yz29` |
@@ -184,6 +186,9 @@ graph read <src_id> --max-chars 3000          # read full sources
 # THEN create the bead with informed context
 ```
 
+### Search heuristic — when widening hurts
+Start with the single highest-signal term. Multi-term queries and `--or` widen the candidate set and tend to score the obvious hit *down* in the relevance ranking, not up. If the result you want is buried, scope before widening: `--type session` / `--type note` / `--project <slug>` / `--tag <tag>` all compose. Reach for `--or` only when AND mode legitimately returns nothing.
+
 ### Checking human attention trail
 ```bash
 graph attention --last 20                     # recent human input
@@ -203,6 +208,7 @@ graph crosstalk send <session> "message"                   # send message
 graph crosstalk send <session> -c - < /tmp/msg.txt         # pipe long message
 graph crosstalk broadcast "message"                        # send to all live sessions
 graph sessions --status                                    # live-only status table
+graph sessions --status --topics                           # same, with topic lines under each row
 graph sessions --since 12h --status                        # include dead sessions active in the last 12h (post-mortem)
 ```
 

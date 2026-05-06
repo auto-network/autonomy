@@ -122,6 +122,7 @@ around any topic. Scoped to the **{{ config.graph_project }}** org.
 
 ```bash
 graph search "query"                  # FTS search (--or for ANY term)
+graph search "query" --type session   # scope by source kind (session/note/bead/…)
 graph search "query" --project {{ config.graph_project }}   # explicit org scope
 graph attention --last 20             # human focus trail
 graph read <src_id|tmux_name> --max-chars 3000  # read a full source
@@ -130,6 +131,7 @@ graph context <src_id|tmux_name> last           # latest turns of a source
 graph tail <src_id|tmux_name> 20                # last N turns of a session
 graph sessions --all                  # ingest latest session data before searching
 graph sessions --status               # live session table (SOURCE column gives the id)
+graph sessions --status --topics      # same, with topic lines under each row
 graph note "text" --tags tag          # persist an insight or pitfall for future agents
 graph notes --since 1h                # recent notes by time
 graph bead "title" --source <id>      # create a bead with provenance
@@ -154,6 +156,8 @@ graph share <file> --alt "..." --caption "..."  # render a file as an inline til
 Run `graph --help` for full reference.
 
 **Reading a session by tmux name.** `graph read`, `graph context`, and `graph tail` accept either a source-id prefix or the tmux name shown by `graph sessions --status` (e.g. `auto-0506-001257`, `host-0506-095207`). Names containing non-hex characters are auto-resolved through the dashboard DB; pass them directly, no UUID lookup needed.
+
+**Search heuristic.** Lead with the single highest-signal term. Multi-term queries and `--or` widen the candidate set and tend to score the obvious hit *down*, not up. If the row you want is buried, scope before widening: `--type session` / `--type note` / `--project` / `--tag` all compose. Reach for `--or` only when the strict-AND query legitimately returns nothing.
 
 **Sharing files with the operator (`graph share`)**
 
