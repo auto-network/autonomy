@@ -8018,7 +8018,7 @@ async def api_diag_settings_mediator(request):
 # ── Background watchers ───────────────────────────────────────
 
 _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
-_HARNESS_USAGE_POLL_INTERVAL = 60.0
+_HARNESS_USAGE_POLL_INTERVAL = 300.0
 
 _WATCHER_HELPERS = [
     "collect_dispatch_data", "get_bead_counts", "count_active_sessions",
@@ -8548,6 +8548,10 @@ def _collect_claude_usage_payloads(
                 alias=alias,
             )
             continue
+        logger.info(
+            "claude harness usage: fetching /usage for org=%s alias=%r",
+            org_uuid, alias,
+        )
         try:
             usage_body, _headers = _fetch_claude_oauth_usage(access_token)
         except Exception as exc:
@@ -8571,6 +8575,10 @@ def _collect_claude_usage_payloads(
         # The credentials row is the source of truth for org identity now;
         # we don't need the response header. Build the payload with the row's
         # own org_uuid so failure rows and ok rows key consistently.
+        logger.info(
+            "claude harness usage: /usage OK for org=%s alias=%r",
+            org_uuid, alias,
+        )
         payloads[row_key] = _harness_usage_settings.normalize_claude_usage_payload(
             bundle={
                 "subscription_type": None,
@@ -8588,8 +8596,12 @@ def _collect_claude_usage_payloads(
 def _fetch_claude_oauth_usage(
     access_token: str,
 ) -> tuple[dict[str, Any], dict[str, str]]:
+    """GET /api/oauth/usage. Logs intent / success / failure with HTTP code +
+    duration so production traces attribute every call to its outcome.
+    Bearer token is never logged."""
+    url = "https://api.anthropic.com/api/oauth/usage"
     req = urllib_request.Request(
-        "https://api.anthropic.com/api/oauth/usage",
+        url,
         headers={
             "Authorization": f"Bearer {access_token}",
             "anthropic-beta": "oauth-2025-04-20",
@@ -8598,28 +8610,54 @@ def _fetch_claude_oauth_usage(
         },
         method="GET",
     )
-
+    logger.info("claude /usage: GET %s (Bearer auth)", url)
+    started = time.monotonic()
     try:
         with urllib_request.urlopen(req, timeout=10) as resp:
             body_bytes = resp.read()
             headers = {k.lower(): v for k, v in resp.headers.items()}
+            status_code = resp.status
     except urllib_error.HTTPError as exc:
+        elapsed_ms = (time.monotonic() - started) * 1000
         detail = ""
         try:
             detail = exc.read().decode("utf-8", errors="replace").strip()
         except Exception:
             detail = ""
+        logger.error(
+            "claude /usage: GET FAILED HTTP %d in %.1fms: %s",
+            exc.code, elapsed_ms, detail[:160] or "<empty body>",
+        )
         suffix = f": {detail[:160]}" if detail else ""
         raise RuntimeError(f"Claude usage API returned HTTP {exc.code}{suffix}") from exc
     except Exception as exc:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        logger.error(
+            "claude /usage: GET ERROR in %.1fms: %s",
+            elapsed_ms, type(exc).__name__,
+        )
         raise RuntimeError(f"Claude usage API failed: {type(exc).__name__}") from exc
 
+    elapsed_ms = (time.monotonic() - started) * 1000
     try:
         body = json.loads(body_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.error(
+            "claude /usage: GET HTTP %d in %.1fms returned invalid JSON",
+            status_code, elapsed_ms,
+        )
         raise RuntimeError("Claude usage API returned invalid JSON") from exc
     if not isinstance(body, dict):
+        logger.error(
+            "claude /usage: GET HTTP %d in %.1fms returned non-object payload",
+            status_code, elapsed_ms,
+        )
         raise RuntimeError("Claude usage API returned a non-object payload")
+    org_id = headers.get("anthropic-organization-id", "<unset>")
+    logger.info(
+        "claude /usage: GET OK HTTP %d in %.1fms org=%s",
+        status_code, elapsed_ms, org_id,
+    )
     return body, headers
 
 
